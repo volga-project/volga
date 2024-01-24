@@ -1,6 +1,6 @@
 master_config:
   resource_config:
     default_worker_resources:
-      CPU: '1'
+      CPU: '0.5'
   scheduler_config: {}
 worker_config_template: {}

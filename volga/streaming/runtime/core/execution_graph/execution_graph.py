@@ -5,7 +5,7 @@ from ray.actor import ActorHandle
 
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, VertexType
 from volga.streaming.api.operator.operator import StreamOperator
-from volga.streaming.api.partition.partition import RoundRobinPartition, Partition
+from volga.streaming.api.partition.partition import RoundRobinPartition, Partition, BroadcastPartition
 
 import pygraphviz as pgv
 
@@ -126,6 +126,7 @@ class ExecutionGraph:
                     # TODO should this depend on operator type?
                     if len(target_exec_vertices) > 1:
                         partition = RoundRobinPartition()
+
                     edge = ExecutionEdge(
                         source_execution_vertex=source_exec_vertex,
                         target_execution_vertex=target_exec_vertex,

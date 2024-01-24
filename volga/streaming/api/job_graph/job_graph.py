@@ -24,6 +24,7 @@ class JobEdge:
         self.target_operator_id = target_vertex_id
 
         self.partition = partition
+        self.is_join_right_edge = False
 
 
 class VertexType(enum.Enum):

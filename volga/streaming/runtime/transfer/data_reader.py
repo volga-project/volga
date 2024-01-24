@@ -10,6 +10,7 @@ import json
 
 logger = logging.getLogger("ray")
 
+
 class DataReader:
     def __init__(
         self,

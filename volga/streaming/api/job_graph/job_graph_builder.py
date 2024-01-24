@@ -73,11 +73,13 @@ class JobGraphBuilder:
             # process join stream
             if isinstance(stream, JoinStream):
                 right_stream = stream.right_stream
-                self.job_graph.add_edge_if_not_exists(JobEdge(
+                edge = JobEdge(
                     source_vertex_id=right_stream.id,
                     target_vertex_id=vertex_id,
                     partition=right_stream.partition
-                ))
+                )
+                edge.is_join_right_edge = True
+                self.job_graph.add_edge_if_not_exists(edge)
                 self._process_stream(right_stream)
 
             # TODO MergeStream

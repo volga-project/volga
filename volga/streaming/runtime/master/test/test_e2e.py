@@ -43,26 +43,48 @@ class TestE2E(unittest.TestCase):
 
     def test_join_streams(self):
 
-        source1 = self.ctx.from_collection([(i, f'a{i}') for i in range(30)])
-        source2 = self.ctx.from_collection([(i, f'b{i}') for i in range(30)])
+        s1_num_events = 300000
+        s2_num_events = 100002
 
-        # sink_cache = SinkCacheActor.remote()
-        # sink_function = SinkToCacheFunction(sink_cache)
+        source1 = self.ctx.from_collection([(i, f'a{i}') for i in range(s1_num_events)])
+        source2 = self.ctx.from_collection([(i, f'b{i}') for i in range(s2_num_events)])
+
+        sink_cache = SinkCacheActor.remote()
+        sink_function = SinkToCacheFunction(sink_cache)
 
         s = source1.join(source2)\
             .where_key(lambda x: x[0])\
             .equal_to(lambda x: x[0])\
             .with_func(lambda x, y: (x, y)) \
-            .filter(lambda x: x[0] != None and x[1] != None)
+            .set_parallelism(10) \
+            .filter(lambda x: x[0] != None and x[1] != None) \
+            .set_parallelism(1) \
+            .map(lambda x: (x[0][0], x[0][1], x[1][1]))
 
-        # s.sink(sink_function)
+        s.sink(sink_function)
         s.sink(lambda x: print(x))
 
         ctx.submit()
 
-        # time.sleep(5)
-        # res = ray.get(sink_cache.get_values.remote())
-        # print(res)
+        time.sleep(20)
+        res = ray.get(sink_cache.get_values.remote())
+        print(len(res))
+        print(res[0], res[-1])
+
+        # find missing
+        missing = []
+        for i in range(s2_num_events):
+            found = False
+            for e in res:
+                if i == e[0]:
+                    found = True
+                    break
+            if not found:
+                missing.append(i)
+
+        print(f'Missing {len(missing)} items')
+        print(f'{missing}')
+
 
     def test_parallelism(self):
         source1 = self.ctx.from_collection([(i, f'a{i}') for i in range(4)])
@@ -83,14 +105,14 @@ if __name__ == '__main__':
         ctx = StreamingContext(job_config=job_config)
         t = TestE2E(ctx)
         # TODO should reset context on each call
-        t.test_sample_stream()
+        # t.test_sample_stream()
         # t.test_parallelism()
-        # t.test_join_streams()
+        t.test_join_streams()
 
         job_master = ctx.job_master
         time.sleep(1000)
     finally:
         if job_master != None:
             ray.get(job_master.destroy.remote())
-        time.sleep(5)
+        time.sleep(1)
         ray.shutdown()
