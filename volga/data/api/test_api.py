@@ -2,6 +2,7 @@ import datetime
 import unittest
 
 from volga.data.api.dataset.dataset import dataset, field, Dataset
+from volga.data.api.dataset.pipeline import pipeline
 
 
 class TestApi(unittest.TestCase):
@@ -23,7 +24,37 @@ class TestApi(unittest.TestCase):
         assert key_fields == ['user_id']
         assert timestamp_field == 'timestamp'
 
+    def test_pipline(self):
+        @dataset
+        class User:
+            user_id: str = field(key=True)
+            name: str
+            timestamp: datetime.datetime = field(timestamp=True)
+
+        @dataset
+        class Order:
+            user_id: str = field(key=True)
+            product_id: str = field(key=True)
+            product_name: str
+            timestamp: datetime.datetime = field(timestamp=True)
+
+
+        @dataset
+        class UserOrderInfo:
+            user_id: str = field(key=True)
+            product_id: str = field(key=True)
+            product_name: str
+            user_name: str
+            timestamp: datetime.datetime = field(timestamp=True)
+
+            @pipeline(inputs=[User, Order])
+            def gen(cls, users: Dataset, orders: Dataset):
+                return users.join(orders, on=['user_id'])
+
+        assert len(UserOrderInfo._pipeline.inputs) == 2
+
 
 if __name__ == '__main__':
     t = TestApi()
-    t.test_api()
+    t.test_dataset()
+    t.test_pipline()

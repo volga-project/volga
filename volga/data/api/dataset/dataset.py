@@ -1,11 +1,10 @@
 import copy
 import inspect
 from dataclasses import dataclass
-from typing import Callable, Dict, Type, Optional, List, cast, TypeVar, Union
+from typing import Callable, Type, Optional, List, cast, TypeVar, Union
 
 from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR
 from volga.data.api.dataset.node import Node
-from volga.data.api.dataset.pipeline import Pipeline
 from volga.data.api.dataset.schema import DataSetSchema
 
 import datetime
@@ -101,7 +100,7 @@ class Dataset(Node):
     _name: str
     _fields: List[Field]
     _key_fields: List[str]
-    _pipeline: Optional[Pipeline]
+    _pipeline: Optional['Pipeline']
     _timestamp_field: str
     is_terminal: bool
 
@@ -173,7 +172,7 @@ class Dataset(Node):
                 key_fields.append(field.name)
         self._key_fields = key_fields
 
-    def _get_pipeline(self) -> Optional[Pipeline]:
+    def _get_pipeline(self) -> Optional['Pipeline']:
         for name, method in inspect.getmembers(self._original_cls):
             if not callable(method):
                 continue
