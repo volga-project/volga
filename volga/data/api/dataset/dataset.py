@@ -1,20 +1,53 @@
 import copy
 import inspect
 from dataclasses import dataclass
-from typing import Callable, Dict, Type, Optional, List, cast, TypeVar
+from typing import Callable, Dict, Type, Optional, List, cast, TypeVar, Union
 
 from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR
+from volga.data.api.dataset.node import Node
 from volga.data.api.dataset.pipeline import Pipeline
 from volga.data.api.dataset.schema import DataSetSchema
-from volga.data.api.operator.operator import Node, Transform, Filter, Assign, GroupBy, Join, Rename, Drop, DropNull
 
 import datetime
 
+from volga.data.api.utils import is_optional
+
 T = TypeVar("T")
 
+
 # decorator to construct Dataset from user defined class
-def dataset():
-    pass
+def dataset(
+    cls: Optional[Type[T]] = None,
+) -> Union[Callable, 'Dataset']:
+
+    def _create_dataset(
+        dataset_cls: Type[T],
+    ) -> Dataset:
+        cls_annotations = dataset_cls.__dict__.get("__annotations__", {})
+        fields = [
+            get_field(
+                cls=dataset_cls,
+                annotation_name=name,
+                dtype=cls_annotations[name],
+            )
+            for name in cls_annotations
+        ]
+
+        return Dataset(
+            dataset_cls,
+            fields,
+        )
+
+    def wrap(c: Type[T]) -> Dataset:
+        return _create_dataset(c)
+
+    if cls is None:
+        # called as @dataset(arguments)
+        return wrap
+    cls = cast(Type[T], cls)
+    # @dataset decorator was used without arguments
+    return wrap(cls)
+
 
 @dataclass
 class Field:
@@ -26,7 +59,42 @@ class Field:
     dtype: Optional[Type]
 
     def __str__(self):
-        return f"{self.name}"
+        return f'{self.name}'
+
+    def is_optional(self) -> bool:
+        return is_optional(self.dtype)
+
+
+def get_field(
+    cls: T,
+    annotation_name: str,
+    dtype: Type,
+) -> Field:
+    if "." in annotation_name:
+        raise ValueError(
+            f"Field name {annotation_name} cannot contain a period."
+        )
+    field = getattr(cls, annotation_name, None)
+    if isinstance(field, Field):
+        field.name = annotation_name
+        field.dtype = dtype
+        field.dataset_name = cls.__name__  # type: ignore
+    else:
+        field = Field(
+            name=annotation_name,
+            dataset_name=cls.__name__,  # type: ignore
+            dataset=None,  # set as part of dataset initialization
+            key=False,
+            timestamp=False,
+            dtype=dtype,
+        )
+
+    if field.key and field.is_optional():
+        raise ValueError(
+            f"Key {annotation_name} in dataset {cls.__name__} cannot be "  # type: ignore
+            f"Optional."
+        )
+    return field
 
 
 class Dataset(Node):
@@ -149,64 +217,4 @@ def field(
             dtype=None,
         ),
     )
-
-
-# user facing operators to construct pipeline graph
-class Node:
-
-    def __init__(self):
-        self.out_edges = []
-
-    def data_set_schema(self) -> DataSetSchema:
-        raise NotImplementedError()
-
-    def transform(self, func: Callable, schema: Dict = {}) -> Node:
-        if schema == {}:
-            return Transform(self, func, None)
-        return Transform(self, func, copy.deepcopy(schema))
-
-    def filter(self, func: Callable) -> Node:
-        return Filter(self, func)
-
-    def assign(self, column: str, result_type: Type, func: Callable) -> Node:
-        return Assign(self, column, result_type, func)
-
-    def groupby(self, *args) -> GroupBy:
-        return GroupBy(self, *args)
-
-    def join(
-        self,
-        other: Dataset,
-        on: List[str],
-    ) -> Join:
-        if not isinstance(other, Dataset) and isinstance(other, Node):
-            raise ValueError(
-                "Cannot join with an intermediate dataset, i.e something defined inside a pipeline."
-                " Only joining against keyed datasets is permitted."
-            )
-        if not isinstance(other, Node):
-            raise TypeError("Cannot join with a non-dataset object")
-        return Join(self, other, on)
-
-    def rename(self, columns: Dict[str, str]) -> Node:
-        return Rename(self, columns)
-
-    def drop(self, columns: List[str]) -> Node:
-        return Drop(self, columns, name="drop")
-
-    def dropnull(self, columns: List[str]) -> 'Node':
-        return DropNull(self, columns)
-
-    def select(self, columns: List[str]) -> 'Node':
-        ts = self.data_set_schema().timestamp
-        # Keep the timestamp col
-        drop_cols = list(
-            filter(
-                lambda c: c not in columns and c != ts, self.data_set_schema().fields()
-            )
-        )
-        # All the cols were selected
-        if len(drop_cols) == 0:
-            return self
-        return Drop(self, drop_cols, name="select")
 

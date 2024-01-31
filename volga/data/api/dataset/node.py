@@ -1,10 +1,67 @@
-from typing import Callable, Dict, Optional, Type, List
+import copy
+from typing import Callable, Dict, Type, List, Optional
 
-import pandas as pd
+from volga.data.api.dataset.schema import DataSetSchema
 
-from volga.data.api.dataset.dataset import Node, Dataset
 
-primitive_numeric_types = [int, float, pd.Int64Dtype, pd.Float64Dtype]
+# user facing operators to construct pipeline graph
+class Node:
+
+    def __init__(self):
+        self.out_edges = []
+
+    def data_set_schema(self) -> DataSetSchema:
+        raise NotImplementedError()
+
+    def transform(self, func: Callable, schema: Dict = {}) -> 'Node':
+        if schema == {}:
+            return Transform(self, func, None)
+        return Transform(self, func, copy.deepcopy(schema))
+
+    def filter(self, func: Callable) -> 'Node':
+        return Filter(self, func)
+
+    def assign(self, column: str, result_type: Type, func: Callable) -> 'Node':
+        return Assign(self, column, result_type, func)
+
+    def groupby(self, *args) -> 'Node':
+        return GroupBy(self, *args)
+
+    def join(
+        self,
+        other: 'Dataset',
+        on: List[str],
+    ) -> 'Node':
+        # if not isinstance(other, Dataset) and isinstance(other, Node):
+        #     raise ValueError(
+        #         "Cannot join with an intermediate dataset, i.e something defined inside a pipeline."
+        #         " Only joining against keyed datasets is permitted."
+        #     )
+        if not isinstance(other, Node):
+            raise TypeError("Cannot join with a non-dataset object")
+        return Join(self, other, on)
+
+    def rename(self, columns: Dict[str, str]) -> 'Node':
+        return Rename(self, columns)
+
+    def drop(self, columns: List[str]) -> 'Node':
+        return Drop(self, columns, name="drop")
+
+    def dropnull(self, columns: List[str]) -> 'Node':
+        return DropNull(self, columns)
+
+    def select(self, columns: List[str]) -> 'Node':
+        ts = self.data_set_schema().timestamp
+        # Keep the timestamp col
+        drop_cols = list(
+            filter(
+                lambda c: c not in columns and c != ts, self.data_set_schema().fields()
+            )
+        )
+        # All the cols were selected
+        if len(drop_cols) == 0:
+            return self
+        return Drop(self, drop_cols, name="select")
 
 
 class Transform(Node):
@@ -51,7 +108,7 @@ class Aggregate(Node):
         self.node.out_edges.append(self)
 
 
-class GroupBy:
+class GroupBy(Node):
     def __init__(self, node: Node, *args):
         super().__init__()
         self.keys = args
@@ -93,7 +150,7 @@ class Join(Node):
     def __init__(
         self,
         node: Node,
-        dataset: Dataset,
+        dataset: 'Dataset',
         on: Optional[List[str]] = None,
     ):
         super().__init__()
