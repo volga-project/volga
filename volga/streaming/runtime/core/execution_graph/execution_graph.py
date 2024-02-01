@@ -127,6 +127,12 @@ class ExecutionGraph:
                     if len(target_exec_vertices) > 1:
                         partition = RoundRobinPartition()
 
+                        # TODO figure out parallel join partitions
+                        if target_exec_vertex.job_vertex.vertex_type == VertexType.JOIN \
+                                and job_edge.is_join_right_edge:
+                            # in case of parallel join, one stream (left) should broadcast all events to all workers
+                            partition = BroadcastPartition()
+
                     edge = ExecutionEdge(
                         source_execution_vertex=source_exec_vertex,
                         target_execution_vertex=target_exec_vertex,

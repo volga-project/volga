@@ -5,6 +5,8 @@ from ray.actor import ActorHandle
 
 from volga.streaming.api.function.function import CollectionSourceFunction, LocalFileSourceFunction, \
     SourceFunction, TimedCollectionSourceFunction
+from volga.streaming.api.function.kafka import KafkaSourceFunction
+from volga.streaming.api.function.mysql import MysqlSourceFunction
 from volga.streaming.api.job_graph.job_graph_builder import JobGraphBuilder
 from volga.streaming.api.stream.stream_sink import StreamSink
 from volga.streaming.api.stream.stream_source import StreamSource
@@ -49,6 +51,47 @@ class StreamingContext:
         # line by line
         func = LocalFileSourceFunction(filename)
         return self.source(func)
+
+    def kafka(
+        self,
+        bootstrap_servers: str,
+        topic: str,
+        security_protocol: Optional[str] = None,
+        sasl_mechanism: Optional[str] = None,
+        sasl_plain_username: Optional[str] = None,
+        sasl_plain_password: Optional[str] = None,
+        verify_cert: Optional[bool] = False,
+    ):
+        func = KafkaSourceFunction(
+            bootstrap_servers=bootstrap_servers,
+            topic=topic,
+            security_protocol=security_protocol,
+            sasl_mechanism=sasl_mechanism,
+            sasl_plain_username=sasl_plain_username,
+            sasl_plain_password=sasl_plain_password,
+            verify_cert=verify_cert
+        )
+        return self.source(func)
+
+    def mysql(
+        self,
+        database: str,
+        table: str,
+        host: str = '127.0.0.1',
+        port: str = '3306',
+        user: str = 'root',
+        password: str = '',
+    ):
+        func = MysqlSourceFunction(
+            database=database,
+            table=table,
+            host=host,
+            port=port,
+            user=user,
+            password=password
+        )
+        return self.source(func)
+
 
     def submit(self):
         job_graph = JobGraphBuilder(stream_sinks=self.stream_sinks).build()

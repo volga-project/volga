@@ -43,11 +43,11 @@ class TestE2E(unittest.TestCase):
 
     def test_join_streams(self):
 
-        s1_num_events = 300000
-        s2_num_events = 100002
+        s1_num_events = 3000
+        s2_num_events = 1005
 
         source1 = self.ctx.from_collection([(i, f'a{i}') for i in range(s1_num_events)])
-        source2 = self.ctx.from_collection([(i, f'b{i}') for i in range(s2_num_events)])
+        source2 = self.ctx.from_collection([(i + 1, f'b{i + 1}') for i in range(s2_num_events)])
 
         sink_cache = SinkCacheActor.remote()
         sink_function = SinkToCacheFunction(sink_cache)
@@ -56,7 +56,7 @@ class TestE2E(unittest.TestCase):
             .where_key(lambda x: x[0])\
             .equal_to(lambda x: x[0])\
             .with_func(lambda x, y: (x, y)) \
-            .set_parallelism(10) \
+            .set_parallelism(4) \
             .filter(lambda x: x[0] != None and x[1] != None) \
             .set_parallelism(1) \
             .map(lambda x: (x[0][0], x[0][1], x[1][1]))
@@ -66,7 +66,7 @@ class TestE2E(unittest.TestCase):
 
         ctx.submit()
 
-        time.sleep(20)
+        time.sleep(5)
         res = ray.get(sink_cache.get_values.remote())
         print(len(res))
         print(res[0], res[-1])
@@ -83,7 +83,7 @@ class TestE2E(unittest.TestCase):
                 missing.append(i)
 
         print(f'Missing {len(missing)} items')
-        print(f'{missing}')
+        # print(f'{missing}')
 
 
     def test_parallelism(self):

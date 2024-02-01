@@ -212,6 +212,7 @@ class TimedCollectionSourceFunction(SourceFunction):
                 time.sleep(self.time_period_s)
         self.values = []
 
+
 class SimpleMapFunction(MapFunction):
     def __init__(self, func):
         self.func = func
