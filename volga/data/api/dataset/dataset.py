@@ -1,4 +1,3 @@
-import copy
 import inspect
 from dataclasses import dataclass
 from typing import Callable, Type, Optional, List, cast, TypeVar, Union
@@ -180,6 +179,9 @@ class Dataset(Node):
                 continue
 
             pipeline = getattr(method, PIPELINE_ATTR)
+            pipeline.set_terminal_node(
+                pipeline.func(self, *pipeline.inputs)
+            )
 
             if pipeline is not None:
                 return pipeline

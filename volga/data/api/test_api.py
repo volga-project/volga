@@ -38,7 +38,6 @@ class TestApi(unittest.TestCase):
             product_name: str
             timestamp: datetime.datetime = field(timestamp=True)
 
-
         @dataset
         class UserOrderInfo:
             user_id: str = field(key=True)
@@ -49,12 +48,26 @@ class TestApi(unittest.TestCase):
 
             @pipeline(inputs=[User, Order])
             def gen(cls, users: Dataset, orders: Dataset):
-                return users.join(orders, on=['user_id'])
 
-        assert len(UserOrderInfo._pipeline.inputs) == 2
+                p = users.join(orders, on=['user_id'])
+                p = p.filter(lambda x: x != '')
+                p = p.dropnull()
+                return p
+
+        pipe = UserOrderInfo._pipeline
+        assert len(pipe.inputs) == 2
+
+
+        # print(pipe.terminal_node)
+        # print(pipe.terminal_node.out_edges)
+        print(pipe.inputs[0].out_edges)
+        print(pipe.inputs[1].out_edges)
+
+
+
 
 
 if __name__ == '__main__':
     t = TestApi()
-    t.test_dataset()
+    # t.test_dataset()
     t.test_pipline()

@@ -47,7 +47,7 @@ class Node:
     def drop(self, columns: List[str]) -> 'Node':
         return Drop(self, columns, name="drop")
 
-    def dropnull(self, columns: List[str]) -> 'Node':
+    def dropnull(self, columns: Optional[List[str]] = None) -> 'Node':
         return DropNull(self, columns)
 
     def select(self, columns: List[str]) -> 'Node':
@@ -186,7 +186,7 @@ class Drop(Node):
 
 
 class DropNull(Node):
-    def __init__(self, node: Node, columns: List[str]):
+    def __init__(self, node: Node, columns: Optional[List[str]] = None):
         super().__init__()
         self.node = node
         self.columns = columns

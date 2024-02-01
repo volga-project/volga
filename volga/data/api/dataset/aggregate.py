@@ -7,7 +7,7 @@ from volga.data.api.dataset.window import Window
 
 class AggregateType(BaseModel):
     window: Window
-    # Name of the field the aggregate will  be assigned to
+    # Name of the field the aggregate will be assigned to
     into_field: str
 
 
@@ -35,16 +35,10 @@ class Max(AggregateType):
     of: str
     default: float
 
-    def agg_type(self):
-        return "max"
-
 
 class Min(AggregateType):
     of: str
     default: float
-
-    def agg_type(self):
-        return "min"
 
 
 class LastK(AggregateType):
