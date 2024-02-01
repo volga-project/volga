@@ -9,3 +9,4 @@ RESERVED_FIELD_NAMES = [
 ]
 
 PIPELINE_ATTR = '__pipeline_attr__'
+CONNECTORS_ATTR = '__connectors_attr__'

@@ -1,13 +1,14 @@
 import inspect
 from dataclasses import dataclass
-from typing import Callable, Type, Optional, List, cast, TypeVar, Union
+from typing import Callable, Type, Optional, List, cast, TypeVar, Union, Dict
 
-from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR
+from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
 from volga.data.api.dataset.node import Node
 from volga.data.api.dataset.schema import DataSetSchema
 
 import datetime
 
+from volga.data.api.source.source import Connector
 from volga.data.api.utils import is_optional
 
 T = TypeVar("T")
@@ -201,6 +202,9 @@ class Dataset(Node):
                 )
         if len(exceptions) != 0:
             raise Exception(exceptions)
+
+    def get_source_connectors(self) -> Optional[Dict[str, Connector]]:
+        return getattr(self, CONNECTORS_ATTR, {})
 
 
 def field(
