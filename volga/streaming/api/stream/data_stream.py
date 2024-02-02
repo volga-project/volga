@@ -1,14 +1,16 @@
 from typing import List, Callable, Union
 
-from volga.streaming.api.function.function import KeyFunction, SimpleMapFunction, SimpleFlatMapFunction, \
+from volga.streaming.api.function.function import SimpleMapFunction, SimpleFlatMapFunction, \
     SimpleFilterFunction, SimpleKeyFunction, SimpleJoinFunction, SimpleReduceFunction, SimpleSinkFunction, Function
 from volga.streaming.api.operator.operator import MapOperator, FlatMapOperator, FilterOperator, \
-    ReduceOperator, StreamOperator, JoinOperator, KeyByOperator, SinkOperator
+    ReduceOperator, StreamOperator, JoinOperator, KeyByOperator, SinkOperator, WindowOperator
 from volga.streaming.api.partition.partition import KeyPartition
 from volga.streaming.api.stream.stream import Stream
 from volga.streaming.api.stream.stream_sink import StreamSink
+from volga.streaming.api.stream.window import WindowAssigner, WindowTrigger
 
 FunctionOrCallable = Union[Function, Callable]
+
 
 class DataStream(Stream):
 
@@ -57,6 +59,9 @@ class DataStream(Stream):
             input_stream=self,
             sink_operator=SinkOperator(sink_func)
         )
+
+    def window(self, window_assigner: WindowAssigner):
+        return WindowedStream(input_stream=self, stream_operator=WindowOperator(), window_assigner=window_assigner)
 
     # TODO union, broadcast, partition_by, process
     # def union(self, streams: List[Stream]) -> 'DataStream':
@@ -127,7 +132,32 @@ class KeyDataStream(DataStream):
 
     def aggregate(self, aggregate_func: FunctionOrCallable) -> DataStream:
         # TODO implement keyed aggregation
-        raise NotImplementedError
+        raise NotImplementedError()
+
+
+# window
+
+class WindowedStream(DataStream):
+    # windows = {} # TODO multiple windows
+    window_trigger: WindowTrigger
+    window_assigner: WindowAssigner
+
+    def __init__(self, input_stream: DataStream, stream_operator: StreamOperator, window_assigner: WindowAssigner):
+        super().__init__(input_stream=input_stream, stream_operator=stream_operator)
+        self.window_assigner = window_assigner
+        # TODO set default trigger and assigner
+
+    def trigger(self, window_trigger: WindowTrigger) -> 'WindowedStream':
+        self.window_trigger = window_trigger
+        return self
+
+    def aggregate(self, aggregate_func: FunctionOrCallable) -> DataStream:
+        # TODO
+        raise NotImplementedError()
+
+
+
+
 
 
 # union

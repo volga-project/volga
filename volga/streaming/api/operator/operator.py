@@ -251,23 +251,14 @@ class JoinOperator(StreamOperator, TwoInputOperator):
             for lv in left_records:
                 self.collect(Record(self.func.join(lv, rv)))
 
-_function_to_operator = {
-    SourceFunction: SourceOperator,
-    MapFunction: MapOperator,
-    FlatMapFunction: FlatMapOperator,
-    FilterFunction: FilterOperator,
-    KeyFunction: KeyByOperator,
-    ReduceFunction: ReduceOperator,
-    SinkFunction: SinkOperator,
-}
 
+class WindowOperator(StreamOperator, OneInputOperator):
 
-def create_operator_with_func(func: Function):
-    operator_class = None
-    super_classes = func.__class__.mro()
-    for super_class in super_classes:
-        operator_class = _function_to_operator.get(super_class, None)
-        if operator_class is not None:
-            break
-    assert operator_class is not None
-    return operator_class(func)
+    def __init__(self):
+        super().__init__(EmptyFunction())
+        # TODO
+        pass
+
+    def process_element(self, record: Record):
+        # TODO
+        self.collect(record)
