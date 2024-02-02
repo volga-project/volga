@@ -61,6 +61,7 @@ class DataStream(Stream):
     # TODO union, broadcast, partition_by, process
     # def union(self, streams: List[Stream]) -> 'DataStream':
 
+
 # join
 class JoinStream(DataStream):
 
@@ -124,7 +125,7 @@ class KeyDataStream(DataStream):
             reduce_func = SimpleReduceFunction(reduce_func)
         return DataStream(input_stream=self, stream_operator=ReduceOperator(reduce_func))
 
-    def aggregate(self) -> DataStream:
+    def aggregate(self, aggregate_func: FunctionOrCallable) -> DataStream:
         # TODO implement keyed aggregation
         raise NotImplementedError
 

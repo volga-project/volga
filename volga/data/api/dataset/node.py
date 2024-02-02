@@ -3,7 +3,7 @@ from typing import Callable, Dict, Type, List, Optional, Union, Any
 
 from volga.data.api.dataset.aggregate import AggregateType
 from volga.data.api.dataset.schema import DataSetSchema
-from volga.streaming.api.stream.data_stream import DataStream
+from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
 from volga.streaming.api.stream.stream_source import StreamSource
 
 
@@ -124,12 +124,24 @@ class Aggregate(Node):
         self.parent = parent
         self.parent.out_edges.append(self)
 
+        assert isinstance(self.parent.stream, KeyDataStream)
+
+        self.stream = self.parent.stream.aggregate(self._stream_aggregate_function)
+
+    def _stream_aggregate_function(self) -> Any:
+        pass
+
 
 class GroupBy:
     def __init__(self, parent: Node, keys: List[str]):
         self.keys = keys
         self.parent = parent
         self.parent.out_edges.append(self)
+        self.stream = self.parent.stream.key_by(key_by_func=self._stream_key_by_func)
+
+    def _stream_key_by_func(self, event: Any) -> Any:
+        # TODO call self.func
+        pass
 
     def aggregate(self, aggregates: List[AggregateType]) -> Node:
         if len(aggregates) == 0:
@@ -137,25 +149,6 @@ class GroupBy:
                 "aggregate operator expects atleast one aggregation operation"
             )
         return Aggregate(self.parent, self.keys, aggregates)
-
-    def first(self) -> Node:
-        return First(self.parent, self.keys)
-
-
-class First(Node):
-    def __init__(self, parent: Node, keys: List[str]):
-        super().__init__()
-        self.keys = keys
-        self.parent = parent
-        self.parent.out_edges.append(self)
-
-
-class Dedup(Node):
-    def __init__(self, parent: Node, by: List[str]):
-        super().__init__()
-        self.parent = parent
-        self.by = by
-        self.parent.out_edges.append(self)
 
 
 class Join(Node):
@@ -166,18 +159,20 @@ class Join(Node):
         on: Optional[List[str]] = None,
     ):
         super().__init__()
-        self.left = left
+        self.parent = left
         self.right = right
         self.on = on
         self.parent.out_edges.append(self)
+        self.stream = self.parent.stream.join(self.right.stream)\
+            .where_key(self._stream_key_func)\
+            .equal_to(self._stream_key_func)\
+            .with_func(self._stream_join_func)
 
+    def _stream_key_func(self, element: Any) -> Any:
+        pass
 
-class Union(Node):
-    def __init__(self, parent: Node, other: Node):
-        super().__init__()
-        self.nodes = [parent, other]
-        parent.out_edges.append(self)
-        other.out_edges.append(self)
+    def _stream_join_func(self, left: Any, right: Any) -> Any:
+        pass
 
 
 class Rename(Node):
@@ -186,6 +181,11 @@ class Rename(Node):
         self.parent = parent
         self.column_mapping = columns
         self.parent.out_edges.append(self)
+        self.stream = self.parent.stream.map(map_func=self._stream_map_func)
+
+    def _stream_map_func(self, event: Any) -> Any:
+        # TODO call self.func
+        pass
 
 
 class Drop(Node):
@@ -195,6 +195,11 @@ class Drop(Node):
         self.columns = columns
         self.__name = name
         self.parent.out_edges.append(self)
+        self.stream = self.parent.stream.filter(filter_func=self._stream_filter_func)
+
+    def _stream_filter_func(self, event: Any) -> Any:
+        # TODO call self.func
+        pass
 
 
 class DropNull(Node):
@@ -203,3 +208,8 @@ class DropNull(Node):
         self.parent = parent
         self.columns = columns
         self.parent.out_edges.append(self)
+        self.stream = self.parent.stream.filter(filter_func=self._stream_filter_func)
+
+    def _stream_filter_func(self, event: Any) -> Any:
+        # TODO call self.func
+        pass
