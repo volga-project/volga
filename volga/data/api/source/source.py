@@ -70,6 +70,7 @@ def source(conn: Connector, tag: str):
 
     return decorator
 
+
 class KafkaSource(Source):
     bootstrap_servers: str
     username: str

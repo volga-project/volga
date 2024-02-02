@@ -1,11 +1,17 @@
 import copy
-from typing import Callable, Dict, Type, List, Optional
+from typing import Callable, Dict, Type, List, Optional, Union, Any
 
+from volga.data.api.dataset.aggregate import AggregateType
 from volga.data.api.dataset.schema import DataSetSchema
+from volga.streaming.api.stream.data_stream import DataStream
+from volga.streaming.api.stream.stream_source import StreamSource
 
 
 # user facing operators to construct pipeline graph
 class Node:
+
+    parent: 'Node'
+    stream: DataStream
 
     def __init__(self):
         self.out_edges = []
@@ -24,8 +30,8 @@ class Node:
     def assign(self, column: str, result_type: Type, func: Callable) -> 'Node':
         return Assign(self, column, result_type, func)
 
-    def groupby(self, *args) -> 'Node':
-        return GroupBy(self, *args)
+    def groupby(self, keys: List[str]) -> 'GroupBy':
+        return GroupBy(self, keys)
 
     def join(
         self,
@@ -65,129 +71,135 @@ class Node:
 
 
 class Transform(Node):
-    def __init__(self, node: Node, func: Callable, schema: Optional[Dict]):
+    def __init__(self, parent: Node, func: Callable, schema: Optional[Dict]):
         super().__init__()
         self.func = func
-        self.node = node
-        self.node.out_edges.append(self)
+        self.parent = parent
+        self.parent.out_edges.append(self)
         self.new_schema = schema
+        self.stream = self.parent.stream.map(map_func=self._stream_map_func)
+
+    def _stream_map_func(self, event: Any) -> Any:
+        # TODO call self.func
+        pass
 
 
 class Assign(Node):
-    def __init__(self, node: Node, column: str, output_type: Type, func: Callable):
+    def __init__(self, parent: Node, column: str, output_type: Type, func: Callable):
         super().__init__()
-        self.node = node
-        self.node.out_edges.append(self)
+        self.parent = parent
+        self.parent.out_edges.append(self)
         self.func = func
         self.column = column
         self.output_type = output_type
+        self.stream = self.parent.stream.map(map_func=self._stream_map_func)
+
+    def _stream_map_func(self, event: Any) -> Any:
+        # TODO call self.func
+        pass
 
 
 class Filter(Node):
-    def __init__(self, node: Node, func: Callable):
+    def __init__(self, parent: Node, func: Callable):
         super().__init__()
-        self.node = node
-        self.node.out_edges.append(self)
+        self.parent = parent
+        self.parent.out_edges.append(self)
         self.func = func
+        self.stream = self.parent.stream.filter(filter_func=self._stream_filter_func)
 
-
-class AggregateType:
-    pass
+    def _stream_filter_func(self, event: Any) -> Any:
+        # TODO call self.func
+        pass
 
 
 class Aggregate(Node):
     def __init__(
-        self, node: Node, keys: List[str], aggregates: List[AggregateType]
+        self, parent: Node, keys: List[str], aggregates: List[AggregateType]
     ):
         super().__init__()
         if len(keys) == 0:
             raise ValueError("Must specify at least one key")
         self.keys = keys
         self.aggregates = aggregates
-        self.node = node
-        self.node.out_edges.append(self)
+        self.parent = parent
+        self.parent.out_edges.append(self)
 
 
-class GroupBy(Node):
-    def __init__(self, node: Node, *args):
-        super().__init__()
-        self.keys = args
-        self.node = node
-        self.node.out_edges.append(self)
+class GroupBy:
+    def __init__(self, parent: Node, keys: List[str]):
+        self.keys = keys
+        self.parent = parent
+        self.parent.out_edges.append(self)
 
     def aggregate(self, aggregates: List[AggregateType]) -> Node:
         if len(aggregates) == 0:
             raise TypeError(
                 "aggregate operator expects atleast one aggregation operation"
             )
-        if len(self.keys) == 1 and isinstance(self.keys[0], list):
-            self.keys = self.keys[0]  # type: ignore
-        return Aggregate(self.node, list(self.keys), aggregates)
+        return Aggregate(self.parent, self.keys, aggregates)
 
     def first(self) -> Node:
-        if len(self.keys) == 1 and isinstance(self.keys[0], list):
-            self.keys = self.keys[0]  # type: ignore
-        return First(self.node, list(self.keys))  # type: ignore
-
-
-class Dedup(Node):
-    def __init__(self, node: Node, by: List[str]):
-        super().__init__()
-        self.node = node
-        self.by = by
-        self.node.out_edges.append(self)
+        return First(self.parent, self.keys)
 
 
 class First(Node):
-    def __init__(self, node: Node, keys: List[str]):
+    def __init__(self, parent: Node, keys: List[str]):
         super().__init__()
         self.keys = keys
-        self.node = node
-        self.node.out_edges.append(self)
+        self.parent = parent
+        self.parent.out_edges.append(self)
+
+
+class Dedup(Node):
+    def __init__(self, parent: Node, by: List[str]):
+        super().__init__()
+        self.parent = parent
+        self.by = by
+        self.parent.out_edges.append(self)
 
 
 class Join(Node):
     def __init__(
         self,
-        node: Node,
-        dataset: 'Dataset',
+        left: Node,
+        right: 'Dataset',
         on: Optional[List[str]] = None,
     ):
         super().__init__()
-        self.node = node
-        self.dataset = dataset
+        self.left = left
+        self.right = right
         self.on = on
-        self.node.out_edges.append(self)
+        self.parent.out_edges.append(self)
 
 
 class Union(Node):
-    def __init__(self, node: Node, other: Node):
+    def __init__(self, parent: Node, other: Node):
         super().__init__()
-        self.nodes = [node, other]
-        node.out_edges.append(self)
+        self.nodes = [parent, other]
+        parent.out_edges.append(self)
         other.out_edges.append(self)
 
 
 class Rename(Node):
-    def __init__(self, node: Node, columns: Dict[str, str]):
+    def __init__(self, parent: Node, columns: Dict[str, str]):
         super().__init__()
-        self.node = node
+        self.parent = parent
         self.column_mapping = columns
-        self.node.out_edges.append(self)
+        self.parent.out_edges.append(self)
 
 
 class Drop(Node):
-    def __init__(self, node: Node, columns: List[str], name="drop"):
+    def __init__(self, parent: Node, columns: List[str], name="drop"):
         super().__init__()
-        self.node = node
+        self.parent = parent
         self.columns = columns
         self.__name = name
-        self.node.out_edges.append(self)
+        self.parent.out_edges.append(self)
 
 
 class DropNull(Node):
-    def __init__(self, node: Node, columns: Optional[List[str]] = None):
+    def __init__(self, parent: Node, columns: Optional[List[str]] = None):
         super().__init__()
-        self.node = node
+        self.parent = parent
         self.columns = columns
-        self.node.out_edges.append(self)
+        self.parent.out_edges.append(self)
