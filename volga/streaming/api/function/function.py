@@ -8,6 +8,7 @@ from ray import cloudpickle
 from ray.actor import ActorHandle
 
 from volga.streaming.api.context.runtime_context import RuntimeContext
+from volga.streaming.api.message.message import Record
 
 
 class Function(ABC):
@@ -54,11 +55,6 @@ class SourceFunction(Function):
 
 
 class MapFunction(Function):
-    """
-    Base interface for Map functions. Map functions take elements and transform
-    them element wise. A Map function always produces a single result element
-    for each input element.
-    """
 
     @abstractmethod
     def map(self, value: Any):
@@ -66,99 +62,45 @@ class MapFunction(Function):
 
 
 class FlatMapFunction(Function):
-    """
-    Base interface for flatMap functions. FlatMap functions take elements and
-    transform them into zero, one, or more elements.
-    """
 
     @abstractmethod
     def flat_map(self, value, collector):
-        """Takes an element from the input data set and transforms it into zero,
-        one, or more elements.
-
-        Args:
-            value: The input value.
-            collector: The collector for returning result values.
-        """
+        # Takes an element from the input data set and transforms it into zero, one, or more elements.
         pass
 
 
 class FilterFunction(Function):
-    """
-    A filter function is a predicate applied individually to each record.
-    The predicate decides whether to keep the element, or to discard it.
-    """
 
     @abstractmethod
     def filter(self, value):
-        """The filter function that evaluates the predicate.
-
-        Args:
-            value: The value to be filtered.
-
-        Returns:
-            True for values that should be retained, false for values to be
-            filtered out.
-        """
         pass
 
 
 class KeyFunction(Function):
-    """
-    A key function is extractor which takes an object and returns the
-    deterministic key for that object.
-    """
 
     @abstractmethod
     def key_by(self, value):
-        """User-defined function that deterministically extracts the key from
-         an object.
-
-        Args:
-            value: The object to get the key from.
-
-        Returns:
-            The extracted key.
-        """
+        # extracts key from the object
         pass
 
 
 class ReduceFunction(Function):
-    """
-    Base interface for Reduce functions. Reduce functions combine groups of
-    elements to a single value, by taking always two elements and combining
-    them into one.
-    """
 
     @abstractmethod
     def reduce(self, old_value, new_value):
-        """
-        The core method of ReduceFunction, combining two values into one value
-        of the same type. The reduce function is consecutively applied to all
-        values of a group until only a single value remains.
-
-        Args:
-            old_value: The old value to combine.
-            new_value: The new input value to combine.
-
-        Returns:
-            The combined value of both values.
-        """
+        # combines two values into one value of the same type
         pass
 
 
 class SinkFunction(Function):
-    """Interface for implementing user defined sink functionality."""
 
     @abstractmethod
     def sink(self, value):
-        """Writes the given value to the sink. This function is called for
-        every record."""
+        # Writes the given value to the sink. This function is called for every record
         pass
 
 
 class JoinFunction(Function):
-    """Interface for implementing user defined join functionality."""
 
     @abstractmethod
     def join(self, left, right):

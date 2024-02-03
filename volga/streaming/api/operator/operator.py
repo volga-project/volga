@@ -6,7 +6,9 @@ from typing import List, Any, Dict, Optional
 from volga.streaming.api.collector.collector import Collector, CollectionCollector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import Function, SourceContext, SourceFunction, MapFunction, \
-    FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
+    FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction, \
+    AggregateFunction
+from volga.streaming.api.function.window_agg import MultiWindowAggregateFunction
 from volga.streaming.api.message.message import Record, KeyRecord
 
 logger = logging.getLogger(__name__)
@@ -191,6 +193,20 @@ class ReduceOperator(StreamOperator, OneInputOperator):
             self.collect(record)
 
 
+class WindowOperator(StreamOperator, OneInputOperator):
+
+    def __init__(self, agg_func: MultiWindowAggregateFunction):
+        assert isinstance(agg_func, MultiWindowAggregateFunction)
+        super().__init__(agg_func)
+        self.agg_func = agg_func
+
+    def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
+        super().open(collectors, runtime_context)
+
+    def process_element(self, record: Record):
+        pass
+
+
 class SinkOperator(StreamOperator, OneInputOperator):
 
     def __init__(self, sink_func: SinkFunction):
@@ -250,15 +266,3 @@ class JoinOperator(StreamOperator, TwoInputOperator):
             self.collect(Record(self.func.join(None, rv)))
             for lv in left_records:
                 self.collect(Record(self.func.join(lv, rv)))
-
-
-class WindowOperator(StreamOperator, OneInputOperator):
-
-    def __init__(self):
-        super().__init__(EmptyFunction())
-        # TODO
-        pass
-
-    def process_element(self, record: Record):
-        # TODO
-        self.collect(record)

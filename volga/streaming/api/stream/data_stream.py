@@ -60,9 +60,6 @@ class DataStream(Stream):
             sink_operator=SinkOperator(sink_func)
         )
 
-    def window(self, window_assigner: WindowAssigner):
-        return WindowedStream(input_stream=self, stream_operator=WindowOperator(), window_assigner=window_assigner)
-
     # TODO union, broadcast, partition_by, process
     # def union(self, streams: List[Stream]) -> 'DataStream':
 
@@ -134,30 +131,8 @@ class KeyDataStream(DataStream):
         # TODO implement keyed aggregation
         raise NotImplementedError()
 
-
-# window
-
-class WindowedStream(DataStream):
-    # windows = {} # TODO multiple windows
-    window_trigger: WindowTrigger
-    window_assigner: WindowAssigner
-
-    def __init__(self, input_stream: DataStream, stream_operator: StreamOperator, window_assigner: WindowAssigner):
-        super().__init__(input_stream=input_stream, stream_operator=stream_operator)
-        self.window_assigner = window_assigner
-        # TODO set default trigger and assigner
-
-    def trigger(self, window_trigger: WindowTrigger) -> 'WindowedStream':
-        self.window_trigger = window_trigger
-        return self
-
-    def aggregate(self, aggregate_func: FunctionOrCallable) -> DataStream:
-        # TODO
-        raise NotImplementedError()
-
-
-
-
+    def multi_window_agg(self):
+        return DataStream(input_stream=self, stream_operator=WindowOperator())
 
 
 # union

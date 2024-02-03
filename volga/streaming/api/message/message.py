@@ -1,14 +1,16 @@
-from typing import Any
+from typing import Any, Optional
 
 from volga.streaming.runtime.transfer.channel import ChannelMessage
 
+from decimal import Decimal
 
 class Record:
     # Data record in data stream
 
-    def __init__(self, value: Any):
+    def __init__(self, value: Any, event_time: Optional[Decimal] = None):
         self.value = value
         self.stream_name = None
+        self.event_time = event_time
 
     def __repr__(self):
         return "Record({})".format(self.value)
@@ -34,8 +36,8 @@ class Record:
 class KeyRecord(Record):
     # Data record in a keyed data stream
 
-    def __init__(self, key: Any, value: Any):
-        super().__init__(value)
+    def __init__(self, key: Any, value: Any, event_time: Optional[Decimal] = None):
+        super().__init__(value=value, event_time=event_time)
         self.key = key
 
     def __eq__(self, other):
