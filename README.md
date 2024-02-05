@@ -30,7 +30,9 @@ setting up complex infra like Spark or Flink simultaneously and/or dependency on
 
 Define data sources
 
-```
+```python
+from volga.sources import KafkaSource, MysqlSource
+
 kafka = KafkaSource.get(bootstrap_servers='', username='', password='')
 mysql = MysqlSource.get(host='127.0.0.1', port='3306', user='root', password='', database='db')
 
@@ -38,7 +40,10 @@ mysql = MysqlSource.get(host='127.0.0.1', port='3306', user='root', password='',
 
 Define input datasets
 
-```
+```python
+from volga.datasets import dataset, field, pipeline
+from volga.sources import source
+
 @source(mysql.table('users'))
 @dataset
 class User:
@@ -61,7 +66,7 @@ class Order:
 
 Define feature dataset and calculation pipeline
 
-```
+```python
 @dataset
 class OnSaleUserSpentInfo:
     user_id: str = field(key=True)
@@ -88,7 +93,9 @@ class OnSaleUserSpentInfo:
 
 Run offline feature calculation job and get results (i.e. for model training)
 
-```
+```python
+from volga import Client
+
 client = Client()
 
 # run batch materialization job
@@ -101,7 +108,7 @@ historical_on_sale_user_spent_df = client.get_offline(targets=[OnSaleUserSpentIn
 
 Run online feature calculation job and query real-time updates (i.e. for model inference)
 
-```
+```python
 # run real-time job
 client.materialize_online(targets=[OnSaleUserSpentInfo], source_tags={Order: 'online'})
 
