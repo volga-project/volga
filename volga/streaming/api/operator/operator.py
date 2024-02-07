@@ -6,9 +6,8 @@ from typing import List, Any, Dict, Optional
 from volga.streaming.api.collector.collector import Collector, CollectionCollector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import Function, SourceContext, SourceFunction, MapFunction, \
-    FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction, \
-    AggregateFunction
-from volga.streaming.api.function.window_agg import MultiWindowAggregateFunction
+    FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
+from volga.streaming.api.function.window import WindowFunction
 from volga.streaming.api.message.message import Record, KeyRecord
 
 logger = logging.getLogger(__name__)
@@ -64,11 +63,6 @@ class TwoInputOperator(Operator, ABC):
 
 
 class StreamOperator(Operator, ABC):
-    """
-    Basic interface for stream operators. Implementers would implement one of
-    :class:`OneInputOperator` or :class:`TwoInputOperator` to create
-    operators that process elements.
-    """
 
     def __init__(self, func: Function):
         self.func = func
@@ -191,20 +185,6 @@ class ReduceOperator(StreamOperator, OneInputOperator):
         else:
             self.reduce_state[key] = value
             self.collect(record)
-
-
-class WindowOperator(StreamOperator, OneInputOperator):
-
-    def __init__(self, agg_func: MultiWindowAggregateFunction):
-        assert isinstance(agg_func, MultiWindowAggregateFunction)
-        super().__init__(agg_func)
-        self.agg_func = agg_func
-
-    def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
-        super().open(collectors, runtime_context)
-
-    def process_element(self, record: Record):
-        pass
 
 
 class SinkOperator(StreamOperator, OneInputOperator):

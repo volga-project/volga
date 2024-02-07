@@ -1,7 +1,8 @@
 
 from pydantic import BaseModel
 
-Duration = str
+from volga.common.time_utils import Duration
+
 
 class Window(BaseModel):
     start: Duration
