@@ -23,7 +23,6 @@ class TestStream(unittest.TestCase):
         assert key_stream.parallelism == 10
 
 
-
 if __name__ == '__main__':
     t = TestStream()
     t.test_stream()

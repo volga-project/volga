@@ -7,8 +7,8 @@ from volga.streaming.api.collector.collector import Collector, CollectionCollect
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import Function, SourceContext, SourceFunction, MapFunction, \
     FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
-from volga.streaming.api.function.window import WindowFunction
 from volga.streaming.api.message.message import Record, KeyRecord
+from volga.streaming.api.operator.timestamp_assigner import TimestampAssigner
 
 logger = logging.getLogger(__name__)
 
@@ -91,21 +91,29 @@ class StreamOperator(Operator, ABC):
 class SourceOperator(StreamOperator):
 
     class SourceContextImpl(SourceContext):
-        def __init__(self, collectors: List[Collector]):
+        def __init__(self, collectors: List[Collector], timestamp_assigner: Optional[TimestampAssigner]):
             self.collectors = collectors
+            self.timestamp_assigner = timestamp_assigner
 
         def collect(self, value: Any):
             for collector in self.collectors:
-                collector.collect(Record(value))
+                record = Record(value)
+                if self.timestamp_assigner is not None:
+                    record = self.timestamp_assigner.assign_timestamp(record)
+                collector.collect(record)
 
     def __init__(self, func: SourceFunction):
         assert isinstance(func, SourceFunction)
         super().__init__(func)
         self.source_context = None
+        self.timestamp_assigner: Optional[TimestampAssigner] = None
+
+    def set_timestamp_assigner(self, timestamp_assigner: TimestampAssigner):
+        self.timestamp_assigner = timestamp_assigner
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
-        self.source_context = SourceOperator.SourceContextImpl(collectors)
+        self.source_context = SourceOperator.SourceContextImpl(collectors, self.timestamp_assigner)
         self.func.init(
             runtime_context.parallelism, runtime_context.task_index
         )
