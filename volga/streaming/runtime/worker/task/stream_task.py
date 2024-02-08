@@ -49,6 +49,7 @@ class StreamTask(ABC):
             if self.execution_vertex.job_vertex.vertex_type != VertexType.SINK:
                 # sinks do not pass data downstream so no writer
                 self.writer = DataWriter(
+                    name=self.execution_vertex.execution_vertex_id,
                     source_stream_name=str(self.execution_vertex.stream_operator.id),
                     output_channels=output_channels
                 )
@@ -63,6 +64,7 @@ class StreamTask(ABC):
             if self.execution_vertex.job_vertex.vertex_type != VertexType.SOURCE:
                 # sources do not read data from upstream so no reader
                 self.reader = DataReader(
+                    name=self.execution_vertex.execution_vertex_id,
                     input_channels=input_channels
                 )
 
@@ -102,11 +104,11 @@ class StreamTask(ABC):
         logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
         self.running = False
         self.processor.close()
-        if self.writer != None:
+        if self.writer is not None:
             self.writer.close()
             logger.info(f'Closed writer for task {self.execution_vertex.execution_vertex_id}')
 
-        if self.reader != None:
+        if self.reader is not None:
             self.reader.close()
             logger.info(f'Closed reader for task {self.execution_vertex.execution_vertex_id}')
         self.thread.join(timeout=5)

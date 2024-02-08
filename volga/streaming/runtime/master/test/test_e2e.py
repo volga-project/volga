@@ -6,40 +6,19 @@ import ray
 import yaml
 
 from volga.streaming.api.context.streaming_context import StreamingContext
+from volga.streaming.api.function.aggregate_function import AggregationType
 from volga.streaming.api.function.function import SinkToCacheFunction
+from volga.streaming.api.operator.timestamp_assigner import EventTimeAssigner
+from volga.streaming.api.operator.window_operator import SlidingWindowConfig
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 
+from decimal import Decimal
 
 class TestE2E(unittest.TestCase):
 
     def __init__(self, ctx: StreamingContext):
         super().__init__()
         self.ctx = ctx
-
-    def test_sample_stream(self):
-        def map_func(x):
-            import random
-            odd = random.randint(0, 1)
-            if odd == 1:
-                return (x, 1)
-            else:
-                return (x, 0)
-
-        sink_cache = SinkCacheActor.remote()
-        sink_function = SinkToCacheFunction(sink_cache)
-        source = self.ctx.from_collection([f'a{i}' for i in range(10)])
-        # source = ctx.from_timed_collection([f'a{i}' for i in range(10)], 1)
-        s = source.map(map_func) \
-            .key_by(lambda x: x[1]) \
-            .reduce(lambda x, y: f'{x}_{y}')
-
-        s.sink(lambda x: print(x))
-        s.sink(sink_function)
-
-        ctx.submit()
-        # time.sleep(5)
-        # res = ray.get(sink_cache.get_values.remote())
-        # print(res)
 
     def test_join_streams(self):
 
@@ -85,14 +64,36 @@ class TestE2E(unittest.TestCase):
         print(f'Missing {len(missing)} items')
         # print(f'{missing}')
 
-
-    def test_parallelism(self):
-        source1 = self.ctx.from_collection([(i, f'a{i}') for i in range(4)])
-        s = source1.map(lambda x: f'map1={x}')
-        s.set_parallelism(2)
-        s = s.map(lambda x: f'map2={x}')
-        s.set_parallelism(1)
-        s.sink(lambda x: print(x)).set_parallelism(1)
+    def test_window(self):
+        s = self.ctx.from_collection([('k', 1), ('k', 2), ('k', 3), ('k', 4)])
+        s = s.timestamp_assigner(EventTimeAssigner(lambda e: Decimal(time.time())))
+        s.key_by(lambda e: e[0]).multi_window_agg([
+            SlidingWindowConfig(
+                duration='1m',
+                agg_type=AggregationType.COUNT,
+                agg_on=(lambda e: e[1]),
+            ),
+            SlidingWindowConfig(
+                duration='1m',
+                agg_type=AggregationType.SUM,
+                agg_on=(lambda e: e[1]),
+            ),
+            SlidingWindowConfig(
+                duration='1m',
+                agg_type=AggregationType.AVG,
+                agg_on=(lambda e: e[1]),
+            ),
+            SlidingWindowConfig(
+                duration='1m',
+                agg_type=AggregationType.MAX,
+                agg_on=(lambda e: e[1]),
+            ),
+            SlidingWindowConfig(
+                duration='1m',
+                agg_type=AggregationType.MIN,
+                agg_on=(lambda e: e[1]),
+            )
+        ]).sink(print)
 
         ctx.submit()
 
@@ -105,9 +106,8 @@ if __name__ == '__main__':
         ctx = StreamingContext(job_config=job_config)
         t = TestE2E(ctx)
         # TODO should reset context on each call
-        # t.test_sample_stream()
-        # t.test_parallelism()
-        t.test_join_streams()
+        # t.test_join_streams()
+        t.test_window()
 
         job_master = ctx.job_master
         time.sleep(1000)

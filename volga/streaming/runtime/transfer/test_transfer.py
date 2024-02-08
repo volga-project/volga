@@ -18,7 +18,7 @@ class Writer:
         channel: Channel,
     ):
         self.channel = channel
-        self.data_writer = DataWriter(source_stream_name='0', output_channels=[channel])
+        self.data_writer = DataWriter(name='test_writer', source_stream_name='0', output_channels=[channel])
 
     def send_items(self, items: List[Dict]):
         for item in items:
@@ -33,7 +33,7 @@ class Reader:
         channel: Channel,
     ):
         self.channel = channel
-        self.data_reader = DataReader([channel])
+        self.data_reader = DataReader(name='test_reader', input_channels=[channel])
 
     def receive_items(self) -> List[Any]:
         t = time.time()

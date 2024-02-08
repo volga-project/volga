@@ -1,8 +1,9 @@
-from abc import ABC
 from collections import deque
+from dataclasses import dataclass
 from typing import List, Optional, Callable, Deque
 
 from pydantic import BaseModel
+from decimal import Decimal
 
 from volga.common.time_utils import duration_to_ms, Duration
 from volga.streaming.api.collector.collector import Collector
@@ -14,9 +15,10 @@ from volga.streaming.api.message.message import Record, KeyRecord
 from volga.streaming.api.operator.operator import StreamOperator, OneInputOperator
 
 
-class Window(BaseModel):
-    records: Deque[Record]
-    length_ms: int
+@dataclass
+class Window:
+    records: Deque
+    length_ms: Decimal
     window_func: WindowFunction
     name: Optional[str] = None
 
@@ -41,12 +43,13 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
 
     def process_element(self, record: Record):
         assert isinstance(record, KeyRecord)
+
         key = record.key
         if key in self.windows_per_key:
             windows = self.windows_per_key[key]
         else:
             windows = self._create_windows()
-            self.windows_per_key[key] = key
+            self.windows_per_key[key] = windows
 
         aggs_per_window = {}
         for w in windows:
@@ -58,7 +61,9 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
                 w.records.popleft()
             if w.name in aggs_per_window:
                 raise RuntimeError(f'Duplicate window names: {w.name}')
-            aggs_per_window[w.name] = w.window_func.apply(w.records)
+            accum = w.window_func.apply(w.records)
+            assert isinstance(accum, AllAggregateFunction._Acc)
+            aggs_per_window[w.name] = accum.aggs
 
         self.collect(Record(value=aggs_per_window, event_time=record.event_time))
 

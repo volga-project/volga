@@ -1,6 +1,7 @@
 import datetime
 import enum
 from abc import abstractmethod
+from dataclasses import dataclass
 from typing import Tuple, List, Optional, Any, Dict, Callable
 from decimal import Decimal
 
@@ -43,7 +44,8 @@ class AggregateFunction(Function):
 
 class AllAggregateFunction(AggregateFunction):
 
-    class _Acc(BaseModel):
+    @dataclass
+    class _Acc:
         aggs: Dict[AggregationType, Decimal]
 
     def __init__(self, agg_on_funcs: Dict[AggregationType, Callable]):
@@ -86,9 +88,11 @@ class AllAggregateFunction(AggregateFunction):
 
             accumulator.aggs[AggregationType.AVG] = accumulator.aggs[AggregationType.SUM]/accumulator.aggs[AggregationType.COUNT]
 
+    def get_result(self, accumulator: Any) -> Any:
+        return accumulator.aggs
 
-
-
+    def merge(self, acc1: Any, acc2: Any) -> Any:
+        raise NotImplementedError()
 
 
 

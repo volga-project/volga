@@ -4,6 +4,7 @@ from volga.streaming.runtime.transfer.channel import ChannelMessage
 
 from decimal import Decimal
 
+
 class Record:
     # Data record in data stream
 
@@ -13,20 +14,21 @@ class Record:
         self.event_time = event_time
 
     def __repr__(self):
-        return "Record({})".format(self.value)
+        return f'Record(value={self.value}, stream_name={self.stream_name}, event_time={self.event_time})'
 
     def __eq__(self, other):
         if type(self) is type(other):
-            return (self.stream_name, self.value) == (other.stream_name, other.value)
+            return (self.stream_name, self.value, self.event_time) == (other.stream_name, other.value, self.event_time)
         return False
 
     def __hash__(self):
-        return hash((self.stream_name, self.value))
+        return hash((self.stream_name, self.value, self.event_time))
 
     def to_channel_message(self) -> ChannelMessage:
         return {
             'value': self.value,
-            'stream_name': self.stream_name
+            'stream_name': self.stream_name,
+            'event_time': self.event_time
         }
 
     def set_stream_name(self, stream_name):
@@ -40,23 +42,28 @@ class KeyRecord(Record):
         super().__init__(value=value, event_time=event_time)
         self.key = key
 
+    def __repr__(self):
+        return f'KeyRecord(key={self.key}, value={self.value}, stream_name={self.stream_name}, event_time={self.event_time})'
+
     def __eq__(self, other):
         if type(self) is type(other):
-            return (self.stream_name, self.key, self.value) == (
+            return (self.stream_name, self.key, self.value, self.event_time) == (
                 other.stream_name,
                 other.key,
                 other.value,
+                other.event_time
             )
         return False
 
     def __hash__(self):
-        return hash((self.stream_name, self.key, self.value))
+        return hash((self.stream_name, self.key, self.value, self.event_time))
 
     def to_channel_message(self):
         return {
             'key': self.key,
             'value': self.value,
-            'stream_name': self.stream_name
+            'stream_name': self.stream_name,
+            'event_time': self.event_time
         }
 
 
@@ -64,11 +71,13 @@ def record_from_channel_message(channel_message: ChannelMessage) -> Record:
     if 'key' in channel_message:
         record = KeyRecord(
             key=channel_message['key'],
-            value=channel_message['value']
+            value=channel_message['value'],
+            event_time=channel_message['event_time']
         )
     else:
         record = Record(
-            value=channel_message['value']
+            value=channel_message['value'],
+            event_time=channel_message['event_time']
         )
 
     record.set_stream_name(channel_message['stream_name'])

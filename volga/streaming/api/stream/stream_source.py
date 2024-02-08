@@ -12,6 +12,7 @@ class StreamSource(DataStream):
             stream_operator=SourceOperator(source_function)
         )
 
-    def timestamp_assigner(self, ta: TimestampAssigner) -> 'StreamSource':
+    def timestamp_assigner(self, timestamp_assigner: TimestampAssigner) -> 'StreamSource':
         assert isinstance(self.stream_operator, SourceOperator)
+        self.stream_operator.set_timestamp_assigner(timestamp_assigner=timestamp_assigner)
         return self

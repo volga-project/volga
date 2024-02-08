@@ -1,5 +1,5 @@
 import enum
-import json
+import ujson
 from typing import List
 
 from volga.streaming.api.message.message import Record
@@ -18,6 +18,7 @@ class DataWriter:
 
     def __init__(
         self,
+        name: str,
         source_stream_name: str,
         output_channels: List[Channel],
         transport_type: TransportType = TransportType.ZMQ_PUSH_PULL
@@ -25,7 +26,9 @@ class DataWriter:
         if transport_type not in [
             TransportType.ZMQ_PUSH_PULL,
         ]:
-            raise RuntimeError(f'Unsupported transport {transport_type}')
+            raise RuntimeError(f'Unsupported transport: {transport_type}')
+        self.name = name
+
         self.source_stream_name = source_stream_name
         self.out_channels = output_channels
         # TODO buffering
@@ -51,10 +54,10 @@ class DataWriter:
     def write_message(self, channel_id: str, message: ChannelMessage):
         # TODO this should use a buffer?
         # TODO serialization perf
-        json_str = json.dumps(message)
+        json_str = ujson.dumps(message)
 
-        # TODO depends on socket type, this can block or just throw exception, test this
         socket = self.sockets_and_contexts[channel_id][0]
+        # TODO depending on socket type, this can block or just throw exception, test this
         socket.send_string(json_str)
 
     def close(self):

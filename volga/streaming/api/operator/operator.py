@@ -132,7 +132,7 @@ class MapOperator(StreamOperator, OneInputOperator):
         super().__init__(map_func)
 
     def process_element(self, record):
-        self.collect(Record(self.func.map(record.value)))
+        self.collect(Record(value=self.func.map(record.value), event_time=record.event_time))
 
 
 class FlatMapOperator(StreamOperator, OneInputOperator):
@@ -169,7 +169,7 @@ class KeyByOperator(StreamOperator, OneInputOperator):
 
     def process_element(self, record: Record):
         key = self.func.key_by(record.value)
-        self.collect(KeyRecord(key, record.value))
+        self.collect(KeyRecord(key, record.value, record.event_time))
 
 
 class ReduceOperator(StreamOperator, OneInputOperator):
@@ -189,7 +189,7 @@ class ReduceOperator(StreamOperator, OneInputOperator):
             old_value = self.reduce_state[key]
             new_value = self.func.reduce(old_value, value)
             self.reduce_state[key] = new_value
-            self.collect(Record(new_value))
+            self.collect(Record(value=new_value, event_time=record.event_time))
         else:
             self.reduce_state[key] = value
             self.collect(record)
@@ -245,12 +245,12 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         if left is not None:
             lv = left.value
             left_records.append(lv)
-            self.collect(Record(self.func.join(lv, None)))
+            self.collect(Record(value=self.func.join(lv, None), event_time=left.event_time))
             for rv in right_records:
-                self.collect(Record(self.func.join(lv, rv)))
+                self.collect(Record(value=self.func.join(lv, rv), event_time=left.event_time))
         else:
             rv = right.value
             right_records.append(rv)
-            self.collect(Record(self.func.join(None, rv)))
+            self.collect(Record(value=self.func.join(None, rv), event_time=right.event_time))
             for lv in left_records:
-                self.collect(Record(self.func.join(lv, rv)))
+                self.collect(Record(value=self.func.join(lv, rv), event_time=right.event_time))

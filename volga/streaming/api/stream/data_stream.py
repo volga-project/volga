@@ -3,11 +3,11 @@ from typing import List, Callable, Union
 from volga.streaming.api.function.function import SimpleMapFunction, SimpleFlatMapFunction, \
     SimpleFilterFunction, SimpleKeyFunction, SimpleJoinFunction, SimpleReduceFunction, SimpleSinkFunction, Function
 from volga.streaming.api.operator.operator import MapOperator, FlatMapOperator, FilterOperator, \
-    ReduceOperator, StreamOperator, JoinOperator, KeyByOperator, SinkOperator, MultiWindowOperator
+    ReduceOperator, StreamOperator, JoinOperator, KeyByOperator, SinkOperator
+from volga.streaming.api.operator.window_operator import MultiWindowOperator, SlidingWindowConfig
 from volga.streaming.api.partition.partition import KeyPartition
 from volga.streaming.api.stream.stream import Stream
 from volga.streaming.api.stream.stream_sink import StreamSink
-from volga.streaming.api.stream.window import WindowAssigner, WindowTrigger
 
 FunctionOrCallable = Union[Function, Callable]
 
@@ -131,8 +131,8 @@ class KeyDataStream(DataStream):
         # TODO implement keyed aggregation
         raise NotImplementedError()
 
-    def multi_window_agg(self):
-        return DataStream(input_stream=self, stream_operator=MultiWindowOperator())
+    def multi_window_agg(self, configs: List[SlidingWindowConfig]) -> DataStream:
+        return DataStream(input_stream=self, stream_operator=MultiWindowOperator(configs))
 
 
 # union

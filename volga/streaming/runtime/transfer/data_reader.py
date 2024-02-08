@@ -5,7 +5,7 @@ from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
 from volga.streaming.runtime.transfer.data_writer import TransportType
 
 import zmq
-import json
+import ujson
 
 
 logger = logging.getLogger("ray")
@@ -14,6 +14,7 @@ logger = logging.getLogger("ray")
 class DataReader:
     def __init__(
         self,
+        name: str,
         input_channels: List[Channel],
         transport_type: TransportType = TransportType.ZMQ_PUSH_PULL
     ):
@@ -22,10 +23,9 @@ class DataReader:
         ]:
             raise RuntimeError(f'Unsupported transport {transport_type}')
 
+        self.name = name
         self.input_channels = input_channels
-
         self.cur_read_id = 0
-
         self.running = True
 
         # TODO buffering
@@ -56,6 +56,10 @@ class DataReader:
                 # default if no data on the wire
                 json_str = None
 
+        # if self.name == '3_0':
+        #     print(json_str)
+        #     raise
+
         # reader was stopped
         if json_str is None:
             assert self.running is False
@@ -64,7 +68,7 @@ class DataReader:
         self.cur_read_id = (self.cur_read_id + 1)%len(self.input_channels)
 
         # TODO serialization perf
-        return json.loads(json_str)
+        return ujson.loads(json_str)
 
     def close(self):
         self.running = False
