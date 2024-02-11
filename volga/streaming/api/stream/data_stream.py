@@ -38,12 +38,6 @@ class DataStream(Stream):
             stream_operator=FilterOperator(filter_func),
         )
 
-    def join(self, other: 'DataStream') -> 'JoinStream':
-        return JoinStream(
-            left_stream=self,
-            right_stream=other
-        )
-
     def key_by(self, key_by_func: FunctionOrCallable) -> 'KeyDataStream':
         if isinstance(key_by_func, Callable):
             key_by_func = SimpleKeyFunction(key_by_func)
@@ -75,41 +69,11 @@ class JoinStream(DataStream):
         super().__init__(input_stream=left_stream, stream_operator=JoinOperator())
         self.right_stream = right_stream
 
-    def where_key(self, key_by_func: FunctionOrCallable) -> 'JoinWhere':
-        if isinstance(key_by_func, Callable):
-            key_by_func = SimpleKeyFunction(key_by_func)
-        self.stream_operator.left_key_by_function = key_by_func
-        return JoinWhere(join_stream=self)
-
-
-class JoinEqual:
-
-    def __init__(
-        self,
-        join_stream: 'JoinStream'
-    ):
-        self.join_stream = join_stream
-
     def with_func(self, join_func: FunctionOrCallable) -> DataStream:
         if isinstance(join_func, Callable):
             join_func = SimpleJoinFunction(join_func)
-        self.join_stream.stream_operator.func = join_func
-        return self.join_stream
-
-
-class JoinWhere:
-
-    def __init__(
-        self,
-        join_stream: 'JoinStream'
-    ):
-        self.join_stream = join_stream
-
-    def equal_to(self, right_key_by_func: FunctionOrCallable) -> JoinEqual:
-        if isinstance(right_key_by_func, Callable):
-            right_key_by_func = SimpleKeyFunction(right_key_by_func)
-        self.join_stream.stream_operator.right_key_by_function = right_key_by_func
-        return JoinEqual(self.join_stream)
+        self.stream_operator.func = join_func
+        return self
 
 
 # key_by
@@ -126,6 +90,12 @@ class KeyDataStream(DataStream):
         if isinstance(reduce_func, Callable):
             reduce_func = SimpleReduceFunction(reduce_func)
         return DataStream(input_stream=self, stream_operator=ReduceOperator(reduce_func))
+
+    def join(self, other: 'KeyDataStream') -> 'JoinStream':
+        return JoinStream(
+            left_stream=self,
+            right_stream=other
+        )
 
     def aggregate(self, aggregate_func: FunctionOrCallable) -> DataStream:
         # TODO implement keyed aggregation

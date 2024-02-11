@@ -19,6 +19,6 @@ class OutputCollector(Collector):
         self.partition = partition
 
     def collect(self, record: Record):
-        partitions = self.partition.partition(record=record, num_partition=len(self.output_channel_ids))
+        partitions = self.partition. partition(record=record, num_partition=len(self.output_channel_ids))
         for partition in partitions:
             self.data_writer.write_record(self.output_channel_ids[partition], record)

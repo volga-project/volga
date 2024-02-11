@@ -5,7 +5,7 @@ from ray.actor import ActorHandle
 
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, VertexType
 from volga.streaming.api.operator.operator import StreamOperator
-from volga.streaming.api.partition.partition import RoundRobinPartition, Partition, BroadcastPartition
+from volga.streaming.api.partition.partition import RoundRobinPartition, Partition, BroadcastPartition, ForwardPartition
 
 import pygraphviz as pgv
 
@@ -123,15 +123,8 @@ class ExecutionGraph:
                 for target_exec_vertex in target_exec_vertices:
                     partition = job_edge.partition
                     # update partition
-                    # TODO should this depend on operator type?
-                    if len(target_exec_vertices) > 1:
+                    if isinstance(partition, ForwardPartition) and len(target_exec_vertices) > 1:
                         partition = RoundRobinPartition()
-
-                        # TODO figure out parallel join partitions
-                        if target_exec_vertex.job_vertex.vertex_type == VertexType.JOIN \
-                                and job_edge.is_join_right_edge:
-                            # in case of parallel join, one stream (left) should broadcast all events to all workers
-                            partition = BroadcastPartition()
 
                     edge = ExecutionEdge(
                         source_execution_vertex=source_exec_vertex,

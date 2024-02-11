@@ -220,15 +220,13 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         super().__init__(join_func)
         self.left_records_dict: Dict[Any, List[Any]] = {}
         self.right_records_dict: Dict[Any, List[Any]] = {}
-        self.left_key_by_function = None
-        self.right_key_by_function = None
 
     # TODO test
-    def process_element(self, left: Record, right: Record):
+    def process_element(self, left: KeyRecord, right: KeyRecord):
         if left is not None:
-            key = self.left_key_by_function.key_by(left.value)
+            key = left.key
         else:
-            key = self.right_key_by_function.key_by(right.value)
+            key = right.key
 
         if key in self.left_records_dict:
             left_records = self.left_records_dict[key]
