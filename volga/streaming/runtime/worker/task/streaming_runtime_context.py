@@ -1,3 +1,5 @@
+from ray.actor import ActorHandle
+
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 
@@ -6,9 +8,11 @@ class StreamingRuntimeContext(RuntimeContext):
 
     def __init__(
         self,
+        job_master: ActorHandle,
         execution_vertex: ExecutionVertex
     ):
         super().__init__(
+            job_master=job_master,
             task_id=execution_vertex.execution_vertex_id,
             task_index=execution_vertex.execution_vertex_index,
             parallelism=execution_vertex.parallelism,

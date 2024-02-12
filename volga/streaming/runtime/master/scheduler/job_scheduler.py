@@ -1,5 +1,7 @@
 import logging
 
+from ray.actor import ActorHandle
+
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
 from volga.streaming.runtime.master.job_lifecycle.job_status import JobStatus
 from volga.streaming.runtime.master.worker_lifecycle_controller import WorkerLifecycleController
@@ -10,9 +12,9 @@ logger = logging.getLogger("ray")
 
 class JobScheduler:
 
-    def __init__(self, runtime_context: JobMasterRuntimeContext):
+    def __init__(self, job_master: ActorHandle, runtime_context: JobMasterRuntimeContext):
         self.runtime_context = runtime_context
-        self.worker_lifecycle_controller = WorkerLifecycleController()
+        self.worker_lifecycle_controller = WorkerLifecycleController(job_master)
 
     def schedule_job(self) -> bool:
         self._prepare_job_submission()

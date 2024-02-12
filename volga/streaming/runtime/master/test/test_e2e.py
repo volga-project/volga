@@ -41,7 +41,7 @@ class TestE2E(unittest.TestCase):
             .map(lambda x: (x[0][0], x[0][1], x[1][1]))
 
         s.sink(sink_function)
-        s.sink(lambda x: print(x))
+        s.sink(print)
 
         ctx.submit()
 

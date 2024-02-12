@@ -1,6 +1,7 @@
 import logging
 
 import ray
+from ray.actor import ActorHandle
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.core.processor.processor import Processor, SourceProcessor, OneInputProcessor
@@ -14,7 +15,8 @@ logger = logging.getLogger("ray")
 @ray.remote
 class JobWorker:
 
-    def __init__(self):
+    def __init__(self, job_master: ActorHandle):
+        self.job_master = job_master
         self.execution_vertex = None
         self.task = None
 
@@ -29,15 +31,16 @@ class JobWorker:
         self.task.start_or_recover()
 
     def _create_stream_task(self) -> StreamTask:
-        task = None
         stream_processor = Processor.build_processor(self.execution_vertex.stream_operator)
         if isinstance(stream_processor, SourceProcessor):
             task = SourceStreamTask(
+                job_master=self.job_master,
                 processor=stream_processor,
                 execution_vertex=self.execution_vertex
             )
         elif isinstance(stream_processor, OneInputProcessor):
             task = OneInputStreamTask(
+                job_master=self.job_master,
                 processor=stream_processor,
                 execution_vertex=self.execution_vertex
             )
@@ -51,6 +54,7 @@ class JobWorker:
             left_stream_name = str(input_op_ids[0])
             right_stream_name = str(input_op_ids[1])
             task = TwoInputStreamTask(
+                job_master=self.job_master,
                 processor=stream_processor,
                 execution_vertex=self.execution_vertex,
                 left_stream_name=left_stream_name,

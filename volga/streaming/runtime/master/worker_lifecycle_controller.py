@@ -4,6 +4,7 @@ from random import randint
 from typing import Dict, List, Any
 
 import ray
+from ray.actor import ActorHandle
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.transfer.channel import Channel
@@ -26,7 +27,8 @@ class WorkerNetworkInfo:
 
 class WorkerLifecycleController:
 
-    def __init__(self):
+    def __init__(self, job_master: ActorHandle):
+        self.job_master = job_master
         self._used_ports = {}
 
     def create_workers(self, execution_graph: ExecutionGraph):
@@ -45,7 +47,7 @@ class WorkerLifecycleController:
                 options_kwargs['num_gpus'] = resources.num_gpus
             if resources.memory is not None:
                 options_kwargs['memory'] = resources.memory
-            worker = JobWorker.options(**options_kwargs).remote()
+            worker = JobWorker.options(**options_kwargs).remote(job_master=self.job_master)
             vertex_ids.append(vertex_id)
             workers[vertex_id] = worker
             vertex.set_worker(worker)
@@ -150,5 +152,3 @@ class WorkerLifecycleController:
                     break
 
         return port
-
-
