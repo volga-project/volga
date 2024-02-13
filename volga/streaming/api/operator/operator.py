@@ -91,9 +91,19 @@ class StreamOperator(Operator, ABC):
 class SourceOperator(StreamOperator):
 
     class SourceContextImpl(SourceContext):
-        def __init__(self, collectors: List[Collector], timestamp_assigner: Optional[TimestampAssigner]):
+        def __init__(
+            self,
+            collectors: List[Collector],
+            runtime_context: RuntimeContext,
+            timestamp_assigner: Optional[TimestampAssigner],
+            num_records: Optional[int],
+        ):
             self.collectors = collectors
+            self.runtime_context = runtime_context
             self.timestamp_assigner = timestamp_assigner
+            self.num_records = num_records
+            self.num_fetched_records = 0
+            self.finished = False
 
         def collect(self, value: Any):
             for collector in self.collectors:
@@ -101,11 +111,17 @@ class SourceOperator(StreamOperator):
                 if self.timestamp_assigner is not None:
                     record = self.timestamp_assigner.assign_timestamp(record)
                 collector.collect(record)
+            self.num_fetched_records += 1
+
+            # notify reached bounds
+            if self.num_records == self.num_fetched_records:
+                # set finished state
+                self.finished = True
 
     def __init__(self, func: SourceFunction):
         assert isinstance(func, SourceFunction)
         super().__init__(func)
-        self.source_context = None
+        self.source_context: Optional[SourceOperator.SourceContextImpl] = None
         self.timestamp_assigner: Optional[TimestampAssigner] = None
 
     def set_timestamp_assigner(self, timestamp_assigner: TimestampAssigner):
@@ -113,9 +129,21 @@ class SourceOperator(StreamOperator):
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
-        self.source_context = SourceOperator.SourceContextImpl(collectors, self.timestamp_assigner)
+        assert isinstance(self.func, SourceFunction)
         self.func.init(
             runtime_context.parallelism, runtime_context.task_index
+        )
+        num_records = None
+        try:
+            num_records = self.func.num_records()
+        except NotImplementedError:
+            # unbounded source
+            pass
+        self.source_context = SourceOperator.SourceContextImpl(
+            collectors,
+            runtime_context=runtime_context,
+            timestamp_assigner=self.timestamp_assigner,
+            num_records=num_records
         )
 
     def fetch(self):

@@ -37,7 +37,7 @@ class SourceFunction(Function):
     # Interface of Source functions
 
     @abstractmethod
-    def init(self, parallel: int, index: int) -> None:
+    def init(self, parallel: int, index: int):
         """
         Args:
             parallel: parallelism of source function
@@ -47,11 +47,15 @@ class SourceFunction(Function):
         pass
 
     @abstractmethod
-    def fetch(self, ctx: SourceContext) -> None:
+    def fetch(self, ctx: SourceContext):
         """Starts the source. Implementations can use the
         :class:`SourceContext` to emit elements.
         """
         pass
+
+    def num_records(self) -> int:
+        # if source is bounded, this should return expected number of records
+        raise NotImplementedError()
 
 
 class MapFunction(Function):
@@ -110,6 +114,7 @@ class JoinFunction(Function):
 class CollectionSourceFunction(SourceFunction):
     def __init__(self, values):
         self.values = values
+        self.num_values = len(values)
 
     def init(self, parallel, index):
         pass
@@ -118,6 +123,9 @@ class CollectionSourceFunction(SourceFunction):
         for v in self.values:
             ctx.collect(v)
         self.values = []
+
+    def num_records(self) -> int:
+        return self.num_values
 
 
 class LocalFileSourceFunction(SourceFunction):

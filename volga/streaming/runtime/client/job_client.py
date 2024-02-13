@@ -22,6 +22,7 @@ class JobClient:
         # TODO master resources
         options_kwargs = {
             'max_restarts': -1,
+            'max_concurrency': 100
         }
 
         master = JobMaster.options(**options_kwargs).remote(

@@ -17,6 +17,7 @@ from volga.streaming.runtime.transfer.channel import Channel
 
 logger = logging.getLogger(__name__)
 
+
 class ExecutionEdge:
 
     def __init__(
@@ -147,11 +148,17 @@ class ExecutionGraph:
 
         return G
 
+    def get_source_vertices(self) -> List[ExecutionVertex]:
+        return [v for v in self.execution_vertices_by_id.values() if v.job_vertex.vertex_type == VertexType.SOURCE]
+
+    def get_non_source_vertices(self) -> List[ExecutionVertex]:
+        return [v for v in self.execution_vertices_by_id.values() if v.job_vertex.vertex_type != VertexType.SOURCE]
+
     def get_source_workers(self) -> List[ActorHandle]:
-        return [v.worker for v in self.execution_vertices_by_id.values() if v.job_vertex.vertex_type == VertexType.SOURCE]
+        return [v.worker for v in self.get_source_vertices()]
 
     def get_non_source_workers(self) -> List[ActorHandle]:
-        return [v.worker for v in self.execution_vertices_by_id.values() if v.job_vertex.vertex_type != VertexType.SOURCE]
+        return [v.worker for v in  self.get_non_source_vertices()]
 
     def set_resources(self, resource_config: ResourceConfig):
         for execution_vertex in self.execution_vertices_by_id.values():

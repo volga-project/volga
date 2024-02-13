@@ -21,11 +21,9 @@ class StreamTask(ABC):
 
     def __init__(
         self,
-        job_master: ActorHandle,
         processor: Processor,
         execution_vertex: ExecutionVertex
     ):
-        self.job_master = job_master
         self.processor = processor
         self.execution_vertex = execution_vertex
         self.thread = Thread(target=self.run, daemon=True)
@@ -97,7 +95,7 @@ class StreamTask(ABC):
                 partition=grouped_partitions[op_name]
             ))
 
-        runtime_context = StreamingRuntimeContext(job_master=self.job_master, execution_vertex=execution_vertex)
+        runtime_context = StreamingRuntimeContext(execution_vertex=execution_vertex)
 
         self.processor.open(
             collectors=self.collectors,
@@ -115,7 +113,8 @@ class StreamTask(ABC):
         if self.reader is not None:
             self.reader.close()
             logger.info(f'Closed reader for task {self.execution_vertex.execution_vertex_id}')
-        self.thread.join(timeout=5)
+        if self.thread is not None:
+            self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')
 
 
@@ -147,14 +146,12 @@ class TwoInputStreamTask(InputStreamTask):
 
     def __init__(
         self,
-        job_master: ActorHandle,
         processor: Processor,
         execution_vertex: ExecutionVertex,
         left_stream_name: str,
         right_stream_name: str,
     ):
         super().__init__(
-            job_master=job_master,
             processor=processor,
             execution_vertex=execution_vertex
         )

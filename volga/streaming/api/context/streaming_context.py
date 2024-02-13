@@ -2,6 +2,7 @@ import logging
 from typing import Dict, List, Optional
 
 from ray.actor import ActorHandle
+from ray.util.client import ray
 
 from volga.streaming.api.function.function import CollectionSourceFunction, LocalFileSourceFunction, \
     SourceFunction, TimedCollectionSourceFunction
@@ -92,7 +93,6 @@ class StreamingContext:
         )
         return self.source(func)
 
-
     def submit(self):
         job_graph = JobGraphBuilder(stream_sinks=self.stream_sinks).build()
         logger.info(f'Built job graph for {job_graph.job_name}')
@@ -100,9 +100,8 @@ class StreamingContext:
         job_client = JobClient()
         self.job_master = job_client.submit(job_graph=job_graph, job_config=self.job_config)
 
-
-    def execute(self, job_name: str):
-        # TODO support block to job finish
-        # job_submit_result = self.submit(job_name)
-        # job_submit_result.wait_finish()
-        raise NotImplementedError
+    # blocks until job is finished
+    def execute(self):
+        self.submit()
+        ray.get(self.job_master.wait_sources_finished.remote())
+        ray.get(self.job_master.destroy.remote())

@@ -1,5 +1,7 @@
 from typing import Dict, Optional
 
+from ray.actor import ActorHandle
+
 
 # Encapsulate the runtime information of a streaming task
 class RuntimeContext:
