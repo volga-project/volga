@@ -2,10 +2,12 @@ import inspect
 import sys
 import time
 from abc import ABC, abstractmethod
+from threading import Thread
 from typing import Any
 
 from ray import cloudpickle
 from ray.actor import ActorHandle
+from ray.util.client import ray
 
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
@@ -256,11 +258,38 @@ class SimpleSinkFunction(SinkFunction):
 
 class SinkToCacheFunction(SinkFunction):
 
+    DUMPER_PERIOD_S = 1
+
     def __init__(self, cache_actor: ActorHandle):
         self.cache_actor = cache_actor
+        self.buffer = []
+        self.dumper_thread = None
+        self.running = False
 
     def sink(self, value):
-        self.cache_actor.append_value.remote(value)
+        self.buffer.append(value)
+
+    def _dump_buffer_if_needed(self):
+        if len(self.buffer) == 0:
+            return
+        self.cache_actor.extend_values.remote(self.buffer)
+        self.buffer = []
+
+    def _dump_buffer_loop(self):
+        while self.running:
+            self._dump_buffer_if_needed()
+            time.sleep(self.DUMPER_PERIOD_S)
+
+    def open(self, runtime_context: RuntimeContext):
+        self.running = True
+        self.dumper_thread = Thread(target=self._dump_buffer_loop)
+        self.dumper_thread.start()
+
+    def close(self):
+        self.running = False
+        self._dump_buffer_if_needed()
+        if self.dumper_thread is not None:
+            self.dumper_thread.join(timeout=5)
 
 
 def serialize(func: Function):

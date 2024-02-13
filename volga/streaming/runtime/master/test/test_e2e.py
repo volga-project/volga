@@ -23,6 +23,7 @@ class TestE2E(unittest.TestCase):
 
     def test_join_streams(self):
 
+        # TODO increasing this 10x prevents sources from reporting finish
         s1_num_events = 30000
         s2_num_events = 10000
 
@@ -41,9 +42,11 @@ class TestE2E(unittest.TestCase):
             .map(lambda x: (x[0][0], x[0][1], x[1][1]))
 
         s.sink(sink_function)
-        s.sink(print)
+        s.sink(lambda x: print(x) if x[0]%1000 == 0 else None)
+        # s.sink(print)
         ctx.execute()
         res = ray.get(sink_cache.get_values.remote())
+        print(len(res))
         assert len(res) == min(s1_num_events, s2_num_events)
         print('assert ok')
 
