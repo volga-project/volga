@@ -102,6 +102,8 @@ class StreamingContext:
 
     # blocks until job is finished
     def execute(self):
-        self.submit()
-        ray.get(self.job_master.wait_sources_finished.remote())
-        ray.get(self.job_master.destroy.remote())
+        job_graph = JobGraphBuilder(stream_sinks=self.stream_sinks).build()
+        logger.info(f'Built job graph for {job_graph.job_name}')
+        logger.info(f'\n {job_graph.gen_digraph()}')
+        job_client = JobClient()
+        job_client.execute(job_graph=job_graph, job_config=self.job_config)

@@ -53,6 +53,7 @@ class JobMaster:
             raise RuntimeError(f'Unable to locate source for {task_id} execution vertex')
 
         self.sources_finished[task_id] = True
+        logger.info(f'Source operator {task_id} finished')
 
     def _all_sources_finished(self) -> bool:
         # optimistic close
@@ -66,6 +67,7 @@ class JobMaster:
             if self._all_sources_finished():
                 break
             time.sleep(0.1)
+        logger.info('All sources finished')
 
     def destroy(self):
         self.running = False

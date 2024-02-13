@@ -1,4 +1,5 @@
 import logging
+import time
 from typing import Optional, Dict
 
 from ray.actor import ActorHandle
@@ -34,6 +35,16 @@ class JobClient:
 
         # TODO return submit_res as well
         return master
+
+    def execute(
+        self,
+        job_graph: JobGraph,
+        job_config: Optional[Dict] = None
+    ):
+        job_master = self.submit(job_graph=job_graph, job_config=job_config)
+        ray.get(job_master.wait_sources_finished.remote())
+        time.sleep(1)
+        ray.get(job_master.destroy.remote())
 
 
 

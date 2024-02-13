@@ -23,8 +23,8 @@ class TestE2E(unittest.TestCase):
 
     def test_join_streams(self):
 
-        s1_num_events = 3000
-        s2_num_events = 1000
+        s1_num_events = 30000
+        s2_num_events = 10000
 
         source1 = self.ctx.from_collection([(i, f'a{i}') for i in range(s1_num_events)])
         source2 = self.ctx.from_collection([(i + 1, f'b{i + 1}') for i in range(s2_num_events)])
@@ -35,19 +35,17 @@ class TestE2E(unittest.TestCase):
         s = source1.key_by(lambda x: x[0])\
             .join(source2.key_by(lambda x: x[0]))\
             .with_func(lambda x, y: (x, y)) \
-            .set_parallelism(4) \
+            .set_parallelism(10) \
             .filter(lambda x: x[0] is not None and x[1] is not None) \
             .set_parallelism(1) \
             .map(lambda x: (x[0][0], x[0][1], x[1][1]))
 
         s.sink(sink_function)
         s.sink(print)
-
-        ctx.submit()
-
-        time.sleep(5)
+        ctx.execute()
         res = ray.get(sink_cache.get_values.remote())
         assert len(res) == min(s1_num_events, s2_num_events)
+        print('assert ok')
 
     def test_window(self):
         s = self.ctx.from_collection([('k', 1), ('k', 2), ('k', 3), ('k', 4)])
@@ -80,8 +78,7 @@ class TestE2E(unittest.TestCase):
             )
         ]).sink(print)
 
-        ctx.submit()
-
+        ctx.execute()
         # TODO assert
 
 
@@ -97,7 +94,6 @@ if __name__ == '__main__':
         # t.test_window()
 
         job_master = ctx.job_master
-        time.sleep(1000)
     finally:
         if job_master is not None:
             ray.get(job_master.destroy.remote())
