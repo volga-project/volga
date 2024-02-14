@@ -4,7 +4,6 @@ from typing import Callable, Dict, Type, List, Optional, Union, Any
 from volga.data.api.dataset.aggregate import AggregateType
 from volga.data.api.dataset.schema import DataSetSchema
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
-from volga.streaming.api.stream.stream_source import StreamSource
 
 
 # user facing operators to construct pipeline graph
@@ -126,9 +125,9 @@ class Aggregate(Node):
 
         assert isinstance(self.parent.stream, KeyDataStream)
 
-        self.stream = self.parent.stream.aggregate(self._stream_aggregate_function)
+        self.stream = self.parent.stream.multi_window_agg(self._stream_window_aggregate_configs())
 
-    def _stream_aggregate_function(self) -> Any:
+    def _stream_window_aggregate_configs(self) -> List:
         pass
 
 
@@ -157,16 +156,25 @@ class Join(Node):
         left: Node,
         right: 'Dataset',
         on: Optional[List[str]] = None,
+        left_on: Optional[List[str]] = None,
+        right_on: Optional[List[str]] = None
     ):
         super().__init__()
         self.parent = left
         self.right = right
         self.on = on
+        self.left_on = left_on
+        self.right_on = right_on
         self.parent.out_edges.append(self)
-        self.stream = self.parent.stream.join(self.right.stream)\
-            .where_key(self._stream_key_func)\
-            .equal_to(self._stream_key_func)\
+        self.stream = self.parent.stream.key_by(self._stream_left_key_func)\
+            .join(self.right.stream.key_by(self._stream_right_key_func))\
             .with_func(self._stream_join_func)
+
+    def _stream_left_key_func(self, element: Any) -> Any:
+        pass
+
+    def _stream_right_key_func(self, element: Any) -> Any:
+        pass
 
     def _stream_key_func(self, element: Any) -> Any:
         pass

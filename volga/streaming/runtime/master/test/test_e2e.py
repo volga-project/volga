@@ -23,7 +23,7 @@ class TestE2E(unittest.TestCase):
 
     def test_join_streams(self):
 
-        # TODO increasing this 10x prevents sources from reporting finish
+        # TODO increasing this 10x prevents sources from reporting finish, why?
         s1_num_events = 30000
         s2_num_events = 10000
 

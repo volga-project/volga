@@ -10,6 +10,8 @@ import datetime
 
 from volga.data.api.source.source import Connector
 from volga.data.api.utils import is_optional
+from volga.streaming.api.context.streaming_context import StreamingContext
+from volga.streaming.api.stream.stream_source import StreamSource
 
 T = TypeVar("T")
 
@@ -69,9 +71,9 @@ def get_field(
     annotation_name: str,
     dtype: Type,
 ) -> Field:
-    if "." in annotation_name:
+    if '.' in annotation_name:
         raise ValueError(
-            f"Field name {annotation_name} cannot contain a period."
+            f'Field name {annotation_name} cannot contain a period.'
         )
     field = getattr(cls, annotation_name, None)
     if isinstance(field, Field):
@@ -180,10 +182,6 @@ class Dataset(Node):
                 continue
 
             pipeline = getattr(method, PIPELINE_ATTR)
-            pipeline.set_terminal_node(
-                pipeline.func(self, *pipeline.inputs)
-            )
-
             if pipeline is not None:
                 return pipeline
 
@@ -203,8 +201,31 @@ class Dataset(Node):
         if len(exceptions) != 0:
             raise Exception(exceptions)
 
-    def get_source_connectors(self) -> Optional[Dict[str, Connector]]:
-        return getattr(self, CONNECTORS_ATTR, {})
+    def _get_source_connectors(self) -> Optional[Dict[str, Connector]]:
+        return getattr(self, CONNECTORS_ATTR, None)
+
+    def is_source(self) -> bool:
+        return hasattr(self, CONNECTORS_ATTR)
+
+    def init_stream_source(self, source_tag: Optional[str], ctx: StreamingContext):
+        if not self.is_source():
+            raise ValueError(f'Dataset {self._name}: Can not get source stream from non-source dataset')
+        if self.stream is not None:
+            raise ValueError(f'Dataset {self._name}: Stream source already inited')
+
+        source_connectors = self._get_source_connectors()
+        assert source_connectors is not None
+        if source_tag is None:
+            if len(source_connectors) > 1:
+                raise ValueError(f'Dataset {self._name}: Need to specify tag for source with > 1 connectors')
+            connector = list[source_connectors.values()][0]
+        else:
+            if source_tag not in source_connectors:
+                raise ValueError(f'Dataset {self._name}: Can not find source tag {source_tag}')
+            connector = source_connectors[source_tag]
+
+        stream_source = connector.to_stream_source(ctx)
+        self.stream = stream_source
 
 
 def field(

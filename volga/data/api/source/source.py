@@ -30,6 +30,7 @@ class KafkaConnector(Connector):
             sasl_plain_password=self.source.password
         )
 
+
 class MysqlConnector(Connector):
 
     def __init__(self, source, table):

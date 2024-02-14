@@ -158,7 +158,7 @@ class ExecutionGraph:
         return [v.worker for v in self.get_source_vertices()]
 
     def get_non_source_workers(self) -> List[ActorHandle]:
-        return [v.worker for v in  self.get_non_source_vertices()]
+        return [v.worker for v in self.get_non_source_vertices()]
 
     def set_resources(self, resource_config: ResourceConfig):
         for execution_vertex in self.execution_vertices_by_id.values():
