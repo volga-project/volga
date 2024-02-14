@@ -30,6 +30,3 @@ class Client:
         stream: DataStream = terminal_node.stream
         stream.sink(print) # TODO configure sink
 
-
-
-

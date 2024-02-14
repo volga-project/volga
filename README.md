@@ -99,7 +99,7 @@ from volga import Client
 client = Client()
 
 # run batch materialization job
-client.materialize_offline(targets=[OnSaleUserSpentInfo], source_tags={Order: 'offline'})
+client.materialize_offline(target=OnSaleUserSpentInfo, source_tags={Order: 'offline'})
 
 # query cold offline storage
 historical_on_sale_user_spent_df = client.get_offline(targets=[OnSaleUserSpentInfo], start='',  end='')
@@ -110,7 +110,7 @@ Run online feature calculation job and query real-time updates (i.e. for model i
 
 ```python
 # run real-time job
-client.materialize_online(targets=[OnSaleUserSpentInfo], source_tags={Order: 'online'})
+client.materialize_online(target=OnSaleUserSpentInfo, source_tags={Order: 'online'})
 
 # query hot cache
 live_on_sale_user_spent_df = client.get_online_latest(targets=[OnSaleUserSpentInfo], keys=[{'user_id': 1}])
