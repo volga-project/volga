@@ -1,5 +1,7 @@
 from typing import List, Dict, Optional
 
+from ray.util.client import ray
+
 from volga.data.api.dataset.dataset import Dataset
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.data_stream import DataStream
@@ -29,4 +31,7 @@ class Client:
         terminal_node = pipeline.func(pipeline.inputs)
         stream: DataStream = terminal_node.stream
         stream.sink(print) # TODO configure sink
+        ray.init(adress='auto')
+        ctx.execute()
+        ray.shutdown()
 
