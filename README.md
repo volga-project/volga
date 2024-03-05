@@ -1,7 +1,9 @@
-## Volga - Real-time feature calculation engine
+## Volga - Data engine for real-time AI/ML
 
-Volga is a scalable real-time feature calculation engine allowing for easy to use user-facing API to define pipelines, 
-consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, lookup and real-time serving. 
+Volga is a scalable data engine tailored for modern real-time AI/ML applications.
+It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
+consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
+real-time serving and on-demand request-time calculations.
 It is a completely standalone system removing any heavy-weight dependencies on data processors (Flink, Spark) and 
 can be run on a laptop or on a 1000-node cluster
 
@@ -11,20 +13,20 @@ Features:
 Kappa architecture - no Flink or Spark
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
-- Kubernetes ready, no vendor-lock - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs
+- Kubernetes ready, no vendor-lock - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python
 - Pure Python, no heavy JVM setups - minimal setup and maintenance efforts in production
 - Standalone - launch on your laptop or a cluster with no heavy-weight external dependencies
 - Cold + Hot storage model allows for customizable offline storage and caches, fast real-time feature queries
 - Easy to use declarative pandas-like API to simultaneously define online and offline feature pipelines, including 
 operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc.
 - [Experimental] Perform heavy embedding dot products, query meta-models or simply calculate users age in milliseconds at request time
- using *[Feature Augmentors]()*, thanks to Read-Write separate calculation design
+ using *[On-Demand Features]()*, thanks to Read-Write separate calculation design
 
 ## Why use Volga
 
-There are no standalone feature calculation platforms which allow consistent online-offline pipelines without vendor-lock,
+There are no standalone open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor-lock,
 setting up complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
-(i.e Tecton, FeatureForm, etc.). Volga fills this spot.
+(i.e Tecton, FeatureForm, Chalk.ai etc.). Volga fills this spot.
 
 ## Quick start
 
