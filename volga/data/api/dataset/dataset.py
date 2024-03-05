@@ -121,7 +121,7 @@ class Dataset(Node):
         self._add_fields_to_class()
         self._set_timestamp_field()
         self._set_key_fields()
-        self._pipeline = self._get_pipeline()
+        self._pipeline = self.get_pipeline()
 
     def data_set_schema(self):
         return DataSetSchema(
@@ -174,7 +174,7 @@ class Dataset(Node):
                 key_fields.append(field.name)
         self._key_fields = key_fields
 
-    def _get_pipeline(self) -> Optional['Pipeline']:
+    def get_pipeline(self) -> Optional['Pipeline']:
         for name, method in inspect.getmembers(self._original_cls):
             if not callable(method):
                 continue

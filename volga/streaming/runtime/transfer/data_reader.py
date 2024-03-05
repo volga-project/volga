@@ -42,7 +42,7 @@ class DataReader:
     def read_message(self) -> Optional[ChannelMessage]:
         # TODO this should use a buffer?
 
-        # round robin read
+        # round-robin read
         channel_id = self.input_channels[self.cur_read_id].channel_id
         socket = self.sockets_and_contexts[channel_id][0]
         json_str = None
@@ -55,10 +55,6 @@ class DataReader:
             except Exception as e:
                 # default if no data on the wire
                 json_str = None
-
-        # if self.name == '3_0':
-        #     print(json_str)
-        #     raise
 
         # reader was stopped
         if json_str is None:

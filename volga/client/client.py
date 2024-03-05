@@ -1,4 +1,4 @@
-from typing import List, Dict, Optional
+from typing import Dict, Optional
 
 from ray.util.client import ray
 
@@ -14,7 +14,7 @@ class Client:
 
     def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]]):
         ctx = StreamingContext()
-        pipeline = target._get_pipeline()
+        pipeline = target.get_pipeline()
 
         # build stream
         # init sources
