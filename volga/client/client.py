@@ -12,7 +12,7 @@ class Client:
     def __init__(self):
         pass
 
-    def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]]):
+    def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
         ctx = StreamingContext()
         pipeline = target.get_pipeline()
 

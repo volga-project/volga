@@ -11,7 +11,6 @@ import datetime
 from volga.data.api.source.source import Connector
 from volga.data.api.utils import is_optional
 from volga.streaming.api.context.streaming_context import StreamingContext
-from volga.streaming.api.stream.stream_source import StreamSource
 
 T = TypeVar("T")
 
@@ -104,7 +103,6 @@ class Dataset(Node):
     _key_fields: List[str]
     _pipeline: Optional['Pipeline']
     _timestamp_field: str
-    is_terminal: bool
 
     def __init__(
         self,
@@ -114,7 +112,6 @@ class Dataset(Node):
         super().__init__()
         self._name = cls.__name__  # type: ignore
         self.__name__ = self._name
-        self.is_terminal = False
         self._fields = fields
         self._validate_field_names(fields)
         self._original_cls = cls

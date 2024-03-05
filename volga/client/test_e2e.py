@@ -1,6 +1,7 @@
 import unittest
 import datetime
 
+from volga.client.client import Client
 from volga.data.api.dataset.aggregate import Avg, Count
 from volga.data.api.dataset.dataset import dataset, field, Dataset
 from volga.data.api.dataset.pipeline import pipeline
@@ -9,7 +10,7 @@ from volga.data.api.source.source import MysqlSource, source
 
 class TestVolgaE2E(unittest.TestCase):
 
-    def test_offline(self):
+    def test_materialize_offline(self):
 
         user_items = []
         order_items = []
@@ -52,6 +53,13 @@ class TestVolgaE2E(unittest.TestCase):
                     Count(window='1w', into='num_purchases_1w'),
                 ])
 
+        client = Client()
+
+        # run batch materialization job
+        client.materialize_offline(target=OnSaleUserSpentInfo)
+
+
+
 if __name__ == '__main__':
     t = TestVolgaE2E()
-    t.test_offline()
+    t.test_materialize_offline()

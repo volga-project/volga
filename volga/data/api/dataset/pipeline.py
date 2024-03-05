@@ -38,13 +38,9 @@ def pipeline(
             break
         for inp in inputs:
             if not isinstance(inp, Dataset):
-                if issubclass(inp, Dataset):
-                    raise TypeError('only Dataset as a parameter')
                 raise TypeError(
                     f'Parameter {inp.__name__} is not a Dataset in {pipeline_name}'
                 )
-            if inp.is_terminal:
-                raise TypeError(f'cannot have terminal dataset {inp.__name__} as input')
             params.append(inp)
 
         setattr(

@@ -1,5 +1,5 @@
 import copy
-from typing import Callable, Dict, Type, List, Optional, Union, Any
+from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.data.api.dataset.aggregate import AggregateType
 from volga.data.api.dataset.schema import DataSetSchema
