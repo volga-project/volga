@@ -131,7 +131,7 @@ class Aggregate(Node):
         return [SlidingWindowConfig(
             duration=agg.window,
             agg_type=agg.get_type(),
-            agg_on=agg.on,
+            agg_on=(lambda e: e[agg.on]),
             name=agg.into
         ) for agg in self.aggregates]
 
