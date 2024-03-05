@@ -2,30 +2,48 @@ from typing import Optional
 
 from pydantic import BaseModel
 
-from volga.data.api.dataset.window import Window
+from volga.common.time_utils import Duration
+from volga.streaming.api.function.aggregate_function import AggregationType
 
 
+# this is similar to AggregationType enum in streaming package, should we merge somehow?
 class AggregateType(BaseModel):
-    window: Window
+    window: Duration
     # Name of the field the aggregate will be assigned to
     into: str
 
+    # Name of the field to aggregate on
+    on: Optional[str] = None
+
+    def get_type(self):
+        raise NotImplementedError()
+
 
 class Count(AggregateType):
-    pass
+
+    def get_type(self):
+        return AggregationType.COUNT
 
 
 class Sum(AggregateType):
-    on: str
+
+    def get_type(self):
+        return AggregationType.SUM
 
 
 class Avg(AggregateType):
-    on: str
+
+    def get_type(self):
+        return AggregationType.AVG
 
 
 class Max(AggregateType):
-    on: str
+
+    def get_type(self):
+        return AggregationType.MAX
 
 
 class Min(AggregateType):
-    on: str
+
+    def get_type(self):
+        return AggregationType.MIN

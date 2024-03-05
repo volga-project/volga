@@ -3,6 +3,7 @@ from typing import Callable, Dict, Type, List, Optional, Union, Any
 
 from volga.data.api.dataset.aggregate import AggregateType
 from volga.data.api.dataset.schema import DataSetSchema
+from volga.streaming.api.operator.window_operator import SlidingWindowConfig
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
 
 
@@ -130,8 +131,16 @@ class Aggregate(Node):
 
         self.stream = self.parent.stream.multi_window_agg(self._stream_window_aggregate_configs())
 
-    def _stream_window_aggregate_configs(self) -> List:
-        pass
+    def _stream_window_aggregate_configs(self) -> List[SlidingWindowConfig]:
+        return [SlidingWindowConfig(
+            duration=agg.window,
+            agg_type=agg.get_type(),
+            agg_on=agg.on,
+            name=agg.into
+        ) for agg in self.aggregates]
+
+
+
 
 
 class GroupBy:
