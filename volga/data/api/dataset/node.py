@@ -9,7 +9,6 @@ from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
 
 # user facing operators to construct pipeline graph
 class Node:
-
     parent: 'Node'
     stream: DataStream
 
@@ -34,11 +33,11 @@ class Node:
         return GroupBy(self, keys)
 
     def join(
-        self,
-        other: 'Dataset',
-        on: Optional[List[str]] = None,
-        left_on: Optional[List[str]] = None,
-        right_on: Optional[List[str]] = None,
+            self,
+            other: 'Dataset',
+            on: Optional[List[str]] = None,
+            left_on: Optional[List[str]] = None,
+            right_on: Optional[List[str]] = None,
     ) -> 'Node':
         if on is None:
             if left_on is None or right_on is None:
@@ -83,8 +82,7 @@ class Transform(Node):
         self.stream = self.parent.stream.map(map_func=self._stream_map_func)
 
     def _stream_map_func(self, event: Any) -> Any:
-        # TODO call self.func
-        pass
+        return self.func(event)
 
 
 class Assign(Node):
@@ -98,8 +96,7 @@ class Assign(Node):
         self.stream = self.parent.stream.map(map_func=self._stream_map_func)
 
     def _stream_map_func(self, event: Any) -> Any:
-        # TODO call self.func
-        pass
+        raise NotImplementedError()
 
 
 class Filter(Node):
@@ -111,13 +108,12 @@ class Filter(Node):
         self.stream = self.parent.stream.filter(filter_func=self._stream_filter_func)
 
     def _stream_filter_func(self, event: Any) -> bool:
-        # TODO call self.func
-        pass
+        return self.func(event)
 
 
 class Aggregate(Node):
     def __init__(
-        self, parent: Node, keys: List[str], aggregates: List[AggregateType]
+            self, parent: Node, keys: List[str], aggregates: List[AggregateType]
     ):
         super().__init__()
         if len(keys) == 0:
@@ -140,19 +136,19 @@ class Aggregate(Node):
         ) for agg in self.aggregates]
 
 
-
-
-
 class GroupBy:
     def __init__(self, parent: Node, keys: List[str]):
+        # TODO support composite key
+        if len(keys) != 1:
+            raise ValueError('Currently GroupBy expects exactly 1 key field')
         self.keys = keys
         self.parent = parent
         self.parent.out_edges.append(self)
         self.stream = self.parent.stream.key_by(key_by_func=self._stream_key_by_func)
 
     def _stream_key_by_func(self, event: Any) -> Any:
-        # TODO call self.func
-        pass
+        assert isinstance(event, Dict)
+        return event[self.keys[0]]
 
     def aggregate(self, aggregates: List[AggregateType]) -> Node:
         if len(aggregates) == 0:
@@ -164,35 +160,62 @@ class GroupBy:
 
 class Join(Node):
     def __init__(
-        self,
-        left: Node,
-        right: 'Dataset',
-        on: Optional[List[str]] = None,
-        left_on: Optional[List[str]] = None,
-        right_on: Optional[List[str]] = None
+            self,
+            left: Node,
+            right: 'Dataset',
+            on: Optional[List[str]] = None,
+            left_on: Optional[List[str]] = None,
+            right_on: Optional[List[str]] = None
     ):
         super().__init__()
         self.parent = left
         self.right = right
         self.on = on
+
+        # TODO support composite keys
+        if on is not None and len(on) != 1 or \
+                left_on is not None and len(left_on) != 1 or \
+                right_on is not None and len(right_on) != 1:
+            raise ValueError('Currently, Join expects exactly 1 key field')
+
         self.left_on = left_on
         self.right_on = right_on
         self.parent.out_edges.append(self)
-        self.stream = self.parent.stream.key_by(self._stream_left_key_func)\
-            .join(self.right.stream.key_by(self._stream_right_key_func))\
+        self.stream = self.parent.stream.key_by(self._stream_left_key_func) \
+            .join(self.right.stream.key_by(self._stream_right_key_func)) \
             .with_func(self._stream_join_func)
 
     def _stream_left_key_func(self, element: Any) -> Any:
-        pass
+        assert isinstance(element, Dict)
+        key = self.left_on[0] if self.on is None else self.on[0]
+        return element[key]
 
     def _stream_right_key_func(self, element: Any) -> Any:
-        pass
-
-    def _stream_key_func(self, element: Any) -> Any:
-        pass
+        assert isinstance(element, Dict)
+        key = self.right_on[0] if self.on is None else self.on[0]
+        return element[key]
 
     def _stream_join_func(self, left: Any, right: Any) -> Any:
-        pass
+        assert isinstance(left, Dict)
+        assert isinstance(right, Dict)
+
+        # TODO we can compute same keys and resulting output schema only once to increase perf
+        same_keys = list(set(left.keys()) & set(right.keys()))
+
+        # rename
+        for k in same_keys:
+            if k in left:
+                new_k_left = f'left_{k}'
+                assert new_k_left not in left
+                left[new_k_left] = left[k]
+                del left[k]
+            if k in right:
+                new_k_right = f'right_{k}'
+                assert new_k_right not in right
+                left[new_k_right] = right[k]
+                del right[k]
+
+        return {**left, **right}
 
 
 class Rename(Node):
@@ -204,8 +227,7 @@ class Rename(Node):
         self.stream = self.parent.stream.map(map_func=self._stream_map_func)
 
     def _stream_map_func(self, event: Any) -> Any:
-        # TODO call self.func
-        pass
+        raise NotImplementedError()
 
 
 class Drop(Node):
@@ -218,8 +240,7 @@ class Drop(Node):
         self.stream = self.parent.stream.filter(filter_func=self._stream_filter_func)
 
     def _stream_filter_func(self, event: Any) -> Any:
-        # TODO call self.func
-        pass
+        raise NotImplementedError()
 
 
 class DropNull(Node):
@@ -231,5 +252,4 @@ class DropNull(Node):
         self.stream = self.parent.stream.filter(filter_func=self._stream_filter_func)
 
     def _stream_filter_func(self, event: Any) -> Any:
-        # TODO call self.func
-        pass
+        raise NotImplementedError()
