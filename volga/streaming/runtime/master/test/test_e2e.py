@@ -15,7 +15,7 @@ from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 from decimal import Decimal
 
 
-class TestE2E(unittest.TestCase):
+class TestStreamingJobE2E(unittest.TestCase):
 
     def __init__(self, ctx: StreamingContext):
         super().__init__()
@@ -91,7 +91,7 @@ if __name__ == '__main__':
         ray.init(address='auto')
         job_config = yaml.safe_load(Path('../../sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
-        t = TestE2E(ctx)
+        t = TestStreamingJobE2E(ctx)
         # TODO should reset context on each call
         t.test_join_streams()
         # t.test_window()

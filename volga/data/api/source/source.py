@@ -1,4 +1,4 @@
-from typing import TypeVar
+from typing import TypeVar, List, Any
 
 from pydantic import BaseModel
 
@@ -48,6 +48,15 @@ class MysqlConnector(Connector):
         )
 
 
+class MockOfflineConnector(Connector):
+
+    def __init__(self, items: List[Any]):
+        self.items = items
+
+    def to_stream_source(self, ctx: StreamingContext) -> StreamSource:
+        return ctx.from_collection(self.items)
+
+
 # produces connections
 class Source(BaseModel):
 
@@ -57,7 +66,7 @@ class Source(BaseModel):
 
 
 # decorator to add source connection to a dataset
-def source(conn: Connector, tag: str):
+def source(conn: Connector, tag: str = 'default'):
     if not isinstance(conn, Connector):
         raise TypeError('Expected Connector type')
 
@@ -124,3 +133,7 @@ class MysqlSource(Source):
             source=self,
             table=table_name
         )
+
+    @staticmethod
+    def mock_with_items(items: List[Any]) -> MockOfflineConnector:
+        return MockOfflineConnector(items)

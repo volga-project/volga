@@ -29,21 +29,24 @@ class Node:
     def assign(self, column: str, result_type: Type, func: Callable) -> 'Node':
         return Assign(self, column, result_type, func)
 
-    def groupby(self, keys: List[str]) -> 'GroupBy':
+    def group_by(self, keys: List[str]) -> 'GroupBy':
         return GroupBy(self, keys)
 
     def join(
         self,
         other: 'Dataset',
-        on: List[str],
+        on: Optional[List[str]] = None,
+        left_on: Optional[List[str]] = None,
+        right_on: Optional[List[str]] = None,
     ) -> 'Node':
-        # if not isinstance(other, Dataset) and isinstance(other, Node):
-        #     raise ValueError(
-        #         "Cannot join with an intermediate dataset, i.e something defined inside a pipeline."
-        #         " Only joining against keyed datasets is permitted."
-        #     )
-        if not isinstance(other, Node):
-            raise TypeError("Cannot join with a non-dataset object")
+        if on is None:
+            if left_on is None or right_on is None:
+                raise TypeError("Join should provide either on or both left_on and right_on")
+
+        if left_on is None or right_on is None:
+            if on is None:
+                raise TypeError("Join should provide either on or both left_on and right_on")
+
         return Join(self, other, on)
 
     def rename(self, columns: Dict[str, str]) -> 'Node':
@@ -106,7 +109,7 @@ class Filter(Node):
         self.func = func
         self.stream = self.parent.stream.filter(filter_func=self._stream_filter_func)
 
-    def _stream_filter_func(self, event: Any) -> Any:
+    def _stream_filter_func(self, event: Any) -> bool:
         # TODO call self.func
         pass
 

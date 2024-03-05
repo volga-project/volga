@@ -54,7 +54,7 @@ class DataStream(Stream):
             sink_operator=SinkOperator(sink_func)
         )
 
-    # TODO union, broadcast, partition_by, process
+    # TODO union, broadcast, process
     # def union(self, streams: List[Stream]) -> 'DataStream':
 
 

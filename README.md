@@ -9,7 +9,8 @@ can be run on a laptop or on a 1000-node cluster
 
 Features:
 
-- Utilizes *[custom scalable stream processing engine](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** and **[ZeroMQ](https://zeromq.org/)**. 
+- Utilizes *[custom scalable stream processing engine](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
+**[ZeroMQ](https://zeromq.org/)** for messaging and **[Rust](https://www.rust-lang.org/)** for some perf-critical parts (*exeprimental*). 
 Kappa architecture - no Flink or Spark
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
