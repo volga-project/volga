@@ -7,7 +7,6 @@ from volga.data.api.dataset.dataset import Dataset
 
 class Pipeline:
     inputs: List[Dataset]
-    _dataset_name: str
     func: Callable
     name: str
 
@@ -25,15 +24,14 @@ class Pipeline:
 def pipeline(
     inputs: List[Dataset]
 ) -> Callable:
-    def wrapper(pipeline_func: Callable) -> Pipeline:
+    def wrapper(pipeline_func: Callable) -> Callable:
         if not callable(pipeline_func):
             raise TypeError('pipeline functions must be callable')
         pipeline_name = pipeline_func.__name__
         sig = inspect.signature(pipeline_func)
-        cls_param = False
-        params = []
+        has_cls_param = False
         for name, param in sig.parameters.items():
-            if not cls_param and param.name != 'cls':
+            if not has_cls_param and param.name != 'cls':
                 raise TypeError('pipeline functions should be class methods')
             break
         for inp in inputs:
@@ -41,13 +39,12 @@ def pipeline(
                 raise TypeError(
                     f'Parameter {inp.__name__} is not a Dataset in {pipeline_name}'
                 )
-            params.append(inp)
 
         setattr(
             pipeline_func,
             PIPELINE_ATTR,
             Pipeline(
-                inputs=list(params),
+                inputs=inputs,
                 func=pipeline_func,
             )
         )

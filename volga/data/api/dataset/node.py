@@ -7,13 +7,15 @@ from volga.streaming.api.operator.window_operator import SlidingWindowConfig
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
 
 
-# user facing operators to construct pipeline graph
-class Node:
-    parent: 'Node'
-    stream: DataStream
-
+class NodeBase:
     def __init__(self):
+        self.parent: Optional['NodeBase'] = None
+        self.stream: Optional[DataStream] = None
         self.out_edges = []
+
+
+# user facing operators to construct pipeline graph
+class Node(NodeBase):
 
     def data_set_schema(self) -> DataSetSchema:
         raise NotImplementedError()
@@ -33,11 +35,11 @@ class Node:
         return GroupBy(self, keys)
 
     def join(
-            self,
-            other: 'Dataset',
-            on: Optional[List[str]] = None,
-            left_on: Optional[List[str]] = None,
-            right_on: Optional[List[str]] = None,
+        self,
+        other: 'Dataset',
+        on: Optional[List[str]] = None,
+        left_on: Optional[List[str]] = None,
+        right_on: Optional[List[str]] = None,
     ) -> 'Node':
         if on is None:
             if left_on is None or right_on is None:
@@ -47,7 +49,7 @@ class Node:
             if on is None:
                 raise TypeError("Join should provide either on or both left_on and right_on")
 
-        return Join(self, other, on)
+        return Join(left=self, right=other, on=on, left_on=left_on, right_on=right_on)
 
     def rename(self, columns: Dict[str, str]) -> 'Node':
         return Rename(self, columns)
@@ -73,7 +75,7 @@ class Node:
 
 
 class Transform(Node):
-    def __init__(self, parent: Node, func: Callable, schema: Optional[Dict]):
+    def __init__(self, parent: NodeBase, func: Callable, schema: Optional[Dict]):
         super().__init__()
         self.func = func
         self.parent = parent
@@ -86,7 +88,7 @@ class Transform(Node):
 
 
 class Assign(Node):
-    def __init__(self, parent: Node, column: str, output_type: Type, func: Callable):
+    def __init__(self, parent: NodeBase, column: str, output_type: Type, func: Callable):
         super().__init__()
         self.parent = parent
         self.parent.out_edges.append(self)
@@ -100,7 +102,7 @@ class Assign(Node):
 
 
 class Filter(Node):
-    def __init__(self, parent: Node, func: Callable):
+    def __init__(self, parent: NodeBase, func: Callable):
         super().__init__()
         self.parent = parent
         self.parent.out_edges.append(self)
@@ -113,7 +115,7 @@ class Filter(Node):
 
 class Aggregate(Node):
     def __init__(
-            self, parent: Node, keys: List[str], aggregates: List[AggregateType]
+            self, parent: NodeBase, keys: List[str], aggregates: List[AggregateType]
     ):
         super().__init__()
         if len(keys) == 0:
@@ -136,8 +138,9 @@ class Aggregate(Node):
         ) for agg in self.aggregates]
 
 
-class GroupBy:
-    def __init__(self, parent: Node, keys: List[str]):
+class GroupBy(NodeBase):
+    def __init__(self, parent: NodeBase, keys: List[str]):
+        super().__init__()
         # TODO support composite key
         if len(keys) != 1:
             raise ValueError('Currently GroupBy expects exactly 1 key field')
@@ -148,24 +151,28 @@ class GroupBy:
 
     def _stream_key_by_func(self, event: Any) -> Any:
         assert isinstance(event, Dict)
-        return event[self.keys[0]]
+        key = self.keys[0]
+        if key not in event:
+            raise RuntimeError(f'key {key} not in event {event}')
+
+        return event[key]
 
     def aggregate(self, aggregates: List[AggregateType]) -> Node:
         if len(aggregates) == 0:
             raise TypeError(
                 "aggregate operator expects atleast one aggregation operation"
             )
-        return Aggregate(self.parent, self.keys, aggregates)
+        return Aggregate(self, self.keys, aggregates)
 
 
 class Join(Node):
     def __init__(
-            self,
-            left: Node,
-            right: 'Dataset',
-            on: Optional[List[str]] = None,
-            left_on: Optional[List[str]] = None,
-            right_on: Optional[List[str]] = None
+        self,
+        left: Node,
+        right: 'Dataset',
+        on: Optional[List[str]] = None,
+        left_on: Optional[List[str]] = None,
+        right_on: Optional[List[str]] = None
     ):
         super().__init__()
         self.parent = left
@@ -196,6 +203,10 @@ class Join(Node):
         return element[key]
 
     def _stream_join_func(self, left: Any, right: Any) -> Any:
+        if left is None:
+            return right
+        if right is None:
+            return left
         assert isinstance(left, Dict)
         assert isinstance(right, Dict)
 
@@ -219,7 +230,7 @@ class Join(Node):
 
 
 class Rename(Node):
-    def __init__(self, parent: Node, columns: Dict[str, str]):
+    def __init__(self, parent: NodeBase, columns: Dict[str, str]):
         super().__init__()
         self.parent = parent
         self.column_mapping = columns
@@ -231,7 +242,7 @@ class Rename(Node):
 
 
 class Drop(Node):
-    def __init__(self, parent: Node, columns: List[str], name="drop"):
+    def __init__(self, parent: NodeBase, columns: List[str], name="drop"):
         super().__init__()
         self.parent = parent
         self.columns = columns
@@ -244,7 +255,7 @@ class Drop(Node):
 
 
 class DropNull(Node):
-    def __init__(self, parent: Node, columns: Optional[List[str]] = None):
+    def __init__(self, parent: NodeBase, columns: Optional[List[str]] = None):
         super().__init__()
         self.parent = parent
         self.columns = columns

@@ -120,6 +120,9 @@ class Dataset(Node):
         self._set_key_fields()
         self._pipeline = self.get_pipeline()
 
+    def __repr__(self):
+        return self._name
+
     def data_set_schema(self):
         return DataSetSchema(
             keys={f.name: f.dtype for f in self._fields if f.key},
@@ -215,7 +218,7 @@ class Dataset(Node):
         if source_tag is None:
             if len(source_connectors) > 1:
                 raise ValueError(f'Dataset {self._name}: Need to specify tag for source with > 1 connectors')
-            connector = list[source_connectors.values()][0]
+            connector = list(source_connectors.values())[0]
         else:
             if source_tag not in source_connectors:
                 raise ValueError(f'Dataset {self._name}: Can not find source tag {source_tag}')

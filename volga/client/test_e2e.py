@@ -11,9 +11,22 @@ from volga.data.api.source.source import MysqlSource, source
 class TestVolgaE2E(unittest.TestCase):
 
     def test_materialize_offline(self):
+        num_users = 100
+        num_orders = 1000
 
-        user_items = []
-        order_items = []
+        user_items = [{
+            'user_id': str(i),
+            'registered_at': datetime.datetime.now(),
+            'name': f'username_{i}'
+        } for i in range(num_users)]
+
+        order_items = [{
+            'buyer_id': str(i),
+            'product_id': f'prod_{i}',
+            'product_type': 'ON_SALE' if i%2 == 0 else 'NORMAL',
+            'purchased_at': datetime.datetime.now(),
+            'product_price': 100.0
+        } for i in range(num_orders)]
 
         @source(MysqlSource.mock_with_items(user_items))
         @dataset
@@ -47,7 +60,8 @@ class TestVolgaE2E(unittest.TestCase):
 
                 per_user = users.join(on_sale_purchases, left_on=['user_id'], right_on=['buyer_id'])
 
-                return per_user.group_by(keys=['user_id']).aggregate([
+                g = per_user.group_by(keys=['user_id'])
+                return g.aggregate([
                     Avg(on='product_price', window='7d', into='avg_spent_7d'),
                     Avg(on='product_price', window='1h', into='avg_spent_1h'),
                     Count(window='1w', into='num_purchases_1w'),
@@ -57,7 +71,6 @@ class TestVolgaE2E(unittest.TestCase):
 
         # run batch materialization job
         client.materialize_offline(target=OnSaleUserSpentInfo)
-
 
 
 if __name__ == '__main__':
