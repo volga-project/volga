@@ -249,7 +249,6 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         self.left_records_dict: Dict[Any, List[Any]] = {}
         self.right_records_dict: Dict[Any, List[Any]] = {}
 
-    # TODO test
     def process_element(self, left: KeyRecord, right: KeyRecord):
         if left is not None:
             key = left.key
@@ -271,12 +270,10 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         if left is not None:
             lv = left.value
             left_records.append(lv)
-            self.collect(Record(value=self.func.join(lv, None), event_time=left.event_time))
             for rv in right_records:
                 self.collect(Record(value=self.func.join(lv, rv), event_time=left.event_time))
         else:
             rv = right.value
             right_records.append(rv)
-            self.collect(Record(value=self.func.join(None, rv), event_time=right.event_time))
             for lv in left_records:
                 self.collect(Record(value=self.func.join(lv, rv), event_time=right.event_time))

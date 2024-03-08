@@ -37,9 +37,8 @@ class TestStreamingJobE2E(unittest.TestCase):
             .join(source2.key_by(lambda x: x[0]))\
             .with_func(lambda x, y: (x, y)) \
             .set_parallelism(10) \
-            .filter(lambda x: x[0] is not None and x[1] is not None) \
-            .set_parallelism(1) \
-            .map(lambda x: (x[0][0], x[0][1], x[1][1]))
+            .map(lambda x: (x[0][0], x[0][1], x[1][1])) \
+            .set_parallelism(1)
 
         s.sink(sink_function)
         s.sink(lambda x: print(x) if x[0]%1000 == 0 else None)
