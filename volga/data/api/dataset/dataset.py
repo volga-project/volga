@@ -2,6 +2,9 @@ import inspect
 from dataclasses import dataclass
 from typing import Callable, Type, Optional, List, cast, TypeVar, Union, Dict
 
+from datashape import Decimal
+
+from volga.common.time_utils import datetime_str_to_ts
 from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
 from volga.data.api.dataset.node import Node
 from volga.data.api.dataset.schema import DataSetSchema
@@ -11,6 +14,8 @@ import datetime
 from volga.data.api.source.source import Connector
 from volga.data.api.utils import is_optional
 from volga.streaming.api.context.streaming_context import StreamingContext
+from volga.streaming.api.message.message import Record
+from volga.streaming.api.operator.timestamp_assigner import EventTimeAssigner
 
 T = TypeVar("T")
 
@@ -225,6 +230,17 @@ class Dataset(Node):
             connector = source_connectors[source_tag]
 
         stream_source = connector.to_stream_source(ctx)
+
+        # set timestamp assigner
+        if self._timestamp_field is None:
+            raise RuntimeError('Can not init source with no timestamp field')
+
+        def _extract_timestamp(record: Record) -> Decimal:
+            dt_str = record.value[self._timestamp_field]
+            return datetime_str_to_ts(dt_str)
+
+        stream_source.timestamp_assigner(EventTimeAssigner(_extract_timestamp))
+
         self.stream = stream_source
 
 

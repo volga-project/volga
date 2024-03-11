@@ -5,7 +5,7 @@ from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
 from volga.streaming.runtime.transfer.data_writer import TransportType
 
 import zmq
-import orjson
+import simplejson
 
 
 logger = logging.getLogger("ray")
@@ -64,7 +64,7 @@ class DataReader:
         self.cur_read_id = (self.cur_read_id + 1)%len(self.input_channels)
 
         # TODO serialization perf
-        return orjson.loads(json_str)
+        return simplejson.loads(json_str)
 
     def close(self):
         self.running = False

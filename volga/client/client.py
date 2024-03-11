@@ -1,3 +1,4 @@
+import time
 from typing import Dict, Optional
 
 from ray.util.client import ray
@@ -50,5 +51,6 @@ class Client:
 
         ray.init(address='auto')
         ctx.execute()
+        time.sleep(1)
         ray.shutdown()
 

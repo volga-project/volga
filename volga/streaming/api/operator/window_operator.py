@@ -1,3 +1,4 @@
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Callable, Deque
@@ -37,13 +38,13 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
         super().__init__(EmptyFunction())
         self.configs = configs
         self.windows_per_key = {}
+        self.i = 0
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
 
     def process_element(self, record: Record):
         assert isinstance(record, KeyRecord)
-
         key = record.key
         if key in self.windows_per_key:
             windows = self.windows_per_key[key]

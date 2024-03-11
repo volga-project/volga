@@ -1,6 +1,7 @@
-from datetime import timedelta
 from decimal import Decimal
 from typing import List
+
+import dateutil.parser
 
 Duration = str
 
@@ -38,3 +39,8 @@ def duration_to_s(duration_string: Duration) -> Decimal:
 
 def duration_to_ms(duration: Duration) -> Decimal:
     return duration_to_s(duration) * 1000
+
+
+def datetime_str_to_ts(dt_str: str) -> Decimal:
+    dt = dateutil.parser.isoparse(dt_str)
+    return Decimal(dt.timestamp())

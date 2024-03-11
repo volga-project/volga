@@ -11,7 +11,7 @@ from volga.streaming.api.function.function import Function
 from volga.streaming.api.message.message import Record
 
 
-class AggregationType(enum.Enum):
+class AggregationType(str, enum.Enum):
     MAX = 'max'
     MIN = 'min'
     COUNT = 'count'
@@ -46,9 +46,9 @@ class AllAggregateFunction(AggregateFunction):
 
     @dataclass
     class _Acc:
-        aggs: Dict[AggregationType, Decimal]
+        aggs: Dict[str, Decimal]
 
-    def __init__(self, agg_on_funcs: Dict[AggregationType, Callable]):
+    def __init__(self, agg_on_funcs: Dict[str, Callable]):
         self.agg_on_funcs = agg_on_funcs
 
     def create_accumulator(self) -> _Acc:

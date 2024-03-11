@@ -248,6 +248,7 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         super().__init__(join_func)
         self.left_records_dict: Dict[Any, List[Any]] = {}
         self.right_records_dict: Dict[Any, List[Any]] = {}
+        self.i = 0
 
     def process_element(self, left: KeyRecord, right: KeyRecord):
         if left is not None:
@@ -266,6 +267,8 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         else:
             right_records = []
             self.right_records_dict[key] = right_records
+
+        # TODO we should let user decide which timestamp the joined element should have
 
         if left is not None:
             lv = left.value

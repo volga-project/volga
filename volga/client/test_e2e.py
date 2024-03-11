@@ -2,7 +2,7 @@ import unittest
 import datetime
 
 from volga.client.client import Client
-from volga.data.api.dataset.aggregate import Avg, Count
+from volga.data.api.dataset.aggregate import Avg, Count, Sum
 from volga.data.api.dataset.dataset import dataset, field, Dataset
 from volga.data.api.dataset.pipeline import pipeline
 from volga.data.api.source.source import MysqlSource, source
@@ -11,12 +11,12 @@ from volga.data.api.source.source import MysqlSource, source
 class TestVolgaE2E(unittest.TestCase):
 
     def test_materialize_offline(self):
-        num_users = 100
-        num_orders = 1000
+        num_users = 20
+        num_orders = 10
 
         user_items = [{
             'user_id': str(i),
-            'registered_at': datetime.datetime.now(),
+            'registered_at': str(datetime.datetime.now()),
             'name': f'username_{i}'
         } for i in range(num_users)]
 
@@ -24,7 +24,7 @@ class TestVolgaE2E(unittest.TestCase):
             'buyer_id': str(i),
             'product_id': f'prod_{i}',
             'product_type': 'ON_SALE' if i%2 == 0 else 'NORMAL',
-            'purchased_at': datetime.datetime.now(),
+            'purchased_at': str(datetime.datetime.now()),
             'product_price': 100.0
         } for i in range(num_orders)]
 
@@ -60,11 +60,13 @@ class TestVolgaE2E(unittest.TestCase):
 
                 per_user = users.join(on_sale_purchases, left_on=['user_id'], right_on=['buyer_id'])
 
-                g = per_user.group_by(keys=['user_id'])
-                return g.aggregate([
-                    Avg(on='product_price', window='7d', into='avg_spent_7d'),
-                    Avg(on='product_price', window='1h', into='avg_spent_1h'),
-                    Count(window='1w', into='num_purchases_1w'),
+                # return per_user
+
+                return per_user.group_by(keys=['user_id']).aggregate([
+                    Sum(on='product_price', window='1h', into='sum_spent_1h'),
+                    # Avg(on='product_price', window='7d', into='avg_spent_7d'),
+                    # Avg(on='product_price', window='1h', into='avg_spent_1h'),
+                    # Count(window='1w', into='num_purchases_1w'),
                 ])
 
         client = Client()

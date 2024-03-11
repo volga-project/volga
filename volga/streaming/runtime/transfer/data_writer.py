@@ -1,5 +1,5 @@
 import enum
-import orjson
+import simplejson
 from typing import List
 
 from volga.streaming.api.message.message import Record
@@ -54,8 +54,7 @@ class DataWriter:
     def write_message(self, channel_id: str, message: ChannelMessage):
         # TODO this should use a buffer?
         # TODO serialization perf
-        json_str = orjson.dumps(message).decode("utf-8")
-
+        json_str = simplejson.dumps(message)
         socket = self.sockets_and_contexts[channel_id][0]
         # TODO depending on socket type, this can block or just throw exception, test this
         socket.send_string(json_str)
