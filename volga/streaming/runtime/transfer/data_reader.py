@@ -43,25 +43,24 @@ class DataReader:
         # TODO this should use a buffer?
 
         # round-robin read
-        channel_id = self.input_channels[self.cur_read_id].channel_id
-        socket = self.sockets_and_contexts[channel_id][0]
+        channel_id = None
         json_str = None
         while self.running and json_str is None:
+            channel_id = self.input_channels[self.cur_read_id].channel_id
+            socket = self.sockets_and_contexts[channel_id][0]
             try:
                 json_str = socket.recv_string(zmq.NOBLOCK)
             except zmq.error.ContextTerminated:
                 logger.info('zmq recv interrupt due to ContextTerminated')
                 json_str = None
             except Exception as e:
-                # default if no data on the wire
                 json_str = None
+            self.cur_read_id = (self.cur_read_id + 1) % len(self.input_channels)
 
         # reader was stopped
         if json_str is None:
             assert self.running is False
             return None
-
-        self.cur_read_id = (self.cur_read_id + 1)%len(self.input_channels)
 
         # TODO serialization perf
         return simplejson.loads(json_str)

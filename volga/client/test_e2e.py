@@ -11,7 +11,7 @@ from volga.data.api.source.source import MysqlSource, source
 class TestVolgaE2E(unittest.TestCase):
 
     def test_materialize_offline(self):
-        num_users = 20
+        num_users = 3
         num_orders = 10
 
         user_items = [{
@@ -21,7 +21,7 @@ class TestVolgaE2E(unittest.TestCase):
         } for i in range(num_users)]
 
         order_items = [{
-            'buyer_id': str(i),
+            'buyer_id': str(i%num_users),
             'product_id': f'prod_{i}',
             'product_type': 'ON_SALE' if i%2 == 0 else 'NORMAL',
             'purchased_at': str(datetime.datetime.now()),
@@ -56,9 +56,9 @@ class TestVolgaE2E(unittest.TestCase):
 
             @pipeline(inputs=[User, Order])
             def gen(cls, users: Dataset, orders: Dataset):
-                on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
+                # on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
 
-                per_user = users.join(on_sale_purchases, left_on=['user_id'], right_on=['buyer_id'])
+                per_user = users.join(orders, left_on=['user_id'], right_on=['buyer_id'])
 
                 # return per_user
 

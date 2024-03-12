@@ -50,7 +50,10 @@ class TestStreamingJobE2E(unittest.TestCase):
         print('assert ok')
 
     def test_window(self):
-        s = self.ctx.from_collection([('k', 1), ('k', 2), ('k', 3), ('k', 4)])
+        s = self.ctx.from_collection([
+            *[('k1', i) for i in range(100)],
+            *[('k2', i) for i in range(100)],
+        ])
         s = s.timestamp_assigner(EventTimeAssigner(lambda e: Decimal(time.time())))
         s.key_by(lambda e: e[0]).multi_window_agg([
             SlidingWindowConfig(
@@ -92,8 +95,8 @@ if __name__ == '__main__':
         ctx = StreamingContext(job_config=job_config)
         t = TestStreamingJobE2E(ctx)
         # TODO should reset context on each call
-        t.test_join_streams()
-        # t.test_window()
+        # t.test_join_streams()
+        t.test_window()
 
         job_master = ctx.job_master
     finally:

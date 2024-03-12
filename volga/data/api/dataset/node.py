@@ -203,10 +203,8 @@ class Join(Node):
         return element[key]
 
     def _stream_join_func(self, left: Any, right: Any) -> Any:
-        if left is None:
-            return right
-        if right is None:
-            return left
+        if left is None or right is None:
+            raise RuntimeError('Can not join null values')
         assert isinstance(left, Dict)
         assert isinstance(right, Dict)
 

@@ -76,17 +76,18 @@ class AllAggregateFunction(AggregateFunction):
 
         if AggregationType.SUM in self.agg_on_funcs or AggregationType.AVG in self.agg_on_funcs:
             if AggregationType.SUM in self.agg_on_funcs:
-                agg_func = self.agg_on_funcs[AggregationType.SUM]
+                agg_on_func = self.agg_on_funcs[AggregationType.SUM]
             else:
-                agg_func = self.agg_on_funcs[AggregationType.AVG]
+                agg_on_func = self.agg_on_funcs[AggregationType.AVG]
 
-            v = agg_func(record.value)
+            v = agg_on_func(record.value)
             if AggregationType.SUM in accumulator.aggs:
                 accumulator.aggs[AggregationType.SUM] += Decimal(v)
             else:
                 accumulator.aggs[AggregationType.SUM] = Decimal(v)
 
-            accumulator.aggs[AggregationType.AVG] = accumulator.aggs[AggregationType.SUM]/accumulator.aggs[AggregationType.COUNT]
+            if AggregationType.AVG in self.agg_on_funcs:
+                accumulator.aggs[AggregationType.AVG] = accumulator.aggs[AggregationType.SUM]/accumulator.aggs[AggregationType.COUNT]
 
     def get_result(self, accumulator: Any) -> Any:
         return accumulator.aggs

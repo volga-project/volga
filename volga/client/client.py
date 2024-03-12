@@ -43,7 +43,9 @@ class Client:
         # TODO we should recursively reconstruct whole tree
         terminal_node = pipeline.func(target.__class__, *pipeline.inputs)
         stream: DataStream = terminal_node.stream
-        s = stream.sink(print) # TODO configure sink
+        # TODO configure sink
+        s = stream.sink(print)
+        # s = stream.sink(lambda e: None)
 
         # jgb = JobGraphBuilder(stream_sinks=[s])
         # jg = jgb.build()

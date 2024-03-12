@@ -38,7 +38,6 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
         super().__init__(EmptyFunction())
         self.configs = configs
         self.windows_per_key = {}
-        self.i = 0
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
@@ -66,7 +65,8 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
             assert isinstance(accum, AllAggregateFunction._Acc)
             aggs_per_window[w.name] = accum.aggs
 
-        self.collect(Record(value=aggs_per_window, event_time=record.event_time))
+        # aggs_per_window['key'] = record.key
+        self.collect(KeyRecord(key=record.key, value=aggs_per_window, event_time=record.event_time))
 
     def _create_windows(self) -> List[Window]:
         res = []
