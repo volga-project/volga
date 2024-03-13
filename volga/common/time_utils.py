@@ -44,3 +44,11 @@ def duration_to_ms(duration: Duration) -> Decimal:
 def datetime_str_to_ts(dt_str: str) -> Decimal:
     dt = dateutil.parser.isoparse(dt_str)
     return Decimal(dt.timestamp())
+
+
+def is_time_str(s: str) -> bool:
+    try:
+        dateutil.parser.isoparse(s)
+        return True
+    except:
+        return False

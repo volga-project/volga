@@ -63,7 +63,6 @@ class Client:
                 p, ctx, target_dataset_schema, source_tags
             )
 
-        # print(node)
         # init sources
         if isinstance(node, Dataset):
             if not node.is_source():
@@ -75,6 +74,7 @@ class Client:
             node.init_stream(ctx=ctx, source_tag=source_tag)
             return
 
+        # TODO special cases i.e. terminal node, join, aggregate, etc.
         if isinstance(node, Aggregate):
             node.init_stream(target_dataset_schema)
         else:

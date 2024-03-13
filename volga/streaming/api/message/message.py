@@ -58,6 +58,7 @@ class KeyRecord(Record):
     def __hash__(self):
         return hash((self.stream_name, self.key, self.value, self.event_time))
 
+    # TODO we should have proper ser/de
     def to_channel_message(self):
         return {
             'key': self.key,
@@ -66,7 +67,7 @@ class KeyRecord(Record):
             'event_time': self.event_time
         }
 
-
+# TODO we should have proper ser/de
 def record_from_channel_message(channel_message: ChannelMessage) -> Record:
     if 'key' in channel_message:
         record = KeyRecord(

@@ -50,8 +50,8 @@ class TestVolgaE2E(unittest.TestCase):
             product_id: str = field(key=True)
             timestamp: datetime.datetime = field(timestamp=True)
 
-            avg_spent_7d: float
-            avg_spent_1h: float
+            # avg_spent_7d: float
+            # avg_spent_1h: float
             num_purchases_1w: int
 
             @pipeline(inputs=[User, Order])
@@ -63,10 +63,10 @@ class TestVolgaE2E(unittest.TestCase):
                 # return per_user
 
                 return per_user.group_by(keys=['user_id']).aggregate([
-                    Sum(on='product_price', window='1h', into='sum_spent_1h'),
+                    # Sum(on='product_price', window='1h', into='sum_spent_1h'),
                     # Avg(on='product_price', window='7d', into='avg_spent_7d'),
                     # Avg(on='product_price', window='1h', into='avg_spent_1h'),
-                    # Count(window='1w', into='num_purchases_1w'),
+                    Count(window='1w', into='num_purchases_1w'),
                 ])
 
         client = Client()

@@ -1,6 +1,7 @@
 import copy
 from typing import Callable, Dict, Type, List, Optional, Any
 
+from volga.common.time_utils import is_time_str
 from volga.data.api.dataset.aggregate import AggregateType
 from volga.data.api.dataset.schema import DataSetSchema
 from volga.streaming.api.message.message import Record
@@ -124,12 +125,47 @@ class Aggregate(Node):
 
     def init_stream(self, target_dataset_schema: DataSetSchema):
 
-        assert isinstance(self.parents[0].stream, KeyDataStream)
-
         def _output_window_func(aggs_per_window: AggregationsPerWindow, record: Record) -> Record:
-            return record
+            record_value = record.value
+            res = {}
 
-        self.stream = self.parents[0].stream.multi_window_agg(
+            # TODO this is a hacky way to infer timestamp field from the record
+            #  Ideally we need to build resulting schema for each node at compilation time and use it to
+            #  derive field names/validate correctness
+
+            # copy keys
+            expected_key_fields = list(target_dataset_schema.keys.keys())
+            for k in expected_key_fields:
+                if k not in record_value:
+                    raise RuntimeError(f'Can not locate key field {k}')
+                res[k] = record_value[k]
+
+            # copy timestamp
+            ts_field = target_dataset_schema.timestamp
+            ts_value = None
+            for v in record_value.values():
+                if is_time_str(v):
+                    ts_value = v
+                    break
+
+            if ts_value is None:
+                raise RuntimeError(f'Unable to locate timestamp field: {record_value}')
+            res[ts_field] = ts_value
+
+            # copy aggregate values
+            values_fields = list(target_dataset_schema.values.keys())
+            for v in values_fields:
+                if v not in aggs_per_window:
+                    raise RuntimeError(f'Unable to locate {v} in aggregates: {aggs_per_window}')
+                res[v] = aggs_per_window[v]
+
+            res_record = Record(value=res, event_time=record.event_time)
+            res_record.set_stream_name(record.stream_name)
+            return res_record
+
+        parent = self.parents[0].stream
+        assert isinstance(parent, KeyDataStream)
+        self.stream = parent.multi_window_agg(
             configs=self._stream_window_aggregate_configs(),
             output_func=_output_window_func
         )
@@ -210,6 +246,7 @@ class Join(Node):
         key = self.right_on[0] if self.on is None else self.on[0]
         return element[key]
 
+    # TODO cast to target_dataset_schema in case of join being terminal node
     def _stream_join_func(self, left: Any, right: Any) -> Any:
         if left is None or right is None:
             raise RuntimeError('Can not join null values')
@@ -219,7 +256,7 @@ class Join(Node):
         # TODO we can compute same keys and resulting output schema only once to increase perf
         same_keys = list(set(left.keys()) & set(right.keys()))
 
-        # rename
+        # rename with prefixex
         for k in same_keys:
             if k in left:
                 new_k_left = f'left_{k}'

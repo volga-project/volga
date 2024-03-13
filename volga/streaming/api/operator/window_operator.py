@@ -21,6 +21,7 @@ class Window:
     length_ms: Decimal
     window_func: WindowFunction
     name: str
+    agg_type: AggregationType
 
 
 class SlidingWindowConfig(BaseModel):
@@ -30,7 +31,7 @@ class SlidingWindowConfig(BaseModel):
     name: Optional[str] = None
 
 
-AggregationsPerWindow = Dict[str, Dict[AggregationType, Decimal]]  # window name to agg value per agg type
+AggregationsPerWindow = Dict[str, Decimal]  # window name agg value
 OutputWindowFunc = Callable[[AggregationsPerWindow, Record], Record] # forms output record
 
 
@@ -71,7 +72,7 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
                 raise RuntimeError(f'Duplicate window names: {w.name}')
             accum = w.window_func.apply(w.records)
             assert isinstance(accum, AllAggregateFunction._Acc)
-            aggs_per_window[w.name] = accum.aggs
+            aggs_per_window[w.name] = accum.aggs[w.agg_type]
 
         if self.output_func is None:
             output_record = KeyRecord(key=record.key, value=aggs_per_window, event_time=record.event_time)
@@ -92,6 +93,7 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
                 records=deque(),
                 length_ms=duration_to_ms(conf.duration),
                 window_func=window_func,
-                name=name
+                name=name,
+                agg_type=conf.agg_type
             ))
         return res
