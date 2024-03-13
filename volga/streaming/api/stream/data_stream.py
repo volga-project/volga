@@ -1,10 +1,10 @@
-from typing import List, Callable, Union
+from typing import List, Callable, Union, Optional
 
 from volga.streaming.api.function.function import SimpleMapFunction, SimpleFlatMapFunction, \
     SimpleFilterFunction, SimpleKeyFunction, SimpleJoinFunction, SimpleReduceFunction, SimpleSinkFunction, Function
 from volga.streaming.api.operator.operator import MapOperator, FlatMapOperator, FilterOperator, \
     ReduceOperator, StreamOperator, JoinOperator, KeyByOperator, SinkOperator
-from volga.streaming.api.operator.window_operator import MultiWindowOperator, SlidingWindowConfig
+from volga.streaming.api.operator.window_operator import MultiWindowOperator, SlidingWindowConfig, OutputWindowFunc
 from volga.streaming.api.partition.partition import KeyPartition
 from volga.streaming.api.stream.stream import Stream
 from volga.streaming.api.stream.stream_sink import StreamSink
@@ -101,8 +101,8 @@ class KeyDataStream(DataStream):
         # TODO implement keyed aggregation
         raise NotImplementedError()
 
-    def multi_window_agg(self, configs: List[SlidingWindowConfig]) -> DataStream:
-        return DataStream(input_stream=self, stream_operator=MultiWindowOperator(configs))
+    def multi_window_agg(self, configs: List[SlidingWindowConfig], output_func: Optional[OutputWindowFunc] = None) -> DataStream:
+        return DataStream(input_stream=self, stream_operator=MultiWindowOperator(configs, output_func))
 
 
 # union

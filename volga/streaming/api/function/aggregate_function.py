@@ -46,7 +46,7 @@ class AllAggregateFunction(AggregateFunction):
 
     @dataclass
     class _Acc:
-        aggs: Dict[str, Decimal]
+        aggs: Dict[AggregationType, Decimal]
 
     def __init__(self, agg_on_funcs: Dict[str, Callable]):
         self.agg_on_funcs = agg_on_funcs

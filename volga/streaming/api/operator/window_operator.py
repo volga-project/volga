@@ -1,7 +1,6 @@
-import time
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional, Callable, Deque
+from typing import List, Optional, Callable, Deque, Dict
 
 from pydantic import BaseModel
 from decimal import Decimal
@@ -21,7 +20,7 @@ class Window:
     records: Deque
     length_ms: Decimal
     window_func: WindowFunction
-    name: Optional[str] = None
+    name: str
 
 
 class SlidingWindowConfig(BaseModel):
@@ -31,13 +30,22 @@ class SlidingWindowConfig(BaseModel):
     name: Optional[str] = None
 
 
+AggregationsPerWindow = Dict[str, Dict[AggregationType, Decimal]]  # window name to agg value per agg type
+OutputWindowFunc = Callable[[AggregationsPerWindow, Record], Record] # forms output record
+
+
 # tracks multiple sliding windows per key, triggers on each event
 class MultiWindowOperator(StreamOperator, OneInputOperator):
 
-    def __init__(self, configs: List[SlidingWindowConfig]):
+    def __init__(
+        self,
+        configs: List[SlidingWindowConfig],
+        output_func: Optional[OutputWindowFunc] = None
+    ):
         super().__init__(EmptyFunction())
         self.configs = configs
         self.windows_per_key = {}
+        self.output_func = output_func
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
@@ -51,7 +59,7 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
             windows = self._create_windows()
             self.windows_per_key[key] = windows
 
-        aggs_per_window = {}
+        aggs_per_window: AggregationsPerWindow = {}
         for w in windows:
             w.records.append(record)
 
@@ -65,8 +73,11 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
             assert isinstance(accum, AllAggregateFunction._Acc)
             aggs_per_window[w.name] = accum.aggs
 
-        # aggs_per_window['key'] = record.key
-        self.collect(KeyRecord(key=record.key, value=aggs_per_window, event_time=record.event_time))
+        if self.output_func is None:
+            output_record = KeyRecord(key=record.key, value=aggs_per_window, event_time=record.event_time)
+        else:
+            output_record = self.output_func(aggs_per_window, record)
+        self.collect(output_record)
 
     def _create_windows(self) -> List[Window]:
         res = []
@@ -84,4 +95,3 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
                 name=name
             ))
         return res
-

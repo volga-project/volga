@@ -212,7 +212,7 @@ class Dataset(Node):
     def is_source(self) -> bool:
         return hasattr(self, CONNECTORS_ATTR)
 
-    def init_stream_source(self, source_tag: Optional[str], ctx: StreamingContext):
+    def init_stream(self, source_tag: Optional[str], ctx: StreamingContext):
         if not self.is_source():
             raise ValueError(f'Dataset {self._name}: Can not get source stream from non-source dataset')
         if self.stream is not None:
