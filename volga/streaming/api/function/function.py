@@ -149,10 +149,10 @@ class LocalFileSourceFunction(SourceFunction):
             self.done = True
 
 
-class TimedCollectionSourceFunction(SourceFunction):
-    def __init__(self, values, time_period_s):
+class DelayedCollectionSourceFunction(SourceFunction):
+    def __init__(self, values, delay_s):
         self.values = values
-        self.time_period_s = time_period_s
+        self.delay_s = delay_s
 
     def init(self, parallel, index):
         pass
@@ -161,8 +161,11 @@ class TimedCollectionSourceFunction(SourceFunction):
         for i in range(len(self.values)):
             ctx.collect(self.values[i])
             if i < len(self.values) - 1:
-                time.sleep(self.time_period_s)
+                time.sleep(self.delay_s)
         self.values = []
+
+    def num_records(self) -> int:
+        return len(self.values)
 
 
 class SimpleMapFunction(MapFunction):

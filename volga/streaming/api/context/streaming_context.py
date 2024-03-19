@@ -5,7 +5,7 @@ from ray.actor import ActorHandle
 from ray.util.client import ray
 
 from volga.streaming.api.function.function import CollectionSourceFunction, LocalFileSourceFunction, \
-    SourceFunction, TimedCollectionSourceFunction
+    SourceFunction, DelayedCollectionSourceFunction
 from volga.streaming.api.function.kafka import KafkaSourceFunction
 from volga.streaming.api.function.mysql import MysqlSourceFunction
 from volga.streaming.api.job_graph.job_graph_builder import JobGraphBuilder
@@ -43,9 +43,9 @@ class StreamingContext:
         func = CollectionSourceFunction(values)
         return self.source(func)
 
-    def from_timed_collection(self, values, time_period_s) -> StreamSource:
+    def from_delayed_collection(self, values, delay_s) -> StreamSource:
         assert values, "values shouldn't be None or empty"
-        func = TimedCollectionSourceFunction(values, time_period_s)
+        func = DelayedCollectionSourceFunction(values, delay_s)
         return self.source(func)
 
     def read_text_file(self, filename: str) -> StreamSource:

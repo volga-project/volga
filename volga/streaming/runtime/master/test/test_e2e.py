@@ -86,6 +86,12 @@ class TestStreamingJobE2E(unittest.TestCase):
         ctx.execute()
         # TODO assert
 
+    def test_delayed_collection_source(self):
+        s1 = self.ctx.from_delayed_collection([(f'k{i}', i) for i in range(10)], delay_s=1)
+        s2 = self.ctx.from_collection([(f'k{i}', i) for i in range(10)])
+        s = s1.key_by(lambda e: e[0]).join(s2.key_by(lambda e: e[0])).with_func(lambda l, r: (l, r))
+        s.sink(print)
+        ctx.execute()
 
 if __name__ == '__main__':
     job_master = None
@@ -96,7 +102,8 @@ if __name__ == '__main__':
         t = TestStreamingJobE2E(ctx)
         # TODO should reset context on each call
         # t.test_join_streams()
-        t.test_window()
+        # t.test_window()
+        t.test_delayed_collection_source()
 
         job_master = ctx.job_master
     finally:

@@ -1,5 +1,5 @@
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from ray.util.client import ray
 
@@ -11,33 +11,27 @@ from volga.streaming.api.job_graph.job_graph_builder import JobGraphBuilder
 from volga.streaming.api.stream.data_stream import DataStream
 
 
+DEFAULT_STREAMING_JOB_CONFIG = {
+    'worker_config_template': {},
+    'master_config': {
+        'resource_config': {
+            'default_worker_resources': {
+                'CPU': '0.1'
+            }
+        },
+        'scheduler_config': {}
+    }
+}
+
+
 class Client:
 
     def __init__(self):
         pass
 
     def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
-        ctx = StreamingContext(job_config={
-            'worker_config_template': {},
-            'master_config': {
-                'resource_config': {
-                    'default_worker_resources': {
-                        'CPU': '0.1'
-                    }
-                },
-                'scheduler_config': {}
-            }
-        })
-        pipeline = target.get_pipeline()
-
-        # build node graph
-        # TODO we should recursively reconstruct whole tree in case inputs are not terminal
-        terminal_node = pipeline.func(target.__class__, *pipeline.inputs)
-
-        # build stream graph
-        self._build_stream_graph(terminal_node, ctx, target.data_set_schema(), source_tags)
-        stream: DataStream = terminal_node.stream
-        # TODO configure sink
+        stream, ctx = self._build_stream(target=target, source_tags=source_tags)
+        # TODO configure sink with ColdStorage
         s = stream.sink(print)
         # s = stream.sink(lambda e: None)
 
@@ -50,7 +44,21 @@ class Client:
         time.sleep(1)
         ray.shutdown()
 
-    def _build_stream_graph(
+    def _build_stream(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]]) -> Tuple[DataStream, StreamingContext]:
+        ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
+        pipeline = target.get_pipeline()
+
+        # build node graph
+        # TODO we should recursively reconstruct whole tree in case inputs are not terminal
+        terminal_node = pipeline.func(target.__class__, *pipeline.inputs)
+
+        # build stream graph
+        self._init_stream_graph(terminal_node, ctx, target.data_set_schema(), source_tags)
+        stream: DataStream = terminal_node.stream
+
+        return stream, ctx
+
+    def _init_stream_graph(
         self,
         node: NodeBase,
         ctx: StreamingContext,
@@ -59,7 +67,7 @@ class Client:
     ):
 
         for p in node.parents:
-            self._build_stream_graph(
+            self._init_stream_graph(
                 p, ctx, target_dataset_schema, source_tags
             )
 

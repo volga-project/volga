@@ -103,16 +103,16 @@ class StreamTask(ABC):
         )
 
     def close(self):
-        logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
+        # logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
         self.running = False
         self.processor.close()
         if self.writer is not None:
             self.writer.close()
-            logger.info(f'Closed writer for task {self.execution_vertex.execution_vertex_id}')
+            # logger.info(f'Closed writer for task {self.execution_vertex.execution_vertex_id}')
 
         if self.reader is not None:
             self.reader.close()
-            logger.info(f'Closed reader for task {self.execution_vertex.execution_vertex_id}')
+            # logger.info(f'Closed reader for task {self.execution_vertex.execution_vertex_id}')
         if self.thread is not None:
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')

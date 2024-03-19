@@ -57,6 +57,16 @@ class MockOfflineConnector(Connector):
         return ctx.from_collection(self.items)
 
 
+class MockOnlineConnector(Connector):
+
+    def __init__(self, items: List[Any], delay_s: int):
+        self.items = items
+        self.delay_s = delay_s
+
+    def to_stream_source(self, ctx: StreamingContext) -> StreamSource:
+        return ctx.from_delayed_collection(self.items, delay_s=self.delay_s)
+
+
 # produces connections
 class Source(BaseModel):
 
@@ -103,6 +113,10 @@ class KafkaSource(Source):
             source=self,
             topic=topic
         )
+
+    @staticmethod
+    def mock_with_delayed_items(items: List[Any], delay_s: int) -> MockOnlineConnector:
+        return MockOnlineConnector(items, delay_s)
 
 
 class MysqlSource(Source):
