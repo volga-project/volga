@@ -2,7 +2,6 @@ import logging
 from typing import Dict, List, Optional
 
 from ray.actor import ActorHandle
-from ray.util.client import ray
 
 from volga.streaming.api.function.function import CollectionSourceFunction, LocalFileSourceFunction, \
     SourceFunction, DelayedCollectionSourceFunction

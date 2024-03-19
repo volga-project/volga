@@ -7,7 +7,6 @@ from typing import Any
 
 from ray import cloudpickle
 from ray.actor import ActorHandle
-from ray.util.client import ray
 
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
@@ -293,22 +292,3 @@ class SinkToCacheFunction(SinkFunction):
         self._dump_buffer_if_needed()
         if self.dumper_thread is not None:
             self.dumper_thread.join(timeout=5)
-
-
-def serialize(func: Function):
-    """Serialize a streaming :class:`Function`"""
-    return cloudpickle.dumps(func)
-
-
-def deserialize(func_bytes):
-    """Deserialize a binary function serialized by `serialize` method."""
-    return cloudpickle.loads(func_bytes)
-
-
-def _get_simple_function_class(function_interface):
-    """Get the wrapper function for the given `function_interface`."""
-    for name, obj in inspect.getmembers(sys.modules[__name__]):
-        if inspect.isclass(obj) and issubclass(obj, function_interface):
-            if obj is not function_interface and obj.__name__.startswith("Simple"):
-                return obj
-    raise Exception("SimpleFunction for {} doesn't exist".format(function_interface))

@@ -1,4 +1,5 @@
 import bisect
+import heapq
 from datetime import datetime
 from threading import Thread
 from typing import Dict, Any, Optional, List, Tuple
@@ -9,6 +10,7 @@ from ray.actor import ActorHandle
 import time
 
 from volga.storage.cold.cold import ColdStorage
+from volga.storage.common.key_index import compose_main_key, KeyIndex
 from volga.storage.hot.hot import HotStorage
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import SinkFunction
@@ -31,8 +33,11 @@ class SimpleInMemoryActorStorage(ColdStorage, HotStorage):
 class SimpleInMemoryCacheActor:
     def __init__(self):
         self.per_dataset_per_key: Dict[str, Dict[str, List[Tuple[Decimal, Any]]]] = {}
+        self.key_index = KeyIndex()
 
-    def put_values(self, dataset_name: str, key: str, timestamped_values: List[Tuple[Decimal, Any]]):
+    def put_values(self, dataset_name: str, keys_dict: Dict[str, Any], timestamped_values: List[Tuple[Decimal, Any]]):
+        key = compose_main_key(keys_dict)
+        self.key_index.put(keys_dict)
         if dataset_name in self.per_dataset_per_key:
             per_key = self.per_dataset_per_key[dataset_name]
         else:
@@ -48,24 +53,34 @@ class SimpleInMemoryCacheActor:
         for ts_val in timestamped_values:
             bisect.insort_right(vals, ts_val)
 
-    def get_values(self, dataset_name: str, key: str, start: Optional[Decimal], end: Optional[Decimal]):
+    def get_values(self, dataset_name: str, keys_dict: Dict[str, Any], start: Optional[Decimal], end: Optional[Decimal]) -> List:
         if dataset_name not in self.per_dataset_per_key:
-            raise RuntimeError(f'No dataset {dataset_name}')
-        if key is not None and key not in self.per_dataset_per_key[dataset_name]:
-            raise RuntimeError(f'No key {key} found in dataset {dataset_name}')
+            # raise RuntimeError(f'No dataset {dataset_name}')
+            return []
 
-        timestamped_values = self.per_dataset_per_key[dataset_name][key]
-        # remove timestamp keys
-        vals = list(map(lambda v: v[1], timestamped_values))
+        main_key = compose_main_key(keys_dict)
+        possible_keys = self.key_index.get(keys_dict)
+        possible_keys.append(main_key)
+        res = []
 
-        # range query
-        first = bisect.bisect_left(vals, start) if start is not None else 0
-        last = bisect.bisect_right(vals, end) if end is not None else vals[-1]
+        for key in possible_keys:
+            timestamped_values = self.per_dataset_per_key[dataset_name][key]
+            # remove timestamp keys
+            vals = list(map(lambda v: v[1], timestamped_values))
 
-        return vals[first:last]
+            # range query
+            first = bisect.bisect_left(vals, start) if start is not None else 0
+            last = bisect.bisect_right(vals, end) if end is not None else vals[-1]
 
-    def get_latest(self, dataset_name: str, key: str):
-        vals = self.get_values(dataset_name=dataset_name, key=key, start=None, end=None)
+            v = vals[first:last]
+            res = list(heapq.merge(res, v))
+
+        return res
+
+    def get_latest(self, dataset_name: str, keys_dict: Dict[str, Any]) -> Optional[Any]:
+        vals = self.get_values(dataset_name=dataset_name, keys_dict=keys_dict, start=None, end=None)
+        if len(vals) == 0:
+            return None
         return vals[-1]
 
 

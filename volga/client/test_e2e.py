@@ -78,9 +78,8 @@ class TestVolgaE2E(unittest.TestCase):
     def test_materialize_offline(self):
 
         client = Client()
-
         # run batch materialization job
-        client.materialize_offline(target=OnSaleUserSpentInfo, source_tags={Order: 'offline'})
+        client.materialize_online(target=OnSaleUserSpentInfo, source_tags={Order: 'online'})
 
 
 if __name__ == '__main__':

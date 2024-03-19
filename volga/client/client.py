@@ -1,13 +1,12 @@
 import time
 from typing import Dict, Optional, Tuple
 
-from ray.util.client import ray
+import ray
 
 from volga.data.api.dataset.dataset import Dataset
 from volga.data.api.dataset.node import Node, Aggregate, NodeBase
 from volga.data.api.dataset.schema import DataSetSchema
 from volga.streaming.api.context.streaming_context import StreamingContext
-from volga.streaming.api.job_graph.job_graph_builder import JobGraphBuilder
 from volga.streaming.api.stream.data_stream import DataStream
 
 
@@ -16,7 +15,7 @@ DEFAULT_STREAMING_JOB_CONFIG = {
     'master_config': {
         'resource_config': {
             'default_worker_resources': {
-                'CPU': '0.1'
+                'CPU': '0.01'
             }
         },
         'scheduler_config': {}
@@ -33,11 +32,16 @@ class Client:
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
         # TODO configure sink with ColdStorage
         s = stream.sink(print)
-        # s = stream.sink(lambda e: None)
 
-        # jgb = JobGraphBuilder(stream_sinks=[s])
-        # jg = jgb.build()
-        # print(jg.gen_digraph())
+        ray.init(address='auto')
+        ctx.execute()
+        time.sleep(1)
+        ray.shutdown()
+
+    def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
+        stream, ctx = self._build_stream(target=target, source_tags=source_tags)
+        # TODO configure sink with HotStorage
+        s = stream.sink(print)
 
         ray.init(address='auto')
         ctx.execute()
