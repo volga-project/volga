@@ -2,7 +2,7 @@ import unittest
 import datetime
 
 from volga.client.client import Client
-from volga.data.api.dataset.aggregate import Avg, Count, Sum
+from volga.data.api.dataset.aggregate import Avg, Count
 from volga.data.api.dataset.dataset import dataset, field, Dataset
 from volga.data.api.dataset.pipeline import pipeline
 from volga.data.api.source.source import MysqlSource, source
@@ -50,9 +50,10 @@ class TestVolgaE2E(unittest.TestCase):
             product_id: str = field(key=True)
             timestamp: datetime.datetime = field(timestamp=True)
 
-            # avg_spent_7d: float
+            avg_spent_7d: float
             # avg_spent_1h: float
             num_purchases_1w: int
+            # sum_spent_1h: float
 
             @pipeline(inputs=[User, Order])
             def gen(cls, users: Dataset, orders: Dataset):
@@ -64,7 +65,7 @@ class TestVolgaE2E(unittest.TestCase):
 
                 return per_user.group_by(keys=['user_id']).aggregate([
                     # Sum(on='product_price', window='1h', into='sum_spent_1h'),
-                    # Avg(on='product_price', window='7d', into='avg_spent_7d'),
+                    Avg(on='product_price', window='7d', into='avg_spent_7d'),
                     # Avg(on='product_price', window='1h', into='avg_spent_1h'),
                     Count(window='1w', into='num_purchases_1w'),
                 ])

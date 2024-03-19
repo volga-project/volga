@@ -59,27 +59,27 @@ class TestStreamingJobE2E(unittest.TestCase):
             SlidingWindowConfig(
                 duration='1m',
                 agg_type=AggregationType.COUNT,
-                agg_on=(lambda e: e[1]),
+                agg_on_func=(lambda e: e[1]),
             ),
             SlidingWindowConfig(
                 duration='1m',
                 agg_type=AggregationType.SUM,
-                agg_on=(lambda e: e[1]),
+                agg_on_func=(lambda e: e[1]),
             ),
             SlidingWindowConfig(
                 duration='1m',
                 agg_type=AggregationType.AVG,
-                agg_on=(lambda e: e[1]),
+                agg_on_func=(lambda e: e[1]),
             ),
             SlidingWindowConfig(
                 duration='1m',
                 agg_type=AggregationType.MAX,
-                agg_on=(lambda e: e[1]),
+                agg_on_func=(lambda e: e[1]),
             ),
             SlidingWindowConfig(
                 duration='1m',
                 agg_type=AggregationType.MIN,
-                agg_on=(lambda e: e[1]),
+                agg_on_func=(lambda e: e[1]),
             )
         ]).sink(print)
 

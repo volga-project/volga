@@ -27,7 +27,7 @@ class Window:
 class SlidingWindowConfig(BaseModel):
     duration: Duration
     agg_type: AggregationType
-    agg_on: Callable
+    agg_on_func: Callable
     name: Optional[str] = None
 
 
@@ -75,7 +75,7 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
             aggs_per_window[w.name] = accum.aggs[w.agg_type]
 
         if self.output_func is None:
-            output_record = KeyRecord(key=record.key, value=aggs_per_window, event_time=record.event_time)
+            output_record = Record(value=aggs_per_window, event_time=record.event_time)
         else:
             output_record = self.output_func(aggs_per_window, record)
         self.collect(output_record)
@@ -87,7 +87,7 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
                 name = f'{conf.agg_type}_{conf.duration}'
             else:
                 name = conf.name
-            agg_func = AllAggregateFunction({conf.agg_type: conf.agg_on})
+            agg_func = AllAggregateFunction(conf.agg_type, conf.agg_on_func)
             window_func = AllAggregateApplyWindowFunction(agg_func)
             res.append(Window(
                 records=deque(),
