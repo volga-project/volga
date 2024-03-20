@@ -1,5 +1,5 @@
 import itertools
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Set
 
 DEFAULT_KV_SEPARATOR = '='
 DEFAULT_KEYS_SEPARATOR = '-'
@@ -9,7 +9,7 @@ DEFAULT_KEYS_SEPARATOR = '-'
 class KeyIndex:
 
     def __init__(self):
-        self.index: Dict[str, List[str]] = {}
+        self.index: Dict[str, Set[str]] = {}
 
     def put(self, keys_dict: Dict[str, Any]):
         main_key = compose_main_key(keys_dict)
@@ -17,14 +17,14 @@ class KeyIndex:
         for k in possible_keys:
             if k in self.index:
                 keys = self.index[k]
-                keys.append(main_key)
+                keys.add(main_key)
             else:
-                keys = [main_key]
+                keys = {main_key}
             self.index[k] = keys
 
     def get(self, keys_dict: Dict[str, Any]) -> List[str]:
         main_key = compose_main_key(keys_dict)
-        return self.index.get(main_key, [])
+        return list(self.index.get(main_key, []))
 
 
 def compose_possible_keys(keys_dict: Dict[str, Any]) -> List[str]:

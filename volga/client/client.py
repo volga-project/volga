@@ -6,6 +6,7 @@ import ray
 from volga.data.api.dataset.dataset import Dataset
 from volga.data.api.dataset.node import Node, Aggregate, NodeBase
 from volga.data.api.dataset.schema import DataSetSchema
+from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.data_stream import DataStream
 
@@ -30,12 +31,14 @@ class Client:
 
     def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
-        # TODO configure sink with ColdStorage
-        s = stream.sink(print)
+        storage = SimpleInMemoryActorStorage(dataset_name=target.__class__.__name__, output_schema=target.data_set_schema())
+        stream.sink(storage.gen_sink_function())
 
         ray.init(address='auto')
         ctx.execute()
         time.sleep(1)
+
+        # storage.get_data()
         ray.shutdown()
 
     def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):

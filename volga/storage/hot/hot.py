@@ -1,14 +1,13 @@
 from abc import ABC, abstractmethod
-from datetime import datetime
 from typing import Dict, Any
 
-from volga.streaming.api.stream.stream_sink import StreamSink
+from volga.streaming.api.function.function import SinkFunction
 
 
 class HotStorage(ABC):
 
     @abstractmethod
-    def get_stream_sink(self) -> StreamSink:
+    def gen_sink_function(self) -> SinkFunction:
         pass
 
     @abstractmethod
