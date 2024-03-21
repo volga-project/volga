@@ -1,5 +1,4 @@
 import bisect
-import heapq
 from threading import Thread
 from typing import Dict, Any, Optional, List, Tuple
 
@@ -9,7 +8,7 @@ from ray.actor import ActorHandle
 import time
 
 from volga.common.time_utils import datetime_str_to_ts
-from volga.data.api.dataset.schema import DataSetSchema
+from volga.data.api.dataset.schema import DatasetSchema
 from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.key_index import compose_main_key, KeyIndex
 from volga.storage.hot.hot import HotStorage
@@ -21,26 +20,26 @@ class SimpleInMemoryActorStorage(ColdStorage, HotStorage):
 
     CACHE_ACTOR_NAME = 'cache_actor'
 
-    def __init__(self, dataset_name: str, output_schema: DataSetSchema):
-        self.dataset_name = dataset_name
-        self.output_schema = output_schema
+    def __init__(self):
         self.cache_actor = SimpleInMemoryCacheActor.options(name=self.CACHE_ACTOR_NAME, get_if_exists=True).remote()
 
-    def gen_sink_function(self) -> SinkFunction:
+    # TODO dataset_name and schema should be part of all records metadata
+    #  When it is so, this outside params won't be needed
+    def gen_sink_function(self, dataset_name: str, output_schema: DatasetSchema) -> SinkFunction:
         return BulkSinkToCacheActorFunction(
             cache_actor=self.cache_actor,
-            dataset_name=self.dataset_name,
-            output_schema=self.output_schema
+            dataset_name=dataset_name,
+            output_schema=output_schema
         )
 
-    def get_data(self, dataset_name: str, keys: Dict[str, Any], start_ts: Optional[Decimal], end_ts: Optional[Decimal]) -> List[Any]:
+    def get_data(self, dataset_name: str, keys: Optional[Dict[str, Any]], start_ts: Optional[Decimal], end_ts: Optional[Decimal]) -> List[Any]:
         return ray.get(self.cache_actor.get_values.remote(dataset_name, keys, start_ts, end_ts))
 
     def get_latest_data(self, dataset_name: str, keys: Dict[str, Any]) -> Any:
         raise NotImplementedError()
 
 
-@ray.remote(num_cpus=0.01) # TODO set memory request
+@ray.remote(num_cpus=0.01)# TODO set memory request
 class SimpleInMemoryCacheActor:
     def __init__(self):
         self.per_dataset_per_key: Dict[str, Dict[str, List[Tuple[Decimal, Any]]]] = {}
@@ -69,36 +68,47 @@ class SimpleInMemoryCacheActor:
                 ts_vals = []
                 per_key[key] = ts_vals
 
+            # ts_vals.append((ts, value))
             bisect.insort_right(ts_vals, (ts, value))
 
-    def get_values(self, dataset_name: str, keys_dict: Dict[str, Any], start: Optional[Decimal], end: Optional[Decimal]) -> List:
+    def get_values(self, dataset_name: str, keys_dict: Optional[Dict[str, Any]], start: Optional[Decimal], end: Optional[Decimal]) -> List:
         if dataset_name not in self.per_dataset_per_key:
-            # raise RuntimeError(f'No dataset {dataset_name}')
-            return []
+            raise RuntimeError(f'No dataset {dataset_name}')
 
-        main_key = compose_main_key(keys_dict)
-        possible_keys = self.key_index.get(keys_dict)
-        possible_keys.append(main_key)
+        if keys_dict is not None:
+            main_key = compose_main_key(keys_dict)
+            possible_keys = self.key_index_per_dataset[dataset_name].get(keys_dict)
+            possible_keys.append(main_key)
+        else:
+            possible_keys = list(self.per_dataset_per_key[dataset_name].keys())
+
         res = []
 
         for key in possible_keys:
             timestamped_values = self.per_dataset_per_key[dataset_name][key]
-            # remove timestamp keys
-            vals = list(map(lambda v: v[1], timestamped_values))
+            # range query on sorted list
+            first = 0
+            while start is not None and timestamped_values[first][0] < start:
+                first += 1
 
-            # range query
-            first = bisect.bisect_left(vals, start) if start is not None else 0
-            last = bisect.bisect_right(vals, end) if end is not None else vals[-1]
+            last = len(timestamped_values) - 1
+            while end is not None and timestamped_values[last][0] > end:
+                last -= 1
 
-            v = vals[first:last]
-            res = list(heapq.merge(res, v))
+            values = timestamped_values[first: last + 1]
 
-        return res
+            # TODO we can merge those since both arrays are sorted
+            res.extend(values)
+
+        res.sort(key=lambda e: e[0])
+        return list(map(lambda e: e[1], res)) # remove timestamps
 
     def get_latest(self, dataset_name: str, keys_dict: Dict[str, Any]) -> Optional[Any]:
         vals = self.get_values(dataset_name=dataset_name, keys_dict=keys_dict, start=None, end=None)
         if len(vals) == 0:
             return None
+
+        # TODO group by timestamp
         return vals[-1]
 
 
@@ -106,7 +116,7 @@ class BulkSinkToCacheActorFunction(SinkFunction):
 
     DUMPER_PERIOD_S = 1
 
-    def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: DataSetSchema):
+    def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: DatasetSchema):
         self.cache_actor = cache_actor
         self.dataset_name = dataset_name
         self.output_schema = output_schema
@@ -116,7 +126,7 @@ class BulkSinkToCacheActorFunction(SinkFunction):
 
     def sink(self, value):
         # TODO all of this should be a part of Record object and not sourced from outside
-        key_fields = list(self.output_schema.keys.values())
+        key_fields = list(self.output_schema.keys.keys())
         keys_dict = {k: value[k] for k in key_fields}
         timestamp_field = self.output_schema.timestamp
         ts = datetime_str_to_ts(value[timestamp_field])

@@ -5,7 +5,8 @@ import ray
 
 from volga.data.api.dataset.dataset import Dataset
 from volga.data.api.dataset.node import Node, Aggregate, NodeBase
-from volga.data.api.dataset.schema import DataSetSchema
+from volga.data.api.dataset.schema import DatasetSchema
+from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.data_stream import DataStream
@@ -29,27 +30,19 @@ class Client:
     def __init__(self):
         pass
 
-    def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
+    def materialize_offline(self, target: Dataset, storage: ColdStorage, source_tags: Optional[Dict[Dataset, str]] = None):
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
-        storage = SimpleInMemoryActorStorage(dataset_name=target.__class__.__name__, output_schema=target.data_set_schema())
-        stream.sink(storage.gen_sink_function())
-
-        ray.init(address='auto')
+        if not isinstance(storage, SimpleInMemoryActorStorage):
+            raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
+        stream.sink(storage.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema()))
+        stream.sink(print) # TODO debug
         ctx.execute()
-        time.sleep(1)
-
-        # storage.get_data()
-        ray.shutdown()
 
     def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
         # TODO configure sink with HotStorage
-        s = stream.sink(print)
-
-        ray.init(address='auto')
+        stream.sink(print)
         ctx.execute()
-        time.sleep(1)
-        ray.shutdown()
 
     def _build_stream(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]]) -> Tuple[DataStream, StreamingContext]:
         ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
@@ -60,7 +53,7 @@ class Client:
         terminal_node = pipeline.func(target.__class__, *pipeline.inputs)
 
         # build stream graph
-        self._init_stream_graph(terminal_node, ctx, target.data_set_schema(), source_tags)
+        self._init_stream_graph(terminal_node, ctx, target.dataset_schema(), source_tags)
         stream: DataStream = terminal_node.stream
 
         return stream, ctx
@@ -69,7 +62,7 @@ class Client:
         self,
         node: NodeBase,
         ctx: StreamingContext,
-        target_dataset_schema: DataSetSchema,
+        target_dataset_schema: DatasetSchema,
         source_tags: Optional[Dict[Dataset, str]] = None
     ):
 

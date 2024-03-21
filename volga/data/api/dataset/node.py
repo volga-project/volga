@@ -3,7 +3,7 @@ from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.common.time_utils import is_time_str
 from volga.data.api.dataset.aggregate import AggregateType
-from volga.data.api.dataset.schema import DataSetSchema
+from volga.data.api.dataset.schema import DatasetSchema
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operator.window_operator import SlidingWindowConfig, AggregationsPerWindow
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
@@ -123,7 +123,7 @@ class Aggregate(Node):
         self.aggregates = aggregates
         self.parents.append(parent)
 
-    def init_stream(self, target_dataset_schema: DataSetSchema):
+    def init_stream(self, target_dataset_schema: DatasetSchema):
 
         def _output_window_func(aggs_per_window: AggregationsPerWindow, record: Record) -> Record:
             record_value = record.value

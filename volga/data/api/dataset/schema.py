@@ -4,7 +4,7 @@ from typing import Dict, Type, List
 
 
 @dataclass
-class DataSetSchema:
+class DatasetSchema:
     keys: Dict[str, Type]
     values: Dict[str, Type]
     timestamp: str

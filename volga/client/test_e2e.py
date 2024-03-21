@@ -1,27 +1,33 @@
+import time
 import unittest
 import datetime
+
+import pandas as pd
+import ray
 
 from volga.client.client import Client
 from volga.data.api.dataset.aggregate import Avg, Count, Sum
 from volga.data.api.dataset.dataset import dataset, field, Dataset
 from volga.data.api.dataset.pipeline import pipeline
 from volga.data.api.source.source import MysqlSource, source, KafkaSource
+from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 
 # mock data
 num_users = 3
-num_orders = 10
-
 user_items = [{
     'user_id': str(i),
     'registered_at': str(datetime.datetime.now()),
     'name': f'username_{i}'
 } for i in range(num_users)]
 
+num_orders = 10
+purchase_time = datetime.datetime.now()
+DELAY_S = 60*60*2
 order_items = [{
     'buyer_id': str(i % num_users),
     'product_id': f'prod_{i}',
     'product_type': 'ON_SALE' if i % 2 == 0 else 'NORMAL',
-    'purchased_at': str(datetime.datetime.now()),
+    'purchased_at': str(purchase_time + datetime.timedelta(seconds=i*DELAY_S)),
     'product_price': 100.0
 } for i in range(num_orders)]
 
@@ -78,7 +84,12 @@ class TestVolgaE2E(unittest.TestCase):
     def test_materialize_offline(self):
         client = Client()
         # run batch materialization job
-        client.materialize_online(target=OnSaleUserSpentInfo, source_tags={Order: 'online'})
+        ray.init(address='auto')
+        storage = SimpleInMemoryActorStorage()
+        client.materialize_offline(target=OnSaleUserSpentInfo, storage=storage, source_tags={Order: 'offline'})
+        time.sleep(1)
+        vals = storage.get_data(dataset_name=OnSaleUserSpentInfo.__name__, keys=None, start_ts=None, end_ts=None)
+        print(pd.DataFrame(vals))
 
 
 if __name__ == '__main__':

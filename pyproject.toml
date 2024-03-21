@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "volga"
 version = "0.1.0"
-description = "Real-time Feature/ML platform"
+description = "Real-time feature/ML engine"
 authors = ["Andrey Novitskiy <valera.dirty@gmail.com>"]
 readme = "README.md"
 

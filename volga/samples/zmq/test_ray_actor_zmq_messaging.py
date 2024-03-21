@@ -71,6 +71,7 @@ class Pull:
         print('Done')
         time.sleep(1)
 
+
 with ray.init(address='auto'):
     pub_port = 5151
     pub_addr = f'tcp://127.0.0.1:{pub_port}'

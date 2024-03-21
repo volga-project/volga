@@ -7,7 +7,7 @@ from volga.streaming.api.function.function import SinkFunction
 class HotStorage(ABC):
 
     @abstractmethod
-    def gen_sink_function(self) -> SinkFunction:
+    def gen_sink_function(self, *args, **kwargs) -> SinkFunction:
         pass
 
     @abstractmethod

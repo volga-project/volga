@@ -7,7 +7,7 @@ from datashape import Decimal
 from volga.common.time_utils import datetime_str_to_ts
 from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
 from volga.data.api.dataset.node import Node
-from volga.data.api.dataset.schema import DataSetSchema
+from volga.data.api.dataset.schema import DatasetSchema
 
 import datetime
 
@@ -128,8 +128,8 @@ class Dataset(Node):
     def __repr__(self):
         return self._name
 
-    def data_set_schema(self):
-        return DataSetSchema(
+    def dataset_schema(self):
+        return DatasetSchema(
             keys={f.name: f.dtype for f in self._fields if f.key},
             values={
                 f.name: f.dtype
