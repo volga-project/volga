@@ -76,9 +76,7 @@ class SimpleInMemoryCacheActor:
             raise RuntimeError(f'No dataset {dataset_name}')
 
         if keys_dict is not None:
-            main_key = compose_main_key(keys_dict)
             possible_keys = self.key_index_per_dataset[dataset_name].get(keys_dict)
-            possible_keys.append(main_key)
         else:
             possible_keys = list(self.per_dataset_per_key[dataset_name].keys())
 

@@ -22,7 +22,7 @@ user_items = [{
 
 num_orders = 10
 purchase_time = datetime.datetime.now()
-DELAY_S = 60*60*2
+DELAY_S = 60*60*24
 order_items = [{
     'buyer_id': str(i % num_users),
     'product_id': f'prod_{i}',
@@ -67,9 +67,8 @@ class OnSaleUserSpentInfo:
     def gen(cls, users: Dataset, orders: Dataset):
         # on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
 
-        per_user = users.join(orders, left_on=['user_id'], right_on=['buyer_id'])
-
-        # return per_user
+        # per_user = users.join(orders, left_on=['user_id'], right_on=['buyer_id'])
+        per_user = orders.join(users, right_on=['user_id'], left_on=['buyer_id'])
 
         return per_user.group_by(keys=['user_id']).aggregate([
             Sum(on='product_price', window='1h', into='sum_spent_1h'),
@@ -88,7 +87,7 @@ class TestVolgaE2E(unittest.TestCase):
         storage = SimpleInMemoryActorStorage()
         client.materialize_offline(target=OnSaleUserSpentInfo, storage=storage, source_tags={Order: 'offline'})
         time.sleep(1)
-        vals = storage.get_data(dataset_name=OnSaleUserSpentInfo.__name__, keys=None, start_ts=None, end_ts=None)
+        vals = storage.get_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0}, start_ts=None, end_ts=None)
         print(pd.DataFrame(vals))
 
 
