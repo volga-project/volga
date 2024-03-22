@@ -75,9 +75,17 @@ class AllAggregateFunction(AggregateFunction):
                 accumulator.aggs[AggregationType.COUNT] += Decimal(1)
             else:
                 accumulator.aggs[AggregationType.COUNT] = Decimal(1)
+            if AggregationType.COUNT == self.agg_type:
+                return
 
         if AggregationType.SUM == self.agg_type or AggregationType.AVG == self.agg_type:
-            v = self.agg_on_func(record.value)
+
+            try:
+                v = self.agg_on_func(record.value)
+            except Exception as e:
+                print(self.agg_type)
+                raise e
+
             if AggregationType.SUM in accumulator.aggs:
                 accumulator.aggs[AggregationType.SUM] += Decimal(v)
             else:
@@ -91,11 +99,3 @@ class AllAggregateFunction(AggregateFunction):
 
     def merge(self, acc1: Any, acc2: Any) -> Any:
         raise NotImplementedError()
-
-
-
-
-
-
-
-

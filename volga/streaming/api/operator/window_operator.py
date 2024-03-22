@@ -28,7 +28,7 @@ class Window:
 class SlidingWindowConfig(BaseModel):
     duration: Duration
     agg_type: AggregationType
-    agg_on_func: Callable
+    agg_on_func: Optional[Callable]
     name: Optional[str] = None
 
 

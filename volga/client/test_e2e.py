@@ -57,11 +57,12 @@ class OnSaleUserSpentInfo:
     product_id: str = field(key=True)
     timestamp: datetime.datetime = field(timestamp=True)
 
-    # avg_spent_7d: float
-    # avg_spent_1h: float
-    # num_purchases_1w: int
+    avg_spent_7d: float
+    avg_spent_1h: float
+    num_purchases_1h: int
+    num_purchases_1d: int
     sum_spent_1h: float
-    # sum_spent_1d: float
+    sum_spent_1d: float
 
     @pipeline(inputs=[User, Order])
     def gen(cls, users: Dataset, orders: Dataset):
@@ -72,10 +73,11 @@ class OnSaleUserSpentInfo:
 
         return per_user.group_by(keys=['user_id']).aggregate([
             Sum(on='product_price', window='1h', into='sum_spent_1h'),
-            # Sum(on='product_price', window='1d', into='sum_spent_1d'),
-            # Avg(on='product_price', window='7d', into='avg_spent_7d'),
-            # Avg(on='product_price', window='1h', into='avg_spent_1h'),
-            # Count(window='1w', into='num_purchases_1w'),
+            Sum(on='product_price', window='1d', into='sum_spent_1d'),
+            Avg(on='product_price', window='7d', into='avg_spent_7d'),
+            Avg(on='product_price', window='1h', into='avg_spent_1h'),
+            Count(window='1h', into='num_purchases_1h'),
+            Count(window='1h', into='num_purchases_1d'),
         ])
 
 

@@ -1,4 +1,5 @@
 import copy
+import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.common.time_utils import is_time_str
@@ -174,7 +175,7 @@ class Aggregate(Node):
         return [SlidingWindowConfig(
             duration=agg.window,
             agg_type=agg.get_type(),
-            agg_on_func=(lambda e: e[agg.on]),
+            agg_on_func=functools.partial(lambda e, key: e[key], key=agg.on),
             name=agg.into
         ) for agg in self.aggregates]
 
