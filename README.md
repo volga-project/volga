@@ -149,7 +149,7 @@ ray start --head
 Make sure your program's entry point is in the same virtual env where you launched the cluster.
 You can run sample e2e tests to see the engine's workflow:
 - [test_volga_e2e.py](https://github.com/anovv/volga/blob/master/volga/client/test_volga_e2e.py) - Sample high-level online/offline pipeline
-- [test_streaming_e2e.py](https://github.com/anovv/volga/blob/master/volga/client/test_streaming_e2e.py) - Sample low-level streaming job
+- [test_streaming_e2e.py](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_streaming_e2e.py) - Sample low-level streaming job
 ```
 python test_volga_e2e.py
 
