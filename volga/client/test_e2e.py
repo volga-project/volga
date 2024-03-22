@@ -13,7 +13,7 @@ from volga.data.api.source.source import MysqlSource, source, KafkaSource
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 
 # mock data
-num_users = 1
+num_users = 2
 user_items = [{
     'user_id': str(i),
     'registered_at': str(datetime.datetime.now()),
@@ -66,10 +66,8 @@ class OnSaleUserSpentInfo:
 
     @pipeline(inputs=[User, Order])
     def gen(cls, users: Dataset, orders: Dataset):
-        # on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
-
-        # per_user = users.join(orders, left_on=['user_id'], right_on=['buyer_id'])
-        per_user = orders.join(users, right_on=['user_id'], left_on=['buyer_id'])
+        on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
+        per_user = on_sale_purchases.join(users, right_on=['user_id'], left_on=['buyer_id'])
 
         return per_user.group_by(keys=['user_id']).aggregate([
             Sum(on='product_price', window='1h', into='sum_spent_1h'),
@@ -77,7 +75,7 @@ class OnSaleUserSpentInfo:
             Avg(on='product_price', window='7d', into='avg_spent_7d'),
             Avg(on='product_price', window='1h', into='avg_spent_1h'),
             Count(window='1h', into='num_purchases_1h'),
-            Count(window='1h', into='num_purchases_1d'),
+            Count(window='1d', into='num_purchases_1d'),
         ])
 
 
@@ -92,6 +90,7 @@ class TestVolgaE2E(unittest.TestCase):
         time.sleep(1)
         vals = storage.get_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0}, start_ts=None, end_ts=None)
         print(pd.DataFrame(vals))
+        ray.shutdown()
 
 
 if __name__ == '__main__':

@@ -6,7 +6,7 @@ from datashape import Decimal
 
 from volga.common.time_utils import datetime_str_to_ts
 from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
-from volga.data.api.dataset.node import Node
+from volga.data.api.dataset.operator import OperatorNode
 from volga.data.api.dataset.schema import DatasetSchema
 
 import datetime
@@ -17,7 +17,7 @@ from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operator.timestamp_assigner import EventTimeAssigner
 
-T = TypeVar("T")
+T = TypeVar('T')
 
 
 # decorator to construct Dataset from user defined class
@@ -102,7 +102,7 @@ def get_field(
     return field
 
 
-class Dataset(Node):
+class Dataset(OperatorNode):
     _name: str
     _fields: List[Field]
     _key_fields: List[str]
@@ -158,8 +158,7 @@ class Dataset(Node):
         if timestamp_field_set:
             return
 
-        # Find a field that has datetime type and set it as timestamp.
-
+        # Find a field that has datetime type and set it as timestamp
         for field in self._fields:
             if field.dtype != datetime.datetime and field.dtype != "datetime":
                 continue

@@ -1,4 +1,3 @@
-import copy
 import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
@@ -10,25 +9,25 @@ from volga.streaming.api.operator.window_operator import SlidingWindowConfig, Ag
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
 
 
-class NodeBase:
+class OperatorNodeBase:
     def __init__(self):
         self.stream: Optional[DataStream] = None
-        self.parents: List['NodeBase'] = []
+        self.parents: List['OperatorNodeBase'] = []
 
     def init_stream(self, *args):
         raise NotImplementedError()
 
 
 # user facing operators to construct pipeline graph
-class Node(NodeBase):
+class OperatorNode(OperatorNodeBase):
 
-    def transform(self, func: Callable) -> 'Node':
+    def transform(self, func: Callable) -> 'OperatorNode':
         return Transform(self, func)
 
-    def filter(self, func: Callable) -> 'Node':
+    def filter(self, func: Callable) -> 'OperatorNode':
         return Filter(self, func)
 
-    def assign(self, column: str, result_type: Type, func: Callable) -> 'Node':
+    def assign(self, column: str, result_type: Type, func: Callable) -> 'OperatorNode':
         return Assign(self, column, result_type, func)
 
     def group_by(self, keys: List[str]) -> 'GroupBy':
@@ -40,7 +39,7 @@ class Node(NodeBase):
         on: Optional[List[str]] = None,
         left_on: Optional[List[str]] = None,
         right_on: Optional[List[str]] = None,
-    ) -> 'Node':
+    ) -> 'OperatorNode':
         if on is None:
             if left_on is None or right_on is None:
                 raise TypeError("Join should provide either on or both left_on and right_on")
@@ -51,16 +50,16 @@ class Node(NodeBase):
 
         return Join(left=self, right=other, on=on, left_on=left_on, right_on=right_on)
 
-    def rename(self, columns: Dict[str, str]) -> 'Node':
+    def rename(self, columns: Dict[str, str]) -> 'OperatorNode':
         return Rename(self, columns)
 
-    def drop(self, columns: List[str]) -> 'Node':
+    def drop(self, columns: List[str]) -> 'OperatorNode':
         return Drop(self, columns, name="drop")
 
-    def dropnull(self, columns: Optional[List[str]] = None) -> 'Node':
+    def dropnull(self, columns: Optional[List[str]] = None) -> 'OperatorNode':
         return DropNull(self, columns)
 
-    def select(self, columns: List[str]) -> 'Node':
+    def select(self, columns: List[str]) -> 'OperatorNode':
         ts = self.data_set_schema().timestamp
         # Keep the timestamp col
         drop_cols = list(
@@ -74,8 +73,8 @@ class Node(NodeBase):
         return Drop(self, drop_cols, name="select")
 
 
-class Transform(Node):
-    def __init__(self, parent: NodeBase, func: Callable):
+class Transform(OperatorNode):
+    def __init__(self, parent: OperatorNodeBase, func: Callable):
         super().__init__()
         self.func = func
         self.parents.append(parent)
@@ -87,8 +86,8 @@ class Transform(Node):
         return self.func(event)
 
 
-class Assign(Node):
-    def __init__(self, parent: NodeBase, column: str, output_type: Type, func: Callable):
+class Assign(OperatorNode):
+    def __init__(self, parent: OperatorNodeBase, column: str, output_type: Type, func: Callable):
         super().__init__()
         self.parents.append(parent)
         self.func = func
@@ -102,8 +101,8 @@ class Assign(Node):
         raise NotImplementedError()
 
 
-class Filter(Node):
-    def __init__(self, parent: NodeBase, func: Callable):
+class Filter(OperatorNode):
+    def __init__(self, parent: OperatorNodeBase, func: Callable):
         super().__init__()
 
         self.parents.append(parent)
@@ -116,9 +115,9 @@ class Filter(Node):
         return self.func(event)
 
 
-class Aggregate(Node):
+class Aggregate(OperatorNode):
     def __init__(
-        self, parent: NodeBase, aggregates: List[AggregateType]
+        self, parent: OperatorNodeBase, aggregates: List[AggregateType]
     ):
         super().__init__()
         self.aggregates = aggregates
@@ -180,8 +179,8 @@ class Aggregate(Node):
         ) for agg in self.aggregates]
 
 
-class GroupBy(NodeBase):
-    def __init__(self, parent: NodeBase, keys: List[str]):
+class GroupBy(OperatorNodeBase):
+    def __init__(self, parent: OperatorNodeBase, keys: List[str]):
         super().__init__()
         # TODO support composite key
         if len(keys) != 1:
@@ -200,16 +199,16 @@ class GroupBy(NodeBase):
 
         return event[key]
 
-    def aggregate(self, aggregates: List[AggregateType]) -> Node:
+    def aggregate(self, aggregates: List[AggregateType]) -> OperatorNode:
         if len(aggregates) == 0:
             raise ValueError('Aggregate expects at least one aggregation operation')
         return Aggregate(self, aggregates)
 
 
-class Join(Node):
+class Join(OperatorNode):
     def __init__(
         self,
-        left: Node,
+        left: OperatorNode,
         right: 'Dataset',
         on: Optional[List[str]] = None,
         left_on: Optional[List[str]] = None,
@@ -273,8 +272,8 @@ class Join(Node):
         return {**left, **right}
 
 
-class Rename(Node):
-    def __init__(self, parent: NodeBase, columns: Dict[str, str]):
+class Rename(OperatorNode):
+    def __init__(self, parent: OperatorNodeBase, columns: Dict[str, str]):
         super().__init__()
         self.column_mapping = columns
         self.parents.append(parent)
@@ -286,8 +285,8 @@ class Rename(Node):
         raise NotImplementedError()
 
 
-class Drop(Node):
-    def __init__(self, parent: NodeBase, columns: List[str], name="drop"):
+class Drop(OperatorNode):
+    def __init__(self, parent: OperatorNodeBase, columns: List[str], name="drop"):
         super().__init__()
         self.parents.append(parent)
         self.columns = columns
@@ -300,8 +299,8 @@ class Drop(Node):
         raise NotImplementedError()
 
 
-class DropNull(Node):
-    def __init__(self, parent: NodeBase, columns: Optional[List[str]] = None):
+class DropNull(OperatorNode):
+    def __init__(self, parent: OperatorNodeBase, columns: Optional[List[str]] = None):
         super().__init__()
         self.columns = columns
         self.parents.append(parent)

@@ -1,10 +1,7 @@
-import time
 from typing import Dict, Optional, Tuple
 
-import ray
-
 from volga.data.api.dataset.dataset import Dataset
-from volga.data.api.dataset.node import Node, Aggregate, NodeBase
+from volga.data.api.dataset.operator import Aggregate, OperatorNodeBase
 from volga.data.api.dataset.schema import DatasetSchema
 from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
@@ -48,43 +45,43 @@ class Client:
         ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
         pipeline = target.get_pipeline()
 
-        # build node graph
+        # build operator graph
         # TODO we should recursively reconstruct whole tree in case inputs are not terminal
-        terminal_node = pipeline.func(target.__class__, *pipeline.inputs)
+        terminal_operator_node = pipeline.func(target.__class__, *pipeline.inputs)
 
         # build stream graph
-        self._init_stream_graph(terminal_node, ctx, target.dataset_schema(), source_tags)
-        stream: DataStream = terminal_node.stream
+        self._init_stream_graph(terminal_operator_node, ctx, target.dataset_schema(), source_tags)
+        stream: DataStream = terminal_operator_node.stream
 
         return stream, ctx
 
     def _init_stream_graph(
         self,
-        node: NodeBase,
+        operator_node: OperatorNodeBase,
         ctx: StreamingContext,
         target_dataset_schema: DatasetSchema,
         source_tags: Optional[Dict[Dataset, str]] = None
     ):
 
-        for p in node.parents:
+        for p in operator_node.parents:
             self._init_stream_graph(
                 p, ctx, target_dataset_schema, source_tags
             )
 
         # init sources
-        if isinstance(node, Dataset):
-            if not node.is_source():
+        if isinstance(operator_node, Dataset):
+            if not operator_node.is_source():
                 raise ValueError('Currently only source inputs are allowed')
             source_tag = None
-            if source_tags is not None and node in source_tags:
-                source_tag = source_tags[node]
+            if source_tags is not None and operator_node in source_tags:
+                source_tag = source_tags[operator_node]
 
-            node.init_stream(ctx=ctx, source_tag=source_tag)
+            operator_node.init_stream(ctx=ctx, source_tag=source_tag)
             return
 
         # TODO special cases i.e. terminal node, join, aggregate, etc.
-        if isinstance(node, Aggregate):
-            node.init_stream(target_dataset_schema)
+        if isinstance(operator_node, Aggregate):
+            operator_node.init_stream(target_dataset_schema)
         else:
-            node.init_stream()
+            operator_node.init_stream()
 
