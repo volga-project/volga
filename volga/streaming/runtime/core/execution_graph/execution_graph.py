@@ -5,9 +5,7 @@ from ray.actor import ActorHandle
 
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, VertexType
 from volga.streaming.api.operator.operator import StreamOperator
-from volga.streaming.api.partition.partition import RoundRobinPartition, Partition, BroadcastPartition, ForwardPartition
-
-import pygraphviz as pgv
+from volga.streaming.api.partition.partition import RoundRobinPartition, Partition, ForwardPartition
 
 from volga.streaming.common.config.resource_config import ResourceConfig
 from volga.streaming.runtime.master.resource_manager.resource_manager import \
@@ -138,7 +136,11 @@ class ExecutionGraph:
 
         return execution_graph
 
-    def gen_digraph(self) -> pgv.AGraph:
+    def gen_digraph(self):
+        try:
+            import pygraphviz as pgv
+        except Exception:
+            return "GraphViz is not installed. To enable ExecutionGraph visualization, please install GraphViz and pygraphviz"
         G = pgv.AGraph()
         for v in self.execution_vertices_by_id.values():
             G.add_node(v.execution_vertex_id, label=f'{v.stream_operator.__class__.__name__}_{v.execution_vertex_id} p={v.parallelism}')

@@ -7,6 +7,11 @@ readme = "README.md"
 
 [tool.poetry.dependencies]
 python = "^3.10"
+pandas = "^1.0.0"
+ray = "2.3.1"
+pydantic = "^1.10.13"
+simplejson = "^3.19.2"
+pyzmq = "23.2.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

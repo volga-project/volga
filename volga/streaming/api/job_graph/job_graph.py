@@ -1,13 +1,9 @@
 import enum
 import time
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 from volga.streaming.api.operator.operator import StreamOperator
 from volga.streaming.api.partition.partition import Partition
-
-# install https://github.com/pygraphviz/pygraphviz/issues/11
-import pygraphviz as pgv
-
 
 class JobEdge:
     def __init__(
@@ -82,7 +78,11 @@ class JobGraph:
                 return
         self.job_edges.append(job_edge)
 
-    def gen_digraph(self) -> pgv.AGraph:
+    def gen_digraph(self):
+        try:
+            import pygraphviz as pgv
+        except Exception:
+            return "GraphViz is not installed. To enable JobGraph visualization, please install GraphViz and pygraphviz"
         G = pgv.AGraph()
         for jv in self.job_vertices:
             G.add_node(jv.vertex_id, label=f'{jv.stream_operator.__class__.__name__} p={jv.parallelism}')

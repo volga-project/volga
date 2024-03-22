@@ -2,7 +2,7 @@ import inspect
 from dataclasses import dataclass
 from typing import Callable, Type, Optional, List, cast, TypeVar, Union, Dict
 
-from datashape import Decimal
+from decimal import Decimal
 
 from volga.common.time_utils import datetime_str_to_ts
 from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
