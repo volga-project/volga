@@ -119,3 +119,43 @@ client.materialize_online(target=OnSaleUserSpentInfo, source_tags={Order: 'onlin
 live_on_sale_user_spent_df = client.get_online_latest(targets=[OnSaleUserSpentInfo], keys=[{'user_id': 1}])
 
 ```
+
+## Installation
+
+The project is currently in dev stage and has no published packages.
+To run locally/dev locally, clone the repository and in your dev env run:
+```
+pip install pyproject.toml
+```
+
+If on Apple Silicon, when installing Ray you may get an error regarding grpcio on Apple Silicon. To fix, run:
+```
+pip uninstall grpcio; conda install grpcio
+```
+
+To enable graph visualization install GraphViz:
+```
+brew install graphviz
+pip install pygraphviz
+```
+
+## Running locally
+
+Since Volga uses Ray's distributed runtime you'll need a running Ray Cluster to run pipelines. The easiest way is to launch
+a local one-node cluster:
+```
+ray start --head
+```
+Make sure your program's entry point is in the same virtual env where you launched the cluster.
+You can run sample e2e tests to see the engine's workflow:
+- [test_volga_e2e.py](https://github.com/anovv/volga/blob/master/volga/client/test_volga_e2e.py) - Sample high-level online/offline pipeline
+- [test_streaming_e2e.py](https://github.com/anovv/volga/blob/master/volga/client/test_streaming_e2e.py) - Sample low-level streaming job
+```
+python test_volga_e2e.py
+
+python test_streaming_e2e.py
+```
+
+## Development
+
+Volga is in a proof of concept state hence any feedback is extremely valuable to us. Issues and PRs are always welcome.
