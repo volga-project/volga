@@ -38,9 +38,6 @@ class DataReader:
             socket.connect(f'tcp://{channel.source_ip}:{channel.source_port}')
             self.sockets_and_contexts[channel.channel_id] = (socket, context)
 
-        self._processed_ts = []
-        self._dupes = 0
-
     # TODO set timeout
     def read_message(self) -> Optional[ChannelMessage]:
         # TODO this should use a buffer?
@@ -67,11 +64,6 @@ class DataReader:
 
         # TODO serialization perf
         msg = simplejson.loads(json_str)
-        if msg['event_time'] not in self._processed_ts:
-            self._processed_ts.append(msg['event_time'])
-        else:
-            self._dupes += 1
-            print(f'{self.name}: {self._dupes} dupes')
         return msg
 
     def close(self):

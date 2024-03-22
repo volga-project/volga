@@ -246,8 +246,8 @@ class JoinOperator(StreamOperator, TwoInputOperator):
 
     def __init__(self, join_func: Optional[JoinFunction] = None):
         super().__init__(join_func)
-        self.left_records_dict: Dict[Any, List[Any]] = {}
-        self.right_records_dict: Dict[Any, List[Any]] = {}
+        self.left_records_dict: Dict[Any, List[Record]] = {}
+        self.right_records_dict: Dict[Any, List[Record]] = {}
         self.i = 0
 
     def process_element(self, left: KeyRecord, right: KeyRecord):
@@ -268,15 +268,19 @@ class JoinOperator(StreamOperator, TwoInputOperator):
             right_records = []
             self.right_records_dict[key] = right_records
 
-        # TODO we should let user decide which timestamp the joined element should have
+        # use left stream event time by default
+        # TODO we should infer event time from values when we schema is implemented
+        # TODO should we let user decide?
 
         if left is not None:
             lv = left.value
-            left_records.append(lv)
-            for rv in right_records:
-                self.collect(Record(value=self.func.join(lv, rv), event_time=left.event_time))
+            event_time = left.event_time
+            left_records.append(left)
+            for right_r in right_records:
+                self.collect(Record(value=self.func.join(lv, right_r.value), event_time=event_time))
         else:
             rv = right.value
-            right_records.append(rv)
-            for lv in left_records:
-                self.collect(Record(value=self.func.join(lv, rv), event_time=right.event_time))
+            right_records.append(right)
+            for left_r in left_records:
+                event_time = left_r.event_time
+                self.collect(Record(value=self.func.join(left_r.value, rv), event_time=event_time))

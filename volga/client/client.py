@@ -35,7 +35,7 @@ class Client:
         if not isinstance(storage, SimpleInMemoryActorStorage):
             raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
         stream.sink(storage.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema()))
-        stream.sink(print) # TODO debug
+        # stream.sink(print)
         ctx.execute()
 
     def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
