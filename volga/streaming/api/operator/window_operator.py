@@ -1,3 +1,4 @@
+import bisect
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Callable, Deque, Dict
@@ -5,7 +6,7 @@ from typing import List, Optional, Callable, Deque, Dict
 from pydantic import BaseModel
 from decimal import Decimal
 
-from volga.common.time_utils import duration_to_ms, Duration
+from volga.common.time_utils import Duration, duration_to_s
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.aggregate_function import AggregationType, AllAggregateFunction
@@ -17,8 +18,8 @@ from volga.streaming.api.operator.operator import StreamOperator, OneInputOperat
 
 @dataclass
 class Window:
-    records: Deque
-    length_ms: Decimal
+    records: List
+    length_s: Decimal
     window_func: WindowFunction
     name: str
     agg_type: AggregationType
@@ -62,12 +63,13 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
 
         aggs_per_window: AggregationsPerWindow = {}
         for w in windows:
-            w.records.append(record)
 
-            # we assume events arrive in order
-            # remove late events
-            while w.records[-1].event_time - w.records[0].event_time > w.length_ms:
-                w.records.popleft()
+            # this is O(logn) search + O(n) insert
+            bisect.insort_right(w.records, record, key=(lambda r: r.event_time))
+
+            # remove out of time events
+            while w.records[-1].event_time - w.records[0].event_time > w.length_s:
+                w.records.pop(0)
             if w.name in aggs_per_window:
                 raise RuntimeError(f'Duplicate window names: {w.name}')
             accum = w.window_func.apply(w.records)
@@ -90,8 +92,8 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
             agg_func = AllAggregateFunction(conf.agg_type, conf.agg_on_func)
             window_func = AllAggregateApplyWindowFunction(agg_func)
             res.append(Window(
-                records=deque(),
-                length_ms=duration_to_ms(conf.duration),
+                records=[],
+                length_s=duration_to_s(conf.duration),
                 window_func=window_func,
                 name=name,
                 agg_type=conf.agg_type

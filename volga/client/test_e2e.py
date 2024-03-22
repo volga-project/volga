@@ -13,7 +13,7 @@ from volga.data.api.source.source import MysqlSource, source, KafkaSource
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 
 # mock data
-num_users = 3
+num_users = 1
 user_items = [{
     'user_id': str(i),
     'registered_at': str(datetime.datetime.now()),
@@ -22,7 +22,7 @@ user_items = [{
 
 num_orders = 10
 purchase_time = datetime.datetime.now()
-DELAY_S = 60*60*24
+DELAY_S = 60*29
 order_items = [{
     'buyer_id': str(i % num_users),
     'product_id': f'prod_{i}',
@@ -57,11 +57,11 @@ class OnSaleUserSpentInfo:
     product_id: str = field(key=True)
     timestamp: datetime.datetime = field(timestamp=True)
 
-    avg_spent_7d: float
-    avg_spent_1h: float
+    # avg_spent_7d: float
+    # avg_spent_1h: float
     # num_purchases_1w: int
-
     sum_spent_1h: float
+    # sum_spent_1d: float
 
     @pipeline(inputs=[User, Order])
     def gen(cls, users: Dataset, orders: Dataset):
@@ -72,8 +72,9 @@ class OnSaleUserSpentInfo:
 
         return per_user.group_by(keys=['user_id']).aggregate([
             Sum(on='product_price', window='1h', into='sum_spent_1h'),
-            Avg(on='product_price', window='7d', into='avg_spent_7d'),
-            Avg(on='product_price', window='1h', into='avg_spent_1h'),
+            # Sum(on='product_price', window='1d', into='sum_spent_1d'),
+            # Avg(on='product_price', window='7d', into='avg_spent_7d'),
+            # Avg(on='product_price', window='1h', into='avg_spent_1h'),
             # Count(window='1w', into='num_purchases_1w'),
         ])
 
