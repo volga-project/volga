@@ -1,19 +1,19 @@
 ## Volga - Data engine for real-time AI/ML
 
-Volga is a scalable data engine tailored for modern real-time AI/ML applications.
+Volga is an open-source, self-serve, scalable data engine tailored for modern real-time AI/ML applications.
 It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations.
-It is a completely standalone system removing any heavy-weight dependencies on data processors (Flink, Spark) and 
-can be run on a laptop or on a 1000-node cluster
+It aims to be a completely standalone and self-serve system removing any heavy-weight dependency on data processors (Flink, Spark) 
+or cloud-based feature platforms (Tecton.ai, Fennel.ai) and can be run on a laptop or on a 1000-node cluster
 
 Features:
 
-- Utilizes *[custom scalable stream processing engine](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
+- Utilizes *[custom scalable stream processing engine](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
 **[ZeroMQ](https://zeromq.org/)** for messaging and **[Rust](https://www.rust-lang.org/)** for some perf-critical parts (*exeprimental*). 
 Kappa architecture - no Flink or Spark
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
-(model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
+(cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
 - Kubernetes ready, no vendor-lock - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python
 - Pure Python, no heavy JVM setups - minimal setup and maintenance efforts in production
 - Standalone - launch on your laptop or a cluster with no heavy-weight external dependencies
@@ -21,13 +21,15 @@ Kappa architecture - no Flink or Spark
 - Easy to use declarative pandas-like API to simultaneously define online and offline feature pipelines, including 
 operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc.
 - [Experimental] Perform heavy embedding dot products, query meta-models or simply calculate users age in milliseconds at request time
- using *[On-Demand Features]()*, thanks to Read-Write separate calculation design
+ using *[On-Demand Features]()*
+
+Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/introduction)
 
 ## Why use Volga
 
-There are no standalone open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor-lock,
-setting up complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
-(i.e Tecton, FeatureForm, Chalk.ai etc.). Volga fills this spot.
+There are no self-serve open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor-lock,
+setting up and managing complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
+(i.e Tecton.ai, Fennel.ai, FeatureForm, Chalk.ai etc.). Volga fills this spot.
 
 ## Quick start
 
@@ -102,7 +104,11 @@ from volga import Client
 client = Client()
 
 # run batch materialization job
-client.materialize_offline(target=OnSaleUserSpentInfo, source_tags={Order: 'offline'})
+client.materialize_offline(
+    target=OnSaleUserSpentInfo, 
+    storage=SimpleInMemoryActorStorage(),
+    source_tags={Order: 'offline'}
+)
 
 # query cold offline storage
 historical_on_sale_user_spent_df = client.get_offline(targets=[OnSaleUserSpentInfo], start='',  end='')
@@ -113,7 +119,11 @@ Run online feature calculation job and query real-time updates (i.e. for model i
 
 ```python
 # run real-time job
-client.materialize_online(target=OnSaleUserSpentInfo, source_tags={Order: 'online'})
+client.materialize_online(
+    target=OnSaleUserSpentInfo, 
+    storage=SimpleInMemoryActorStorage(),
+    source_tags={Order: 'online'}
+)
 
 # query hot cache
 live_on_sale_user_spent_df = client.get_online_latest(targets=[OnSaleUserSpentInfo], keys=[{'user_id': 1}])
