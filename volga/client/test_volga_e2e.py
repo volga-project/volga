@@ -91,11 +91,37 @@ class TestVolgaE2E(unittest.TestCase):
             source_tags={Order: 'offline'}
         )
         time.sleep(1)
-        vals = client.get_offline_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0}, start=None, end=None)
-        print(pd.DataFrame(vals))
+        res = client.get_offline_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0}, start=None, end=None)
+        print(res)
+        ray.shutdown()
+
+    def test_materialize_online(self):
+        storage = SimpleInMemoryActorStorage()
+        client = Client(hot=storage)
+        # run online materialization job
+        ray.init(address='auto', ignore_reinit_error=True)
+        client.materialize_online(
+            target=OnSaleUserSpentInfo,
+            source_tags={Order: 'offline'},
+            _async=True
+        )
+        time.sleep(1)
+
+        live_on_sale_user_spent = None
+        while True:
+            res = client.get_online_latest_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0})
+            if res is None or live_on_sale_user_spent == res:
+                continue
+            live_on_sale_user_spent = res
+            print(f'[{time.time()}]{res}')
+
+        print(res)
         ray.shutdown()
 
 
 if __name__ == '__main__':
     t = TestVolgaE2E()
     t.test_materialize_offline()
+
+    # uncomment for online case
+    # t.test_materialize_online()

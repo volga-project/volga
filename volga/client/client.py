@@ -33,7 +33,7 @@ class Client:
         self.cold = cold
         self.hot = hot
 
-    def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
+    def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None, _async: bool = False):
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
         if self.cold is None:
             raise ValueError('Offline materialization requires ColdStorage')
@@ -41,13 +41,19 @@ class Client:
             raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
         stream.sink(self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema()))
         # stream.sink(print)
-        ctx.execute()
+        if _async:
+            ctx.submit()
+        else:
+            ctx.execute()
 
-    def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
+    def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None, _async: bool = False):
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
         # TODO configure sink with HotStorage
         stream.sink(print)
-        ctx.execute()
+        if _async:
+            ctx.submit()
+        else:
+            ctx.execute()
 
     def get_offline_data(
         self,

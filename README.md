@@ -112,9 +112,23 @@ client.materialize_offline(
 )
 
 # query cold offline storage
-historical_on_sale_user_spent_df = client.get_offline(targets=[OnSaleUserSpentInfo], start='',  end='')
-
+historical_on_sale_user_spent_df = client.get_offline_data(
+    dataset_name=OnSaleUserSpentInfo.__name__, 
+    keys={'user_id': 0}, 
+    start=None, end=None
+)
 ```
+```
+historical_on_sale_user_spent_df
+...
+  user_id product_id                   timestamp  avg_spent_7d  avg_spent_1h  num_purchases_1h  num_purchases_1d  sum_spent_1h  sum_spent_1d
+0       0     prod_0  2024-03-27 11:26:45.514375           100           100                 1                 1           100           100
+1       0     prod_2  2024-03-27 12:24:45.514375           100           100                 2                 2           200           200
+2       0     prod_4  2024-03-27 13:22:45.514375           100           100                 2                 3           200           300
+3       0     prod_6  2024-03-27 14:20:45.514375           100           100                 2                 4           200           400
+4       0     prod_8  2024-03-27 15:18:45.514375           100           100                 2                 5           200           500
+```
+
 
 Run online feature calculation job and query real-time updates (i.e. for model inference)
 
@@ -123,12 +137,22 @@ Run online feature calculation job and query real-time updates (i.e. for model i
 client.materialize_online(
     target=OnSaleUserSpentInfo, 
     storage=storage,
-    source_tags={Order: 'online'}
+    source_tags={Order: 'online'},
+    _async=True
 )
 
 # query hot cache
-live_on_sale_user_spent_df = client.get_online_latest(targets=[OnSaleUserSpentInfo], keys=[{'user_id': 1}])
-
+live_on_sale_user_spent = None
+while True:
+    res = client.get_online_latest_data(
+        dataset_name=OnSaleUserSpentInfo.__name__, 
+        keys={'user_id': 0}
+    )
+    if res is None or live_on_sale_user_spent == res:
+        # skip same event
+        continue
+    live_on_sale_user_spent = res
+    print(f'[{time.time()}]{res}')
 ```
 
 ## Installation
