@@ -82,13 +82,16 @@ class OnSaleUserSpentInfo:
 class TestVolgaE2E(unittest.TestCase):
 
     def test_materialize_offline(self):
-        client = Client()
-        # run batch materialization job
-        ray.init(address='auto')
         storage = SimpleInMemoryActorStorage()
-        client.materialize_offline(target=OnSaleUserSpentInfo, storage=storage, source_tags={Order: 'offline'})
+        client = Client(cold=storage)
+        # run batch materialization job
+        ray.init(address='auto', ignore_reinit_error=True)
+        client.materialize_offline(
+            target=OnSaleUserSpentInfo,
+            source_tags={Order: 'offline'}
+        )
         time.sleep(1)
-        vals = storage.get_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0}, start_ts=None, end_ts=None)
+        vals = client.get_offline_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0}, start=None, end=None)
         print(pd.DataFrame(vals))
         ray.shutdown()
 

@@ -1,10 +1,15 @@
-from typing import Dict, Optional, Tuple
+from datetime import datetime
+from typing import Dict, Optional, Tuple, Any
 
+import pandas as pd
+
+from volga.common.time_utils import datetime_to_ts
 from volga.data.api.dataset.dataset import Dataset
 from volga.data.api.dataset.operator import Aggregate, OperatorNodeBase
 from volga.data.api.dataset.schema import DatasetSchema
 from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
+from volga.storage.hot.hot import HotStorage
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.data_stream import DataStream
 
@@ -24,14 +29,17 @@ DEFAULT_STREAMING_JOB_CONFIG = {
 
 class Client:
 
-    def __init__(self):
-        pass
+    def __init__(self, hot: Optional[HotStorage] = None, cold: Optional[ColdStorage] = None):
+        self.cold = cold
+        self.hot = hot
 
-    def materialize_offline(self, target: Dataset, storage: ColdStorage, source_tags: Optional[Dict[Dataset, str]] = None):
+    def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None):
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
-        if not isinstance(storage, SimpleInMemoryActorStorage):
+        if self.cold is None:
+            raise ValueError('Offline materialization requires ColdStorage')
+        if not isinstance(self.cold, SimpleInMemoryActorStorage):
             raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
-        stream.sink(storage.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema()))
+        stream.sink(self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema()))
         # stream.sink(print)
         ctx.execute()
 
@@ -40,6 +48,29 @@ class Client:
         # TODO configure sink with HotStorage
         stream.sink(print)
         ctx.execute()
+
+    def get_offline_data(
+        self,
+        dataset_name: str,
+        keys: Optional[Dict[str, Any]],
+        start: Optional[datetime],
+        end: Optional[datetime]
+    ) -> pd.DataFrame:
+        if self.cold is None:
+            raise ValueError('ColdStorage is not set')
+        start_ts = None if start is None else datetime_to_ts(start)
+        end_ts = None if end is None else datetime_to_ts(end)
+        data = self.cold.get_data(dataset_name=dataset_name, keys=keys, start_ts=start_ts, end_ts=end_ts)
+        return pd.DataFrame(data)
+
+    def get_online_latest_data(
+        self,
+        dataset_name: str,
+        keys: Optional[Dict[str, Any]]
+    ) -> Any:
+        if self.hot is None:
+            raise ValueError('HotStorage is not set')
+        return self.hot.get_latest_data(dataset_name=dataset_name, keys=keys)
 
     def _build_stream(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]]) -> Tuple[DataStream, StreamingContext]:
         ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
