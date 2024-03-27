@@ -86,24 +86,31 @@ class TestStreamingJobE2E(unittest.TestCase):
         ctx.execute()
         # TODO assert
 
-    def test_delayed_collection_source(self):
-        s1 = self.ctx.from_delayed_collection([(f'k{i}', i) for i in range(10)], delay_s=1)
-        s2 = self.ctx.from_collection([(f'k{i}', i) for i in range(10)])
-        s = s1.key_by(lambda e: e[0]).join(s2.key_by(lambda e: e[0])).with_func(lambda l, r: (l, r))
-        s.sink(print)
+    def test_parallel_collection_source(self):
+        num_events = 1000
+        parallelism = 10
+        ins = [i for i in range(num_events)]
+        s = self.ctx.from_collection(ins)
+        s.set_parallelism(parallelism)
+        sink_cache = SinkCacheActor.remote()
+        sink_function = SinkToCacheFunction(sink_cache)
+        s.sink(sink_function).set_parallelism(parallelism)
         ctx.execute()
+        res = ray.get(sink_cache.get_values.remote())
+        assert sorted(res) == ins
 
 if __name__ == '__main__':
     job_master = None
     try:
-        ray.init(address='auto')
+        ray.init(address='auto', ignore_reinit_error=True)
         job_config = yaml.safe_load(Path('../../sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
         t = TestStreamingJobE2E(ctx)
         # TODO should reset context on each call
-        t.test_join_streams()
+        # t.test_join_streams()
         # t.test_window()
         # t.test_delayed_collection_source()
+        t.test_parallel_collection_source()
 
         job_master = ctx.job_master
     finally:

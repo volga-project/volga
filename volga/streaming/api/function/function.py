@@ -2,6 +2,7 @@ import inspect
 import sys
 import time
 from abc import ABC, abstractmethod
+from math import ceil
 from threading import Thread
 from typing import Any
 
@@ -10,6 +11,7 @@ from ray.actor import ActorHandle
 
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
+from volga.streaming.common.utils import collection_chunk_at_index
 
 
 class Function(ABC):
@@ -113,12 +115,14 @@ class JoinFunction(Function):
 
 
 class CollectionSourceFunction(SourceFunction):
-    def __init__(self, values):
-        self.values = values
-        self.num_values = len(values)
+    def __init__(self, all_values):
+        self.all_values = all_values
+        self.values = None
+        self.num_values = None
 
     def init(self, parallel, index):
-        pass
+        self.values = collection_chunk_at_index(self.all_values, parallel, index)
+        self.num_values = len(self.values)
 
     def fetch(self, ctx: SourceContext):
         for v in self.values:
@@ -135,7 +139,8 @@ class LocalFileSourceFunction(SourceFunction):
         self.done = False
 
     def init(self, parallel, index):
-        pass
+        if parallel > 1:
+            raise RuntimeError('Does not support parallelism > 1')
 
     def fetch(self, ctx: SourceContext):
         if self.done:
@@ -149,12 +154,15 @@ class LocalFileSourceFunction(SourceFunction):
 
 
 class DelayedCollectionSourceFunction(SourceFunction):
-    def __init__(self, values, delay_s):
-        self.values = values
+    def __init__(self, all_values, delay_s):
         self.delay_s = delay_s
+        self.all_values = all_values
+        self.values = None
+        self.num_values = None
 
     def init(self, parallel, index):
-        pass
+        self.values = collection_chunk_at_index(self.all_values, parallel, index)
+        self.num_values = len(self.values)
 
     def fetch(self, ctx: SourceContext):
         for i in range(len(self.values)):
