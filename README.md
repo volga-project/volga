@@ -4,7 +4,7 @@ Volga is an open-source, self-serve, scalable data engine tailored for modern re
 It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations.
-It aims to be a completely standalone and self-serve system removing any heavy-weight dependency on data processors (Flink, Spark) 
+It aims to be a completely standalone and self-serve system removing any heavy-weight dependency on general data processors (Flink, Spark) 
 or cloud-based feature platforms (Tecton.ai, Fennel.ai) and can be run on a laptop or on a 1000-node cluster
 
 Features:
@@ -63,7 +63,7 @@ class User:
 class Order:
     buyer_id: str = field(key=True)
     product_id: str = field(key=True)
-    product_type: str
+    product_type: str # 'ON_SALE' or 'REGULAR' 
     purchased_at: datetime.datetime = field(timestamp=True)
     product_price: float
 
@@ -84,9 +84,8 @@ class OnSaleUserSpentInfo:
 
     @pipeline(inputs=[User, Order])
     def gen(cls, users: Dataset, orders: Dataset):
-        on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')         
-
-        per_user = users.join(on_sale_purchases, left_on=['user_id'], right_on=['buyer_id'])
+        on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')       
+        per_user = on_sale_purchases.join(users, right_on=['user_id'], left_on=['buyer_id'])
 
         return per_user.group_by(keys=['user_id']).aggregate([
             Avg(on='product_price', window= '7d', into='avg_spent_7d'),
@@ -100,13 +99,15 @@ Run offline feature calculation job and get results (i.e. for model training)
 
 ```python
 from volga import Client
+from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 
-client = Client()
+storage = SimpleInMemoryActorStorage()
+client = Client(hot=storage, cold=storage)
 
 # run batch materialization job
 client.materialize_offline(
     target=OnSaleUserSpentInfo, 
-    storage=SimpleInMemoryActorStorage(),
+    storage=storage,
     source_tags={Order: 'offline'}
 )
 
@@ -121,7 +122,7 @@ Run online feature calculation job and query real-time updates (i.e. for model i
 # run real-time job
 client.materialize_online(
     target=OnSaleUserSpentInfo, 
-    storage=SimpleInMemoryActorStorage(),
+    storage=storage,
     source_tags={Order: 'online'}
 )
 
