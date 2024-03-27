@@ -66,7 +66,6 @@ class Order:
     product_type: str # 'ON_SALE' or 'REGULAR' 
     purchased_at: datetime.datetime = field(timestamp=True)
     product_price: float
-
 ```
 
 Define feature dataset and calculation pipeline
@@ -80,7 +79,7 @@ class OnSaleUserSpentInfo:
 
     avg_spent_7d: float
     avg_spent_1h: float
-    num_purchases_1w: int
+    num_purchases_1d: int
 
     @pipeline(inputs=[User, Order])
     def gen(cls, users: Dataset, orders: Dataset):
@@ -90,9 +89,8 @@ class OnSaleUserSpentInfo:
         return per_user.group_by(keys=['user_id']).aggregate([
             Avg(on='product_price', window= '7d', into='avg_spent_7d'),
             Avg(on='product_price', window= '1h', into='avg_spent_1h'),
-            Count(window='1w', into='num_purchases_1w'),
+            Count(window='1d', into='num_purchases_1d'),
         ])
-
 ```
 
 Run offline feature calculation job and get results (i.e. for model training)
@@ -120,12 +118,12 @@ historical_on_sale_user_spent_df = client.get_offline_data(
 ```
 historical_on_sale_user_spent_df
 ...
-  user_id product_id                   timestamp  avg_spent_7d  avg_spent_1h  num_purchases_1h  num_purchases_1d  sum_spent_1h  sum_spent_1d
-0       0     prod_0  2024-03-27 11:26:45.514375           100           100                 1                 1           100           100
-1       0     prod_2  2024-03-27 12:24:45.514375           100           100                 2                 2           200           200
-2       0     prod_4  2024-03-27 13:22:45.514375           100           100                 2                 3           200           300
-3       0     prod_6  2024-03-27 14:20:45.514375           100           100                 2                 4           200           400
-4       0     prod_8  2024-03-27 15:18:45.514375           100           100                 2                 5           200           500
+  user_id product_id                   timestamp  avg_spent_7d  avg_spent_1h  num_purchases_1d
+0       0     prod_0  2024-03-27 11:26:45.514375           100           100                 1
+1       0     prod_2  2024-03-27 12:24:45.514375           100           100                 2
+2       0     prod_4  2024-03-27 13:22:45.514375           100           100                 3
+3       0     prod_6  2024-03-27 14:20:45.514375           100           100                 4
+4       0     prod_8  2024-03-27 15:18:45.514375           100           100                 5
 ```
 
 
@@ -153,9 +151,9 @@ while True:
     print(f'[{time.time()}]{res}')
 ```
 ```
-[1711537166.856853][{'user_id': '0', 'product_id': 'prod_0', 'timestamp': '2024-03-27 14:59:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1h': 1, 'num_purchases_1d': 1, 'sum_spent_1h': 100, 'sum_spent_1d': 100}]
-[1711537167.867083][{'user_id': '0', 'product_id': 'prod_2', 'timestamp': '2024-03-27 15:57:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1h': 2, 'num_purchases_1d': 2, 'sum_spent_1h': 200, 'sum_spent_1d': 200}]
-[1711537169.8647628][{'user_id': '0', 'product_id': 'prod_4', 'timestamp': '2024-03-27 16:55:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1h': 2, 'num_purchases_1d': 3, 'sum_spent_1h': 200, 'sum_spent_1d': 300}]
+[1711537166.856853][{'user_id': '0', 'product_id': 'prod_0', 'timestamp': '2024-03-27 14:59:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1d': 1}]
+[1711537167.867083][{'user_id': '0', 'product_id': 'prod_2', 'timestamp': '2024-03-27 15:57:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1d': 2}]
+[1711537169.8647628][{'user_id': '0', 'product_id': 'prod_4', 'timestamp': '2024-03-27 16:55:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1d': 3}]
 ...
 ```
 
