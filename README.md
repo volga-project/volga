@@ -107,7 +107,6 @@ client = Client(hot=storage, cold=storage)
 # run batch materialization job
 client.materialize_offline(
     target=OnSaleUserSpentInfo, 
-    storage=storage,
     source_tags={Order: 'offline'}
 )
 
@@ -115,7 +114,7 @@ client.materialize_offline(
 historical_on_sale_user_spent_df = client.get_offline_data(
     dataset_name=OnSaleUserSpentInfo.__name__, 
     keys={'user_id': 0}, 
-    start=None, end=None
+    start=None, end=None # whole dataset
 )
 ```
 ```
@@ -136,7 +135,6 @@ Run online feature calculation job and query real-time updates (i.e. for model i
 # run real-time job
 client.materialize_online(
     target=OnSaleUserSpentInfo, 
-    storage=storage,
     source_tags={Order: 'online'},
     _async=True
 )
@@ -153,6 +151,12 @@ while True:
         continue
     live_on_sale_user_spent = res
     print(f'[{time.time()}]{res}')
+```
+```
+[1711537166.856853][{'user_id': '0', 'product_id': 'prod_0', 'timestamp': '2024-03-27 14:59:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1h': 1, 'num_purchases_1d': 1, 'sum_spent_1h': 100, 'sum_spent_1d': 100}]
+[1711537167.867083][{'user_id': '0', 'product_id': 'prod_2', 'timestamp': '2024-03-27 15:57:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1h': 2, 'num_purchases_1d': 2, 'sum_spent_1h': 200, 'sum_spent_1d': 200}]
+[1711537169.8647628][{'user_id': '0', 'product_id': 'prod_4', 'timestamp': '2024-03-27 16:55:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1h': 2, 'num_purchases_1d': 3, 'sum_spent_1h': 200, 'sum_spent_1d': 300}]
+...
 ```
 
 ## Installation

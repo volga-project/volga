@@ -39,7 +39,9 @@ class Client:
             raise ValueError('Offline materialization requires ColdStorage')
         if not isinstance(self.cold, SimpleInMemoryActorStorage):
             raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
-        stream.sink(self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema()))
+        stream.sink(
+            self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema(), hot=False)
+        )
         # stream.sink(print)
         if _async:
             ctx.submit()
@@ -48,8 +50,14 @@ class Client:
 
     def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None, _async: bool = False):
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
-        # TODO configure sink with HotStorage
-        stream.sink(print)
+        if self.hot is None:
+            raise ValueError('Online materialization requires HotStorage')
+        if not isinstance(self.hot, SimpleInMemoryActorStorage):
+            raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
+        stream.sink(
+            self.hot.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema(), hot=True)
+        )
+        # stream.sink(print)
         if _async:
             ctx.submit()
         else:

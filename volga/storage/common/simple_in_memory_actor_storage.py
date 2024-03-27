@@ -25,18 +25,25 @@ class SimpleInMemoryActorStorage(ColdStorage, HotStorage):
 
     # TODO dataset_name and schema should be part of all records metadata
     #  When it is so, this outside params won't be needed
-    def gen_sink_function(self, dataset_name: str, output_schema: DatasetSchema) -> SinkFunction:
-        return BulkSinkToCacheActorFunction(
-            cache_actor=self.cache_actor,
-            dataset_name=dataset_name,
-            output_schema=output_schema
-        )
+    def gen_sink_function(self, dataset_name: str, output_schema: DatasetSchema, hot: bool) -> SinkFunction:
+        if hot:
+            return SingleEventSinkToCacheActorFunction(
+                cache_actor=self.cache_actor,
+                dataset_name=dataset_name,
+                output_schema=output_schema
+            )
+        else:
+            return BulkSinkToCacheActorFunction(
+                cache_actor=self.cache_actor,
+                dataset_name=dataset_name,
+                output_schema=output_schema
+            )
 
     def get_data(self, dataset_name: str, keys: Optional[Dict[str, Any]], start_ts: Optional[Decimal], end_ts: Optional[Decimal]) -> List[Any]:
         return ray.get(self.cache_actor.get_values.remote(dataset_name, keys, start_ts, end_ts))
 
-    def get_latest_data(self, dataset_name: str, keys: Dict[str, Any]) -> Any:
-        raise NotImplementedError()
+    def get_latest_data(self, dataset_name: str, keys: Dict[str, Any]) -> Optional[List[Any]]:
+        return ray.get(self.cache_actor.get_latest.remote(dataset_name, keys))
 
 
 @ray.remote(num_cpus=0.01)# TODO set memory request
@@ -71,7 +78,13 @@ class SimpleInMemoryCacheActor:
             # ts_vals.append((ts, value))
             bisect.insort_right(ts_vals, (ts, value))
 
-    def get_values(self, dataset_name: str, keys_dict: Optional[Dict[str, Any]], start: Optional[Decimal], end: Optional[Decimal]) -> List:
+    def get_values(
+        self,
+        dataset_name: str,
+        keys_dict: Optional[Dict[str, Any]],
+        start: Optional[Decimal], end: Optional[Decimal],
+        with_timestamps: bool = False
+    ) -> List:
         if dataset_name not in self.per_dataset_per_key:
             raise RuntimeError(f'No dataset {dataset_name}')
 
@@ -99,15 +112,23 @@ class SimpleInMemoryCacheActor:
             res.extend(values)
 
         res.sort(key=lambda e: e[0])
-        return list(map(lambda e: e[1], res)) # remove timestamps
+        if with_timestamps:
+            return res
+        else:
+            return list(map(lambda e: e[1], res)) # remove timestamps
 
-    def get_latest(self, dataset_name: str, keys_dict: Dict[str, Any]) -> Optional[Any]:
-        vals = self.get_values(dataset_name=dataset_name, keys_dict=keys_dict, start=None, end=None)
+    def get_latest(self, dataset_name: str, keys_dict: Dict[str, Any]) -> Optional[List]:
+        vals = self.get_values(dataset_name=dataset_name, keys_dict=keys_dict, start=None, end=None, with_timestamps=True)
         if len(vals) == 0:
             return None
 
-        # TODO group by timestamp
-        return vals[-1]
+        last = len(vals) - 1
+        last_ts = vals[last][0]
+        res = []
+        while last >= 0 and vals[last][0] == last_ts:
+            res.append(vals[last][1])
+            last -= 1
+        return res
 
 
 class BulkSinkToCacheActorFunction(SinkFunction):
@@ -151,3 +172,19 @@ class BulkSinkToCacheActorFunction(SinkFunction):
         self._dump_buffer_if_needed()
         if self.dumper_thread is not None:
             self.dumper_thread.join(timeout=5)
+
+
+class SingleEventSinkToCacheActorFunction(SinkFunction):
+
+    def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: DatasetSchema):
+        self.cache_actor = cache_actor
+        self.dataset_name = dataset_name
+        self.output_schema = output_schema
+
+    def sink(self, value):
+        key_fields = list(self.output_schema.keys.keys())
+        keys_dict = {k: value[k] for k in key_fields}
+        timestamp_field = self.output_schema.timestamp
+        ts = datetime_str_to_ts(value[timestamp_field])
+        self.cache_actor.put_records.remote(self.dataset_name, [(keys_dict, ts, value)])
+

@@ -102,9 +102,10 @@ class TestVolgaE2E(unittest.TestCase):
         ray.init(address='auto', ignore_reinit_error=True)
         client.materialize_online(
             target=OnSaleUserSpentInfo,
-            source_tags={Order: 'offline'},
+            source_tags={Order: 'online'},
             _async=True
         )
+
         time.sleep(1)
 
         live_on_sale_user_spent = None
@@ -114,14 +115,12 @@ class TestVolgaE2E(unittest.TestCase):
                 continue
             live_on_sale_user_spent = res
             print(f'[{time.time()}]{res}')
-
-        print(res)
         ray.shutdown()
 
 
 if __name__ == '__main__':
     t = TestVolgaE2E()
-    t.test_materialize_offline()
+    # t.test_materialize_offline()
 
     # uncomment for online case
-    # t.test_materialize_online()
+    t.test_materialize_online()
