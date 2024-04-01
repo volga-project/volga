@@ -13,7 +13,7 @@ class MysqlSourceFunction(SourceFunction):
         database: str,
         table: str,
     ):
-        pass
+        raise NotImplementedError('MysqlSource is not implemented yet, please use mock sources')
 
     def init(self, parallel, index):
         pass

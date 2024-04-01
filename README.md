@@ -74,7 +74,6 @@ Define feature dataset and calculation pipeline
 @dataset
 class OnSaleUserSpentInfo:
     user_id: str = field(key=True)
-    product_id: str = field(key=True)
     timestamp: datetime.datetime = field(timestamp=True)
 
     avg_spent_7d: float
@@ -92,20 +91,23 @@ class OnSaleUserSpentInfo:
             Count(window='1d', into='num_purchases_1d'),
         ])
 ```
-
-Run offline feature calculation job and get results (i.e. for model training)
+Define ```Client``` and ```Storage``` interfaces for online (```HotStorage```) and offline (```ColdStorage```) features
 
 ```python
 from volga import Client
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 
-storage = SimpleInMemoryActorStorage()
+storage = SimpleInMemoryActorStorage() # default in-memory storage, can be used as both hot and cold
 client = Client(hot=storage, cold=storage)
+```
 
+Run offline feature calculation job and get results (i.e. for model training)
+```python
 # run batch materialization job
 client.materialize_offline(
     target=OnSaleUserSpentInfo, 
-    source_tags={Order: 'offline'}
+    source_tags={Order: 'offline'},
+    paralellism=1
 )
 
 # query cold offline storage
@@ -134,6 +136,7 @@ Run online feature calculation job and query real-time updates (i.e. for model i
 client.materialize_online(
     target=OnSaleUserSpentInfo, 
     source_tags={Order: 'online'},
+    scaling_config={'Join_1': 4}, # optional parallelism per operator
     _async=True
 )
 
@@ -144,7 +147,7 @@ while True:
         dataset_name=OnSaleUserSpentInfo.__name__, 
         keys={'user_id': 0}
     )
-    if res is None or live_on_sale_user_spent == res:
+    if live_on_sale_user_spent == res:
         # skip same event
         continue
     live_on_sale_user_spent = res
@@ -155,6 +158,60 @@ while True:
 [1711537167.867083][{'user_id': '0', 'product_id': 'prod_2', 'timestamp': '2024-03-27 15:57:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1d': 2}]
 [1711537169.8647628][{'user_id': '0', 'product_id': 'prod_4', 'timestamp': '2024-03-27 16:55:20.124752', 'avg_spent_7d': 100, 'avg_spent_1h': 100, 'num_purchases_1d': 3}]
 ...
+```
+
+## On-Demand Features (Experimental work in progress)
+On-Demand features allow performing stateless transformations at request time, both in online and offline setting.
+This can be helpful in cases when transformation is too resource-heavy for streaming or when input data is available 
+only at request time (e.g. GPS coordinates, meta-model outputs, etc.)
+
+Define resulting ```@dataset``` with ```@on_demand``` function. On-Demand features can depend on regular datasets (with @pipeline function)
+as well as other on-demand datasets - this is configured via ```deps=[Dataset]``` parameter. When materialization is launched (both offline and online), the framework builds 
+on-demand task DAG and executes it in parallel on on-demand worker pool (Ray Actors).
+
+```python
+@dataset
+class UserOnSaleTransactionTooBig:
+    user_id: str = field(key=True)
+    tx_id: str = field(key=True)
+    tx_ts: datetime.datetime = field(timestamp=True)
+
+    over_7d_avg: bool
+    over_1h_avg: bool
+
+    @on_demand(deps=[OnSaleUserSpentInfo])
+    def gen(cls, ts: datetime.datetime, transaction: Dict):
+        on_sale_spent_info = OnSaleUserSpentInfo.get(keys=[{'user_id': transaction['user_id']}], ts=ts) # returns Dict-like object
+        over_7d_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_7d']
+        over_1h_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_1h']
+        
+        # output schema should match dataset schema
+        return {
+            'user_id': transaction['user_id'],
+            'tx_id': transaction['tx_id'],
+            'tx_ts': ts,
+            'over_7d_avg': over_7d_avg,
+            'over_1h_avg': over_1h_avg
+        }
+```
+
+Calculate on-demand transformation, this can be done for both online and offline storages. 
+This step will first check availability of all dependant datasets and will fail if not present.
+
+```python
+res = client.get_on_demand(
+    target=UserOnSaleTransactionTooBig,
+    online=True, # False for offline storage source
+    start = None, end = None, # datetime range in case of offline request
+    inputs=[{
+        'user_id': '1',
+        'tx_id': 'tx_0',
+        'tx_amount': 150
+    }]
+)
+...
+
+{'user_id': '1', 'timestamp': '2024-03-27 14:59:20.124752', 'tx_id': 'tx_0', 'over_7d_avg': 'false', 'over_1h_avg': 'true'}
 ```
 
 ## Installation

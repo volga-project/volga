@@ -54,7 +54,6 @@ class Order:
 @dataset
 class OnSaleUserSpentInfo:
     user_id: str = field(key=True)
-    product_id: str = field(key=True)
     timestamp: datetime.datetime = field(timestamp=True)
 
     avg_spent_7d: float
@@ -105,13 +104,11 @@ class TestVolgaE2E(unittest.TestCase):
             source_tags={Order: 'online'},
             _async=True
         )
-
         time.sleep(1)
-
         live_on_sale_user_spent = None
         while True:
             res = client.get_online_latest_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0})
-            if res is None or live_on_sale_user_spent == res:
+            if live_on_sale_user_spent == res:
                 continue
             live_on_sale_user_spent = res
             print(f'[{time.time()}]{res}')
@@ -120,7 +117,7 @@ class TestVolgaE2E(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestVolgaE2E()
-    # t.test_materialize_offline()
+    t.test_materialize_offline()
 
     # uncomment for online case
-    t.test_materialize_online()
+    # t.test_materialize_online()
