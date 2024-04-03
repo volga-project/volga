@@ -1,6 +1,6 @@
-## Volga - Data engine for real-time AI/ML
+## Volga - Feature Engine for real-time AI/ML
 
-Volga is an open-source, self-serve, scalable data engine tailored for modern real-time AI/ML applications.
+Volga is an open-source, self-serve, scalable data/feature engine tailored for modern real-time AI/ML applications.
 It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations.
@@ -38,7 +38,7 @@ Define data sources
 ```python
 from volga.sources import KafkaSource, MysqlSource
 
-kafka = KafkaSource.get(bootstrap_servers='', username='', password='')
+kafka = KafkaSource.get(bootstrap_servers='127.0.0.1:9092', username='root', password='')
 mysql = MysqlSource.get(host='127.0.0.1', port='3306', user='root', password='', database='db')
 
 ```
@@ -71,6 +71,8 @@ class Order:
 Define feature dataset and calculation pipeline
 
 ```python
+from volga.pipeline import pipeline
+
 @dataset
 class OnSaleUserSpentInfo:
     user_id: str = field(key=True)
@@ -170,6 +172,8 @@ as well as other on-demand datasets - this is configured via ```deps=[Dataset]``
 on-demand task DAG and executes it in parallel on on-demand worker pool (Ray Actors).
 
 ```python
+from volga.on_demand import on_demand
+
 @dataset
 class UserOnSaleTransactionTooBig:
     user_id: str = field(key=True)
@@ -252,4 +256,9 @@ python test_streaming_e2e.py
 
 ## Development
 
-Volga is in a proof of concept state hence any feedback is extremely valuable to us. Issues and PRs are always welcome.
+Volga is in a proof of concept state and requires some key features to be prod-ready (checkpointing and state backend, 
+watermarks, etc.), you can see the backlog here
+
+**[BACKLOG](https://github.com/users/anovv/projects/1/views/1)**
+
+Any feedback is extremely valuable, issues and PRs are always welcome.
