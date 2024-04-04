@@ -26,6 +26,7 @@ DEFAULT_STREAMING_JOB_CONFIG = {
     }
 }
 
+ScalingConfig = Dict
 
 class Client:
 
@@ -33,7 +34,16 @@ class Client:
         self.cold = cold
         self.hot = hot
 
-    def materialize_offline(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None, _async: bool = False):
+    def materialize_offline(
+        self,
+        target: Dataset,
+        source_tags: Optional[Dict[Dataset, str]] = None,
+        parallelism: int = 1,
+        scaling_config: Optional[ScalingConfig] = None,
+        _async: bool = False
+    ):
+        if scaling_config is not None:
+            raise ValueError('ScalingConfig is not supported yet')
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
         if self.cold is None:
             raise ValueError('Offline materialization requires ColdStorage')
@@ -48,7 +58,16 @@ class Client:
         else:
             ctx.execute()
 
-    def materialize_online(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]] = None, _async: bool = False):
+    def materialize_online(
+        self,
+        target: Dataset,
+        source_tags: Optional[Dict[Dataset, str]] = None,
+        parallelism: int = 1,
+        scaling_config: Optional[ScalingConfig] = None,
+        _async: bool = False
+    ):
+        if scaling_config is not None:
+            raise ValueError('ScalingConfig is not supported yet')
         stream, ctx = self._build_stream(target=target, source_tags=source_tags)
         if self.hot is None:
             raise ValueError('Online materialization requires HotStorage')
