@@ -181,22 +181,22 @@ class UserOnSaleTransactionTooBig:
     tx_id: str = field(key=True)
     tx_ts: datetime.datetime = field(timestamp=True)
 
-    over_7d_avg: bool
-    over_1h_avg: bool
+    above_7d_avg: bool
+    above_1h_avg: bool
 
     @on_demand(deps=[OnSaleUserSpentInfo])
     def gen(cls, ts: datetime.datetime, transaction: Dict):
         on_sale_spent_info = OnSaleUserSpentInfo.get(keys=[{'user_id': transaction['user_id'], 'product_id': transaction['product_id']}], ts=ts) # returns Dict-like object
-        over_7d_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_7d']
-        over_1h_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_1h']
+        above_7d_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_7d']
+        above_1h_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_1h']
         
         # output schema should match dataset schema
         return {
             'user_id': transaction['user_id'],
             'tx_id': transaction['tx_id'],
             'tx_ts': ts,
-            'over_7d_avg': over_7d_avg,
-            'over_1h_avg': over_1h_avg
+            'above_7d_avg': above_7d_avg,
+            'above_1h_avg': above_1h_avg
         }
 ```
 
@@ -217,7 +217,7 @@ res = client.get_on_demand(
 )
 ...
 
-{'user_id': '1', 'timestamp': '2024-03-27 14:59:20.124752', 'tx_id': 'tx_0', 'over_7d_avg': 'false', 'over_1h_avg': 'true'}
+{'user_id': '1', 'timestamp': '2024-03-27 14:59:20.124752', 'tx_id': 'tx_0', 'above_7d_avg': 'false', 'above_1h_avg': 'true'}
 ```
 
 ## Installation
