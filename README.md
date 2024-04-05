@@ -1,12 +1,14 @@
 ## Volga - Feature Engine for real-time AI/ML
 
-Volga is an open-source, self-serve, scalable data/feature engine tailored for modern real-time AI/ML applications.
+*[Volga](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)* is an open-source, self-serve, scalable data/feature engine tailored for modern real-time AI/ML applications.
 It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations.
 It aims to be a completely standalone and self-serve system removing any heavy-weight dependency on general data processors (Flink, Spark) 
-or cloud-based feature platforms (Tecton.ai, Fennel.ai) and can be run on a laptop or on a 1000-node cluster
+or cloud-based feature platforms (Tecton.ai, Fennel.ai) and can be run on a laptop or on a 1000-node cluster.
 
+See our *[blog](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)* for more details on motivation and technical details.
+ 
 Features:
 
 - Utilizes *[custom scalable stream processing engine](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
@@ -23,13 +25,14 @@ operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate``
 - [Experimental] Perform heavy embedding dot products, query meta-models or simply calculate users age in milliseconds at request time
  using *[On-Demand Features]()*
 
-Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/introduction)
+Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/introduction).
 
 ## Why use Volga
 
 There are no self-serve open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor lock-in,
 setting up and managing complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
-(i.e Tecton.ai, Fennel.ai, FeatureForm, Chalk.ai etc.). Volga fills this spot.
+(i.e Tecton.ai, Fennel.ai, FeatureForm, Chalk.ai etc.). Volga fills this spot. More info *[here](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)*.
+
 
 ## Quick start
 
@@ -207,7 +210,7 @@ This step will first check availability of all dependant datasets and will fail 
 res = client.get_on_demand(
     target=UserOnSaleTransactionTooBig,
     online=True, # False for offline storage source
-    start = None, end = None, # datetime range in case of offline request
+    start=None, end=None, # datetime range in case of offline request
     inputs=[{
         'user_id': '1',
         'tx_id': 'tx_0',
