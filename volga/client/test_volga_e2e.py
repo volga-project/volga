@@ -54,6 +54,7 @@ class Order:
 @dataset
 class OnSaleUserSpentInfo:
     user_id: str = field(key=True)
+    product_id: str = field(key=True)
     timestamp: datetime.datetime = field(timestamp=True)
 
     avg_spent_7d: float

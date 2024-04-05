@@ -14,7 +14,7 @@ Features:
 Kappa architecture - no Flink or Spark
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
-- Kubernetes ready, no vendor-lock - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python
+- Kubernetes ready, no vendor lock-in - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python
 - Pure Python, no heavy JVM setups - minimal setup and maintenance efforts in production
 - Standalone - launch on your laptop or a cluster with no heavy-weight external dependencies
 - Cold + Hot storage model allows for customizable offline storage and caches, fast real-time feature queries
@@ -27,7 +27,7 @@ Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/intr
 
 ## Why use Volga
 
-There are no self-serve open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor-lock,
+There are no self-serve open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor lock-in,
 setting up and managing complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
 (i.e Tecton.ai, Fennel.ai, FeatureForm, Chalk.ai etc.). Volga fills this spot.
 
@@ -76,6 +76,7 @@ from volga.pipeline import pipeline
 @dataset
 class OnSaleUserSpentInfo:
     user_id: str = field(key=True)
+    product_id: str = field(key=True)
     timestamp: datetime.datetime = field(timestamp=True)
 
     avg_spent_7d: float
@@ -185,7 +186,7 @@ class UserOnSaleTransactionTooBig:
 
     @on_demand(deps=[OnSaleUserSpentInfo])
     def gen(cls, ts: datetime.datetime, transaction: Dict):
-        on_sale_spent_info = OnSaleUserSpentInfo.get(keys=[{'user_id': transaction['user_id']}], ts=ts) # returns Dict-like object
+        on_sale_spent_info = OnSaleUserSpentInfo.get(keys=[{'user_id': transaction['user_id'], 'product_id': transaction['product_id']}], ts=ts) # returns Dict-like object
         over_7d_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_7d']
         over_1h_avg = transaction['tx_amount'] > on_sale_spent_info['avg_spent_1h']
         
@@ -210,6 +211,7 @@ res = client.get_on_demand(
     inputs=[{
         'user_id': '1',
         'tx_id': 'tx_0',
+        'product_id': 'prod_0',
         'tx_amount': 150
     }]
 )
