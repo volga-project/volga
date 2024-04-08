@@ -12,5 +12,5 @@ class ColdStorage(ABC):
         pass
 
     @abstractmethod
-    def get_data(self, dataset_name: str, keys: Optional[Dict[str, Any]], start_ts: Optional[Decimal], end_ts: Optional[Decimal]) -> List[Any]:
+    def get_data(self, dataset_name: str, keys: Optional[List[Dict[str, Any]]], start_ts: Optional[Decimal], end_ts: Optional[Decimal]) -> List[Any]:
         pass

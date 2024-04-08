@@ -39,11 +39,24 @@ class SimpleInMemoryActorStorage(ColdStorage, HotStorage):
                 output_schema=output_schema
             )
 
-    def get_data(self, dataset_name: str, keys: Optional[Dict[str, Any]], start_ts: Optional[Decimal], end_ts: Optional[Decimal]) -> List[Any]:
-        return ray.get(self.cache_actor.get_values.remote(dataset_name, keys, start_ts, end_ts))
+    def get_data(self, dataset_name: str, keys: Optional[List[Dict[str, Any]]], start_ts: Optional[Decimal], end_ts: Optional[Decimal]) -> List[Any]:
+        if keys is not None:
+            if len(keys) > 1:
+                raise ValueError('Multiple key lookup is not supported yet')
+            keys_dict = keys[0]
+        else:
+            keys_dict = None
+        return ray.get(self.cache_actor.get_values.remote(dataset_name, keys_dict, start_ts, end_ts))
 
-    def get_latest_data(self, dataset_name: str, keys: Dict[str, Any]) -> Optional[List[Any]]:
-        return ray.get(self.cache_actor.get_latest.remote(dataset_name, keys))
+    def get_latest_data(self, dataset_name: str, keys: List[Dict[str, Any]]) -> Optional[List[Any]]:
+        if keys is not None:
+            if len(keys) > 1:
+                raise ValueError('Multiple key lookup is not supported yet')
+            keys_dict = keys[0]
+        else:
+            keys_dict = None
+
+        return ray.get(self.cache_actor.get_latest.remote(dataset_name, keys_dict))
 
 
 @ray.remote(num_cpus=0.01)# TODO set memory request

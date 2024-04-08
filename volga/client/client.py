@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Dict, Optional, Tuple, Any
+from typing import Dict, Optional, Tuple, Any, List
 
 import pandas as pd
 
@@ -85,7 +85,7 @@ class Client:
     def get_offline_data(
         self,
         dataset_name: str,
-        keys: Optional[Dict[str, Any]],
+        keys: Optional[List[Dict[str, Any]]],
         start: Optional[datetime],
         end: Optional[datetime]
     ) -> pd.DataFrame:
@@ -99,7 +99,7 @@ class Client:
     def get_online_latest_data(
         self,
         dataset_name: str,
-        keys: Optional[Dict[str, Any]]
+        keys: Optional[List[Dict[str, Any]]]
     ) -> Any:
         if self.hot is None:
             raise ValueError('HotStorage is not set')

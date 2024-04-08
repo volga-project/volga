@@ -119,7 +119,7 @@ client.materialize_offline(
 # query cold offline storage
 historical_on_sale_user_spent_df = client.get_offline_data(
     dataset_name=OnSaleUserSpentInfo.__name__, 
-    keys={'user_id': 0}, 
+    keys=[{'user_id': 0}], 
     start=None, end=None # whole dataset
 )
 ```
@@ -151,7 +151,7 @@ live_on_sale_user_spent = None
 while True:
     res = client.get_online_latest_data(
         dataset_name=OnSaleUserSpentInfo.__name__, 
-        keys={'user_id': 0}
+        keys=[{'user_id': 0}]
     )
     if live_on_sale_user_spent == res:
         # skip same event

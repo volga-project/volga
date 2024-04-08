@@ -91,7 +91,7 @@ class TestVolgaE2E(unittest.TestCase):
             source_tags={Order: 'offline'}
         )
         time.sleep(1)
-        res = client.get_offline_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0}, start=None, end=None)
+        res = client.get_offline_data(dataset_name=OnSaleUserSpentInfo.__name__, keys=[{'user_id': 0}], start=None, end=None)
         print(res)
         ray.shutdown()
 
@@ -108,7 +108,7 @@ class TestVolgaE2E(unittest.TestCase):
         time.sleep(1)
         live_on_sale_user_spent = None
         while True:
-            res = client.get_online_latest_data(dataset_name=OnSaleUserSpentInfo.__name__, keys={'user_id': 0})
+            res = client.get_online_latest_data(dataset_name=OnSaleUserSpentInfo.__name__, keys=[{'user_id': 0}])
             if live_on_sale_user_spent == res:
                 continue
             live_on_sale_user_spent = res
@@ -118,7 +118,7 @@ class TestVolgaE2E(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestVolgaE2E()
-    t.test_materialize_offline()
+    # t.test_materialize_offline()
 
     # uncomment for online case
-    # t.test_materialize_online()
+    t.test_materialize_online()

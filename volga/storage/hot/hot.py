@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Dict, Any
+from typing import Dict, Any, List
 
 from volga.streaming.api.function.function import SinkFunction
 
@@ -11,5 +11,5 @@ class HotStorage(ABC):
         pass
 
     @abstractmethod
-    def get_latest_data(self, dataset_name: str, keys: Dict[str, Any]) -> Any:
+    def get_latest_data(self, dataset_name: str, keys: List[Dict[str, Any]]) -> Any:
         pass
