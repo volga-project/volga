@@ -31,7 +31,7 @@ Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/intr
 
 There are no self-serve open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor lock-in,
 setting up and managing complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
-(i.e Tecton.ai, Fennel.ai, FeatureForm, Chalk.ai etc.). Volga fills this spot. More info *[here](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)*.
+(i.e Tecton.ai, Fennel.ai, Chalk.ai etc.). Volga fills this spot. More info *[here](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)*.
 
 
 ## Quick start
