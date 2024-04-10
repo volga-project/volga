@@ -5,14 +5,14 @@ from typing import Callable, Type, Optional, List, cast, TypeVar, Union, Dict
 from decimal import Decimal
 
 from volga.common.time_utils import datetime_str_to_ts
-from volga.data.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
-from volga.data.api.dataset.operator import OperatorNode
-from volga.data.api.dataset.schema import DatasetSchema
+from volga.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
+from volga.api.dataset.operator import OperatorNode
+from volga.api.dataset.schema import DatasetSchema
 
 import datetime
 
-from volga.data.api.source.source import Connector
-from volga.data.api.utils import is_optional
+from volga.api.source.source import Connector
+from volga.api.utils import is_optional
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operator.timestamp_assigner import EventTimeAssigner

@@ -1,6 +1,6 @@
 from typing import List, Callable
 
-from volga.data.api.dataset.dataset import Dataset
+from volga.api.dataset.dataset import Dataset
 
 
 # decorator

@@ -2,8 +2,8 @@ import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.common.time_utils import is_time_str
-from volga.data.api.dataset.aggregate import AggregateType
-from volga.data.api.dataset.schema import DatasetSchema
+from volga.api.dataset.aggregate import AggregateType
+from volga.api.dataset.schema import DatasetSchema
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operator.window_operator import SlidingWindowConfig, AggregationsPerWindow
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
@@ -42,11 +42,11 @@ class OperatorNode(OperatorNodeBase):
     ) -> 'OperatorNode':
         if on is None:
             if left_on is None or right_on is None:
-                raise TypeError("Join should provide either on or both left_on and right_on")
+                raise ValueError('Join should provide either on or both left_on and right_on')
 
         if left_on is None or right_on is None:
             if on is None:
-                raise TypeError("Join should provide either on or both left_on and right_on")
+                raise ValueError('Join should provide either on or both left_on and right_on')
 
         return Join(left=self, right=other, on=on, left_on=left_on, right_on=right_on)
 
@@ -54,23 +54,22 @@ class OperatorNode(OperatorNodeBase):
         return Rename(self, columns)
 
     def drop(self, columns: List[str]) -> 'OperatorNode':
-        return Drop(self, columns, name="drop")
+        return Drop(self, columns)
 
     def dropnull(self, columns: Optional[List[str]] = None) -> 'OperatorNode':
         return DropNull(self, columns)
 
     def select(self, columns: List[str]) -> 'OperatorNode':
-        ts = self.data_set_schema().timestamp
+        # ts = self.data_set_schema().timestamp
+        ts = None # TODO derive ts field from schema
         # Keep the timestamp col
-        drop_cols = list(
-            filter(
-                lambda c: c not in columns and c != ts, self.data_set_schema().fields()
-            )
-        )
+        drop_cols = list(filter(
+            lambda c: c not in columns and c != ts, self.data_set_schema().fields()
+        ))
         # All the cols were selected
         if len(drop_cols) == 0:
             return self
-        return Drop(self, drop_cols, name="select")
+        return Drop(self, drop_cols)
 
 
 class Transform(OperatorNode):
@@ -254,6 +253,7 @@ class Join(OperatorNode):
         assert isinstance(right, Dict)
 
         # TODO we can compute same keys and resulting output schema only once to increase perf
+        # TODO schema should be already derived at Node Graph compilation time
         same_keys = list(set(left.keys()) & set(right.keys()))
 
         # rename with prefixex
@@ -285,12 +285,12 @@ class Rename(OperatorNode):
         raise NotImplementedError()
 
 
+# TODO Drop is used for both drop() and select() API, indicate difference?
 class Drop(OperatorNode):
-    def __init__(self, parent: OperatorNodeBase, columns: List[str], name="drop"):
+    def __init__(self, parent: OperatorNodeBase, columns: List[str]):
         super().__init__()
         self.parents.append(parent)
         self.columns = columns
-        self.__name = name
 
     def init_stream(self):
         self.stream = self.parents[0].stream.filter(filter_func=self._stream_filter_func)

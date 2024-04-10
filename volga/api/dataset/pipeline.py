@@ -1,8 +1,8 @@
 import inspect
 from typing import List, Callable
 
-from volga.data.api.consts import PIPELINE_ATTR
-from volga.data.api.dataset.dataset import Dataset
+from volga.api.consts import PIPELINE_ATTR
+from volga.api.dataset.dataset import Dataset
 
 
 class Pipeline:

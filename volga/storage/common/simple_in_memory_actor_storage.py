@@ -8,7 +8,7 @@ from ray.actor import ActorHandle
 import time
 
 from volga.common.time_utils import datetime_str_to_ts
-from volga.data.api.dataset.schema import DatasetSchema
+from volga.api.dataset.schema import DatasetSchema
 from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.key_index import compose_main_key, KeyIndex
 from volga.storage.hot.hot import HotStorage

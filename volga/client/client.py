@@ -4,9 +4,9 @@ from typing import Dict, Optional, Tuple, Any, List
 import pandas as pd
 
 from volga.common.time_utils import datetime_to_ts
-from volga.data.api.dataset.dataset import Dataset
-from volga.data.api.dataset.operator import Aggregate, OperatorNodeBase
-from volga.data.api.dataset.schema import DatasetSchema
+from volga.api.dataset.dataset import Dataset
+from volga.api.dataset.operator import Aggregate, OperatorNodeBase
+from volga.api.dataset.schema import DatasetSchema
 from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 from volga.storage.hot.hot import HotStorage
@@ -26,7 +26,8 @@ DEFAULT_STREAMING_JOB_CONFIG = {
     }
 }
 
-ScalingConfig = Dict
+ScalingConfig = Dict # TODO move
+
 
 class Client:
 

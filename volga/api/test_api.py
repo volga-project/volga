@@ -1,9 +1,9 @@
 import datetime
 import unittest
 
-from volga.data.api.dataset.dataset import dataset, field, Dataset
-from volga.data.api.dataset.pipeline import pipeline
-from volga.data.api.source.source import KafkaSource, MysqlSource, source
+from volga.api.dataset.dataset import dataset, field, Dataset
+from volga.api.dataset.pipeline import pipeline
+from volga.api.source.source import KafkaSource, MysqlSource, source
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.stream_source import StreamSource
 

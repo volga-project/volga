@@ -2,7 +2,7 @@ from typing import TypeVar, List, Any
 
 from pydantic import BaseModel
 
-from volga.data.api.consts import CONNECTORS_ATTR
+from volga.api.consts import CONNECTORS_ATTR
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.stream_source import StreamSource
 
