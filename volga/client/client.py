@@ -106,6 +106,15 @@ class Client:
             raise ValueError('HotStorage is not set')
         return self.hot.get_latest_data(dataset_name=dataset_name, keys=keys)
 
+    def get_on_demand(
+        self,
+        target: Dataset,
+        online: bool,  # False for offline storage source
+        start: Optional[datetime], end: Optional[datetime],  # datetime range in case of offline request
+        inputs: List[Dict]
+    ) -> Any:
+        raise NotImplementedError()
+
     def _build_stream(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]]) -> Tuple[DataStream, StreamingContext]:
         ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
         pipeline = target.get_pipeline()
