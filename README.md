@@ -39,7 +39,7 @@ setting up and managing complex infra like Spark or Flink simultaneously and/or 
 Define data sources
 
 ```python
-from volga.sources import KafkaSource, MysqlSource
+from volga.api.source.source import MysqlSource, KafkaSource
 
 kafka = KafkaSource.get(bootstrap_servers='127.0.0.1:9092', username='root', password='')
 mysql = MysqlSource.get(host='127.0.0.1', port='3306', user='root', password='', database='db')
@@ -49,8 +49,8 @@ mysql = MysqlSource.get(host='127.0.0.1', port='3306', user='root', password='',
 Define input datasets
 
 ```python
-from volga.datasets import dataset, field, pipeline
-from volga.sources import source
+from volga.api.dataset.dataset import dataset, field, Dataset
+from volga.api.source.source import source
 
 @source(mysql.table('users'))
 @dataset
@@ -74,7 +74,8 @@ class Order:
 Define feature dataset and calculation pipeline
 
 ```python
-from volga.pipeline import pipeline
+from volga.api.dataset.pipeline import pipeline
+from volga.api.dataset.aggregate import Avg, Count
 
 @dataset
 class OnSaleUserSpentInfo:
@@ -100,7 +101,7 @@ class OnSaleUserSpentInfo:
 Define ```Client``` and ```Storage``` interfaces for online (```HotStorage```) and offline (```ColdStorage```) features
 
 ```python
-from volga import Client
+from volga.client.client import Client
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 
 storage = SimpleInMemoryActorStorage() # default in-memory storage, can be used as both hot and cold
@@ -176,7 +177,7 @@ as well as other on-demand datasets - this is configured via ```deps=[Dataset]``
 on-demand task DAG and executes it in parallel on on-demand worker pool (Ray Actors).
 
 ```python
-from volga.on_demand import on_demand
+from volga.on_demand.on_demand import on_demand
 
 @dataset
 class UserOnSaleTransactionTooBig:
