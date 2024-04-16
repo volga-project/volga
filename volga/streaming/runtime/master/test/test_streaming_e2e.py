@@ -33,8 +33,8 @@ class TestStreamingJobE2E(unittest.TestCase):
         sink_cache = SinkCacheActor.remote()
         sink_function = SinkToCacheFunction(sink_cache)
 
-        s = source1.key_by(lambda x: x[0])\
-            .join(source2.key_by(lambda x: x[0]))\
+        s = source1.key_by(lambda x: x[0]) \
+            .join(source2.key_by(lambda x: x[0])) \
             .with_func(lambda x, y: (x, y)) \
             .set_parallelism(10) \
             .map(lambda x: (x[0][0], x[0][1], x[1][1])) \

@@ -109,8 +109,8 @@ class Client:
     def get_on_demand(
         self,
         target: Dataset,
-        online: bool,  # False for offline storage source
-        start: Optional[datetime], end: Optional[datetime],  # datetime range in case of offline request
+        online: bool, # False for offline storage source
+        start: Optional[datetime], end: Optional[datetime], # datetime range in case of offline request
         inputs: List[Dict]
     ) -> Any:
         raise NotImplementedError()
