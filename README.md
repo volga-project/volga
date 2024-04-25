@@ -260,6 +260,9 @@ python test_volga_e2e.py
 python test_streaming_e2e.py
 ```
 
+The development is done with Python 3.10.8 and Ray 2.3.1, in case of any import/installation related errors, please try rolling
+your dev env back to these version
+
 ## Development
 
 Volga is in a proof of concept state and requires some key features to be prod-ready (checkpointing and state backend, 
