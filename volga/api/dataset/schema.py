@@ -4,13 +4,13 @@ from typing import Dict, Type, List
 
 
 @dataclass
-class DatasetSchema:
+class Schema:
     keys: Dict[str, Type]
     values: Dict[str, Type]
     timestamp: str
     name: str = ""
 
-    def schema(self) -> Dict[str, Type]:
+    def to_dict(self) -> Dict[str, Type]:
         schema = {**self.keys, **self.values, self.timestamp: datetime.datetime}
         return schema
 

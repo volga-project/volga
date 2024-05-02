@@ -6,7 +6,7 @@ import pandas as pd
 from volga.common.time_utils import datetime_to_ts
 from volga.api.dataset.dataset import Dataset
 from volga.api.dataset.operator import Aggregate, OperatorNodeBase
-from volga.api.dataset.schema import DatasetSchema
+from volga.api.dataset.schema import Schema
 from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 from volga.storage.hot.hot import HotStorage
@@ -51,7 +51,7 @@ class Client:
         if not isinstance(self.cold, SimpleInMemoryActorStorage):
             raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
         stream.sink(
-            self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema(), hot=False)
+            self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.schema(), hot=False)
         )
         # stream.sink(print)
         if _async:
@@ -75,7 +75,7 @@ class Client:
         if not isinstance(self.hot, SimpleInMemoryActorStorage):
             raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
         stream.sink(
-            self.hot.gen_sink_function(dataset_name=target.__name__, output_schema=target.dataset_schema(), hot=True)
+            self.hot.gen_sink_function(dataset_name=target.__name__, output_schema=target.schema(), hot=True)
         )
         # stream.sink(print)
         if _async:
@@ -124,7 +124,7 @@ class Client:
         terminal_operator_node = pipeline.func(target.__class__, *pipeline.inputs)
 
         # build stream graph
-        self._init_stream_graph(terminal_operator_node, ctx, target.dataset_schema(), source_tags)
+        self._init_stream_graph(terminal_operator_node, ctx, target.schema(), source_tags)
         stream: DataStream = terminal_operator_node.stream
 
         return stream, ctx
@@ -133,7 +133,7 @@ class Client:
         self,
         operator_node: OperatorNodeBase,
         ctx: StreamingContext,
-        target_dataset_schema: DatasetSchema,
+        target_dataset_schema: Schema,
         source_tags: Optional[Dict[Dataset, str]] = None
     ):
 

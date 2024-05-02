@@ -3,7 +3,7 @@ from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.common.time_utils import is_time_str
 from volga.api.dataset.aggregate import AggregateType
-from volga.api.dataset.schema import DatasetSchema
+from volga.api.dataset.schema import Schema
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operator.window_operator import SlidingWindowConfig, AggregationsPerWindow
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
@@ -15,6 +15,9 @@ class OperatorNodeBase:
         self.parents: List['OperatorNodeBase'] = []
 
     def init_stream(self, *args):
+        raise NotImplementedError()
+
+    def schema(self) -> Schema:
         raise NotImplementedError()
 
 
@@ -122,7 +125,7 @@ class Aggregate(OperatorNode):
         self.aggregates = aggregates
         self.parents.append(parent)
 
-    def init_stream(self, target_dataset_schema: DatasetSchema):
+    def init_stream(self, target_dataset_schema: Schema):
 
         def _output_window_func(aggs_per_window: AggregationsPerWindow, record: Record) -> Record:
             record_value = record.value

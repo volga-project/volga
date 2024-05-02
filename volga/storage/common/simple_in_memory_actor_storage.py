@@ -8,7 +8,7 @@ from ray.actor import ActorHandle
 import time
 
 from volga.common.time_utils import datetime_str_to_ts
-from volga.api.dataset.schema import DatasetSchema
+from volga.api.dataset.schema import Schema
 from volga.storage.cold.cold import ColdStorage
 from volga.storage.common.key_index import compose_main_key, KeyIndex
 from volga.storage.hot.hot import HotStorage
@@ -24,8 +24,8 @@ class SimpleInMemoryActorStorage(ColdStorage, HotStorage):
         self.cache_actor = SimpleInMemoryCacheActor.options(name=self.CACHE_ACTOR_NAME, get_if_exists=True).remote()
 
     # TODO dataset_name and schema should be part of all records metadata
-    #  When it is so, this outside params won't be needed
-    def gen_sink_function(self, dataset_name: str, output_schema: DatasetSchema, hot: bool) -> SinkFunction:
+    #  When it is so, these outside params won't be needed
+    def gen_sink_function(self, dataset_name: str, output_schema: Schema, hot: bool) -> SinkFunction:
         if hot:
             return SingleEventSinkToCacheActorFunction(
                 cache_actor=self.cache_actor,
@@ -148,7 +148,7 @@ class BulkSinkToCacheActorFunction(SinkFunction):
 
     DUMPER_PERIOD_S = 1
 
-    def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: DatasetSchema):
+    def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: Schema):
         self.cache_actor = cache_actor
         self.dataset_name = dataset_name
         self.output_schema = output_schema
@@ -189,7 +189,7 @@ class BulkSinkToCacheActorFunction(SinkFunction):
 
 class SingleEventSinkToCacheActorFunction(SinkFunction):
 
-    def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: DatasetSchema):
+    def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: Schema):
         self.cache_actor = cache_actor
         self.dataset_name = dataset_name
         self.output_schema = output_schema
