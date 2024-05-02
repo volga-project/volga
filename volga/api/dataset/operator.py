@@ -38,7 +38,7 @@ class OperatorNode(OperatorNodeBase):
 
     def join(
         self,
-        other: 'Dataset',
+        other: 'OperatorNode',
         on: Optional[List[str]] = None,
         left_on: Optional[List[str]] = None,
         right_on: Optional[List[str]] = None,
@@ -63,11 +63,10 @@ class OperatorNode(OperatorNodeBase):
         return DropNull(self, columns)
 
     def select(self, columns: List[str]) -> 'OperatorNode':
-        # ts = self.data_set_schema().timestamp
-        ts = None # TODO derive ts field from schema
+        ts = self.schema().timestamp
         # Keep the timestamp col
         drop_cols = list(filter(
-            lambda c: c not in columns and c != ts, self.data_set_schema().fields()
+            lambda c: c not in columns and c != ts, self.schema().fields()
         ))
         # All the cols were selected
         if len(drop_cols) == 0:
@@ -115,6 +114,10 @@ class Filter(OperatorNode):
 
     def _stream_filter_func(self, event: Any) -> bool:
         return self.func(event)
+
+    def schema(self) -> Schema:
+        # filtering  does not alter parent's schema
+        return self.parents[0].schema()
 
 
 class Aggregate(OperatorNode):
@@ -206,12 +209,16 @@ class GroupBy(OperatorNodeBase):
             raise ValueError('Aggregate expects at least one aggregation operation')
         return Aggregate(self, aggregates)
 
+    def schema(self) -> Schema:
+        # group by does not alter parent's schema
+        return self.parents[0].schema()
+
 
 class Join(OperatorNode):
     def __init__(
         self,
         left: OperatorNode,
-        right: 'Dataset',
+        right: OperatorNode,
         on: Optional[List[str]] = None,
         left_on: Optional[List[str]] = None,
         right_on: Optional[List[str]] = None
