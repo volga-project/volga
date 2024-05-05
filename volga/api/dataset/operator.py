@@ -128,7 +128,7 @@ class Aggregate(OperatorNode):
         self.aggregates = aggregates
         self.parents.append(parent)
 
-    def init_stream(self, target_dataset_schema: Schema):
+    def init_stream(self, output_schema: Schema):
 
         def _output_window_func(aggs_per_window: AggregationsPerWindow, record: Record) -> Record:
             record_value = record.value
@@ -139,14 +139,14 @@ class Aggregate(OperatorNode):
             #  derive field names/validate correctness
 
             # copy keys
-            expected_key_fields = list(target_dataset_schema.keys.keys())
+            expected_key_fields = list(output_schema.keys.keys())
             for k in expected_key_fields:
                 if k not in record_value:
                     raise RuntimeError(f'Can not locate key field {k}')
                 res[k] = record_value[k]
 
             # copy timestamp
-            ts_field = target_dataset_schema.timestamp
+            ts_field = output_schema.timestamp
             ts_value = None
             for v in record_value.values():
                 if is_time_str(v):
@@ -158,7 +158,7 @@ class Aggregate(OperatorNode):
             res[ts_field] = ts_value
 
             # copy aggregate values
-            values_fields = list(target_dataset_schema.values.keys())
+            values_fields = list(output_schema.values.keys())
             for v in values_fields:
                 if v not in aggs_per_window:
                     raise RuntimeError(f'Unable to locate {v} in aggregates: {aggs_per_window}')

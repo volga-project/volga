@@ -133,13 +133,13 @@ class Client:
         self,
         operator_node: OperatorNodeBase,
         ctx: StreamingContext,
-        target_dataset_schema: Schema,
+        target_schema: Schema,
         source_tags: Optional[Dict[Dataset, str]] = None
     ):
 
         for p in operator_node.parents:
             self._init_stream_graph(
-                p, ctx, target_dataset_schema, source_tags
+                p, ctx, target_schema, source_tags
             )
 
         # init sources
@@ -155,7 +155,7 @@ class Client:
 
         # TODO special cases i.e. terminal node, join, aggregate, etc.
         if isinstance(operator_node, Aggregate):
-            operator_node.init_stream(target_dataset_schema)
+            operator_node.init_stream(target_schema)
         else:
             operator_node.init_stream()
 
