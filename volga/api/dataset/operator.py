@@ -75,16 +75,39 @@ class OperatorNode(OperatorNodeBase):
 
 
 class Transform(OperatorNode):
-    def __init__(self, parent: OperatorNodeBase, func: Callable):
+    def __init__(self, parent: OperatorNodeBase, func: Callable, new_schema_dict: Optional[Dict[str, Type]] = None):
         super().__init__()
         self.func = func
         self.parents.append(parent)
+        self.new_schema_dict = new_schema_dict
 
     def init_stream(self):
         self.stream = self.parents[0].stream.map(map_func=self._stream_map_func)
 
     def _stream_map_func(self, event: Any) -> Any:
         return self.func(event)
+
+    def schema(self) -> Schema:
+        input_schema = self.parents[0].schema()
+        if self.new_schema_dict is None:
+            # schema has not been changed
+            return input_schema
+
+        # we assume new schema alters value fields only, keys and timestamp fields are intact
+        keys = input_schema.keys
+        values = {}
+        for field, type in self.new_schema_dict.items():
+            if field in keys.keys() or field == input_schema.timestamp:
+                continue
+            if field in values:
+                raise ValueError(f'Duplicate field {field} for Transform operator schema')
+            values[field] = type
+
+        return Schema(
+            keys=keys,
+            values=values,
+            timestamp=input_schema.timestamp,
+        )
 
 
 class Assign(OperatorNode):
