@@ -29,6 +29,4 @@ class Schema:
         elif field == self.timestamp:
             return datetime.datetime
         else:
-            raise Exception(
-                f"field `{field}` not found in schema of `{self.name}`"
-            )
+            raise ValueError(f'Field {field} not found')

@@ -68,14 +68,15 @@ class OnSaleUserSpentInfo:
         on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
         per_user = on_sale_purchases.join(users, right_on=['user_id'], left_on=['buyer_id'])
 
-        return per_user.group_by(keys=['user_id']).aggregate([
-            Sum(on='product_price', window='1h', into='sum_spent_1h'),
-            Sum(on='product_price', window='1d', into='sum_spent_1d'),
-            Avg(on='product_price', window='7d', into='avg_spent_7d'),
-            Avg(on='product_price', window='1h', into='avg_spent_1h'),
-            Count(window='1h', into='num_purchases_1h'),
-            Count(window='1d', into='num_purchases_1d'),
-        ])
+        return per_user
+        # return per_user.group_by(keys=['user_id']).aggregate([
+        #     Sum(on='product_price', window='1h', into='sum_spent_1h'),
+        #     Sum(on='product_price', window='1d', into='sum_spent_1d'),
+        #     Avg(on='product_price', window='7d', into='avg_spent_7d'),
+        #     Avg(on='product_price', window='1h', into='avg_spent_1h'),
+        #     Count(window='1h', into='num_purchases_1h'),
+        #     Count(window='1d', into='num_purchases_1d'),
+        # ])
 
 
 class TestVolgaE2E(unittest.TestCase):
@@ -92,6 +93,7 @@ class TestVolgaE2E(unittest.TestCase):
         time.sleep(1)
         res = client.get_offline_data(dataset_name=OnSaleUserSpentInfo.__name__, keys=[{'user_id': 0}], start=None, end=None)
         print(res)
+        # TODO assert expected
         ray.shutdown()
 
     def test_materialize_online(self):
@@ -112,12 +114,13 @@ class TestVolgaE2E(unittest.TestCase):
                 continue
             live_on_sale_user_spent = res
             print(f'[{time.time()}]{res}')
+        # TODO store results and assert expected
         ray.shutdown()
 
 
 if __name__ == '__main__':
     t = TestVolgaE2E()
-    # t.test_materialize_offline()
+    t.test_materialize_offline()
 
     # uncomment for online case
-    t.test_materialize_online()
+    # t.test_materialize_online()

@@ -17,6 +17,7 @@ class OperatorNodeBase:
     def init_stream(self, *args):
         raise NotImplementedError()
 
+    # TODO we want to be able to cast schema to Dataset's defined schema if the operator is the last in chain
     def schema(self) -> Schema:
         raise NotImplementedError()
 
@@ -260,13 +261,64 @@ class Join(OperatorNode):
                 right_on is not None and len(right_on) != 1:
             raise ValueError('Currently, Join expects exactly 1 key field')
 
+        if (left_on is None and right_on is not None) or \
+            (left_on is not None and right_on is None):
+            raise ValueError('Join expects both left_on and right_on')
+
         self.left_on = left_on
         self.right_on = right_on
+
+        # fields with the same name
+        self._same_fields = list(set(self.left.schema().fields()) & set(self.right.schema().fields()))
 
     def init_stream(self):
         self.stream = self.left.stream.key_by(self._stream_left_key_func) \
             .join(self.right.stream.key_by(self._stream_right_key_func)) \
             .with_func(self._stream_join_func)
+
+    @staticmethod
+    def _prefix_duplicate_field(field: str, is_left: bool):
+        if is_left:
+            return f'left_{field}'
+        else:
+            return f'right_{field}'
+
+    def schema(self) -> Schema:
+        ls = self.left.schema()
+        rs = self.right.schema()
+        ts = ls.timestamp # we use left ts by default
+
+        keys = {}
+        if self.on is not None:
+            for k in self.on:
+                keys[k] = ls.keys[k]
+        else:
+            # use left by default
+            for k in self.left_on:
+                keys[k] = ls.keys[k]
+
+        values = {}
+        # copy left values
+        for f in ls.values:
+            if f in self._same_fields:
+                new_f = self._prefix_duplicate_field(field=f, is_left=True)
+                values[new_f] = ls.values[f]
+            else:
+                values[f] = ls.values[f]
+
+        # copy right values
+        for f in rs.values:
+            if f in self._same_fields:
+                new_f = self._prefix_duplicate_field(field=f, is_left=False)
+                values[new_f] = rs.values[f]
+            else:
+                values[f] = rs.values[f]
+
+        return Schema(
+            keys=keys,
+            values=values,
+            timestamp=ts
+        )
 
     def _stream_left_key_func(self, element: Any) -> Any:
         assert isinstance(element, Dict)
@@ -277,20 +329,10 @@ class Join(OperatorNode):
         assert isinstance(element, Dict)
         key = self.right_on[0] if self.on is None else self.on[0]
         return element[key]
-
-    # TODO cast to target_dataset_schema in case of join being terminal node
+    # {'buyer_id': '0', 'product_type': 'ON_SALE', 'purchased_at': '2024-05-07 14:08:26.519626', 'product_price': 100.0, 'name': 'username_0'}
+    # {'buyer_id': '0', 'product_id': 'prod_0', 'product_type': 'ON_SALE', 'purchased_at': '2024-05-07 14:14:20.335705', 'product_price': 100.0, 'user_id': '0', 'registered_at': '2024-05-07 14:14:20.335697', 'name': 'username_0'}
     def _stream_join_func(self, left: Any, right: Any) -> Any:
-        if left is None or right is None:
-            raise RuntimeError('Can not join null values')
-        assert isinstance(left, Dict)
-        assert isinstance(right, Dict)
-
-        # TODO we can compute same keys and resulting output schema only once to increase perf
-        # TODO schema should be already derived at Node Graph compilation time
-        same_keys = list(set(left.keys()) & set(right.keys()))
-
-        # rename with prefixex
-        for k in same_keys:
+        for k in self._same_fields:
             if k in left:
                 new_k_left = f'left_{k}'
                 assert new_k_left not in left
@@ -303,6 +345,39 @@ class Join(OperatorNode):
                 del right[k]
 
         return {**left, **right}
+
+    # TODO cast to target_dataset_schema in case of join being terminal node
+    def _stream_join_func_new(self, left: Any, right: Any) -> Any:
+        if left is None or right is None:
+            raise RuntimeError('Can not join null values')
+        assert isinstance(left, Dict)
+        assert isinstance(right, Dict)
+
+
+        out_event = {}
+
+        schema = self.schema()
+        for f in left:
+            if f in self._same_fields:
+                new_f = self._prefix_duplicate_field(field=f, is_left=True)
+                out_event[new_f] = left[f]
+            else:
+                # skip fields not in schema
+                if f not in schema.fields():
+                    continue
+                out_event[f] = left[f]
+
+        for f in right:
+            if f in self._same_fields:
+                new_f = self._prefix_duplicate_field(field=f, is_left=False)
+                out_event[new_f] = right[f]
+            else:
+                # skip fields not in schema
+                if f not in schema.fields():
+                    continue
+                out_event[f] = right[f]
+
+        return out_event
 
 
 class Rename(OperatorNode):

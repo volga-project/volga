@@ -157,7 +157,9 @@ class BulkSinkToCacheActorFunction(SinkFunction):
         self.running = False
 
     def sink(self, value):
-        # TODO all of this should be a part of Record object and not sourced from outside
+        print(value)
+        raise
+        # TODO all of this should be a part of Record object (value) and not sourced from outside
         key_fields = list(self.output_schema.keys.keys())
         keys_dict = {k: value[k] for k in key_fields}
         timestamp_field = self.output_schema.timestamp
