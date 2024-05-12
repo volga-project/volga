@@ -8,7 +8,6 @@ class Schema:
     keys: Dict[str, Type]
     values: Dict[str, Type]
     timestamp: str
-    name: str = ""
 
     def to_dict(self) -> Dict[str, Type]:
         schema = {**self.keys, **self.values, self.timestamp: datetime.datetime}

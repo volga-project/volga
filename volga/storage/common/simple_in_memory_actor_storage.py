@@ -148,6 +148,7 @@ class BulkSinkToCacheActorFunction(SinkFunction):
 
     DUMPER_PERIOD_S = 1
 
+    # TODO we need to get rid of passing output_schema, it should be a part of a message
     def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: Schema):
         self.cache_actor = cache_actor
         self.dataset_name = dataset_name
@@ -157,8 +158,8 @@ class BulkSinkToCacheActorFunction(SinkFunction):
         self.running = False
 
     def sink(self, value):
-        print(value)
-        raise
+        # print(value)
+        # raise
         # TODO all of this should be a part of Record object (value) and not sourced from outside
         key_fields = list(self.output_schema.keys.keys())
         keys_dict = {k: value[k] for k in key_fields}

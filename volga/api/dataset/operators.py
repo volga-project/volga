@@ -1,3 +1,4 @@
+from datetime import datetime
 import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
@@ -261,8 +262,8 @@ class Join(OperatorNode):
                 right_on is not None and len(right_on) != 1:
             raise ValueError('Currently, Join expects exactly 1 key field')
 
-        if (left_on is None and right_on is not None) or \
-            (left_on is not None and right_on is None):
+        if left_on is None and right_on is not None or \
+                left_on is not None and right_on is None:
             raise ValueError('Join expects both left_on and right_on')
 
         self.left_on = left_on
@@ -283,42 +284,65 @@ class Join(OperatorNode):
         else:
             return f'right_{field}'
 
-    def schema(self) -> Schema:
-        ls = self.left.schema()
-        rs = self.right.schema()
-        ts = ls.timestamp # we use left ts by default
+    @staticmethod
+    def _joined_schema(ls: Schema, rs: Schema, on: Optional[List[str]], left_on: Optional[List[str]]):
+        same_fields = list(set(ls.fields()) & set(rs.fields()))
+        ts = ls.timestamp  # we use left ts by default
 
         keys = {}
-        if self.on is not None:
-            for k in self.on:
+        values = {}
+        if on is not None:
+            for k in on:
                 keys[k] = ls.keys[k]
         else:
-            # use left by default
-            for k in self.left_on:
+            # use left keys by default
+            for k in left_on:
                 keys[k] = ls.keys[k]
 
-        values = {}
-        # copy left values
-        for f in ls.values:
-            if f in self._same_fields:
-                new_f = self._prefix_duplicate_field(field=f, is_left=True)
+        for f in ls.fields():
+            if f == ts or f in keys:
+                continue
+            renamed_f = None
+            if f in same_fields:
+                renamed_f = Join._prefix_duplicate_field(field=f, is_left=True)
+            new_f = f if renamed_f is None else renamed_f
+            if new_f in values:
+                raise RuntimeError(f'Duplicate entry for filed {new_f}')
+            if f in ls.values:
                 values[new_f] = ls.values[f]
+            elif f in ls.keys:
+                values[new_f] = ls.keys[f]
             else:
-                values[f] = ls.values[f]
+                raise ValueError(f'Unable to locate field {f} in left side of a join')
 
-        # copy right values
-        for f in rs.values:
-            if f in self._same_fields:
-                new_f = self._prefix_duplicate_field(field=f, is_left=False)
+        for f in rs.fields():
+            if f == ts or f in keys:
+                continue
+            renamed_f = None
+            if f in same_fields:
+                renamed_f = Join._prefix_duplicate_field(field=f, is_left=False)
+            new_f = f if renamed_f is None else renamed_f
+            if new_f in values:
+                raise RuntimeError(f'Duplicate entry for filed {new_f}')
+            if f in rs.values:
                 values[new_f] = rs.values[f]
+            elif f in rs.keys:
+                values[new_f] = rs.keys[f]
+            elif f == rs.timestamp:
+                # right still has a timestamp field, we need to handle it explicitly
+                values[new_f] = datetime
             else:
-                values[f] = rs.values[f]
+                raise ValueError(f'Unable to locate field {f} in left side of a join')
 
         return Schema(
             keys=keys,
             values=values,
             timestamp=ts
         )
+
+    def schema(self) -> Schema:
+        return Join._joined_schema(self.left.schema(), self.right.schema(), self.on, self.left_on)
+
 
     def _stream_left_key_func(self, element: Any) -> Any:
         assert isinstance(element, Dict)
