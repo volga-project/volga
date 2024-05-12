@@ -68,15 +68,15 @@ class OnSaleUserSpentInfo:
         on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
         per_user = on_sale_purchases.join(users, right_on=['user_id'], left_on=['buyer_id'])
 
-        return per_user
-        # return per_user.group_by(keys=['user_id']).aggregate([
-        #     Sum(on='product_price', window='1h', into='sum_spent_1h'),
-        #     Sum(on='product_price', window='1d', into='sum_spent_1d'),
-        #     Avg(on='product_price', window='7d', into='avg_spent_7d'),
-        #     Avg(on='product_price', window='1h', into='avg_spent_1h'),
-        #     Count(window='1h', into='num_purchases_1h'),
-        #     Count(window='1d', into='num_purchases_1d'),
-        # ])
+        # return per_user
+        return per_user.group_by(keys=['user_id']).aggregate([
+            Sum(on='product_price', window='1h', into='sum_spent_1h'),
+            Sum(on='product_price', window='1d', into='sum_spent_1d'),
+            Avg(on='product_price', window='7d', into='avg_spent_7d'),
+            Avg(on='product_price', window='1h', into='avg_spent_1h'),
+            Count(window='1h', into='num_purchases_1h'),
+            Count(window='1d', into='num_purchases_1d'),
+        ])
 
 
 class TestVolgaE2E(unittest.TestCase):

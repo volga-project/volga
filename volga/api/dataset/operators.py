@@ -343,7 +343,6 @@ class Join(OperatorNode):
     def schema(self) -> Schema:
         return Join._joined_schema(self.left.schema(), self.right.schema(), self.on, self.left_on)
 
-
     def _stream_left_key_func(self, element: Any) -> Any:
         assert isinstance(element, Dict)
         key = self.left_on[0] if self.on is None else self.on[0]
@@ -353,17 +352,18 @@ class Join(OperatorNode):
         assert isinstance(element, Dict)
         key = self.right_on[0] if self.on is None else self.on[0]
         return element[key]
+
     # {'buyer_id': '0', 'product_type': 'ON_SALE', 'purchased_at': '2024-05-07 14:08:26.519626', 'product_price': 100.0, 'name': 'username_0'}
     # {'buyer_id': '0', 'product_id': 'prod_0', 'product_type': 'ON_SALE', 'purchased_at': '2024-05-07 14:14:20.335705', 'product_price': 100.0, 'user_id': '0', 'registered_at': '2024-05-07 14:14:20.335697', 'name': 'username_0'}
     def _stream_join_func(self, left: Any, right: Any) -> Any:
         for k in self._same_fields:
             if k in left:
-                new_k_left = f'left_{k}'
+                new_k_left = Join._prefix_duplicate_field(field=k, is_left=True)
                 assert new_k_left not in left
                 left[new_k_left] = left[k]
                 del left[k]
             if k in right:
-                new_k_right = f'right_{k}'
+                new_k_right = Join._prefix_duplicate_field(field=k, is_left=False)
                 assert new_k_right not in right
                 left[new_k_right] = right[k]
                 del right[k]
