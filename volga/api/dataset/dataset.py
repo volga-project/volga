@@ -6,8 +6,8 @@ from decimal import Decimal
 
 from volga.common.time_utils import datetime_str_to_ts
 from volga.api.consts import RESERVED_FIELD_NAMES, PIPELINE_ATTR, CONNECTORS_ATTR
-from volga.api.dataset.operator import OperatorNode
-from volga.api.dataset.schema import DatasetSchema
+from volga.api.dataset.operators import OperatorNode
+from volga.api.dataset.schema import Schema
 
 import datetime
 
@@ -128,8 +128,8 @@ class Dataset(OperatorNode):
     def __repr__(self):
         return self._name
 
-    def dataset_schema(self):
-        return DatasetSchema(
+    def schema(self) -> Schema:
+        return Schema(
             keys={f.name: f.dtype for f in self._fields if f.key},
             values={
                 f.name: f.dtype
@@ -137,7 +137,6 @@ class Dataset(OperatorNode):
                 if not f.key and f.name != self._timestamp_field
             },
             timestamp=self._timestamp_field,
-            name=f"'[Dataset:{self._name}]'",
         )
 
     def _add_fields_to_class(self) -> None:
