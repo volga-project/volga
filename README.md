@@ -229,7 +229,7 @@ res = client.get_on_demand(
 The project is currently in dev stage and has no published packages.
 To run locally/dev locally, clone the repository and in your dev env run:
 ```
-pip install .
+pip install pyproject.toml
 ```
 
 If on Apple Silicon, when installing Ray you may get an error regarding grpcio on Apple Silicon. To fix, run:
