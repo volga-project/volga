@@ -32,6 +32,7 @@ class DataWriter:
         self.source_stream_name = source_stream_name
         self.out_channels = output_channels
         # TODO buffering
+        # buffer pool impl https://github.com/Naman-Bhalla/dbms-buffer-pool-manager-python/tree/master/src
 
         self.sockets_and_contexts = {}
         for channel in self.out_channels:

@@ -19,8 +19,9 @@ logger = logging.getLogger("ray")
 
 class WorkerNetworkInfo:
 
-    def __init__(self, node_ip: str, out_edges_ports: Dict[Any, int]):
+    def __init__(self, node_ip: str, node_id: str, out_edges_ports: Dict[Any, int]):
         self.node_ip = node_ip
+        self.node_id = node_id
         # port per output edge
         self.out_edges_ports = out_edges_ports
 
@@ -52,11 +53,11 @@ class WorkerLifecycleController:
             workers[vertex_id] = worker
             vertex.set_worker(worker)
 
-        worker_hosts_ips = ray.get([workers[vertex_id].get_host_ip.remote() for vertex_id in vertex_ids])
+        worker_hosts_info = ray.get([workers[vertex_id].get_host_info.remote() for vertex_id in vertex_ids])
         worker_infos = []
         for i in range(len(vertex_ids)):
             vertex_id = vertex_ids[i]
-            node_ip = worker_hosts_ips[i]
+            node_id, node_ip = worker_hosts_info[i]
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
             # gen ports for each output edge
             out_edges_ports = {}
@@ -64,11 +65,12 @@ class WorkerLifecycleController:
                 out_edges_ports[out_edge.id] = self._gen_port(node_ip)
             ni = WorkerNetworkInfo(
                 node_ip=node_ip,
+                node_id=node_id,
                 # TODO we assume node_ip == node_id
                 out_edges_ports=out_edges_ports
             )
             vertex.set_worker_network_info(ni)
-            worker_infos.append((vertex_id, ni.node_ip, ni.out_edges_ports))
+            worker_infos.append((vertex_id, ni.node_id, ni.node_ip, ni.out_edges_ports))
 
         logger.info(f'Created {len(workers)} workers')
         logger.info(f'Workers writer network info: {worker_infos}')

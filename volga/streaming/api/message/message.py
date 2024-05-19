@@ -67,6 +67,7 @@ class KeyRecord(Record):
             'event_time': self.event_time
         }
 
+
 # TODO we should have proper ser/de
 def record_from_channel_message(channel_message: ChannelMessage) -> Record:
     if 'key' in channel_message:

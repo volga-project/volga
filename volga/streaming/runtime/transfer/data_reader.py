@@ -29,6 +29,7 @@ class DataReader:
         self.running = True
 
         # TODO buffering
+        # buffer pool impl https://github.com/Naman-Bhalla/dbms-buffer-pool-manager-python/tree/master/src
         self.sockets_and_contexts = {}
         for channel in self.input_channels:
             context = zmq.Context()

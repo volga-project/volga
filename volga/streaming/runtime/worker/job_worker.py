@@ -1,6 +1,7 @@
 import logging
 import time
 from threading import Thread
+from typing import Tuple
 
 import ray
 from ray.actor import ActorHandle
@@ -25,8 +26,9 @@ class JobWorker:
         self.task_watcher_thread = None
         self.running = True
 
-    def get_host_ip(self) -> str:
-        return ray.util.get_node_ip_address()
+    def get_host_info(self) -> Tuple[str, str]:
+        ctx = ray.get_runtime_context()
+        return ctx.get_node_id(), ray.util.get_node_ip_address()
 
     def init(self, execution_vertex: ExecutionVertex):
         self.execution_vertex = execution_vertex
