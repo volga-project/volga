@@ -42,6 +42,7 @@ class JobWorker:
         self.task_watcher_thread.start()
 
     def _watch_task_state_loop(self):
+        # print('watch started')
         while self.running:
             # currently only check source
             if isinstance(self.task, SourceStreamTask):
@@ -58,6 +59,20 @@ class JobWorker:
             time.sleep(0.1)
 
     def _create_stream_task(self) -> StreamTask:
+        init_timeout_s = 5
+        # we wait in case init has not happened yet
+        start_ts = time.time()
+        not_inited = self.execution_vertex is None
+        while self.execution_vertex is None:
+            if time.time() - start_ts > init_timeout_s:
+                actor_id = ray.get_runtime_context().get_actor_id()
+                raise RuntimeError(f'Init timeout for actor {actor_id}')
+            time.sleep(0.1)
+
+        init_delay = time.time() - start_ts
+        if not_inited:
+            logger.info(f'Worker {self.execution_vertex.execution_vertex_id} inited with delay {init_delay}s')
+
         stream_processor = Processor.build_processor(self.execution_vertex.stream_operator)
         if isinstance(stream_processor, SourceProcessor):
             task = SourceStreamTask(

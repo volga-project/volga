@@ -107,10 +107,10 @@ if __name__ == '__main__':
         ctx = StreamingContext(job_config=job_config)
         t = TestStreamingJobE2E(ctx)
         # TODO should reset context on each call
-        # t.test_join_streams()
+        t.test_join_streams()
         # t.test_window()
         # t.test_delayed_collection_source()
-        t.test_parallel_collection_source()
+        # t.test_parallel_collection_source()
 
         job_master = ctx.job_master
     finally:

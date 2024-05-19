@@ -40,7 +40,8 @@ class WorkerLifecycleController:
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
             resources = vertex.resources
             options_kwargs = {
-                'max_restarts': -1
+                'max_restarts': -1,
+                'max_concurrency': 10
             }
             if resources.num_cpus is not None:
                 options_kwargs['num_cpus'] = resources.num_cpus
