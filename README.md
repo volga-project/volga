@@ -243,6 +243,14 @@ brew install graphviz
 pip install pygraphviz
 ```
 
+To develop locally and have Ray pick up local changes, you need to uninstall local volga package and append 
+PYTHONPATH env var with a path to your local volga project folder:
+```
+pip uninstall volga
+export PYTHONPATH=/path/to/local/volga/folder:$PYTHONPATH # you need to set it in each new shell/window. Alternatively, use env vars setting in you virtual env maanger
+```
+
+
 ## Running locally
 
 Since Volga uses Ray's distributed runtime you'll need a running Ray Cluster to run pipelines. The easiest way is to launch
