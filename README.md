@@ -268,7 +268,7 @@ python test_volga_e2e.py
 python test_streaming_e2e.py
 ```
 
-The development is done with Python 3.10.8 and Ray 2.3.1, in case of any import/installation related errors, please try rolling
+The development is done with Python 3.10.8 and Ray 2.22.0, in case of any import/installation related errors, please try rolling
 your dev env back to these version
 
 ## Development
