@@ -22,8 +22,8 @@ class Writer:
 
     def send_items(self, items: List[Dict]):
         for item in items:
-            self.data_writer.write_message(self.channel.channel_id, item)
-        self.data_writer.write_message(self.channel.channel_id, TERMINAL_MESSAGE)
+            self.data_writer._write_message(self.channel.channel_id, item)
+        self.data_writer._write_message(self.channel.channel_id, TERMINAL_MESSAGE)
 
 
 @ray.remote

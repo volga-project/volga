@@ -78,7 +78,7 @@ class WorkerLifecycleController:
 
     # construct channels based on Ray assigned actor IPs and update execution_graph
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
-        logger.info(f'Initializing {len(execution_graph.execution_vertices_by_id)} workers...')
+        logger.info(f'Initing {len(execution_graph.execution_vertices_by_id)} workers...')
 
         # create channels
         for edge in execution_graph.execution_edges:

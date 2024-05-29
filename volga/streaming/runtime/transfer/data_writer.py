@@ -50,9 +50,9 @@ class DataWriter:
         # add sender operator_id
         record.set_stream_name(self.source_stream_name)
         message = record.to_channel_message()
-        self.write_message(channel_id, message)
+        self._write_message(channel_id, message)
 
-    def write_message(self, channel_id: str, message: ChannelMessage):
+    def _write_message(self, channel_id: str, message: ChannelMessage):
         # TODO this should use a buffer?
         # TODO serialization perf
         json_str = simplejson.dumps(message)
