@@ -3,7 +3,7 @@ import simplejson
 from typing import List
 
 from volga.streaming.api.message.message import Record
-from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
+from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage, RemoteChannel
 
 import zmq
 
@@ -39,6 +39,7 @@ class DataWriter:
             if channel.channel_id in self.sockets_and_contexts:
                 raise RuntimeError('duplicate channel ids')
             context = zmq.Context()
+            assert isinstance(channel, RemoteChannel)
 
             # TODO set HWM
             socket = context.socket(zmq.PUSH)

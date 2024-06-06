@@ -7,11 +7,42 @@ class Channel:
     def __init__(
         self,
         channel_id: str, # should be exec_edge_id?
-        source_ip: str,
-        source_port: int,
     ):
         self.channel_id = channel_id
-        self.source_ip = source_ip
-        self.source_port = source_port
 
+
+# connects two actors on the same node via a simple ZMQ ipc connection
+class LocalChannel(Channel):
+
+    def __init__(
+        self,
+        channel_id: str,
+        ipc_addr: str
+    ):
+        super().__init__(channel_id=channel_id)
+        self.ipc_addr = ipc_addr
+
+
+# 3-part channel: local ipc on source, source <-> target TCP, local ipc on target
+class RemoteChannel(Channel):
+
+    def __init__(
+        self,
+        channel_id: str,
+        source_local_ipc_addr: str,
+        source_node_ip: str,
+        source_node_id: str,
+        target_local_ipc_addr: str,
+        target_node_ip: str,
+        target_node_id: str,
+        port: int,
+    ):
+        super().__init__(channel_id=channel_id)
+        self.source_local_ipc_addr = source_local_ipc_addr
+        self.target_local_ipc_addr = target_local_ipc_addr
+        self.source_node_ip = source_node_ip
+        self.target_node_ip = target_node_ip
+        self.port = port
+        self.source_node_id = source_node_id
+        self.target_node_id = target_node_id
 

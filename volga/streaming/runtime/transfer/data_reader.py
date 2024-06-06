@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 
-from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
+from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage, RemoteChannel
 from volga.streaming.runtime.transfer.data_writer import TransportType
 
 import zmq
@@ -32,6 +32,7 @@ class DataReader:
         # buffer pool impl https://github.com/Naman-Bhalla/dbms-buffer-pool-manager-python/tree/master/src
         self.sockets_and_contexts = {}
         for channel in self.input_channels:
+            assert isinstance(channel, RemoteChannel)
             context = zmq.Context()
             # TODO set HWM
             socket = context.socket(zmq.PULL)
