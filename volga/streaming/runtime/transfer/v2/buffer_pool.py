@@ -2,16 +2,23 @@
 
 DEFAULT_CAPACITY = 1024 * 32
 
-# TODO make thread safe
+
+# TODO make thread/proc safe
 class BufferPool:
 
-    def __init__(self, capacity_bytes: int = DEFAULT_CAPACITY):
-        self.capacity_bytes = capacity_bytes
+    _instance = None
 
-    def can_acquire(self, amount: int) -> bool:
-        return True
+    @staticmethod
+    def instance(node_id: str, capacity_bytes: int = DEFAULT_CAPACITY):
+        if BufferPool._instance is None:
+            BufferPool._instance = BufferPool(node_id, capacity_bytes)
+        return BufferPool._instance
 
-    def acquire(self, amount: int):
+    def __init__(self, node_id: str, capacity_bytes: int = DEFAULT_CAPACITY):
+        self._capacity_bytes = capacity_bytes
+        self._node_id = node_id
+
+    def try_acquire(self, amount: int) -> bool:
         pass
 
     def release(self, amount: int):

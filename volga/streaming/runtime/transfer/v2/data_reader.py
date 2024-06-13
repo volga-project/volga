@@ -1,108 +1,80 @@
 import asyncio
 import logging
+import time
 from collections import deque
 from threading import Thread
-from typing import List, Optional, Dict
+from typing import List, Dict, Optional
 
-from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage, RemoteChannel, LocalChannel
+from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
 
-import zmq
 import zmq.asyncio as zmq_async
 import simplejson
 
-from volga.streaming.runtime.transfer.v2.buffer_pool import BufferPool
+from volga.streaming.runtime.transfer.v2.buffer import Buffer, AckMessage, msg_id, buffer_id
+from volga.streaming.runtime.transfer.v2.data_handler_base import DataHandlerBase
 
 logger = logging.getLogger("ray")
 
 
-class DataReaderV2:
+class DataReaderV2(DataHandlerBase):
     def __init__(
         self,
         name: str,
-        input_channels: List[Channel],
+        channels: List[Channel],
+        node_id: str,
+        zmq_ctx: zmq_async.Context,
     ):
+        super().__init__(
+            name=name,
+            channels=channels,
+            node_id=node_id,
+            zmq_ctx=zmq_ctx
+        )
 
-        self.name = name
-        self._in_channels = input_channels
-        self._channel_map = {c.channel_id: c for c in self._in_channels}
-        self.cur_read_id = 0
-        self.running = True
+        self._channels = channels
+        self._channel_map = {c.channel_id: c for c in self._channels}
 
-        self._reader_event_loop = asyncio.new_event_loop()
-        self._reader_thread = Thread(target=self._start_reader_event_loop)
-
-        self._buffer_pools: Dict[str, BufferPool] = {c.channel_id: BufferPool() for c in self._in_channels}
-        self._buffer_queues: Dict[str, deque] = {c.channel_id: deque() for c in self._in_channels}
-
-        self._zmq_ctx = None
-        self._poller = None
-        self._in_sockets = {}
-
-    def _init_sockets(self):
-        self._zmq_ctx = zmq_async.Context.instance(io_threads=64)  # TODO configure
-        self._poller = zmq_async.Poller()
-        for channel in self._in_channels:
-            if channel.channel_id in self._in_sockets:
-                raise RuntimeError('duplicate channel ids')
-
-            # TODO set HWM
-            socket = self._zmq_ctx.socket(zmq.PULL)
-            socket.setsockopt(zmq.LINGER, 0)
-            if isinstance(channel, LocalChannel):
-                socket.connect(channel.ipc_addr)
-            elif isinstance(channel, RemoteChannel):
-                socket.connect(channel.target_local_ipc_addr)
-            else:
-                raise ValueError('Unknown channel type')
-            self._poller.register(socket, zmq.POLLIN)
-            self._in_sockets[socket] = channel.channel_id
+        self._buffer_queue = deque()
 
     # TODO set timeout
-    def read_message(self) -> ChannelMessage:
-        # round-robin read
-        data = None
-        while self.running and data is None:
-            channel_id = self._in_channels[self.cur_read_id].channel_id
-            buffer_queue = self._buffer_queues[channel_id]
-            if len(buffer_queue) == 0:
-                self.cur_read_id = (self.cur_read_id + 1) % len(self._in_channels)
-                continue
-            else:
-                data = buffer_queue.pop()
-                break
-        self.cur_read_id = (self.cur_read_id + 1) % len(self._in_channels)
+    def read_message(self) -> Optional[ChannelMessage]:
+        if len(self._buffer_queue) == 0:
+            return None
+        data = self._buffer_queue.pop()
         msg = simplejson.loads(data.decode('utf-8'))
         return msg
 
-    async def _reader_loop(self):
+    async def _receive_loop(self):
+        print('reader rcv loop started')
         while self.running:
-            sockets_and_flags = await self._poller.poll()
+            sockets_and_flags = await self._rcv_poller.poll()
             for (socket, _) in sockets_and_flags:
-                channel_id = self._in_sockets[socket]
-
                 # TODO check buffer pool capacity
-                asyncio.create_task(self._read(socket, channel_id))
+                # TODO limit number in-flight reads, indicate channel backpressure if read times-out
+                asyncio.create_task(self._read(socket))
 
-    async def _read(self, source: zmq_async.Socket, channel_id: str):
-        data = await source.recv()
-        self._buffer_queues[channel_id].append(data)
+    async def _read(self, rcv_socket: zmq_async.Socket):
+        buffer = await rcv_socket.recv()
+        # TODO check if buff_id exists to avoid duplicates, re-send ack on duplicate
+        # TODO acquire buffer pool
+        self._buffer_queue.append(buffer)
+        channel_id = self._rcv_sockets[rcv_socket]
+        # TODO batch acks
+        asyncio.run_coroutine_threadsafe(self._ack(channel_id, buffer), self._sender_event_loop)
 
-    async def _close_sockets(self):
-        await asyncio.gather(*[socket.close(linger=0) for socket in list(self._in_sockets.keys())])
-        await self._zmq_ctx.destroy(linger=0)
+    async def _ack(self, channel_id: str, buffer: Buffer):
+        ack_msg = AckMessage(buff_id=buffer_id(buffer), msg_id=msg_id(buffer), channel_id=channel_id)
+        send_socket = self._send_sockets[channel_id]
 
-    def _start_reader_event_loop(self):
-        asyncio.set_event_loop(self._reader_event_loop)
-        self._init_sockets()
-        self._reader_event_loop.run_forever()
+        # TODO limit number of in-flights acks?
+        # TODO handle exceptions? retries?
+        await send_socket.send_string(ack_msg.ser())
 
     def start(self):
-        self.running = True
-        self._reader_thread.start()
-        asyncio.run_coroutine_threadsafe(self._reader_loop(), self._reader_event_loop)
+        super().start()
+        # TODO wait for loop to be set
+        time.sleep(0.01)
+        asyncio.run_coroutine_threadsafe(self._receive_loop(), self._receiver_event_loop)
 
     def close(self):
-        self.running = False
-        asyncio.run_coroutine_threadsafe(self._close_sockets(), self._reader_event_loop)
-        self._reader_event_loop.call_soon_threadsafe(self._reader_event_loop.stop)
-        self._reader_thread.join(timeout=5)
+        super().close()

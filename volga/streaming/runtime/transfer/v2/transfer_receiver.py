@@ -33,7 +33,7 @@ class TransferReceiver:
 
             # init local ipc
             local_socket = self._zmq_ctx.socket(zmq.PUSH)
-            local_socket.connect(channel.target_local_ipc_addr)
+            local_socket.connect(channel.target_local_ipc_addr_to)
             self._poller.register(local_socket, zmq.POLLOUT)
             self._local_out_sockets[channel.channel_id] = local_socket
 
@@ -42,7 +42,7 @@ class TransferReceiver:
                 continue
             else:
                 remote_socket = self._zmq_ctx.socket(zmq.PULL)
-                remote_socket.bind(f'tcp://{channel.target_node_ip}:{channel.port}')
+                remote_socket.bind(f'tcp://{channel.target_node_ip}:{channel.port_to}')
                 self._poller.register(remote_socket, zmq.POLLIN)
                 self._remote_in_sockets[remote_socket] = channel.source_node_id
 

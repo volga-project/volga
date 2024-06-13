@@ -11,38 +11,46 @@ class Channel:
         self.channel_id = channel_id
 
 
-# connects two actors on the same node via a simple ZMQ ipc connection
+# bi-directional channel, connects two actors on the same node via a simple ZMQ ipc connection
 class LocalChannel(Channel):
 
     def __init__(
         self,
         channel_id: str,
-        ipc_addr: str
+        ipc_addr_to: str,
+        ipc_addr_from: str
     ):
         super().__init__(channel_id=channel_id)
-        self.ipc_addr = ipc_addr
+        self.ipc_addr_to = ipc_addr_to
+        self.ipc_addr_from = ipc_addr_from
 
 
-# 3-part channel: local ipc on source, source <-> target TCP, local ipc on target
+# bi-directional 3-part channel: local ipc on source, source <-> target TCP, local ipc on target
 class RemoteChannel(Channel):
 
     def __init__(
         self,
         channel_id: str,
-        source_local_ipc_addr: str,
+        source_local_ipc_addr_to: str,
+        source_local_ipc_addr_from: str,
         source_node_ip: str,
         source_node_id: str,
-        target_local_ipc_addr: str,
+        target_local_ipc_addr_to: str,
+        target_local_ipc_addr_from: str,
         target_node_ip: str,
         target_node_id: str,
-        port: int,
+        port_to: int,
+        port_from: int
     ):
         super().__init__(channel_id=channel_id)
-        self.source_local_ipc_addr = source_local_ipc_addr
-        self.target_local_ipc_addr = target_local_ipc_addr
+        self.source_local_ipc_addr_to = source_local_ipc_addr_to
+        self.source_local_ipc_addr_from = source_local_ipc_addr_from
+        self.target_local_ipc_addr_to = target_local_ipc_addr_to
+        self.target_local_ipc_addr_from = target_local_ipc_addr_from
         self.source_node_ip = source_node_ip
         self.target_node_ip = target_node_ip
-        self.port = port
         self.source_node_id = source_node_id
         self.target_node_id = target_node_id
+        self.port_to = port_to
+        self.port_from = port_from
 

@@ -81,7 +81,8 @@ class ExecutionVertex:
 
 class ExecutionGraph:
 
-    def __init__(self):
+    def __init__(self, job_name: str):
+        self.job_name = job_name
         self.execution_vertices_by_id: Dict[str, ExecutionVertex] = {}
         self.execution_edges: List[ExecutionEdge] = []
 
@@ -91,7 +92,7 @@ class ExecutionGraph:
     @classmethod
     def from_job_graph(cls, job_graph: JobGraph) -> 'ExecutionGraph':
 
-        execution_graph = ExecutionGraph()
+        execution_graph = ExecutionGraph(job_graph.job_name)
 
         # create exec vertices
         for job_vertex in job_graph.job_vertices:

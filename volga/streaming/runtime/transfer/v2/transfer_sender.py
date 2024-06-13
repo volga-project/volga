@@ -9,6 +9,7 @@ import zmq
 # router dealer
 # https://github.com/zeromq/pyzmq/blob/main/examples/asyncio/helloworld_pubsub_dealerrouter.py
 
+
 class TransferSender:
 
     def __init__(
@@ -35,7 +36,7 @@ class TransferSender:
 
             # init local ipc
             local_socket = self._zmq_ctx.socket(zmq.PULL)
-            local_socket.connect(channel.source_local_ipc_addr)
+            local_socket.connect(channel.source_local_ipc_addr_to)
             self._local_in_sockets[local_socket] = channel.channel_id
 
             # init remote tcp
@@ -43,7 +44,7 @@ class TransferSender:
                 continue
             else:
                 remote_socket = self._zmq_ctx.socket(zmq.PUSH)
-                remote_socket.bind(f'tcp://{channel.source_node_ip}:{channel.port}')
+                remote_socket.bind(f'tcp://{channel.source_node_ip}:{channel.port_to}')
                 self._poller.register(remote_socket, zmq.POLLOUT)
                 self._remote_out_sockets[remote_socket] = channel.target_node_id
 
@@ -65,7 +66,7 @@ class TransferSender:
                     channel_id = self._local_in_sockets[_local]
                     if self._channel_map[channel_id].target_node_id == target_node_id:
                         # schedule async send
-                        asyncio.run_coroutine_threadsafe(self._send(_local, _remote), self._sender_event_loop)
+                        asyncio.create_task(self._send(_local, _remote))
                         break
 
     async def _send(self, source: zmq_async.Socket, target: zmq_async.Socket):

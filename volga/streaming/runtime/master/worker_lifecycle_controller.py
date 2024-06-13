@@ -7,7 +7,7 @@ import ray
 from ray.actor import ActorHandle
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
-from volga.streaming.runtime.transfer.channel import Channel, LocalChannel, RemoteChannel
+from volga.streaming.runtime.transfer.channel import LocalChannel, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
 VALID_PORT_RANGE = (30000, 65000)
@@ -28,8 +28,7 @@ class WorkerLifecycleController:
 
     def __init__(self, job_master: ActorHandle):
         self.job_master = job_master
-        self._node_ports = {}
-        self._ipc_addr_suffix = {}
+        self._reserved_node_ports = {}
 
     def create_workers(self, execution_graph: ExecutionGraph):
         workers = {}
@@ -72,7 +71,7 @@ class WorkerLifecycleController:
     # construct channels based on Ray assigned actor IPs and update execution_graph
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
         logger.info(f'Initing {len(execution_graph.execution_vertices_by_id)} workers...')
-
+        job_name = execution_graph.job_name
         # create channels
         for edge in execution_graph.execution_edges:
             source_worker_network_info: WorkerNetworkInfo = edge.source_execution_vertex.worker_network_info
@@ -83,20 +82,29 @@ class WorkerLifecycleController:
             if source_worker_network_info.node_id == target_worker_network_info.node_id:
                 channel = LocalChannel(
                     channel_id=edge.id,
-                    ipc_addr=self._gen_ipc_addr(node_id=source_worker_network_info.node_id)
+                    ipc_addr_to=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_to=True),
+                    ipc_addr_from=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_to=False)
                 )
             else:
-                # unique port per node-node connection
-                port = self._gen_port(key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}')
+                # unique ports per node-node connection
+                port_to = self._gen_port(
+                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}-to'
+                )
+                port_from = self._gen_port(
+                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}-from'
+                )
                 channel = RemoteChannel(
                     channel_id=edge.id,
-                    source_local_ipc_addr=self._gen_ipc_addr(node_id=source_worker_network_info.node_id),
+                    source_local_ipc_addr_to=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_to=True),
+                    source_local_ipc_addr_from=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_to=False),
                     source_node_ip=source_worker_network_info.node_ip,
                     source_node_id=source_worker_network_info.node_id,
-                    target_local_ipc_addr=self._gen_ipc_addr(node_id=source_worker_network_info.node_id),
+                    target_local_ipc_addr_to=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_to=True),
+                    target_local_ipc_addr_from=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_to=False),
                     target_node_ip=target_worker_network_info.node_ip,
                     target_node_id=target_worker_network_info.node_id,
-                    port=port,
+                    port_to=port_to,
+                    port_from=port_from
                 )
 
             edge.set_channel(channel)
@@ -151,20 +159,15 @@ class WorkerLifecycleController:
             w.exit.remote()
 
     def _gen_port(self, key: str) -> int:
-        if key not in self._node_ports:
+        if key not in self._reserved_node_ports:
             port = randint(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1])
-            self._node_ports[key] = [port]
+            self._reserved_node_ports[key] = [port]
         else:
-            return self._node_ports[key]
+            return self._reserved_node_ports[key]
 
-    def _gen_ipc_addr(self, node_id) -> str:
-        session_id = f'run_{int(time.time())}'
-        PREFIX = f'ipc:///tmp/volga_ipc/{session_id}'
-        if node_id in self._ipc_addr_suffix:
-            suff = self._ipc_addr_suffix[node_id]
-            self._ipc_addr_suffix[node_id] += 1
-            return f'{PREFIX}/ipc_{suff}'
-        else:
-            self._ipc_addr_suffix[node_id] = 0
-            return f'{PREFIX}/ipc_0'
+    @staticmethod
+    def _gen_ipc_addr(job_name: str, channel_id: str, direction_to: bool) -> str:
+        PREFIX = f'ipc:///tmp/volga_ipc/{job_name}'
+        dir = 'to' if direction_to else 'from'
+        return f'{PREFIX}/ipc_{channel_id}_{dir}'
 
