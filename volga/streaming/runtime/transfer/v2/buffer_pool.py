@@ -19,7 +19,7 @@ class BufferPool:
         self._node_id = node_id
 
     def try_acquire(self, amount: int) -> bool:
-        pass
+        return True
 
     def release(self, amount: int):
         pass

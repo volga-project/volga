@@ -74,8 +74,8 @@ class TestLocalTransferV2(unittest.TestCase):
     def test_one_to_one_ray(self):
         channel = LocalChannel(
             channel_id='1',
-            ipc_addr_to='ipc:///tmp/zmqtest_to',
-            ipc_addr_from='ipc:///tmp/zmqtest_from'
+            ipc_addr_out='ipc:///tmp/zmqtest_out',
+            ipc_addr_in='ipc:///tmp/zmqtest_to'
         )
         ray.init()
         num_items = 100
@@ -98,8 +98,8 @@ class TestLocalTransferV2(unittest.TestCase):
     def test_one_to_one_local(self):
         channel = LocalChannel(
             channel_id='1',
-            ipc_addr_to='ipc:///tmp/zmqtest_to',
-            ipc_addr_from='ipc:///tmp/zmqtest_from'
+            ipc_addr_out='ipc:///tmp/zmqtest_out',
+            ipc_addr_in='ipc:///tmp/zmqtest_in'
         )
         node_id = '0'
         zmq_ctx = zmq_async.Context.instance()
@@ -113,7 +113,7 @@ class TestLocalTransferV2(unittest.TestCase):
                 msg = {'i': i}
                 data_writer._write_message(channel.channel_id, msg)
                 print(f'Write: {msg}')
-                time.sleep(0.1)
+                time.sleep(2)
 
         wt = Thread(target=write)
 
@@ -129,7 +129,7 @@ class TestLocalTransferV2(unittest.TestCase):
 
         wt.start()
         rt.start()
-        time.sleep(2)
+        time.sleep(20)
 
         data_writer.close()
         data_reader.close()

@@ -36,7 +36,7 @@ class TransferSender:
 
             # init local ipc
             local_socket = self._zmq_ctx.socket(zmq.PULL)
-            local_socket.connect(channel.source_local_ipc_addr_to)
+            local_socket.connect(channel.source_local_ipc_addr_out)
             self._local_in_sockets[local_socket] = channel.channel_id
 
             # init remote tcp
