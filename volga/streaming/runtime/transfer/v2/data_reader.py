@@ -12,7 +12,7 @@ from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage, Lo
 import zmq.asyncio as zmq_async
 import simplejson
 
-from volga.streaming.runtime.transfer.v2.buffer import Buffer, AckMessage, msg_id, buffer_id
+from volga.streaming.runtime.transfer.v2.buffer import Buffer, AckMessage, msg_id, get_buffer_id
 from volga.streaming.runtime.transfer.v2.data_handler_base import DataHandlerBase
 
 logger = logging.getLogger("ray")
@@ -99,7 +99,7 @@ class DataReaderV2(DataHandlerBase):
         asyncio.run_coroutine_threadsafe(self._ack(channel_id, buffer), self._sender_event_loop)
 
     async def _ack(self, channel_id: str, buffer: Buffer):
-        ack_msg = AckMessage(buff_id=buffer_id(buffer), msg_id=msg_id(buffer), channel_id=channel_id)
+        ack_msg = AckMessage(buff_id=get_buffer_id(buffer), msg_id=msg_id(buffer), channel_id=channel_id)
         send_socket = self._send_sockets[channel_id]
 
         # TODO limit number of in-flights acks?

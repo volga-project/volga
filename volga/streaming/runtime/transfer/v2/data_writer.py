@@ -13,8 +13,7 @@ from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage, Lo
 
 import zmq.asyncio as zmq_async
 
-from volga.streaming.runtime.transfer.v2.buffer import buffer_id, Buffer, BufferCreator, AckMessage, \
-    buffer_size
+from volga.streaming.runtime.transfer.v2.buffer import get_buffer_id, Buffer, BufferCreator, AckMessage
 from volga.streaming.runtime.transfer.v2.buffer_pool import BufferPool
 from volga.streaming.runtime.transfer.v2.data_handler_base import DataHandlerBase
 
@@ -142,7 +141,7 @@ class DataWriterV2(DataHandlerBase):
                         break
 
                     buffer = buffer_queue.pop()
-                    bid = buffer_id(buffer)
+                    bid = get_buffer_id(buffer)
                     # TODO uncomment when we have proper buffer creation
                     # if bid in in_flight_scheduled:
                     #     raise RuntimeError('duplicate bid scheduled')
@@ -154,7 +153,7 @@ class DataWriterV2(DataHandlerBase):
 
     async def _send(self, channel_id: str, buffer: Buffer):
         print('sent started')
-        bid = buffer_id(buffer)
+        bid = get_buffer_id(buffer)
         socket = self._send_sockets[channel_id]
         # TODO handle exceptions on send
         await socket.send(buffer)
@@ -177,7 +176,7 @@ class DataWriterV2(DataHandlerBase):
                     _, buffer = self._in_flight_nacked[ack_msg.channel_id][ack_msg.buff_id]
                     del self._in_flight_nacked[ack_msg.channel_id][ack_msg.buff_id]
                     # release buffer
-                    self._buffer_pool.release(buffer_size(buffer))
+                    self._buffer_pool.release(len(buffer))
 
     def start(self):
         super().start()
