@@ -11,6 +11,67 @@ from zmq.utils.monitor import recv_monitor_message
 
 class TestAsyncZMQ(unittest.TestCase):
 
+    def test_async_vs_sync_perf(self):
+        zmq_ctx = zmq.Context.instance()
+        ADDR = 'ipc:///tmp/zmq_test_1'
+        push = zmq_ctx.socket(zmq.PUSH)
+        push.bind(ADDR)
+        pull = zmq_ctx.socket(zmq.PULL)
+        pull.connect(ADDR)
+
+        n = 1000
+
+        lats = []
+        start = time.time()
+        for i in range(n):
+            msg = f'msg_{i}'
+            t = time.time()
+            # try:
+            # f = push.send_string(msg, copy=False, track=True)
+            # f = push.send(msg.encode(), copy=False, track=True)
+            # f.wait()
+            push.send(msg.encode())
+            # except:
+            #     continue
+            lat = time.time() - t
+            lats.append(lat)
+        total_time = time.time() - start
+
+        print(f'Sync Mean lat: {sum(lats)/len(lats)}, num samples: {len(lats)}')
+        print(f'Total time sync: {total_time}')
+
+        zmq_ctx = zmq_async.Context.instance()
+        ADDR = 'ipc:///tmp/zmq_test_2'
+        push = zmq_ctx.socket(zmq.PUSH)
+        push.bind(ADDR)
+        pull = zmq_ctx.socket(zmq.PULL)
+        pull.connect(ADDR)
+        lats = []
+        start = time.time()
+
+        async def _send(msg):
+            t = time.time()
+            await push.send(msg.encode(), zmq.DONTWAIT)
+            lat = time.time() - t
+            lats.append(lat)
+
+        async def s_c():
+            for i in range(n):
+                msg = f'msg_{i}'
+                asyncio.create_task(_send(msg))
+
+        async def s():
+            for i in range(n):
+                msg = f'msg_{i}'
+                await _send(msg)
+
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(s())
+        loop.close()
+        total_time = time.time() - start
+        print(f'Async Mean lat: {sum(lats)/len(lats)}, num samples: {len(lats)}')
+        print(f'Total time async: {total_time}')
+
     def test_async_zmq(self):
 
         ADDR = 'ipc:///tmp/zmq_test'
@@ -140,4 +201,5 @@ class TestAsyncZMQ(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestAsyncZMQ()
-    t.test_async_zmq()
+    # t.test_async_zmq()
+    t.test_async_vs_sync_perf()

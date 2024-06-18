@@ -11,46 +11,39 @@ class Channel:
         self.channel_id = channel_id
 
 
-# bi-directional channel, connects two actors on the same node via a simple ZMQ ipc connection
+# connects two actors on the same node via a zmq.PAIR ipc connection
 class LocalChannel(Channel):
 
     def __init__(
         self,
         channel_id: str,
-        ipc_addr_out: str,
-        ipc_addr_in: str
+        ipc_addr: str,
     ):
         super().__init__(channel_id=channel_id)
-        self.ipc_addr_out = ipc_addr_out
-        self.ipc_addr_in = ipc_addr_in
+        self.ipc_addr = ipc_addr
 
 
-# bi-directional 3-part channel: local ipc on source, source <-> target TCP, local ipc on target
+# connects two actors on different nodes
+# 3-part channel: local zmq.PAIR ipc on source, source <-> target  zmq.PAIR TCP, local zmq.PAIR ipc on target
 class RemoteChannel(Channel):
 
     def __init__(
         self,
         channel_id: str,
-        source_local_ipc_addr_out: str,
-        source_local_ipc_addr_in: str,
+        source_local_ipc_addr: str,
         source_node_ip: str,
         source_node_id: str,
-        target_local_ipc_addr_out: str,
-        target_local_ipc_addr_in: str,
+        target_local_ipc_addr: str,
         target_node_ip: str,
         target_node_id: str,
-        port_out: int,
-        port_in: int
+        port: int,
     ):
         super().__init__(channel_id=channel_id)
-        self.source_local_ipc_addr_out = source_local_ipc_addr_out
-        self.source_local_ipc_addr_in = source_local_ipc_addr_in
-        self.target_local_ipc_addr_out = target_local_ipc_addr_out
-        self.target_local_ipc_addr_in = target_local_ipc_addr_in
+        self.source_local_ipc_addr = source_local_ipc_addr
+        self.target_local_ipc_addr = target_local_ipc_addr
         self.source_node_ip = source_node_ip
         self.target_node_ip = target_node_ip
         self.source_node_id = source_node_id
         self.target_node_id = target_node_id
-        self.port_out = port_out
-        self.port_in = port_in
+        self.port = port
 

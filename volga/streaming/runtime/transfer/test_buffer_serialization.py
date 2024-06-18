@@ -2,8 +2,8 @@ import unittest
 
 import simplejson
 
-from volga.streaming.runtime.transfer.v2.buffer import serialize, get_buffer_id, get_channel_id, get_payload
-from volga.streaming.runtime.transfer.v2.utils import bytes_to_str, int_to_bytes, bytes_to_int, str_to_bytes
+from volga.streaming.runtime.transfer.buffer import serialize, get_buffer_id, get_channel_id, get_payload
+from volga.streaming.runtime.transfer.utils import bytes_to_str, int_to_bytes, bytes_to_int, str_to_bytes
 
 
 class TestBufferSerialization(unittest.TestCase):
@@ -15,7 +15,6 @@ class TestBufferSerialization(unittest.TestCase):
         s = 'acbdefgh'
         assert s == bytes_to_str(str_to_bytes(s))
         assert s == bytes_to_str(str_to_bytes(s, pad_to_size=10), strip_padding=True)
-
 
     def test_ser_de(self):
         BUFFER_SIZE = 32 * 1024

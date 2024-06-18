@@ -82,29 +82,22 @@ class WorkerLifecycleController:
             if source_worker_network_info.node_id == target_worker_network_info.node_id:
                 channel = LocalChannel(
                     channel_id=edge.id,
-                    ipc_addr_out=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_out=True),
-                    ipc_addr_in=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_out=False)
+                    ipc_addr=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id),
                 )
             else:
                 # unique ports per node-node connection
-                port_out = self._gen_port(
-                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}-out'
-                )
-                port_in = self._gen_port(
-                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}-in'
+                port = self._gen_port(
+                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}'
                 )
                 channel = RemoteChannel(
                     channel_id=edge.id,
-                    source_local_ipc_addr_out=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_out=True),
-                    source_local_ipc_addr_in=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_out=False),
+                    source_local_ipc_addr=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id),
                     source_node_ip=source_worker_network_info.node_ip,
                     source_node_id=source_worker_network_info.node_id,
-                    target_local_ipc_addr_out=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_out=True),
-                    target_local_ipc_addr_in=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id, direction_out=False),
+                    target_local_ipc_addr=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id),
                     target_node_ip=target_worker_network_info.node_ip,
                     target_node_id=target_worker_network_info.node_id,
-                    port_out=port_out,
-                    port_in=port_in
+                    port=port,
                 )
 
             edge.set_channel(channel)
@@ -166,8 +159,7 @@ class WorkerLifecycleController:
             return self._reserved_node_ports[key]
 
     @staticmethod
-    def _gen_ipc_addr(job_name: str, channel_id: str, direction_out: bool) -> str:
+    def _gen_ipc_addr(job_name: str, channel_id: str) -> str:
         PREFIX = f'ipc:///tmp/volga_ipc/{job_name}'
-        dir = 'out' if direction_out else 'in'
-        return f'{PREFIX}/ipc_{channel_id}_{dir}'
+        return f'{PREFIX}/ipc_{channel_id}'
 

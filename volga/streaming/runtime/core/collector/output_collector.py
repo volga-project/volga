@@ -3,14 +3,14 @@ from typing import List
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.partition.partition import Partition
-from volga.streaming.runtime.transfer.data_writer import DataWriter
+from volga.streaming.runtime.transfer.deprecated.data_writer import DataWriter_DEPR
 
 
 class OutputCollector(Collector):
 
     def __init__(
         self,
-        data_writer: DataWriter,
+        data_writer: DataWriter_DEPR,
         output_channel_ids: List[str],
         partition: Partition
     ):

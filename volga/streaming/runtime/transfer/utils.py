@@ -2,13 +2,14 @@ from typing import Optional
 
 
 def str_to_bytes(s: str, pad_to_size: Optional[int] = None) -> bytes:
+    b = s.encode('utf-8')
     if pad_to_size is None:
-        return s.encode('utf-8')
-    diff = pad_to_size - len(s) # 1 char is 1 byte
+        return b
+    diff = pad_to_size - len(b)
     if diff < 0:
         raise ValueError('Unable to pad string')
-    s += diff * ' '
-    return s.encode('utf-8')
+    b += diff * b' '
+    return b
 
 
 def bytes_to_str(b: bytes, strip_padding: bool = False) -> str:

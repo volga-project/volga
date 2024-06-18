@@ -18,9 +18,8 @@ class A:
         self.d[k] = v
 
     def get_d(self, k) -> Any:
-        # v = self.d[k]
-        # return v
-        return 5
+        v = self.d[k]
+        return v
 
 with ray.init(address='auto'):
 

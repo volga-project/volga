@@ -1,12 +1,11 @@
-import dataclasses
 from collections import deque
-from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
 import simplejson
+from pydantic import BaseModel
 
 from volga.streaming.runtime.transfer.channel import Channel
-from volga.streaming.runtime.transfer.v2.utils import str_to_bytes, int_to_bytes, bytes_to_int, bytes_to_str
+from volga.streaming.runtime.transfer.utils import str_to_bytes, int_to_bytes, bytes_to_int, bytes_to_str
 
 Buffer = bytes
 # Buffer schema
@@ -22,18 +21,27 @@ MSG_SIZE_HEADER_LENGTH = 32  # int
 DEFAULT_BUFFER_SIZE = 32 * 1024
 
 
-@dataclass
-class AckMessage:
-    buff_id: int
-    msg_id: int
+class AckMessage(BaseModel):
+    buffer_id: int
     channel_id: str
 
     @staticmethod
     def de(raw: str) -> 'AckMessage':
-        return simplejson.loads(raw)
+        return AckMessage(**simplejson.loads(raw))
 
     def ser(self) -> str:
-        return simplejson.dumps(dataclasses.asdict(self))
+        return simplejson.dumps(self.dict())
+
+
+class AckMessageBatch(BaseModel):
+    acks: List[AckMessage]
+
+    @staticmethod
+    def de(raw: str) -> 'AckMessageBatch':
+        return AckMessageBatch(**simplejson.loads(raw))
+
+    def ser(self) -> str:
+        return simplejson.dumps(self.dict())
 
 
 class BufferCreator:

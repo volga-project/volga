@@ -5,7 +5,7 @@ import zmq
 
 from volga.streaming.runtime.transfer.channel import LocalChannel, RemoteChannel
 from volga.streaming.runtime.transfer.v2.transfer_receiver import TransferReceiver
-from volga.streaming.runtime.transfer.v2.transfer_sender import TransferSender
+from volga.streaming.runtime.transfer.v2.transfer_sender import AsyncTransferSender
 
 
 @ray.remote
@@ -18,7 +18,7 @@ class TransferActor:
         host_node_id,
     ):
         self._zmq_ctx = zmq.Context()
-        self._sender = TransferSender(
+        self._sender = AsyncTransferSender(
             remote_out_channels=remote_out_channels,
             host_node_id=host_node_id,
         )

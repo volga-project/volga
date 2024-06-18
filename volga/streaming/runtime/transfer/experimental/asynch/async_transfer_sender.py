@@ -2,22 +2,24 @@ import asyncio
 from threading import Thread
 from typing import List, Dict
 
-from volga.streaming.runtime.transfer.channel import RemoteChannel
 import zmq.asyncio as zmq_async
 import zmq
+
+from volga.streaming.runtime.transfer.experimental.channel import RemoteBiChannel
+
 
 # router dealer
 # https://github.com/zeromq/pyzmq/blob/main/examples/asyncio/helloworld_pubsub_dealerrouter.py
 
 
-class TransferSender:
+class AsyncTransferSender:
 
     def __init__(
         self,
-        remote_out_channels: List[RemoteChannel],
+        remote_out_channels: List[RemoteBiChannel],
         host_node_id,
     ):
-        self._channel_map: Dict[str, RemoteChannel] = {c.channel_id: c for c in remote_out_channels}
+        self._channel_map: Dict[str, RemoteBiChannel] = {c.channel_id: c for c in remote_out_channels}
         self._zmq_ctx = zmq_async.Context.instance(io_threads=64) # TODO configure
         self._host_node_id = host_node_id
         self._poller: zmq_async.Poller = zmq_async.Poller()
@@ -44,7 +46,7 @@ class TransferSender:
                 continue
             else:
                 remote_socket = self._zmq_ctx.socket(zmq.PUSH)
-                remote_socket.bind(f'tcp://{channel.source_node_ip}:{channel.port_to}')
+                remote_socket.bind(f'tcp://{channel.source_node_ip}:{channel.port_out}')
                 self._poller.register(remote_socket, zmq.POLLOUT)
                 self._remote_out_sockets[remote_socket] = channel.target_node_id
 

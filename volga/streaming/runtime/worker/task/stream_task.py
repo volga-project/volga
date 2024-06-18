@@ -2,16 +2,14 @@ import logging
 from abc import ABC, abstractmethod
 from threading import Thread
 
-from ray.actor import ActorHandle
-
 from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.message.message import Record, record_from_channel_message
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.worker.task.streaming_runtime_context import StreamingRuntimeContext
 from volga.streaming.runtime.core.collector.output_collector import OutputCollector
 from volga.streaming.runtime.core.processor.processor import Processor, TwoInputProcessor
-from volga.streaming.runtime.transfer.data_reader import DataReader
-from volga.streaming.runtime.transfer.data_writer import DataWriter
+from volga.streaming.runtime.transfer.deprecated.data_reader import DataReader
+from volga.streaming.runtime.transfer.deprecated.data_writer import DataWriter_DEPR
 
 
 logger = logging.getLogger("ray")
@@ -50,7 +48,7 @@ class StreamTask(ABC):
                 raise RuntimeError('Writer already inited')
             if self.execution_vertex.job_vertex.vertex_type != VertexType.SINK:
                 # sinks do not pass data downstream so no writer
-                self.writer = DataWriter(
+                self.writer = DataWriter_DEPR(
                     name=self.execution_vertex.execution_vertex_id,
                     source_stream_name=str(self.execution_vertex.stream_operator.id),
                     output_channels=output_channels

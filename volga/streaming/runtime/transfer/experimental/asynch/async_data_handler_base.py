@@ -1,26 +1,23 @@
 import asyncio
 from abc import ABC, abstractmethod
-from enum import Enum
 from threading import Thread
 from typing import List, Dict
 
-import zmq
-
-from volga.streaming.runtime.transfer.channel import Channel, LocalChannel, RemoteChannel
 import zmq.asyncio as zmq_async
 
-from volga.streaming.runtime.transfer.v2.buffer_pool import BufferPool
+from volga.streaming.runtime.transfer.buffer_pool import BufferPool
+from volga.streaming.runtime.transfer.experimental.channel import BiChannel
 
 
 # Bi-directional connection data handler, sends and receives messages, acts as a base for DataReader/DataWriter
 # Each Channel instance has a corresponding pair of sockets:
 # zmq.PULL socket in _rcv_sockets and zmq.PUSH in _send_sockets
-class DataHandlerBase(ABC):
+class AsyncDataHandlerBase(ABC):
 
     def __init__(
         self,
         name: str,
-        channels: List[Channel],
+        channels: List[BiChannel],
         node_id: str,
         zmq_ctx: zmq_async.Context
     ):

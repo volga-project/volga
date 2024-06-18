@@ -4,17 +4,18 @@ from typing import List, Dict
 import zmq.asyncio as zmq_async
 import zmq
 
-from volga.streaming.runtime.transfer.channel import RemoteChannel
+from volga.streaming.runtime.transfer.experimental.channel import RemoteBiChannel
+
 
 # https://stackoverflow.com/questions/64201043/why-does-pyzmq-subscriber-behave-differently-with-asyncio
-class TransferReceiver:
+class AsyncTransferReceiver:
 
     def __init__(
         self,
-        remote_in_channels: List[RemoteChannel],
+        remote_in_channels: List[RemoteBiChannel],
         host_node_id,
     ):
-        self._channel_map: Dict[str, RemoteChannel] = {c.channel_id: c for c in remote_in_channels}
+        self._channel_map: Dict[str, RemoteBiChannel] = {c.channel_id: c for c in remote_in_channels}
         self._zmq_ctx = zmq_async.Context.instance(io_threads=64) # TODO configure
         self._host_node_id = host_node_id
         self._poller: zmq_async.Poller = zmq_async.Poller()
@@ -33,7 +34,7 @@ class TransferReceiver:
 
             # init local ipc
             local_socket = self._zmq_ctx.socket(zmq.PUSH)
-            local_socket.connect(channel.target_local_ipc_addr_to)
+            local_socket.connect(channel.target_local_ipc_addr_out)
             self._poller.register(local_socket, zmq.POLLOUT)
             self._local_out_sockets[channel.channel_id] = local_socket
 
@@ -42,7 +43,7 @@ class TransferReceiver:
                 continue
             else:
                 remote_socket = self._zmq_ctx.socket(zmq.PULL)
-                remote_socket.bind(f'tcp://{channel.target_node_ip}:{channel.port_to}')
+                remote_socket.bind(f'tcp://{channel.target_node_ip}:{channel.port_out}')
                 self._poller.register(remote_socket, zmq.POLLIN)
                 self._remote_in_sockets[remote_socket] = channel.source_node_id
 
