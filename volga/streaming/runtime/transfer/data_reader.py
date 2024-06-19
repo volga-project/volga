@@ -10,7 +10,7 @@ from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
 import simplejson
 
 from volga.streaming.runtime.transfer.buffer import AckMessage, get_buffer_id, get_payload, AckMessageBatch
-from volga.streaming.runtime.transfer.config import ZMQConfig, DEFAULT_ZMQ_CONFIG
+from volga.streaming.runtime.transfer.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.transfer.data_handler_base import DataHandlerBase
 from volga.streaming.runtime.transfer.utils import bytes_to_str
 
@@ -20,9 +20,21 @@ logger = logging.getLogger("ray")
 class DataReader(DataHandlerBase):
 
     class _Stats:
-        def __init__(self):
-            self.msgs_rcvd = 0
-            self.acks_sent = 0
+        def __init__(self, channels: List[Channel]):
+            self.msgs_rcvd = {c.channel_id: 0 for c in channels}
+            self.acks_sent = {c.channel_id: 0 for c in channels}
+
+        def inc_msgs_rcvd(self, channel_id: str, num: Optional[int] = None):
+            if num is None:
+                self.msgs_rcvd[channel_id] += 1
+            else:
+                self.msgs_rcvd[channel_id] += num
+
+        def inc_acks_sent(self, channel_id: str, num: Optional[int] = None):
+            if num is None:
+                self.acks_sent[channel_id] += 1
+            else:
+                self.acks_sent[channel_id] += num
 
         def __repr__(self):
             return str(self.__dict__)
@@ -33,7 +45,7 @@ class DataReader(DataHandlerBase):
         channels: List[Channel],
         node_id: str,
         zmq_ctx: zmq.Context,
-        zmq_config: Optional[ZMQConfig] = DEFAULT_ZMQ_CONFIG
+        network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
     ):
         super().__init__(
             name=name,
@@ -41,10 +53,10 @@ class DataReader(DataHandlerBase):
             node_id=node_id,
             zmq_ctx=zmq_ctx,
             is_reader=True,
-            zmq_config=zmq_config
+            network_config=network_config
         )
 
-        self.stats = DataReader._Stats()
+        self.stats = DataReader._Stats(channels)
 
         self._channels = channels
         self._channel_map = { c for c in self._channels}
@@ -65,8 +77,8 @@ class DataReader(DataHandlerBase):
 
     def _send(self, channel_id: str, socket: zmq.Socket):
         ack_queue = self._acks_queues[channel_id]
-        batch_size = 10
-        if len(ack_queue) < batch_size:
+        ack_batch_size = self._network_config.ack_batch_size
+        if len(ack_queue) < ack_batch_size:
             return
         acks = []
         while len(ack_queue) != 0:
@@ -79,7 +91,7 @@ class DataReader(DataHandlerBase):
         # TODO handle exceptions, EAGAIN, etc., retries
         # send_socket.send_string(data, zmq.NOBLOCK)
         socket.send(data)
-        self.stats.acks_sent += len(ack_msg_batch.acks)
+        self.stats.inc_acks_sent(channel_id, len(ack_msg_batch.acks))
         for ack_msg in ack_msg_batch.acks:
             print(f'sent ack {ack_msg.buffer_id}, lat: {time.time() - t}')
 
@@ -88,7 +100,7 @@ class DataReader(DataHandlerBase):
 
         # TODO NOBLOCK, exceptions, eagain etc.
         buffer = socket.recv()
-        self.stats.msgs_rcvd += 1
+        self.stats.inc_msgs_rcvd(channel_id)
         print(f'Rcvd {get_buffer_id(buffer)}, lat: {time.time() - t}')
         # TODO check if buffer_id exists to avoid duplicates, re-send ack on duplicate
         # TODO acquire buffer pool

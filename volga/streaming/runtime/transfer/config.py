@@ -19,3 +19,13 @@ DEFAULT_ZMQ_CONFIG = ZMQConfig(
     RCVBUF=32 * 1024,
 )
 
+
+class NetworkConfig(BaseModel):
+    zmq: Optional[ZMQConfig]
+    ack_batch_size: int
+
+
+DEFAULT_NETWORK_CONFIG = NetworkConfig(
+    zmq=DEFAULT_ZMQ_CONFIG,
+    ack_batch_size=1
+)

@@ -58,7 +58,7 @@ class ExecutionVertex:
         self.input_edges: List[ExecutionEdge] = []
         self.output_edges: List[ExecutionEdge] = []
         self.worker = None
-        self.worker_network_info = None
+        self.worker_node_info = None
 
     def _gen_id(self) -> str:
         return f'{self.job_vertex.vertex_id}_{self.execution_vertex_index}'
@@ -75,8 +75,8 @@ class ExecutionVertex:
     def set_resources(self, resources: Resources):
         self.resources = resources
 
-    def set_worker_network_info(self, info: 'WorkerNetworkInfo'):
-        self.worker_network_info = info
+    def set_worker_node_info(self, info: 'WorkerNodeInfo'):
+        self.worker_node_info = info
 
 
 class ExecutionGraph:

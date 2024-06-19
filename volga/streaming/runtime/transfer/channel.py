@@ -2,6 +2,7 @@ from typing import Any, Dict
 
 ChannelMessage = Dict[str, Any]
 
+IPC_DIR = '/tmp/volga_ipc'
 
 class Channel:
     def __init__(
@@ -47,3 +48,14 @@ class RemoteChannel(Channel):
         self.target_node_id = target_node_id
         self.port = port
 
+
+def gen_ipc_addr(job_name: str, channel_id: str) -> str:
+    path = f'ipc://{IPC_DIR}/{job_name}'
+    return f'{path}/ipc_{channel_id}'
+
+def ipc_path_from_addr(ipc_addr: str) -> str:
+    s = ipc_addr.split('/')
+    suff = s[-1]
+
+    # remove 'ipc://' prefix and suffix
+    return ipc_addr[6:len(ipc_addr) - len(suff)]

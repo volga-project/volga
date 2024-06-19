@@ -11,25 +11,27 @@ from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
 
 from volga.streaming.runtime.transfer.buffer import get_buffer_id, BufferCreator, AckMessageBatch
 from volga.streaming.runtime.transfer.buffer_pool import BufferPool
-from volga.streaming.runtime.transfer.config import ZMQConfig, DEFAULT_ZMQ_CONFIG
+from volga.streaming.runtime.transfer.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.transfer.data_handler_base import DataHandlerBase
-
-# max number of futures per channel, makes sure we do not exhaust io loop
-MAX_IN_FLIGHT_PER_CHANNEL = 100000
-
-# max number of not acked buffers, makes sure we do not schedule more if acks are not happening
-MAX_NACKED_PER_CHANNEL = 100000
-
-# how long we wait for a message to be sent before assuming it is inactive (so we stop scheduling more on this channel)
-IN_FLIGHT_TIMEOUT_S = 1
-
 
 class DataWriter(DataHandlerBase):
 
     class _Stats:
-        def __init__(self):
-            self.msgs_sent = 0
-            self.acks_rcvd = 0
+        def __init__(self, channels: List[Channel]):
+            self.msgs_sent = {c.channel_id: 0 for c in channels}
+            self.acks_rcvd = {c.channel_id: 0 for c in channels}
+
+        def inc_msgs_sent(self, channel_id: str, num: Optional[int] = None):
+            if num is None:
+                self.msgs_sent[channel_id] += 1
+            else:
+                self.msgs_sent[channel_id] += num
+
+        def inc_acks_rcvd(self, channel_id: str, num: Optional[int] = None):
+            if num is None:
+                self.acks_rcvd[channel_id] += 1
+            else:
+                self.acks_rcvd[channel_id] += num
 
         def __repr__(self):
             return str(self.__dict__)
@@ -41,7 +43,7 @@ class DataWriter(DataHandlerBase):
         channels: List[Channel],
         node_id: str,
         zmq_ctx: zmq.Context,
-        zmq_config: Optional[ZMQConfig] = DEFAULT_ZMQ_CONFIG
+        network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
     ):
         super().__init__(
             name=name,
@@ -49,10 +51,10 @@ class DataWriter(DataHandlerBase):
             node_id=node_id,
             zmq_ctx=zmq_ctx,
             is_reader=False,
-            zmq_config=zmq_config
+            network_config=network_config
         )
 
-        self.stats = DataWriter._Stats()
+        self.stats = DataWriter._Stats(channels)
         self._source_stream_name = source_stream_name
 
         self._buffer_queues: Dict[str, deque] = {c.channel_id: deque() for c in self._channels}
@@ -68,8 +70,14 @@ class DataWriter(DataHandlerBase):
         self._write_message(channel_id, message)
 
     def _write_message(self, channel_id: str, message: ChannelMessage):
+        # block until starts running
+        timeout_s = 5
+        t = time.time()
+        while not self.running and time.time() - t < timeout_s:
+            time.sleep(0.01)
         if not self.running:
-            raise RuntimeError('Can not write a message while writer is not running!')
+            raise RuntimeError(f'DataWriter did not start after {timeout_s}s, {message}')
+
         # TODO serialization perf
         json_str = simplejson.dumps(message)
         buffers = self._buffer_creator.msg_to_buffers(json_str, channel_id=channel_id)
@@ -98,7 +106,7 @@ class DataWriter(DataHandlerBase):
 
         # TODO use noblock, handle exceptions
         socket.send(buffer)
-        self.stats.msgs_sent += 1
+        self.stats.inc_msgs_sent(channel_id)
         print(f'Sent {buffer_id}, lat: {time.time() - t}')
         self._nacked[channel_id][buffer_id] = (time.time(), buffer)
 
@@ -111,7 +119,7 @@ class DataWriter(DataHandlerBase):
         for ack_msg in ack_msg_batch.acks:
             print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
             if channel_id in self._nacked and ack_msg.buffer_id in self._nacked[channel_id]:
-                self.stats.acks_rcvd += 1
+                self.stats.inc_acks_rcvd(channel_id)
                 # TODO update buff/msg send metric
                 # perform ack
                 _, buffer = self._nacked[channel_id][ack_msg.buffer_id]

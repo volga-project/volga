@@ -22,7 +22,6 @@ class TestStreamingJobE2E(unittest.TestCase):
         self.ctx = ctx
 
     def test_join_streams(self):
-
         def dummy_join(a, b, k1, k2, how):
 
             def listify(t):

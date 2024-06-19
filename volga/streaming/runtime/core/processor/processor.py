@@ -5,7 +5,7 @@ from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operator.operator import OneInputOperator, Operator, SourceOperator, \
-    StreamOperator, OperatorType
+    StreamOperator, OperatorType, TwoInputOperator
 
 
 class Processor(ABC):
@@ -30,10 +30,13 @@ class Processor(ABC):
     def build_processor(cls, stream_operator: StreamOperator) -> 'StreamProcessor':
         op_type = stream_operator.operator_type()
         if op_type == OperatorType.SOURCE:
+            assert isinstance(stream_operator,  SourceOperator)
             return SourceProcessor(stream_operator)
         elif op_type == OperatorType.ONE_INPUT:
+            assert isinstance(stream_operator,  OneInputOperator)
             return OneInputProcessor(stream_operator)
         elif op_type == OperatorType.TWO_INPUT:
+            assert isinstance(stream_operator,  TwoInputOperator)
             return TwoInputProcessor(stream_operator)
         else:
             raise RuntimeError('Unsupported operator type')
@@ -67,7 +70,7 @@ class OneInputProcessor(StreamProcessor):
 
 
 class TwoInputProcessor(StreamProcessor):
-    def __init__(self, two_input_operator: OneInputOperator):
+    def __init__(self, two_input_operator: TwoInputOperator):
         super().__init__(operator=two_input_operator)
         self.left_stream_name = None
         self.right_stream_name = None

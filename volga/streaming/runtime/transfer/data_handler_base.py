@@ -1,14 +1,15 @@
+import os
 from abc import ABC, abstractmethod
 from threading import Thread
 from typing import List, Dict, Optional
 
 import zmq
 
-from volga.streaming.runtime.transfer.channel import Channel, LocalChannel, RemoteChannel
+from volga.streaming.runtime.transfer.channel import Channel, LocalChannel, RemoteChannel, ipc_path_from_addr
 import zmq.asyncio as zmq_async
 
 from volga.streaming.runtime.transfer.buffer_pool import BufferPool
-from volga.streaming.runtime.transfer.config import ZMQConfig
+from volga.streaming.runtime.transfer.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 
 
 # Bidirectional connection data handler, sends and receives messages, acts as a base for DataReader/DataWriter
@@ -22,14 +23,14 @@ class DataHandlerBase(ABC):
         node_id: str,
         zmq_ctx: zmq_async.Context,
         is_reader: bool, # we should find more elegant way of detecting subclass type
-        zmq_config: Optional[ZMQConfig]
+        network_config: NetworkConfig
     ):
         self._is_reader = is_reader
         self.name = name
         self.running = False
         self._thread = Thread(target=self._start_loop)
         self._zmq_ctx = zmq_ctx
-        self._zmq_config = zmq_config
+        self._network_config = network_config
 
         self._channels = channels
         self._channel_map = {c.channel_id: c for c in self._channels}
@@ -47,18 +48,29 @@ class DataHandlerBase(ABC):
 
             socket = self._zmq_ctx.socket(zmq.PAIR)
 
+            # created ipc path if not exists
+            # TODO we should clean it up on socket deletion
+            if isinstance(channel, LocalChannel):
+                ipc_path = ipc_path_from_addr(channel.ipc_addr)
+                print(ipc_path)
+                os.makedirs(ipc_path, exist_ok=True)
+            elif isinstance(channel, RemoteChannel):
+                raise ValueError('RemoteChannel not supported yet')
+
+
             # configure
-            if self._zmq_config is not None:
-                if self._zmq_config.LINGER is not None:
-                    socket.setsockopt(zmq.LINGER, self._zmq_config.LINGER)
-                if self._zmq_config.SNDHWM is not None:
-                    socket.setsockopt(zmq.SNDHWM, self._zmq_config.SNDHWM)
-                if self._zmq_config.RCVHWM is not None:
-                    socket.setsockopt(zmq.RCVHWM, self._zmq_config.RCVHWM)
-                if self._zmq_config.SNDBUF is not None:
-                    socket.setsockopt(zmq.SNDBUF, self._zmq_config.SNDBUF)
-                if self._zmq_config.RCVBUF is not None:
-                    socket.setsockopt(zmq.RCVBUF, self._zmq_config.RCVBUF)
+            zmq_config = self._network_config.zmq
+            if zmq_config is not None:
+                if zmq_config.LINGER is not None:
+                    socket.setsockopt(zmq.LINGER, zmq_config.LINGER)
+                if zmq_config.SNDHWM is not None:
+                    socket.setsockopt(zmq.SNDHWM, zmq_config.SNDHWM)
+                if zmq_config.RCVHWM is not None:
+                    socket.setsockopt(zmq.RCVHWM, zmq_config.RCVHWM)
+                if zmq_config.SNDBUF is not None:
+                    socket.setsockopt(zmq.SNDBUF, zmq_config.SNDBUF)
+                if zmq_config.RCVBUF is not None:
+                    socket.setsockopt(zmq.RCVBUF, zmq_config.RCVBUF)
 
             if isinstance(channel, LocalChannel):
                 if self._is_reader:

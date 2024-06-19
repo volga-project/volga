@@ -7,7 +7,7 @@ import ray
 from ray.actor import ActorHandle
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
-from volga.streaming.runtime.transfer.channel import LocalChannel, RemoteChannel
+from volga.streaming.runtime.transfer.channel import LocalChannel, RemoteChannel, gen_ipc_addr
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
 VALID_PORT_RANGE = (30000, 65000)
@@ -17,7 +17,7 @@ VALID_PORT_RANGE = (30000, 65000)
 logger = logging.getLogger("ray")
 
 
-class WorkerNetworkInfo:
+class WorkerNodeInfo:
 
     def __init__(self, node_ip: str, node_id: str):
         self.node_ip = node_ip
@@ -58,15 +58,15 @@ class WorkerLifecycleController:
             vertex_id = vertex_ids[i]
             node_id, node_ip = worker_hosts_info[i]
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
-            ni = WorkerNetworkInfo(
+            ni = WorkerNodeInfo(
                 node_ip=node_ip,
                 node_id=node_id,
             )
-            vertex.set_worker_network_info(ni)
+            vertex.set_worker_node_info(ni)
             worker_infos.append((vertex_id, ni.node_id, ni.node_ip))
 
         logger.info(f'Created {len(workers)} workers')
-        logger.info(f'Workers writer network info: {worker_infos}')
+        logger.info(f'Workers writer node info: {worker_infos}')
 
     # construct channels based on Ray assigned actor IPs and update execution_graph
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
@@ -74,15 +74,15 @@ class WorkerLifecycleController:
         job_name = execution_graph.job_name
         # create channels
         for edge in execution_graph.execution_edges:
-            source_worker_network_info: WorkerNetworkInfo = edge.source_execution_vertex.worker_network_info
-            target_worker_network_info: WorkerNetworkInfo = edge.target_execution_vertex.worker_network_info
+            source_worker_network_info: WorkerNodeInfo = edge.source_execution_vertex.worker_node_info
+            target_worker_network_info: WorkerNodeInfo = edge.target_execution_vertex.worker_node_info
             if source_worker_network_info is None or target_worker_network_info is None:
                 raise RuntimeError(f'No worker network info')
 
             if source_worker_network_info.node_id == target_worker_network_info.node_id:
                 channel = LocalChannel(
                     channel_id=edge.id,
-                    ipc_addr=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id),
+                    ipc_addr=gen_ipc_addr(job_name=job_name, channel_id=edge.id),
                 )
             else:
                 # unique ports per node-node connection
@@ -91,10 +91,10 @@ class WorkerLifecycleController:
                 )
                 channel = RemoteChannel(
                     channel_id=edge.id,
-                    source_local_ipc_addr=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id),
+                    source_local_ipc_addr=gen_ipc_addr(job_name=job_name, channel_id=edge.id),
                     source_node_ip=source_worker_network_info.node_ip,
                     source_node_id=source_worker_network_info.node_id,
-                    target_local_ipc_addr=self._gen_ipc_addr(job_name=job_name, channel_id=edge.id),
+                    target_local_ipc_addr=gen_ipc_addr(job_name=job_name, channel_id=edge.id),
                     target_node_ip=target_worker_network_info.node_ip,
                     target_node_id=target_worker_network_info.node_id,
                     port=port,
@@ -157,9 +157,4 @@ class WorkerLifecycleController:
             self._reserved_node_ports[key] = [port]
         else:
             return self._reserved_node_ports[key]
-
-    @staticmethod
-    def _gen_ipc_addr(job_name: str, channel_id: str) -> str:
-        PREFIX = f'ipc:///tmp/volga_ipc/{job_name}'
-        return f'{PREFIX}/ipc_{channel_id}'
 
