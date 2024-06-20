@@ -3,7 +3,7 @@ from typing import List
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.partition.partition import Partition
-from volga.streaming.runtime.transfer.data_writer import DataWriter
+from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 
 
 class OutputCollector(Collector):

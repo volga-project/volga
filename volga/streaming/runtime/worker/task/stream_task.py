@@ -8,8 +8,9 @@ import zmq
 from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.message.message import Record, record_from_channel_message
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
-from volga.streaming.runtime.transfer.data_reader import DataReader
-from volga.streaming.runtime.transfer.data_writer import DataWriter
+from volga.streaming.runtime.network.transfer.io_loop import IOLoop
+from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
+from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 from volga.streaming.runtime.worker.task.streaming_runtime_context import StreamingRuntimeContext
 from volga.streaming.runtime.core.collector.output_collector import OutputCollector
 from volga.streaming.runtime.core.processor.processor import Processor, TwoInputProcessor
@@ -32,7 +33,8 @@ class StreamTask(ABC):
         self.data_reader: Optional[DataReader] = None
         self.running = True
         self.collectors = []
-        # TODO pass zmq config
+        # TODO pass network config
+        self.io_loop = IOLoop()
         self.zmq_ctx = zmq.Context.instance(io_threads=4)
 
     @abstractmethod
@@ -60,6 +62,7 @@ class StreamTask(ABC):
                     node_id=self.execution_vertex.worker_node_info.node_id,
                     zmq_ctx=self.zmq_ctx
                 )
+                self.io_loop.register(self.data_writer)
 
         # reader
         if len(self.execution_vertex.input_edges) != 0:
@@ -76,6 +79,7 @@ class StreamTask(ABC):
                     node_id=self.execution_vertex.worker_node_info.node_id,
                     zmq_ctx=self.zmq_ctx
                 )
+                self.io_loop.register(self.data_reader)
 
         self._open_processor()
 
@@ -104,11 +108,7 @@ class StreamTask(ABC):
 
         runtime_context = StreamingRuntimeContext(execution_vertex=execution_vertex)
 
-        if self.data_reader is not None:
-            self.data_reader.start()
-
-        if self.data_writer is not None:
-            self.data_writer.start()
+        self.io_loop.start()
 
         self.processor.open(
             collectors=self.collectors,
@@ -119,13 +119,7 @@ class StreamTask(ABC):
         # logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
         self.running = False
         self.processor.close()
-        if self.data_writer is not None:
-            self.data_writer.close()
-            # logger.info(f'Closed writer for task {self.execution_vertex.execution_vertex_id}')
-
-        if self.data_reader is not None:
-            self.data_reader.close()
-            # logger.info(f'Closed reader for task {self.execution_vertex.execution_vertex_id}')
+        self.io_loop.close()
         if self.thread is not None:
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')

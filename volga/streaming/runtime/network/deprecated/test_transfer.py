@@ -2,10 +2,10 @@ import time
 import unittest
 from typing import List, Dict, Any
 
-from volga.streaming.runtime.transfer.channel import Channel
-from volga.streaming.runtime.transfer.deprecated.channel import Channel_DEP
-from volga.streaming.runtime.transfer.deprecated.data_reader import DataReader_DEPR
-from volga.streaming.runtime.transfer.deprecated.data_writer import DataWriter_DEPR
+from volga.streaming.runtime.network.channel import Channel
+from volga.streaming.runtime.network.deprecated.channel import Channel_DEP
+from volga.streaming.runtime.network.deprecated.data_reader import DataReader_DEPR
+from volga.streaming.runtime.network.deprecated.data_writer import DataWriter_DEPR
 
 import ray
 

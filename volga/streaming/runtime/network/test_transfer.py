@@ -6,9 +6,10 @@ from typing import List, Dict, Any
 import ray
 import zmq
 
-from volga.streaming.runtime.transfer.channel import Channel, LocalChannel
-from volga.streaming.runtime.transfer.data_reader import DataReader
-from volga.streaming.runtime.transfer.data_writer import DataWriter
+from volga.streaming.runtime.network.channel import Channel, LocalChannel
+from volga.streaming.runtime.network.transfer.io_loop import IOLoop
+from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
+from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 
 
 @ray.remote
@@ -18,6 +19,7 @@ class Writer:
         channel: Channel,
     ):
         self.channel = channel
+        self.io_loop = IOLoop()
         self.data_writer = DataWriter(
             name='test_writer',
             source_stream_name='0',
@@ -25,17 +27,20 @@ class Writer:
             node_id='0',
             zmq_ctx=zmq.Context.instance()
         )
+        self.io_loop.register(self.data_writer)
+        self.io_loop.start()
         print('writer inited')
 
     def send_items(self, items: List[Dict]):
-        self.data_writer.start()
+        # self.data_writer.start()
         for item in items:
             self.data_writer._write_message(self.channel.channel_id, item)
 
     def get_stats(self):
         return self.data_writer.stats
+
     def close(self):
-        self.data_writer.close()
+        self.io_loop.close()
 
 
 @ray.remote
@@ -46,6 +51,7 @@ class Reader:
         num_expected: int,
     ):
         self.channel = channel
+        self.io_loop = IOLoop()
         self.data_reader = DataReader(
             name='test_reader',
             channels=[channel],
@@ -53,10 +59,12 @@ class Reader:
             zmq_ctx=zmq.Context.instance()
         )
         self.num_expected = num_expected
+        self.io_loop.register(self.data_reader)
+        self.io_loop.start()
         print('reader inited')
 
     def receive_items(self) -> List[Any]:
-        self.data_reader.start()
+        # self.data_reader.start()
         t = time.time()
         res = []
         while True:
@@ -77,7 +85,7 @@ class Reader:
         return self.data_reader.stats
 
     def close(self):
-        self.data_reader.close()
+        self.io_loop.close()
 
 
 class TestLocalTransfer(unittest.TestCase):
@@ -110,6 +118,8 @@ class TestLocalTransfer(unittest.TestCase):
         assert writer_stats.acks_rcvd[channel.channel_id] == num_items
         assert writer_stats.msgs_sent[channel.channel_id] == num_items
 
+        print('assert ok')
+
         ray.get(reader.close.remote())
         ray.get(reader.close.remote())
 
@@ -119,7 +129,7 @@ class TestLocalTransfer(unittest.TestCase):
 
     def test_one_to_one_local(self):
         num_items = 1000
-
+        io_loop = IOLoop()
         channel = LocalChannel(
             channel_id='1',
             ipc_addr='ipc:///tmp/zmqtest',
@@ -127,9 +137,12 @@ class TestLocalTransfer(unittest.TestCase):
         zmq_ctx = zmq.Context.instance(io_threads=10)
         data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
+        io_loop.register(data_writer)
+        io_loop.register(data_reader)
+        io_loop.start()
 
         def write():
-            data_writer.start()
+            # data_writer.start()
             for i in range(num_items):
                 msg = {'i': i}
                 data_writer._write_message(channel.channel_id, msg)
@@ -137,7 +150,7 @@ class TestLocalTransfer(unittest.TestCase):
         num_rcvd = [0]
 
         def read():
-            data_reader.start()
+            # data_reader.start()
             t = time.time()
             while True:
                 if time.time() - t > 10:
@@ -165,13 +178,15 @@ class TestLocalTransfer(unittest.TestCase):
         assert writer_stats.acks_rcvd[channel.channel_id] == num_items
         assert writer_stats.msgs_sent[channel.channel_id] == num_items
 
-        data_writer.close()
-        data_reader.close()
+        print('assert ok')
+        # data_writer.close()
+        # data_reader.close()
+        io_loop.close()
         wt.join(5)
 
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    t.test_one_to_one_local()
-    # t.test_one_to_one_ray()
+    # t.test_one_to_one_local()
+    t.test_one_to_one_ray()
 

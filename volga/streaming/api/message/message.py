@@ -1,6 +1,6 @@
 from typing import Any, Optional
 
-from volga.streaming.runtime.transfer.channel import ChannelMessage
+from volga.streaming.runtime.network.channel import ChannelMessage
 
 from decimal import Decimal
 

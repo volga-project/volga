@@ -59,7 +59,7 @@ class TestStreamingJobE2E(unittest.TestCase):
             # .set_parallelism(1)
 
         s.sink(sink_function)
-        s.sink(lambda x: print(x) if x[0]%1000 == 0 else None)
+        # s.sink(lambda x: print(x) if x[0]%10 == 0 else None)
         # s.sink(print)
         ctx.execute()
         res = ray.get(sink_cache.get_values.remote())

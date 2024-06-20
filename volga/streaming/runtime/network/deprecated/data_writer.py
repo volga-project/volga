@@ -6,7 +6,7 @@ from volga.streaming.api.message.message import Record
 
 import zmq
 
-from volga.streaming.runtime.transfer.deprecated.channel import Channel_DEP
+from volga.streaming.runtime.network.deprecated.channel import Channel_DEP
 
 
 class TransportType(enum.Enum):

@@ -10,7 +10,7 @@ from volga.streaming.api.partition.partition import RoundRobinPartition, Partiti
 from volga.streaming.common.config.resource_config import ResourceConfig
 from volga.streaming.runtime.master.resource_manager.resource_manager import \
     Resources, RESOURCE_KEY_CPU, RESOURCE_KEY_GPU, RESOURCE_KEY_MEM
-from volga.streaming.runtime.transfer.channel import Channel
+from volga.streaming.runtime.network.channel import Channel
 
 
 logger = logging.getLogger(__name__)
@@ -59,6 +59,9 @@ class ExecutionVertex:
         self.output_edges: List[ExecutionEdge] = []
         self.worker = None
         self.worker_node_info = None
+
+    def __repr__(self):
+        return f'{self.execution_vertex_id}, {self.job_vertex.stream_operator.__class__.__name__}'
 
     def _gen_id(self) -> str:
         return f'{self.job_vertex.vertex_id}_{self.execution_vertex_index}'

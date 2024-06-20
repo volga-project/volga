@@ -7,7 +7,7 @@ import ray
 from ray.actor import ActorHandle
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
-from volga.streaming.runtime.transfer.channel import LocalChannel, RemoteChannel, gen_ipc_addr
+from volga.streaming.runtime.network.channel import LocalChannel, RemoteChannel, gen_ipc_addr
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
 VALID_PORT_RANGE = (30000, 65000)
@@ -137,16 +137,19 @@ class WorkerLifecycleController:
         workers = [v.worker for v in vertices]
 
         # wait for actors to properly close
-        timeout=5
+        timeout = 5
+        refs = [w.close.remote() for w in workers]
         closed_finished_refs, closed_pending_refs = ray.wait(
-            [w.close.remote() for w in workers],
+            refs,
             timeout=timeout,
             num_returns=len(workers)
         )
         if len(closed_finished_refs) == len(workers):
             logger.info('All workers closed gracefully')
         else:
-            logger.info(f'Timeout ({timeout}s) waiting for actors to close gracefully, {len(closed_pending_refs)} not ready')
+            pending_vertex_indices = [i for i in range(len(refs)) if refs[i] in closed_pending_refs]
+            pending_vertices = [vertices[i] for i in pending_vertex_indices]
+            logger.info(f'Timeout ({timeout}s) waiting for actors to close gracefully, {len(closed_pending_refs)} not ready: {pending_vertices}')
 
         for w in workers:
             w.exit.remote()

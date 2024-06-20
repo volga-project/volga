@@ -1,3 +1,4 @@
+import asyncio
 import time
 from collections import deque
 from threading import Thread
@@ -6,35 +7,35 @@ import simplejson
 from typing import List, Dict
 
 import zmq
-from zmq import MessageTracker
 
 from volga.streaming.api.message.message import Record
-from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage, LocalChannel, RemoteChannel
 
+import zmq.asyncio as zmq_async
 
-from volga.streaming.runtime.transfer.buffer import get_buffer_id, Buffer, BufferCreator, AckMessageBatch
-from volga.streaming.runtime.transfer.buffer_pool import BufferPool
-from volga.streaming.runtime.transfer.experimental.threaded import DataHandlerBase
+from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, Buffer, BufferCreator, AckMessage
+from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.experimental.asynch.async_data_handler_base import AsyncDataHandlerBase
+from volga.streaming.runtime.network.experimental.channel import BiChannel, RemoteBiChannel, LocalBiChannel
 
 # max number of futures per channel, makes sure we do not exhaust io loop
-MAX_IN_FLIGHT_PER_CHANNEL = 100000
+MAX_IN_FLIGHT_FUTURES_PER_CHANNEL = 100000
 
 # max number of not acked buffers, makes sure we do not schedule more if acks are not happening
-MAX_NACKED_PER_CHANNEL = 100000
+MAX_IN_FLIGHT_NACKED_PER_CHANNEL = 100000
 
 # how long we wait for a message to be sent before assuming it is inactive (so we stop scheduling more on this channel)
-IN_FLIGHT_TIMEOUT_S = 1
+SCHEDULED_BLOCK_TIMEOUT_S = 1
 
 
-class DataWriterV2(DataHandlerBase):
+class DataWriterV2Async(AsyncDataHandlerBase):
 
     def __init__(
         self,
         name: str,
         source_stream_name: str,
-        channels: List[Channel],
+        channels: List[BiChannel],
         node_id: str,
-        zmq_ctx: zmq.Context,
+        zmq_ctx: zmq_async.Context,
     ):
         super().__init__(
             name=name,
@@ -49,10 +50,10 @@ class DataWriterV2(DataHandlerBase):
         self._buffer_creator = BufferCreator(self._channels, self._buffer_queues)
         self._buffer_pool = BufferPool.instance(node_id=node_id)
 
-        self._in_flight = {c.channel_id: {} for c in self._channels}
-        self._nacked = {c.channel_id: {} for c in self._channels}
+        self._flusher_thread = Thread(target=self._flusher_loop)
 
-        self._cleaner_thread = Thread(target=self._cleaner_loop)
+        self._in_flight_scheduled = {c.channel_id: {} for c in self._channels}
+        self._in_flight_nacked = {c.channel_id: {} for c in self._channels}
 
     def _init_send_sockets(self):
         for channel in self._channels:
@@ -62,13 +63,9 @@ class DataWriterV2(DataHandlerBase):
             # TODO set HWM
             send_socket = self._zmq_ctx.socket(zmq.PUSH)
             send_socket.setsockopt(zmq.LINGER, 0)
-            send_socket.setsockopt(zmq.SNDHWM, 10000)
-            send_socket.setsockopt(zmq.RCVHWM, 10000)
-            send_socket.setsockopt(zmq.SNDBUF, 2000 * 1024)
-            send_socket.setsockopt(zmq.RCVBUF, 2000 * 1024)
-            if isinstance(channel, LocalChannel):
+            if isinstance(channel, LocalBiChannel):
                 send_socket.bind(channel.ipc_addr_out)
-            elif isinstance(channel, RemoteChannel):
+            elif isinstance(channel, RemoteBiChannel):
                 raise ValueError('RemoteChannel not supported yet')
             else:
                 raise ValueError('Unknown channel type')
@@ -82,13 +79,9 @@ class DataWriterV2(DataHandlerBase):
             # TODO set HWM
             rcv_socket = self._zmq_ctx.socket(zmq.PULL)
             rcv_socket.setsockopt(zmq.LINGER, 0)
-            rcv_socket.setsockopt(zmq.SNDHWM, 10000)
-            rcv_socket.setsockopt(zmq.RCVHWM, 10000)
-            rcv_socket.setsockopt(zmq.SNDBUF, 2000 * 1024)
-            rcv_socket.setsockopt(zmq.RCVBUF, 2000 * 1024)
-            if isinstance(channel, LocalChannel):
+            if isinstance(channel, LocalBiChannel):
                 rcv_socket.connect(channel.ipc_addr_in)
-            elif isinstance(channel, RemoteChannel):
+            elif isinstance(channel, RemoteBiChannel):
                 raise ValueError('RemoteChannel not supported yet')
             else:
                 raise ValueError('Unknown channel type')
@@ -101,7 +94,7 @@ class DataWriterV2(DataHandlerBase):
         message = record.to_channel_message()
         self._write_message(channel_id, message)
 
-    def _write_message(self, channel_id: str, message: ChannelMessage):
+    def _write_message(self, channel_id: str, message: 'ChannelMessage'):
         if not self.running:
             raise RuntimeError('Can not write a message while writer is not running!')
         # TODO serialization perf
@@ -119,8 +112,8 @@ class DataWriterV2(DataHandlerBase):
             # TODO indicate buffer pool backpressure
             print('buffer backpressure')
 
-    def _send_loop(self):
-        print('sender started')
+    def _flusher_loop(self):
+        print('flusher started')
         # we continuously flush all queues based on configured behaviour
         # (fixed interval, on each new message, on each new buffer)
 
@@ -128,95 +121,76 @@ class DataWriterV2(DataHandlerBase):
         while self.running:
             for channel_id in self._buffer_queues:
                 buffer_queue = self._buffer_queues[channel_id]
-                in_flight = self._in_flight[channel_id]
-                nacked = self._nacked[channel_id]
+                in_flight_scheduled = self._in_flight_scheduled[channel_id]
+                in_flight_nacked = self._in_flight_nacked[channel_id]
                 if channel_id not in self._send_sockets:
                     continue # not inited yet
 
                 while len(buffer_queue) != 0:
                     # check if we have appropriate in_flight data size, send if ok
-                    if len(in_flight) > MAX_IN_FLIGHT_PER_CHANNEL:
-                        print(f'MAX_IN_FLIGHT_PER_CHANNEL {len(in_flight)}')
+                    if len(in_flight_scheduled) > MAX_IN_FLIGHT_FUTURES_PER_CHANNEL:
+                        print(f'MAX_IN_FLIGHT_FUTURES_PER_CHANNEL {len(in_flight_scheduled)}')
                         break
-                    if len(nacked) > MAX_NACKED_PER_CHANNEL:
-                        print(f'MAX_NACKED_PER_CHANNEL {len(nacked)}')
+                    if len(in_flight_nacked) > MAX_IN_FLIGHT_NACKED_PER_CHANNEL:
+                        print(f'MAX_IN_FLIGHT_NACKED_PER_CHANNEL {len(in_flight_nacked)}')
                         break
 
                     # check if previously scheduled (very first) send is timing out
-                    if len(in_flight) > 0 and \
-                            list(in_flight.values())[0][1] - time.time() > IN_FLIGHT_TIMEOUT_S:
+                    if len(in_flight_scheduled) > 0 and \
+                            list(in_flight_scheduled.values())[0][1] - time.time() > SCHEDULED_BLOCK_TIMEOUT_S:
                         print('in_flight timeout')
                         break
 
                     buffer = buffer_queue.pop()
-                    self._send(channel_id, buffer)
+                    bid = get_buffer_id(buffer)
+                    if bid in in_flight_scheduled:
+                        raise RuntimeError('duplicate bid scheduled')
+                    fut = asyncio.run_coroutine_threadsafe(self._send(channel_id, buffer), self._sender_event_loop)
+                    in_flight_scheduled[bid] = (fut, time.time())
                     # print('poped and scheded')
 
-        print(f'sender finished, running: {self.running}')
+        print(f'flusher finished, running: {self.running}')
 
-    def _send(self, channel_id: str, buffer: Buffer):
+    async def _send(self, channel_id: str, buffer: Buffer):
         buffer_id = get_buffer_id(buffer)
-        if buffer_id in self._nacked[channel_id]:
-            raise RuntimeError('duplicate buffer_id scheduled')
         socket = self._send_sockets[channel_id]
         # TODO handle exceptions on send
         t = time.time()
-        # TODO handle exceptions, EAGAIN, etc.
-        # tracker = socket.send(buffer, copy=False, track=True)
-        tracker = []
-        socket.send(buffer)
-
+        await socket.send(buffer, zmq.NOBLOCK)
         print(f'Sent {buffer_id}, lat: {time.time() - t}')
-        self._in_flight[channel_id][buffer_id] = (tracker, time.time())
-        self._nacked[channel_id][buffer_id] = (time.time(), buffer)
+        # move from scheduled to nacked
+        del self._in_flight_scheduled[channel_id][buffer_id]
+        self._in_flight_nacked[channel_id][buffer_id] = (time.time(), buffer)
 
-    # def _start_receiver_loop(self):
-    #     pass
-
-    def _receive_loop(self):
+    async def _receive_loop(self):
         while self.running:
-            socks_and_masks = self._rcv_poller.poll()
-            # TODO limit number of pending reads tasks
+            socks_and_masks = await self._rcv_poller.poll()
+            # TODO limit number of pending io tasks
             for (rcv_sock, _) in socks_and_masks:
-                self._handle_ack(rcv_sock)
+                asyncio.create_task(self._handle_ack(rcv_sock))
 
-    def _handle_ack(self, rcv_sock: zmq.Socket):
+    async def _handle_ack(self, rcv_sock: zmq_async.Socket):
         t = time.time()
+        msg_raw = await rcv_sock.recv_string(zmq.NOBLOCK)
+        ack_msg = AckMessage.de(msg_raw)
+        print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
+        if ack_msg.channel_id in self._in_flight_nacked and ack_msg.buffer_id in self._in_flight_nacked[ack_msg.channel_id]:
+            # TODO update buff/msg send metric
+            # perform ack
+            _, buffer = self._in_flight_nacked[ack_msg.channel_id][ack_msg.buffer_id]
+            del self._in_flight_nacked[ack_msg.channel_id][ack_msg.buffer_id]
+            # release buffer
+            self._buffer_pool.release(len(buffer))
 
-        # TODO handle exceptions, EAGAIN, etc.
-        # msg_raw = rcv_sock.recv_string(zmq.NOBLOCK)
-        msg_raw_bytes = rcv_sock.recv()
-        ack_msg_batch = AckMessageBatch.de(msg_raw_bytes.decode())
-        for ack_msg in ack_msg_batch.acks:
-            print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
-            if ack_msg.channel_id in self._nacked and ack_msg.buffer_id in self._nacked[ack_msg.channel_id]:
-                # TODO update buff/msg send metric
-                # perform ack
-                _, buffer = self._nacked[ack_msg.channel_id][ack_msg.buffer_id]
-                del self._nacked[ack_msg.channel_id][ack_msg.buffer_id]
-                # release buffer
-                self._buffer_pool.release(len(buffer))
-
-    def _cleaner_loop(self):
-        while self.running:
-            for channel_id in self._in_flight:
-                to_del = []
-                for buffer_id in self._in_flight[channel_id].keys():
-                    tracker, scheduled_at = self._in_flight[channel_id][buffer_id]
-                    assert isinstance(tracker, MessageTracker)
-                    if tracker.done:
-                        to_del.append(buffer_id)
-                    else:
-                        pass
-                        # TODO track timeout, backpressure writes ? Or is it already done in sender loop?
-                for buffer_id in to_del:
-                    del self._in_flight[channel_id][buffer_id]
 
     def start(self):
         super().start()
-        # self._cleaner_thread.start()
+        # TODO wait for event loop to be set
+        time.sleep(0.01)
+        asyncio.run_coroutine_threadsafe(self._receive_loop(), self._receiver_event_loop)
+        self._flusher_thread.start()
 
     def close(self):
+        # TODO cancel all in-flight tasks
         super().close()
-        # TODO cancel or wait all in-flight msgs?
-        self._cleaner_thread.join(timeout=5)
+        self._flusher_thread.join(timeout=5)

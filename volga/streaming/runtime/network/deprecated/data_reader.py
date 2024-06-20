@@ -1,9 +1,9 @@
 import logging
 from typing import List, Optional
 
-from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage, RemoteChannel
-from volga.streaming.runtime.transfer.deprecated.channel import Channel_DEP
-from volga.streaming.runtime.transfer.deprecated.data_writer import TransportType
+from volga.streaming.runtime.network.channel import Channel, ChannelMessage, RemoteChannel
+from volga.streaming.runtime.network.deprecated.channel import Channel_DEP
+from volga.streaming.runtime.network.deprecated.data_writer import TransportType
 
 import zmq
 import simplejson

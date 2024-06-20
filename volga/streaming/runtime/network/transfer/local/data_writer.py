@@ -7,14 +7,16 @@ from typing import List, Dict, Optional
 import zmq
 
 from volga.streaming.api.message.message import Record
-from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
+from volga.streaming.runtime.network.transfer.io_loop import Direction
+from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
-from volga.streaming.runtime.transfer.buffer import get_buffer_id, BufferCreator, AckMessageBatch
-from volga.streaming.runtime.transfer.buffer_pool import BufferPool
-from volga.streaming.runtime.transfer.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
-from volga.streaming.runtime.transfer.data_handler_base import DataHandlerBase
+from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, BufferCreator, AckMessageBatch
+from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
+from volga.streaming.runtime.network.transfer.local.local_data_handler import LocalDataHandler
 
-class DataWriter(DataHandlerBase):
+
+class DataWriter(LocalDataHandler):
 
     class _Stats:
         def __init__(self, channels: List[Channel]):
@@ -50,7 +52,7 @@ class DataWriter(DataHandlerBase):
             channels=channels,
             node_id=node_id,
             zmq_ctx=zmq_ctx,
-            is_reader=False,
+            direction=Direction.SENDER,
             network_config=network_config
         )
 
@@ -73,10 +75,10 @@ class DataWriter(DataHandlerBase):
         # block until starts running
         timeout_s = 5
         t = time.time()
-        while not self.running and time.time() - t < timeout_s:
+        while not self.is_running() and time.time() - t < timeout_s:
             time.sleep(0.01)
-        if not self.running:
-            raise RuntimeError(f'DataWriter did not start after {timeout_s}s, {message}')
+        if not self.is_running():
+            raise RuntimeError(f'DataWriter did not start after {timeout_s}s')
 
         # TODO serialization perf
         json_str = simplejson.dumps(message)
@@ -93,7 +95,8 @@ class DataWriter(DataHandlerBase):
             # TODO indicate buffer pool backpressure
             print('buffer backpressure')
 
-    def _send(self, channel_id: str, socket: zmq.Socket):
+    def send(self, socket: zmq.Socket):
+        channel_id = self._socket_to_ch[socket]
         buffer_queue = self._buffer_queues[channel_id]
         if len(buffer_queue) == 0:
             return
@@ -107,17 +110,18 @@ class DataWriter(DataHandlerBase):
         # TODO use noblock, handle exceptions
         socket.send(buffer)
         self.stats.inc_msgs_sent(channel_id)
-        print(f'Sent {buffer_id}, lat: {time.time() - t}')
+        # print(f'Sent {buffer_id}, lat: {time.time() - t}')
         self._nacked[channel_id][buffer_id] = (time.time(), buffer)
 
-    def _rcv(self, channel_id: str, socket: zmq.Socket):
+    def rcv(self, socket: zmq.Socket):
+        channel_id = self._socket_to_ch[socket]
         t = time.time()
 
         # TODO use NOBLOCK handle exceptions, EAGAIN, etc.
         msg_raw_bytes = socket.recv()
         ack_msg_batch = AckMessageBatch.de(msg_raw_bytes.decode())
         for ack_msg in ack_msg_batch.acks:
-            print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
+            # print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
             if channel_id in self._nacked and ack_msg.buffer_id in self._nacked[channel_id]:
                 self.stats.inc_acks_rcvd(channel_id)
                 # TODO update buff/msg send metric

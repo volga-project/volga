@@ -4,8 +4,8 @@ from typing import List, Dict, Tuple
 import simplejson
 from pydantic import BaseModel
 
-from volga.streaming.runtime.transfer.channel import Channel
-from volga.streaming.runtime.transfer.utils import str_to_bytes, int_to_bytes, bytes_to_int, bytes_to_str
+from volga.streaming.runtime.network.channel import Channel
+from volga.streaming.runtime.network.utils import str_to_bytes, int_to_bytes, bytes_to_int, bytes_to_str
 
 Buffer = bytes
 # Buffer schema

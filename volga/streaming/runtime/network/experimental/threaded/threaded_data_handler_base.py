@@ -4,10 +4,10 @@ from typing import List, Dict
 
 import zmq
 
-from volga.streaming.runtime.transfer.channel import Channel
+from volga.streaming.runtime.network.channel import Channel
 import zmq.asyncio as zmq_async
 
-from volga.streaming.runtime.transfer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
 
 
 # Bi-directional connection data handler, sends and receives messages, acts as a base for DataReader/DataWriter

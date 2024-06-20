@@ -5,7 +5,7 @@ from typing import List, Dict
 import zmq.asyncio as zmq_async
 import zmq
 
-from volga.streaming.runtime.transfer.experimental.channel import RemoteBiChannel
+from volga.streaming.runtime.network.experimental.channel import RemoteBiChannel
 
 
 # router dealer

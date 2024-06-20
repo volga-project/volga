@@ -4,7 +4,7 @@ from typing import List, Dict
 import zmq.asyncio as zmq_async
 import zmq
 
-from volga.streaming.runtime.transfer.experimental.channel import RemoteBiChannel
+from volga.streaming.runtime.network.experimental.channel import RemoteBiChannel
 
 
 # https://stackoverflow.com/questions/64201043/why-does-pyzmq-subscriber-behave-differently-with-asyncio
