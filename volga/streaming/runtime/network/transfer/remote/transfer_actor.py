@@ -18,7 +18,6 @@ class TransferActor:
         in_channels: Optional[List[RemoteChannel]],
         out_channels: Optional[List[RemoteChannel]],
         network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
-
     ):
         if in_channels is None and out_channels is None:
             raise ValueError('Transfer actor should have at least one of in_channels or out_channels')

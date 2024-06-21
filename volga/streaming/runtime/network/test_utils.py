@@ -9,6 +9,19 @@ from volga.streaming.runtime.network.transfer.local.data_reader import DataReade
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 import ray
 
+import volga
+
+REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
+    'pip': [
+        'pydantic==1.10.13',
+        'simplejson==3.19.2',
+        'pyzmq==23.2.0',
+        'shared-memory-dict==0.7.2',
+        'lockit==1.0.1',
+        'aenum'
+    ],
+    'py_modules': [volga]
+}
 
 @ray.remote
 class TestWriter:
@@ -64,7 +77,7 @@ class TestReader:
         t = time.time()
         res = []
         while True:
-            if time.time() - t > 10:
+            if time.time() - t > 1000:
                 raise RuntimeError('Timeout reading data')
 
             item = self.data_reader.read_message()

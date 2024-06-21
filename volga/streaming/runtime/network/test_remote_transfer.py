@@ -1,44 +1,98 @@
 import functools
+import random
 import time
 import unittest
 from threading import Thread
+from typing import Optional, Any
 
 import ray
 import zmq
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.stats import StatsEvent
-from volga.streaming.runtime.network.test_utils import write, read, TestReader, TestWriter
+from volga.streaming.runtime.network.test_utils import write, read, TestReader, TestWriter, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop, Direction
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 from volga.streaming.runtime.network.transfer.remote.remote_transfer_handler import RemoteTransferHandler
 from volga.streaming.runtime.network.transfer.remote.transfer_actor import TransferActor
 
+import ray.util.state as ray_state
+
 
 class TestRemoteTransfer(unittest.TestCase):
 
-    def test_one_to_one_on_ray(self):
+    def test_one_to_one_on_ray(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
         num_items = 1000
         to_send = [{'i': i} for i in range(num_items)]
 
-        source_node_id = 'node_1'
-        target_node_id = 'node_2'
-        channel = RemoteChannel(
-            channel_id='ch_0',
-            source_local_ipc_addr='ipc:///tmp/source_local',
-            source_node_ip='127.0.0.1',
-            source_node_id=source_node_id,
-            target_local_ipc_addr='ipc:///tmp/target_local',
-            target_node_ip='127.0.0.1',
-            target_node_id=target_node_id,
-            port=1234
-        )
-        ray.init()
-        reader = TestReader.remote(channel, num_items)
-        writer = TestWriter.remote(channel)
-        source_transfer_actor = TransferActor.remote(None, [channel])
-        target_transfer_actor = TransferActor.remote([channel], None)
+        ray.init(address=ray_addr, runtime_env=runtime_env)
+        channel_id = 'ch_0'
+        if multinode:
+            all_nodes = ray_state.list_nodes()
+            no_head = list(filter(lambda n: not n.is_head_node, all_nodes))
+            if len(no_head) < 2:
+                raise RuntimeError(f'Not enough non-head nodes in the cluster: {len(no_head)}')
+            two_nodes = random.sample(no_head, 2)
+            source_node, target_node = two_nodes[0], two_nodes[1]
+            source_node_id = source_node.node_id
+            target_node_id = target_node.node_id
+            channel = RemoteChannel(
+                channel_id=channel_id,
+                source_local_ipc_addr='ipc:///tmp/source_local',
+                source_node_ip=source_node.node_ip,
+                source_node_id=source_node_id,
+                target_local_ipc_addr='ipc:///tmp/target_local',
+                target_node_ip=target_node.node_ip,
+                target_node_id=target_node_id,
+                port=1234
+            )
+            # schedule on source node
+            writer = TestWriter.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=source_node_id,
+                    soft=False
+                )
+            ).remote(channel)
+            source_transfer_actor = TransferActor.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=source_node_id,
+                    soft=False
+                )
+            ).remote(None, [channel])
+
+            # schedule on target node
+            reader = TestReader.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=target_node_id,
+                    soft=False
+                )
+            ).remote(channel, num_items)
+            target_transfer_actor = TransferActor.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(
+                    node_id=target_node_id,
+                    soft=False
+                )
+            ).remote([channel], None)
+        else:
+            source_node_id = 'node_1'
+            target_node_id = 'node_2'
+            channel = RemoteChannel(
+                channel_id=channel_id,
+                source_local_ipc_addr='ipc:///tmp/source_local',
+                source_node_ip='127.0.0.1',
+                source_node_id=source_node_id,
+                target_local_ipc_addr='ipc:///tmp/target_local',
+                target_node_ip='127.0.0.1',
+                target_node_id=target_node_id,
+                port=1234
+            )
+            reader = TestReader.remote(channel, num_items)
+            writer = TestWriter.remote(channel)
+            source_transfer_actor = TransferActor.remote(None, [channel])
+            target_transfer_actor = TransferActor.remote([channel], None)
+
         source_transfer_actor.start.remote()
         target_transfer_actor.start.remote()
 
@@ -65,7 +119,6 @@ class TestRemoteTransfer(unittest.TestCase):
         print('assert ok')
 
         ray.shutdown()
-
 
     def test_one_to_one_locally(self):
         num_items = 1000
@@ -146,4 +199,5 @@ class TestRemoteTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_one_to_one_locally()
-    t.test_one_to_one_on_ray()
+    # t.test_one_to_one_on_ray()
+    t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)

@@ -2,14 +2,14 @@ import functools
 import time
 import unittest
 from threading import Thread
-from typing import List, Dict, Any
+from typing import Optional, Any
 
 import ray
 import zmq
 
-from volga.streaming.runtime.network.channel import Channel, LocalChannel
+from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
-from volga.streaming.runtime.network.test_utils import TestReader, TestWriter, write, read
+from volga.streaming.runtime.network.test_utils import TestReader, TestWriter, write, read, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
@@ -17,12 +17,12 @@ from volga.streaming.runtime.network.transfer.local.data_writer import DataWrite
 
 class TestLocalTransfer(unittest.TestCase):
 
-    def test_one_to_one_on_ray(self):
+    def test_one_to_one_on_ray(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None):
         channel = LocalChannel(
             channel_id='1',
             ipc_addr='ipc:///tmp/zmqtest',
         )
-        ray.init()
+        ray.init(address=ray_addr, runtime_env=runtime_env)
         num_items = 1000
         to_send = [{'i': i} for i in range(num_items)]
 
@@ -90,6 +90,7 @@ class TestLocalTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    t.test_one_to_one_locally()
-    t.test_one_to_one_on_ray()
+    # t.test_one_to_one_locally()
+    # t.test_one_to_one_on_ray()
+    t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
 
