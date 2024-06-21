@@ -172,7 +172,7 @@ class DataWriterV2Async(AsyncDataHandlerBase):
     async def _handle_ack(self, rcv_sock: zmq_async.Socket):
         t = time.time()
         msg_raw = await rcv_sock.recv_string(zmq.NOBLOCK)
-        ack_msg = AckMessage.de(msg_raw)
+        ack_msg = AckMessage(**simplejson.loads(msg_raw))
         print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
         if ack_msg.channel_id in self._in_flight_nacked and ack_msg.buffer_id in self._in_flight_nacked[ack_msg.channel_id]:
             # TODO update buff/msg send metric

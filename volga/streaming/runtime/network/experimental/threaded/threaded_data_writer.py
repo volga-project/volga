@@ -12,9 +12,9 @@ from volga.streaming.api.message.message import Record
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage, LocalChannel, RemoteChannel
 
 
-from volga.streaming.runtime.network.buffer import get_buffer_id, Buffer, BufferCreator, AckMessageBatch
+from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, Buffer, BufferCreator, AckMessageBatch
 from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
-from volga.streaming.runtime.network.experimental.threaded import DataHandlerBase
+from volga.streaming.runtime.network.experimental.threaded.threaded_data_handler_base import DataHandlerBase
 
 # max number of futures per channel, makes sure we do not exhaust io loop
 MAX_IN_FLIGHT_PER_CHANNEL = 100000
@@ -186,7 +186,7 @@ class DataWriterV2(DataHandlerBase):
         # TODO handle exceptions, EAGAIN, etc.
         # msg_raw = rcv_sock.recv_string(zmq.NOBLOCK)
         msg_raw_bytes = rcv_sock.recv()
-        ack_msg_batch = AckMessageBatch.de(msg_raw_bytes.decode())
+        ack_msg_batch = AckMessageBatch.de(msg_raw_bytes)
         for ack_msg in ack_msg_batch.acks:
             print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
             if ack_msg.channel_id in self._nacked and ack_msg.buffer_id in self._nacked[ack_msg.channel_id]:

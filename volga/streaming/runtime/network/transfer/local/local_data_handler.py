@@ -6,7 +6,6 @@ from typing import List, Dict
 
 import zmq
 
-from volga.streaming.runtime.network.transfer.bidir_handler_base import BidirHandlerBase
 from volga.streaming.runtime.network.channel import Channel, LocalChannel, RemoteChannel, ipc_path_from_addr
 import zmq.asyncio as zmq_async
 
@@ -58,7 +57,10 @@ class LocalDataHandler(IOHandler, ABC):
                 ipc_path = ipc_path_from_addr(channel.ipc_addr)
                 os.makedirs(ipc_path, exist_ok=True)
             elif isinstance(channel, RemoteChannel):
-                raise ValueError('RemoteChannel not supported yet')
+                ipc_path = ipc_path_from_addr(
+                    channel.target_local_ipc_addr if self._is_reader else channel.source_local_ipc_addr
+                )
+                os.makedirs(ipc_path, exist_ok=True)
 
             # configure
             zmq_config = self._network_config.zmq
@@ -66,12 +68,18 @@ class LocalDataHandler(IOHandler, ABC):
                 configure_socket(socket, zmq_config)
 
             if isinstance(channel, LocalChannel):
+                # connects to another local DataReader/DataWriter instance
                 if self._is_reader:
                     socket.connect(channel.ipc_addr)
                 else:
                     socket.bind(channel.ipc_addr)
             elif isinstance(channel, RemoteChannel):
-                raise ValueError('RemoteChannel not supported yet')
+                if self._is_reader:
+                    # connects to receiver RemoteTransferHandler
+                    socket.connect(channel.target_local_ipc_addr)
+                else:
+                    # connects to sender RemoteTransferHandler
+                    socket.bind(channel.source_local_ipc_addr)
             else:
                 raise ValueError('Unknown channel type')
             self._ch_to_socket[channel.channel_id] = socket

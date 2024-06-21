@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 import zmq
 
 from volga.streaming.api.message.message import Record
+from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
@@ -17,26 +18,6 @@ from volga.streaming.runtime.network.transfer.local.local_data_handler import Lo
 
 
 class DataWriter(LocalDataHandler):
-
-    class _Stats:
-        def __init__(self, channels: List[Channel]):
-            self.msgs_sent = {c.channel_id: 0 for c in channels}
-            self.acks_rcvd = {c.channel_id: 0 for c in channels}
-
-        def inc_msgs_sent(self, channel_id: str, num: Optional[int] = None):
-            if num is None:
-                self.msgs_sent[channel_id] += 1
-            else:
-                self.msgs_sent[channel_id] += num
-
-        def inc_acks_rcvd(self, channel_id: str, num: Optional[int] = None):
-            if num is None:
-                self.acks_rcvd[channel_id] += 1
-            else:
-                self.acks_rcvd[channel_id] += num
-
-        def __repr__(self):
-            return str(self.__dict__)
 
     def __init__(
         self,
@@ -56,7 +37,7 @@ class DataWriter(LocalDataHandler):
             network_config=network_config
         )
 
-        self.stats = DataWriter._Stats(channels)
+        self.stats = Stats()
         self._source_stream_name = source_stream_name
 
         self._buffer_queues: Dict[str, deque] = {c.channel_id: deque() for c in self._channels}
@@ -109,7 +90,7 @@ class DataWriter(LocalDataHandler):
 
         # TODO use noblock, handle exceptions
         socket.send(buffer)
-        self.stats.inc_msgs_sent(channel_id)
+        self.stats.inc(StatsEvent.MSG_SENT, channel_id)
         # print(f'Sent {buffer_id}, lat: {time.time() - t}')
         self._nacked[channel_id][buffer_id] = (time.time(), buffer)
 
@@ -119,11 +100,11 @@ class DataWriter(LocalDataHandler):
 
         # TODO use NOBLOCK handle exceptions, EAGAIN, etc.
         msg_raw_bytes = socket.recv()
-        ack_msg_batch = AckMessageBatch.de(msg_raw_bytes.decode())
+        ack_msg_batch = AckMessageBatch.de(msg_raw_bytes)
         for ack_msg in ack_msg_batch.acks:
             # print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
             if channel_id in self._nacked and ack_msg.buffer_id in self._nacked[channel_id]:
-                self.stats.inc_acks_rcvd(channel_id)
+                self.stats.inc(StatsEvent.ACK_RCVD, channel_id)
                 # TODO update buff/msg send metric
                 # perform ack
                 _, buffer = self._nacked[channel_id][ack_msg.buffer_id]

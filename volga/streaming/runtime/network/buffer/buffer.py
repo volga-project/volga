@@ -23,25 +23,27 @@ DEFAULT_BUFFER_SIZE = 32 * 1024
 
 class AckMessage(BaseModel):
     buffer_id: int
-    channel_id: str
-
-    @staticmethod
-    def de(raw: str) -> 'AckMessage':
-        return AckMessage(**simplejson.loads(raw))
-
-    def ser(self) -> str:
-        return simplejson.dumps(self.dict())
 
 
 class AckMessageBatch(BaseModel):
+    channel_id: str
     acks: List[AckMessage]
 
     @staticmethod
-    def de(raw: str) -> 'AckMessageBatch':
-        return AckMessageBatch(**simplejson.loads(raw))
+    def de(raw: bytes) -> 'AckMessageBatch':
+        # remove channel_id header
+        payload = bytearray(raw)[CHANNEL_ID_HEADER_LENGTH:]
+        return AckMessageBatch(**simplejson.loads(payload.decode()))
 
-    def ser(self) -> str:
-        return simplejson.dumps(self.dict())
+    def ser(self) -> bytes:
+
+        str = simplejson.dumps(self.dict())
+        data = str.encode('utf-8')
+
+        # append channel_id header
+        channel_id_bytes = str_to_bytes(self.channel_id, pad_to_size=CHANNEL_ID_HEADER_LENGTH)
+
+        return channel_id_bytes + data
 
 
 class BufferCreator:

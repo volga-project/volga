@@ -5,6 +5,7 @@ from typing import List, Optional
 
 import zmq
 
+from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
@@ -20,25 +21,6 @@ logger = logging.getLogger("ray")
 
 class DataReader(LocalDataHandler):
 
-    class _Stats:
-        def __init__(self, channels: List[Channel]):
-            self.msgs_rcvd = {c.channel_id: 0 for c in channels}
-            self.acks_sent = {c.channel_id: 0 for c in channels}
-
-        def inc_msgs_rcvd(self, channel_id: str, num: Optional[int] = None):
-            if num is None:
-                self.msgs_rcvd[channel_id] += 1
-            else:
-                self.msgs_rcvd[channel_id] += num
-
-        def inc_acks_sent(self, channel_id: str, num: Optional[int] = None):
-            if num is None:
-                self.acks_sent[channel_id] += 1
-            else:
-                self.acks_sent[channel_id] += num
-
-        def __repr__(self):
-            return str(self.__dict__)
 
     def __init__(
         self,
@@ -57,7 +39,7 @@ class DataReader(LocalDataHandler):
             network_config=network_config
         )
 
-        self.stats = DataReader._Stats(channels)
+        self.stats = Stats()
 
         self._buffer_queue = deque()
         self._acks_queues = {c.channel_id: deque() for c in self._channels}
@@ -83,14 +65,14 @@ class DataReader(LocalDataHandler):
         while len(ack_queue) != 0:
             ack_msg = ack_queue.pop()
             acks.append(ack_msg)
-        ack_msg_batch = AckMessageBatch(acks=acks)
-        data = ack_msg_batch.ser().encode()
+        ack_msg_batch = AckMessageBatch(channel_id=channel_id, acks=acks)
+        b = ack_msg_batch.ser()
         t = time.time()
 
-        # TODO handle exceptions, EAGAIN, etc., retries
+        # TODO NOBLOCK, handle exceptions, EAGAIN, etc., retries
         # send_socket.send_string(data, zmq.NOBLOCK)
-        socket.send(data)
-        self.stats.inc_acks_sent(channel_id, len(ack_msg_batch.acks))
+        socket.send(b)
+        self.stats.inc(StatsEvent.ACK_SENT, channel_id, len(ack_msg_batch.acks))
         # for ack_msg in ack_msg_batch.acks:
         #     print(f'sent ack {ack_msg.buffer_id}, lat: {time.time() - t}')
 
@@ -100,7 +82,7 @@ class DataReader(LocalDataHandler):
 
         # TODO NOBLOCK, exceptions, eagain etc.
         buffer = socket.recv()
-        self.stats.inc_msgs_rcvd(channel_id)
+        self.stats.inc(StatsEvent.MSG_RCVD, channel_id)
         # print(f'Rcvd {get_buffer_id(buffer)}, lat: {time.time() - t}')
         # TODO check if buffer_id exists to avoid duplicates, re-send ack on duplicate
         # TODO acquire buffer pool
@@ -109,5 +91,5 @@ class DataReader(LocalDataHandler):
         # TODO keep track of a low watermark, schedule ack only if received buff_id is above
         # schedule ack message for sender
         buffer_id = get_buffer_id(buffer)
-        ack_msg = AckMessage(buffer_id=buffer_id, channel_id=channel_id)
+        ack_msg = AckMessage(buffer_id=buffer_id)
         self._acks_queues[channel_id].append(ack_msg)

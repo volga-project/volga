@@ -2,7 +2,7 @@ from typing import Optional
 
 import zmq
 
-from volga.streaming.runtime.network.config import NetworkConfig, ZMQConfig
+from volga.streaming.runtime.network.config import ZMQConfig
 
 
 def str_to_bytes(s: str, pad_to_size: Optional[int] = None) -> bytes:

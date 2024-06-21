@@ -1,8 +1,9 @@
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 ChannelMessage = Dict[str, Any]
 
 IPC_DIR = '/tmp/volga_ipc'
+
 
 class Channel:
     def __init__(
@@ -49,9 +50,13 @@ class RemoteChannel(Channel):
         self.port = port
 
 
-def gen_ipc_addr(job_name: str, channel_id: str) -> str:
+def gen_ipc_addr(job_name: str, channel_id: str, node_id: Optional[str] = None) -> str:
     path = f'ipc://{IPC_DIR}/{job_name}'
-    return f'{path}/ipc_{channel_id}'
+    if node_id is None:
+        return f'{path}/ipc_{channel_id}'
+    else:
+        return f'{path}/ipc_{channel_id}_{node_id}'
+
 
 def ipc_path_from_addr(ipc_addr: str) -> str:
     s = ipc_addr.split('/')

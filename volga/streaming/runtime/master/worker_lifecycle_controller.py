@@ -91,10 +91,10 @@ class WorkerLifecycleController:
                 )
                 channel = RemoteChannel(
                     channel_id=edge.id,
-                    source_local_ipc_addr=gen_ipc_addr(job_name=job_name, channel_id=edge.id),
+                    source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_worker_network_info.node_id),
                     source_node_ip=source_worker_network_info.node_ip,
                     source_node_id=source_worker_network_info.node_id,
-                    target_local_ipc_addr=gen_ipc_addr(job_name=job_name, channel_id=edge.id),
+                    target_local_ipc_addr=gen_ipc_addr(job_name, edge.id, target_worker_network_info.node_id),
                     target_node_ip=target_worker_network_info.node_ip,
                     target_node_id=target_worker_network_info.node_id,
                     port=port,

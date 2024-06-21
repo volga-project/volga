@@ -106,12 +106,12 @@ class DataReaderV2Async(AsyncDataHandlerBase):
 
     async def _send_ack(self, channel_id: str, buffer: Buffer):
         buffer_id = get_buffer_id(buffer)
-        ack_msg = AckMessage(buffer_id=buffer_id, channel_id=channel_id)
+        ack_msg = AckMessage(buffer_id=buffer_id)
         send_socket = self._send_sockets[channel_id]
 
         # TODO limit number of in-flights acks?
         # TODO handle exceptions? retries?
-        data = ack_msg.ser()
+        data = simplejson.dumps(ack_msg.dict())
         # print(data)
         # raise
         t = time.time()

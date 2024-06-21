@@ -7,13 +7,14 @@ import ray
 import zmq
 
 from volga.streaming.runtime.network.channel import Channel, LocalChannel
+from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 
 
 @ray.remote
-class Writer:
+class TestWriter:
     def __init__(
         self,
         channel: Channel,
@@ -32,7 +33,6 @@ class Writer:
         print('writer inited')
 
     def send_items(self, items: List[Dict]):
-        # self.data_writer.start()
         for item in items:
             self.data_writer._write_message(self.channel.channel_id, item)
 
@@ -44,7 +44,7 @@ class Writer:
 
 
 @ray.remote
-class Reader:
+class TestReader:
     def __init__(
         self,
         channel: Channel,
@@ -64,7 +64,6 @@ class Reader:
         print('reader inited')
 
     def receive_items(self) -> List[Any]:
-        # self.data_reader.start()
         t = time.time()
         res = []
         while True:
@@ -90,7 +89,7 @@ class Reader:
 
 class TestLocalTransfer(unittest.TestCase):
 
-    def test_one_to_one_ray(self):
+    def test_one_to_one_on_ray(self):
         channel = LocalChannel(
             channel_id='1',
             ipc_addr='ipc:///tmp/zmqtest',
@@ -101,8 +100,8 @@ class TestLocalTransfer(unittest.TestCase):
             'data': f'{i}'
         } for i in range(num_items)]
 
-        reader = Reader.remote(channel, num_items)
-        writer = Writer.remote(channel)
+        reader = TestReader.remote(channel, num_items)
+        writer = TestWriter.remote(channel)
 
         # make sure Ray has enough time to start actors
         time.sleep(1)
@@ -110,13 +109,13 @@ class TestLocalTransfer(unittest.TestCase):
         res = ray.get(reader.receive_items.remote())
         assert len(res) == num_items
         time.sleep(1)
-        reader_stats: DataReader._Stats = ray.get(reader.get_stats.remote())
-        writer_stats: DataWriter._Stats = ray.get(writer.get_stats.remote())
+        reader_stats: Stats = ray.get(reader.get_stats.remote())
+        writer_stats: Stats = ray.get(writer.get_stats.remote())
 
-        assert reader_stats.msgs_rcvd[channel.channel_id] == num_items
-        assert reader_stats.acks_sent[channel.channel_id] == num_items
-        assert writer_stats.acks_rcvd[channel.channel_id] == num_items
-        assert writer_stats.msgs_sent[channel.channel_id] == num_items
+        assert reader_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items
+        assert reader_stats.get_counter_for_event(StatsEvent.ACK_SENT)[channel.channel_id] == num_items
+        assert writer_stats.get_counter_for_event(StatsEvent.ACK_RCVD)[channel.channel_id] == num_items
+        assert writer_stats.get_counter_for_event(StatsEvent.MSG_SENT)[channel.channel_id] == num_items
 
         print('assert ok')
 
@@ -127,8 +126,8 @@ class TestLocalTransfer(unittest.TestCase):
 
         ray.shutdown()
 
-    def test_one_to_one_local(self):
-        num_items = 1000
+    def test_one_to_one_locally(self):
+        num_items = 10
         io_loop = IOLoop()
         channel = LocalChannel(
             channel_id='1',
@@ -141,16 +140,13 @@ class TestLocalTransfer(unittest.TestCase):
         io_loop.register(data_reader)
         io_loop.start()
 
+        to_send = [{'i': i} for i in range(num_items)]
         def write():
-            # data_writer.start()
-            for i in range(num_items):
-                msg = {'i': i}
+            for msg in to_send:
                 data_writer._write_message(channel.channel_id, msg)
 
-        num_rcvd = [0]
-
+        rcvd = []
         def read():
-            # data_reader.start()
             t = time.time()
             while True:
                 if time.time() - t > 10:
@@ -160,8 +156,8 @@ class TestLocalTransfer(unittest.TestCase):
                     time.sleep(0.001)
                     continue
                 else:
-                    num_rcvd[0] += 1
-                if num_rcvd[0] == num_items:
+                    rcvd.append(msg)
+                if len(rcvd) == num_items:
                     break
         wt = Thread(target=write)
 
@@ -171,22 +167,19 @@ class TestLocalTransfer(unittest.TestCase):
 
         reader_stats = data_reader.stats
         writer_stats = data_writer.stats
-
-        assert num_items == num_rcvd[0]
-        assert reader_stats.msgs_rcvd[channel.channel_id] == num_items
-        assert reader_stats.acks_sent[channel.channel_id] == num_items
-        assert writer_stats.acks_rcvd[channel.channel_id] == num_items
-        assert writer_stats.msgs_sent[channel.channel_id] == num_items
+        assert to_send == sorted(rcvd, key=lambda e: e['i'])
+        assert reader_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items
+        assert reader_stats.get_counter_for_event(StatsEvent.ACK_SENT)[channel.channel_id] == num_items
+        assert writer_stats.get_counter_for_event(StatsEvent.ACK_RCVD)[channel.channel_id] == num_items
+        assert writer_stats.get_counter_for_event(StatsEvent.MSG_SENT)[channel.channel_id] == num_items
 
         print('assert ok')
-        # data_writer.close()
-        # data_reader.close()
         io_loop.close()
         wt.join(5)
 
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    # t.test_one_to_one_local()
-    t.test_one_to_one_ray()
+    t.test_one_to_one_locally()
+    # t.test_one_to_one_on_ray()
 

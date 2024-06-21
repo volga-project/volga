@@ -9,8 +9,8 @@ from volga.streaming.runtime.network.channel import Channel, ChannelMessage, Loc
 
 import simplejson
 
-from volga.streaming.runtime.network.buffer import AckMessage, get_buffer_id, get_payload, AckMessageBatch
-from volga.streaming.runtime.network.experimental.threaded import DataHandlerBase
+from volga.streaming.runtime.network.buffer.buffer import AckMessage, get_buffer_id, get_payload, AckMessageBatch
+from volga.streaming.runtime.network.experimental.threaded.threaded_data_handler_base import DataHandlerBase
 from volga.streaming.runtime.network.utils import bytes_to_str
 
 logger = logging.getLogger("ray")
@@ -136,8 +136,7 @@ class DataReaderV2(DataHandlerBase):
     def _send_acks(self, channel_id: str, ack_msg_batch: AckMessageBatch):
         send_socket = self._send_sockets[channel_id]
         # TODO limit number of in-flights acks?
-        data = ack_msg_batch.ser()
-        bs = data.encode()
+        bs = ack_msg_batch.ser()
         t = time.time()
 
         # TODO handle exceptions, EAGAIN, etc., retries
