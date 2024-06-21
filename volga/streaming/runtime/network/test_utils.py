@@ -77,7 +77,7 @@ class TestReader:
         t = time.time()
         res = []
         while True:
-            if time.time() - t > 1000:
+            if time.time() - t > 10:
                 raise RuntimeError('Timeout reading data')
 
             item = self.data_reader.read_message()

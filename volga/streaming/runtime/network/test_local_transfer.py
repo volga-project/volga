@@ -90,7 +90,7 @@ class TestLocalTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    # t.test_one_to_one_locally()
+    t.test_one_to_one_locally()
     # t.test_one_to_one_on_ray()
-    t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
+    # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
 
