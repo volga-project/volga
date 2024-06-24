@@ -98,6 +98,8 @@ class DataWriter(LocalDataHandler):
         channel_id = self._socket_to_ch[socket]
         t = time.time()
 
+        # TODO handle nacks requests
+
         # TODO use NOBLOCK handle exceptions, EAGAIN, etc.
         msg_raw_bytes = socket.recv()
         ack_msg_batch = AckMessageBatch.de(msg_raw_bytes)

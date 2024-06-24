@@ -89,7 +89,7 @@ class RemoteTransferHandler(IOHandler):
                 remote_socket.connect(tcp_addr)
                 remote_socket_name = f'transfer_remote_sender_{channel.channel_id}'
             else:
-                tcp_addr = f'tcp://127.0.0.1:{channel.port}'
+                tcp_addr = f'tcp://0.0.0.0:{channel.port}'
                 remote_socket.bind(tcp_addr)
                 remote_socket_name = f'transfer_remote_receiver_{channel.channel_id}'
 
