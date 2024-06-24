@@ -6,6 +6,7 @@ from typing import Optional, Any
 
 import ray
 import zmq
+import random
 
 from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
@@ -13,6 +14,10 @@ from volga.streaming.runtime.network.test_utils import TestReader, TestWriter, w
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
+
+
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+import ray.util.state as ray_state
 
 
 class TestLocalTransfer(unittest.TestCase):
@@ -26,8 +31,28 @@ class TestLocalTransfer(unittest.TestCase):
         num_items = 1000
         to_send = [{'i': i} for i in range(num_items)]
 
-        reader = TestReader.remote(channel, num_items)
-        writer = TestWriter.remote(channel)
+        # make sure we schedule on the same node
+        all_nodes = ray.nodes()
+        if len(all_nodes) >= 2:
+            # skip head node
+            no_head = list(filter(lambda n: 'node:__internal_head__' not in n['Resources'], all_nodes))
+            node = random.sample(no_head, 1)[0]
+        else:
+            node = all_nodes[0]
+        reader = TestReader.options(
+            num_cpus=0,
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=node['NodeID'],
+                soft=False
+            )
+        ).remote(channel, num_items)
+        writer = TestWriter.options(
+            num_cpus=0,
+            scheduling_strategy=NodeAffinitySchedulingStrategy(
+                node_id=node['NodeID'],
+                soft=False
+            )
+        ).remote(channel)
 
         # make sure Ray has enough time to start actors
         time.sleep(1)
@@ -77,6 +102,8 @@ class TestLocalTransfer(unittest.TestCase):
 
         reader_stats = data_reader.stats
         writer_stats = data_writer.stats
+        print(to_send)
+        print(rcvd)
         assert to_send == sorted(rcvd, key=lambda e: e['i'])
         assert reader_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items
         assert reader_stats.get_counter_for_event(StatsEvent.ACK_SENT)[channel.channel_id] == num_items
@@ -90,7 +117,7 @@ class TestLocalTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    t.test_one_to_one_locally()
+    # t.test_one_to_one_locally()
     # t.test_one_to_one_on_ray()
-    # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
+    t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
 

@@ -2,7 +2,7 @@ import os
 import time
 from abc import ABC
 from threading import Thread
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import zmq
 
@@ -42,14 +42,15 @@ class LocalDataHandler(IOHandler, ABC):
 
         self._buffer_pool = BufferPool.instance(node_id=node_id)
 
-    def init_sockets(self) -> List[zmq.Socket]:
+    def init_sockets(self) -> List[Tuple[str, zmq.Socket]]:
         sockets = []
         for channel in self._channels:
             if channel.channel_id in self._ch_to_socket:
                 raise RuntimeError('duplicate channel ids')
 
             socket = self._zmq_ctx.socket(zmq.PAIR)
-            sockets.append(socket)
+            socket_name = '' # TODO
+            sockets.append((socket_name, socket))
 
             # created ipc path if not exists
             # TODO we should clean it up on socket deletion

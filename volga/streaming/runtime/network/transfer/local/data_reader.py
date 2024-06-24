@@ -42,6 +42,8 @@ class DataReader(LocalDataHandler):
         self.stats = Stats()
 
         self._buffer_queue = deque()
+
+        self._watermarks = {c.channel_id: 0 for c in self._channels}
         self._acks_queues = {c.channel_id: deque() for c in self._channels}
 
     def read_message(self) -> Optional[ChannelMessage]:
@@ -83,7 +85,7 @@ class DataReader(LocalDataHandler):
         # TODO NOBLOCK, exceptions, eagain etc.
         buffer = socket.recv()
         self.stats.inc(StatsEvent.MSG_RCVD, channel_id)
-        # print(f'Rcvd {get_buffer_id(buffer)}, lat: {time.time() - t}')
+        print(f'Rcvd {get_buffer_id(buffer)}, lat: {time.time() - t}')
         # TODO check if buffer_id exists to avoid duplicates, re-send ack on duplicate
         # TODO acquire buffer pool
         self._buffer_queue.append(buffer)

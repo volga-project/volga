@@ -1,7 +1,7 @@
 import os
 import time
 from collections import deque
-from typing import List, Dict
+from typing import List, Dict, Tuple
 
 import zmq
 
@@ -46,7 +46,7 @@ class RemoteTransferHandler(IOHandler):
 
         self.stats = Stats()
 
-    def init_sockets(self) -> List[zmq.Socket]:
+    def init_sockets(self) -> List[Tuple[str, zmq.Socket]]:
         sockets = []
         for channel in self._channels:
             assert isinstance(channel, RemoteChannel)
@@ -55,7 +55,8 @@ class RemoteTransferHandler(IOHandler):
 
             # local socket setup
             local_socket = self._zmq_ctx.socket(zmq.PAIR)
-            sockets.append(local_socket)
+            local_socket_name = '' # TODO
+            sockets.append((local_socket_name, local_socket))
             zmq_config = self._network_config.zmq
             if zmq_config is not None:
                 configure_socket(local_socket, zmq_config)
@@ -80,17 +81,19 @@ class RemoteTransferHandler(IOHandler):
                 continue
 
             remote_socket = self._zmq_ctx.socket(zmq.PAIR)
-            sockets.append(remote_socket)
             # TODO separate zmq_config for remote and local sockets
             if zmq_config is not None:
                 configure_socket(remote_socket, zmq_config)
-
             if self._is_sender:
                 tcp_addr = f'tcp://{channel.target_node_ip}:{channel.port}'
                 remote_socket.connect(tcp_addr)
+                remote_socket_name = f'transfer_remote_sender_{channel.channel_id}'
             else:
                 tcp_addr = f'tcp://127.0.0.1:{channel.port}'
                 remote_socket.bind(tcp_addr)
+                remote_socket_name = f'transfer_remote_receiver_{channel.channel_id}'
+
+            sockets.append((remote_socket_name, remote_socket))
 
             self._remote_node_to_sock[peer_node_id] = remote_socket
             self._remote_socket_to_node[remote_socket] = peer_node_id
@@ -100,9 +103,6 @@ class RemoteTransferHandler(IOHandler):
         return sockets
 
     def send(self, socket: zmq.Socket):
-        stats_event = None
-        stats_key = None
-
         if socket in self._local_socket_to_ch:
             channel_id = self._local_socket_to_ch[socket]
             queue = self._local_queues[channel_id]

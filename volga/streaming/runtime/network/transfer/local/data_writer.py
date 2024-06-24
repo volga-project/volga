@@ -91,7 +91,7 @@ class DataWriter(LocalDataHandler):
         # TODO use noblock, handle exceptions
         socket.send(buffer)
         self.stats.inc(StatsEvent.MSG_SENT, channel_id)
-        # print(f'Sent {buffer_id}, lat: {time.time() - t}')
+        print(f'Sent {buffer_id}, lat: {time.time() - t}')
         self._nacked[channel_id][buffer_id] = (time.time(), buffer)
 
     def rcv(self, socket: zmq.Socket):
@@ -105,7 +105,7 @@ class DataWriter(LocalDataHandler):
             # print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
             if channel_id in self._nacked and ack_msg.buffer_id in self._nacked[channel_id]:
                 self.stats.inc(StatsEvent.ACK_RCVD, channel_id)
-                # TODO update buff/msg send metric
+                # TODO update buff/msg delivered metric
                 # perform ack
                 _, buffer = self._nacked[channel_id][ack_msg.buffer_id]
                 del self._nacked[channel_id][ack_msg.buffer_id]

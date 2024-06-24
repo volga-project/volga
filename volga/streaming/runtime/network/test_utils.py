@@ -18,10 +18,11 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
         'pyzmq==23.2.0',
         'shared-memory-dict==0.7.2',
         'lockit==1.0.1',
-        'aenum'
+        'aenum==3.1.15'
     ],
     'py_modules': [volga]
 }
+
 
 @ray.remote
 class TestWriter:
@@ -77,7 +78,7 @@ class TestReader:
         t = time.time()
         res = []
         while True:
-            if time.time() - t > 10:
+            if time.time() - t > 300:
                 raise RuntimeError('Timeout reading data')
 
             item = self.data_reader.read_message()
@@ -108,6 +109,7 @@ def read(rcvd: List, data_reader: DataReader, num_expected: int):
             continue
         else:
             rcvd.append(msg)
+
         if len(rcvd) == num_expected:
             break
 

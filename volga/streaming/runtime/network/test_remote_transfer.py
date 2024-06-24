@@ -30,21 +30,21 @@ class TestRemoteTransfer(unittest.TestCase):
         ray.init(address=ray_addr, runtime_env=runtime_env)
         channel_id = 'ch_0'
         if multinode:
-            all_nodes = ray_state.list_nodes()
-            no_head = list(filter(lambda n: not n.is_head_node, all_nodes))
+            all_nodes = ray.nodes()
+            no_head = list(filter(lambda n: 'node:__internal_head__' not in n['Resources'], all_nodes))
             if len(no_head) < 2:
                 raise RuntimeError(f'Not enough non-head nodes in the cluster: {len(no_head)}')
             two_nodes = random.sample(no_head, 2)
             source_node, target_node = two_nodes[0], two_nodes[1]
-            source_node_id = source_node.node_id
-            target_node_id = target_node.node_id
+            source_node_id = source_node['NodeID']
+            target_node_id = target_node['NodeID']
             channel = RemoteChannel(
                 channel_id=channel_id,
                 source_local_ipc_addr='ipc:///tmp/source_local',
-                source_node_ip=source_node.node_ip,
+                source_node_ip=source_node['NodeManagerAddress'],
                 source_node_id=source_node_id,
                 target_local_ipc_addr='ipc:///tmp/target_local',
-                target_node_ip=target_node.node_ip,
+                target_node_ip=target_node['NodeManagerAddress'],
                 target_node_id=target_node_id,
                 port=1234
             )
@@ -198,6 +198,6 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_one_to_one_locally()
-    # t.test_one_to_one_on_ray()
-    # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
+    # t.test_one_to_one_locally()
+    t.test_one_to_one_on_ray()
+    # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
