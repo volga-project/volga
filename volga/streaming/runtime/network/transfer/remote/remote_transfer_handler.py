@@ -10,7 +10,7 @@ from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandler
 from volga.streaming.runtime.network.channel import RemoteChannel, ipc_path_from_addr
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
-from volga.streaming.runtime.network.utils import configure_socket
+from volga.streaming.runtime.network.utils import configure_socket, send_no_block, rcv_no_block
 
 
 # base class for remote TransferReceiver and TransferSender
@@ -61,7 +61,7 @@ class RemoteTransferHandler(IOHandler):
             if zmq_config is not None:
                 configure_socket(local_socket, zmq_config)
 
-            # TODO we should clean it up paths on socket deletion
+            # TODO we should clean up paths on socket deletion
             if self._is_sender:
                 ipc_path = ipc_path_from_addr(channel.source_local_ipc_addr)
                 os.makedirs(ipc_path, exist_ok=True)
@@ -119,11 +119,17 @@ class RemoteTransferHandler(IOHandler):
         if len(queue) == 0:
             return
 
-        data = queue.pop()
+        data = queue.popleft()
 
         # TODO NOBLOCK, handle exceptions, timeouts retries etc.
         t = time.time()
-        socket.send(data)
+        sent = send_no_block(socket, data)
+        if not sent:
+            # return data
+            queue.insert(0, data)
+            # TODO indicate somehow?
+            # TODO add delay on retry
+            return
 
         # update stats
         self.stats.inc(stats_event, stats_key)
@@ -134,19 +140,23 @@ class RemoteTransferHandler(IOHandler):
     def rcv(self, socket: zmq.Socket):
 
         t = time.time()
+        data = rcv_no_block(socket)
+        if data is None:
+            # TODO indicate somehow?
+            # TODO add delay on retry
+            return
         if socket in self._local_socket_to_ch:
             channel_id = self._local_socket_to_ch[socket]
             peer_node_id = self._ch_id_to_node_id[channel_id]
             queue = self._remote_queues[peer_node_id]
-            data = socket.recv()
+            # TODO set limit on the queue size
             queue.append(data)
             self.stats.inc(StatsEvent.MSG_RCVD if self._is_sender else StatsEvent.ACK_RCVD, channel_id)
         elif socket in self._remote_socket_to_node:
-            data = socket.recv()
             channel_id = get_channel_id(data)
             peer_node_id = self._ch_id_to_node_id[channel_id]
             queue = self._local_queues[channel_id]
-            # TODO if a queue is full we have two options:
+            # TODO set limit on the queue size. If a queue is full we have two options:
             #  1) drop the message and count on higher-level retry mechanism to resend it
             #  2) block the whole peer-node channel and count on higher-level backpressure mechanism (Credit based)
             #  we need to test which is better for throughput/latency

@@ -2,7 +2,7 @@ import time
 from collections import deque
 
 import simplejson
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 import zmq
 
@@ -15,6 +15,10 @@ from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, BufferC
 from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.transfer.local.local_data_handler import LocalDataHandler
+from volga.streaming.runtime.network.utils import send_no_block, rcv_no_block
+
+IN_FLIGHT_LIMIT_PER_CHANNEL = 1000 # max number of un-acked buffers
+INN_FLIGHT_TIMEOUT_S = 0.5 # how long to wait before re-sending un-acked buffers
 
 
 class DataWriter(LocalDataHandler):
@@ -44,7 +48,7 @@ class DataWriter(LocalDataHandler):
         self._buffer_creator = BufferCreator(self._channels, self._buffer_queues)
         self._buffer_pool = BufferPool.instance(node_id=node_id)
 
-        self._nacked = {c.channel_id: {} for c in self._channels}
+        self._in_flight = {c.channel_id: {} for c in self._channels}
 
     def write_record(self, channel_id: str, record: Record):
         # add sender operator_id
@@ -78,38 +82,64 @@ class DataWriter(LocalDataHandler):
 
     def send(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]
+
+        # re-sent timed-out in-flight buffers first
+        t = time.time()
+        for in_flight_buff_id in self._in_flight[channel_id]:
+            ts, buffer = self._in_flight[channel_id][in_flight_buff_id]
+            if t - ts > INN_FLIGHT_TIMEOUT_S:
+                self._in_flight[channel_id][in_flight_buff_id] = (t, buffer)
+                sent = send_no_block(socket, buffer)
+                if sent:
+                    print(f'Re-sent {in_flight_buff_id}')
+                else:
+                    print(f'Re-sent failed')
+                # TODO make RESEND event in stats ?
+                return
+
+        # stop sending new buffers if in-flight limit is reached
+        if len(self._in_flight[channel_id]) > IN_FLIGHT_LIMIT_PER_CHANNEL:
+            # TODO indicate backpressure due to in_flight limit?
+            return
+
         buffer_queue = self._buffer_queues[channel_id]
         if len(buffer_queue) == 0:
             return
-        buffer = buffer_queue.pop()
-        buffer_id = get_buffer_id(buffer)
-        if buffer_id in self._nacked[channel_id]:
-            raise RuntimeError('duplicate buffer_id scheduled')
-        # TODO handle exceptions on send
-        t = time.time()
 
-        # TODO use noblock, handle exceptions
-        socket.send(buffer)
-        self.stats.inc(StatsEvent.MSG_SENT, channel_id)
-        print(f'Sent {buffer_id}, lat: {time.time() - t}')
-        self._nacked[channel_id][buffer_id] = (time.time(), buffer)
+        # TODO we should pop buffer only on successful delivery
+        buffer = buffer_queue.popleft()
+        buffer_id = get_buffer_id(buffer)
+        if buffer_id in self._in_flight[channel_id]:
+            raise RuntimeError('duplicate buffer_id scheduled')
+
+        self._in_flight[channel_id][buffer_id] = (time.time(), buffer)
+        sent = send_no_block(socket, buffer)
+        if sent:
+            self.stats.inc(StatsEvent.MSG_SENT, channel_id)
+            print(f'Sent {buffer_id}, lat: {time.time() - t}')
+        else:
+            # TODO add delay on retries
+            pass
+        # TODO should we make a separate container for failed sends or indicate it some other way?
 
     def rcv(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]
-        t = time.time()
 
-        # TODO handle nacks requests
-
-        # TODO use NOBLOCK handle exceptions, EAGAIN, etc.
-        msg_raw_bytes = socket.recv()
+        msg_raw_bytes = rcv_no_block(socket)
+        if msg_raw_bytes is None:
+            # TODO indicate somehow? Possible backpressure?
+            # TODO add delay on retry
+            return
         ack_msg_batch = AckMessageBatch.de(msg_raw_bytes)
         for ack_msg in ack_msg_batch.acks:
             # print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
-            if channel_id in self._nacked and ack_msg.buffer_id in self._nacked[channel_id]:
+            if channel_id in self._in_flight and ack_msg.buffer_id in self._in_flight[channel_id]:
                 self.stats.inc(StatsEvent.ACK_RCVD, channel_id)
                 # TODO update buff/msg delivered metric
                 # perform ack
-                _, buffer = self._nacked[channel_id][ack_msg.buffer_id]
-                del self._nacked[channel_id][ack_msg.buffer_id]
+                _, buffer = self._in_flight[channel_id][ack_msg.buffer_id]
+                del self._in_flight[channel_id][ack_msg.buffer_id]
                 # release buffer
                 self._buffer_pool.release(len(buffer))
+
+                # TODO pop input queue only on successful delivery. In this case acks should be performed in order

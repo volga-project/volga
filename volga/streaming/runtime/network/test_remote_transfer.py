@@ -11,7 +11,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.stats import StatsEvent
-from volga.streaming.runtime.network.test_utils import write, read, TestReader, TestWriter, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+from volga.streaming.runtime.network.testing_utils import write, read, TestReader, TestWriter, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop, Direction
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
@@ -179,7 +179,7 @@ class TestRemoteTransfer(unittest.TestCase):
         print(f'TransferSender stats: {transfer_sender_stats}')
         print(f'TransferSender stats: {transfer_receiver_stats}')
 
-        assert to_send == sorted(rcvd, key=lambda e: e['i'])
+        assert to_send == rcvd
 
         assert transfer_sender_stats.get_counter_for_event(StatsEvent.MSG_SENT)[target_node_id] == num_items
         assert transfer_sender_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items

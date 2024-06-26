@@ -10,7 +10,8 @@ import random
 
 from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
-from volga.streaming.runtime.network.test_utils import TestReader, TestWriter, write, read, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, write, read, \
+    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, FakeIOLoop
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
@@ -104,7 +105,7 @@ class TestLocalTransfer(unittest.TestCase):
         writer_stats = data_writer.stats
         print(to_send)
         print(rcvd)
-        assert to_send == sorted(rcvd, key=lambda e: e['i'])
+        assert to_send == rcvd
         assert reader_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items
         assert reader_stats.get_counter_for_event(StatsEvent.ACK_SENT)[channel.channel_id] == num_items
         assert writer_stats.get_counter_for_event(StatsEvent.ACK_RCVD)[channel.channel_id] == num_items
@@ -114,10 +115,37 @@ class TestLocalTransfer(unittest.TestCase):
         io_loop.close()
         wt.join(5)
 
+    def test_unreliable_connection(self):
+        loss_rate = 0.1
+        exception_rate = 0.05
+        out_of_orderness = 0.2
+        num_items = 10000
+        channel = LocalChannel(
+            channel_id='1',
+            ipc_addr='ipc:///tmp/zmqtest',
+        )
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
+                                 zmq_ctx=None)
+        data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=None)
+
+        fake_io_loop = FakeIOLoop(data_reader, data_writer, loss_rate, exception_rate, out_of_orderness)
+        fake_io_loop.start()
+
+        to_send = [{'i': i} for i in range(num_items)]
+        rcvd = []
+
+        wt = Thread(target=functools.partial(write, to_send, data_writer, channel))
+        wt.start()
+        read(rcvd, data_reader, num_items)
+        time.sleep(1)
+        fake_io_loop.close()
+        assert to_send == rcvd
+        print('assert ok')
+
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
     t.test_one_to_one_locally()
     # t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
-
+    t.test_unreliable_connection()

@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Any
 
 import zmq
 
@@ -40,3 +40,21 @@ def configure_socket(socket: zmq.Socket, zmq_config: ZMQConfig):
         socket.setsockopt(zmq.SNDBUF, zmq_config.SNDBUF)
     if zmq_config.RCVBUF is not None:
         socket.setsockopt(zmq.RCVBUF, zmq_config.RCVBUF)
+
+
+# TODO we should have a delay mechanism for retrying in case of exceptions to avoid exhausting CPU
+def rcv_no_block(socket: zmq.Socket) -> Optional[Any]:
+    try:
+        data = socket.recv(zmq.NOBLOCK)
+        return data
+    except:
+        return None
+
+
+# TODO we should have a delay mechanism for retrying in case of exceptions to avoid exhausting CPU
+def send_no_block(socket: zmq.Socket, data) -> bool:
+    try:
+        socket.send(data, zmq.NOBLOCK)
+        return True
+    except:
+        return False
