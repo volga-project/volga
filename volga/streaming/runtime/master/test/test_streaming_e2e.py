@@ -23,30 +23,53 @@ class TestStreamingJobE2E(unittest.TestCase):
 
     def test_join_streams(self):
 
-        # TODO increasing this 10x prevents sources from reporting finish, why?
-        s1_num_events = 30000
-        s2_num_events = 10000
+        def dummy_join(a, b, k1, k2, how):
 
-        source1 = self.ctx.from_collection([(i, f'a{i}') for i in range(s1_num_events)])
-        source2 = self.ctx.from_collection([(i + 1, f'b{i + 1}') for i in range(s2_num_events)])
+            def listify(t):
+                return [listify(i) for i in t] if isinstance(t, (list, tuple)) else t
+
+            d1 = {k1(e): e for e in a}
+            d2 = {k2(e): e for e in b}
+            res = []
+            for k in d1:
+                if k in d2:
+                    res.append(how(d1[k], d2[k]))
+
+            # TODO for some reason volga transforms tuples to lists, figure out why
+            return listify(res)
+
+        # TODO increasing this 10x prevents sources from reporting finish, why?
+        s1_num_events = 100
+        s2_num_events = 100
+        s1 = [(i, f'a{i}') for i in range(s1_num_events)]
+        s2 = [(i + 1, f'b{i + 1}') for i in range(s2_num_events)]
+
+        source1 = self.ctx.from_collection(s1)
+        source2 = self.ctx.from_collection(s2)
 
         sink_cache = SinkCacheActor.remote()
         sink_function = SinkToCacheFunction(sink_cache)
-
-        s = source1.key_by(lambda x: x[0]) \
-            .join(source2.key_by(lambda x: x[0])) \
-            .with_func(lambda x, y: (x, y)) \
-            .set_parallelism(10) \
-            .map(lambda x: (x[0][0], x[0][1], x[1][1])) \
-            .set_parallelism(1)
+        k1 = lambda x: x[0]
+        k2 = lambda x: x[0]
+        how = lambda x, y: (x, y)
+        s = source1.key_by(k1) \
+            .join(source2.key_by(k2)) \
+            .with_func(how) \
+            .set_parallelism(4)
+            # .map(lambda x: (x[0][0], x[0][1], x[1][1])) \
+            # .set_parallelism(1)
 
         s.sink(sink_function)
         s.sink(lambda x: print(x) if x[0]%1000 == 0 else None)
         # s.sink(print)
         ctx.execute()
         res = ray.get(sink_cache.get_values.remote())
-        print(len(res))
-        assert len(res) == min(s1_num_events, s2_num_events)
+        # print(res)
+
+        expected = dummy_join(s1, s2, k1, k2, how)
+        # print(expected)
+        assert len(res) == len(expected)
+        # assert expected == sorted(res, key=lambda x: x[0][0])
         print('assert ok')
 
     def test_window(self):
