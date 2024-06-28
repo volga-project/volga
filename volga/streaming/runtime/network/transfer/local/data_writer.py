@@ -7,17 +7,22 @@ from typing import List, Dict
 import zmq
 
 from volga.streaming.api.message.message import Record
+from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, AckMessageBatch, DEFAULT_BUFFER_SIZE
+from volga.streaming.runtime.network.buffer.buffering_policy import BufferingPolicy, PeriodicPartialFlushPolicy, \
+    BufferPerMessagePolicy
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
-from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, BufferCreator, AckMessageBatch
+from volga.streaming.runtime.network.buffer.buffer_queues import BufferQueues
 from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.transfer.local.local_data_handler import LocalDataHandler
 from volga.streaming.runtime.network.utils import send_no_block, rcv_no_block
 
+# TODO we want to make sure this limit is low enough to cause backpressure when buffer memory is full
 IN_FLIGHT_LIMIT_PER_CHANNEL = 1000 # max number of un-acked buffers
+
 INN_FLIGHT_TIMEOUT_S = 0.5 # how long to wait before re-sending un-acked buffers
 
 
@@ -30,7 +35,9 @@ class DataWriter(LocalDataHandler):
         channels: List[Channel],
         node_id: str,
         zmq_ctx: zmq.Context,
-        network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
+        network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG,
+        buffer_size: int = DEFAULT_BUFFER_SIZE,
+        buffering_policy: BufferingPolicy = BufferPerMessagePolicy()
     ):
         super().__init__(
             name=name,
@@ -44,9 +51,8 @@ class DataWriter(LocalDataHandler):
         self.stats = Stats()
         self._source_stream_name = source_stream_name
 
-        self._buffer_queues: Dict[str, deque] = {c.channel_id: deque() for c in self._channels}
-        self._buffer_creator = BufferCreator(self._channels, self._buffer_queues)
         self._buffer_pool = BufferPool.instance(node_id=node_id)
+        self._buffer_queues = BufferQueues(self._channels, self._buffer_pool, buffer_size, buffering_policy)
 
         self._in_flight = {c.channel_id: {} for c in self._channels}
 
@@ -65,20 +71,9 @@ class DataWriter(LocalDataHandler):
         if not self.is_running():
             raise RuntimeError(f'DataWriter did not start after {timeout_s}s')
 
-        # TODO serialization perf
-        json_str = simplejson.dumps(message)
-        buffers = self._buffer_creator.msg_to_buffers(json_str, channel_id=channel_id)
-        length_bytes = sum(list(map(lambda b: len(b), buffers)))
-        buffer_queue = self._buffer_queues[channel_id]
-
-        if self._buffer_pool.try_acquire(length_bytes):
-            for buffer in buffers:
-                # TODO we can merge pending buffers in case they are not full
-                buffer_queue.append(buffer)
-                # print(f'Buff len {len(buffer_queue)}')
-        else:
-            # TODO indicate buffer pool backpressure
-            print('buffer backpressure')
+        backpressure = not self._buffer_queues.append_msg(message, channel_id)
+        # TODO indicate buffer pool backpressure
+        # TODO block until buffer pool is ready?
 
     def send(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]
@@ -102,12 +97,11 @@ class DataWriter(LocalDataHandler):
             # TODO indicate backpressure due to in_flight limit?
             return
 
-        buffer_queue = self._buffer_queues[channel_id]
-        if len(buffer_queue) == 0:
+        # TODO we should pop buffer only on successful delivery
+        buffer = self._buffer_queues.pop(channel_id)
+        if buffer is None:
             return
 
-        # TODO we should pop buffer only on successful delivery
-        buffer = buffer_queue.popleft()
         buffer_id = get_buffer_id(buffer)
         if buffer_id in self._in_flight[channel_id]:
             raise RuntimeError('duplicate buffer_id scheduled')

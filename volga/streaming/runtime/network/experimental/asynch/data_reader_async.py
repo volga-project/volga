@@ -9,7 +9,8 @@ import zmq
 import zmq.asyncio as zmq_async
 import simplejson
 
-from volga.streaming.runtime.network.buffer.buffer import Buffer, AckMessage, get_buffer_id, get_payload
+from volga.streaming.runtime.network.buffer.buffer_queues import get_buffer_id, get_payload
+from volga.streaming.runtime.network.buffer.buffer import Buffer, AckMessage
 from volga.streaming.runtime.network.experimental.asynch.async_data_handler_base import AsyncDataHandlerBase
 from volga.streaming.runtime.network.experimental.channel import BiChannel, LocalBiChannel, RemoteBiChannel
 from volga.streaming.runtime.network.utils import bytes_to_str

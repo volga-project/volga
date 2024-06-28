@@ -9,7 +9,8 @@ from volga.streaming.runtime.network.channel import Channel, ChannelMessage, Loc
 
 import simplejson
 
-from volga.streaming.runtime.network.buffer.buffer import AckMessage, get_buffer_id, get_payload, AckMessageBatch
+from volga.streaming.runtime.network.buffer.buffer_queues import get_buffer_id, get_payload
+from volga.streaming.runtime.network.buffer.buffer import AckMessage, AckMessageBatch
 from volga.streaming.runtime.network.experimental.threaded.threaded_data_handler_base import DataHandlerBase
 from volga.streaming.runtime.network.utils import bytes_to_str
 

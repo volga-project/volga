@@ -12,7 +12,8 @@ from volga.streaming.api.message.message import Record
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage, LocalChannel, RemoteChannel
 
 
-from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, Buffer, BufferCreator, AckMessageBatch
+from volga.streaming.runtime.network.buffer.buffer_queues import get_buffer_id, BufferQueues
+from volga.streaming.runtime.network.buffer.buffer import Buffer, AckMessageBatch
 from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
 from volga.streaming.runtime.network.experimental.threaded.threaded_data_handler_base import DataHandlerBase
 
@@ -46,7 +47,7 @@ class DataWriterV2(DataHandlerBase):
         self._source_stream_name = source_stream_name
 
         self._buffer_queues: Dict[str, deque] = {c.channel_id: deque() for c in self._channels}
-        self._buffer_creator = BufferCreator(self._channels, self._buffer_queues)
+        self._buffer_creator = BufferQueues(self._channels, self._buffer_queues)
         self._buffer_pool = BufferPool.instance(node_id=node_id)
 
         self._in_flight = {c.channel_id: {} for c in self._channels}
@@ -106,7 +107,7 @@ class DataWriterV2(DataHandlerBase):
             raise RuntimeError('Can not write a message while writer is not running!')
         # TODO serialization perf
         json_str = simplejson.dumps(message)
-        buffers = self._buffer_creator.msg_to_buffers(json_str, channel_id=channel_id)
+        buffers = self._buffer_creator._msg_to_buffers(json_str, channel_id=channel_id)
         length_bytes = sum(list(map(lambda b: len(b), buffers)))
         buffer_queue = self._buffer_queues[channel_id]
 

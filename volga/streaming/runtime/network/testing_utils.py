@@ -84,11 +84,11 @@ class TestReader:
             if time.time() - t > 300:
                 raise RuntimeError('Timeout reading data')
 
-            item = self.data_reader.read_message()
-            if item is None:
+            items = self.data_reader.read_message()
+            if len(items) == 0:
                 time.sleep(0.001)
                 continue
-            res.append(item)
+            res.extend(items)
             if len(res) == self.num_expected:
                 break
         return res
@@ -106,13 +106,13 @@ def read(rcvd: List, data_reader: DataReader, num_expected: int):
     while True:
         if time.time() - t > 180:
             raise RuntimeError('Timeout reading data')
-        msg = data_reader.read_message()
-        if msg is None:
+        msgs = data_reader.read_message()
+        if len(msgs) == 0:
             time.sleep(0.001)
             continue
         else:
             # print(f'Read: {msg}')
-            rcvd.append(msg)
+            rcvd.extend(msgs)
 
         if len(rcvd) == num_expected:
             break
@@ -121,7 +121,7 @@ def read(rcvd: List, data_reader: DataReader, num_expected: int):
 def write(to_send: List, data_writer: DataWriter, channel: Channel):
     for msg in to_send:
         data_writer._write_message(channel.channel_id, msg)
-        # time.sleep(0.01)
+        # time.sleep(0.2)
 
 
 class FakeSocket:

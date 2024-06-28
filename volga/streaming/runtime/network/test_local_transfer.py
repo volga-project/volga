@@ -8,6 +8,8 @@ import ray
 import zmq
 import random
 
+from volga.streaming.runtime.network.buffer.buffer_queues import BufferQueues
+from volga.streaming.runtime.network.buffer.buffering_policy import BufferPerMessagePolicy, PeriodicPartialFlushPolicy
 from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, write, read, \
@@ -80,7 +82,7 @@ class TestLocalTransfer(unittest.TestCase):
         ray.shutdown()
 
     def test_one_to_one_locally(self):
-        num_items = 10
+        num_items = 10000
         io_loop = IOLoop()
         channel = LocalChannel(
             channel_id='1',
@@ -103,8 +105,8 @@ class TestLocalTransfer(unittest.TestCase):
 
         reader_stats = data_reader.stats
         writer_stats = data_writer.stats
-        print(to_send)
-        print(rcvd)
+        # print(to_send)
+        # print(rcvd)
         assert to_send == rcvd
         assert reader_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items
         assert reader_stats.get_counter_for_event(StatsEvent.ACK_SENT)[channel.channel_id] == num_items
@@ -142,10 +144,59 @@ class TestLocalTransfer(unittest.TestCase):
         assert to_send == rcvd
         print('assert ok')
 
+    def test_buffering(self):
+        # tests with disabled buffer memory pool/allocator
+        num_items = 100000
+        buffer_size = 32 * 1024
+        buffering_policy = PeriodicPartialFlushPolicy(0.1)
+        channel = LocalChannel(
+            channel_id='1',
+            ipc_addr='ipc:///tmp/zmqtest',
+        )
+
+        to_send = [{'i': i} for i in range(num_items)]
+
+        # calculate expected number of buffers
+        queues = BufferQueues(channels=[channel], buffer_pool=None, buffer_size=buffer_size, buffering_policy=buffering_policy)
+        for e in to_send:
+            queues.append_msg(message=e, channel_id=channel.channel_id)
+
+        num_buffers = len(queues._buffer_queues[channel.channel_id])
+
+        io_loop = IOLoop()
+
+        zmq_ctx = zmq.Context.instance(io_threads=10)
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
+                                 zmq_ctx=zmq_ctx,
+                                 buffer_size=buffer_size, buffering_policy=buffering_policy)
+        data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
+        io_loop.register(data_writer)
+        io_loop.register(data_reader)
+        io_loop.start()
+        rcvd = []
+
+        wt = Thread(target=functools.partial(write, to_send, data_writer, channel))
+        wt.start()
+        read(rcvd, data_reader, num_items)
+        time.sleep(1)
+
+        reader_stats = data_reader.stats
+        writer_stats = data_writer.stats
+        # print(to_send)
+        # print(rcvd)
+        assert to_send == rcvd
+        assert reader_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_buffers
+        assert writer_stats.get_counter_for_event(StatsEvent.MSG_SENT)[channel.channel_id] == num_buffers
+
+        print('assert ok')
+        io_loop.close()
+        wt.join(5)
+
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    t.test_one_to_one_locally()
+    # t.test_one_to_one_locally()
     # t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
-    t.test_unreliable_connection()
+    # t.test_unreliable_connection()
+    # t.test_buffering()

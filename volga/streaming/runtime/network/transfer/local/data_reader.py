@@ -5,13 +5,13 @@ from typing import List, Optional
 
 import zmq
 
+from volga.streaming.runtime.network.buffer.buffer import get_payload, get_buffer_id, AckMessage, AckMessageBatch
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
 import simplejson
 
-from volga.streaming.runtime.network.buffer.buffer import AckMessage, get_buffer_id, get_payload, AckMessageBatch
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.transfer.local.local_data_handler import LocalDataHandler
 from volga.streaming.runtime.network.utils import bytes_to_str, rcv_no_block, send_no_block
@@ -46,16 +46,18 @@ class DataReader(LocalDataHandler):
         self._out_of_order = {c.channel_id: {} for c in self._channels}
         self._acks_queues = {c.channel_id: deque() for c in self._channels}
 
-    def read_message(self) -> Optional[ChannelMessage]:
+    def read_message(self) -> List[ChannelMessage]:
         if len(self._output_queue) == 0:
-            return None
+            return []
         buffer = self._output_queue.popleft()
         payload = get_payload(buffer)
 
-        # TODO implement impartial messages/multiple messages in a buffer
-        msg_id, data = payload[0]
-        msg = simplejson.loads(bytes_to_str(data))
-        return msg
+        # TODO implement partial messages
+        res = []
+        for (msg_id, data) in payload:
+            msg = simplejson.loads(bytes_to_str(data))
+            res.append(msg)
+        return res
 
     def send(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]

@@ -137,12 +137,13 @@ class InputStreamTask(StreamTask):
 
     def run(self):
         while self.running:
-            message = self.data_reader.read_message()
-            if message is None:
+            messages = self.data_reader.read_message()
+            if len(messages) == 0:
                 # TODO indicate special message
                 continue
-            record = record_from_channel_message(message)
-            self.processor.process(record)
+            for message in messages:
+                record = record_from_channel_message(message)
+                self.processor.process(record)
 
 
 class OneInputStreamTask(InputStreamTask):
