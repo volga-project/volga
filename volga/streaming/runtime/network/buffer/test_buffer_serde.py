@@ -16,6 +16,7 @@ class TestBufferSerialization(unittest.TestCase):
         s = 'acbdefgh'
         assert s == bytes_to_str(str_to_bytes(s))
         assert s == bytes_to_str(str_to_bytes(s, pad_to_size=10), strip_padding=True)
+        print('assert ok')
 
     def test_ser_de(self):
         BUFFER_SIZE = 32 * 1024
@@ -34,6 +35,7 @@ class TestBufferSerialization(unittest.TestCase):
         _msg_id, _msg_bytes = payload[0]
         assert msg_id == _msg_id
         assert data == simplejson.loads(bytes_to_str(_msg_bytes))
+        print('assert ok')
 
     def test_append(self):
         BUFFER_SIZE = 32 * 1024
@@ -62,6 +64,52 @@ class TestBufferSerialization(unittest.TestCase):
         assert data_1 == simplejson.loads(bytes_to_str(_msg_bytes_1))
         assert msg_id_2 == _msg_id_2
         assert data_2 == simplejson.loads(bytes_to_str(_msg_bytes_2))
+        print('assert ok')
+
+    def test_append_many(self):
+        num_items = 10000
+        buffer_size = 32*1024
+        channel_id='1'
+        to_send = [{'i': i} for i in range(num_items)]
+        r = []
+        msg_id = 0
+        buff_id = 0
+        for msg in to_send:
+            msg_str = simplejson.dumps(msg)
+            if len(r) == 0:
+                buff = serialize(channel_id, buff_id, msg_str, msg_id, buffer_size, with_header=True)
+                r.append(buff)
+                buff_id += 1
+                msg_id += 1
+                continue
+
+            payload = serialize(channel_id, buff_id, msg_str, msg_id, buffer_size, with_header=False)
+            try:
+                buff = append_to_buffer(r[-1], payload, buffer_size)
+                r[-1] = buff
+            except:
+                buff = serialize(channel_id, buff_id, msg_str, msg_id, buffer_size, with_header=True)
+                r.append(buff)
+                buff_id += 1
+            msg_id += 1
+
+        res = []
+        last_msg_id = -1
+        for buffer in r:
+            payload = get_payload(buffer)
+
+            for (msg_id, data) in payload:
+                if msg_id != last_msg_id + 1:
+                    raise RuntimeError(f'msg_id order missmatch')
+                last_msg_id = msg_id
+                msg = simplejson.loads(bytes_to_str(data))
+                if msg_id != msg['i']:
+                    raise RuntimeError('msg_id missmatch')
+                res.append(msg)
+
+        assert to_send == res
+        print('assert ok')
+
 
 
 if __name__ == '__main__':
@@ -69,3 +117,4 @@ if __name__ == '__main__':
     t.test_utils()
     t.test_ser_de()
     t.test_append()
+    t.test_append_many()

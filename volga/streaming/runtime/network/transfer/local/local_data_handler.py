@@ -7,7 +7,7 @@ import zmq
 from volga.streaming.runtime.network.channel import Channel, LocalChannel, RemoteChannel, ipc_path_from_addr
 import zmq.asyncio as zmq_async
 
-from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 from volga.streaming.runtime.network.config import NetworkConfig
 from volga.streaming.runtime.network.transfer.io_loop import IOHandler, Direction
 from volga.streaming.runtime.network.utils import configure_socket
@@ -38,7 +38,7 @@ class LocalDataHandler(IOHandler, ABC):
         self._ch_to_socket: Dict[str, zmq.Socket] = {}
         self._socket_to_ch: Dict[zmq.Socket, str] = {}
 
-        self._buffer_pool = BufferPool.instance(node_id=node_id)
+        self._buffer_memory_tracker = BufferMemoryTracker.instance(node_id=node_id)
 
     def init_sockets(self) -> List[Tuple[str, zmq.Socket]]:
         sockets = []

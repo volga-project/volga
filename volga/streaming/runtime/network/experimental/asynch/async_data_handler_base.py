@@ -5,7 +5,7 @@ from typing import List, Dict
 
 import zmq.asyncio as zmq_async
 
-from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 from volga.streaming.runtime.network.experimental.channel import BiChannel
 
 
@@ -36,7 +36,7 @@ class AsyncDataHandlerBase(ABC):
         self._rcv_sockets: Dict[zmq_async.Socket, str] = {}
         self._rcv_poller = zmq_async.Poller()
 
-        self._buffer_pool = BufferPool.instance(node_id=node_id)
+        self._buffer_pool = BufferMemoryTracker.instance(node_id=node_id)
 
     # send and rcv sockets are inited in different threads, hence separation
     @abstractmethod

@@ -7,7 +7,7 @@ import zmq
 from volga.streaming.runtime.network.channel import Channel
 import zmq.asyncio as zmq_async
 
-from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 
 
 # Bi-directional connection data handler, sends and receives messages, acts as a base for DataReader/DataWriter
@@ -35,7 +35,7 @@ class DataHandlerBase(ABC):
         self._rcv_sockets: Dict[zmq.Socket, str] = {}
         self._rcv_poller = zmq.Poller()
 
-        self._buffer_pool = BufferPool.instance(node_id=node_id)
+        self._buffer_pool = BufferMemoryTracker.instance(node_id=node_id)
 
     # send and rcv sockets are inited in different threads, hence separation
     @abstractmethod

@@ -8,7 +8,7 @@ import ray
 import zmq
 import random
 
-from volga.streaming.runtime.network.buffer.buffer_queues import BufferQueues
+from volga.streaming.runtime.network.buffer.buffering_config import BufferingConfig
 from volga.streaming.runtime.network.buffer.buffering_policy import BufferPerMessagePolicy, PeriodicPartialFlushPolicy
 from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
@@ -20,7 +20,6 @@ from volga.streaming.runtime.network.transfer.local.data_writer import DataWrite
 
 
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-import ray.util.state as ray_state
 
 
 class TestLocalTransfer(unittest.TestCase):
@@ -89,7 +88,9 @@ class TestLocalTransfer(unittest.TestCase):
             ipc_addr='ipc:///tmp/zmqtest',
         )
         zmq_ctx = zmq.Context.instance(io_threads=10)
-        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
+        buffering_policy = BufferPerMessagePolicy()
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0', zmq_ctx=zmq_ctx,
+                                 buffering_policy=buffering_policy)
         data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
@@ -122,12 +123,14 @@ class TestLocalTransfer(unittest.TestCase):
         exception_rate = 0.05
         out_of_orderness = 0.2
         num_items = 10000
+        buffering_config = BufferingConfig(buffer_size=32 * 1024)
+        buffering_policy = PeriodicPartialFlushPolicy(0.1)
         channel = LocalChannel(
             channel_id='1',
             ipc_addr='ipc:///tmp/zmqtest',
         )
         data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
-                                 zmq_ctx=None)
+                                 zmq_ctx=None, buffering_config=buffering_config, buffering_policy=buffering_policy)
         data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=None)
 
         fake_io_loop = FakeIOLoop(data_reader, data_writer, loss_rate, exception_rate, out_of_orderness)
@@ -144,10 +147,9 @@ class TestLocalTransfer(unittest.TestCase):
         assert to_send == rcvd
         print('assert ok')
 
-    def test_buffering(self):
-        # tests with disabled buffer memory pool/allocator
-        num_items = 100000
-        buffer_size = 32 * 1024
+    def test_buffer_batching(self):
+        num_items = 1000000
+        buffering_config = BufferingConfig(buffer_size=132 * 1024)
         buffering_policy = PeriodicPartialFlushPolicy(0.1)
         channel = LocalChannel(
             channel_id='1',
@@ -156,19 +158,12 @@ class TestLocalTransfer(unittest.TestCase):
 
         to_send = [{'i': i} for i in range(num_items)]
 
-        # calculate expected number of buffers
-        queues = BufferQueues(channels=[channel], buffer_pool=None, buffer_size=buffer_size, buffering_policy=buffering_policy)
-        for e in to_send:
-            queues.append_msg(message=e, channel_id=channel.channel_id)
-
-        num_buffers = len(queues._buffer_queues[channel.channel_id])
-
         io_loop = IOLoop()
 
         zmq_ctx = zmq.Context.instance(io_threads=10)
         data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
                                  zmq_ctx=zmq_ctx,
-                                 buffer_size=buffer_size, buffering_policy=buffering_policy)
+                                 buffering_config=buffering_config, buffering_policy=buffering_policy)
         data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
@@ -180,23 +175,62 @@ class TestLocalTransfer(unittest.TestCase):
         read(rcvd, data_reader, num_items)
         time.sleep(1)
 
-        reader_stats = data_reader.stats
-        writer_stats = data_writer.stats
-        # print(to_send)
-        # print(rcvd)
         assert to_send == rcvd
-        assert reader_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_buffers
-        assert writer_stats.get_counter_for_event(StatsEvent.MSG_SENT)[channel.channel_id] == num_buffers
 
         print('assert ok')
         io_loop.close()
         wt.join(5)
 
+    def test_backpressure(self):
+        buffering_config = BufferingConfig(capacity_per_in_channel=3, capacity_per_out=2)
+        buffering_policy = BufferPerMessagePolicy()
+        channel = LocalChannel(
+            channel_id='1',
+            ipc_addr='ipc:///tmp/zmqtest',
+        )
+
+        io_loop = IOLoop()
+
+        zmq_ctx = zmq.Context.instance(io_threads=10)
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
+                                 zmq_ctx=zmq_ctx,
+                                 buffering_policy=buffering_policy, buffering_config=buffering_config)
+        data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
+        io_loop.register(data_writer)
+        io_loop.register(data_reader)
+        io_loop.start()
+        try:
+            for _ in range(buffering_config.capacity_per_in_channel + buffering_config.capacity_per_out):
+                time.sleep(0.1)
+                s = data_writer._write_message(channel_id=channel.channel_id, message={'k': 'v'}, block=False)
+                assert s is True
+
+            time.sleep(0.1)
+            s = data_writer._write_message(channel_id=channel.channel_id, message={'k': 'v'}, block=False)
+            # should backpressure
+            assert s is False
+
+            # read one
+            time.sleep(0.1)
+            data_reader.read_message()
+            time.sleep(0.1)
+            s = data_writer._write_message(channel_id=channel.channel_id, message={'k': 'v'}, block=False)
+            # should not backpressure
+            assert s is True
+
+            # TODO test queue lengths
+            print('assert ok')
+        finally:
+            io_loop.close()
+
+
+
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    # t.test_one_to_one_locally()
+    t.test_one_to_one_locally()
     # t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
-    # t.test_unreliable_connection()
-    # t.test_buffering()
+    t.test_unreliable_connection()
+    t.test_buffer_batching()
+    t.test_backpressure()

@@ -6,6 +6,7 @@ from typing import List, Any, Dict
 
 import zmq
 
+from volga.streaming.runtime.network.buffer.buffering_policy import BufferPerMessagePolicy
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
@@ -30,17 +31,19 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
 @ray.remote
 class TestWriter:
     def __init__(
-            self,
-            channel: Channel,
+        self,
+        channel: Channel,
     ):
         self.channel = channel
         self.io_loop = IOLoop()
+        buffering_policy = BufferPerMessagePolicy()
         self.data_writer = DataWriter(
             name='test_writer',
             source_stream_name='0',
             channels=[channel],
             node_id='0',
-            zmq_ctx=zmq.Context.instance()
+            zmq_ctx=zmq.Context.instance(),
+            buffering_policy=buffering_policy
         )
         self.io_loop.register(self.data_writer)
         self.io_loop.start()
@@ -107,13 +110,14 @@ def read(rcvd: List, data_reader: DataReader, num_expected: int):
         if time.time() - t > 180:
             raise RuntimeError('Timeout reading data')
         msgs = data_reader.read_message()
+        # time.sleep(0.01)
         if len(msgs) == 0:
-            time.sleep(0.001)
+            time.sleep(0.01)
             continue
         else:
-            # print(f'Read: {msg}')
             rcvd.extend(msgs)
 
+        print(len(rcvd))
         if len(rcvd) == num_expected:
             break
 

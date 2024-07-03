@@ -14,7 +14,7 @@ from volga.streaming.runtime.network.channel import Channel, ChannelMessage, Loc
 
 from volga.streaming.runtime.network.buffer.buffer_queues import get_buffer_id, BufferQueues
 from volga.streaming.runtime.network.buffer.buffer import Buffer, AckMessageBatch
-from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 from volga.streaming.runtime.network.experimental.threaded.threaded_data_handler_base import DataHandlerBase
 
 # max number of futures per channel, makes sure we do not exhaust io loop
@@ -48,7 +48,7 @@ class DataWriterV2(DataHandlerBase):
 
         self._buffer_queues: Dict[str, deque] = {c.channel_id: deque() for c in self._channels}
         self._buffer_creator = BufferQueues(self._channels, self._buffer_queues)
-        self._buffer_pool = BufferPool.instance(node_id=node_id)
+        self._buffer_pool = BufferMemoryTracker.instance(node_id=node_id)
 
         self._in_flight = {c.channel_id: {} for c in self._channels}
         self._nacked = {c.channel_id: {} for c in self._channels}

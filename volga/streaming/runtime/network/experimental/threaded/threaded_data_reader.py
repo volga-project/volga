@@ -129,7 +129,7 @@ class DataReaderV2(DataHandlerBase):
                     continue
                 acks = []
                 while len(ack_queue) != 0:
-                    ack_msg = ack_queue.pop()
+                    ack_msg = ack_queue.schedule_next()
                     acks.append(ack_msg)
                 ack_msg_batch = AckMessageBatch(acks=acks)
                 self._send_acks(channel_id, ack_msg_batch)

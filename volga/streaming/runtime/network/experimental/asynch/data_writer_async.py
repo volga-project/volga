@@ -14,7 +14,7 @@ import zmq.asyncio as zmq_async
 
 from volga.streaming.runtime.network.buffer.buffer_queues import get_buffer_id, BufferQueues
 from volga.streaming.runtime.network.buffer.buffer import Buffer, AckMessage
-from volga.streaming.runtime.network.buffer.buffer_pool import BufferPool
+from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 from volga.streaming.runtime.network.experimental.asynch.async_data_handler_base import AsyncDataHandlerBase
 from volga.streaming.runtime.network.experimental.channel import BiChannel, RemoteBiChannel, LocalBiChannel
 
@@ -49,7 +49,7 @@ class DataWriterV2Async(AsyncDataHandlerBase):
 
         self._buffer_queues: Dict[str, deque] = {c.channel_id: deque() for c in self._channels}
         self._buffer_creator = BufferQueues(self._channels, self._buffer_queues)
-        self._buffer_pool = BufferPool.instance(node_id=node_id)
+        self._buffer_pool = BufferMemoryTracker.instance(node_id=node_id)
 
         self._flusher_thread = Thread(target=self._flusher_loop)
 
