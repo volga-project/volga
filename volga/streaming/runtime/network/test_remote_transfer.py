@@ -28,6 +28,8 @@ class TestRemoteTransfer(unittest.TestCase):
         to_send = [{'i': i} for i in range(num_items)]
 
         ray.init(address=ray_addr, runtime_env=runtime_env)
+
+        job_name = f'job-{int(time.time())}'
         channel_id = 'ch_0'
         if multinode:
             all_nodes = ray.nodes()
@@ -68,13 +70,13 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=target_node_id,
                     soft=False
                 )
-            ).remote(channel, num_items)
+            ).remote(job_name, channel, num_items)
             target_transfer_actor = TransferActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=target_node_id,
                     soft=False
                 )
-            ).remote([channel], None)
+            ).remote(job_name, [channel], None)
         else:
             source_node_id = 'node_1'
             target_node_id = 'node_2'
@@ -88,8 +90,8 @@ class TestRemoteTransfer(unittest.TestCase):
                 target_node_id=target_node_id,
                 port=1234
             )
-            reader = TestReader.remote(channel, num_items)
-            writer = TestWriter.remote(channel)
+            reader = TestReader.remote(job_name, channel, num_items)
+            writer = TestWriter.remote(job_name, channel)
             source_transfer_actor = TransferActor.remote(None, [channel])
             target_transfer_actor = TransferActor.remote([channel], None)
 
@@ -134,11 +136,13 @@ class TestRemoteTransfer(unittest.TestCase):
             target_node_id=target_node_id,
             port=1234
         )
+        job_name = f'job-{int(time.time())}'
         io_loop = IOLoop()
         zmq_ctx = zmq.Context.instance(io_threads=10)
         data_writer = DataWriter(
             name='test_writer',
             source_stream_name='0',
+            job_name=job_name,
             channels=[channel],
             node_id=source_node_id,
             zmq_ctx=zmq_ctx
@@ -146,6 +150,7 @@ class TestRemoteTransfer(unittest.TestCase):
         data_reader = DataReader(
             name='test_reader',
             channels=[channel],
+            job_name=job_name,
             node_id=target_node_id,
             zmq_ctx=zmq_ctx
         )
@@ -199,5 +204,5 @@ class TestRemoteTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     t.test_one_to_one_locally()
-    # t.test_one_to_one_on_ray()
+    t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)

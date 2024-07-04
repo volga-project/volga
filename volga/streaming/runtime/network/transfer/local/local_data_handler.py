@@ -38,8 +38,6 @@ class LocalDataHandler(IOHandler, ABC):
         self._ch_to_socket: Dict[str, zmq.Socket] = {}
         self._socket_to_ch: Dict[zmq.Socket, str] = {}
 
-        self._buffer_memory_tracker = BufferMemoryTracker.instance(node_id=node_id)
-
     def init_sockets(self) -> List[Tuple[str, zmq.Socket]]:
         sockets = []
         for channel in self._channels:

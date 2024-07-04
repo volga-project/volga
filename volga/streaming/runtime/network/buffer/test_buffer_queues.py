@@ -17,13 +17,14 @@ from volga.streaming.runtime.network.utils import bytes_to_str
 class TestBufferQueues(unittest.TestCase):
 
     def test(self, num_items: int, buffer_size: int, buffering_policy: BufferingPolicy):
+        job_name = f'job-{int(time.time())}'
         channel = LocalChannel(
             channel_id='1',
             ipc_addr='ipc:///tmp/zmqtest',
         )
 
         to_send = [{'i': i} for i in range(num_items)]
-        bma = BufferMemoryTracker.instance(node_id='1', capacity_per_in_channel=3, capacity_per_out=2)
+        bma = BufferMemoryTracker.instance(node_id='1', job_name=job_name, capacity_per_in_channel=3, capacity_per_out=2)
         queues = BufferQueues(
             channels=[channel],
             buffer_memory_tracker=bma,

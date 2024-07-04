@@ -41,6 +41,7 @@ class ExecutionVertex:
 
     def __init__(
         self,
+        job_name: str,
         job_vertex: JobVertex,
         execution_vertex_index: int, # sub index based on parallelism of job vertex operator
         parallelism: int,
@@ -48,6 +49,7 @@ class ExecutionVertex:
         job_config: Optional[Dict] = None,
         resources: Optional[Resources] = None
     ):
+        self.job_name = job_name
         self.job_vertex = job_vertex
         self.execution_vertex_index = execution_vertex_index
         self.execution_vertex_id = self._gen_id()
@@ -101,6 +103,7 @@ class ExecutionGraph:
         for job_vertex in job_graph.job_vertices:
             for i in range(job_vertex.parallelism):
                 execution_vertex = ExecutionVertex(
+                    job_name=job_graph.job_name,
                     job_vertex = job_vertex,
                     execution_vertex_index=i,
                     parallelism=job_vertex.parallelism,

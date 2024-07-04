@@ -25,6 +25,7 @@ class DataReader(LocalDataHandler):
     def __init__(
         self,
         name: str,
+        job_name: str,
         channels: List[Channel],
         node_id: str,
         zmq_ctx: zmq.Context,
@@ -47,7 +48,7 @@ class DataReader(LocalDataHandler):
         self._out_of_order = {c.channel_id: {} for c in self._channels}
         self._acks_queues = {c.channel_id: deque() for c in self._channels}
 
-        self._buffer_memory_tracker = BufferMemoryTracker.instance(node_id=node_id)
+        self._buffer_memory_tracker = BufferMemoryTracker.instance(node_id=node_id, job_name=job_name)
 
     def read_message(self) -> List[ChannelMessage]:
         if len(self._output_queue) == 0:

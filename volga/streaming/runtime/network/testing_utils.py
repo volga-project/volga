@@ -32,6 +32,7 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
 class TestWriter:
     def __init__(
         self,
+        job_name: str,
         channel: Channel,
     ):
         self.channel = channel
@@ -40,6 +41,7 @@ class TestWriter:
         self.data_writer = DataWriter(
             name='test_writer',
             source_stream_name='0',
+            job_name=job_name,
             channels=[channel],
             node_id='0',
             zmq_ctx=zmq.Context.instance(),
@@ -63,15 +65,17 @@ class TestWriter:
 @ray.remote
 class TestReader:
     def __init__(
-            self,
-            channel: Channel,
-            num_expected: int,
+        self,
+        job_name: str,
+        channel: Channel,
+        num_expected: int,
     ):
         self.channel = channel
         self.io_loop = IOLoop()
         self.data_reader = DataReader(
             name='test_reader',
             channels=[channel],
+            job_name=job_name,
             node_id='0',
             zmq_ctx=zmq.Context.instance()
         )

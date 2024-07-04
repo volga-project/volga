@@ -1,3 +1,4 @@
+import hashlib
 import os
 from typing import Optional
 
@@ -25,22 +26,25 @@ class BufferMemoryTracker:
     @staticmethod
     def instance(
         node_id: str,
+        job_name: str,
         capacity_per_in_channel: int = DEFAULT_CAPACITY_PER_IN_CHANNEL,
         capacity_per_out: int = DEFAULT_CAPACITY_PER_OUT
     ) -> 'BufferMemoryTracker':
-        if node_id not in BufferMemoryTracker._instances:
-            BufferMemoryTracker._instances[node_id] = BufferMemoryTracker(node_id, capacity_per_in_channel, capacity_per_out)
-        return BufferMemoryTracker._instances[node_id]
+        key = f'{node_id}-{job_name}'
+        if key not in BufferMemoryTracker._instances:
+            BufferMemoryTracker._instances[key] = BufferMemoryTracker(node_id, job_name, capacity_per_in_channel, capacity_per_out)
+        return BufferMemoryTracker._instances[key]
 
-    def __init__(self, node_id: str, capacity_per_channel: int, capacity_per_out: int):
+    def __init__(self, node_id: str, job_name: str, capacity_per_channel: int, capacity_per_out: int):
         self._capacity_per_in_channel = capacity_per_channel
         self._capacity_per_out = capacity_per_out
         self._node_id = node_id
-        # TODO should we add job_name to dict and lock identifiers?
-        self._shared_dict_name = f'shared-dict-{self._node_id}'
+        self._job_name = job_name
+        self._shared_dict_name = _short_hash(f'{self._node_id}-{self._job_name}')
 
-        os.makedirs(BufferMemoryTracker.LOCKET_LOCK_DIR, exist_ok=True)
-        self._lock_name = f'{BufferMemoryTracker.LOCKET_LOCK_DIR}/lock-memory-allocator-{self._node_id}'
+        locket_dir = f'{BufferMemoryTracker.LOCKET_LOCK_DIR}/{self._job_name}'
+        os.makedirs(locket_dir, exist_ok=True)
+        self._lock_name = f'{locket_dir}/{self._node_id}'
         self._shared_dict = SharedMemoryDict(name=self._shared_dict_name, size=BufferMemoryTracker.DICT_MEMORY_SIZE)
         self._lock = locket.lock_file(self._lock_name)
 
@@ -74,5 +78,16 @@ class BufferMemoryTracker:
         return res
 
     def close(self):
+        # TODO cleanup lock file
         self._shared_dict.shm.close()
         self._shared_dict.shm.unlink()
+
+
+# TODO util this
+def _short_hash(s: str, length: int = 16) -> str:
+    s = s.encode('utf-8')
+    if length < len(hashlib.sha256(s).hexdigest()):
+        return hashlib.sha256(s).hexdigest()[:length]
+    else:
+        raise Exception('Length too long. Length of {y} when hash length is {x}.'.format(
+            x=str(len(hashlib.sha256(s).hexdigest())), y=length))

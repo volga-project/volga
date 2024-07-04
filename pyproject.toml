@@ -13,7 +13,7 @@ pydantic = "^1.10.13"
 simplejson = "^3.19.2"
 pyzmq = "23.2.0"
 shared-memory-dict = "0.7.2"
-lockit = "1.0.1"
+locket = "1.0.0"
 aenum = "3.1.15"
 
 [build-system]

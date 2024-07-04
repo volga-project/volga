@@ -33,6 +33,7 @@ class TestLocalTransfer(unittest.TestCase):
         num_items = 1000
         to_send = [{'i': i} for i in range(num_items)]
 
+        job_name = f'job-{int(time.time())}'
         # make sure we schedule on the same node
         all_nodes = ray.nodes()
         if len(all_nodes) >= 2:
@@ -47,14 +48,14 @@ class TestLocalTransfer(unittest.TestCase):
                 node_id=node['NodeID'],
                 soft=False
             )
-        ).remote(channel, num_items)
+        ).remote(job_name, channel, num_items)
         writer = TestWriter.options(
             num_cpus=0,
             scheduling_strategy=NodeAffinitySchedulingStrategy(
                 node_id=node['NodeID'],
                 soft=False
             )
-        ).remote(channel)
+        ).remote(job_name, channel)
 
         # make sure Ray has enough time to start actors
         time.sleep(1)
@@ -89,9 +90,12 @@ class TestLocalTransfer(unittest.TestCase):
         )
         zmq_ctx = zmq.Context.instance(io_threads=10)
         buffering_policy = BufferPerMessagePolicy()
-        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0', zmq_ctx=zmq_ctx,
+
+        job_name = f'job-{int(time.time())}'
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', job_name=job_name,
+                                 channels=[channel], node_id='0', zmq_ctx=zmq_ctx,
                                  buffering_policy=buffering_policy)
-        data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
+        data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
         io_loop.start()
@@ -129,9 +133,11 @@ class TestLocalTransfer(unittest.TestCase):
             channel_id='1',
             ipc_addr='ipc:///tmp/zmqtest',
         )
-        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
+        job_name = f'job-{int(time.time())}'
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', job_name=job_name,
+                                 channels=[channel], node_id='0',
                                  zmq_ctx=None, buffering_config=buffering_config, buffering_policy=buffering_policy)
-        data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=None)
+        data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], node_id='0', zmq_ctx=None)
 
         fake_io_loop = FakeIOLoop(data_reader, data_writer, loss_rate, exception_rate, out_of_orderness)
         fake_io_loop.start()
@@ -160,11 +166,13 @@ class TestLocalTransfer(unittest.TestCase):
 
         io_loop = IOLoop()
 
+        job_name = f'job-{int(time.time())}'
         zmq_ctx = zmq.Context.instance(io_threads=10)
-        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', job_name=job_name,
+                                 channels=[channel], node_id='0',
                                  zmq_ctx=zmq_ctx,
                                  buffering_config=buffering_config, buffering_policy=buffering_policy)
-        data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
+        data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
         io_loop.start()
@@ -191,11 +199,12 @@ class TestLocalTransfer(unittest.TestCase):
 
         io_loop = IOLoop()
 
+        job_name = f'job-{int(time.time())}'
         zmq_ctx = zmq.Context.instance(io_threads=10)
-        data_writer = DataWriter(name='test_writer', source_stream_name='0', channels=[channel], node_id='0',
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', job_name=job_name, channels=[channel], node_id='0',
                                  zmq_ctx=zmq_ctx,
                                  buffering_policy=buffering_policy, buffering_config=buffering_config)
-        data_reader = DataReader(name='test_reader', channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
+        data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
         io_loop.start()
@@ -229,7 +238,7 @@ class TestLocalTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestLocalTransfer()
     t.test_one_to_one_locally()
-    # t.test_one_to_one_on_ray()
+    t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
     t.test_unreliable_connection()
     t.test_buffer_batching()

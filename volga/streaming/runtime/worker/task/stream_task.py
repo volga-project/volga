@@ -58,6 +58,7 @@ class StreamTask(ABC):
                 self.data_writer = DataWriter(
                     name=self.execution_vertex.execution_vertex_id,
                     source_stream_name=str(self.execution_vertex.stream_operator.id),
+                    job_name=self.execution_vertex.job_name,
                     channels=output_channels,
                     node_id=self.execution_vertex.worker_node_info.node_id,
                     zmq_ctx=self.zmq_ctx
@@ -75,6 +76,7 @@ class StreamTask(ABC):
                 # sources do not read data from upstream so no reader
                 self.data_reader = DataReader(
                     name=self.execution_vertex.execution_vertex_id,
+                    job_name=self.execution_vertex.job_name,
                     channels=input_channels,
                     node_id=self.execution_vertex.worker_node_info.node_id,
                     zmq_ctx=self.zmq_ctx

@@ -1,5 +1,6 @@
 import unittest
 from threading import Thread
+import time
 
 from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 
@@ -7,9 +8,10 @@ from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferM
 class TestBufferMemoryTracker(unittest.TestCase):
 
     def test(self):
+        job_name = f'job-{int(time.time())}'
         channel_id = 'ch1'
         out_task_name = 'out1'
-        bmt1 = BufferMemoryTracker.instance(node_id='1', capacity_per_in_channel=2, capacity_per_out=2)
+        bmt1 = BufferMemoryTracker.instance(node_id='1', job_name=job_name, capacity_per_in_channel=2, capacity_per_out=2)
         r1 = bmt1.try_acquire(key=channel_id, amount=2, _in=True)
         assert r1 is True
         assert bmt1.get_capacity(key=channel_id) == 0
@@ -28,7 +30,7 @@ class TestBufferMemoryTracker(unittest.TestCase):
         assert r5 is True
 
         # test second to make sure they do not share same memory
-        bmt2 = BufferMemoryTracker.instance(node_id='2', capacity_per_in_channel=2, capacity_per_out=2)
+        bmt2 = BufferMemoryTracker.instance(node_id='2', job_name=job_name, capacity_per_in_channel=2, capacity_per_out=2)
         r6 = bmt2.try_acquire(key=channel_id, amount=2, _in=True)
         assert r6 is True
 
@@ -38,7 +40,8 @@ class TestBufferMemoryTracker(unittest.TestCase):
         print('assert ok')
 
     def test_concurrent_access(self):
-        local_bmt = BufferMemoryTracker.instance(node_id='3', capacity_per_in_channel=2, capacity_per_out=2)
+        job_name = f'job-{int(time.time())}'
+        local_bmt = BufferMemoryTracker.instance(node_id='3', job_name=job_name, capacity_per_in_channel=2, capacity_per_out=2)
         key = 'ch1'
 
         def p1():

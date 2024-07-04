@@ -35,6 +35,7 @@ class DataWriter(LocalDataHandler):
         self,
         name: str,
         source_stream_name: str,
+        job_name: str,
         channels: List[Channel],
         node_id: str,
         zmq_ctx: zmq.Context,
@@ -51,6 +52,7 @@ class DataWriter(LocalDataHandler):
             network_config=network_config
         )
 
+        self._job_name = job_name
         self.stats = Stats()
         self._source_stream_name = source_stream_name
 
@@ -58,6 +60,7 @@ class DataWriter(LocalDataHandler):
             self._channels,
             BufferMemoryTracker.instance(
                 node_id=node_id,
+                job_name=self._job_name,
                 capacity_per_in_channel=buffering_config.capacity_per_in_channel,
                 capacity_per_out=buffering_config.capacity_per_out
             ),
