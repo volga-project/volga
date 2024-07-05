@@ -4,7 +4,7 @@ import simplejson
 
 from volga.streaming.runtime.network.buffer.buffer import serialize, get_buffer_id, get_channel_id, get_payload, \
     append_to_buffer
-from volga.streaming.runtime.network.utils import bytes_to_str, int_to_bytes, bytes_to_int, str_to_bytes
+from volga.streaming.runtime.network.byte_utils import bytes_to_str, int_to_bytes, bytes_to_int, str_to_bytes
 
 
 class TestBufferSerialization(unittest.TestCase):

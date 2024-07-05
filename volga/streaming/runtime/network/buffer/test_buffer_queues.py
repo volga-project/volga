@@ -11,7 +11,7 @@ from volga.streaming.runtime.network.buffer.buffer_queues import BufferQueues
 from volga.streaming.runtime.network.buffer.buffering_policy import PeriodicPartialFlushPolicy, BufferPerMessagePolicy, \
     BufferingPolicy
 from volga.streaming.runtime.network.channel import LocalChannel
-from volga.streaming.runtime.network.utils import bytes_to_str
+from volga.streaming.runtime.network.byte_utils import bytes_to_str
 
 
 class TestBufferQueues(unittest.TestCase):

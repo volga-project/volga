@@ -21,7 +21,7 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
         'simplejson==3.19.2',
         'pyzmq==23.2.0',
         'shared-memory-dict==0.7.2',
-        'lockit==1.0.1',
+        'locket==1.0.0',
         'aenum==3.1.15'
     ],
     'py_modules': [volga]
@@ -34,9 +34,11 @@ class TestWriter:
         self,
         job_name: str,
         channel: Channel,
+        delay_s: float = 0
     ):
         self.channel = channel
         self.io_loop = IOLoop()
+        self.delay_s = delay_s
         buffering_policy = BufferPerMessagePolicy()
         self.data_writer = DataWriter(
             name='test_writer',
@@ -54,6 +56,8 @@ class TestWriter:
     def send_items(self, items: List[Dict]):
         for item in items:
             self.data_writer._write_message(self.channel.channel_id, item)
+            if self.delay_s > 0:
+                time.sleep(self.delay_s)
 
     def get_stats(self):
         return self.data_writer.stats
@@ -83,10 +87,10 @@ class TestReader:
         self.io_loop.register(self.data_reader)
         self.io_loop.start()
         print('reader inited')
+        self.res = []
 
     def receive_items(self) -> List[Any]:
         t = time.time()
-        res = []
         while True:
             if time.time() - t > 300:
                 raise RuntimeError('Timeout reading data')
@@ -95,10 +99,13 @@ class TestReader:
             if len(items) == 0:
                 time.sleep(0.001)
                 continue
-            res.extend(items)
-            if len(res) == self.num_expected:
+            self.res.extend(items)
+            if len(self.res) == self.num_expected:
                 break
-        return res
+        return self.res
+
+    def get_items(self) -> List:
+        return self.res
 
     def get_stats(self):
         return self.data_reader.stats

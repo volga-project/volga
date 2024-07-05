@@ -3,7 +3,7 @@ from typing import List, Tuple
 import simplejson
 from pydantic import BaseModel
 
-from volga.streaming.runtime.network.utils import str_to_bytes, int_to_bytes, bytes_to_int, bytes_to_str
+from volga.streaming.runtime.network.byte_utils import str_to_bytes, int_to_bytes, bytes_to_int, bytes_to_str
 
 
 Buffer = bytes

@@ -10,7 +10,7 @@ import zmq.asyncio as zmq_async
 from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 from volga.streaming.runtime.network.config import NetworkConfig
 from volga.streaming.runtime.network.transfer.io_loop import IOHandler, Direction
-from volga.streaming.runtime.network.utils import configure_socket
+from volga.streaming.runtime.network.socket_utils import configure_socket, SocketMetadata, SocketOwner, SocketRole
 
 
 # Base class for local DataReader and DataWriter
@@ -38,15 +38,14 @@ class LocalDataHandler(IOHandler, ABC):
         self._ch_to_socket: Dict[str, zmq.Socket] = {}
         self._socket_to_ch: Dict[zmq.Socket, str] = {}
 
-    def init_sockets(self) -> List[Tuple[str, zmq.Socket]]:
+    def init_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
         sockets = []
         for channel in self._channels:
             if channel.channel_id in self._ch_to_socket:
                 raise RuntimeError('duplicate channel ids')
 
             socket = self._zmq_ctx.socket(zmq.PAIR)
-            socket_name = '' # TODO
-            sockets.append((socket_name, socket))
+            socket_owner = SocketOwner.CLIENT
 
             # created ipc path if not exists
             # TODO we should clean it up on socket deletion
@@ -68,19 +67,27 @@ class LocalDataHandler(IOHandler, ABC):
                 # connects to another local DataReader/DataWriter instance
                 if self._is_reader:
                     socket.connect(channel.ipc_addr)
+                    socket_role = SocketRole.CONNECT
                 else:
                     socket.bind(channel.ipc_addr)
+                    socket_role = SocketRole.BIND
             elif isinstance(channel, RemoteChannel):
                 if self._is_reader:
                     # connects to receiver RemoteTransferHandler
                     socket.connect(channel.target_local_ipc_addr)
+                    socket_role = SocketRole.CONNECT
                 else:
                     # connects to sender RemoteTransferHandler
                     socket.bind(channel.source_local_ipc_addr)
+                    socket_role = SocketRole.BIND
             else:
                 raise ValueError('Unknown channel type')
             self._ch_to_socket[channel.channel_id] = socket
             self._socket_to_ch[socket] = channel.channel_id
+            sockets.append((
+                SocketMetadata(owner=socket_owner, role=socket_role, channel_id=channel.channel_id),
+                socket
+            ))
 
         return sockets
 

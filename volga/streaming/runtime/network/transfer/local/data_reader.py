@@ -15,7 +15,8 @@ import simplejson
 
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.transfer.local.local_data_handler import LocalDataHandler
-from volga.streaming.runtime.network.utils import bytes_to_str, rcv_no_block, send_no_block
+from volga.streaming.runtime.network.byte_utils import bytes_to_str
+from volga.streaming.runtime.network.socket_utils import rcv_no_block, send_no_block
 
 logger = logging.getLogger("ray")
 

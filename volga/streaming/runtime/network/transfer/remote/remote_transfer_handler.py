@@ -10,7 +10,8 @@ from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandler
 from volga.streaming.runtime.network.channel import RemoteChannel, ipc_path_from_addr
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
-from volga.streaming.runtime.network.utils import configure_socket, send_no_block, rcv_no_block
+from volga.streaming.runtime.network.socket_utils import configure_socket, rcv_no_block, send_no_block, _try_tcp_bind, \
+    SocketMetadata, SocketOwner, SocketRole
 
 
 # base class for remote TransferReceiver and TransferSender
@@ -46,7 +47,7 @@ class RemoteTransferHandler(IOHandler):
 
         self.stats = Stats()
 
-    def init_sockets(self) -> List[Tuple[str, zmq.Socket]]:
+    def init_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
         sockets = []
         for channel in self._channels:
             assert isinstance(channel, RemoteChannel)
@@ -55,8 +56,7 @@ class RemoteTransferHandler(IOHandler):
 
             # local socket setup
             local_socket = self._zmq_ctx.socket(zmq.PAIR)
-            local_socket_name = '' # TODO
-            sockets.append((local_socket_name, local_socket))
+            local_socket_owner = SocketOwner.TRANSFER_LOCAL
             zmq_config = self._network_config.zmq
             if zmq_config is not None:
                 configure_socket(local_socket, zmq_config)
@@ -66,13 +66,17 @@ class RemoteTransferHandler(IOHandler):
                 ipc_path = ipc_path_from_addr(channel.source_local_ipc_addr)
                 os.makedirs(ipc_path, exist_ok=True)
                 local_socket.connect(channel.source_local_ipc_addr)
+                local_socket_role = SocketRole.CONNECT
             else:
                 ipc_path = ipc_path_from_addr(channel.target_local_ipc_addr)
                 os.makedirs(ipc_path, exist_ok=True)
                 local_socket.bind(channel.target_local_ipc_addr)
+                local_socket_role = SocketRole.BIND
 
             self._local_ch_to_socket[channel.channel_id] = local_socket
             self._local_socket_to_ch[local_socket] = channel.channel_id
+            local_socket_metadata = SocketMetadata(owner=local_socket_owner, role=local_socket_role, channel_id=channel.channel_id)
+            sockets.append((local_socket_metadata, local_socket))
 
             # remote socket setup
             peer_node_id = channel.target_node_id if self._is_sender else channel.source_node_id
@@ -81,25 +85,29 @@ class RemoteTransferHandler(IOHandler):
                 continue
 
             remote_socket = self._zmq_ctx.socket(zmq.PAIR)
+            remote_socket_owner = SocketOwner.TRANSFER_REMOTE
             # TODO separate zmq_config for remote and local sockets
             if zmq_config is not None:
                 configure_socket(remote_socket, zmq_config)
             if self._is_sender:
                 tcp_addr = f'tcp://{channel.target_node_ip}:{channel.port}'
                 remote_socket.connect(tcp_addr)
-                remote_socket_name = f'transfer_remote_sender_{channel.channel_id}'
+                remote_socket_role = SocketRole.CONNECT
             else:
                 tcp_addr = f'tcp://0.0.0.0:{channel.port}'
-                remote_socket.bind(tcp_addr)
-                remote_socket_name = f'transfer_remote_receiver_{channel.channel_id}'
+                # remote_socket.bind(tcp_addr)
+                _try_tcp_bind(remote_socket, tcp_addr, channel.port)
+                remote_socket_role = SocketRole.BIND
 
-            sockets.append((remote_socket_name, remote_socket))
+            remote_socket_metadata = SocketMetadata(owner=remote_socket_owner, role=remote_socket_role, channel_id=channel.channel_id)
+            sockets.append((remote_socket_metadata, remote_socket))
 
             self._remote_node_to_sock[peer_node_id] = remote_socket
             self._remote_socket_to_node[remote_socket] = peer_node_id
 
             # TODO what happens if we reconnect? Do we just drop existing queues?
             self._remote_queues[peer_node_id] = deque()
+
         return sockets
 
     def send(self, socket: zmq.Socket):
@@ -174,4 +182,3 @@ class RemoteTransferHandler(IOHandler):
             s.close(linger=0)
         for s in self._remote_socket_to_node:
             s.close(linger=0)
-

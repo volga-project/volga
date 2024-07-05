@@ -1,9 +1,11 @@
 import functools
+import os
 import random
+import signal
 import time
 import unittest
 from threading import Thread
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 import ray
 import zmq
@@ -23,12 +25,7 @@ import ray.util.state as ray_state
 
 class TestRemoteTransfer(unittest.TestCase):
 
-    def test_one_to_one_on_ray(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_items = 1000
-        to_send = [{'i': i} for i in range(num_items)]
-
-        ray.init(address=ray_addr, runtime_env=runtime_env)
-
+    def _init_ray_actors(self, num_items: int, writer_delay_s: float = 0, multinode: bool = False) -> Tuple:
         job_name = f'job-{int(time.time())}'
         channel_id = 'ch_0'
         if multinode:
@@ -56,7 +53,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=source_node_id,
                     soft=False
                 )
-            ).remote(channel)
+            ).remote(job_name, channel, writer_delay_s)
             source_transfer_actor = TransferActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=source_node_id,
@@ -76,7 +73,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=target_node_id,
                     soft=False
                 )
-            ).remote(job_name, [channel], None)
+            ).remote([channel], None)
         else:
             source_node_id = 'node_1'
             target_node_id = 'node_2'
@@ -91,9 +88,22 @@ class TestRemoteTransfer(unittest.TestCase):
                 port=1234
             )
             reader = TestReader.remote(job_name, channel, num_items)
-            writer = TestWriter.remote(job_name, channel)
+            writer = TestWriter.remote(job_name, channel, writer_delay_s)
             source_transfer_actor = TransferActor.remote(None, [channel])
             target_transfer_actor = TransferActor.remote([channel], None)
+
+        return reader, writer, source_transfer_actor, target_transfer_actor, channel, source_node_id, target_node_id
+
+    def test_one_to_one_on_ray(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
+        num_items = 1000
+        to_send = [{'i': i} for i in range(num_items)]
+
+        ray.init(address=ray_addr, runtime_env=runtime_env)
+
+        reader, writer, source_transfer_actor, target_transfer_actor, channel, source_node_id, target_node_id = self._init_ray_actors(
+            num_items=num_items,
+            multinode=multinode
+        )
 
         source_transfer_actor.start.remote()
         target_transfer_actor.start.remote()
@@ -200,9 +210,77 @@ class TestRemoteTransfer(unittest.TestCase):
         io_loop.close()
         wt.join(5)
 
+    def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
+        num_items = 1000
+        writer_delay_s = 0
+        to_send = [{'i': i} for i in range(num_items)]
+
+        ray.init(address=ray_addr, runtime_env=runtime_env)
+        reader, writer, source_transfer_actor, target_transfer_actor, channel, source_node_id, target_node_id = self._init_ray_actors(
+            num_items=num_items,
+            writer_delay_s=writer_delay_s,
+            multinode=multinode
+        )
+
+        source_transfer_actor.start.remote()
+        target_transfer_actor.start.remote()
+        print('started')
+        writer.send_items.remote(to_send)
+        fut = reader.receive_items.remote()
+
+        time.sleep(1)
+        for i in range(5):
+            # if i < 10:
+            if i%2 == 0:
+                ray.kill(source_transfer_actor)
+                time.sleep(0.2)
+                ray.kill(target_transfer_actor)
+                print('graceful kill')
+            else:
+                source_transfer_actor_pid = ray.get(source_transfer_actor.get_pid.remote())
+                time.sleep(0.2)
+                target_transfer_actor_pid = ray.get(target_transfer_actor.get_pid.remote())
+                os.kill(source_transfer_actor_pid, signal.SIGKILL)
+                os.kill(target_transfer_actor_pid, signal.SIGKILL)
+                print('SIGKILL kill')
+
+            # TODO try 0.2 this may not work
+            time.sleep(1)
+
+            if multinode:
+                source_transfer_actor = TransferActor.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=source_node_id,
+                        soft=False
+                    )
+                ).remote(None, [channel])
+
+                target_transfer_actor = TransferActor.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=target_node_id,
+                        soft=False
+                    )
+                ).remote([channel], None)
+            else:
+                source_transfer_actor = TransferActor.remote(None, [channel])
+                target_transfer_actor = TransferActor.remote([channel], None)
+
+            source_transfer_actor.start.remote()
+            time.sleep(0.3)
+            target_transfer_actor.start.remote()
+            print('re-started')
+            time.sleep(2)
+
+        rcvd = ray.get(reader.get_items.remote())
+
+        print(len(rcvd))
+        assert to_send == rcvd
+        print('assert ok')
+
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_one_to_one_locally()
-    t.test_one_to_one_on_ray()
+    # t.test_one_to_one_locally()
+    # t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
+    t.test_transfer_actor_interruption()

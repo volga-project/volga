@@ -1,3 +1,4 @@
+import os
 from typing import List, Optional, Tuple
 
 import ray
@@ -52,6 +53,9 @@ class TransferActor:
         sender_stats = self._sender.stats if self._sender is not None else None
         receiver_stats = self._receiver.stats if self._receiver is not None else None
         return sender_stats, receiver_stats
+
+    def get_pid(self):
+        return os.getpid()
 
     def start(self):
         self._loop.start()

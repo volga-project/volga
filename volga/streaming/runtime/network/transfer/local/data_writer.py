@@ -19,7 +19,7 @@ from volga.streaming.runtime.network.buffer.buffer_queues import BufferQueues
 from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.transfer.local.local_data_handler import LocalDataHandler
-from volga.streaming.runtime.network.utils import send_no_block, rcv_no_block
+from volga.streaming.runtime.network.socket_utils import rcv_no_block, send_no_block
 
 # TODO we want to make sure this limit is low enough to cause backpressure when buffer memory is full
 # TODO should this be smaller then default buffer memory capacity per channel
