@@ -2,13 +2,13 @@ import time
 from collections import deque
 from random import randrange, choices
 from threading import Thread
-from typing import List, Any, Dict
+from typing import List, Any, Dict, Tuple
 
 import zmq
 
 from volga.streaming.runtime.network.buffer.buffering_policy import BufferPerMessagePolicy
 from volga.streaming.runtime.network.channel import Channel
-from volga.streaming.runtime.network.transfer.io_loop import IOLoop
+from volga.streaming.runtime.network.transfer.io_loop import IOLoop, IOHandler
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 import ray
@@ -28,7 +28,7 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
 }
 
 
-@ray.remote
+@ray.remote(max_concurrency=4)
 class TestWriter:
     def __init__(
         self,
@@ -50,8 +50,9 @@ class TestWriter:
             buffering_policy=buffering_policy
         )
         self.io_loop.register(self.data_writer)
-        self.io_loop.start()
-        print('writer inited')
+
+    def start(self) -> Tuple[bool, Any]:
+        return self.io_loop.start()
 
     def send_items(self, items: List[Dict]):
         for item in items:
@@ -66,7 +67,7 @@ class TestWriter:
         self.io_loop.close()
 
 
-@ray.remote
+@ray.remote(max_concurrency=4)
 class TestReader:
     def __init__(
         self,
@@ -85,9 +86,10 @@ class TestReader:
         )
         self.num_expected = num_expected
         self.io_loop.register(self.data_reader)
-        self.io_loop.start()
-        print('reader inited')
         self.res = []
+
+    def start(self) -> Tuple[bool, Any]:
+        return self.io_loop.start()
 
     def receive_items(self) -> List[Any]:
         t = time.time()
@@ -128,7 +130,6 @@ def read(rcvd: List, data_reader: DataReader, num_expected: int):
         else:
             rcvd.extend(msgs)
 
-        print(len(rcvd))
         if len(rcvd) == num_expected:
             break
 
@@ -243,3 +244,12 @@ def insert_random(q: deque, el: Any, out_of_orderness: float):
         return
     i = randrange(int((1-out_of_orderness) * l), l)
     q.insert(i, el)
+
+def start_ray_io_handler_actors(handler_actors: List):
+    futs = [h.start.remote() for h in handler_actors]
+    res = ray.get(futs)
+    for i in range(len(res)):
+        succ, err = res[i]
+        if not succ:
+            raise RuntimeError(f'Failed to start {handler_actors[i].__class__.__name__}, err: {err}')
+

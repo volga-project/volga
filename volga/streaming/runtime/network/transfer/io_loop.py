@@ -1,14 +1,17 @@
 import enum
+import threading
+import time
 from abc import ABC, abstractmethod
 from threading import Thread
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 
 import zmq
-from zmq.utils.monitor import recv_monitor_message, parse_monitor_message
+from zmq.utils.monitor import recv_monitor_message
+from zmq.constants import Event
 
-from volga.streaming.runtime.network.channel import Channel
+from volga.streaming.runtime.network.channel import Channel, LocalChannel
 from volga.streaming.runtime.network.config import NetworkConfig
-from volga.streaming.runtime.network.socket_utils import SocketMetadata, SocketOwner
+from volga.streaming.runtime.network.socket_utils import SocketMetadata, SocketOwner, SocketKind
 
 
 # Indicates the role of the handler.
@@ -38,6 +41,7 @@ class IOHandler(ABC):
         self._zmq_ctx = zmq_ctx
         self._channels = channels
         self.io_loop: Optional[IOLoop] = None
+        self._sockets_meta: Dict[SocketMetadata, zmq.Socket] = {}
 
     def is_running(self):
         if self.io_loop is None:
@@ -45,8 +49,22 @@ class IOHandler(ABC):
         return self.io_loop.running
 
     @abstractmethod
-    def init_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
+    def create_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
         raise NotImplementedError()
+
+    def bind_and_connect(self):
+        if len(self._sockets_meta) == 0:
+            raise RuntimeError('No sockets to bind/connect')
+        for meta in self._sockets_meta:
+            socket = self._sockets_meta[meta]
+            assert isinstance(socket, zmq.Socket)
+            addr = meta.addr
+            if meta.kind == SocketKind.BIND:
+                socket.bind(addr)
+            elif meta.kind == SocketKind.CONNECT:
+                socket.connect(addr)
+            else:
+                raise RuntimeError('Unknown socket kind')
 
     @abstractmethod
     def rcv(self, socket: zmq.Socket):
@@ -64,15 +82,20 @@ class IOHandler(ABC):
 # Polls zmq sockets and delegates send or rcv events to registered io handlers
 class IOLoop:
     def __init__(self):
-        self._poller: zmq.Poller = zmq.Poller()
+        self._poller = None
 
         self.running = False
-        self._thread = Thread(target=self._start_loop)
+        self._thread = None
         self._registered_handlers: List[IOHandler] = []
         self._socket_to_handler: Dict[zmq.Socket, IOHandler] = {}
 
         # monitoring
         self._monitor_sockets: Dict[zmq.Socket, SocketMetadata] = {}
+
+        # keep track of connected events for sockets which should have it
+        self._to_be_connected: Dict[SocketMetadata, Tuple[bool, Optional[Event]]] = {}
+        # once all of the above is connected, release this event so the loop starts
+        self._all_connected_event = threading.Event()
 
     def register(self, io_handler: IOHandler):
         if self.running is True:
@@ -81,9 +104,12 @@ class IOLoop:
         io_handler.io_loop = self
 
     def _start_loop(self):
+        self._poller = zmq.Poller()
+
         for handler in self._registered_handlers:
-            socket_metas = handler.init_sockets()
+            socket_metas = handler.create_sockets()
             for (socket_meta, socket) in socket_metas:
+                assert isinstance(socket_meta, SocketMetadata)
                 if socket in self._socket_to_handler:
                     raise RuntimeError('Duplicate socket')
                 self._socket_to_handler[socket] = handler
@@ -91,9 +117,17 @@ class IOLoop:
 
                 # register for monitoring
                 monitor_socket = socket.get_monitor_socket()
-                # TODO we should identify it by channel_id->socket_type->side(BIND/CONNECT)
                 self._monitor_sockets[monitor_socket] = socket_meta
                 self._poller.register(monitor_socket, zmq.POLLIN)
+
+                # register if this socket should be awaited to confirm connection
+                if socket_meta.kind == SocketKind.CONNECT:
+                    self._to_be_connected[socket_meta] = (False, None)
+
+            handler.bind_and_connect()
+
+        if len(self._to_be_connected) == 0:
+            self._all_connected_event.set()
 
         self.running = True
         self._loop()
@@ -102,7 +136,26 @@ class IOLoop:
 
     def _on_monitor_event(self, monitor_socket: zmq.Socket, socket_meta: SocketMetadata):
         evt = recv_monitor_message(monitor_socket)
-        if socket_meta.owner == SocketOwner.TRANSFER_REMOTE:
+        if socket_meta.kind == SocketKind.CONNECT:
+            event = evt['event']
+            assert isinstance(event, Event)
+            if event == Event.CONNECTED:
+                self._to_be_connected[socket_meta] = (True, event)
+            else:
+                self._to_be_connected[socket_meta] = (self._to_be_connected[socket_meta][0], event)
+
+            # check if all connected
+            all_con = True
+            for s in self._to_be_connected:
+                if not self._to_be_connected[s][0]:
+                    all_con = False
+                    break
+
+            if all_con:
+                self._all_connected_event.set()
+
+        # TODO remove after debug
+        if socket_meta.owner == SocketOwner.CLIENT:
             print(f'Monitor [{socket_meta}] {evt}')
 
     def _loop(self):
@@ -114,6 +167,10 @@ class IOLoop:
             for (socket, flag) in sockets_and_flags:
                 if socket in self._monitor_sockets:
                     self._on_monitor_event(socket, self._monitor_sockets[socket])
+                    continue
+                assert isinstance(socket, zmq.Socket)
+                # do not process data until we have everything connected
+                if not self._all_connected_event.is_set():
                     continue
 
                 handler = self._socket_to_handler[socket]
@@ -127,9 +184,21 @@ class IOLoop:
                 else:
                     raise RuntimeError(f'Unknown flag {flag}')
 
-    def start(self):
+    def start(self, timeout: int = 5) -> Tuple[bool, Any]:
+
         self.running = True
+        self._all_connected_event = threading.Event()
+        self._thread = Thread(target=self._start_loop)
         self._thread.start()
+
+        ready = self._all_connected_event.wait(timeout=timeout)
+        if not ready:
+            # get info about not connected sockets
+            not_connected_info = [(str(sm), str(self._to_be_connected[sm][1])) for sm in self._to_be_connected if not self._to_be_connected[sm][0]]
+            self.close()
+            return False, not_connected_info
+        else:
+            return True, None
 
     def close(self):
         self.running = False

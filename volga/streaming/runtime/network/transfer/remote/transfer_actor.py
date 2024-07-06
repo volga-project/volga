@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 
 import ray
 import zmq
@@ -57,8 +57,8 @@ class TransferActor:
     def get_pid(self):
         return os.getpid()
 
-    def start(self):
-        self._loop.start()
+    def start(self) -> Tuple[bool, Any]:
+        return self._loop.start()
 
     def stop(self):
         self._loop.close()

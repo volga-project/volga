@@ -11,7 +11,7 @@ from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandle
 from volga.streaming.runtime.network.channel import RemoteChannel, ipc_path_from_addr
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.socket_utils import configure_socket, rcv_no_block, send_no_block, _try_tcp_bind, \
-    SocketMetadata, SocketOwner, SocketRole
+    SocketMetadata, SocketOwner, SocketKind
 
 
 # base class for remote TransferReceiver and TransferSender
@@ -47,7 +47,7 @@ class RemoteTransferHandler(IOHandler):
 
         self.stats = Stats()
 
-    def init_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
+    def create_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
         sockets = []
         for channel in self._channels:
             assert isinstance(channel, RemoteChannel)
@@ -65,17 +65,25 @@ class RemoteTransferHandler(IOHandler):
             if self._is_sender:
                 ipc_path = ipc_path_from_addr(channel.source_local_ipc_addr)
                 os.makedirs(ipc_path, exist_ok=True)
-                local_socket.connect(channel.source_local_ipc_addr)
-                local_socket_role = SocketRole.CONNECT
+                local_addr = channel.source_local_ipc_addr
+                local_socket_kind = SocketKind.CONNECT
             else:
                 ipc_path = ipc_path_from_addr(channel.target_local_ipc_addr)
                 os.makedirs(ipc_path, exist_ok=True)
-                local_socket.bind(channel.target_local_ipc_addr)
-                local_socket_role = SocketRole.BIND
+                local_addr = channel.target_local_ipc_addr
+                local_socket_kind = SocketKind.BIND
 
             self._local_ch_to_socket[channel.channel_id] = local_socket
             self._local_socket_to_ch[local_socket] = channel.channel_id
-            local_socket_metadata = SocketMetadata(owner=local_socket_owner, role=local_socket_role, channel_id=channel.channel_id)
+            local_socket_metadata = SocketMetadata(
+                owner=local_socket_owner,
+                kind=local_socket_kind,
+                channel_id=channel.channel_id,
+                addr=local_addr
+            )
+            if local_socket_metadata in self._sockets_meta:
+                raise
+            self._sockets_meta[local_socket_metadata] = local_socket
             sockets.append((local_socket_metadata, local_socket))
 
             # remote socket setup
@@ -91,16 +99,16 @@ class RemoteTransferHandler(IOHandler):
                 configure_socket(remote_socket, zmq_config)
             if self._is_sender:
                 tcp_addr = f'tcp://{channel.target_node_ip}:{channel.port}'
-                remote_socket.connect(tcp_addr)
-                remote_socket_role = SocketRole.CONNECT
+                remote_socket_kind = SocketKind.CONNECT
             else:
                 tcp_addr = f'tcp://0.0.0.0:{channel.port}'
-                # remote_socket.bind(tcp_addr)
-                _try_tcp_bind(remote_socket, tcp_addr, channel.port)
-                remote_socket_role = SocketRole.BIND
+                remote_socket_kind = SocketKind.BIND
 
-            remote_socket_metadata = SocketMetadata(owner=remote_socket_owner, role=remote_socket_role, channel_id=channel.channel_id)
+            remote_socket_metadata = SocketMetadata(owner=remote_socket_owner, kind=remote_socket_kind, channel_id=channel.channel_id, addr=tcp_addr)
             sockets.append((remote_socket_metadata, remote_socket))
+            if remote_socket_metadata in self._sockets_meta:
+                raise
+            self._sockets_meta[remote_socket_metadata] = remote_socket
 
             self._remote_node_to_sock[peer_node_id] = remote_socket
             self._remote_socket_to_node[remote_socket] = peer_node_id
@@ -177,6 +185,7 @@ class RemoteTransferHandler(IOHandler):
         remote_or_local = 'remote' if socket in self._remote_socket_to_node else 'local'
         print(f'Rcvd {remote_or_local} in {time.time() - t}')
 
+    # TODO we should unbind/disconnect sockets
     def close_sockets(self):
         for s in self._local_socket_to_ch:
             s.close(linger=0)

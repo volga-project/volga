@@ -13,7 +13,7 @@ from volga.streaming.runtime.network.buffer.buffering_policy import BufferPerMes
 from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, write, read, \
-    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, FakeIOLoop
+    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, FakeIOLoop, start_ray_io_handler_actors
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
@@ -57,6 +57,8 @@ class TestLocalTransfer(unittest.TestCase):
             )
         ).remote(job_name, channel)
 
+        start_ray_io_handler_actors([reader, writer])
+
         # make sure Ray has enough time to start actors
         time.sleep(1)
         writer.send_items.remote(to_send)
@@ -98,7 +100,9 @@ class TestLocalTransfer(unittest.TestCase):
         data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
-        io_loop.start()
+        succ, err = io_loop.start()
+        if not succ:
+            raise RuntimeError(f'Unable to connect io_loop: {err}')
 
         to_send = [{'i': i} for i in range(num_items)]
         rcvd = []
@@ -175,7 +179,9 @@ class TestLocalTransfer(unittest.TestCase):
         data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
-        io_loop.start()
+        succ, err = io_loop.start()
+        if not succ:
+            raise RuntimeError(f'Unable to connect io_loop: {err}')
         rcvd = []
 
         wt = Thread(target=functools.partial(write, to_send, data_writer, channel))
@@ -207,7 +213,9 @@ class TestLocalTransfer(unittest.TestCase):
         data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], node_id='0', zmq_ctx=zmq_ctx)
         io_loop.register(data_writer)
         io_loop.register(data_reader)
-        io_loop.start()
+        succ, err = io_loop.start()
+        if not succ:
+            raise RuntimeError(f'Unable to connect io_loop: {err}')
         try:
             for _ in range(buffering_config.capacity_per_in_channel + buffering_config.capacity_per_out):
                 time.sleep(0.1)
@@ -231,8 +239,6 @@ class TestLocalTransfer(unittest.TestCase):
             print('assert ok')
         finally:
             io_loop.close()
-
-
 
 
 if __name__ == '__main__':

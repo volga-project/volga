@@ -79,7 +79,7 @@ class DataWriter(LocalDataHandler):
 
     def _write_message(self, channel_id: str, message: ChannelMessage, block=True, timeout=5) -> bool:
         # block until starts running
-        timeout_s = 5
+        timeout_s = 10
         t = time.time()
         while not self.is_running() and time.time() - t < timeout_s:
             time.sleep(0.01)

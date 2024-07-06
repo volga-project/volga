@@ -31,9 +31,20 @@ class BufferMemoryTracker:
         capacity_per_out: int = DEFAULT_CAPACITY_PER_OUT
     ) -> 'BufferMemoryTracker':
         key = f'{node_id}-{job_name}'
+        lock = BufferMemoryTracker._get_lock(node_id, job_name)
+        lock.acquire()
         if key not in BufferMemoryTracker._instances:
             BufferMemoryTracker._instances[key] = BufferMemoryTracker(node_id, job_name, capacity_per_in_channel, capacity_per_out)
-        return BufferMemoryTracker._instances[key]
+        res = BufferMemoryTracker._instances[key]
+        lock.release()
+        return res
+
+    @staticmethod
+    def _get_lock(node_id: str, job_name: str):
+        locket_dir = f'{BufferMemoryTracker.LOCKET_LOCK_DIR}/{job_name}'
+        os.makedirs(locket_dir, exist_ok=True)
+        lock_name = f'{locket_dir}/{node_id}'
+        return locket.lock_file(lock_name)
 
     def __init__(self, node_id: str, job_name: str, capacity_per_channel: int, capacity_per_out: int):
         self._capacity_per_in_channel = capacity_per_channel
@@ -46,7 +57,7 @@ class BufferMemoryTracker:
         os.makedirs(locket_dir, exist_ok=True)
         self._lock_name = f'{locket_dir}/{self._node_id}'
         self._shared_dict = SharedMemoryDict(name=self._shared_dict_name, size=BufferMemoryTracker.DICT_MEMORY_SIZE)
-        self._lock = locket.lock_file(self._lock_name)
+        self._lock = BufferMemoryTracker._get_lock(node_id, job_name)
 
     def try_acquire(self, key: str, amount: int = 1, _in: bool = True) -> bool:
         self._lock.acquire()

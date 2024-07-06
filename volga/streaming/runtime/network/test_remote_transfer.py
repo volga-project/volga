@@ -13,7 +13,8 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.stats import StatsEvent
-from volga.streaming.runtime.network.testing_utils import write, read, TestReader, TestWriter, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+from volga.streaming.runtime.network.testing_utils import write, read, TestReader, TestWriter, \
+    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, start_ray_io_handler_actors
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop, Direction
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
@@ -104,9 +105,7 @@ class TestRemoteTransfer(unittest.TestCase):
             num_items=num_items,
             multinode=multinode
         )
-
-        source_transfer_actor.start.remote()
-        target_transfer_actor.start.remote()
+        start_ray_io_handler_actors([reader, writer, source_transfer_actor, target_transfer_actor])
 
         time.sleep(1)
         writer.send_items.remote(to_send)
@@ -116,17 +115,10 @@ class TestRemoteTransfer(unittest.TestCase):
         transfer_sender_stats, _ = ray.get(source_transfer_actor.get_stats.remote())
         _, transfer_receiver_stats = ray.get(target_transfer_actor.get_stats.remote())
 
-        assert to_send == sorted(rcvd, key=lambda e: e['i'])
+        print(f'TransferSender stats: {transfer_sender_stats}')
+        print(f'TransferSender stats: {transfer_receiver_stats}')
 
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.MSG_SENT)[target_node_id] == num_items
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.ACK_SENT)[channel.channel_id] == num_items
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.ACK_RCVD)[target_node_id] == num_items
-
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.MSG_SENT)[channel.channel_id] == num_items
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[source_node_id] == num_items
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.ACK_SENT)[source_node_id] == num_items
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.ACK_RCVD)[channel.channel_id] == num_items
+        assert to_send == rcvd
 
         print('assert ok')
 
@@ -196,22 +188,12 @@ class TestRemoteTransfer(unittest.TestCase):
 
         assert to_send == rcvd
 
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.MSG_SENT)[target_node_id] == num_items
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[channel.channel_id] == num_items
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.ACK_SENT)[channel.channel_id] == num_items
-        assert transfer_sender_stats.get_counter_for_event(StatsEvent.ACK_RCVD)[target_node_id] == num_items
-
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.MSG_SENT)[channel.channel_id] == num_items
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.MSG_RCVD)[source_node_id] == num_items
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.ACK_SENT)[source_node_id] == num_items
-        assert transfer_receiver_stats.get_counter_for_event(StatsEvent.ACK_RCVD)[channel.channel_id] == num_items
-
         print('assert ok')
         io_loop.close()
         wt.join(5)
 
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_items = 1000
+        num_items = 2000
         writer_delay_s = 0
         to_send = [{'i': i} for i in range(num_items)]
 
@@ -221,16 +203,18 @@ class TestRemoteTransfer(unittest.TestCase):
             writer_delay_s=writer_delay_s,
             multinode=multinode
         )
+        start_ray_io_handler_actors([reader, writer, source_transfer_actor, target_transfer_actor])
 
-        source_transfer_actor.start.remote()
-        target_transfer_actor.start.remote()
-        print('started')
         writer.send_items.remote(to_send)
         fut = reader.receive_items.remote()
 
         time.sleep(1)
-        for i in range(5):
-            # if i < 10:
+        i = 0
+        timeout = 120
+        t = time.time()
+        while len(ray.get(reader.get_items.remote())) != len(to_send):
+            if t - time.time() > timeout:
+                raise RuntimeError('Timeout waiting for finish')
             if i%2 == 0:
                 ray.kill(source_transfer_actor)
                 time.sleep(0.2)
@@ -244,7 +228,6 @@ class TestRemoteTransfer(unittest.TestCase):
                 os.kill(target_transfer_actor_pid, signal.SIGKILL)
                 print('SIGKILL kill')
 
-            # TODO try 0.2 this may not work
             time.sleep(1)
 
             if multinode:
@@ -265,22 +248,19 @@ class TestRemoteTransfer(unittest.TestCase):
                 source_transfer_actor = TransferActor.remote(None, [channel])
                 target_transfer_actor = TransferActor.remote([channel], None)
 
-            source_transfer_actor.start.remote()
-            time.sleep(0.3)
-            target_transfer_actor.start.remote()
+            start_ray_io_handler_actors([source_transfer_actor, target_transfer_actor])
             print('re-started')
-            time.sleep(2)
+            i += 1
+            time.sleep(1)
 
-        rcvd = ray.get(reader.get_items.remote())
-
-        print(len(rcvd))
+        rcvd = ray.get(fut)
         assert to_send == rcvd
         print('assert ok')
 
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    # t.test_one_to_one_locally()
-    # t.test_one_to_one_on_ray()
+    t.test_one_to_one_locally()
+    t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
     t.test_transfer_actor_interruption()

@@ -17,15 +17,16 @@ class SocketOwner(enum.Enum):
     CLIENT = 'client' # belongs to DataReader/DataWriter
 
 
-class SocketRole(enum.Enum):
+class SocketKind(enum.Enum):
     BIND = 'bind' # socket is used as a binded access point
     CONNECT = 'connect'# socket is used as a connecting client
 
 
-class SocketMetadata(BaseModel):
+class SocketMetadata(BaseModel, frozen=True):
     owner: SocketOwner
-    role: SocketRole
+    kind: SocketKind
     channel_id: str
+    addr: str
 
 
 def configure_socket(socket: zmq.Socket, zmq_config: ZMQConfig):
@@ -39,6 +40,7 @@ def configure_socket(socket: zmq.Socket, zmq_config: ZMQConfig):
         socket.setsockopt(zmq.SNDBUF, zmq_config.SNDBUF)
     if zmq_config.RCVBUF is not None:
         socket.setsockopt(zmq.RCVBUF, zmq_config.RCVBUF)
+    socket.setsockopt(zmq.CONNECT_TIMEOUT, 4)
 
 
 # TODO we should have a delay mechanism for retrying in case of exceptions to avoid exhausting CPU
