@@ -1,13 +1,15 @@
 import os
 import time
+from abc import ABC
 from collections import deque
 from typing import List, Dict, Tuple
 
 import zmq
 
 from volga.streaming.runtime.network.buffer.buffer import get_channel_id
+from volga.streaming.runtime.network.metrics import MetricsRecorder, Metric
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
-from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandler
+from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandler, IOHandlerType
 from volga.streaming.runtime.network.channel import RemoteChannel, ipc_path_from_addr
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.socket_utils import configure_socket, rcv_no_block, send_no_block, _try_tcp_bind, \
@@ -15,16 +17,20 @@ from volga.streaming.runtime.network.socket_utils import configure_socket, rcv_n
 
 
 # base class for remote TransferReceiver and TransferSender
-class RemoteTransferHandler(IOHandler):
+class RemoteTransferHandler(IOHandler, ABC):
 
     def __init__(
         self,
+        job_name: str,
+        name: str,
         channels: List[RemoteChannel],
         zmq_ctx: zmq.Context,
         direction: Direction,
         network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
     ):
         super().__init__(
+            job_name=job_name,
+            name=name,
             channels=channels,
             zmq_ctx=zmq_ctx,
             direction=direction,
@@ -44,8 +50,19 @@ class RemoteTransferHandler(IOHandler):
         self._remote_queues: Dict[str, deque] = {}
 
         self._ch_id_to_node_id = {c.channel_id: c.target_node_id if self._is_sender else c.source_node_id for c in channels}
+        self._node_id = self._get_node_id(channels)
 
         self.stats = Stats()
+
+    def _get_node_id(self, channels: List[RemoteChannel]):
+        n = set()
+        for c in channels:
+            n.add(c.source_node_id if self._is_sender else c.target_node_id)
+        if len(n) != 1:
+            raise RuntimeError('Misconfigured node ids on channels')
+
+        return n.pop()
+
 
     def create_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
         sockets = []
@@ -119,6 +136,7 @@ class RemoteTransferHandler(IOHandler):
         return sockets
 
     def send(self, socket: zmq.Socket):
+        metric_key = None
         if socket in self._local_socket_to_ch:
             channel_id = self._local_socket_to_ch[socket]
             queue = self._local_queues[channel_id]
@@ -129,6 +147,7 @@ class RemoteTransferHandler(IOHandler):
             queue = self._remote_queues[node_id]
             stats_event = StatsEvent.MSG_SENT if self._is_sender else StatsEvent.ACK_SENT
             stats_key = node_id
+            metric_key = f'{self._node_id}-{node_id}'
         else:
             raise RuntimeError('Unregistered socket')
 
@@ -143,12 +162,14 @@ class RemoteTransferHandler(IOHandler):
         if not sent:
             # return data
             queue.insert(0, data)
-            # TODO indicate somehow?
+            self.metrics_recorder.inc(Metric.NUM_BUFFERS_RESENT, self.name, self.get_handler_type(), metric_key)
             # TODO add delay on retry
             return
 
         # update stats
         self.stats.inc(stats_event, stats_key)
+        if socket in self._remote_socket_to_node:
+            self.metrics_recorder.inc(Metric.NUM_BUFFERS_SENT, self.name, self.get_handler_type(), metric_key)
 
         remote_or_local = 'remote' if socket in self._remote_socket_to_node else 'local'
         print(f'Sent {remote_or_local} in {time.time() - t}')
@@ -178,7 +199,8 @@ class RemoteTransferHandler(IOHandler):
             #  we need to test which is better for throughput/latency
             queue.append(data)
             self.stats.inc(StatsEvent.ACK_RCVD if self._is_sender else StatsEvent.MSG_RCVD, peer_node_id)
-
+            metric_key = f'{self._node_id}-{peer_node_id}'
+            self.metrics_recorder.inc(Metric.NUM_BUFFERS_RCVD, self.name, self.get_handler_type(), metric_key)
         else:
             raise RuntimeError('Unregistered socket')
 
@@ -191,3 +213,47 @@ class RemoteTransferHandler(IOHandler):
             s.close(linger=0)
         for s in self._remote_socket_to_node:
             s.close(linger=0)
+
+
+class TransferSender(RemoteTransferHandler):
+    def __init__(
+        self,
+        job_name: str,
+        name: str, # TODO should this be actor name or some other unique name?
+        channels: List[RemoteChannel],
+        zmq_ctx: zmq.Context,
+        network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
+    ):
+        super().__init__(
+            job_name=job_name,
+            name=name,
+            channels=channels,
+            zmq_ctx=zmq_ctx,
+            direction=Direction.SENDER,
+            network_config=network_config
+        )
+
+    def get_handler_type(self) -> IOHandlerType:
+        return IOHandlerType.TRANSFER_SENDER
+
+
+class TransferReceiver(RemoteTransferHandler):
+    def __init__(
+        self,
+        job_name: str,
+        name: str, # TODO should this be actor name or some other unique name?
+        channels: List[RemoteChannel],
+        zmq_ctx: zmq.Context,
+        network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
+    ):
+        super().__init__(
+            job_name=job_name,
+            name=name,
+            channels=channels,
+            zmq_ctx=zmq_ctx,
+            direction=Direction.RECEIVER,
+            network_config=network_config
+        )
+
+    def get_handler_type(self) -> IOHandlerType:
+        return IOHandlerType.TRANSFER_RECEIVER

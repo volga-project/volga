@@ -7,8 +7,8 @@ import zmq
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.stats import Stats
-from volga.streaming.runtime.network.transfer.io_loop import IOLoop, Direction
-from volga.streaming.runtime.network.transfer.remote.remote_transfer_handler import RemoteTransferHandler
+from volga.streaming.runtime.network.transfer.io_loop import IOLoop
+from volga.streaming.runtime.network.transfer.remote.remote_transfer_handler import TransferSender, TransferReceiver
 
 
 @ray.remote
@@ -16,6 +16,8 @@ class TransferActor:
 
     def __init__(
         self,
+        job_name: str,
+        name: str,
         in_channels: Optional[List[RemoteChannel]],
         out_channels: Optional[List[RemoteChannel]],
         network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
@@ -26,10 +28,11 @@ class TransferActor:
         self._loop = IOLoop()
         self._zmq_ctx = zmq.Context.instance()
         if out_channels is not None:
-            self._sender = RemoteTransferHandler(
+            self._sender = TransferSender(
+                job_name=job_name,
+                name=name,
                 channels=out_channels,
                 zmq_ctx=self._zmq_ctx,
-                direction=Direction.SENDER,
                 network_config=network_config
             )
             self._loop.register(self._sender)
@@ -38,10 +41,11 @@ class TransferActor:
             self._sender = None
 
         if in_channels is not None:
-            self._receiver = RemoteTransferHandler(
+            self._receiver = TransferReceiver(
+                job_name=job_name,
+                name=name,
                 channels=in_channels,
                 zmq_ctx=self._zmq_ctx,
-                direction=Direction.RECEIVER,
                 network_config=network_config
             )
             self._loop.register(self._receiver)

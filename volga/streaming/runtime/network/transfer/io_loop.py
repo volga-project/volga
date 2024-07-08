@@ -9,10 +9,15 @@ import zmq
 from zmq.utils.monitor import recv_monitor_message
 from zmq.constants import Event
 
-from volga.streaming.runtime.network.channel import Channel, LocalChannel
+from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.config import NetworkConfig
+from volga.streaming.runtime.network.metrics import MetricsRecorder
 from volga.streaming.runtime.network.socket_utils import SocketMetadata, SocketOwner, SocketKind
 
+
+# zmq on Kubernetes
+# https://stackoverflow.com/questions/63430835/2-minutes-for-zmq-pub-sub-to-connect-in-kubernetes
+# https://stackoverflow.com/questions/65679784/zmq-sockets-do-not-work-as-expected-on-kubernetes
 
 # Indicates the role of the handler.
 # SENDER means forward flow - sends payload, receives acks
@@ -21,9 +26,12 @@ class Direction(enum.Enum):
     SENDER = 1
     RECEIVER = 2
 
-# zmq on Kubernetes
-# https://stackoverflow.com/questions/63430835/2-minutes-for-zmq-pub-sub-to-connect-in-kubernetes
-# https://stackoverflow.com/questions/65679784/zmq-sockets-do-not-work-as-expected-on-kubernetes
+
+class IOHandlerType(enum.Enum):
+    DATA_READER = 'data_reader'
+    DATA_WRITER = 'data_writer'
+    TRANSFER_SENDER = 'transfer_sender'
+    TRANSFER_RECEIVER = 'transfer_receiver'
 
 
 # Interface describing what to do on each socket event (send or rcv)
@@ -31,17 +39,23 @@ class IOHandler(ABC):
 
     def __init__(
         self,
+        job_name: str,
+        name: str,
         channels: List[Channel],
         zmq_ctx: zmq.Context,
         direction: Direction,
         network_config: NetworkConfig
     ):
+        self.job_name = job_name
+        self.name = name
         self._direction = direction
         self._network_config = network_config
         self._zmq_ctx = zmq_ctx
         self._channels = channels
         self.io_loop: Optional[IOLoop] = None
         self._sockets_meta: Dict[SocketMetadata, zmq.Socket] = {}
+
+        self.metrics_recorder = MetricsRecorder.instance(job_name)
 
     def is_running(self):
         if self.io_loop is None:
@@ -76,6 +90,10 @@ class IOHandler(ABC):
 
     @abstractmethod
     def close_sockets(self):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def get_handler_type(self) -> IOHandlerType:
         raise NotImplementedError()
 
 

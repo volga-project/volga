@@ -17,14 +17,16 @@ class LocalDataHandler(IOHandler, ABC):
 
     def __init__(
         self,
+        job_name: str,
         name: str,
         channels: List[Channel],
-        node_id: str,
         zmq_ctx: zmq_async.Context,
         direction: Direction,
         network_config: NetworkConfig
     ):
         super().__init__(
+            job_name=job_name,
+            name=name,
             channels=channels,
             zmq_ctx=zmq_ctx,
             direction=direction,
@@ -32,7 +34,6 @@ class LocalDataHandler(IOHandler, ABC):
         )
 
         self._is_reader = direction == Direction.RECEIVER
-        self.name = name
 
         self._ch_to_socket: Dict[str, zmq.Socket] = {}
         self._socket_to_ch: Dict[zmq.Socket, str] = {}

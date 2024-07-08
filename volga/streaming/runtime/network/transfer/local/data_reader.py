@@ -5,10 +5,12 @@ from typing import List, Optional
 
 import zmq
 
-from volga.streaming.runtime.network.buffer.buffer import get_payload, get_buffer_id, AckMessage, AckMessageBatch
+from volga.streaming.runtime.network.buffer.buffer import get_payload, get_buffer_id, AckMessage, AckMessageBatch, \
+    get_channel_id
 from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
+from volga.streaming.runtime.network.metrics import Metric
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
-from volga.streaming.runtime.network.transfer.io_loop import Direction
+from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandlerType
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
 import simplejson
@@ -33,9 +35,9 @@ class DataReader(LocalDataHandler):
         network_config: NetworkConfig = DEFAULT_NETWORK_CONFIG
     ):
         super().__init__(
+            job_name=job_name,
             name=name,
             channels=channels,
-            node_id=node_id,
             zmq_ctx=zmq_ctx,
             direction=Direction.RECEIVER,
             network_config=network_config
@@ -51,10 +53,14 @@ class DataReader(LocalDataHandler):
 
         self._buffer_memory_tracker = BufferMemoryTracker.instance(node_id=node_id, job_name=job_name)
 
+    def get_handler_type(self) -> IOHandlerType:
+        return IOHandlerType.DATA_WRITER
+
     def read_message(self) -> List[ChannelMessage]:
         if len(self._output_queue) == 0:
             return []
         buffer = self._output_queue.popleft()
+        channel_id = get_channel_id(buffer)
         # release memory
         self._buffer_memory_tracker.release(self.name, _in=False)
 
@@ -65,6 +71,7 @@ class DataReader(LocalDataHandler):
         for (msg_id, data) in payload:
             msg = simplejson.loads(bytes_to_str(data))
             res.append(msg)
+            self.metrics_recorder.inc(Metric.NUM_RECORDS_SENT, self.name, self.get_handler_type(), channel_id)
         return res
 
     def send(self, socket: zmq.Socket):
@@ -86,6 +93,7 @@ class DataReader(LocalDataHandler):
         sent = send_no_block(socket, b)
         if sent:
             self.stats.inc(StatsEvent.ACK_SENT, channel_id, len(ack_msg_batch.acks))
+            self.metrics_recorder.inc(Metric.NUM_BUFFERS_SENT, self.name, self.get_handler_type(), channel_id)
             # for ack_msg in ack_msg_batch.acks:
             #     print(f'sent ack {ack_msg.buffer_id}, lat: {time.time() - t}')
         else:
@@ -116,6 +124,7 @@ class DataReader(LocalDataHandler):
             return
 
         self.stats.inc(StatsEvent.MSG_RCVD, channel_id)
+        self.metrics_recorder.inc(Metric.NUM_BUFFERS_RCVD, self.name, self.get_handler_type(), channel_id)
         print(f'Rcvd {get_buffer_id(buffer)}, lat: {time.time() - t}')
 
         buffer_id = get_buffer_id(buffer)

@@ -11,8 +11,9 @@ from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, AckMess
 from volga.streaming.runtime.network.buffer.buffering_config import BufferingConfig
 from volga.streaming.runtime.network.buffer.buffering_policy import BufferingPolicy, PeriodicPartialFlushPolicy, \
     BufferPerMessagePolicy
+from volga.streaming.runtime.network.metrics import Metric
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
-from volga.streaming.runtime.network.transfer.io_loop import Direction
+from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandlerType
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
 from volga.streaming.runtime.network.buffer.buffer_queues import BufferQueues
@@ -26,7 +27,7 @@ from volga.streaming.runtime.network.socket_utils import rcv_no_block, send_no_b
 # TODO do we even need this? we should have no more than max buffer queue length of in-flight buffers
 IN_FLIGHT_LIMIT_PER_CHANNEL = 1000 # max number of un-acked buffers
 
-INN_FLIGHT_TIMEOUT_S = 0.5 # how long to wait before re-sending un-acked buffers
+IN_FLIGHT_TIMEOUT_S = 0.5 # how long to wait before re-sending un-acked buffers
 
 
 class DataWriter(LocalDataHandler):
@@ -44,9 +45,9 @@ class DataWriter(LocalDataHandler):
         buffering_config: BufferingConfig = BufferingConfig()
     ):
         super().__init__(
+            job_name=job_name,
             name=name,
             channels=channels,
-            node_id=node_id,
             zmq_ctx=zmq_ctx,
             direction=Direction.SENDER,
             network_config=network_config
@@ -70,6 +71,9 @@ class DataWriter(LocalDataHandler):
 
         self._in_flight = {c.channel_id: {} for c in self._channels}
 
+    def get_handler_type(self) -> IOHandlerType:
+        return IOHandlerType.DATA_WRITER
+
     # TODO we should update logic how to handle backpressure upstream
     def write_record(self, channel_id: str, record: Record):
         # add sender operator_id
@@ -88,6 +92,7 @@ class DataWriter(LocalDataHandler):
 
         backpressure = not self._buffer_queues.append_msg(message, channel_id)
         if not backpressure:
+            self.metrics_recorder.inc(Metric.NUM_RECORDS_SENT, self.name, self.get_handler_type(), channel_id)
             return True
 
         if not block:
@@ -99,20 +104,24 @@ class DataWriter(LocalDataHandler):
                 break
             backpressure = not self._buffer_queues.append_msg(message, channel_id)
             time.sleep(0.01)
-        # TODO record backpressure stats
+        # TODO record backpressure metrics
+
+        if not backpressure:
+            self.metrics_recorder.inc(Metric.NUM_RECORDS_SENT, self.name, self.get_handler_type(), channel_id)
         return not backpressure
 
     def send(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]
-
+        start_ts = time.time()
         # re-sent timed-out in-flight buffers first
-        t = time.time()
         for in_flight_buff_id in self._in_flight[channel_id]:
+            t = time.perf_counter()
             ts, buffer = self._in_flight[channel_id][in_flight_buff_id]
-            if t - ts > INN_FLIGHT_TIMEOUT_S:
+            if t - ts > IN_FLIGHT_TIMEOUT_S:
                 self._in_flight[channel_id][in_flight_buff_id] = (t, buffer)
                 sent = send_no_block(socket, buffer)
                 if sent:
+                    self.metrics_recorder.inc(Metric.NUM_BUFFERS_RESENT, self.name, self.get_handler_type(), channel_id)
                     print(f'Re-sent {in_flight_buff_id}')
                 else:
                     print(f'Re-sent failed')
@@ -134,11 +143,12 @@ class DataWriter(LocalDataHandler):
         if buffer_id in self._in_flight[channel_id]:
             raise RuntimeError('duplicate buffer_id scheduled')
 
-        self._in_flight[channel_id][buffer_id] = (time.time(), buffer)
+        self._in_flight[channel_id][buffer_id] = (time.perf_counter(), buffer)
         sent = send_no_block(socket, buffer)
         if sent:
             self.stats.inc(StatsEvent.MSG_SENT, channel_id)
-            print(f'Sent {buffer_id}, lat: {time.time() - t}')
+            self.metrics_recorder.inc(Metric.NUM_BUFFERS_SENT, self.name, self.get_handler_type(), channel_id)
+            print(f'Sent {buffer_id}, lat: {time.time() - start_ts}')
         else:
             # TODO add delay on retries
             pass
@@ -152,16 +162,24 @@ class DataWriter(LocalDataHandler):
             # TODO indicate somehow? Possible backpressure?
             # TODO add delay on retry
             return
+
+        self.metrics_recorder.inc(Metric.NUM_BUFFERS_RCVD, self.name, self.get_handler_type(), channel_id)
         ack_msg_batch = AckMessageBatch.de(msg_raw_bytes)
         for ack_msg in ack_msg_batch.acks:
-            # print(f'rcved ack {ack_msg.buffer_id}, lat: {time.time() - t}')
             if channel_id in self._in_flight and ack_msg.buffer_id in self._in_flight[channel_id]:
                 self.stats.inc(StatsEvent.ACK_RCVD, channel_id)
-                # TODO update buff/msg delivered metric
-                # perform ack
-                _, buffer = self._in_flight[channel_id][ack_msg.buffer_id]
+                self.metrics_recorder.inc(Metric.NUM_BUFFERS_DELIVERED, self.name, self.get_handler_type(), channel_id)
+
+                # TODO num records delivered
+
+                ts, buffer = self._in_flight[channel_id][ack_msg.buffer_id]
                 if ack_msg.buffer_id != get_buffer_id(buffer):
                     raise RuntimeError('buffer_id missmatch')
+
+                latency = (time.perf_counter() - ts) * 1000
+                self.metrics_recorder.latency(latency, self.name, channel_id)
+
+                # perform ack
                 del self._in_flight[channel_id][ack_msg.buffer_id]
 
                 # pop input queue on successful delivery

@@ -6,7 +6,8 @@ from typing import List, Any, Dict, Tuple
 
 import zmq
 
-from volga.streaming.runtime.network.buffer.buffering_policy import BufferPerMessagePolicy
+from volga.streaming.runtime.network.buffer.buffering_config import BufferingConfig
+from volga.streaming.runtime.network.buffer.buffering_policy import BufferPerMessagePolicy, BufferingPolicy
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop, IOHandler
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
@@ -34,12 +35,13 @@ class TestWriter:
         self,
         job_name: str,
         channel: Channel,
-        delay_s: float = 0
+        delay_s: float = 0,
+        buffering_policy: BufferingPolicy = BufferPerMessagePolicy(),
+        buffering_config: BufferingConfig = BufferingConfig()
     ):
         self.channel = channel
         self.io_loop = IOLoop()
         self.delay_s = delay_s
-        buffering_policy = BufferPerMessagePolicy()
         self.data_writer = DataWriter(
             name='test_writer',
             source_stream_name='0',
@@ -47,7 +49,8 @@ class TestWriter:
             channels=[channel],
             node_id='0',
             zmq_ctx=zmq.Context.instance(),
-            buffering_policy=buffering_policy
+            buffering_policy=buffering_policy,
+            buffering_config=buffering_config
         )
         self.io_loop.register(self.data_writer)
 

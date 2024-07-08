@@ -11,23 +11,32 @@ import ray
 import zmq
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from volga.streaming.runtime.network.buffer.buffering_config import BufferingConfig
+from volga.streaming.runtime.network.buffer.buffering_policy import BufferingPolicy, PeriodicPartialFlushPolicy, \
+    BufferPerMessagePolicy
 from volga.streaming.runtime.network.channel import RemoteChannel
-from volga.streaming.runtime.network.stats import StatsEvent
 from volga.streaming.runtime.network.testing_utils import write, read, TestReader, TestWriter, \
     REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, start_ray_io_handler_actors
-from volga.streaming.runtime.network.transfer.io_loop import IOLoop, Direction
+from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
-from volga.streaming.runtime.network.transfer.remote.remote_transfer_handler import RemoteTransferHandler
+from volga.streaming.runtime.network.transfer.remote.remote_transfer_handler import TransferSender, TransferReceiver
 from volga.streaming.runtime.network.transfer.remote.transfer_actor import TransferActor
-
-import ray.util.state as ray_state
 
 
 class TestRemoteTransfer(unittest.TestCase):
 
-    def _init_ray_actors(self, num_items: int, writer_delay_s: float = 0, multinode: bool = False) -> Tuple:
-        job_name = f'job-{int(time.time())}'
+    def _init_ray_actors(
+        self,
+        num_items: int,
+        writer_delay_s: float = 0,
+        multinode: bool = False,
+        job_name: Optional[str] = None,
+        buffering_policy: BufferingPolicy = BufferPerMessagePolicy(),
+        buffering_config: BufferingConfig = BufferingConfig()
+    ) -> Tuple:
+        if job_name is None:
+            job_name = f'job-{int(time.time())}'
         channel_id = 'ch_0'
         if multinode:
             all_nodes = ray.nodes()
@@ -54,7 +63,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=source_node_id,
                     soft=False
                 )
-            ).remote(job_name, channel, writer_delay_s)
+            ).remote(job_name, channel, writer_delay_s, buffering_policy, buffering_config)
             source_transfer_actor = TransferActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=source_node_id,
@@ -89,21 +98,26 @@ class TestRemoteTransfer(unittest.TestCase):
                 port=1234
             )
             reader = TestReader.remote(job_name, channel, num_items)
-            writer = TestWriter.remote(job_name, channel, writer_delay_s)
-            source_transfer_actor = TransferActor.remote(None, [channel])
-            target_transfer_actor = TransferActor.remote([channel], None)
+            writer = TestWriter.remote(job_name, channel, writer_delay_s, buffering_policy, buffering_config)
+            source_transfer_actor = TransferActor.remote(job_name, 'source_transfer_actor', None, [channel])
+            target_transfer_actor = TransferActor.remote(job_name, 'target_transfer_actor', [channel], None)
 
         return reader, writer, source_transfer_actor, target_transfer_actor, channel, source_node_id, target_node_id
 
     def test_one_to_one_on_ray(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_items = 1000
+        num_items = 100000000
         to_send = [{'i': i} for i in range(num_items)]
+
+        buffering_config = BufferingConfig(buffer_size=32 * 1024, capacity_per_in_channel=10, capacity_per_out=10)
+        buffering_policy = PeriodicPartialFlushPolicy(0.1)
 
         ray.init(address=ray_addr, runtime_env=runtime_env)
 
         reader, writer, source_transfer_actor, target_transfer_actor, channel, source_node_id, target_node_id = self._init_ray_actors(
             num_items=num_items,
-            multinode=multinode
+            multinode=multinode,
+            buffering_policy=buffering_policy,
+            buffering_config=buffering_config
         )
         start_ray_io_handler_actors([reader, writer, source_transfer_actor, target_transfer_actor])
 
@@ -116,11 +130,13 @@ class TestRemoteTransfer(unittest.TestCase):
         _, transfer_receiver_stats = ray.get(target_transfer_actor.get_stats.remote())
 
         print(f'TransferSender stats: {transfer_sender_stats}')
-        print(f'TransferSender stats: {transfer_receiver_stats}')
+        print(f'TransferReceiver stats: {transfer_receiver_stats}')
 
         assert to_send == rcvd
 
         print('assert ok')
+
+        time.sleep(15)
 
         ray.shutdown()
 
@@ -156,15 +172,17 @@ class TestRemoteTransfer(unittest.TestCase):
             node_id=target_node_id,
             zmq_ctx=zmq_ctx
         )
-        transfer_sender = RemoteTransferHandler(
+        transfer_sender = TransferSender(
+            job_name=job_name,
+            name='test_transfer_sender',
             channels=[channel],
-            zmq_ctx=zmq_ctx,
-            direction=Direction.SENDER
+            zmq_ctx=zmq_ctx
         )
-        transfer_receiver = RemoteTransferHandler(
+        transfer_receiver = TransferReceiver(
+            job_name=job_name,
+            name='test_transfer_receiver',
             channels=[channel],
-            zmq_ctx=zmq_ctx,
-            direction=Direction.RECEIVER
+            zmq_ctx=zmq_ctx
         )
         io_loop.register(data_writer)
         io_loop.register(data_reader)
@@ -193,6 +211,7 @@ class TestRemoteTransfer(unittest.TestCase):
         wt.join(5)
 
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
+        job_name = f'job-{int(time.time())}'
         num_items = 2000
         writer_delay_s = 0
         to_send = [{'i': i} for i in range(num_items)]
@@ -201,7 +220,8 @@ class TestRemoteTransfer(unittest.TestCase):
         reader, writer, source_transfer_actor, target_transfer_actor, channel, source_node_id, target_node_id = self._init_ray_actors(
             num_items=num_items,
             writer_delay_s=writer_delay_s,
-            multinode=multinode
+            multinode=multinode,
+            job_name=job_name
         )
         start_ray_io_handler_actors([reader, writer, source_transfer_actor, target_transfer_actor])
 
@@ -236,14 +256,14 @@ class TestRemoteTransfer(unittest.TestCase):
                         node_id=source_node_id,
                         soft=False
                     )
-                ).remote(None, [channel])
+                ).remote(job_name, 'source_transfer_actor', None, [channel])
 
                 target_transfer_actor = TransferActor.options(
                     scheduling_strategy=NodeAffinitySchedulingStrategy(
                         node_id=target_node_id,
                         soft=False
                     )
-                ).remote([channel], None)
+                ).remote(job_name, 'target_transfer_actor', [channel], None)
             else:
                 source_transfer_actor = TransferActor.remote(None, [channel])
                 target_transfer_actor = TransferActor.remote([channel], None)
@@ -260,7 +280,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_one_to_one_locally()
+    # t.test_one_to_one_locally()
     t.test_one_to_one_on_ray()
     # t.test_one_to_one_on_ray(ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
-    t.test_transfer_actor_interruption()
+    # t.test_transfer_actor_interruption()
