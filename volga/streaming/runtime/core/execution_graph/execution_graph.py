@@ -10,7 +10,7 @@ from volga.streaming.api.partition.partition import RoundRobinPartition, Partiti
 from volga.streaming.common.config.resource_config import ResourceConfig
 from volga.streaming.runtime.master.resource_manager.resource_manager import \
     Resources, RESOURCE_KEY_CPU, RESOURCE_KEY_GPU, RESOURCE_KEY_MEM
-from volga.streaming.runtime.transfer.channel import Channel
+from volga.streaming.runtime.network.channel import Channel
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +41,7 @@ class ExecutionVertex:
 
     def __init__(
         self,
+        job_name: str,
         job_vertex: JobVertex,
         execution_vertex_index: int, # sub index based on parallelism of job vertex operator
         parallelism: int,
@@ -48,6 +49,7 @@ class ExecutionVertex:
         job_config: Optional[Dict] = None,
         resources: Optional[Resources] = None
     ):
+        self.job_name = job_name
         self.job_vertex = job_vertex
         self.execution_vertex_index = execution_vertex_index
         self.execution_vertex_id = self._gen_id()
@@ -58,7 +60,10 @@ class ExecutionVertex:
         self.input_edges: List[ExecutionEdge] = []
         self.output_edges: List[ExecutionEdge] = []
         self.worker = None
-        self.worker_network_info = None
+        self.worker_node_info = None
+
+    def __repr__(self):
+        return f'{self.execution_vertex_id}, {self.job_vertex.stream_operator.__class__.__name__}'
 
     def _gen_id(self) -> str:
         return f'{self.job_vertex.vertex_id}_{self.execution_vertex_index}'
@@ -75,13 +80,14 @@ class ExecutionVertex:
     def set_resources(self, resources: Resources):
         self.resources = resources
 
-    def set_worker_network_info(self, info: 'WorkerNetworkInfo'):
-        self.worker_network_info = info
+    def set_worker_node_info(self, info: 'WorkerNodeInfo'):
+        self.worker_node_info = info
 
 
 class ExecutionGraph:
 
-    def __init__(self):
+    def __init__(self, job_name: str):
+        self.job_name = job_name
         self.execution_vertices_by_id: Dict[str, ExecutionVertex] = {}
         self.execution_edges: List[ExecutionEdge] = []
 
@@ -91,12 +97,13 @@ class ExecutionGraph:
     @classmethod
     def from_job_graph(cls, job_graph: JobGraph) -> 'ExecutionGraph':
 
-        execution_graph = ExecutionGraph()
+        execution_graph = ExecutionGraph(job_graph.job_name)
 
         # create exec vertices
         for job_vertex in job_graph.job_vertices:
             for i in range(job_vertex.parallelism):
                 execution_vertex = ExecutionVertex(
+                    job_name=job_graph.job_name,
                     job_vertex = job_vertex,
                     execution_vertex_index=i,
                     parallelism=job_vertex.parallelism,

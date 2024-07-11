@@ -1,17 +1,20 @@
 import logging
 from abc import ABC, abstractmethod
 from threading import Thread
+from typing import Optional
 
-from ray.actor import ActorHandle
+import zmq
 
 from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.message.message import Record, record_from_channel_message
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
+from volga.streaming.runtime.network.buffer.buffering_policy import PeriodicPartialFlushPolicy
+from volga.streaming.runtime.network.transfer.io_loop import IOLoop
+from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
+from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 from volga.streaming.runtime.worker.task.streaming_runtime_context import StreamingRuntimeContext
 from volga.streaming.runtime.core.collector.output_collector import OutputCollector
 from volga.streaming.runtime.core.processor.processor import Processor, TwoInputProcessor
-from volga.streaming.runtime.transfer.data_reader import DataReader
-from volga.streaming.runtime.transfer.data_writer import DataWriter
 
 
 logger = logging.getLogger("ray")
@@ -27,10 +30,13 @@ class StreamTask(ABC):
         self.processor = processor
         self.execution_vertex = execution_vertex
         self.thread = Thread(target=self.run, daemon=True)
-        self.writer = None
-        self.reader = None
+        self.data_writer: Optional[DataWriter] = None
+        self.data_reader: Optional[DataReader] = None
         self.running = True
         self.collectors = []
+        # TODO pass network config
+        self.io_loop = IOLoop()
+        self.zmq_ctx = zmq.Context.instance(io_threads=4)
 
     @abstractmethod
     def run(self):
@@ -46,29 +52,38 @@ class StreamTask(ABC):
             output_channels = self.execution_vertex.get_output_channels()
             assert len(output_channels) > 0
             assert output_channels[0] is not None
-            if self.writer is not None:
+            if self.data_writer is not None:
                 raise RuntimeError('Writer already inited')
             if self.execution_vertex.job_vertex.vertex_type != VertexType.SINK:
                 # sinks do not pass data downstream so no writer
-                self.writer = DataWriter(
+                self.data_writer = DataWriter(
                     name=self.execution_vertex.execution_vertex_id,
                     source_stream_name=str(self.execution_vertex.stream_operator.id),
-                    output_channels=output_channels
+                    job_name=self.execution_vertex.job_name,
+                    channels=output_channels,
+                    node_id=self.execution_vertex.worker_node_info.node_id,
+                    zmq_ctx=self.zmq_ctx,
+                    buffering_policy=PeriodicPartialFlushPolicy()
                 )
+                self.io_loop.register(self.data_writer)
 
         # reader
         if len(self.execution_vertex.input_edges) != 0:
             input_channels = self.execution_vertex.get_input_channels()
             assert len(input_channels) > 0
             assert input_channels[0] is not None
-            if self.reader is not None:
+            if self.data_reader is not None:
                 raise RuntimeError('Reader already inited')
             if self.execution_vertex.job_vertex.vertex_type != VertexType.SOURCE:
                 # sources do not read data from upstream so no reader
-                self.reader = DataReader(
+                self.data_reader = DataReader(
                     name=self.execution_vertex.execution_vertex_id,
-                    input_channels=input_channels
+                    job_name=self.execution_vertex.job_name,
+                    channels=input_channels,
+                    node_id=self.execution_vertex.worker_node_info.node_id,
+                    zmq_ctx=self.zmq_ctx
                 )
+                self.io_loop.register(self.data_reader)
 
         self._open_processor()
 
@@ -90,12 +105,14 @@ class StreamTask(ABC):
 
         for op_name in grouped_partitions:
             self.collectors.append(OutputCollector(
-                data_writer=self.writer,
+                data_writer=self.data_writer,
                 output_channel_ids=grouped_channel_ids[op_name],
                 partition=grouped_partitions[op_name]
             ))
 
         runtime_context = StreamingRuntimeContext(execution_vertex=execution_vertex)
+
+        self.io_loop.start()
 
         self.processor.open(
             collectors=self.collectors,
@@ -106,13 +123,7 @@ class StreamTask(ABC):
         # logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
         self.running = False
         self.processor.close()
-        if self.writer is not None:
-            self.writer.close()
-            # logger.info(f'Closed writer for task {self.execution_vertex.execution_vertex_id}')
-
-        if self.reader is not None:
-            self.reader.close()
-            # logger.info(f'Closed reader for task {self.execution_vertex.execution_vertex_id}')
+        self.io_loop.close()
         if self.thread is not None:
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')
@@ -130,12 +141,13 @@ class InputStreamTask(StreamTask):
 
     def run(self):
         while self.running:
-            message = self.reader.read_message()
-            if message is None:
+            messages = self.data_reader.read_message()
+            if len(messages) == 0:
                 # TODO indicate special message
                 continue
-            record = record_from_channel_message(message)
-            self.processor.process(record)
+            for message in messages:
+                record = record_from_channel_message(message)
+                self.processor.process(record)
 
 
 class OneInputStreamTask(InputStreamTask):

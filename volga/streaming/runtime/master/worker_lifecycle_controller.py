@@ -7,7 +7,7 @@ import ray
 from ray.actor import ActorHandle
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
-from volga.streaming.runtime.transfer.channel import Channel
+from volga.streaming.runtime.network.channel import LocalChannel, RemoteChannel, gen_ipc_addr
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
 VALID_PORT_RANGE = (30000, 65000)
@@ -17,20 +17,18 @@ VALID_PORT_RANGE = (30000, 65000)
 logger = logging.getLogger("ray")
 
 
-class WorkerNetworkInfo:
+class WorkerNodeInfo:
 
-    def __init__(self, node_ip: str, node_id: str, out_edges_ports: Dict[Any, int]):
+    def __init__(self, node_ip: str, node_id: str):
         self.node_ip = node_ip
         self.node_id = node_id
-        # port per output edge
-        self.out_edges_ports = out_edges_ports
 
 
 class WorkerLifecycleController:
 
     def __init__(self, job_master: ActorHandle):
         self.job_master = job_master
-        self._used_ports = {}
+        self._reserved_node_ports = {}
 
     def create_workers(self, execution_graph: ExecutionGraph):
         workers = {}
@@ -60,37 +58,49 @@ class WorkerLifecycleController:
             vertex_id = vertex_ids[i]
             node_id, node_ip = worker_hosts_info[i]
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
-            # gen ports for each output edge
-            out_edges_ports = {}
-            for out_edge in vertex.output_edges:
-                out_edges_ports[out_edge.id] = self._gen_port(node_ip)
-            ni = WorkerNetworkInfo(
+            ni = WorkerNodeInfo(
                 node_ip=node_ip,
                 node_id=node_id,
-                # TODO we assume node_ip == node_id
-                out_edges_ports=out_edges_ports
             )
-            vertex.set_worker_network_info(ni)
-            worker_infos.append((vertex_id, ni.node_id, ni.node_ip, ni.out_edges_ports))
+            vertex.set_worker_node_info(ni)
+            worker_infos.append((vertex_id, ni.node_id, ni.node_ip))
 
         logger.info(f'Created {len(workers)} workers')
-        logger.info(f'Workers writer network info: {worker_infos}')
+        logger.info(f'Workers writer node info: {worker_infos}')
 
     # construct channels based on Ray assigned actor IPs and update execution_graph
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
         logger.info(f'Initing {len(execution_graph.execution_vertices_by_id)} workers...')
-
+        job_name = execution_graph.job_name
         # create channels
         for edge in execution_graph.execution_edges:
-            worker_network_info: WorkerNetworkInfo = edge.source_execution_vertex.worker_network_info
-            if worker_network_info is None:
-                raise RuntimeError(f'Vertex {edge.source_execution_vertex.job_vertex.get_name()} has no worker network info')
+            source_worker_network_info: WorkerNodeInfo = edge.source_execution_vertex.worker_node_info
+            target_worker_network_info: WorkerNodeInfo = edge.target_execution_vertex.worker_node_info
+            if source_worker_network_info is None or target_worker_network_info is None:
+                raise RuntimeError(f'No worker network info')
 
-            edge.set_channel(Channel(
-                channel_id=edge.id,
-                source_ip=worker_network_info.node_ip,
-                source_port=worker_network_info.out_edges_ports[edge.id]
-            ))
+            if source_worker_network_info.node_id == target_worker_network_info.node_id:
+                channel = LocalChannel(
+                    channel_id=edge.id,
+                    ipc_addr=gen_ipc_addr(job_name=job_name, channel_id=edge.id),
+                )
+            else:
+                # unique ports per node-node connection
+                port = self._gen_port(
+                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}'
+                )
+                channel = RemoteChannel(
+                    channel_id=edge.id,
+                    source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_worker_network_info.node_id),
+                    source_node_ip=source_worker_network_info.node_ip,
+                    source_node_id=source_worker_network_info.node_id,
+                    target_local_ipc_addr=gen_ipc_addr(job_name, edge.id, target_worker_network_info.node_id),
+                    target_node_ip=target_worker_network_info.node_ip,
+                    target_node_id=target_worker_network_info.node_id,
+                    port=port,
+                )
+
+            edge.set_channel(channel)
 
         # init workers
         f = []
@@ -127,31 +137,27 @@ class WorkerLifecycleController:
         workers = [v.worker for v in vertices]
 
         # wait for actors to properly close
-        timeout=5
+        timeout = 5
+        refs = [w.close.remote() for w in workers]
         closed_finished_refs, closed_pending_refs = ray.wait(
-            [w.close.remote() for w in workers],
+            refs,
             timeout=timeout,
             num_returns=len(workers)
         )
         if len(closed_finished_refs) == len(workers):
             logger.info('All workers closed gracefully')
         else:
-            logger.info(f'Timeout ({timeout}s) waiting for actors to close gracefully, {len(closed_pending_refs)} not ready')
+            pending_vertex_indices = [i for i in range(len(refs)) if refs[i] in closed_pending_refs]
+            pending_vertices = [vertices[i] for i in pending_vertex_indices]
+            logger.info(f'Timeout ({timeout}s) waiting for actors to close gracefully, {len(closed_pending_refs)} not ready: {pending_vertices}')
 
         for w in workers:
             w.exit.remote()
 
-    def _gen_port(self, node_id) -> int:
-        while True:
+    def _gen_port(self, key: str) -> int:
+        if key not in self._reserved_node_ports:
             port = randint(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1])
-            if node_id not in self._used_ports:
-                self._used_ports[node_id] = [port]
-                break
-            else:
-                if len(self._used_ports[node_id]) == VALID_PORT_RANGE[1] - VALID_PORT_RANGE[0]:
-                    raise RuntimeError('Too many open ports')
-                if port not in self._used_ports[node_id]:
-                    self._used_ports[node_id].append(port)
-                    break
+            self._reserved_node_ports[key] = [port]
+        else:
+            return self._reserved_node_ports[key]
 
-        return port

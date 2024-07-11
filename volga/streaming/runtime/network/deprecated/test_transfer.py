@@ -2,9 +2,10 @@ import time
 import unittest
 from typing import List, Dict, Any
 
-from volga.streaming.runtime.transfer.channel import Channel
-from volga.streaming.runtime.transfer.data_reader import DataReader
-from volga.streaming.runtime.transfer.data_writer import DataWriter
+from volga.streaming.runtime.network.channel import Channel
+from volga.streaming.runtime.network.deprecated.channel import Channel_DEP
+from volga.streaming.runtime.network.deprecated.data_reader import DataReader_DEPR
+from volga.streaming.runtime.network.deprecated.data_writer import DataWriter_DEPR
 
 import ray
 
@@ -15,10 +16,10 @@ TERMINAL_MESSAGE = {'data': 'done'}
 class Writer:
     def __init__(
         self,
-        channel: Channel,
+        channel: Channel_DEP,
     ):
         self.channel = channel
-        self.data_writer = DataWriter(name='test_writer', source_stream_name='0', output_channels=[channel])
+        self.data_writer = DataWriter_DEPR(name='test_writer', source_stream_name='0', output_channels=[channel])
 
     def send_items(self, items: List[Dict]):
         for item in items:
@@ -33,7 +34,7 @@ class Reader:
         channel: Channel,
     ):
         self.channel = channel
-        self.data_reader = DataReader(name='test_reader', input_channels=[channel])
+        self.data_reader = DataReader_DEPR(name='test_reader', input_channels=[channel])
 
     def receive_items(self) -> List[Any]:
         t = time.time()
@@ -53,7 +54,7 @@ class Reader:
 class TestTransfer(unittest.TestCase):
 
     def test_one_to_one_transfer(self):
-        channel = Channel(
+        channel = Channel_DEP(
             channel_id='1',
             source_ip='127.0.0.1',
             source_port=4321

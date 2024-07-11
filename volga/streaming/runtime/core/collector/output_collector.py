@@ -3,7 +3,7 @@ from typing import List
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.partition.partition import Partition
-from volga.streaming.runtime.transfer.data_writer import DataWriter
+from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
 
 
 class OutputCollector(Collector):
@@ -19,6 +19,6 @@ class OutputCollector(Collector):
         self.partition = partition
 
     def collect(self, record: Record):
-        partitions = self.partition. partition(record=record, num_partition=len(self.output_channel_ids))
+        partitions = self.partition.partition(record=record, num_partition=len(self.output_channel_ids))
         for partition in partitions:
             self.data_writer.write_record(self.output_channel_ids[partition], record)

@@ -3,9 +3,10 @@ import simplejson
 from typing import List
 
 from volga.streaming.api.message.message import Record
-from volga.streaming.runtime.transfer.channel import Channel, ChannelMessage
 
 import zmq
+
+from volga.streaming.runtime.network.deprecated.channel import Channel_DEP
 
 
 class TransportType(enum.Enum):
@@ -14,13 +15,13 @@ class TransportType(enum.Enum):
     RAY_SHARED_MEM = 3
 
 
-class DataWriter:
+class DataWriter_DEPR:
 
     def __init__(
         self,
         name: str,
         source_stream_name: str,
-        output_channels: List[Channel],
+        output_channels: List[Channel_DEP],
         transport_type: TransportType = TransportType.ZMQ_PUSH_PULL
     ):
         if transport_type not in [
@@ -52,7 +53,7 @@ class DataWriter:
         message = record.to_channel_message()
         self._write_message(channel_id, message)
 
-    def _write_message(self, channel_id: str, message: ChannelMessage):
+    def _write_message(self, channel_id: str, message: 'ChannelMessage'):
         # TODO this should use a buffer?
         # TODO serialization perf
         json_str = simplejson.dumps(message)

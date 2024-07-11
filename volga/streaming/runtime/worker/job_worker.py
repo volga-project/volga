@@ -69,6 +69,7 @@ class JobWorker:
                 raise RuntimeError(f'Init timeout for actor {actor_id}')
             time.sleep(0.1)
 
+        assert self.execution_vertex is not None
         init_delay = time.time() - start_ts
         if not_inited:
             logger.info(f'Worker {self.execution_vertex.execution_vertex_id} inited with delay {init_delay}s')

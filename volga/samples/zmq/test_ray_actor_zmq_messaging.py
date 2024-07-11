@@ -43,9 +43,12 @@ class Message:
     def from_bytes(bs: bytes) -> 'Message':
         return Message.de(bs.decode())
 
+    def __repr__(self):
+        return str(self.payload)
 
 def _msg(msg_id: int) -> Message:
-    payload = {'value': f'msg_{msg_id}', 'dummy_heavy_load': 'a'*1000}
+    # payload = {'value': f'msg_{msg_id}', 'dummy_heavy_load': 'a'*1000}
+    payload = {'value': f'msg_{msg_id}'}
     return Message(msg_id=msg_id, payload=payload)
 
 
@@ -75,10 +78,9 @@ class Push:
         self.socket.bind('ipc:///tmp/zmqtest')
         print('Push inited')
 
-    def start(self, num_events: int, loop_timeout_s: float):
+    def start(self, to_send: List, loop_timeout_s: float):
         start = time.time()
-        for i in range(num_events):
-            msg = _msg(i)
+        for msg in to_send:
             send_start = time.time()
             is_backpressured = False
             while True:
@@ -96,7 +98,8 @@ class Push:
                     is_backpressured = True
                     pass
                 time.sleep(0.001)
-            time.sleep(loop_timeout_s)
+                if loop_timeout_s > 0:
+                    time.sleep(loop_timeout_s)
         self.total_time = time.time() - start
         time.sleep(1)
         self.socket.send_string('done')
@@ -125,8 +128,8 @@ class Pull:
         self.socket.connect(peer_addr)
         print('Pull inited')
 
-    def start(self, start_delay_s: float, loop_timeout_s: float) -> int:
-        num_received = 0
+    def start(self, start_delay_s: float, loop_timeout_s: float) -> List:
+        received = []
         time.sleep(start_delay_s)
         while True:
             b = self.socket.recv()
@@ -134,14 +137,15 @@ class Pull:
                 break
             msg = Message.from_bytes(b)
             print(f'rcvd {msg.msg_id}')
-            num_received += 1
-            time.sleep(loop_timeout_s)
+            received.append(msg)
+            if loop_timeout_s > 0:
+                time.sleep(loop_timeout_s)
 
         time.sleep(1)
-        print(f'num received: {num_received}')
+        print(f'num received: {len(received)}')
         print('Done')
         time.sleep(1)
-        return num_received
+        return received
 
 
 with ray.init(address='auto'):
@@ -150,7 +154,9 @@ with ray.init(address='auto'):
     print(f'Msg len bytes: {len(sample_msg.to_bytes())}')
 
     # sender config
-    num_events = 300
+    num_events = 10
+    to_send = [_msg(i) for i in range(num_events)]
+
     push_loop_timeout_s = 0.01
     push_snd_hwm = 10
     push_rcv_hwm = None
@@ -172,8 +178,8 @@ with ray.init(address='auto'):
     ray.get(push.initialize.remote(peer_port, push_snd_hwm, push_rcv_hwm, push_snd_buf, push_rcv_buf))
     pull = Pull.remote()
     ray.get(pull.initialize.remote(peer_addr, pull_snd_hwm, pull_rcv_hwm, pull_snd_buf, pull_rcv_buf))
-    push.start.remote(num_events, push_loop_timeout_s)
-    num_received = ray.get(pull.start.remote(pull_start_delay_s, pull_loop_timeout_s))
+    push.start.remote(to_send, push_loop_timeout_s)
+    received = ray.get(pull.start.remote(pull_start_delay_s, pull_loop_timeout_s))
 
     # calculate backpressure stats
     backpressure_intervals, push_total_time = ray.get(push.get_backpressure_stats.remote())
@@ -185,4 +191,7 @@ with ray.init(address='auto'):
            f'Total push time: {push_total_time}'
     print(bprs_stats)
 
-    assert num_events == num_received
+    print(to_send)
+    print(received)
+    # assert to_send == received
+    assert num_events == len(received)

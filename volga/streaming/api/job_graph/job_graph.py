@@ -59,7 +59,7 @@ class JobGraph:
         job_config: Optional[Dict]
     ):
         if job_name is None:
-            job_name = f'job_{time.time()}'
+            job_name = f'job_{int(time.time())}'
         self.job_name = job_name
         self.job_config = job_config
         self.job_vertices: List[JobVertex] = []
