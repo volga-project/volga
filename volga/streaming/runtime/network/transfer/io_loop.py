@@ -173,8 +173,8 @@ class IOLoop:
                 self._all_connected_event.set()
 
         # TODO remove after debug
-        if socket_meta.owner == SocketOwner.CLIENT:
-            print(f'Monitor [{socket_meta}] {evt}')
+        # if socket_meta.owner == SocketOwner.CLIENT:
+        #     print(f'Monitor [{socket_meta}] {evt}')
 
     def _loop(self):
         while self.running:

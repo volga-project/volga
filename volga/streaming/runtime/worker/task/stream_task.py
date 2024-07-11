@@ -8,6 +8,7 @@ import zmq
 from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.message.message import Record, record_from_channel_message
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
+from volga.streaming.runtime.network.buffer.buffering_policy import PeriodicPartialFlushPolicy
 from volga.streaming.runtime.network.transfer.io_loop import IOLoop
 from volga.streaming.runtime.network.transfer.local.data_reader import DataReader
 from volga.streaming.runtime.network.transfer.local.data_writer import DataWriter
@@ -61,7 +62,8 @@ class StreamTask(ABC):
                     job_name=self.execution_vertex.job_name,
                     channels=output_channels,
                     node_id=self.execution_vertex.worker_node_info.node_id,
-                    zmq_ctx=self.zmq_ctx
+                    zmq_ctx=self.zmq_ctx,
+                    buffering_policy=PeriodicPartialFlushPolicy()
                 )
                 self.io_loop.register(self.data_writer)
 

@@ -21,6 +21,7 @@ class TestStreamingJobE2E(unittest.TestCase):
         super().__init__()
         self.ctx = ctx
 
+    # TODO this test is unreliable, need to debug
     def test_join_streams(self):
         def dummy_join(a, b, k1, k2, how):
 
@@ -38,8 +39,8 @@ class TestStreamingJobE2E(unittest.TestCase):
             return listify(res)
 
         # TODO increasing this 10x prevents sources from reporting finish, why?
-        s1_num_events = 100
-        s2_num_events = 100
+        s1_num_events = 10000
+        s2_num_events = 10000
         s1 = [(i, f'a{i}') for i in range(s1_num_events)]
         s2 = [(i + 1, f'b{i + 1}') for i in range(s2_num_events)]
 
@@ -61,7 +62,10 @@ class TestStreamingJobE2E(unittest.TestCase):
         s.sink(sink_function)
         # s.sink(lambda x: print(x) if x[0]%10 == 0 else None)
         # s.sink(print)
+
+        start_ts = time.time()
         ctx.execute()
+        print(f'Finished in {time.time() - start_ts}s')
         res = ray.get(sink_cache.get_values.remote())
         # print(res)
 

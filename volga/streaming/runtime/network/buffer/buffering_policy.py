@@ -12,7 +12,7 @@ class BufferPerMessagePolicy(BufferingPolicy):
 # This makes sure we do not wait indefinitely on idle channels
 class PeriodicPartialFlushPolicy(BufferingPolicy):
 
-    DEFAULT_FLUSH_PERIOD_S = 1
+    DEFAULT_FLUSH_PERIOD_S = 0.1
 
     def __init__(self, flush_period_s: float = DEFAULT_FLUSH_PERIOD_S):
         self.flush_period_s = flush_period_s

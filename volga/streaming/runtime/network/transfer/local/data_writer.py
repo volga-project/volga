@@ -176,7 +176,7 @@ class DataWriter(LocalDataHandler):
 
                 latency = (time.perf_counter() - ts) * 1000
                 self.metrics_recorder.latency(latency, self.name, channel_id)
-                print(latency)
+                # print(latency)
 
                 # perform ack
                 del self._in_flight[channel_id][ack_msg.buffer_id]
