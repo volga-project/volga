@@ -16,11 +16,3 @@ def bytes_to_str(b: bytes, strip_padding: bool = False) -> str:
     s = b.decode('utf-8')
     return s.strip() if strip_padding else s
 
-
-def int_to_bytes(i: int, buff_size: int) -> bytes:
-    return i.to_bytes(buff_size, 'big')
-
-
-def bytes_to_int(b: bytes) -> int:
-    return int.from_bytes(b, 'big')
-

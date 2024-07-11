@@ -6,9 +6,11 @@ from typing import List, Dict, Optional, Tuple
 import simplejson
 
 from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
-from volga.streaming.runtime.network.buffer.buffer import serialize, append_to_buffer, Buffer, get_buffer_id
+from volga.streaming.runtime.network.buffer.buffer import Buffer
 from volga.streaming.runtime.network.buffer.buffering_policy import BufferingPolicy, PeriodicPartialFlushPolicy, \
     BufferPerMessagePolicy
+from volga.streaming.runtime.network.buffer.serialization.buffer_serializer import JSONBufferSerializer, \
+    BufferSerializer
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
 
@@ -44,21 +46,20 @@ class BufferQueues:
     def append_msg(self, message: ChannelMessage, channel_id: str) -> Optional[Tuple[int, int]]: # success or backpressure
         lock = self._locks[channel_id]
         with lock:
-            msg_str = simplejson.dumps(message)
             buffer_queue = self._buffer_queues[channel_id]
             msg_id = self._msg_id_seq[channel_id]
             buffer_id = self._buffer_id_seq[channel_id]
 
-            msg_payload = serialize(channel_id, buffer_id, msg_str, msg_id, self._buffer_size, with_header=False)
+            msg_payload_bytes = JSONBufferSerializer.serialize_msg(channel_id, buffer_id, message, msg_id, self._buffer_size, with_header=False)
             needs_new_buffer = len(buffer_queue) == 0 \
                        or isinstance(self._buffering_policy, BufferPerMessagePolicy) \
-                       or self._buffer_size - len(buffer_queue[-1]) < len(msg_payload)
+                       or self._buffer_size - len(buffer_queue[-1]) < len(msg_payload_bytes)
 
             cut_buffer = self._should_cut_buffer[channel_id]
 
             if not needs_new_buffer and not cut_buffer:
                 last_buffer = buffer_queue[-1]
-                updated_last_buffer = append_to_buffer(last_buffer, msg_payload, self._buffer_size)
+                updated_last_buffer = BufferSerializer.append_msg_bytes(last_buffer, msg_payload_bytes, self._buffer_size)
                 buffer_queue[-1] = updated_last_buffer
                 res = (self._msg_id_seq[channel_id], self._buffer_id_seq[channel_id])
                 self._msg_id_seq[channel_id] += 1
@@ -70,7 +71,7 @@ class BufferQueues:
             if not has_mem:
                 return None
 
-            buffer = serialize(channel_id, buffer_id, msg_str, msg_id, self._buffer_size, with_header=True)
+            buffer = JSONBufferSerializer.serialize_msg(channel_id, buffer_id, message, msg_id, self._buffer_size, with_header=True)
             buffer_queue.append(buffer)
             res = (self._msg_id_seq[channel_id], self._buffer_id_seq[channel_id])
             self._msg_id_seq[channel_id] += 1
@@ -112,12 +113,12 @@ class BufferQueues:
             buffer_queue = self._buffer_queues[channel_id]
             if len(buffer_queue) == 0:
                 raise RuntimeError('Can not pop empty queue')
-            while len(buffer_queue) != 0 and get_buffer_id(buffer_queue[0]) in self._pops[channel_id]:
+            while len(buffer_queue) != 0 and BufferSerializer.get_buffer_id(buffer_queue[0]) in self._pops[channel_id]:
                 buffer = buffer_queue.popleft()
                 self._schedule_index[channel_id] -= 1
                 if self._schedule_index[channel_id] < 0:
                     raise RuntimeError('buffer queue schedule index can not be < 1')
                 if self._buffer_memory_tracker is not None:
                     self._buffer_memory_tracker.release(channel_id)
-                del self._pops[channel_id][get_buffer_id(buffer)]
+                del self._pops[channel_id][BufferSerializer.get_buffer_id(buffer)]
 

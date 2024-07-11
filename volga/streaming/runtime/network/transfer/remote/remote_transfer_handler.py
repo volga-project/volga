@@ -6,13 +6,13 @@ from typing import List, Dict, Tuple
 
 import zmq
 
-from volga.streaming.runtime.network.buffer.buffer import get_channel_id
-from volga.streaming.runtime.network.metrics import MetricsRecorder, Metric
+from volga.streaming.runtime.network.buffer.serialization.buffer_serializer import BufferSerializer
+from volga.streaming.runtime.network.metrics import Metric
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandler, IOHandlerType
 from volga.streaming.runtime.network.channel import RemoteChannel, ipc_path_from_addr
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
-from volga.streaming.runtime.network.socket_utils import configure_socket, rcv_no_block, send_no_block, _try_tcp_bind, \
+from volga.streaming.runtime.network.socket_utils import configure_socket, rcv_no_block, send_no_block, \
     SocketMetadata, SocketOwner, SocketKind
 
 
@@ -190,7 +190,7 @@ class RemoteTransferHandler(IOHandler, ABC):
             queue.append(data)
             self.stats.inc(StatsEvent.MSG_RCVD if self._is_sender else StatsEvent.ACK_RCVD, channel_id)
         elif socket in self._remote_socket_to_node:
-            channel_id = get_channel_id(data)
+            channel_id = BufferSerializer.get_channel_id(data)
             peer_node_id = self._ch_id_to_node_id[channel_id]
             queue = self._local_queues[channel_id]
             # TODO set limit on the queue size. If a queue is full we have two options:

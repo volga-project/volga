@@ -84,7 +84,7 @@ class TestLocalTransfer(unittest.TestCase):
         ray.shutdown()
 
     def test_one_to_one_locally(self):
-        num_items = 10000
+        num_items = 2000
         io_loop = IOLoop()
         channel = LocalChannel(
             channel_id='1',

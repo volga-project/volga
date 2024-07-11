@@ -12,7 +12,7 @@ import simplejson
 from volga.streaming.runtime.network.buffer.buffer_queues import get_buffer_id, get_payload
 from volga.streaming.runtime.network.buffer.buffer import AckMessage, AckMessageBatch
 from volga.streaming.runtime.network.experimental.threaded.threaded_data_handler_base import DataHandlerBase
-from volga.streaming.runtime.network.byte_utils import bytes_to_str
+from volga.streaming.runtime.network.buffer.serialization.byte_utils import bytes_to_str
 
 logger = logging.getLogger("ray")
 

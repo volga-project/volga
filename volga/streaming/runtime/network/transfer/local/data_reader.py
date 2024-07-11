@@ -1,23 +1,21 @@
 import logging
 import time
 from collections import deque
-from typing import List, Optional
+from typing import List
 
 import zmq
 
-from volga.streaming.runtime.network.buffer.buffer import get_payload, get_buffer_id, AckMessage, AckMessageBatch, \
-    get_channel_id
+from volga.streaming.runtime.network.buffer.buffer import AckMessage, AckMessageBatch
 from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
+from volga.streaming.runtime.network.buffer.serialization.buffer_serializer import JSONBufferSerializer, \
+    BufferSerializer
 from volga.streaming.runtime.network.metrics import Metric
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandlerType
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
 
-import simplejson
-
 from volga.streaming.runtime.network.config import NetworkConfig, DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.network.transfer.local.local_data_handler import LocalDataHandler
-from volga.streaming.runtime.network.byte_utils import bytes_to_str
 from volga.streaming.runtime.network.socket_utils import rcv_no_block, send_no_block
 
 logger = logging.getLogger("ray")
@@ -60,19 +58,16 @@ class DataReader(LocalDataHandler):
         if len(self._output_queue) == 0:
             return []
         buffer = self._output_queue.popleft()
-        channel_id = get_channel_id(buffer)
+        channel_id = BufferSerializer.get_channel_id(buffer)
         # release memory
         self._buffer_memory_tracker.release(self.name, _in=False)
 
-        payload = get_payload(buffer)
-
         # TODO implement partial messages
-        res = []
-        for (msg_id, data) in payload:
-            msg = simplejson.loads(bytes_to_str(data))
-            res.append(msg)
+        msgs = JSONBufferSerializer.deser(buffer)
+        for _ in msgs:
             self.metrics_recorder.inc(Metric.NUM_RECORDS_SENT, self.name, self.get_handler_type(), channel_id)
-        return res
+
+        return msgs
 
     def send(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]
@@ -125,9 +120,9 @@ class DataReader(LocalDataHandler):
 
         self.stats.inc(StatsEvent.MSG_RCVD, channel_id)
         self.metrics_recorder.inc(Metric.NUM_BUFFERS_RCVD, self.name, self.get_handler_type(), channel_id)
-        print(f'Rcvd {get_buffer_id(buffer)}, lat: {time.time() - t}')
+        print(f'Rcvd {BufferSerializer.get_buffer_id(buffer)}, lat: {time.time() - t}')
 
-        buffer_id = get_buffer_id(buffer)
+        buffer_id = BufferSerializer.get_buffer_id(buffer)
         wm = self._watermarks[channel_id]
         if buffer_id <= wm:
             # drop and resend ack

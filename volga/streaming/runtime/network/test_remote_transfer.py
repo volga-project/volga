@@ -112,10 +112,10 @@ class TestRemoteTransfer(unittest.TestCase):
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
     def test_n_to_n_on_ray(self, n: int, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_items_per_channel = 100000
+        num_items_per_channel = 10000000
         to_send = [{'i': i} for i in range(num_items_per_channel)]
 
-        buffering_config = BufferingConfig(buffer_size=32 * 1024, capacity_per_in_channel=10, capacity_per_out=10)
+        buffering_config = BufferingConfig(buffer_size=32 * 1024, capacity_per_in_channel=100, capacity_per_out=100)
         buffering_policy = PeriodicPartialFlushPolicy(0.1)
 
         ray.init(address=ray_addr, runtime_env=runtime_env)
@@ -306,7 +306,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_n_to_n_locally(n=3)
-    t.test_n_to_n_on_ray(n=3)
+    # t.test_n_to_n_locally(n=3)
+    t.test_n_to_n_on_ray(n=1)
     # t.test_n_to_n_on_ray(n=1, ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
-    t.test_transfer_actor_interruption()
+    # t.test_transfer_actor_interruption()

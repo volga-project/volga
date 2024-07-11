@@ -5,13 +5,13 @@ from threading import Thread
 
 import simplejson
 
-from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, get_payload
 from volga.streaming.runtime.network.buffer.buffer_memory_tracker import BufferMemoryTracker
 from volga.streaming.runtime.network.buffer.buffer_queues import BufferQueues
 from volga.streaming.runtime.network.buffer.buffering_policy import PeriodicPartialFlushPolicy, BufferPerMessagePolicy, \
     BufferingPolicy
+from volga.streaming.runtime.network.buffer.serialization.buffer_serializer import BufferSerializer
 from volga.streaming.runtime.network.channel import LocalChannel
-from volga.streaming.runtime.network.byte_utils import bytes_to_str
+from volga.streaming.runtime.network.buffer.serialization.byte_utils import bytes_to_str
 
 
 class TestBufferQueues(unittest.TestCase):
@@ -59,7 +59,7 @@ class TestBufferQueues(unittest.TestCase):
                 if buffer is None:
                     time.sleep(0.001)
                     continue
-                payload = get_payload(buffer)
+                payload = BufferSerializer.get_payload(buffer)
 
                 for (msg_id, data) in payload:
                     if msg_id != last_msg_id + 1:
@@ -72,7 +72,7 @@ class TestBufferQueues(unittest.TestCase):
                     rcvd.append(msg)
 
                 time.sleep(random.uniform(0.001, 0.002))
-                queues.pop(channel_id=channel.channel_id, buffer_id=get_buffer_id(buffer))
+                queues.pop(channel_id=channel.channel_id, buffer_id=BufferSerializer.get_buffer_id(buffer))
 
                 if len(rcvd) == num_items:
                     break
@@ -87,8 +87,8 @@ class TestBufferQueues(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestBufferQueues()
-    # test PeriodicPartialFlushPolicy
-    t.test(1000000, 132 * 1024, PeriodicPartialFlushPolicy(0.0015))
-
     # test BufferPerMessagePolicy
     t.test(10000, 32 * 1024, BufferPerMessagePolicy())
+
+    # test PeriodicPartialFlushPolicy
+    t.test(1000000, 132 * 1024, PeriodicPartialFlushPolicy(0.0015))

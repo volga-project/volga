@@ -1,16 +1,14 @@
 import time
-from collections import deque
-
-import simplejson
-from typing import List, Dict
+from typing import List
 
 import zmq
 
 from volga.streaming.api.message.message import Record
-from volga.streaming.runtime.network.buffer.buffer import get_buffer_id, AckMessageBatch, DEFAULT_BUFFER_SIZE
+from volga.streaming.runtime.network.buffer.buffer import AckMessageBatch
 from volga.streaming.runtime.network.buffer.buffering_config import BufferingConfig
 from volga.streaming.runtime.network.buffer.buffering_policy import BufferingPolicy, PeriodicPartialFlushPolicy, \
     BufferPerMessagePolicy
+from volga.streaming.runtime.network.buffer.serialization.buffer_serializer import BufferSerializer
 from volga.streaming.runtime.network.metrics import Metric
 from volga.streaming.runtime.network.stats import Stats, StatsEvent
 from volga.streaming.runtime.network.transfer.io_loop import Direction, IOHandlerType
@@ -139,7 +137,7 @@ class DataWriter(LocalDataHandler):
         if buffer is None:
             return
 
-        buffer_id = get_buffer_id(buffer)
+        buffer_id = BufferSerializer.get_buffer_id(buffer)
         if buffer_id in self._in_flight[channel_id]:
             raise RuntimeError('duplicate buffer_id scheduled')
 
@@ -173,11 +171,12 @@ class DataWriter(LocalDataHandler):
                 # TODO num records delivered
 
                 ts, buffer = self._in_flight[channel_id][ack_msg.buffer_id]
-                if ack_msg.buffer_id != get_buffer_id(buffer):
+                if ack_msg.buffer_id != BufferSerializer.get_buffer_id(buffer):
                     raise RuntimeError('buffer_id missmatch')
 
                 latency = (time.perf_counter() - ts) * 1000
                 self.metrics_recorder.latency(latency, self.name, channel_id)
+                print(latency)
 
                 # perform ack
                 del self._in_flight[channel_id][ack_msg.buffer_id]
