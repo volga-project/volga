@@ -39,7 +39,10 @@ class Operator(ABC):
         pass
 
     def get_next_operators(self) -> List['Operator']:
-        return []
+        raise
+
+    def add_next_operator(self, operator: 'Operator'):
+        raise
 
 
 class OneInputOperator(Operator, ABC):

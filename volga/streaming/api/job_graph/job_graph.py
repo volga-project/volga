@@ -5,19 +5,28 @@ from typing import List, Dict, Optional, Any
 from volga.streaming.api.operator.operator import StreamOperator
 from volga.streaming.api.partition.partition import Partition
 
+
 class JobEdge:
     def __init__(
         self,
         source_vertex_id: int,
         target_vertex_id: int,
         partition: Partition,
+        source_operator_id: Optional[int] = None,
+        target_operator_id: Optional[int] = None
     ):
         self.source_vertex_id = source_vertex_id
         self.target_vertex_id = target_vertex_id
 
-        # TODO is this ok
-        self.source_operator_id = source_vertex_id
-        self.target_operator_id = target_vertex_id
+        if source_operator_id is None:
+            self.source_operator_id = source_vertex_id
+        else:
+            self.source_operator_id = source_operator_id
+
+        if target_operator_id is None:
+            self.target_operator_id = target_vertex_id
+        else:
+            self.target_operator_id = target_operator_id
 
         self.partition = partition
         self.is_join_right_edge = False
@@ -77,6 +86,15 @@ class JobGraph:
                     edge.target_vertex_id == job_edge.target_vertex_id:
                 return
         self.job_edges.append(job_edge)
+
+    def get_vertex_output_edges(self, vertex_id: int) -> List[JobEdge]:
+        return list(filter(lambda e: e.source_vertex_id == vertex_id, self.job_edges))
+
+    def get_vertex_input_edges(self, vertex_id: int) -> List[JobEdge]:
+        return list(filter(lambda e: e.target_vertex_id == vertex_id, self.job_edges))
+
+    def get_source_vertices(self) -> List[JobVertex]:
+        return list(filter(lambda v: v.vertex_type == VertexType.SOURCE, self.job_vertices))
 
     def gen_digraph(self):
         try:
