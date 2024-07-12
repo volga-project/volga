@@ -20,10 +20,7 @@ class OperatorType(enum.Enum):
 
 
 class Operator(ABC):
-    """
-    Abstract base class for all operators.
-    An operator is used to run a :class:`function.Function`.
-    """
+    # Abstract base class for all operators. An operator is used to run a Function
 
     @abstractmethod
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
@@ -40,6 +37,9 @@ class Operator(ABC):
     @abstractmethod
     def operator_type(self) -> OperatorType:
         pass
+
+    def get_next_operators(self) -> List['Operator']:
+        return []
 
 
 class OneInputOperator(Operator, ABC):
