@@ -59,7 +59,9 @@ class TestWriter:
 
     def send_items(self, items: List[Dict]):
         for item in items:
-            self.data_writer._write_message(self.channel.channel_id, item)
+            succ = self.data_writer._write_message(self.channel.channel_id, item, timeout=10)
+            if not succ:
+                raise RuntimeError('Unable to send message after backpressure timeout')
             if self.delay_s > 0:
                 time.sleep(self.delay_s)
 
@@ -128,7 +130,7 @@ def read(rcvd: List, data_reader: DataReader, num_expected: int):
         msgs = data_reader.read_message()
         # time.sleep(0.01)
         if len(msgs) == 0:
-            time.sleep(0.01)
+            time.sleep(0.001)
             continue
         else:
             rcvd.extend(msgs)
@@ -139,7 +141,9 @@ def read(rcvd: List, data_reader: DataReader, num_expected: int):
 
 def write(to_send: List, data_writer: DataWriter, channel: Channel):
     for msg in to_send:
-        data_writer._write_message(channel.channel_id, msg)
+        succ = data_writer._write_message(channel.channel_id, msg, timeout=10)
+        if not succ:
+            raise RuntimeError('Unable to send message after backpressure timeout')
         # time.sleep(0.2)
 
 
