@@ -25,7 +25,8 @@ from volga.streaming.runtime.network.socket_utils import rcv_no_block, send_no_b
 # TODO do we even need this? we should have no more than max buffer queue length of in-flight buffers
 IN_FLIGHT_LIMIT_PER_CHANNEL = 1000 # max number of un-acked buffers
 
-IN_FLIGHT_TIMEOUT_S = 0.5 # how long to wait before re-sending un-acked buffers
+# TODO test low values, e.g. 0.5 seems weird/may block - why?
+IN_FLIGHT_TIMEOUT_S = 4 # how long to wait before re-sending un-acked buffers
 
 
 class DataWriter(LocalDataHandler):
@@ -175,7 +176,8 @@ class DataWriter(LocalDataHandler):
                     raise RuntimeError('buffer_id missmatch')
 
                 latency = (time.perf_counter() - ts) * 1000
-                self.metrics_recorder.latency(latency, self.name, channel_id)
+                # TODO report latency
+                # self.metrics_recorder.latency(latency, self.name, channel_id)
                 # print(latency)
 
                 # perform ack
