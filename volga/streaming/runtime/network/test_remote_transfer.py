@@ -111,7 +111,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
-    def test_n_to_n_on_ray(self, n: int, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
+    def test_n_to_n_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
         num_items_per_channel = 100000
         to_send = [{'i': i} for i in range(num_items_per_channel)]
 
@@ -151,7 +151,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
         ray.shutdown()
 
-    def test_n_to_n_locally(self, n: int):
+    def test_n_to_n_locally(self, n: int = 3):
         # simulates n 1:1 connections multiplexed via single transfer connection
         num_items_per_channel = 1000
         source_node_id = 'node_1'
