@@ -76,9 +76,9 @@ class MetricsRecorder:
         )
         self.latency_hist.set_default_tags({'job_name': job_name})
 
-    def inc(self, metric: Metric, handler_name: str, handler_type: 'IOHandlerType', channel_id: str):
+    def inc(self, metric: Metric, handler_name: str, handler_type: 'IOHandlerType', channel_id: str, value: int = 1):
         assert channel_id is not None
-        self.counters[metric].inc(tags={
+        self.counters[metric].inc(value=value, tags={
             'handler_name': handler_name,
             'handler_type': handler_type.value,
             'channel_id': channel_id

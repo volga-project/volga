@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Union, Tuple, List
 
-import simplejson
+import orjson
 
 import volga.streaming.runtime.network.buffer.serialization.varint as vi
 from volga.streaming.runtime.network.buffer.buffer import CHANNEL_ID_HEADER_LENGTH, Buffer
@@ -112,8 +112,8 @@ class JSONBufferSerializer(BufferSerializer):
 
     @classmethod
     def msg_to_bytes(cls, msg: ChannelMessage) -> bytes:
-        return str_to_bytes(simplejson.dumps(msg))
+        return orjson.dumps(msg)
 
     @classmethod
     def bytes_to_msg(cls, b: bytes) -> ChannelMessage:
-        return simplejson.loads(bytes_to_str(b))
+        return orjson.loads(b)

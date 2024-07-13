@@ -1,6 +1,8 @@
+import datetime
 import unittest
 
-from volga.streaming.runtime.network.buffer.serialization.buffer_serializer import BufferSerializer, JSONBufferSerializer
+from volga.streaming.runtime.network.buffer.serialization.buffer_serializer import BufferSerializer, \
+    JSONBufferSerializer
 from volga.streaming.runtime.network.buffer.serialization.byte_utils import bytes_to_str, str_to_bytes
 
 
@@ -59,7 +61,7 @@ class TestBufferSerializer(unittest.TestCase):
         print('assert ok')
 
     def test_json_serializer(self):
-        data = {'i': 123456}
+        data = {'i': 123456, 'm': {'k': 'abc'}, 'date': str(datetime.datetime.now())}
         assert data == JSONBufferSerializer.bytes_to_msg(JSONBufferSerializer.msg_to_bytes(data))
         print('assert ok')
 
