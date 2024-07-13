@@ -64,8 +64,7 @@ class DataReader(LocalDataHandler):
 
         # TODO implement partial messages
         msgs = JSONBufferSerializer.deser(buffer)
-        for _ in msgs:
-            self.metrics_recorder.inc(Metric.NUM_RECORDS_SENT, self.name, self.get_handler_type(), channel_id)
+        self.metrics_recorder.inc(Metric.NUM_RECORDS_RCVD, self.name, self.get_handler_type(), channel_id, len(msgs))
 
         return msgs
 
