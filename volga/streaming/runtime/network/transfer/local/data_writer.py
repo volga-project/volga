@@ -110,10 +110,9 @@ class DataWriter(LocalDataHandler):
 
     def send(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]
-        start_ts = time.time()
+        t = time.perf_counter()
         # re-sent timed-out in-flight buffers first
         for in_flight_buff_id in self._in_flight[channel_id]:
-            t = time.perf_counter()
             ts, buffer = self._in_flight[channel_id][in_flight_buff_id]
             if t - ts > IN_FLIGHT_TIMEOUT_S:
                 self._in_flight[channel_id][in_flight_buff_id] = (t, buffer)
@@ -146,7 +145,7 @@ class DataWriter(LocalDataHandler):
         if sent:
             self.stats.inc(StatsEvent.MSG_SENT, channel_id)
             self.metrics_recorder.inc(Metric.NUM_BUFFERS_SENT, self.name, self.get_handler_type(), channel_id)
-            print(f'Sent {buffer_id}, lat: {time.time() - start_ts}')
+            print(f'Sent {buffer_id}, lat: {time.perf_counter() - t}')
         else:
             # TODO add delay on retries
             pass
