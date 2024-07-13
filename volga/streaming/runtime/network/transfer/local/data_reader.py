@@ -98,7 +98,7 @@ class DataReader(LocalDataHandler):
 
     def rcv(self, socket: zmq.Socket):
         channel_id = self._socket_to_ch[socket]
-        t = time.time()
+        t = time.perf_counter()
 
         has_mem = self._buffer_memory_tracker.try_acquire(self.name, _in=False)
         if has_mem:
@@ -119,7 +119,7 @@ class DataReader(LocalDataHandler):
 
         self.stats.inc(StatsEvent.MSG_RCVD, channel_id)
         self.metrics_recorder.inc(Metric.NUM_BUFFERS_RCVD, self.name, self.get_handler_type(), channel_id)
-        print(f'Rcvd {BufferSerializer.get_buffer_id(buffer)}, lat: {time.time() - t}')
+        print(f'Rcvd {BufferSerializer.get_buffer_id(buffer)}, lat: {time.perf_counter() - t}')
 
         buffer_id = BufferSerializer.get_buffer_id(buffer)
         wm = self._watermarks[channel_id]
