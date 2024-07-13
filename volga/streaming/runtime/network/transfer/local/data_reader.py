@@ -52,7 +52,7 @@ class DataReader(LocalDataHandler):
         self._buffer_memory_tracker = BufferMemoryTracker.instance(node_id=node_id, job_name=job_name)
 
     def get_handler_type(self) -> IOHandlerType:
-        return IOHandlerType.DATA_WRITER
+        return IOHandlerType.DATA_READER
 
     def read_message(self) -> List[ChannelMessage]:
         if len(self._output_queue) == 0:
@@ -133,7 +133,8 @@ class DataReader(LocalDataHandler):
             # however in theory it should not happen - sender will ony send maximum of it's buffer queue size
             # before receiving ack and sending more (which happens only after all _out_of_order is processed)
             if buffer_id in self._out_of_order[channel_id]:
-                # duplicate, do nothing. Should we ack out_of_order buffers?
+                # TODO we should ack here, we may have an ack loss and a message will never be acked
+                # duplicate
                 return
             self._out_of_order[channel_id][buffer_id] = buffer
 
