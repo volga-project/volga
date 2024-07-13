@@ -141,11 +141,12 @@ class DataWriter(LocalDataHandler):
             raise RuntimeError('duplicate buffer_id scheduled')
 
         self._in_flight[channel_id][buffer_id] = (time.perf_counter(), buffer)
+        _ts = time.perf_counter()
         sent = send_no_block(socket, buffer)
         if sent:
+            print(f'Sent {buffer_id}, lat: {time.perf_counter() - _ts}')
             self.stats.inc(StatsEvent.MSG_SENT, channel_id)
             self.metrics_recorder.inc(Metric.NUM_BUFFERS_SENT, self.name, self.get_handler_type(), channel_id)
-            print(f'Sent {buffer_id}, lat: {time.perf_counter() - t}')
         else:
             # TODO add delay on retries
             pass
