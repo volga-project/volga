@@ -133,7 +133,8 @@ class DataReader(LocalDataHandler):
             # however in theory it should not happen - sender will ony send maximum of it's buffer queue size
             # before receiving ack and sending more (which happens only after all _out_of_order is processed)
             if buffer_id in self._out_of_order[channel_id]:
-                # TODO we should ack here, we may have an ack loss and a message will never be acked
+                ack_msg = AckMessage(buffer_id=buffer_id)
+                self._acks_queues[channel_id].append(ack_msg)
                 # duplicate
                 return
             self._out_of_order[channel_id][buffer_id] = buffer
