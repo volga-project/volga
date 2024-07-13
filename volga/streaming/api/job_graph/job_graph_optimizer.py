@@ -1,6 +1,7 @@
-from typing import Dict, Set, List
+from typing import Dict, List
 
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, JobEdge
+from volga.streaming.api.operator.chained import new_chained_operator
 from volga.streaming.api.partition.partition import ForwardPartition, Partition, RoundRobinPartition
 
 
@@ -23,8 +24,20 @@ class JobGraphOptimizer:
         self._tail_edges_map:  Dict[int, List[JobEdge]] = {}
 
     def optimize(self) -> JobGraph:
-        # TODO implement chaining
-        return self.job_graph
+        # reset operators
+        for vertex in self.job_graph.job_vertices:
+            vertex.stream_operator.set_next_operators([])
+
+        for source_vertex in self.job_graph.get_source_vertices():
+            self.add_vertex_to_chain_set(source_vertex.vertex_id, source_vertex)
+            self.divide_vertices(source_vertex.vertex_id, source_vertex)
+
+        return JobGraph(
+            self.job_graph.job_name,
+            self.job_graph.job_config,
+            self.merge_vertices(),
+            self.reset_edges()
+        )
 
     # Divide the original DAG into multiple operator groups, each group's operators will be chained
     # as one ChainedOperator.
@@ -100,6 +113,29 @@ class JobGraphOptimizer:
                 new_job_edges.append(new_edge)
         new_job_edges.sort(key=lambda e: e.is_join_right_edge)
         return new_job_edges
+
+    def merge_vertices(self) -> List[JobVertex]:
+        new_job_vertices = []
+        for head_vertex_id in self._chain_set:
+            tree_list = self._chain_set[head_vertex_id]
+            head_vertex = tree_list[0]
+            if len(tree_list) == 1:
+                # no chain
+                merged_vertex = head_vertex
+            else:
+                operators = [self._vertex_map[v.vertex_id].stream_operator for v in tree_list]
+                # TODO chain resource_configs and op_configs
+                operator = new_chained_operator(operators)
+                merged_vertex = JobVertex(
+                    head_vertex.vertex_id,
+                    head_vertex.parallelism,
+                    head_vertex.vertex_type,
+                    operator # TODO figure out typing
+                )
+            new_job_vertices.append(merged_vertex)
+
+        return new_job_vertices
+
 
 def _change_partition(partition: Partition):
     if isinstance(partition, ForwardPartition):

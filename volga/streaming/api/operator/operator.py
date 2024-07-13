@@ -44,6 +44,9 @@ class Operator(ABC):
     def add_next_operator(self, operator: 'Operator'):
         raise
 
+    def set_next_operators(self, operator: List['Operator']):
+        raise
+
 
 class OneInputOperator(Operator, ABC):
 

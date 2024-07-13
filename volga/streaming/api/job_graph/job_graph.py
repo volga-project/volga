@@ -65,14 +65,24 @@ class JobGraph:
     def __init__(
         self,
         job_name: Optional[str],
-        job_config: Optional[Dict]
+        job_config: Optional[Dict],
+        job_vertices: List[JobVertex] = None,
+        job_edges: List[JobEdge] = None
     ):
         if job_name is None:
             job_name = f'job_{int(time.time())}'
         self.job_name = job_name
         self.job_config = job_config
-        self.job_vertices: List[JobVertex] = []
-        self.job_edges: List[JobEdge] = []
+
+        if job_vertices is None:
+            self.job_vertices = []
+        else:
+            self.job_vertices = job_vertices
+
+        if job_edges is None:
+            self.job_edges = []
+        else:
+            self.job_edges = job_edges
 
     def add_vertex_if_not_exists(self, job_vertex: JobVertex):
         for vertex in self.job_vertices:
