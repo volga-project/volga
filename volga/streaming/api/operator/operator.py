@@ -38,15 +38,6 @@ class Operator(ABC):
     def operator_type(self) -> OperatorType:
         pass
 
-    def get_next_operators(self) -> List['Operator']:
-        raise
-
-    def add_next_operator(self, operator: 'Operator'):
-        raise
-
-    def set_next_operators(self, operator: List['Operator']):
-        raise
-
 
 class OneInputOperator(Operator, ABC):
 
@@ -78,6 +69,9 @@ class StreamOperator(Operator, ABC):
         # set at jobGraph compilation
         self.id = None
 
+        # next operators, used for operator chaining
+        self.next_operators = []
+
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         self.collectors = collectors
         self.runtime_context = runtime_context
@@ -92,6 +86,15 @@ class StreamOperator(Operator, ABC):
     def collect(self, record: Record):
         for collector in self.collectors:
             collector.collect(record)
+
+    def get_next_operators(self) -> List['StreamOperator']:
+        return self.next_operators
+
+    def add_next_operator(self, operator: 'StreamOperator'):
+        self.next_operators.append(operator)
+
+    def set_next_operators(self, operators: List['StreamOperator']):
+        self.next_operators = operators
 
 
 class SourceOperator(StreamOperator):

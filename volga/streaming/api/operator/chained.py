@@ -8,9 +8,11 @@ from volga.streaming.api.operator.operator import Operator, StreamOperator, Oper
     TwoInputOperator, SourceOperator
 
 
-class ChainedOperator(Operator, ABC):
+class ChainedOperator(StreamOperator, ABC):
 
     def __init__(self, operators: List[StreamOperator]):
+        # TODO what to do with init
+        # super().__init__()
         assert len(operators) > 1
         self.operators = operators
         self.head_operator = operators[0]
@@ -98,12 +100,19 @@ def new_chained_operator(operators: List[StreamOperator]) -> ChainedOperator:
     else:
         raise RuntimeError('Unknown operator type')
 
+
 #  Find all tail operators of the given operator set. The tail operator contains: 1. The operator
 #  that does not have any succeeding operators; 2. The operator whose succeeding operators are all
 #  outsiders, i.e. not in the given set.
 #
 #  @param operators The given operator set
 #  @return The tail operators of the given set
-def gen_tail_operators(operators: List[StreamOperator]) -> List[StreamOperator]:
-    # TODO
-    raise
+def gen_tail_operators(operators: List[StreamOperator]) -> List[StreamOperator]: # TODO set?
+    tail_operators = []
+    for operator in operators:
+        if len(operator.get_next_operators()) == 0:
+            tail_operators.append(operator)
+        for sub_operator in operator.get_next_operators():
+            if sub_operator not in operators:
+                tail_operators.append(sub_operator)
+    return tail_operators

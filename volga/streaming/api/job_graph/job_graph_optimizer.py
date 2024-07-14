@@ -2,6 +2,7 @@ from typing import Dict, List
 
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, JobEdge
 from volga.streaming.api.operator.chained import new_chained_operator
+from volga.streaming.api.operator.operator import StreamOperator
 from volga.streaming.api.partition.partition import ForwardPartition, Partition, RoundRobinPartition
 
 
@@ -24,7 +25,7 @@ class JobGraphOptimizer:
         self._tail_edges_map:  Dict[int, List[JobEdge]] = {}
 
     def optimize(self) -> JobGraph:
-        # reset operators
+        # reset next operators
         for vertex in self.job_graph.job_vertices:
             vertex.stream_operator.set_next_operators([])
 
@@ -126,11 +127,13 @@ class JobGraphOptimizer:
                 operators = [self._vertex_map[v.vertex_id].stream_operator for v in tree_list]
                 # TODO chain resource_configs and op_configs
                 operator = new_chained_operator(operators)
+                print(type(operator))
+                assert isinstance(operator, StreamOperator)
                 merged_vertex = JobVertex(
                     head_vertex.vertex_id,
                     head_vertex.parallelism,
                     head_vertex.vertex_type,
-                    operator # TODO figure out typing
+                    operator
                 )
             new_job_vertices.append(merged_vertex)
 

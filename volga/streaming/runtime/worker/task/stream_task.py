@@ -94,6 +94,8 @@ class StreamTask(ABC):
         grouped_channel_ids = {}
         grouped_partitions = {}
 
+        op_id_and_downstream_id_map = {}
+
         for i in range(len(output_edges)):
             output_edge = output_edges[i]
             op_name = output_edge.target_execution_vertex.job_vertex.get_name()
@@ -103,8 +105,15 @@ class StreamTask(ABC):
             grouped_channel_ids[op_name].append(output_channel_ids[i])
             grouped_partitions[op_name] = output_edge.partition
 
+            op_id_and_downstream_id_map[op_name] = (
+                output_edge.source_execution_vertex.stream_operator.id,
+                output_edge.target_execution_vertex.stream_operator.id
+            )
+
         for op_name in grouped_partitions:
             self.collectors.append(OutputCollector(
+                op_id_and_downstream_id_map[op_name][0],
+                op_id_and_downstream_id_map[op_name][1],
                 data_writer=self.data_writer,
                 output_channel_ids=grouped_channel_ids[op_name],
                 partition=grouped_partitions[op_name]
