@@ -13,7 +13,7 @@ from volga.streaming.api.function.aggregate_function import AggregationType, All
 from volga.streaming.api.function.function import EmptyFunction
 from volga.streaming.api.function.window_function import WindowFunction, AllAggregateApplyWindowFunction
 from volga.streaming.api.message.message import Record, KeyRecord
-from volga.streaming.api.operator.operator import StreamOperator, OneInputOperator
+from volga.streaming.api.operators.operators import StreamOperator, OneInputOperator
 
 
 @dataclass

@@ -4,36 +4,29 @@ from typing import List
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
-from volga.streaming.api.operator.operator import Operator, StreamOperator, OperatorType, OneInputOperator, \
+from volga.streaming.api.operators.operators import StreamOperator, OperatorType, OneInputOperator, \
     TwoInputOperator, SourceOperator
 
 
 class ChainedOperator(StreamOperator, ABC):
 
     def __init__(self, operators: List[StreamOperator]):
-        # TODO what to do with init
-        # super().__init__()
+        super().__init__(None)
         assert len(operators) > 1
         self.operators = operators
         self.head_operator = operators[0]
-        self.tail_operators = gen_tail_operators(self.operators)
+        self.tail_operator = operators[len(operators) - 1]
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         # do not call super class, we open each operator separately
-        for i in range(len(self.operators)):
+        for i in range(len(self.operators) - 1):
             operator = self.operators[i]
-            succeeding_collectors = []
-            for sub_operator in operator.get_next_operators():
-                assert isinstance(sub_operator, StreamOperator)
-                if sub_operator in self.operators:
-                    assert isinstance(sub_operator, OneInputOperator)
-                    succeeding_collectors.append(ForwardCollector(sub_operator))
-                else:
-                    for collector in collectors:
-                        if collector.get_id() == operator.id and collector.get_downstream_op_id() == sub_operator.id:
-                            succeeding_collectors.append(collector)
+            next_operator = self.operators[i + 1]
+            assert isinstance(next_operator, OneInputOperator)
+            forward_collector = ForwardCollector(next_operator)
+            operator.open([forward_collector], self._create_runtime_context(runtime_context, i))
 
-            operator.open(succeeding_collectors, self._create_runtime_context(runtime_context, i))
+        self.tail_operator.open(collectors, self._create_runtime_context(runtime_context, len(self.operators) - 1))
 
     def finish(self):
         for op in self.operators:
@@ -45,6 +38,12 @@ class ChainedOperator(StreamOperator, ABC):
 
     def operator_type(self) -> OperatorType:
         return self.head_operator.operator_type()
+
+    def get_description(self) -> str:
+        d = f'{self.__class__.__name__}('
+        for op in self.operators:
+            d += f'{op.__class__.__name__}->'
+        return d.removesuffix('->') + ')'
 
     def _create_runtime_context(self, runtime_context: RuntimeContext, index: int) -> RuntimeContext:
         # TODO implement based on index
@@ -99,20 +98,3 @@ def new_chained_operator(operators: List[StreamOperator]) -> ChainedOperator:
         return ChainedTwoInputOperator(operators)
     else:
         raise RuntimeError('Unknown operator type')
-
-
-#  Find all tail operators of the given operator set. The tail operator contains: 1. The operator
-#  that does not have any succeeding operators; 2. The operator whose succeeding operators are all
-#  outsiders, i.e. not in the given set.
-#
-#  @param operators The given operator set
-#  @return The tail operators of the given set
-def gen_tail_operators(operators: List[StreamOperator]) -> List[StreamOperator]: # TODO set?
-    tail_operators = []
-    for operator in operators:
-        if len(operator.get_next_operators()) == 0:
-            tail_operators.append(operator)
-        for sub_operator in operator.get_next_operators():
-            if sub_operator not in operators:
-                tail_operators.append(sub_operator)
-    return tail_operators

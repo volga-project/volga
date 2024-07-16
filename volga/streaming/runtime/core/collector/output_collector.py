@@ -10,14 +10,10 @@ class OutputCollector(Collector):
 
     def __init__(
         self,
-        collector_id: int,
-        downstream_id: int,
         data_writer: DataWriter,
         output_channel_ids: List[str],
         partition: Partition
     ):
-        self.collector_id = collector_id
-        self.downstream_id = downstream_id
         self.data_writer = data_writer
         self.output_channel_ids = output_channel_ids
         self.partition = partition
@@ -27,8 +23,3 @@ class OutputCollector(Collector):
         for partition in partitions:
             self.data_writer.write_record(self.output_channel_ids[partition], record)
 
-    def get_id(self) -> int:
-        return self.collector_id
-
-    def get_downstream_op_id(self) -> int:
-        return self.downstream_id

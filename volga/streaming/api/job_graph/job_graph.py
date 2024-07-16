@@ -2,7 +2,8 @@ import enum
 import time
 from typing import List, Dict, Optional, Any
 
-from volga.streaming.api.operator.operator import StreamOperator
+from volga.streaming.api.operators.chained import ChainedOperator
+from volga.streaming.api.operators.operators import StreamOperator
 from volga.streaming.api.partition.partition import Partition
 
 
@@ -60,6 +61,9 @@ class JobVertex:
     def get_name(self) -> str:
         return f'{self.vertex_id}_{self.stream_operator.__class__.__name__}'
 
+    def __repr__(self):
+        return self.get_name()
+
 
 class JobGraph:
     def __init__(
@@ -113,7 +117,11 @@ class JobGraph:
             return "GraphViz is not installed. To enable JobGraph visualization, please install GraphViz and pygraphviz"
         G = pgv.AGraph()
         for jv in self.job_vertices:
-            G.add_node(jv.vertex_id, label=f'{jv.stream_operator.__class__.__name__} p={jv.parallelism}')
+            if isinstance(jv.stream_operator, ChainedOperator):
+                label = f'{jv.stream_operator.get_description()} p={jv.parallelism}'
+            else:
+                label = f'{jv.stream_operator.__class__.__name__} p={jv.parallelism}'
+            G.add_node(jv.vertex_id, label=label)
 
         for je in self.job_edges:
             G.add_edge(je.source_vertex_id, je.target_vertex_id, label=je.partition.__class__.__name__)

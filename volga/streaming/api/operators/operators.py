@@ -8,7 +8,7 @@ from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import Function, SourceContext, SourceFunction, MapFunction, \
     FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
 from volga.streaming.api.message.message import Record, KeyRecord
-from volga.streaming.api.operator.timestamp_assigner import TimestampAssigner
+from volga.streaming.api.operators.timestamp_assigner import TimestampAssigner
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ class TwoInputOperator(Operator, ABC):
 
 class StreamOperator(Operator, ABC):
 
-    def __init__(self, func: Function):
+    def __init__(self, func: Optional[Function] = None):
         self.func = func
         self.collectors = None
         self.runtime_context = None
@@ -69,32 +69,20 @@ class StreamOperator(Operator, ABC):
         # set at jobGraph compilation
         self.id = None
 
-        # next operators, used for operator chaining
-        self.next_operators = []
-
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         self.collectors = collectors
         self.runtime_context = runtime_context
         self.func.open(runtime_context)
 
-    def finish(self):
-        pass
-
     def close(self):
         self.func.close()
+
+    def finish(self):
+        pass
 
     def collect(self, record: Record):
         for collector in self.collectors:
             collector.collect(record)
-
-    def get_next_operators(self) -> List['StreamOperator']:
-        return self.next_operators
-
-    def add_next_operator(self, operator: 'StreamOperator'):
-        self.next_operators.append(operator)
-
-    def set_next_operators(self, operators: List['StreamOperator']):
-        self.next_operators = operators
 
 
 class SourceOperator(StreamOperator):
@@ -128,7 +116,6 @@ class SourceOperator(StreamOperator):
                 self.finished = True
 
     def __init__(self, func: SourceFunction):
-        assert isinstance(func, SourceFunction)
         super().__init__(func)
         self.source_context: Optional[SourceOperator.SourceContextImpl] = None
         self.timestamp_assigner: Optional[TimestampAssigner] = None

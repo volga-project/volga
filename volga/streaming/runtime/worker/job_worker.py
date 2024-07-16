@@ -6,7 +6,7 @@ from typing import Tuple
 import ray
 from ray.actor import ActorHandle
 
-from volga.streaming.api.operator.operator import SourceOperator
+from volga.streaming.api.operators.operators import SourceOperator
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.core.processor.processor import Processor, SourceProcessor, OneInputProcessor
 from volga.streaming.runtime.worker.task.stream_task import StreamTask, SourceStreamTask, \

@@ -14,13 +14,6 @@ class Collector(ABC):
     def collect(self, record: Record):
         pass
 
-    # Used by operator chain/tree to filter out collectors
-    def get_id(self) -> int:
-        return -1
-
-    def get_downstream_op_id(self) -> int:
-        return -1
-
 
 class CollectionCollector(Collector):
     def __init__(self, collector_list: List[Collector]):
@@ -29,3 +22,13 @@ class CollectionCollector(Collector):
     def collect(self, value: Any):
         for collector in self._collector_list:
             collector.collect(Record(value))
+
+
+class DummyCollector(Collector):
+
+    def __init__(self, l: List):
+        self._list = l
+
+    def collect(self, value: Any):
+        self._list.append(value)
+

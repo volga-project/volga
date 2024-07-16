@@ -2,9 +2,9 @@ from typing import List, Callable, Union, Optional
 
 from volga.streaming.api.function.function import SimpleMapFunction, SimpleFlatMapFunction, \
     SimpleFilterFunction, SimpleKeyFunction, SimpleJoinFunction, SimpleReduceFunction, SimpleSinkFunction, Function
-from volga.streaming.api.operator.operator import MapOperator, FlatMapOperator, FilterOperator, \
+from volga.streaming.api.operators.operators import MapOperator, FlatMapOperator, FilterOperator, \
     ReduceOperator, StreamOperator, JoinOperator, KeyByOperator, SinkOperator
-from volga.streaming.api.operator.window_operator import MultiWindowOperator, SlidingWindowConfig, OutputWindowFunc
+from volga.streaming.api.operators.window_operator import MultiWindowOperator, SlidingWindowConfig, OutputWindowFunc
 from volga.streaming.api.partition.partition import KeyPartition
 from volga.streaming.api.stream.stream import Stream
 from volga.streaming.api.stream.stream_sink import StreamSink

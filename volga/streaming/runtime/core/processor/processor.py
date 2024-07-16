@@ -4,7 +4,7 @@ from typing import List
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
-from volga.streaming.api.operator.operator import OneInputOperator, Operator, SourceOperator, \
+from volga.streaming.api.operators.operators import OneInputOperator, Operator, SourceOperator, \
     StreamOperator, OperatorType, TwoInputOperator
 
 

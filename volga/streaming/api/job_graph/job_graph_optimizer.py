@@ -1,8 +1,8 @@
 from typing import Dict, List
 
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, JobEdge
-from volga.streaming.api.operator.chained import new_chained_operator
-from volga.streaming.api.operator.operator import StreamOperator
+from volga.streaming.api.operators.chained import new_chained_operator
+from volga.streaming.api.operators.operators import StreamOperator
 from volga.streaming.api.partition.partition import ForwardPartition, Partition, RoundRobinPartition
 
 
@@ -25,9 +25,6 @@ class JobGraphOptimizer:
         self._tail_edges_map:  Dict[int, List[JobEdge]] = {}
 
     def optimize(self) -> JobGraph:
-        # reset next operators
-        for vertex in self.job_graph.job_vertices:
-            vertex.stream_operator.set_next_operators([])
 
         for source_vertex in self.job_graph.get_source_vertices():
             self.add_vertex_to_chain_set(source_vertex.vertex_id, source_vertex)
@@ -39,6 +36,7 @@ class JobGraphOptimizer:
             self.merge_vertices(),
             self.reset_edges()
         )
+        # return self.job_graph
 
     # Divide the original DAG into multiple operator groups, each group's operators will be chained
     # as one ChainedOperator.
@@ -50,7 +48,7 @@ class JobGraphOptimizer:
         for output_edge in output_edges:
             target_id = output_edge.target_vertex_id
             target_vertex = self._vertex_map[target_id]
-            src_vertex.stream_operator.add_next_operator(target_vertex.stream_operator)
+            # src_vertex.stream_operator.add_next_operator(target_vertex.stream_operator)
             if self.can_chain(src_vertex, target_vertex, output_edge):
                 self.add_vertex_to_chain_set(head_vertex_id, target_vertex)
                 self.divide_vertices(head_vertex_id, target_vertex)
@@ -65,8 +63,6 @@ class JobGraphOptimizer:
                     self._visited.add(target_vertex)
                     self.add_vertex_to_chain_set(target_id, target_vertex)
                     self.divide_vertices(target_id, target_vertex)
-                else:
-                    self._visited.add(target_vertex)
 
     def add_vertex_to_chain_set(self, root_id: int, target_vertex: JobVertex):
         if root_id in self._chain_set:
@@ -92,7 +88,8 @@ class JobGraphOptimizer:
         if src_vertex.parallelism != target_vertex.parallelism:
             return False
 
-        if len(self.job_graph.get_vertex_input_edges(target_vertex.vertex_id)) > 1:
+        if len(self.job_graph.get_vertex_input_edges(target_vertex.vertex_id)) > 1 \
+                or len(self.job_graph.get_vertex_output_edges(src_vertex.vertex_id)) > 1:
             return False
 
         return isinstance(edge.partition, ForwardPartition)
@@ -127,7 +124,6 @@ class JobGraphOptimizer:
                 operators = [self._vertex_map[v.vertex_id].stream_operator for v in tree_list]
                 # TODO chain resource_configs and op_configs
                 operator = new_chained_operator(operators)
-                print(type(operator))
                 assert isinstance(operator, StreamOperator)
                 merged_vertex = JobVertex(
                     head_vertex.vertex_id,
