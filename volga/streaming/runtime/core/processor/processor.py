@@ -5,7 +5,7 @@ from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operators.operators import OneInputOperator, Operator, SourceOperator, \
-    StreamOperator, OperatorType, TwoInputOperator
+    StreamOperator, OperatorType, TwoInputOperator, ISourceOperator
 
 
 class Processor(ABC):
@@ -30,7 +30,7 @@ class Processor(ABC):
     def build_processor(cls, stream_operator: StreamOperator) -> 'StreamProcessor':
         op_type = stream_operator.operator_type()
         if op_type == OperatorType.SOURCE:
-            assert isinstance(stream_operator,  SourceOperator)
+            assert isinstance(stream_operator,  ISourceOperator)
             return SourceProcessor(stream_operator)
         elif op_type == OperatorType.ONE_INPUT:
             assert isinstance(stream_operator,  OneInputOperator)
@@ -86,7 +86,7 @@ class TwoInputProcessor(StreamProcessor):
 
 
 class SourceProcessor(StreamProcessor):
-    def __init__(self, source_operator: SourceOperator):
+    def __init__(self, source_operator: ISourceOperator):
         super().__init__(operator=source_operator)
 
     def process(self, record: Record):

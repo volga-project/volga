@@ -62,7 +62,7 @@ class TwoInputOperator(Operator, ABC):
 class StreamOperator(Operator, ABC):
 
     def __init__(self, func: Optional[Function] = None):
-        self.func = func
+        self.func = func # chained operators do not have this
         self.collectors = None
         self.runtime_context = None
 
@@ -85,7 +85,21 @@ class StreamOperator(Operator, ABC):
             collector.collect(record)
 
 
-class SourceOperator(StreamOperator):
+class ISourceOperator(StreamOperator, ABC):
+
+    @abstractmethod
+    def get_source_context(self) -> SourceContext:
+        raise NotImplementedError
+
+    @abstractmethod
+    def fetch(self):
+        raise NotImplementedError()
+
+    def operator_type(self):
+        return OperatorType.SOURCE
+
+
+class SourceOperator(ISourceOperator):
 
     class SourceContextImpl(SourceContext):
         def __init__(
@@ -143,10 +157,10 @@ class SourceOperator(StreamOperator):
         )
 
     def fetch(self):
-        self.func.fetch(self.source_context)
+        self.func.fetch(self.get_source_context())
 
-    def operator_type(self):
-        return OperatorType.SOURCE
+    def get_source_context(self) -> SourceContext:
+        return self.source_context
 
 
 class MapOperator(StreamOperator, OneInputOperator):

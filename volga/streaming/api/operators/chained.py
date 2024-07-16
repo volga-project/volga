@@ -3,9 +3,10 @@ from typing import List
 
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
+from volga.streaming.api.function.function import SourceContext
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operators.operators import StreamOperator, OperatorType, OneInputOperator, \
-    TwoInputOperator, SourceOperator
+    TwoInputOperator, SourceOperator, ISourceOperator
 
 
 class ChainedOperator(StreamOperator, ABC):
@@ -70,14 +71,17 @@ class ChainedTwoInputOperator(ChainedOperator, TwoInputOperator):
         self.head_operator.process_element(left, right)
 
 
-class ChainedSourceOperator(ChainedOperator, SourceOperator):
+class ChainedSourceOperator(ChainedOperator, ISourceOperator):
 
     def __init__(self, operators: List[StreamOperator]):
+        assert isinstance(operators[0], SourceOperator)
         super().__init__(operators)
-        assert isinstance(self.head_operator, SourceOperator)
 
     def fetch(self):
-        self.head_operator.fetch(self.source_context)
+        self.head_operator.fetch()
+
+    def get_source_context(self) -> SourceContext:
+        return self.head_operator.get_source_context()
 
 
 class ForwardCollector(Collector):

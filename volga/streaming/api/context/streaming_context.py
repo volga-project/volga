@@ -8,6 +8,7 @@ from volga.streaming.api.function.function import CollectionSourceFunction, Loca
 from volga.streaming.api.function.kafka import KafkaSourceFunction
 from volga.streaming.api.function.mysql import MysqlSourceFunction
 from volga.streaming.api.job_graph.job_graph_builder import JobGraphBuilder
+from volga.streaming.api.job_graph.job_graph_optimizer import JobGraphOptimizer
 from volga.streaming.api.stream.stream_sink import StreamSink
 from volga.streaming.api.stream.stream_source import StreamSource
 from volga.streaming.runtime.client.job_client import JobClient
@@ -101,8 +102,12 @@ class StreamingContext:
 
     # blocks until job is finished
     def execute(self):
-        job_graph = JobGraphBuilder(stream_sinks=self.stream_sinks).build()
-        logger.info(f'Built job graph for {job_graph.job_name}')
-        logger.info(f'\n {job_graph.gen_digraph()}')
+        jg = JobGraphBuilder(stream_sinks=self.stream_sinks).build()
+        logger.info(f'Built job graph for {jg.job_name}')
+        logger.info(f'\n {jg.gen_digraph()}')
+        optimizer = JobGraphOptimizer(jg)
+        optimized_jg = optimizer.optimize()
+        logger.info(f'Optimized job graph {jg.job_name}')
+        logger.info(f'\n {optimized_jg.gen_digraph()}')
         job_client = JobClient()
-        job_client.execute(job_graph=job_graph, job_config=self.job_config)
+        job_client.execute(job_graph=optimized_jg, job_config=self.job_config)
