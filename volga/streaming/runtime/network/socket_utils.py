@@ -18,7 +18,7 @@ class SocketOwner(enum.Enum):
 
 
 class SocketKind(enum.Enum):
-    BIND = 'bind' # socket is used as a binded access point
+    BIND = 'bind' # socket is used as a bind access point
     CONNECT = 'connect'# socket is used as a connecting client
 
 
