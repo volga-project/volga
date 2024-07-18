@@ -110,8 +110,8 @@ class TestStreamingJobE2E(unittest.TestCase):
         # TODO assert
 
     def test_wordcount(self):
-        num_word_types = 4
-        num_words_per_type = 10000
+        num_word_types = 20
+        num_words_per_type = 100000
         word_length = 32
 
         word_types = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(num_word_types)]
@@ -143,11 +143,12 @@ class TestStreamingJobE2E(unittest.TestCase):
         # TODO # we do not want to sink on each update, only the last one, make custom sink_function
         sink_function = SinkToCacheFunction(sink_cache)
 
-        source = self.ctx.from_collection(words).set_parallelism(5)
+        source = self.ctx.from_collection(words).set_parallelism(1)
         source.map(lambda wrd: (wrd, 1))\
             .key_by(lambda e: e[0])\
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))\
             .sink(sink_function)
+            # .sink(lambda x: None)
         ctx.execute()
 
         res = ray.get(sink_cache.get_values.remote())
