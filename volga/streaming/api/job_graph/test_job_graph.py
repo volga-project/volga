@@ -47,7 +47,6 @@ class TestJobGraph(unittest.TestCase):
 
         # print_digraph(jg.gen_digraph())
 
-
     def _build_data_sync_job_graph(self) -> JobGraph:
         ctx = StreamingContext()
         sink = ctx.from_values('a', 'b', 'c').sink(lambda x: logger.info(x))

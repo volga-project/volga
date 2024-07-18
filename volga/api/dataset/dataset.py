@@ -15,7 +15,7 @@ from volga.api.source.source import Connector
 from volga.api.utils import is_optional
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.message.message import Record
-from volga.streaming.api.operator.timestamp_assigner import EventTimeAssigner
+from volga.streaming.api.operators.timestamp_assigner import EventTimeAssigner
 
 T = TypeVar('T')
 

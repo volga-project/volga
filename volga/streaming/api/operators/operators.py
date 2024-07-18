@@ -8,7 +8,7 @@ from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import Function, SourceContext, SourceFunction, MapFunction, \
     FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
 from volga.streaming.api.message.message import Record, KeyRecord
-from volga.streaming.api.operator.timestamp_assigner import TimestampAssigner
+from volga.streaming.api.operators.timestamp_assigner import TimestampAssigner
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,7 @@ class OperatorType(enum.Enum):
 
 
 class Operator(ABC):
-    """
-    Abstract base class for all operators.
-    An operator is used to run a :class:`function.Function`.
-    """
+    # Abstract base class for all operators. An operator is used to run a Function
 
     @abstractmethod
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
@@ -64,8 +61,8 @@ class TwoInputOperator(Operator, ABC):
 
 class StreamOperator(Operator, ABC):
 
-    def __init__(self, func: Function):
-        self.func = func
+    def __init__(self, func: Optional[Function] = None):
+        self.func = func # chained operators do not have this
         self.collectors = None
         self.runtime_context = None
 
@@ -77,18 +74,32 @@ class StreamOperator(Operator, ABC):
         self.runtime_context = runtime_context
         self.func.open(runtime_context)
 
-    def finish(self):
-        pass
-
     def close(self):
         self.func.close()
+
+    def finish(self):
+        pass
 
     def collect(self, record: Record):
         for collector in self.collectors:
             collector.collect(record)
 
 
-class SourceOperator(StreamOperator):
+class ISourceOperator(StreamOperator, ABC):
+
+    @abstractmethod
+    def get_source_context(self) -> SourceContext:
+        raise NotImplementedError
+
+    @abstractmethod
+    def fetch(self):
+        raise NotImplementedError()
+
+    def operator_type(self):
+        return OperatorType.SOURCE
+
+
+class SourceOperator(ISourceOperator):
 
     class SourceContextImpl(SourceContext):
         def __init__(
@@ -119,7 +130,6 @@ class SourceOperator(StreamOperator):
                 self.finished = True
 
     def __init__(self, func: SourceFunction):
-        assert isinstance(func, SourceFunction)
         super().__init__(func)
         self.source_context: Optional[SourceOperator.SourceContextImpl] = None
         self.timestamp_assigner: Optional[TimestampAssigner] = None
@@ -147,10 +157,10 @@ class SourceOperator(StreamOperator):
         )
 
     def fetch(self):
-        self.func.fetch(self.source_context)
+        self.func.fetch(self.get_source_context())
 
-    def operator_type(self):
-        return OperatorType.SOURCE
+    def get_source_context(self) -> SourceContext:
+        return self.source_context
 
 
 class MapOperator(StreamOperator, OneInputOperator):

@@ -1,4 +1,4 @@
-from volga.streaming.api.operator.operator import SinkOperator
+from volga.streaming.api.operators.operators import SinkOperator
 from volga.streaming.api.stream.stream import Stream
 
 

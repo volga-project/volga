@@ -6,7 +6,7 @@ from typing import Tuple
 import ray
 from ray.actor import ActorHandle
 
-from volga.streaming.api.operator.operator import SourceOperator
+from volga.streaming.api.operators.operators import SourceOperator, ISourceOperator
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.core.processor.processor import Processor, SourceProcessor, OneInputProcessor
 from volga.streaming.runtime.worker.task.stream_task import StreamTask, SourceStreamTask, \
@@ -42,18 +42,17 @@ class JobWorker:
         self.task_watcher_thread.start()
 
     def _watch_task_state_loop(self):
-        # print('watch started')
         while self.running:
             # currently only check source
             if isinstance(self.task, SourceStreamTask):
                 source_op = self.task.processor.operator
-                assert isinstance(source_op, SourceOperator)
-                source_finished = source_op.source_context.finished
+                assert isinstance(source_op, ISourceOperator)
+                source_finished = source_op.get_source_context().finished
 
                 # notify master if source finished
                 if source_finished:
                     self.job_master.notify_source_finished.remote(
-                        task_id=source_op.source_context.runtime_context.task_id
+                        task_id=source_op.get_source_context().runtime_context.task_id
                     )
                     break
             time.sleep(0.1)

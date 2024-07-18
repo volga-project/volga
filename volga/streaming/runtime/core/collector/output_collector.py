@@ -22,3 +22,4 @@ class OutputCollector(Collector):
         partitions = self.partition.partition(record=record, num_partition=len(self.output_channel_ids))
         for partition in partitions:
             self.data_writer.write_record(self.output_channel_ids[partition], record)
+

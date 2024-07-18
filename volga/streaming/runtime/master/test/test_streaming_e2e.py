@@ -8,8 +8,8 @@ import yaml
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.function.aggregate_function import AggregationType
 from volga.streaming.api.function.function import SinkToCacheFunction
-from volga.streaming.api.operator.timestamp_assigner import EventTimeAssigner
-from volga.streaming.api.operator.window_operator import SlidingWindowConfig
+from volga.streaming.api.operators.timestamp_assigner import EventTimeAssigner
+from volga.streaming.api.operators.window_operator import SlidingWindowConfig
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 
 from decimal import Decimal

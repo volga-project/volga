@@ -6,7 +6,7 @@ from volga.common.time_utils import is_time_str
 from volga.api.dataset.aggregate import AggregateType
 from volga.api.dataset.schema import Schema
 from volga.streaming.api.message.message import Record
-from volga.streaming.api.operator.window_operator import SlidingWindowConfig, AggregationsPerWindow
+from volga.streaming.api.operators.window_operator import SlidingWindowConfig, AggregationsPerWindow
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
 
 

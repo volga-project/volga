@@ -1,7 +1,7 @@
 from abc import ABC
 from typing import Optional
 
-from volga.streaming.api.operator.operator import StreamOperator
+from volga.streaming.api.operators.operators import StreamOperator
 from volga.streaming.api.partition.partition import Partition, ForwardPartition
 
 

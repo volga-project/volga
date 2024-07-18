@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 from ray.actor import ActorHandle
 
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, VertexType
-from volga.streaming.api.operator.operator import StreamOperator
+from volga.streaming.api.operators.operators import StreamOperator
 from volga.streaming.api.partition.partition import RoundRobinPartition, Partition, ForwardPartition
 
 from volga.streaming.common.config.resource_config import ResourceConfig
