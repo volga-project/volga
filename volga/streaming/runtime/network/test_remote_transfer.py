@@ -112,7 +112,7 @@ class TestRemoteTransfer(unittest.TestCase):
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
     def test_n_to_n_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_items_per_channel = 100000
+        num_items_per_channel = 100000000
         to_send = [{'i': i} for i in range(num_items_per_channel)]
 
         buffering_config = BufferingConfig(buffer_size=32 * 1024, capacity_per_in_channel=100, capacity_per_out=100)

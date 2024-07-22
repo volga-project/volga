@@ -6,10 +6,10 @@ import locket
 from shared_memory_dict import SharedMemoryDict
 
 # each input channel has it's own capacity allocation (in buffers, since we have multiple input queues on DataWriter)
-DEFAULT_CAPACITY_PER_IN_CHANNEL = 3 # approx 3 buffers
+DEFAULT_CAPACITY_PER_IN_CHANNEL = 30 # approx 3 buffers
 
 # for operator's outputs we share capacity per operator (not per channel, since we have one output queue on DataReader)
-DEFAULT_CAPACITY_PER_OUT = 2
+DEFAULT_CAPACITY_PER_OUT = 20
 
 
 # TODO add floating buffers

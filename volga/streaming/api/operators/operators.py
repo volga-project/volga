@@ -258,7 +258,6 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         super().__init__(join_func)
         self.left_records_dict: Dict[Any, List[Record]] = {}
         self.right_records_dict: Dict[Any, List[Record]] = {}
-        self.i = 0
 
     def process_element(self, left: KeyRecord, right: KeyRecord):
         if left is not None:

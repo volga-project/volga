@@ -20,6 +20,7 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     'pip': [
         'pydantic==1.10.13',
         'simplejson==3.19.2',
+        'orjson==3.10.6',
         'pyzmq==23.2.0',
         'shared-memory-dict==0.7.2',
         'locket==1.0.0',
@@ -99,7 +100,7 @@ class TestReader:
     def receive_items(self) -> List[Any]:
         t = time.time()
         while True:
-            if time.time() - t > 300:
+            if time.time() - t > 3000:
                 raise RuntimeError('Timeout reading data')
 
             items = self.data_reader.read_message()
