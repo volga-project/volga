@@ -1,8 +1,8 @@
-use std::{cmp::max, collections::{HashMap, VecDeque}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{JoinHandle, ThreadId}, time};
+use std::{cmp::max, collections::{HashMap, VecDeque}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{JoinHandle}, time};
 
 use zmq::{PollItem, POLLIN};
 
-use super::{channel::{self, Channel}, socket_meta::{SocketKind, SocketMetadata, SocketOwner}};
+use super::{channel::{self, Channel, ChannelMessage}, socket_meta::{SocketKind, SocketMetadata, SocketOwner}};
 
 use super::socket_meta::ipc_path_from_addr;
 
@@ -31,14 +31,88 @@ trait IOHandler {
 
     fn get_channels(&self) -> &Vec<Channel>;
 
-    fn get_in_queue(&self, key: &String) -> Arc<RwLock<VecDeque<&Bytes>>>;
+    fn get_in_queue(&self, key: &String) -> Arc<RwLock<VecDeque<Box<Bytes>>>>;
 
-    fn get_out_queue(&self, key: &String) -> Arc<RwLock<VecDeque<&Bytes>>>;
+    fn get_out_queue(&self, key: &String) -> Arc<RwLock<VecDeque<Box<Bytes>>>>;
 }
 
 
 struct DataWriter {
-    name: String
+    name: String,
+    channels: Vec<Channel>,
+    in_queues: Arc<RwLock<HashMap<String, Arc<RwLock<VecDeque<Box<Bytes>>>>>>>,
+    out_queues: Arc<RwLock<HashMap<String, Arc<RwLock<VecDeque<Box<Bytes>>>>>>>,
+    in_message_queue: Arc<RwLock<VecDeque<Box<ChannelMessage>>>>,
+
+    running: Arc<AtomicBool>,
+}
+
+impl DataWriter {
+    fn new(name: String, channels: Vec<Channel>) -> DataWriter {
+        let in_queues =  Arc::new(RwLock::new(HashMap::new()));
+        let out_queues =  Arc::new(RwLock::new(HashMap::new()));
+
+        for ch in &channels {
+            in_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(RwLock::new(VecDeque::new())));
+            out_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(RwLock::new(VecDeque::new())));
+        }
+
+        DataWriter{
+            name,
+            channels,
+            in_queues,
+            out_queues,
+            in_message_queue: Arc::new(RwLock::new(VecDeque::new())),
+            running: Arc::new(AtomicBool::new(false))
+        }
+    }
+
+    fn write_message(&self, channel_id: &String, message: ChannelMessage) {
+        // TODO set limit for backpressure
+        let queue = &self.in_message_queue.clone();
+        queue.write().unwrap().push_back(Box::new(message));
+    }
+
+    fn start(&self) {
+        // start dispatcher thread: takes message from in_message_queue, passes to serializators pool, puts result in out_queue
+    }
+
+    fn close (&self) {
+
+    }
+}
+
+impl IOHandler for DataWriter {
+    fn get_handler_type(&self) -> IOHandlerType {
+        IOHandlerType::DataWriter
+    }
+
+    fn on_send_ready(&self, channel_id: &String) -> bool {
+        true
+    }
+
+    fn on_recv_ready(&self, channel_id: &String) -> bool {
+        true
+    }
+
+    fn get_channels(&self) -> &Vec<Channel> {
+        &self.channels
+    }
+
+    fn get_in_queue(&self, key: &String) -> Arc<RwLock<VecDeque<Box<Bytes>>>> {
+        let local = &self.in_queues.clone();
+        let hm = local.read().unwrap();
+        let v = hm.get(key).unwrap();
+        v.clone()
+    }
+
+    fn get_out_queue(&self, key: &String) -> Arc<RwLock<VecDeque<Box<Bytes>>>> {
+        let local = &self.out_queues.clone();
+        let hm = local.read().unwrap();
+        let v = hm.get(key).unwrap();
+        v.clone()
+    }
+
 }
 
 struct SocketManager {
@@ -52,12 +126,10 @@ impl SocketManager {
     }
 
     fn create_sockets(&mut self, zmq_context: &zmq::Context, socket_metas: &Vec<SocketMetadata>) {
-        let mut v = Vec::new();
         for sm in socket_metas {
             let socket = zmq_context.socket(zmq::PAIR).unwrap();
-            v.push((socket, sm.clone()));
+            self.sockets_and_metas.push((socket, sm.clone()));
         }
-        self.sockets_and_metas = v;
     }
 
     fn bind_and_connect(&mut self) {
@@ -70,7 +142,11 @@ impl SocketManager {
         }
     }
 
-    fn close_sockets(&mut self) {}
+    fn close_sockets(&mut self) {
+        for (socket, _) in &self.sockets_and_metas {
+            // TODO unbind/disconnect?
+        }
+    }
 }
 
 fn create_local_sockets_meta(channels: &Vec<Channel>, direction: Direction) -> Vec<SocketMetadata> {
@@ -89,16 +165,7 @@ fn create_local_sockets_meta(channels: &Vec<Channel>, direction: Direction) -> V
                 };
                 v.push(socket_meta);
             }
-            Channel::Remote {
-                channel_id, 
-                source_local_ipc_addr, 
-                source_node_ip, 
-                source_node_id, 
-                target_local_ipc_addr, 
-                target_node_ip, 
-                target_node_id, 
-                port 
-            } => {
+            Channel::Remote {..} => {
                 panic!("Remote Not supported")
             }
         }
@@ -217,7 +284,7 @@ impl IOLoop {
 
                                 // TODO for transfer handlers we should use peer ndoe id as key
                                 let in_queue = handler.get_in_queue(channel_id);
-                                in_queue.clone().write().unwrap().push_back(&bytes);
+                                in_queue.write().unwrap().push_back(Box::new(bytes));
                             }
                         }
 
@@ -227,9 +294,9 @@ impl IOLoop {
                                 // TODO for transfer handlers we should use peer ndoe id as key
                                 let out_queue = handler.get_out_queue(channel_id);
                                 
-                                let bytes = out_queue.clone().write().unwrap().pop_front();
-                                if bytes.is_some() {
-                                    socket.send(bytes.unwrap(), zmq::DONTWAIT).unwrap();
+                                let bytes = out_queue.write().unwrap().pop_front();
+                                if !bytes.is_none() {
+                                    socket.send(bytes.unwrap().as_ref(), zmq::DONTWAIT).unwrap();
                                 }
                             }
                         }

@@ -3,7 +3,7 @@ use std::any::Any;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
-struct ChannelMessage {
+pub struct ChannelMessage {
     key: String,
     value: String
 }
@@ -22,5 +22,18 @@ pub enum Channel {
         target_node_ip: String,
         target_node_id: String,
         port: i32,
+    }
+}
+
+impl Channel {
+    pub fn get_channel_id(&self) -> &String {
+        match &self {
+            Channel::Local { channel_id, ..} => {
+                channel_id
+            },
+            Channel::Remote { channel_id, ..} => {
+                channel_id
+            }
+        }
     }
 }
