@@ -1,10 +1,12 @@
-use std::{cmp::max, collections::HashMap, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{JoinHandle, ThreadId}, time};
+use std::{cmp::max, collections::{HashMap, VecDeque}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{JoinHandle, ThreadId}, time};
+
+use zmq::{PollItem, POLLIN};
 
 use super::{channel::{self, Channel}, socket_meta::{SocketKind, SocketMetadata, SocketOwner}};
 
 use super::socket_meta::ipc_path_from_addr;
 
-type Bytes = Vec<i8>;
+type Bytes = Vec<u8>;
 
 #[derive(PartialEq, Eq)]
 enum Direction {
@@ -23,11 +25,15 @@ enum IOHandlerType {
 trait IOHandler {
     fn get_handler_type(&self) -> IOHandlerType;
 
-    fn send(&self, channel_id: &String, b: &Bytes);
+    fn on_send_ready(&self, channel_id: &String) -> bool;
 
-    fn recv(&self, channel_id: &String, b: &Bytes);
+    fn on_recv_ready(&self, channel_id: &String) -> bool;
 
     fn get_channels(&self) -> &Vec<Channel>;
+
+    fn get_in_queue(&self, key: &String) -> Arc<RwLock<VecDeque<&Bytes>>>;
+
+    fn get_out_queue(&self, key: &String) -> Arc<RwLock<VecDeque<&Bytes>>>;
 }
 
 
@@ -46,10 +52,12 @@ impl SocketManager {
     }
 
     fn create_sockets(&mut self, zmq_context: &zmq::Context, socket_metas: &Vec<SocketMetadata>) {
+        let mut v = Vec::new();
         for sm in socket_metas {
             let socket = zmq_context.socket(zmq::PAIR).unwrap();
-            self.sockets_and_metas.push((socket, sm.clone()));
+            v.push((socket, sm.clone()));
         }
+        self.sockets_and_metas = v;
     }
 
     fn bind_and_connect(&mut self) {
@@ -102,7 +110,8 @@ struct IOLoop {
     handlers: Arc<RwLock<Vec<Arc<dyn IOHandler + Send + Sync>>>>,
     running: Arc<AtomicBool>,
     zmq_context: Arc<zmq::Context>,
-    io_threads: Vec<JoinHandle<()>>
+    io_threads: Vec<JoinHandle<()>>,
+    socket_meta_to_handler: Arc<RwLock<HashMap<SocketMetadata, Arc<dyn IOHandler + Send + Sync>>>>
 }
 
 impl IOLoop {
@@ -112,7 +121,8 @@ impl IOLoop {
             handlers: Arc::new(RwLock::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
             zmq_context: Arc::new(zmq::Context::new()),
-            io_threads: Vec::new()
+            io_threads: Vec::new(),
+            socket_meta_to_handler: Arc::new(RwLock::new(HashMap::new()))
         };
         io_loop
     }
@@ -135,7 +145,16 @@ impl IOLoop {
             } else {
                 dir = Direction::Receiver;
             }
-            sockets_metadata.append(&mut create_local_sockets_meta(channels, dir));
+
+            if (handler_type == IOHandlerType::DataWriter) | (handler_type == IOHandlerType::DataReader) {
+                let mut sockets_meta = create_local_sockets_meta(channels, dir);
+                sockets_metadata.append(&mut sockets_meta);
+                for sm in sockets_meta {
+                    self.socket_meta_to_handler.write().unwrap().insert(sm, handler.clone());
+                }
+            } else {
+                panic!("Transfer Handlers are not implemented yet");
+            }
         }
 
         let num_threads = max(num_threads, sockets_metadata.len() as i16);
@@ -153,22 +172,75 @@ impl IOLoop {
         }
 
         for (_thread_id, sms) in sockets_meta_per_thread.iter() {
+
+            let this_runnning = self.running.clone();
+            let this_zmqctx = self.zmq_context.clone();
+            let this_meta_to_handlers = self.socket_meta_to_handler.clone();
             let new_sms = sms.to_vec();
-            let this_zmqctx = Arc::clone(&self.zmq_context);
+
             let f = move |metas: &Vec<SocketMetadata>| {
                 let mut socket_manager = SocketManager::new();
-                socket_manager.create_sockets(this_zmqctx.as_ref(), metas);
+                socket_manager.create_sockets(&this_zmqctx, metas);
                 socket_manager.bind_and_connect();
-                // socket_manager.sockets_and_metas
+                let mut handlers = Vec::new();
+                let m = this_meta_to_handlers.read().unwrap();
+                for i in 0..socket_manager.sockets_and_metas.len() {
+                    let sm = socket_manager.sockets_and_metas[i].1.clone(); 
+                    let handler = m.get(&sm).unwrap();
+                    handlers.push(handler);
+                }
+                
+                // run loop
+                loop  {
+                    let running = this_runnning.load(Ordering::Relaxed);
+                    if !running {
+                        break;
+                    }
+                    // let revent_list = {
+                    let mut poll_list = Vec::new();
+                    for i in 0..socket_manager.sockets_and_metas.len() {
+                        let socket = &socket_manager.sockets_and_metas[i].0;
+                        poll_list.push(socket.as_poll_item(zmq::POLLIN|zmq::POLLOUT));
+                    }
+
+                    zmq::poll(&mut poll_list, 1).unwrap();
+
+                    for i in 0..poll_list.len() {
+                        let channel_id = &socket_manager.sockets_and_metas[i].1.channel_id;
+                        let handler = handlers[i];
+                        let socket = &socket_manager.sockets_and_metas[i].0;
+                        if poll_list[i].is_readable() {
+                            let ready = handler.on_recv_ready(channel_id);
+                            if ready {
+                                // this goes on heap
+                                let bytes = socket.recv_bytes(zmq::DONTWAIT).unwrap();
+
+                                // TODO for transfer handlers we should use peer ndoe id as key
+                                let in_queue = handler.get_in_queue(channel_id);
+                                in_queue.clone().write().unwrap().push_back(&bytes);
+                            }
+                        }
+
+                        if poll_list[i].is_writable() {
+                            let ready = handler.on_send_ready(channel_id);
+                            if ready {
+                                // TODO for transfer handlers we should use peer ndoe id as key
+                                let out_queue = handler.get_out_queue(channel_id);
+                                
+                                let bytes = out_queue.clone().write().unwrap().pop_front();
+                                if bytes.is_some() {
+                                    socket.send(bytes.unwrap(), zmq::DONTWAIT).unwrap();
+                                }
+                            }
+                        }
+                    }
+                }
             };
 
             self.io_threads.push(std::thread::spawn(move || {f(&new_sms)}));
         }
 
         // thread_handles.into_iter().for_each(|c| c.join().unwrap());
-        // let sockets_meta_per_thread = Arc::new(RwLock::new(HashMap::new()));
-
-
 
     }
 
@@ -245,6 +317,7 @@ mod tests {
         io_loop.stop_after();
         let l = io_loop.run();
         assert_eq!(l, 0);
-        print!("Size: {l}")
+        print!("Size: {l}");
     }
+
 }

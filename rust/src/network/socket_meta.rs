@@ -1,17 +1,17 @@
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SocketOwner {
     TransferRemote,
     TransferLocal,
     Client
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SocketKind {
     Bind, // socket is used as a bind access point
     Connect // socket is used as a connecting client
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SocketMetadata {
     pub owner: SocketOwner,
     pub kind: SocketKind,
