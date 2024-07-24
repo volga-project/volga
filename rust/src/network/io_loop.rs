@@ -79,6 +79,7 @@ impl DataWriter {
 
     fn start(&self) {
         // start dispatcher thread: takes message from in_message_queue, passes to serializators pool, puts result in out_buffer_queue
+        self.running.store(true, Ordering::Relaxed);
 
         let this_in_message_queues = self.in_message_queues.clone();
         let this_in_buffer_queues = self.in_buffer_queues.clone();
@@ -190,6 +191,7 @@ impl DataReader {
 
     fn start(&self) {
         // start dispatcher thread: takes message from out_buffer_queue, passes to deserializators pool, puts result in out_msg_queue
+        self.running.store(true, Ordering::Relaxed);
 
         let this_out_message_queue = self.out_message_queue.clone();
         let this_out_buffer_queues = self.out_buffer_queues.clone();
@@ -318,7 +320,7 @@ fn create_local_sockets_meta(channels: &Vec<Channel>, direction: Direction) -> V
 }
 
 struct IOLoop {
-    handlers: Arc<RwLock<Vec<Arc<dyn IOHandler + Send + Sync>>>>,
+    handlers: Arc<Mutex<Vec<Arc<dyn IOHandler + Send + Sync>>>>,
     running: Arc<AtomicBool>,
     zmq_context: Arc<zmq::Context>,
     io_threads: Vec<JoinHandle<()>>,
@@ -329,7 +331,7 @@ impl IOLoop {
 
     fn new() -> IOLoop {
         let io_loop = IOLoop{
-            handlers: Arc::new(RwLock::new(Vec::new())),
+            handlers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
             zmq_context: Arc::new(zmq::Context::new()),
             io_threads: Vec::new(),
@@ -339,7 +341,7 @@ impl IOLoop {
     }
 
     fn register_handler(&mut self, handler: Arc<dyn IOHandler + Send + Sync>) {
-        self.handlers.write().unwrap().push(handler);
+        self.handlers.lock().unwrap().push(handler);
     }
 
     fn start_io_threads(&mut self, num_threads: i16) {
@@ -347,7 +349,9 @@ impl IOLoop {
         // each IO thread can have multiple sockets associated with it
         // let mut num_sockets = 0;
         let mut sockets_metadata = Vec::new();
-        for handler in self.handlers.clone().read().unwrap().iter() {
+        let this_handlers = self.handlers.clone();
+        let locked_handlers = this_handlers.lock().unwrap();
+        for handler in locked_handlers.iter() {
             let handler_type = handler.get_handler_type();
             let channels = handler.get_channels();
             let dir;
@@ -367,6 +371,7 @@ impl IOLoop {
                 panic!("Transfer Handlers are not implemented yet");
             }
         }
+        drop(locked_handlers);
 
         let num_threads = min(num_threads, sockets_metadata.len() as i16);
         let mut cur_thread_id = 0;
@@ -381,6 +386,8 @@ impl IOLoop {
                 sockets_meta_per_thread.get_mut(&cur_thread_id).unwrap().push(sm);
             }
         }
+
+        self.running.store(true, Ordering::Relaxed);
 
         for (_thread_id, sms) in sockets_meta_per_thread.iter() {
 
@@ -407,7 +414,7 @@ impl IOLoop {
                     if !running {
                         break;
                     }
-                    // let revent_list = {
+
                     let mut poll_list = Vec::new();
                     for i in 0..socket_manager.sockets_and_metas.len() {
                         let socket = &socket_manager.sockets_and_metas[i].0;
@@ -482,13 +489,21 @@ mod tests {
             vec![channel.clone()]
         );
         data_writer.start();
+        let l_r = Arc::new(data_reader);
+        let l_w = Arc::new(data_writer);
         let mut io_loop = IOLoop::new();
-        io_loop.register_handler(Arc::new(data_reader));
-        io_loop.register_handler(Arc::new(data_writer));
+        io_loop.register_handler(l_r.clone());
+        io_loop.register_handler(l_w.clone());
         io_loop.start_io_threads(1);
         let msg = ChannelMessage{key: String::from(""), value: String::from("")};
-        data_writer.write_message(channel.get_channel_id(), msg);
-        std::thread::sleep(Duration::from_millis(2000))
+        l_w.clone().write_message(channel.get_channel_id(), msg);
+        std::thread::sleep(Duration::from_millis(1000));
+        let _msg = l_r.read_message();
+        // assert!(_msg.is_some());
+        std::thread::sleep(Duration::from_millis(1000));
+        // TODO close loops
+
+        print!("TEST OK");
     }
 
 }
