@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
 pub struct ChannelMessage {
-    key: String,
-    value: String
+    pub key: String,
+    pub value: String
 }
 
+#[derive(Clone)]
 pub enum Channel {
     Local {
         channel_id: String,
