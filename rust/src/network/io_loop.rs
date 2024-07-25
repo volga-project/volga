@@ -1,4 +1,4 @@
-use std::{cmp::{max, min}, collections::{HashMap, VecDeque}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle, time};
+use std::{cmp::{max, min}, collections::{HashMap, VecDeque}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle, time::{self, Duration}};
 
 use serde::Serialize;
 use zmq::{PollItem, POLLIN};
@@ -16,14 +16,15 @@ enum Direction {
 }
 
 #[derive(PartialEq, Eq)]
-enum IOHandlerType {
+pub enum IOHandlerType {
     DataReader,
     DataWriter,
     TransferSender,
     TransferReceiver
 }
 
-trait IOHandler {
+pub trait IOHandler {
+
     fn get_handler_type(&self) -> IOHandlerType;
 
     fn on_send_ready(&self, channel_id: &String) -> bool;
@@ -32,57 +33,60 @@ trait IOHandler {
 
     fn get_channels(&self) -> &Vec<Channel>;
 
-    fn get_in_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>>;
+    fn get_send_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>>;
 
-    fn get_out_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>>;
+    fn get_recv_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>>;
 }
 
 
-struct DataWriter {
+pub struct DataWriter {
     name: String,
     channels: Vec<Channel>,
-    in_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
-    out_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
+    send_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
+    recv_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
     in_message_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<ChannelMessage>>>>>>>,
 
     running: Arc<AtomicBool>,
+    dispatcher_thread: Option<JoinHandle<()>>
 }
 
 impl DataWriter {
-    fn new(name: String, channels: Vec<Channel>) -> DataWriter {
-        let in_queues =  Arc::new(RwLock::new(HashMap::new()));
-        let out_queues =  Arc::new(RwLock::new(HashMap::new()));
+
+    pub fn new(name: String, channels: Vec<Channel>) -> DataWriter {
+        let send_queues =  Arc::new(RwLock::new(HashMap::new()));
+        let recv_queues =  Arc::new(RwLock::new(HashMap::new()));
         let in_message_queues =  Arc::new(RwLock::new(HashMap::new()));
 
         for ch in &channels {
-            in_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
-            out_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
+            send_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
+            recv_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
             in_message_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
         }
 
         DataWriter{
             name,
             channels,
-            in_buffer_queues: in_queues,
-            out_buffer_queues: out_queues,
+            send_buffer_queues: send_queues,
+            recv_buffer_queues: recv_queues,
             in_message_queues,
-            running: Arc::new(AtomicBool::new(false))
+            running: Arc::new(AtomicBool::new(false)),
+            dispatcher_thread: None
         }
     }
 
-    fn write_message(&self, channel_id: &String, message: ChannelMessage) {
+    pub fn write_message(&self, channel_id: &String, message: ChannelMessage) {
         // TODO set limit for backpressure
         let queues = &self.in_message_queues.read().unwrap();
         let queue = queues.get(channel_id).unwrap();
         queue.lock().unwrap().push_back(Box::new(message));
     }
 
-    fn start(&self) {
+    pub fn start(&mut self) {
         // start dispatcher thread: takes message from in_message_queue, passes to serializators pool, puts result in out_buffer_queue
         self.running.store(true, Ordering::Relaxed);
 
         let this_in_message_queues = self.in_message_queues.clone();
-        let this_in_buffer_queues = self.in_buffer_queues.clone();
+        let this_send_buffer_queues = self.send_buffer_queues.clone();
         let this_runnning = self.running.clone();
         let f = move || {
             loop {
@@ -91,7 +95,7 @@ impl DataWriter {
                     break;
                 }
                 let msg_queues = this_in_message_queues.read().unwrap();
-                let b_in_queues = this_in_buffer_queues.read().unwrap();
+                let b_send_queues = this_send_buffer_queues.read().unwrap();
                 for channel_id in  msg_queues.keys() {
                     let mut locked_msg_queue = msg_queues.get(channel_id).unwrap().lock().unwrap();
                     let msg = locked_msg_queue.pop_front();
@@ -102,22 +106,25 @@ impl DataWriter {
                         let bytes = Box::new(serde_json::to_string(&msg).unwrap().as_bytes().to_vec()); // move to heap
                         
                         // put to buffer queue
-                        let mut locked_b_in_queue = b_in_queues.get(channel_id).unwrap().lock().unwrap();
-                        locked_b_in_queue.push_back(bytes);
+                        let mut locked_b_send_queue = b_send_queues.get(channel_id).unwrap().lock().unwrap();
+                        locked_b_send_queue.push_back(bytes);
                     }
                 }
             }
             
         };
-        std::thread::spawn(f);
+        let name = &self.name;
+        let thread_name = format!("volga_{name}_dispatcher_thread");
+        self.dispatcher_thread = Some(std::thread::Builder::new().name(thread_name).spawn(f).unwrap());
     }
 
-    fn close (&self) {
+    pub fn close (&self) {
         // TODO join thread
     }
 }
 
 impl IOHandler for DataWriter {
+
     fn get_handler_type(&self) -> IOHandlerType {
         IOHandlerType::DataWriter
     }
@@ -134,51 +141,54 @@ impl IOHandler for DataWriter {
         &self.channels
     }
 
-    fn get_in_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
-        let hm = &self.in_buffer_queues.read().unwrap();
+    fn get_send_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
+        let hm = &self.send_buffer_queues.read().unwrap();
         let v = hm.get(key).unwrap();
         v.clone()
     }
 
-    fn get_out_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
-        let hm = &self.out_buffer_queues.read().unwrap();
+    fn get_recv_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
+        let hm = &self.recv_buffer_queues.read().unwrap();
         let v = hm.get(key).unwrap();
         v.clone()
     }
 
 }
 
-struct DataReader {
+pub struct DataReader {
     name: String,
     channels: Vec<Channel>,
-    in_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
-    out_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
+    send_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
+    recv_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
     out_message_queue: Arc<Mutex<VecDeque<Box<ChannelMessage>>>>,
 
     running: Arc<AtomicBool>,
+    dispatcher_thread: Option<JoinHandle<()>>
 }
 
 impl DataReader {
-    fn new(name: String, channels: Vec<Channel>) -> DataReader {
-        let in_queues =  Arc::new(RwLock::new(HashMap::new()));
-        let out_queues =  Arc::new(RwLock::new(HashMap::new()));
+
+    pub fn new(name: String, channels: Vec<Channel>) -> DataReader {
+        let send_queues =  Arc::new(RwLock::new(HashMap::new()));
+        let recv_queues =  Arc::new(RwLock::new(HashMap::new()));
 
         for ch in &channels {
-            in_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
-            out_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
+            send_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
+            recv_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
         }
 
         DataReader{
             name,
             channels,
-            in_buffer_queues: in_queues,
-            out_buffer_queues: out_queues,
+            send_buffer_queues: send_queues,
+            recv_buffer_queues: recv_queues,
             out_message_queue: Arc::new(Mutex::new(VecDeque::new())),
-            running: Arc::new(AtomicBool::new(false))
+            running: Arc::new(AtomicBool::new(false)),
+            dispatcher_thread: None
         }
     }
 
-    fn read_message(&self) -> Option<Box<ChannelMessage>> {
+    pub fn read_message(&self) -> Option<Box<ChannelMessage>> {
         // TODO set limit for backpressure
         let msg = self.out_message_queue.lock().unwrap().pop_front();
         if !msg.is_none() {
@@ -189,12 +199,12 @@ impl DataReader {
         }
     }
 
-    fn start(&self) {
+    pub fn start(&mut self) {
         // start dispatcher thread: takes message from out_buffer_queue, passes to deserializators pool, puts result in out_msg_queue
         self.running.store(true, Ordering::Relaxed);
 
         let this_out_message_queue = self.out_message_queue.clone();
-        let this_out_buffer_queues = self.out_buffer_queues.clone();
+        let this_recv_buffer_queues = self.recv_buffer_queues.clone();
         let this_runnning = self.running.clone();
         let f = move || {
             loop {
@@ -202,12 +212,12 @@ impl DataReader {
                 if !running {
                     break;
                 }
-                // let msg_queues = this_out_message_queues.read().unwrap();
-                let b_out_queues = this_out_buffer_queues.read().unwrap();
-                for channel_id in  b_out_queues.keys() {
-                    let mut locked_b_out_queue = b_out_queues.get(channel_id).unwrap().lock().unwrap();
-                    let b = locked_b_out_queue.pop_front();
-                    drop(locked_b_out_queue); // release lock
+
+                let b_recv_queues = this_recv_buffer_queues.read().unwrap();
+                for channel_id in  b_recv_queues.keys() {
+                    let mut locked_b_recv_queue = b_recv_queues.get(channel_id).unwrap().lock().unwrap();
+                    let b = locked_b_recv_queue.pop_front();
+                    drop(locked_b_recv_queue); // release lock
                     if !b.is_none() {
                         // TODO we should asynchronously dispatch to serde pool here, for simplicity we do sequential serde
                         let b = b.unwrap();
@@ -221,10 +231,14 @@ impl DataReader {
             }
             
         };
-        std::thread::spawn(f);
+
+        let name = &self.name;
+        let thread_name = format!("volga_{name}_dispatcher_thread");
+        self.dispatcher_thread = Some(std::thread::Builder::new().name(thread_name).spawn(f).unwrap());
+
     }
 
-    fn close (&self) {
+    pub fn close (&self) {
         // TODO join thread
     }
 }
@@ -247,14 +261,14 @@ impl IOHandler for DataReader {
         &self.channels
     }
 
-    fn get_in_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
-        let hm = &self.in_buffer_queues.read().unwrap();
+    fn get_send_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
+        let hm = &self.send_buffer_queues.read().unwrap();
         let v = hm.get(key).unwrap();
         v.clone()
     }
 
-    fn get_out_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
-        let hm = &self.out_buffer_queues.read().unwrap();
+    fn get_recv_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
+        let hm = &self.recv_buffer_queues.read().unwrap();
         let v = hm.get(key).unwrap();
         v.clone()
     }
@@ -319,7 +333,7 @@ fn create_local_sockets_meta(channels: &Vec<Channel>, direction: Direction) -> V
     v
 }
 
-struct IOLoop {
+pub struct IOLoop {
     handlers: Arc<Mutex<Vec<Arc<dyn IOHandler + Send + Sync>>>>,
     running: Arc<AtomicBool>,
     zmq_context: Arc<zmq::Context>,
@@ -329,7 +343,7 @@ struct IOLoop {
 
 impl IOLoop {
 
-    fn new() -> IOLoop {
+    pub fn new() -> IOLoop {
         let io_loop = IOLoop{
             handlers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
@@ -340,17 +354,17 @@ impl IOLoop {
         io_loop
     }
 
-    fn register_handler(&mut self, handler: Arc<dyn IOHandler + Send + Sync>) {
+    pub fn register_handler(&mut self, handler: Arc<dyn IOHandler + Send + Sync>) {
         self.handlers.lock().unwrap().push(handler);
     }
 
-    fn start_io_threads(&mut self, num_threads: i16) {
+    pub fn start_io_threads(&mut self, num_threads: i16) {
         // since zmq::Sockets are not thread safe we will have a model where each socket can be polled by only 1 IO thread
         // each IO thread can have multiple sockets associated with it
         // let mut num_sockets = 0;
         let mut sockets_metadata = Vec::new();
-        let this_handlers = self.handlers.clone();
-        let locked_handlers = this_handlers.lock().unwrap();
+        // let this_handlers = self.handlers.clone();
+        let locked_handlers = self.handlers.lock().unwrap();
         for handler in locked_handlers.iter() {
             let handler_type = handler.get_handler_type();
             let channels = handler.get_channels();
@@ -362,16 +376,19 @@ impl IOLoop {
             }
 
             if (handler_type == IOHandlerType::DataWriter) | (handler_type == IOHandlerType::DataReader) {
-                let mut sockets_meta = create_local_sockets_meta(channels, dir);
-                sockets_metadata.append(&mut sockets_meta);
+                let sockets_meta = create_local_sockets_meta(channels, dir);
+                // sockets_metadata.append(&mut sockets_meta);
                 for sm in sockets_meta {
-                    self.socket_meta_to_handler.write().unwrap().insert(sm, handler.clone());
+                    sockets_metadata.push(sm.clone());
+                    self.socket_meta_to_handler.write().unwrap().insert(sm.clone(), handler.clone());
                 }
             } else {
                 panic!("Transfer Handlers are not implemented yet");
             }
         }
         drop(locked_handlers);
+
+        assert_eq!(self.socket_meta_to_handler.read().unwrap().len(), sockets_metadata.len());
 
         let num_threads = min(num_threads, sockets_metadata.len() as i16);
         let mut cur_thread_id = 0;
@@ -389,7 +406,7 @@ impl IOLoop {
 
         self.running.store(true, Ordering::Relaxed);
 
-        for (_thread_id, sms) in sockets_meta_per_thread.iter() {
+        for (thread_id, sms) in sockets_meta_per_thread.iter() {
 
             let this_runnning = self.running.clone();
             let this_zmqctx = self.zmq_context.clone();
@@ -401,13 +418,13 @@ impl IOLoop {
                 socket_manager.create_sockets(&this_zmqctx, metas);
                 socket_manager.bind_and_connect();
                 let mut handlers = Vec::new();
-                let m: std::sync::RwLockReadGuard<HashMap<SocketMetadata, Arc<dyn IOHandler + Send + Sync>>> = this_meta_to_handlers.read().unwrap();
+                let locked_meta_to_handlers = this_meta_to_handlers.read().unwrap();
                 for i in 0..socket_manager.sockets_and_metas.len() {
                     let sm = socket_manager.sockets_and_metas[i].1.clone(); 
-                    let handler = m.get(&sm).unwrap();
+                    let handler = locked_meta_to_handlers.get(&sm).unwrap();
                     handlers.push(handler);
                 }
-                
+
                 // run loop
                 loop  {
                     let running = this_runnning.load(Ordering::Relaxed);
@@ -434,7 +451,7 @@ impl IOLoop {
                                 let bytes = socket.recv_bytes(zmq::DONTWAIT).unwrap();
 
                                 // TODO for transfer handlers we should use peer ndoe id as key
-                                let in_queue = handler.get_in_buffer_queue(channel_id);
+                                let in_queue = handler.get_send_buffer_queue(channel_id);
                                 let mut l = in_queue.lock().unwrap();
                                 l.push_back(Box::new(bytes));
                                 drop(l); // release lock
@@ -445,7 +462,7 @@ impl IOLoop {
                             let ready = handler.on_send_ready(channel_id);
                             if ready {
                                 // TODO for transfer handlers we should use peer ndoe id as key
-                                let out_queue = handler.get_out_buffer_queue(channel_id);
+                                let out_queue = handler.get_recv_buffer_queue(channel_id);
                                 
                                 let mut l = out_queue.lock().unwrap();
                                 let bytes = l.pop_front();
@@ -458,52 +475,15 @@ impl IOLoop {
                     }
                 }
             };
-
-            self.io_threads.push(std::thread::spawn(move || {f(&new_sms)}));
+            let thread_name = format!("volga_io_thread_{thread_id}");
+            self.io_threads.push(
+                std::thread::Builder::new().name(thread_name).spawn(
+                    move || {f(&new_sms)}
+                ).unwrap()
+            );
         }
 
         // thread_handles.into_iter().for_each(|c| c.join().unwrap());
 
     }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{sync::{Arc}, time::Duration};
-
-    use crate::network::channel::{Channel, ChannelMessage};
-
-    use super::{DataReader, DataWriter, IOLoop};
-
-
-    #[test]
-    fn test_io_loop() {
-        let channel = Channel::Local { channel_id: String::from("ch_0"), ipc_addr: String::from("ipc:///tmp/ipc_0") };
-        let data_reader = DataReader::new(
-            String::from("data_reader"),
-            vec![channel.clone()]
-        );
-        data_reader.start();
-        let data_writer = DataWriter::new(
-            String::from("data_reader"),
-            vec![channel.clone()]
-        );
-        data_writer.start();
-        let l_r = Arc::new(data_reader);
-        let l_w = Arc::new(data_writer);
-        let mut io_loop = IOLoop::new();
-        io_loop.register_handler(l_r.clone());
-        io_loop.register_handler(l_w.clone());
-        io_loop.start_io_threads(1);
-        let msg = ChannelMessage{key: String::from(""), value: String::from("")};
-        l_w.clone().write_message(channel.get_channel_id(), msg);
-        std::thread::sleep(Duration::from_millis(1000));
-        let _msg = l_r.read_message();
-        // assert!(_msg.is_some());
-        std::thread::sleep(Duration::from_millis(1000));
-        // TODO close loops
-
-        print!("TEST OK");
-    }
-
 }
