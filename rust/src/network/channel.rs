@@ -1,8 +1,6 @@
-use std::any::Any;
-
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq)]
 pub struct ChannelMessage {
     pub key: String,
     pub value: String
