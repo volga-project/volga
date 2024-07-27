@@ -1,6 +1,8 @@
-use std::{cmp::min, collections::{HashMap, VecDeque}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
+use std::{cmp::min, collections::HashMap, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
 
-use super::{channel::{Channel, ChannelMessage}, socket_meta::{SocketKind, SocketMetadata, SocketOwner}};
+use crossbeam::channel::{Sender, Receiver};
+
+use super::{channel::Channel, socket_meta::{SocketKind, SocketMetadata, SocketOwner}};
 
 use super::socket_meta::ipc_path_from_addr;
 
@@ -30,9 +32,9 @@ pub trait IOHandler {
 
     fn get_channels(&self) -> &Vec<Channel>;
 
-    fn get_send_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>>;
+    fn get_send_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>);
 
-    fn get_recv_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>>;
+    fn get_recv_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>);
 }
 
 struct SocketManager {
@@ -198,7 +200,7 @@ impl IOLoop {
                         poll_list.push(socket.as_poll_item(zmq::POLLIN|zmq::POLLOUT));
                     }
 
-                    zmq::poll(&mut poll_list, 1).unwrap();
+                    zmq::poll(&mut poll_list, -1).unwrap();
 
                     for i in 0..poll_list.len() {
                         let channel_id = &socket_manager.sockets_and_metas[i].1.channel_id;
@@ -208,13 +210,14 @@ impl IOLoop {
                             let ready = handler.on_recv_ready(channel_id);
                             if ready {
                                 // this goes on heap
-                                let bytes = socket.recv_bytes(zmq::DONTWAIT).unwrap();
+                                let recv_chan = handler.get_recv_chan(channel_id);
+                                if !recv_chan.0.is_full() {
+                                    let bytes = socket.recv_bytes(zmq::DONTWAIT).unwrap();
 
-                                // TODO for transfer handlers we should use peer ndoe id as key
-                                let recv_queue = handler.get_recv_buffer_queue(channel_id);
-                                let mut l = recv_queue.lock().unwrap();
-                                l.push_back(Box::new(bytes));
-                                drop(l); // release lock
+                                    // TODO for transfer handlers we should use peer ndoe id as key
+                                    let recv_chan = handler.get_recv_chan(channel_id);
+                                    recv_chan.0.send(Box::new(bytes)).unwrap();
+                                }
                             }
                         }
 
@@ -222,13 +225,10 @@ impl IOLoop {
                             let ready = handler.on_send_ready(channel_id);
                             if ready {
                                 // TODO for transfer handlers we should use peer ndoe id as key
-                                let send_queue = handler.get_send_buffer_queue(channel_id);
-                                
-                                let mut l = send_queue.lock().unwrap();
-                                let bytes = l.pop_front();
-                                drop(l); // release lock
-                                if !bytes.is_none() {
-                                    socket.send(bytes.unwrap().as_ref(), zmq::DONTWAIT).unwrap();
+                                let send_chan = handler.get_send_chan(channel_id);
+                                if !send_chan.1.is_empty() {
+                                    let bytes = send_chan.1.recv().unwrap();
+                                    socket.send(bytes.as_ref(), zmq::DONTWAIT).unwrap();
                                 }
                             }
                         }

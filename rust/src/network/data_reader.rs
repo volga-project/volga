@@ -1,58 +1,65 @@
-use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
+use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::JoinHandle};
 
-use super::{channel::{Channel, ChannelMessage}, io_loop::{Bytes, IOHandler, IOHandlerType}};
+use super::{channel::Channel, io_loop::{Bytes, IOHandler, IOHandlerType}};
+use crossbeam::{channel::{unbounded, Sender, Receiver}, queue::ArrayQueue};
+
+const OUTPUT_QUEUE_SIZE: usize = 100000;
 
 pub struct DataReader {
     name: String,
     channels: Vec<Channel>,
-    send_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
-    recv_buffer_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
-    out_message_queue: Arc<Mutex<VecDeque<Box<ChannelMessage>>>>,
+
+    // TODO maps are read-only, do we need locks here?
+    send_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
+    recv_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
+    out_queue: Arc<ArrayQueue<Box<Bytes>>>,
 
     running: Arc<AtomicBool>,
-    dispatcher_thread: Option<JoinHandle<()>>
+    dispatcher_thread: Option<JoinHandle<()>>,
 }
 
 impl DataReader {
 
     pub fn new(name: String, channels: Vec<Channel>) -> DataReader {
-        let send_queues =  Arc::new(RwLock::new(HashMap::new()));
-        let recv_queues =  Arc::new(RwLock::new(HashMap::new()));
+        let n_channels = channels.len();
+        let mut send_chans = HashMap::with_capacity(n_channels);
+        let mut recv_chans = HashMap::with_capacity(n_channels);
 
+        // TODO we should use bounded channels here?
         for ch in &channels {
-            send_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
-            recv_queues.write().unwrap().insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::new())));
+            send_chans.insert(ch.get_channel_id().clone(), unbounded());
+            recv_chans.insert(ch.get_channel_id().clone(), unbounded());
         }
 
         DataReader{
             name,
             channels,
-            send_buffer_queues: send_queues,
-            recv_buffer_queues: recv_queues,
-            out_message_queue: Arc::new(Mutex::new(VecDeque::new())),
+            send_chans: Arc::new(RwLock::new(send_chans)),
+            recv_chans: Arc::new(RwLock::new(recv_chans)),
+            out_queue: Arc::new(ArrayQueue::new(OUTPUT_QUEUE_SIZE)),
             running: Arc::new(AtomicBool::new(false)),
             dispatcher_thread: None
         }
     }
 
-    pub fn read_message(&self) -> Option<Box<ChannelMessage>> {
+    pub fn read_bytes(&self) -> Option<Box<Bytes>> {
         // TODO set limit for backpressure
-        let msg = self.out_message_queue.lock().unwrap().pop_front();
-        if !msg.is_none() {
-            let msg = msg.unwrap();
-            Some(msg)
+        let b = self.out_queue.pop();
+        if !b.is_none() {
+            let b = b.unwrap();
+            Some(b)
         } else {
             None
         }
     }
 
     pub fn start(&mut self) {
-        // start dispatcher thread: takes message from out_buffer_queue, passes to deserializators pool, puts result in out_msg_queue
+        // start dispatcher thread: takes message from channels, in shared out_queue
         self.running.store(true, Ordering::Relaxed);
 
-        let this_out_message_queue = self.out_message_queue.clone();
-        let this_recv_buffer_queues = self.recv_buffer_queues.clone();
         let this_runnning = self.running.clone();
+        let this_recv_chans = self.recv_chans.clone();
+        let this_out_queue = self.out_queue.clone();
         let f = move || {
             loop {
                 let running = this_runnning.load(Ordering::Relaxed);
@@ -60,22 +67,16 @@ impl DataReader {
                     break;
                 }
 
-                let b_recv_queues = this_recv_buffer_queues.read().unwrap();
-                for channel_id in  b_recv_queues.keys() {
-                    let mut locked_b_recv_queue = b_recv_queues.get(channel_id).unwrap().lock().unwrap();
-                    let b = locked_b_recv_queue.pop_front();
-                    drop(locked_b_recv_queue); // release lock
-                    if !b.is_none() {
-                        // TODO we should asynchronously dispatch to serde pool here, for simplicity we do sequential serde
-                        let b = b.unwrap();
-                        // let msg: ChannelMessage = serde_json::from_str(&String::from_utf8(*b).unwrap()).unwrap();
-
-                        let msg = bincode::deserialize(b.as_ref()).unwrap();
-                        
-                        // put to out msg queue
-                        this_out_message_queue.lock().unwrap().push_back(Box::new(msg));
+                let locked_map = this_recv_chans.read().unwrap();
+                for channel_id in locked_map.keys() {
+                    let recv_chan = locked_map.get(channel_id).unwrap();
+                    let receiver = recv_chan.1.clone();
+                    let b = receiver.try_recv();
+                    if b.is_ok() {
+                        this_out_queue.push(b.unwrap()).unwrap();
                     }
                 }
+                drop(locked_map);
             }
             
         };
@@ -110,14 +111,14 @@ impl IOHandler for DataReader {
         &self.channels
     }
 
-    fn get_send_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
-        let hm = &self.send_buffer_queues.read().unwrap();
+    fn get_send_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
+        let hm = &self.send_chans.read().unwrap();
         let v = hm.get(key).unwrap();
         v.clone()
     }
 
-    fn get_recv_buffer_queue(&self, key: &String) -> Arc<Mutex<VecDeque<Box<Bytes>>>> {
-        let hm = &self.recv_buffer_queues.read().unwrap();
+    fn get_recv_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
+        let hm = &self.recv_chans.read().unwrap();
         let v = hm.get(key).unwrap();
         v.clone()
     }

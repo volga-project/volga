@@ -1,7 +1,8 @@
-import volga_rust # type: ignore
+from volga_rust import Channel, LocalChannel, RemoteChannel
 
-res = volga_rust.sum_as_string(1, 2)
-assert res == '3'
+c = Channel('ch_0')
+lc = LocalChannel('ch_0', 'ipc_addr_0')
 
-r = volga_rust.test_function()
-assert r == 'test'
+print(lc.channel_id, lc.ipc_addr)
+print(isinstance(lc, Channel))
+# rc = RemoteChannel()
