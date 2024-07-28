@@ -10,6 +10,7 @@ data_writer = RustDataWriter('test_writer', [lc])
 io_loop = RustIOLoop()
 io_loop.register_data_writer(data_writer)
 io_loop.register_data_reader(data_reader)
+data_writer.start()
 data_reader.start()
 io_loop.start(1)
 
@@ -52,6 +53,7 @@ while len(rcvd) != num_msgs:
 run_ts = time.time() - start_ts
 io_loop.close()
 data_reader.close()
+data_writer.close()
 assert msgs == rcvd
 throughput = num_msgs/run_ts
 print(f'Assert ok, finished in {run_ts}s, throughput: {throughput} msg/sec')
