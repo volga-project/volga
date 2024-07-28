@@ -12,7 +12,7 @@ use std::io::Cursor;
 #[test]
 fn test_one_to_one() {
     let channel = Channel::Local { channel_id: String::from("ch_0"), ipc_addr: String::from("ipc:///tmp/ipc_0") };
-    let mut data_reader = DataReader::new(
+    let data_reader = DataReader::new(
         String::from("data_reader"),
         vec![channel.clone()],
     );
@@ -23,7 +23,7 @@ fn test_one_to_one() {
     );
     let l_r = Arc::new(data_reader);
     let l_w = Arc::new(data_writer);
-    let mut io_loop = IOLoop::new();
+    let io_loop = IOLoop::new();
     io_loop.register_handler(l_r.clone());
     io_loop.register_handler(l_w.clone());
     io_loop.start_io_threads(1);

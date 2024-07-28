@@ -1,7 +1,9 @@
-use pyo3::{pyclass, pymethods, types::PyBytes, Python};
+use std::{borrow::{Borrow, BorrowMut}, hash::Hash, sync::{Arc, RwLock}};
+
+use pyo3::{pyclass, pymethods, types::PyBytes, IntoPy, Py, PyResult, PyTryFrom, Python};
 use rmp::decode::bytes;
 
-use super::{channel::Channel, data_reader::{self, DataReader}};
+use super::{channel::Channel, data_reader::{self, DataReader}, data_writer::DataWriter, io_loop::IOLoop};
 
 pub trait ToRustChannel {
     fn to_rust_channel(&self) -> Channel;
@@ -121,59 +123,98 @@ impl PyChannel {
 
 
 #[pyclass(name="RustDataReader")]
-struct PyDataReader {
-    data_reader: DataReader
+pub struct PyDataReader {
+    data_reader: Arc<DataReader>
 }
 
 
 #[pymethods]
 impl PyDataReader {
+
     #[new]
     pub fn new(name: String, channels: Vec<PyLocalChannel>) -> PyDataReader { // TODO we need to pass generic PyChannel
         let mut rust_channels = Vec::new();
         for ch in channels {
             rust_channels.push(ch.to_rust_channel());
         };
-        let data_reader = DataReader::new(name.clone(), rust_channels);
-        PyDataReader{data_reader}
+        let data_reader = DataReader::new(name, rust_channels);
+        PyDataReader{data_reader: Arc::new(data_reader)}
     }
 
-    pub fn start(&mut self) {
-        self.data_reader.start()
+    pub fn start(&self) {
+        self.data_reader.start();
     }
 
-    pub fn close(&mut self) {
-        self.data_reader.close()
+    pub fn close(&self) {
+        self.data_reader.close();
     }
 
-    // pub fn read_bytes(&self, py: Python) -> Option<PyBytes> {
-    //     let bytes = self.data_reader.read_bytes();
-    //     if !bytes.is_none() {
-    //         Ok(PyBytes::new(py, bytes.unwrap().as_ptr()).into())
-    //     } else {
-    //         None
-    //     }
-    // }
-
+    pub fn read_bytes(&self, py: Python) -> Option<Py<PyBytes>>{
+        let bytes = self.data_reader.read_bytes();
+        if !bytes.is_none() {
+            let bytes = bytes.unwrap();
+            let pb = PyBytes::new(py, bytes.as_slice());
+            Some(pb.into())
+        } else {
+            None
+        }
+    }
 }
 
 
 #[pyclass(name="RustDataWriter")]
-struct PyDataWriter {
-
+pub struct PyDataWriter {
+    data_writer: Arc<DataWriter>
 }
 
 #[pymethods]
 impl PyDataWriter {
 
+    #[new]
+    pub fn new(name: String, channels: Vec<PyLocalChannel>) -> PyDataWriter { // TODO we need to pass generic PyChannel
+        let mut rust_channels = Vec::new();
+        for ch in channels {
+            rust_channels.push(ch.to_rust_channel());
+        };
+        let data_writer = DataWriter::new(name, rust_channels);
+        PyDataWriter{data_writer: Arc::new(data_writer)}
+    }
+
+    pub fn write_bytes(&self, channel_id: String, b: &PyBytes, timeout_ms: i32, retry_step_micros: u64) -> Option<u128> {
+        let bytes = b.as_bytes().to_vec();
+        self.data_writer.write_bytes(&channel_id, Box::new(bytes), timeout_ms, retry_step_micros)
+    }
 }
 
 #[pyclass(name="RustIOLoop")]
-struct PyIOLoop {
-
+pub struct PyIOLoop {
+    io_loop: IOLoop,
 }
 
 #[pymethods]
 impl PyIOLoop {
+
+    #[new]
+    pub fn new() -> PyIOLoop {
+        PyIOLoop{
+            io_loop: IOLoop::new(),
+        }
+    }
+
+    pub fn register_data_writer(&self, dw: &PyDataWriter) {
+        self.io_loop.register_handler(dw.data_writer.clone());
+    }
+
+    pub fn register_data_reader(&self, dr: &PyDataReader) {
+        self.io_loop.register_handler(dr.data_reader.clone());
+    }
+
+    pub fn start(&self, num_io_threads: usize) {
+        self.io_loop.start_io_threads(num_io_threads)
+    }
+
+    pub fn close(&self) {
+        self.io_loop.close()
+    }
 
 }

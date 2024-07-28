@@ -15,7 +15,7 @@ pub struct DataReader {
     out_queue: Arc<ArrayQueue<Box<Bytes>>>,
 
     running: Arc<AtomicBool>,
-    dispatcher_thread: Option<JoinHandle<()>>,
+    dispatcher_thread_handle: Arc<ArrayQueue<JoinHandle<()>>> // array queue so we do not mutate DataReader and kepp ownership
 }
 
 impl DataReader {
@@ -38,7 +38,7 @@ impl DataReader {
             recv_chans: Arc::new(RwLock::new(recv_chans)),
             out_queue: Arc::new(ArrayQueue::new(OUTPUT_QUEUE_SIZE)),
             running: Arc::new(AtomicBool::new(false)),
-            dispatcher_thread: None
+            dispatcher_thread_handle: Arc::new(ArrayQueue::new(1))
         }
     }
 
@@ -53,7 +53,7 @@ impl DataReader {
         }
     }
 
-    pub fn start(&mut self) {
+    pub fn start(&self) {
         // start dispatcher thread: takes message from channels, in shared out_queue
         self.running.store(true, Ordering::Relaxed);
 
@@ -83,13 +83,14 @@ impl DataReader {
 
         let name = &self.name;
         let thread_name = format!("volga_{name}_dispatcher_thread");
-        self.dispatcher_thread = Some(std::thread::Builder::new().name(thread_name).spawn(f).unwrap());
+        self.dispatcher_thread_handle.push(std::thread::Builder::new().name(thread_name).spawn(f).unwrap()).unwrap();
 
     }
 
     pub fn close (&self) {
         self.running.store(false, Ordering::Relaxed);
-        // TODO join thread
+        let handle = self.dispatcher_thread_handle.pop();
+        handle.unwrap().join().unwrap();
     }
 }
 

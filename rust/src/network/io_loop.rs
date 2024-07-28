@@ -1,6 +1,6 @@
 use std::{cmp::min, collections::HashMap, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
 
-use crossbeam::channel::{Sender, Receiver};
+use crossbeam::{channel::{Sender, Receiver}, queue::SegQueue};
 
 use super::{channel::Channel, socket_meta::{SocketKind, SocketMetadata, SocketOwner}};
 
@@ -99,7 +99,7 @@ pub struct IOLoop {
     handlers: Arc<Mutex<Vec<Arc<dyn IOHandler + Send + Sync>>>>,
     running: Arc<AtomicBool>,
     zmq_context: Arc<zmq::Context>,
-    io_threads: Vec<JoinHandle<()>>,
+    io_threads: Arc<SegQueue<JoinHandle<()>>>,
     socket_meta_to_handler: Arc<RwLock<HashMap<SocketMetadata, Arc<dyn IOHandler + Send + Sync>>>>
 }
 
@@ -110,17 +110,17 @@ impl IOLoop {
             handlers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
             zmq_context: Arc::new(zmq::Context::new()),
-            io_threads: Vec::new(),
+            io_threads: Arc::new(SegQueue::new()),
             socket_meta_to_handler: Arc::new(RwLock::new(HashMap::new()))
         };
         io_loop
     }
 
-    pub fn register_handler(&mut self, handler: Arc<dyn IOHandler + Send + Sync>) {
+    pub fn register_handler(&self, handler: Arc<dyn IOHandler + Send + Sync>) {
         self.handlers.lock().unwrap().push(handler);
     }
 
-    pub fn start_io_threads(&mut self, num_threads: i16) {
+    pub fn start_io_threads(&self, num_threads: usize) {
         // since zmq::Sockets are not thread safe we will have a model where each socket can be polled by only 1 IO thread
         // each IO thread can have multiple sockets associated with it
         // let mut num_sockets = 0;
@@ -152,7 +152,7 @@ impl IOLoop {
 
         assert_eq!(self.socket_meta_to_handler.read().unwrap().len(), sockets_metadata.len());
 
-        let num_threads = min(num_threads, sockets_metadata.len() as i16);
+        let num_threads = min(num_threads, sockets_metadata.len());
         let mut cur_thread_id = 0;
         let mut sockets_meta_per_thread = HashMap::new();
 
@@ -246,5 +246,12 @@ impl IOLoop {
 
     pub fn close(&self) {
         self.running.store(false, Ordering::Relaxed);
+        // for handle in self.io_threads {
+        //     handle.join();
+        // }
+        while !self.io_threads.is_empty() {
+            let handle = self.io_threads.pop();
+            handle.unwrap().join().unwrap();
+        }
     }
 }
