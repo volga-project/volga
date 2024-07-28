@@ -13,14 +13,24 @@ io_loop.register_data_reader(data_reader)
 data_reader.start()
 io_loop.start(1)
 
-num_msgs = 100000
-msg_size = 32*1024
+num_msgs = 10000000
+msg_size = 1024
+batch_size = 1000
 
 msgs = ['a' * msg_size] * num_msgs
 
 def send():
+    batch = []
     for msg in msgs:
-        b = msgpack.dumps(msg)
+        batch.append(msg)
+        if len(batch) == batch_size:
+            b = msgpack.dumps(batch)
+            res = None
+            while res is None:
+                res = data_writer.write_bytes(lc.channel_id, b, 1000, 1)
+            batch = []
+    if len(batch) != 0:
+        b = msgpack.dumps(batch)
         res = None
         while res is None:
             res = data_writer.write_bytes(lc.channel_id, b, 1000, 1)
@@ -36,10 +46,12 @@ while len(rcvd) != num_msgs:
     _b = None
     while _b is None:
         _b = data_reader.read_bytes()
-    _msg = msgpack.loads(_b)
-    rcvd.append(_msg)
+    _batch = msgpack.loads(_b)
+    rcvd.extend(_batch)
+
 run_ts = time.time() - start_ts
 io_loop.close()
 data_reader.close()
 assert msgs == rcvd
-print(f'Assert ok, finished in {run_ts}s')
+throughput = num_msgs/run_ts
+print(f'Assert ok, finished in {run_ts}s, throughput: {throughput} msg/sec')
