@@ -1,20 +1,22 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{channel::Channel, io_loop::{IOHandler, IOHandlerType}};
+use super::{buffer_queue::{BufferQueue, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 
-const MAX_BUFFERS_PER_CHANNEL: usize = 1000000;
+const IN_FLIGHT_TIMEOUT_S: usize = 5; // how long to wait before re-sending un-acked buffers
 
 pub struct DataWriter {
     name: String,
     channels: Vec<Channel>,
     send_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
     recv_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
-    in_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,
+    buffer_queue: Arc<BufferQueue>,
+
+    in_flight: Arc<RwLock<HashMap<String, Arc<RwLock<HashMap<u32, (u128, Box<Bytes>)>>>>>>,
 
     running: Arc<AtomicBool>,
-    dispatcher_thread_handle: Arc<ArrayQueue<JoinHandle<()>>> // array queue so we do not mutate DataReader and kepp ownership
+    io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>> // array queue so we do not mutate DataReader and keep ownership
 }
 
 impl DataWriter {
@@ -23,131 +25,142 @@ impl DataWriter {
         let n_channels = channels.len();
         let mut send_chans = HashMap::with_capacity(n_channels);
         let mut recv_chans = HashMap::with_capacity(n_channels);
-        let mut in_queues = HashMap::with_capacity(n_channels);
+        let mut in_flight = HashMap::with_capacity(n_channels);
 
         for ch in &channels {
             send_chans.insert(ch.get_channel_id().clone(), bounded(MAX_BUFFERS_PER_CHANNEL));
             recv_chans.insert(ch.get_channel_id().clone(), bounded(MAX_BUFFERS_PER_CHANNEL));
-            in_queues.insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(VecDeque::with_capacity(MAX_BUFFERS_PER_CHANNEL))));
+            in_flight.insert(ch.get_channel_id().clone(), Arc::new(RwLock::new(HashMap::new())));
         }
 
         DataWriter{
             name,
-            channels,
+            channels: channels.to_vec(),
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),
-            in_queues: Arc::new(RwLock::new(in_queues)),
+            buffer_queue: Arc::new(BufferQueue::new(channels.to_vec())),
+            in_flight: Arc::new(RwLock::new(in_flight)),
             running: Arc::new(AtomicBool::new(false)),
-            dispatcher_thread_handle: Arc::new(ArrayQueue::new(1))
+            io_thread_handles: Arc::new(ArrayQueue::new(2))
         }
     }
 
     pub fn write_bytes(&self, channel_id: &String, b: Box<Bytes>, timeout_ms: i32, retry_step_micros: u64) -> Option<u128> {
-        let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
+        let t: u128 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
         let mut num_retries = 0;
         loop {
             let _t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
             if _t - t > timeout_ms as u128 * 1000 {
                 return None
             }
-            let locked_in_queues = self.in_queues.read().unwrap();
-            let in_queue = locked_in_queues.get(channel_id).unwrap();
-            let mut locked_in_queue = in_queue.lock().unwrap();
-            if locked_in_queue.len() == MAX_BUFFERS_PER_CHANNEL {
-                drop(locked_in_queue);
+            let succ = self.buffer_queue.try_push(channel_id, b.clone());
+            if !succ {
                 num_retries += 1;
                 thread::sleep(Duration::from_micros(retry_step_micros));
                 continue;
             }
-            locked_in_queue.push_back(b.clone());
-            drop(locked_in_queue);
             break;
         }
         let backpressured_time = if num_retries == 0 {0} else {SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros() - t};
         Some(backpressured_time)
     }
 
-    // Returns backpressure in microseconds
-    // pub fn write_message(&self, channel_id: &String, message: Arc<ChannelMessage>, timeout_ms: i32, retry_step_micros: i32) -> Option<u128> {
-    //     let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
-    //     let mut num_retries = 0;
-    //     loop {
-    //         let _t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
-    //         if _t - t > timeout_ms as u128 * 1000 {
-    //             return None
-    //         }
-    //         if !self.write_message_no_block(channel_id, message.clone()) {
-    //             if retry_step_micros > 0 {
-    //                 std::thread::sleep(Duration::from_micros(retry_step_micros as u64));
-    //             }
-    //             num_retries += 1;
-    //             continue;
-    //         } else {
-    //             break;
-    //         }
-    //     }
-    //     let backpressured_time = if num_retries == 0 {0} else {SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros() - t};
-    //     Some(backpressured_time)
-    // }
-  
-    // pub fn write_message_no_block(&self, channel_id: &String, b: Box<ChannelMessage>) -> bool {
-    //     // check send_queue size for backpressure
-    //     let send_b_queues = &self.send_buffer_queues.read().unwrap();
-    //     let locked_send_b_queue = send_b_queues.get(channel_id).unwrap().lock().unwrap();
-    //     if locked_send_b_queue.len() >= MAX_BUFFERS_PER_CHANNEL {
-    //         return false
-    //     }
-    //     drop(locked_send_b_queue);
-
-    //     let in_queues = &self.in_message_queues.read().unwrap();
-    //     let mut locked_queue = in_queues.get(channel_id).unwrap().lock().unwrap();
-    //     locked_queue.push_back(message);
-    //     true
-    // }
-
     pub fn start(&self) {
-        // start dispatcher thread: takes data from in_queue, passes to channel to IOLoop's threads
+        // start io threads to send buffers and receive acks
         self.running.store(true, Ordering::Relaxed);
         
-
         let this_send_chans = self.send_chans.clone();
-        let this_in_queues = self.in_queues.clone();
+        let this_buffer_queue = self.buffer_queue.clone();
+        let this_in_flights = self.in_flight.clone();
         let this_runnning = self.running.clone();
-        let f = move || {
+
+        let output_loop = move || {
             loop {
                 let running = this_runnning.load(Ordering::Relaxed);
                 if !running {
                     break;
                 }
-                let locked_in_queues = this_in_queues.read().unwrap();
+                let locked_in_flights = this_in_flights.read().unwrap();
                 let locked_send_chans = this_send_chans.read().unwrap();
-                for channel_id in  locked_in_queues.keys() {
-                    let mut locked_in_queue = locked_in_queues.get(channel_id).unwrap().lock().unwrap();
-                    if locked_in_queue.is_empty() {
-                        drop(locked_in_queue);
+                for channel_id in  locked_send_chans.keys() {
+
+                    // check if in-flight buffers need to be resent first
+                    let locked_in_flight = locked_in_flights.get(channel_id).unwrap().read().unwrap();
+                    for in_flight_buffer_id in locked_in_flight.keys() {
+                        let ts_and_b = locked_in_flight.get(in_flight_buffer_id).unwrap();
+                        let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+                        if now_ts - ts_and_b.0 > IN_FLIGHT_TIMEOUT_S as u128 {
+                            let send_chan = locked_send_chans.get(channel_id).unwrap();
+                            let sender = send_chan.0.clone();
+                            if !sender.is_full() {
+                                sender.send(ts_and_b.1.clone()).unwrap();
+                                locked_in_flight.clone().insert(*in_flight_buffer_id, (now_ts, ts_and_b.1.clone()));
+                            }
+                        }
+                    }
+
+                    // stop sending new buffers if in-flight limit is reached
+                    if locked_in_flight.len() == MAX_BUFFERS_PER_CHANNEL {
                         continue;
                     }
                     
                     let send_chan = locked_send_chans.get(channel_id).unwrap();
                     let sender = send_chan.0.clone();
                     if !sender.is_full() {
-                        let b = locked_in_queue.pop_front().unwrap();
-                        sender.send(b).unwrap();
+
+                        let b = this_buffer_queue.schedule_next(channel_id);
+                        if b.is_some() {
+                            let b = b.unwrap();
+                            sender.send(b.clone()).unwrap();
+                            let buffer_id = get_buffer_id(b.clone());
+                            let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+                            locked_in_flight.clone().insert(buffer_id, (now_ts, b.clone()));
+                        }
                     }
-                    drop(locked_in_queue);
                 }
-                drop(locked_in_queues);
-                drop(locked_send_chans);
             }
         };
+
+        let this_runnning = self.running.clone();
+        let this_recv_chans = self.recv_chans.clone();
+        let this_buffer_queue = self.buffer_queue.clone();
+        let this_in_flights = self.in_flight.clone();
+        let input_loop = move || {
+            loop {
+                let running = this_runnning.load(Ordering::Relaxed);
+                if !running {
+                    break;
+                }
+                let locked_in_flights = this_in_flights.write().unwrap();
+                let locked_recv_chans = this_recv_chans.read().unwrap();
+                for channel_id in  locked_recv_chans.keys() {
+                    // poll for acks
+                    let recv_chan = locked_recv_chans.get(channel_id).unwrap();
+                    let receiver = recv_chan.1.clone();
+                    let b = receiver.try_recv();
+                    if b.is_ok() {
+                        let ack: AckMessage = bincode::deserialize(&b.unwrap()).unwrap();
+
+                        // remove from in-flights
+                        locked_in_flights.get(channel_id).unwrap().write().unwrap().remove(&ack.buffer_id);
+
+                        // requets in-order pop
+                        this_buffer_queue.request_pop(channel_id, ack);
+                    }
+                }
+            }
+        };
+
         let name = &self.name;
-        let thread_name = format!("volga_{name}_dispatcher_thread");
-        self.dispatcher_thread_handle.push(std::thread::Builder::new().name(thread_name).spawn(f).unwrap()).unwrap();
+        let in_thread_name = format!("volga_{name}_in_thread");
+        let out_thread_name = format!("volga_{name}_out_thread");
+        self.io_thread_handles.push(std::thread::Builder::new().name(in_thread_name).spawn(input_loop).unwrap()).unwrap();
+        self.io_thread_handles.push(std::thread::Builder::new().name(out_thread_name).spawn(output_loop).unwrap()).unwrap();
     }
 
     pub fn close (&self) {
         self.running.store(false, Ordering::Relaxed);
-        let handle = self.dispatcher_thread_handle.pop();
+        let handle = self.io_thread_handles.pop();
         handle.unwrap().join().unwrap();
     }
 }

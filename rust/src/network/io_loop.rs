@@ -71,6 +71,7 @@ impl SocketManager {
     }
 }
 
+// used for DataReader/DataWriter
 fn create_local_sockets_meta(channels: &Vec<Channel>, direction: Direction) -> Vec<SocketMetadata> {
     let mut v: Vec<SocketMetadata> = Vec::new();
     let is_reader = direction == Direction::Receiver;

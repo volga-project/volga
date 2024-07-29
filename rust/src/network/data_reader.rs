@@ -1,9 +1,10 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
 
-use super::{channel::Channel, io_loop::{Bytes, IOHandler, IOHandlerType}};
-use crossbeam::{channel::{unbounded, Sender, Receiver}, queue::ArrayQueue};
+use super::{buffer_utils::{get_buffer_id}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}};
+use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQueue};
 
-const OUTPUT_QUEUE_SIZE: usize = 100000;
+const OUTPUT_QUEUE_SIZE: usize = 10;
+// const RECV_CHANNEL_SIZE: usize = 10;
 
 pub struct DataReader {
     name: String,
@@ -24,10 +25,11 @@ impl DataReader {
         let mut send_chans = HashMap::with_capacity(n_channels);
         let mut recv_chans = HashMap::with_capacity(n_channels);
 
-        // TODO we should use bounded channels here?
         for ch in &channels {
-            send_chans.insert(ch.get_channel_id().clone(), unbounded());
-            recv_chans.insert(ch.get_channel_id().clone(), unbounded());
+            send_chans.insert(ch.get_channel_id().clone(), unbounded()); // TODO should we use bounded channels for acks?
+            recv_chans.insert(ch.get_channel_id().clone(), unbounded()); 
+            // TODO making recv_chans bounded drops throughput 10x, why?
+            // recv_chans.insert(ch.get_channel_id().clone(), bounded(RECV_CHANNEL_SIZE));
         }
 
         DataReader{
@@ -59,6 +61,7 @@ impl DataReader {
 
         let this_runnning = self.running.clone();
         let this_recv_chans = self.recv_chans.clone();
+        let this_send_chans = self.send_chans.clone();
         let this_out_queue = self.out_queue.clone();
         let f = move || {
             loop {
@@ -67,24 +70,32 @@ impl DataReader {
                     break;
                 }
 
-                let locked_map = this_recv_chans.read().unwrap();
-                for channel_id in locked_map.keys() {
+                let locked_recv_chans = this_recv_chans.read().unwrap();
+                let locked_send_chans = this_send_chans.read().unwrap();
+                for channel_id in locked_recv_chans.keys() {
                     let mut locked_out_queue = this_out_queue.lock().unwrap();
                     if locked_out_queue.len() == OUTPUT_QUEUE_SIZE {
                         // full
                         drop(locked_out_queue);
                         continue
                     }
-                    let recv_chan = locked_map.get(channel_id).unwrap();
+                    let recv_chan = locked_recv_chans.get(channel_id).unwrap();
                     let receiver = recv_chan.1.clone();
 
                     let b = receiver.try_recv();
                     if b.is_ok() {
-                        locked_out_queue.push_back(b.unwrap());
+                        let b = b.unwrap();
+                        let buffer_id = get_buffer_id(b.clone());
+                        // let payload = new_buffer_drop_meta(b.clone());
+                        // locked_out_queue.push_back(payload);
+
+                        // send ack
+                        let ack = AckMessage{channel_id: channel_id.clone(), buffer_id};
+                        let send_chan = locked_send_chans.get(channel_id).unwrap();
+                        let sender = send_chan.0.clone();
+                        sender.send(Box::new(bincode::serialize(&ack).unwrap())).expect("ok");
                     }
-                    drop(locked_out_queue);
                 }
-                drop(locked_map);
             }
             
         };

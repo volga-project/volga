@@ -1,11 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize, PartialEq)]
-pub struct ChannelMessage {
-    pub key: String,
-    pub value: String
-}
-
 #[derive(Clone)]
 pub enum Channel {
     Local {
@@ -35,4 +29,11 @@ impl Channel {
             }
         }
     }
+}
+
+
+#[derive(Serialize, Deserialize, PartialEq)]
+pub struct AckMessage {
+    pub channel_id: String,
+    pub buffer_id: u32
 }
