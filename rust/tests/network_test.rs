@@ -1,10 +1,13 @@
 use std::{collections::HashMap, rc::Rc, sync::Arc, time::{Duration, SystemTime}};
 
 use volga_rust::network::{channel::{Channel}, data_reader::DataReader, data_writer::DataWriter, io_loop::IOLoop, utils::random_string};
+<<<<<<< HEAD
 
 use rmpv::decode;
 use rmpv::Value;
 use std::io::Cursor;
+=======
+>>>>>>> 85a48ff ([Rustify Network] Acks WIP)
 
 
 #[test]
@@ -65,8 +68,10 @@ fn test_one_to_one() {
     }
     let total_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start_ts;
     let backp_s = j_handle.join().unwrap()/1000;
+    let throughput = ((num_msgs as f64)/(total_ms as f64) * 1000.0) as u16;
     println!("Transfered in (ms): {total_ms}");
     println!("Backpressure (ms): {backp_s}");
+    println!("Throughput (msg/s): {throughput}");
     l_r.close();
     l_w.close();
     io_loop.close();

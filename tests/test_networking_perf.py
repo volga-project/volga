@@ -14,9 +14,9 @@ data_writer.start()
 data_reader.start()
 io_loop.start(1)
 
-num_msgs = 10000000
+num_msgs = 1000
 msg_size = 1024
-batch_size = 1000
+batch_size = 32
 
 msgs = ['a' * msg_size] * num_msgs
 
