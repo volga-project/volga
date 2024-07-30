@@ -117,8 +117,6 @@ impl DataWriter {
                             let buffer_id = get_buffer_id(b.clone());
                             let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
                             locked_in_flight.clone().insert(buffer_id, (now_ts, b.clone()));
-
-                            // this_buffer_queue.request_pop(channel_id, buffer_id);
                         }
                     }
                 }

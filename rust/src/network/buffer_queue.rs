@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicU32, AtomicU8, Ordering}, Arc, Mutex, RwLock}};
 
-use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta}, channel::{AckMessage, Channel}, io_loop::Bytes};
+use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta}, channel::{Channel}, io_loop::Bytes};
 
 
 pub const MAX_BUFFERS_PER_CHANNEL: usize = 10;

@@ -151,7 +151,7 @@ class DataReader(LocalDataHandler):
                 self._output_queue.append(self._out_of_order[channel_id][next_wm])
 
                 # ack only when placed onto output queue
-                ack_msg = AckMessage(buffer_id=buffer_id)
+                ack_msg = AckMessage(buffer_id=buffer_id) # TODO we should ack stored buffer id
                 self._acks_queues[channel_id].append(ack_msg)
                 to_del.append(next_wm)
                 next_wm += 1
