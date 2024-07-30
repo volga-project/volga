@@ -39,21 +39,6 @@ pub fn new_buffer_with_meta(b: Box<Bytes>, channel_id: String, buffer_id: u32) -
     Box::new(res)
 }
 
-<<<<<<< HEAD
-// pub fn new_buffer_drop_meta(b: Box<Bytes>) -> Box<Bytes> {
-//     let mut res = b.to_vec(); 
-//     res.drain(0..CHANNEL_ID_META_BYTES_LENGTH); // remove channeld_id bytes
-//     let mut c = Cursor::new(&res);
-//     c.set_position(0);
-//     VarintRead::read_unsigned_varint_32(&mut c).expect("ok");
-//     // res.drain(c.position() as usize..); // remove buffer_id bytaes
-//     Box::new(res)
-// }
-
-
-pub fn new_buffer_drop_meta(b: Box<Bytes>) -> Box<Bytes> {
-    return b // TODO
-=======
 pub fn new_buffer_drop_meta(b: Box<Bytes>) -> Box<Bytes> {
     let local_b = b.clone();
     let mut c = Cursor::new(*b);
@@ -62,7 +47,6 @@ pub fn new_buffer_drop_meta(b: Box<Bytes>) -> Box<Bytes> {
     let pos = c.position();
     let res = local_b[pos as usize..].to_vec();
     Box::new(res)
->>>>>>> 85a48ff ([Rustify Network] Acks WIP)
 }
 
 pub fn get_channeld_id(b: Box<Bytes>) -> String {
@@ -86,12 +70,8 @@ mod tests {
     fn test_buffer_utils() {
 
         let s = String::from("a");
-<<<<<<< HEAD
-        let b = Box::new(bincode::serialize(&s).unwrap());
-=======
         let bytes = bincode::serialize(&s).unwrap();
         let b = Box::new(bytes);
->>>>>>> 85a48ff ([Rustify Network] Acks WIP)
         // let l = b.len();
         let ch_id = String::from("ch_0");
         let buffer_id = 12345;
@@ -100,18 +80,10 @@ mod tests {
         let _ch_id = get_channeld_id(_b.clone());
         let _buffer_id = get_buffer_id(_b.clone());
 
-<<<<<<< HEAD
-        assert_eq!(ch_id, _ch_id);
-        assert_eq!(buffer_id, _buffer_id);
-
-        // let _s: String = bincode::deserialize(&b).unwrap();
-        
-=======
         let b_ = new_buffer_drop_meta(_b);
         let s_: String = bincode::deserialize(&b_).unwrap();
         assert_eq!(ch_id, _ch_id);
         assert_eq!(buffer_id, _buffer_id);
         assert_eq!(s_, s);
->>>>>>> 85a48ff ([Rustify Network] Acks WIP)
     }
 }

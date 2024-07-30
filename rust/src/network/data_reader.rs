@@ -1,10 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
 
-<<<<<<< HEAD
-use super::{buffer_utils::{get_buffer_id}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}};
-=======
 use super::{buffer_utils::{get_buffer_id, new_buffer_drop_meta}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}};
->>>>>>> 85a48ff ([Rustify Network] Acks WIP)
 use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQueue};
 
 const OUTPUT_QUEUE_SIZE: usize = 10;
@@ -88,19 +84,12 @@ impl DataReader {
 
                     let b = receiver.try_recv();
                     if b.is_ok() {
-<<<<<<< HEAD
-                        let b = b.unwrap();
-                        let buffer_id = get_buffer_id(b.clone());
-                        // let payload = new_buffer_drop_meta(b.clone());
-                        // locked_out_queue.push_back(payload);
-=======
                         // TODO set low watermark
 
                         let b = b.unwrap();
                         let buffer_id = get_buffer_id(b.clone());
                         let payload = new_buffer_drop_meta(b.clone());
                         locked_out_queue.push_back(payload);
->>>>>>> 85a48ff ([Rustify Network] Acks WIP)
 
                         // send ack
                         let ack = AckMessage{channel_id: channel_id.clone(), buffer_id};

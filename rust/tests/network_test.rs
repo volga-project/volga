@@ -1,13 +1,6 @@
 use std::{collections::HashMap, rc::Rc, sync::Arc, time::{Duration, SystemTime}};
 
 use volga_rust::network::{channel::{Channel}, data_reader::DataReader, data_writer::DataWriter, io_loop::IOLoop, utils::random_string};
-<<<<<<< HEAD
-
-use rmpv::decode;
-use rmpv::Value;
-use std::io::Cursor;
-=======
->>>>>>> 85a48ff ([Rustify Network] Acks WIP)
 
 
 #[test]
@@ -31,7 +24,7 @@ fn test_one_to_one() {
     io_loop.register_handler(l_w.clone());
     io_loop.start_io_threads(1);
 
-    let num_msgs = 1000;
+    let num_msgs = 100000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
