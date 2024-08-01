@@ -63,7 +63,6 @@ class RemoteTransferHandler(IOHandler, ABC):
 
         return n.pop()
 
-
     def create_sockets(self) -> List[Tuple[SocketMetadata, zmq.Socket]]:
         sockets = []
         for channel in self._channels:

@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 use super::io_loop::Bytes;
 
-const CHANNEL_ID_META_BYTES_LENGTH: usize = 16 * 4; // 16 chars
+pub const CHANNEL_ID_META_BYTES_LENGTH: usize = 16 * 4; // 16 chars
 
 pub fn new_buffer_with_meta(b: Box<Bytes>, channel_id: String, buffer_id: u32) -> Box<Bytes>{
     // let channel_id_bytes = vec![0; CHANNEL_ID_META_BYTES_LENGTH];

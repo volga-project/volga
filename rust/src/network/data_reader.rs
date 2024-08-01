@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, AtomicI32, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
 
-use super::{buffer_utils::{get_buffer_id, new_buffer_drop_meta}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}};
+use super::{buffer_utils::{get_buffer_id, new_buffer_drop_meta}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}, sockets::SocketMetadata};
 use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQueue};
 
 const OUTPUT_QUEUE_SIZE: usize = 10;
@@ -63,7 +63,37 @@ impl DataReader {
         }
     }
 
-    pub fn start(&self) {
+    fn send_ack(channel_id: &String, buffer_id: u32, sender: Sender<Box<Bytes>>) {
+        // we assume ack channels are unbounded
+        let ack = AckMessage{channel_id: channel_id.clone(), buffer_id};
+        let b = ack.ser();
+        sender.send(b).unwrap();
+    }
+}
+
+impl IOHandler for DataReader {
+
+    fn get_handler_type(&self) -> IOHandlerType {
+        IOHandlerType::DataReader
+    }
+
+    fn get_channels(&self) -> &Vec<Channel> {
+        &self.channels
+    }
+
+    fn get_send_chan(&self, sm: &SocketMetadata) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
+        let hm = &self.send_chans.read().unwrap();
+        let v = hm.get(&sm.channel_id).unwrap();
+        v.clone()
+    }
+
+    fn get_recv_chan(&self, sm: &SocketMetadata) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
+        let hm = &self.recv_chans.read().unwrap();
+        let v = hm.get(&sm.channel_id).unwrap();
+        v.clone()
+    }
+
+    fn start(&self) {
         // start dispatcher thread: takes message from channels, in shared out_queue
         self.running.store(true, Ordering::Relaxed);
 
@@ -74,12 +104,9 @@ impl DataReader {
         let this_watermarks = self.watermarks.clone();
         let this_out_of_order_buffers = self.out_of_order_buffers.clone();
         let f = move || {
-            loop {
-                let running = this_runnning.load(Ordering::Relaxed);
-                if !running {
-                    break;
-                }
 
+            while this_runnning.load(Ordering::Relaxed) {
+                
                 let locked_recv_chans = this_recv_chans.read().unwrap();
                 let locked_send_chans = this_send_chans.read().unwrap();
                 let locked_watermarks = this_watermarks.read().unwrap();
@@ -146,49 +173,11 @@ impl DataReader {
         let name = &self.name;
         let thread_name = format!("volga_{name}_dispatcher_thread");
         self.dispatcher_thread_handle.push(std::thread::Builder::new().name(thread_name).spawn(f).unwrap()).unwrap();
-
     }
 
-    fn send_ack(channel_id: &String, buffer_id: u32, sender: Sender<Box<Bytes>>) {
-        let ack = AckMessage{channel_id: channel_id.clone(), buffer_id};
-        sender.send(Box::new(bincode::serialize(&ack).unwrap())).expect("ok");
-    }
-
-    pub fn close (&self) {
+    fn close (&self) {
         self.running.store(false, Ordering::Relaxed);
         let handle = self.dispatcher_thread_handle.pop();
         handle.unwrap().join().unwrap();
     }
-}
-
-impl IOHandler for DataReader {
-
-    fn get_handler_type(&self) -> IOHandlerType {
-        IOHandlerType::DataReader
-    }
-
-    fn on_send_ready(&self, channel_id: &String) -> bool {
-        true
-    }
-
-    fn on_recv_ready(&self, channel_id: &String) -> bool {
-        true
-    }
-
-    fn get_channels(&self) -> &Vec<Channel> {
-        &self.channels
-    }
-
-    fn get_send_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
-        let hm = &self.send_chans.read().unwrap();
-        let v = hm.get(key).unwrap();
-        v.clone()
-    }
-
-    fn get_recv_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
-        let hm = &self.recv_chans.read().unwrap();
-        let v = hm.get(key).unwrap();
-        v.clone()
-    }
-
 }

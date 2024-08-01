@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queue::{BufferQueue, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}};
+use super::{buffer_queue::{BufferQueue, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, sockets::SocketMetadata};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 
@@ -65,10 +65,34 @@ impl DataWriter {
         Some(backpressured_time)
     }
 
-    pub fn start(&self) {
+    
+}
+
+impl IOHandler for DataWriter {
+
+    fn get_handler_type(&self) -> IOHandlerType {
+        IOHandlerType::DataWriter
+    }
+
+    fn get_channels(&self) -> &Vec<Channel> {
+        &self.channels
+    }
+
+    fn get_send_chan(&self, sm: &SocketMetadata) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
+        let hm = &self.send_chans.read().unwrap();
+        let v = hm.get(&sm.channel_id).unwrap();
+        v.clone()
+    }
+
+    fn get_recv_chan(&self, sm: &SocketMetadata) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
+        let hm = &self.recv_chans.read().unwrap();
+        let v = hm.get(&sm.channel_id).unwrap();
+        v.clone()
+    }
+
+    fn start(&self) {
         // start io threads to send buffers and receive acks
         self.running.store(true, Ordering::Relaxed);
-        
         
         let this_send_chans = self.send_chans.clone();
         let this_buffer_queue = self.buffer_queue.clone();
@@ -76,11 +100,9 @@ impl DataWriter {
         let this_runnning = self.running.clone();
 
         let output_loop = move || {
-            loop {
-                let running = this_runnning.load(Ordering::Relaxed);
-                if !running {
-                    break;
-                }
+
+            while this_runnning.load(Ordering::Relaxed) {
+
                 let locked_in_flights = this_in_flights.read().unwrap();
                 let locked_send_chans = this_send_chans.read().unwrap();
                 
@@ -141,7 +163,8 @@ impl DataWriter {
                     let receiver = recv_chan.1.clone();
                     let b = receiver.try_recv();
                     if b.is_ok() {
-                        let ack: AckMessage = bincode::deserialize(&b.unwrap()).unwrap();
+                        // let ack: AckMessage = bincode::deserialize(&b.unwrap()).unwrap();
+                        let ack = AckMessage::de(b.unwrap());
                         let buffer_id = &ack.buffer_id;
                         // remove from in-flights
                         locked_in_flights.get(channel_id).unwrap().write().unwrap().remove(buffer_id);
@@ -153,7 +176,6 @@ impl DataWriter {
             }
         };
 
-
         let name = &self.name;
         let in_thread_name = format!("volga_{name}_in_thread");
         let out_thread_name = format!("volga_{name}_out_thread");
@@ -161,43 +183,11 @@ impl DataWriter {
         self.io_thread_handles.push(std::thread::Builder::new().name(out_thread_name).spawn(output_loop).unwrap()).unwrap();
     }
 
-    pub fn close (&self) {
+    fn close (&self) {
         self.running.store(false, Ordering::Relaxed);
         while self.io_thread_handles.len() != 0 {
             let handle = self.io_thread_handles.pop();
             handle.unwrap().join().unwrap();
         }
     }
-}
-
-impl IOHandler for DataWriter {
-
-    fn get_handler_type(&self) -> IOHandlerType {
-        IOHandlerType::DataWriter
-    }
-
-    fn on_send_ready(&self, channel_id: &String) -> bool {
-        true
-    }
-
-    fn on_recv_ready(&self, channel_id: &String) -> bool {
-        true
-    }
-
-    fn get_channels(&self) -> &Vec<Channel> {
-        &self.channels
-    }
-
-    fn get_send_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
-        let hm = &self.send_chans.read().unwrap();
-        let v = hm.get(key).unwrap();
-        v.clone()
-    }
-
-    fn get_recv_chan(&self, key: &String) -> (Sender<Box<Bytes>>, Receiver<Box<Bytes>>) {
-        let hm = &self.recv_chans.read().unwrap();
-        let v = hm.get(key).unwrap();
-        v.clone()
-    }
-
 }

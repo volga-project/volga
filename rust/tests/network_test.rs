@@ -1,30 +1,76 @@
-use std::{collections::HashMap, rc::Rc, sync::Arc, time::{Duration, SystemTime}};
+use std::{collections::HashMap, sync::Arc, time::{Duration, SystemTime}};
 
-use volga_rust::network::{channel::{Channel}, data_reader::DataReader, data_writer::DataWriter, io_loop::IOLoop, utils::random_string};
+use volga_rust::network::{channel::Channel, data_reader::DataReader, data_writer::DataWriter, io_loop::{Direction, IOHandler, IOLoop}, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
 
 #[test]
-fn test_one_to_one() {
-    let channel = Channel::Local { channel_id: String::from("ch_0"), ipc_addr: String::from("ipc:///tmp/ipc_0") };
-    let data_reader = DataReader::new(
+fn test_one_to_one_local() {
+    test_one_to_one(true);
+}
+
+#[test]
+fn test_one_to_one_remote() {
+    test_one_to_one(false);
+}
+
+fn test_one_to_one(local: bool) {
+    let channel;
+    if local {
+        channel = Channel::Local { 
+            channel_id: String::from("local_ch_0"), 
+            ipc_addr: String::from("ipc:///tmp/ipc_0") 
+        };
+    } else {
+        channel = Channel::Remote { 
+            channel_id: String::from("remote_ch_0"),
+            source_local_ipc_addr: String::from("ipc:///tmp/source_local_0"), 
+            source_node_ip: String::from("127.0.0.1"), 
+            source_node_id: String::from("node_1"), 
+            target_local_ipc_addr: String::from("ipc:///tmp/target_local_0"), 
+            target_node_ip: String::from("127.0.0.1"), 
+            target_node_id: String::from("node_2"), 
+            port: 1234 
+        }
+    }
+    let data_reader = Arc::new(DataReader::new(
         String::from("data_reader"),
         vec![channel.clone()],
-    );
-    data_reader.start();
-    let data_writer = DataWriter::new(
+    ));
+    let data_writer = Arc::new(DataWriter::new(
         String::from("data_writer"),
         vec![channel.clone()],
-    );
-    data_writer.start();
-    let l_r = Arc::new(data_reader);
-    let l_w = Arc::new(data_writer);
+    ));
+
+    let mut remote_transfer_handlers = Vec::new();
 
     let io_loop = IOLoop::new();
-    io_loop.register_handler(l_r.clone());
-    io_loop.register_handler(l_w.clone());
+    io_loop.register_handler(data_reader.clone());
+    io_loop.register_handler(data_writer.clone());
+    if !local {
+        let transfer_sender = Arc::new(RemoteTransferHandler::new(
+            String::from("transfer_sender"),
+            vec![channel.clone()],
+            Direction::Sender
+        ));
+        let transfer_receiver = Arc::new(RemoteTransferHandler::new(
+            String::from("transfer_sender"),
+            vec![channel.clone()],
+            Direction::Receiver
+        ));
+        io_loop.register_handler(transfer_sender.clone());
+        io_loop.register_handler(transfer_receiver.clone());
+        remote_transfer_handlers.push(transfer_sender.clone());
+        remote_transfer_handlers.push(transfer_receiver.clone());
+        transfer_sender.start();
+        transfer_receiver.start();
+    }
+
+    data_reader.start();
+    data_writer.start();
+
     io_loop.start_io_threads(1);
 
-    let num_msgs = 100000;
+    let num_msgs = 1;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -40,13 +86,13 @@ fn test_one_to_one() {
     let data_alloc_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis()- data_alloc_start_ts;
     println!("Data allocated in (ms): {data_alloc_time}");
 
-    let moved_w = l_w.clone();
+    let moved_data_writer: Arc<DataWriter> = data_writer.clone();
     let start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
     let local_to_send = to_send.clone();
     let j_handle = std::thread::spawn(move|| {
         let mut backp = 0;
         for msg in local_to_send.as_ref() {
-            backp += moved_w.write_bytes(channel.get_channel_id(), msg.clone(), 1000, 0).unwrap();
+            backp += moved_data_writer.write_bytes(channel.get_channel_id(), msg.clone(), 1000, 0).unwrap();
         }
         backp
     });
@@ -54,19 +100,27 @@ fn test_one_to_one() {
     let mut recvd = vec![];
 
     while recvd.len() != to_send.len() {
-        let _msg = l_r.read_bytes();
+        let _msg = data_reader.read_bytes();
         if _msg.is_some() {
             recvd.push(_msg.unwrap());
         }
     }
+    
     let total_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start_ts;
     let backp_s = j_handle.join().unwrap()/1000;
     let throughput = ((num_msgs as f64)/(total_ms as f64) * 1000.0) as u16;
     println!("Transfered in (ms): {total_ms}");
     println!("Backpressure (ms): {backp_s}");
     println!("Throughput (msg/s): {throughput}");
-    l_r.close();
-    l_w.close();
+    
+    data_reader.close();
+    data_writer.close();
+    if !local {
+        while remote_transfer_handlers.len() != 0 {
+            remote_transfer_handlers.pop().unwrap().close();
+        }
+    }
+
     io_loop.close();
     assert_eq!(to_send.len(), recvd.len());
     for i in 0..to_send.len() {
@@ -74,5 +128,4 @@ fn test_one_to_one() {
     }
 
     println!("TEST OK");
-
 }

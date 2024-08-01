@@ -1,9 +1,8 @@
 use std::{borrow::{Borrow, BorrowMut}, hash::Hash, sync::{Arc, RwLock}};
 
 use pyo3::{pyclass, pymethods, types::PyBytes, IntoPy, Py, PyResult, PyTryFrom, Python};
-use rmp::decode::bytes;
 
-use super::{channel::Channel, data_reader::{self, DataReader}, data_writer::DataWriter, io_loop::IOLoop};
+use super::{channel::Channel, data_reader::{self, DataReader}, data_writer::DataWriter, io_loop::{IOHandler, IOLoop}};
 
 pub trait ToRustChannel {
     fn to_rust_channel(&self) -> Channel;
@@ -142,11 +141,11 @@ impl PyDataReader {
     }
 
     pub fn start(&self) {
-        self.data_reader.start();
+        (self.data_reader.clone() as Arc<dyn IOHandler>).start();
     }
 
     pub fn close(&self) {
-        self.data_reader.close();
+        (self.data_reader.clone() as Arc<dyn IOHandler>).close();
     }
 
     pub fn read_bytes(&self, py: Python) -> Option<Py<PyBytes>>{
