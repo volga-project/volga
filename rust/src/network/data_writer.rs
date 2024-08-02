@@ -8,6 +8,7 @@ const IN_FLIGHT_TIMEOUT_S: usize = 5; // how long to wait before re-sending un-a
 
 pub struct DataWriter {
     name: String,
+    job_name: String,
     channels: Vec<Channel>,
     send_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
     recv_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
@@ -21,7 +22,7 @@ pub struct DataWriter {
 
 impl DataWriter {
 
-    pub fn new(name: String, channels: Vec<Channel>) -> DataWriter {
+    pub fn new(name: String, job_name: String, channels: Vec<Channel>) -> DataWriter {
         let n_channels = channels.len();
         let mut send_chans = HashMap::with_capacity(n_channels);
         let mut recv_chans = HashMap::with_capacity(n_channels);
@@ -35,6 +36,7 @@ impl DataWriter {
 
         DataWriter{
             name,
+            job_name,
             channels: channels.to_vec(),
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),

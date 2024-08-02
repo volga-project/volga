@@ -2,7 +2,7 @@ use std::{borrow::{Borrow, BorrowMut}, hash::Hash, sync::{Arc, RwLock}};
 
 use pyo3::{pyclass, pymethods, types::PyBytes, IntoPy, Py, PyResult, PyTryFrom, Python};
 
-use super::{channel::Channel, data_reader::{self, DataReader}, data_writer::DataWriter, io_loop::{IOHandler, IOLoop}};
+use super::{channel::Channel, data_reader::{self, DataReader}, data_writer::DataWriter, io_loop::{Direction, IOHandler, IOLoop}, remote_transfer_handler::RemoteTransferHandler};
 
 pub trait ToRustChannel {
     fn to_rust_channel(&self) -> Channel;
@@ -131,12 +131,12 @@ pub struct PyDataReader {
 impl PyDataReader {
 
     #[new]
-    pub fn new(name: String, channels: Vec<PyLocalChannel>) -> PyDataReader { // TODO we need to pass generic PyChannel
+    pub fn new(name: String, job_name: String, channels: Vec<PyLocalChannel>) -> PyDataReader { // TODO we need to pass generic PyChannel
         let mut rust_channels = Vec::new();
         for ch in channels {
             rust_channels.push(ch.to_rust_channel());
         };
-        let data_reader = DataReader::new(name, rust_channels);
+        let data_reader = DataReader::new(name, job_name, rust_channels);
         PyDataReader{data_reader: Arc::new(data_reader)}
     }
 
@@ -170,12 +170,12 @@ pub struct PyDataWriter {
 impl PyDataWriter {
 
     #[new]
-    pub fn new(name: String, channels: Vec<PyLocalChannel>) -> PyDataWriter { // TODO we need to pass generic PyChannel
+    pub fn new(name: String, job_name: String, channels: Vec<PyLocalChannel>) -> PyDataWriter { // TODO we need to pass generic PyChannel
         let mut rust_channels = Vec::new();
         for ch in channels {
             rust_channels.push(ch.to_rust_channel());
         };
-        let data_writer = DataWriter::new(name, rust_channels);
+        let data_writer = DataWriter::new(name, job_name, rust_channels);
         PyDataWriter{data_writer: Arc::new(data_writer)}
     }
 
@@ -190,6 +190,61 @@ impl PyDataWriter {
     pub fn write_bytes(&self, channel_id: String, b: &PyBytes, timeout_ms: i32, retry_step_micros: u64) -> Option<u128> {
         let bytes = b.as_bytes().to_vec();
         self.data_writer.write_bytes(&channel_id, Box::new(bytes), timeout_ms, retry_step_micros)
+    }
+}
+
+
+#[pyclass(name="RustTransferSender")]
+pub struct PyTransferSender {
+    transfer_sender: Arc<RemoteTransferHandler>
+}
+
+
+#[pymethods]
+impl PyTransferSender {
+    #[new]
+    pub fn new(name: String, job_name: String, channels: Vec<PyRemoteChannel>) -> PyTransferSender {
+        let mut rust_channels = Vec::new();
+        for ch in channels {
+            rust_channels.push(ch.to_rust_channel());
+        };
+        let transfer_sender = RemoteTransferHandler::new(name, job_name, rust_channels, Direction::Sender);
+        PyTransferSender{transfer_sender: Arc::new(transfer_sender)}
+    }
+
+    pub fn start(&self) {
+        self.transfer_sender.start();
+    }
+
+    pub fn close(&self) {
+        self.transfer_sender.close();
+    }
+}
+
+#[pyclass(name="RustTransferReceiver")]
+pub struct PyTransferReceiver {
+    transfer_receiver: Arc<RemoteTransferHandler>
+}
+
+
+#[pymethods]
+impl PyTransferReceiver {
+    #[new]
+    pub fn new(name: String, job_name: String, channels: Vec<PyRemoteChannel>) -> PyTransferReceiver {
+        let mut rust_channels = Vec::new();
+        for ch in channels {
+            rust_channels.push(ch.to_rust_channel());
+        };
+        let transfer_receiver = RemoteTransferHandler::new(name, job_name, rust_channels, Direction::Receiver);
+        PyTransferReceiver{transfer_receiver: Arc::new(transfer_receiver)}
+    }
+
+    pub fn start(&self) {
+        self.transfer_receiver.start();
+    }
+
+    pub fn close(&self) {
+        self.transfer_receiver.close();
     }
 }
 
@@ -223,5 +278,4 @@ impl PyIOLoop {
     pub fn close(&self) {
         self.io_loop.close()
     }
-
 }

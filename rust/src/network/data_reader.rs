@@ -8,6 +8,7 @@ const OUTPUT_QUEUE_SIZE: usize = 10;
 
 pub struct DataReader {
     name: String,
+    job_name: String,
     channels: Vec<Channel>,
 
     send_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
@@ -23,7 +24,7 @@ pub struct DataReader {
 
 impl DataReader {
 
-    pub fn new(name: String, channels: Vec<Channel>) -> DataReader {
+    pub fn new(name: String, job_name: String, channels: Vec<Channel>) -> DataReader {
         let n_channels = channels.len();
         let mut send_chans = HashMap::with_capacity(n_channels);
         let mut recv_chans = HashMap::with_capacity(n_channels);
@@ -40,6 +41,7 @@ impl DataReader {
 
         DataReader{
             name,
+            job_name,
             channels,
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),
@@ -148,11 +150,15 @@ impl IOHandler for DataReader {
                                 locked_out_of_order.insert(buffer_id as i32, b.clone());
                                 let mut next_wm = wm + 1;
                                 while locked_out_of_order.contains_key(&next_wm) {
+                                    if locked_out_queue.len() == OUTPUT_QUEUE_SIZE {
+                                        // full
+                                        break;
+                                    }
+
                                     let stored_b = locked_out_of_order.get(&next_wm).unwrap();
                                     let stored_buffer_id = get_buffer_id(stored_b.clone());
                                     let payload = new_buffer_drop_meta(stored_b.clone());
 
-                                    // TODO what if locked_out_queue is full?
                                     locked_out_queue.push_back(payload); 
 
                                     // send ack

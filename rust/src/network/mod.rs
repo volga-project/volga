@@ -8,3 +8,4 @@ pub mod py_interface;
 pub mod buffer_utils;
 pub mod buffer_queue;
 pub mod remote_transfer_handler;
+pub mod metrics;

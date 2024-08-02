@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc, time::{Duration, SystemTime}};
+use std::{collections::HashMap, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
 use volga_rust::network::{channel::Channel, data_reader::DataReader, data_writer::DataWriter, io_loop::{Direction, IOHandler, IOLoop}, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
@@ -12,6 +12,9 @@ fn test_one_to_one_local() {
 fn test_one_to_one_remote() {
     test_one_to_one(false);
 }
+
+// TODO add unreliable channel test (out-of-orders, drops and duplicates)
+// TODO add transfer handler disconnect/reconnect test 
 
 fn test_one_to_one(local: bool) {
     let channel;
@@ -32,12 +35,16 @@ fn test_one_to_one(local: bool) {
             port: 1234 
         }
     }
+    let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
+    let job_name = format!("job-{now_ts}");
     let data_reader = Arc::new(DataReader::new(
         String::from("data_reader"),
+        job_name.clone(),
         vec![channel.clone()],
     ));
     let data_writer = Arc::new(DataWriter::new(
         String::from("data_writer"),
+        job_name.clone(),
         vec![channel.clone()],
     ));
 
@@ -49,11 +56,13 @@ fn test_one_to_one(local: bool) {
     if !local {
         let transfer_sender = Arc::new(RemoteTransferHandler::new(
             String::from("transfer_sender"),
+            job_name.clone(),
             vec![channel.clone()],
             Direction::Sender
         ));
         let transfer_receiver = Arc::new(RemoteTransferHandler::new(
             String::from("transfer_sender"),
+            job_name.clone(),
             vec![channel.clone()],
             Direction::Receiver
         ));
@@ -70,7 +79,7 @@ fn test_one_to_one(local: bool) {
 
     io_loop.start_io_threads(1);
 
-    let num_msgs = 1;
+    let num_msgs = 100000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();

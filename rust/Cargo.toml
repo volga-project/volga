@@ -22,7 +22,8 @@ crossbeam = "0.8.4"
 rmp = "0.8.14"
 rmpv = "1.3.0"
 rmp-serde = "1.3.0"
-varint= "0.9.0"
+varint = "0.9.0"
+advisory-lock = "0.3.0"
 
 [target.x86_64-apple-darwin]
 rustflags = [

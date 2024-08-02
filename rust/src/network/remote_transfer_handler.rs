@@ -1,13 +1,14 @@
 use std::{collections::HashMap, hash::Hash, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::JoinHandle};
 
-use crossbeam::{channel::{unbounded, Receiver, Sender}, queue::ArrayQueue};
+use crossbeam::{channel::{unbounded, bounded, Receiver, Sender}, queue::ArrayQueue};
 
-use super::{buffer_utils::get_channeld_id, channel::{self, Channel}, io_loop::{Bytes, Direction, IOHandler, IOHandlerType}, sockets::{SocketMetadata, SocketOwner}};
+use super::{buffer_utils::{get_buffer_id, get_channeld_id}, channel::{self, Channel}, io_loop::{Bytes, Direction, IOHandler, IOHandlerType}, sockets::{SocketMetadata, SocketOwner}};
 
 // const TRANSFER_QUEUE_SIZE: usize = 1000;
 
 pub struct RemoteTransferHandler {
     name: String,
+    job_name: String,
     channels: Vec<Channel>,
     direction: Direction,
 
@@ -25,7 +26,7 @@ pub struct RemoteTransferHandler {
 
 impl RemoteTransferHandler {
 
-    pub fn new(name: String, channels: Vec<Channel>, direction: Direction) -> Self {
+    pub fn new(name: String, job_name: String, channels: Vec<Channel>, direction: Direction) -> Self {
 
         let is_sender = direction == Direction::Sender;
 
@@ -58,12 +59,23 @@ impl RemoteTransferHandler {
                     if !remote_recv_chans.contains_key(peer_node_id) {
                         remote_recv_chans.insert(peer_node_id.clone(), unbounded());
                     }
+
+                    // let ch_len = 10000;
+                    // local_send_chans.insert(channel_id.clone(), bounded(ch_len));
+                    // local_recv_chans.insert(channel_id.clone(), bounded(ch_len));
+                    // if !remote_send_chans.contains_key(peer_node_id) {
+                    //     remote_send_chans.insert(peer_node_id.clone(), bounded(ch_len));
+                    // }
+                    // if !remote_recv_chans.contains_key(peer_node_id) {
+                    //     remote_recv_chans.insert(peer_node_id.clone(), bounded(ch_len));
+                    // }
                 }
             }
         }
 
         RemoteTransferHandler{
             name, 
+            job_name,
             channels,
             direction,
             local_send_chans: Arc::new(RwLock::new(local_send_chans)),
@@ -131,6 +143,7 @@ impl IOHandler for RemoteTransferHandler {
         let this_remote_send_chans = self.remote_send_chans.clone();
         let this_runnning = self.running.clone();
         let this_peers = self.channel_id_to_node_id.clone();
+        let is_sender = self.direction == Direction::Sender;
 
         // we put stuff fromm all local recv chans into corresponding remote out chans
         let output_loop = move || {
@@ -149,14 +162,18 @@ impl IOHandler for RemoteTransferHandler {
                     let receiver = recv_chan.1.clone();
                     if !sender.is_full() & !receiver.is_empty() {
                         let b = receiver.recv().unwrap();
+                        let mut _buffer_id = 0;
+                        if is_sender {
+                            _buffer_id = get_buffer_id(b.clone());
+                        }
                         sender.send(b).unwrap();
                     }
                 }
             }
         };
 
-        let this_local_send_chans = self.local_recv_chans.clone();
-        let this_remote_recv_chans = self.remote_send_chans.clone();
+        let this_local_send_chans = self.local_send_chans.clone();
+        let this_remote_recv_chans = self.remote_recv_chans.clone();
         let this_runnning = self.running.clone();
 
         let input_loop = move || {
