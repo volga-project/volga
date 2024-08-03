@@ -4,9 +4,11 @@ import time
 import threading
 
 lc = LocalChannel('ch_0', 'ipc:///tmp/ipc_0')
+now = int(time.time())
+job_name = f"job-{now}"
 
-data_reader = RustDataReader('test_reader', [lc])
-data_writer = RustDataWriter('test_writer', [lc])
+data_reader = RustDataReader('test_reader', job_name, [lc])
+data_writer = RustDataWriter('test_writer', job_name, [lc])
 io_loop = RustIOLoop()
 io_loop.register_data_writer(data_writer)
 io_loop.register_data_reader(data_reader)

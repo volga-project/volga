@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queue::{BufferQueue, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, sockets::SocketMetadata};
+use super::{buffer_queue::{BufferQueue, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 
@@ -15,6 +15,8 @@ pub struct DataWriter {
     buffer_queue: Arc<BufferQueue>,
 
     in_flight: Arc<RwLock<HashMap<String, Arc<RwLock<HashMap<u32, (u128, Box<Bytes>)>>>>>>,
+
+    metrics_recorder: Arc<MetricsRecorder>,
 
     running: Arc<AtomicBool>,
     io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>> // array queue so we do not mutate DataReader and keep ownership
@@ -35,13 +37,14 @@ impl DataWriter {
         }
 
         DataWriter{
-            name,
-            job_name,
+            name: name.clone(),
+            job_name: job_name.clone(),
             channels: channels.to_vec(),
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),
             buffer_queue: Arc::new(BufferQueue::new(channels.to_vec())),
             in_flight: Arc::new(RwLock::new(in_flight)),
+            metrics_recorder: Arc::new(MetricsRecorder::new(name.clone(), job_name.clone())),
             running: Arc::new(AtomicBool::new(false)),
             io_thread_handles: Arc::new(ArrayQueue::new(2))
         }
@@ -95,11 +98,13 @@ impl IOHandler for DataWriter {
     fn start(&self) {
         // start io threads to send buffers and receive acks
         self.running.store(true, Ordering::Relaxed);
+        self.metrics_recorder.start();
         
         let this_send_chans = self.send_chans.clone();
         let this_buffer_queue = self.buffer_queue.clone();
         let this_in_flights = self.in_flight.clone();
         let this_runnning = self.running.clone();
+        let this_metrics_recorder = self.metrics_recorder.clone();
 
         let output_loop = move || {
 
@@ -120,7 +125,10 @@ impl IOHandler for DataWriter {
                             let sender = send_chan.0.clone();
                             if !sender.is_full() {
                                 sender.send(ts_and_b.1.clone()).unwrap();
+                                let size = ts_and_b.1.len();
                                 locked_in_flight.clone().insert(*in_flight_buffer_id, (now_ts, ts_and_b.1.clone()));
+                                this_metrics_recorder.inc(NUM_BUFFERS_RESENT, &channel_id, 1);
+                                this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
                             }
                         }
                     }
@@ -137,10 +145,14 @@ impl IOHandler for DataWriter {
                         let b = this_buffer_queue.schedule_next(channel_id);
                         if b.is_some() {
                             let b = b.unwrap();
+                            let size = b.len();
                             sender.send(b.clone()).unwrap();
                             let buffer_id = get_buffer_id(b.clone());
                             let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
                             locked_in_flight.clone().insert(buffer_id, (now_ts, b.clone()));
+
+                            this_metrics_recorder.inc(NUM_BUFFERS_SENT, &channel_id, 1);
+                            this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
                         }
                     }
                 }
@@ -151,6 +163,7 @@ impl IOHandler for DataWriter {
         let this_recv_chans = self.recv_chans.clone();
         let this_buffer_queue = self.buffer_queue.clone();
         let this_in_flights = self.in_flight.clone();
+        let this_metrics_recorder = self.metrics_recorder.clone();
         let input_loop = move || {
             loop {
                 let running = this_runnning.load(Ordering::Relaxed);
@@ -165,14 +178,17 @@ impl IOHandler for DataWriter {
                     let receiver = recv_chan.1.clone();
                     let b = receiver.try_recv();
                     if b.is_ok() {
-                        // let ack: AckMessage = bincode::deserialize(&b.unwrap()).unwrap();
-                        let ack = AckMessage::de(b.unwrap());
+                        let b = b.unwrap();
+                        let size = b.len();
+                        let ack = AckMessage::de(b);
                         let buffer_id = &ack.buffer_id;
                         // remove from in-flights
                         locked_in_flights.get(channel_id).unwrap().write().unwrap().remove(buffer_id);
 
                         // requets in-order pop
                         this_buffer_queue.request_pop(channel_id, *buffer_id);
+                        this_metrics_recorder.inc(NUM_BUFFERS_RECVD, &channel_id, 1);
+                        this_metrics_recorder.inc(NUM_BYTES_RECVD, &channel_id, size as u64);
                     }
                 }
             }
@@ -191,5 +207,6 @@ impl IOHandler for DataWriter {
             let handle = self.io_thread_handles.pop();
             handle.unwrap().join().unwrap();
         }
+        self.metrics_recorder.close();
     }
 }
