@@ -4,7 +4,6 @@ use network::py_interface::*;
 
 #[pymodule]
 fn volga_rust(_py: Python, m: &PyModule) -> PyResult<()> {
-    m.add_class::<PyChannel>()?;
     m.add_class::<PyLocalChannel>()?;
     m.add_class::<PyRemoteChannel>()?;
     m.add_class::<PyDataReader>()?;

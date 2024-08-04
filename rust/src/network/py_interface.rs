@@ -1,6 +1,6 @@
-use std::{borrow::{Borrow, BorrowMut}, hash::Hash, sync::{Arc, RwLock}};
+use std::{any::Any, borrow::{Borrow, BorrowMut}, hash::Hash, sync::{Arc, RwLock}};
 
-use pyo3::{pyclass, pymethods, types::PyBytes, IntoPy, Py, PyResult, PyTryFrom, Python};
+use pyo3::{pyclass, pymethods, types::PyBytes, IntoPy, Py, PyAny, PyResult, PyTryFrom, Python};
 
 use super::{channel::Channel, data_reader::{self, DataReader}, data_writer::DataWriter, io_loop::{Direction, IOHandler, IOLoop}, remote_transfer_handler::RemoteTransferHandler};
 
@@ -9,7 +9,7 @@ pub trait ToRustChannel {
 }
 
 #[derive(Clone)]
-#[pyclass(extends=PyChannel, name="LocalChannel")]
+#[pyclass(name="RustLocalChannel")]
 pub struct PyLocalChannel {
     #[pyo3(get, set)]
     channel_id: String,
@@ -21,8 +21,8 @@ pub struct PyLocalChannel {
 impl PyLocalChannel {
 
     #[new]
-    pub fn new(channel_id: String, ipc_addr: String) -> (Self, PyChannel) {
-        (PyLocalChannel{channel_id: channel_id.clone(), ipc_addr: ipc_addr.clone()}, PyChannel{channel_id: channel_id.clone()})
+    pub fn new(channel_id: String, ipc_addr: String) -> Self {
+        PyLocalChannel{channel_id: channel_id.clone(), ipc_addr: ipc_addr.clone()}
     }
 }
 
@@ -34,7 +34,7 @@ impl ToRustChannel for PyLocalChannel {
 }
 
 #[derive(Clone)]
-#[pyclass(extends=PyChannel, name="RemoteChannel")]
+#[pyclass(name="RustRemoteChannel")]
 pub struct PyRemoteChannel {
     #[pyo3(get, set)]
     channel_id: String,
@@ -83,8 +83,8 @@ impl PyRemoteChannel {
         target_node_ip: String,
         target_node_id: String,
         port: i32,
-    ) -> (Self, PyChannel) {
-        (PyRemoteChannel{
+    ) -> Self {
+        PyRemoteChannel{
             channel_id: channel_id.clone(), 
             source_local_ipc_addr: source_local_ipc_addr.clone(), 
             source_node_ip: source_node_ip.clone(), 
@@ -93,32 +93,9 @@ impl PyRemoteChannel {
             target_node_ip: target_node_ip.clone(), 
             target_node_id: target_node_id.clone(), 
             port: port.clone()
-        }, 
-        PyChannel{channel_id: channel_id.clone()})
+        }
     }
 }
-
-#[derive(Clone)]
-#[pyclass(name="Channel", subclass)]
-pub struct PyChannel {
-    #[pyo3(get, set)]
-    channel_id: String,
-}
-
-#[pymethods]
-impl PyChannel {
-
-    #[new]
-    pub fn new(channel_id: String) -> PyChannel {
-        PyChannel{channel_id}
-    }
-}
-
-// impl ToRustChannel for PyChannel {
-//     fn to_rust_channel(&self) -> Channel {
-//         // TODO
-//     }
-// }
 
 
 #[pyclass(name="RustDataReader")]
@@ -131,10 +108,16 @@ pub struct PyDataReader {
 impl PyDataReader {
 
     #[new]
-    pub fn new(name: String, job_name: String, channels: Vec<PyLocalChannel>) -> PyDataReader { // TODO we need to pass generic PyChannel
+    pub fn new(name: String, job_name: String, channels: Vec<&PyAny>) -> PyDataReader {
         let mut rust_channels = Vec::new();
         for ch in channels {
-            rust_channels.push(ch.to_rust_channel());
+            let ext: Result<PyLocalChannel, pyo3::PyErr> = ch.extract();
+            if ext.is_ok() {
+                rust_channels.push(ext.unwrap().to_rust_channel());
+            } else {
+                let ext: Result<PyRemoteChannel, pyo3::PyErr> = ch.extract();
+                rust_channels.push(ext.unwrap().to_rust_channel());
+            }
         };
         let data_reader = DataReader::new(name, job_name, rust_channels);
         PyDataReader{data_reader: Arc::new(data_reader)}
@@ -170,10 +153,16 @@ pub struct PyDataWriter {
 impl PyDataWriter {
 
     #[new]
-    pub fn new(name: String, job_name: String, channels: Vec<PyLocalChannel>) -> PyDataWriter { // TODO we need to pass generic PyChannel
+    pub fn new(name: String, job_name: String, channels: Vec<&PyAny>) -> PyDataWriter {
         let mut rust_channels = Vec::new();
         for ch in channels {
-            rust_channels.push(ch.to_rust_channel());
+            let ext: Result<PyLocalChannel, pyo3::PyErr> = ch.extract();
+            if ext.is_ok() {
+                rust_channels.push(ext.unwrap().to_rust_channel());
+            } else {
+                let ext: Result<PyRemoteChannel, pyo3::PyErr> = ch.extract();
+                rust_channels.push(ext.unwrap().to_rust_channel());
+            }
         };
         let data_writer = DataWriter::new(name, job_name, rust_channels);
         PyDataWriter{data_writer: Arc::new(data_writer)}

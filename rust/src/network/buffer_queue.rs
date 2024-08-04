@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicU32, 
 use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta}, channel::{Channel}, io_loop::Bytes};
 
 
-pub const MAX_BUFFERS_PER_CHANNEL: usize = 10;
+pub const MAX_BUFFERS_PER_CHANNEL: usize = 100000;
 
 pub struct BufferQueue {
     in_queues: Arc<RwLock<HashMap<String, Arc<Mutex<VecDeque<Box<Bytes>>>>>>>,

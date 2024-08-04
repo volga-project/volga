@@ -2,9 +2,9 @@ import time
 import msgpack
 import orjson
 
-n = 1000000
+n = 1000
 msg_size = 1024
-batch_size = 100
+batch_size = 1
 
 msgs = [{'k': i, 'v': msg_size*'a'} for i in range(n)]
 

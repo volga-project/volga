@@ -4,7 +4,7 @@ use super::{buffer_queue::{BufferQueue, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 
-const IN_FLIGHT_TIMEOUT_S: usize = 5; // how long to wait before re-sending un-acked buffers
+const IN_FLIGHT_TIMEOUT_S: usize = 1; // how long to wait before re-sending un-acked buffers
 
 pub struct DataWriter {
     name: String,
