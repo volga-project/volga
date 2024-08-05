@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queue::{BufferQueue, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
+use super::{buffer_queues::{BufferQueues, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 
@@ -12,7 +12,7 @@ pub struct DataWriter {
     channels: Vec<Channel>,
     send_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
     recv_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
-    buffer_queue: Arc<BufferQueue>,
+    buffer_queues: Arc<BufferQueues>,
 
     in_flight: Arc<RwLock<HashMap<String, Arc<RwLock<HashMap<u32, (u128, Box<Bytes>)>>>>>>,
 
@@ -42,7 +42,7 @@ impl DataWriter {
             channels: channels.to_vec(),
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),
-            buffer_queue: Arc::new(BufferQueue::new(channels.to_vec())),
+            buffer_queues: Arc::new(BufferQueues::new(channels.to_vec())),
             in_flight: Arc::new(RwLock::new(in_flight)),
             metrics_recorder: Arc::new(MetricsRecorder::new(name.clone(), job_name.clone())),
             running: Arc::new(AtomicBool::new(false)),
@@ -58,7 +58,7 @@ impl DataWriter {
             if _t - t > timeout_ms as u128 * 1000 {
                 return None
             }
-            let succ = self.buffer_queue.try_push(channel_id, b.clone());
+            let succ = self.buffer_queues.try_push(channel_id, b.clone());
             if !succ {
                 num_retries += 1;
                 thread::sleep(Duration::from_micros(retry_step_micros));
@@ -101,7 +101,7 @@ impl IOHandler for DataWriter {
         self.metrics_recorder.start();
         
         let this_send_chans = self.send_chans.clone();
-        let this_buffer_queue = self.buffer_queue.clone();
+        let this_buffer_queues = self.buffer_queues.clone();
         let this_in_flights = self.in_flight.clone();
         let this_runnning = self.running.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
@@ -142,7 +142,7 @@ impl IOHandler for DataWriter {
                     let sender = send_chan.0.clone();
                     if !sender.is_full() {
 
-                        let b = this_buffer_queue.schedule_next(channel_id);
+                        let b = this_buffer_queues.schedule_next(channel_id);
                         if b.is_some() {
                             let b = b.unwrap();
                             let size = b.len();
@@ -161,7 +161,7 @@ impl IOHandler for DataWriter {
 
         let this_runnning = self.running.clone();
         let this_recv_chans = self.recv_chans.clone();
-        let this_buffer_queue = self.buffer_queue.clone();
+        let this_buffer_queues = self.buffer_queues.clone();
         let this_in_flights = self.in_flight.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
         let input_loop = move || {
@@ -186,7 +186,7 @@ impl IOHandler for DataWriter {
                         locked_in_flights.get(channel_id).unwrap().write().unwrap().remove(buffer_id);
 
                         // requets in-order pop
-                        this_buffer_queue.request_pop(channel_id, *buffer_id);
+                        this_buffer_queues.request_pop(channel_id, *buffer_id);
                         this_metrics_recorder.inc(NUM_BUFFERS_RECVD, &channel_id, 1);
                         this_metrics_recorder.inc(NUM_BYTES_RECVD, &channel_id, size as u64);
                     }
