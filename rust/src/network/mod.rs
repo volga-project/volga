@@ -6,6 +6,6 @@ pub mod data_reader;
 pub mod utils;
 pub mod py_interface;
 pub mod buffer_utils;
-pub mod buffer_queue;
+pub mod buffer_queues;
 pub mod remote_transfer_handler;
 pub mod metrics;

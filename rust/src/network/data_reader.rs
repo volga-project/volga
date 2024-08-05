@@ -15,6 +15,7 @@ pub struct DataReader {
     recv_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
     out_queue: Arc<Mutex<VecDeque<Box<Bytes>>>>,
 
+    // TODO only one thread actually modifies this, can we simplify?
     watermarks: Arc<RwLock<HashMap<String, Arc<AtomicI32>>>>,
     out_of_order_buffers: Arc<RwLock<HashMap<String, Arc<RwLock<HashMap<i32, Box<Bytes>>>>>>>,
 
