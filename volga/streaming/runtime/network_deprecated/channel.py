@@ -1,23 +1,16 @@
-from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional, Union
-
-from volga_rust import RustLocalChannel, RustRemoteChannel
+from typing import Any, Dict, Optional
 
 ChannelMessage = Dict[str, Any]
 
 IPC_DIR = '/tmp/volga_ipc'
 
 
-class Channel(ABC):
+class Channel:
     def __init__(
         self,
-        channel_id: str
+        channel_id: str, # should be exec_edge_id?
     ):
         self.channel_id = channel_id
-
-    @abstractmethod
-    def to_rust_channel(self) -> Union[RustLocalChannel|RustRemoteChannel]:
-        raise NotImplementedError()
 
 
 # connects two actors on the same node via a zmq.PAIR ipc connection
@@ -30,9 +23,6 @@ class LocalChannel(Channel):
     ):
         super().__init__(channel_id=channel_id)
         self.ipc_addr = ipc_addr
-
-    def to_rust_channel(self) -> RustLocalChannel:
-        return RustLocalChannel(self.channel_id, self.ipc_addr)
 
 
 # connects two actors on different nodes
@@ -59,17 +49,6 @@ class RemoteChannel(Channel):
         self.target_node_id = target_node_id
         self.port = port
 
-    def to_rust_channel(self) -> RustRemoteChannel:
-        return RustRemoteChannel(
-            self.source_local_ipc_addr,
-            self.target_local_ipc_addr,
-            self.source_node_ip,
-            self.target_node_ip,
-            self.source_node_id,
-            self.target_node_id,
-            self.port
-        )
-
 
 def gen_ipc_addr(job_name: str, channel_id: str, node_id: Optional[str] = None) -> str:
     path = f'ipc://{IPC_DIR}/{job_name}'
@@ -77,3 +56,11 @@ def gen_ipc_addr(job_name: str, channel_id: str, node_id: Optional[str] = None) 
         return f'{path}/ipc_{channel_id}'
     else:
         return f'{path}/ipc_{channel_id}_{node_id}'
+
+
+def ipc_path_from_addr(ipc_addr: str) -> str:
+    s = ipc_addr.split('/')
+    suff = s[-1]
+
+    # remove 'ipc://' prefix and suffix
+    return ipc_addr[6:len(ipc_addr) - len(suff)]
