@@ -12,7 +12,7 @@ See our *[blog](https://medium.com/@andreynovitskiy/volga-open-source-data-engin
 Features:
 
 - Utilizes *[custom scalable stream processing engine](https://github.com/volga-project/volga/blob/master/tests/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
-**[ZeroMQ](https://zeromq.org/)** for messaging and **[Rust](https://www.rust-lang.org/)** for some perf-critical parts (*exeprimental*). 
+**[ZeroMQ](https://zeromq.org/)** for messaging and **[Rust](https://www.rust-lang.org/)** for perf-critical parts. 
 Kappa architecture - no Flink or Spark
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
@@ -230,6 +230,12 @@ The project is currently in dev stage and has no published packages.
 To run locally/dev locally, clone the repository and in your dev env run:
 ```
 pip install .
+```
+
+After that make sure to compile rust binaries and build Python binding using PyO3's ```maturin``` :
+```
+cd rust
+maturin develop
 ```
 
 If on Apple Silicon, when installing Ray you may get an error regarding grpcio on Apple Silicon. To fix, run:
