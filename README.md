@@ -11,7 +11,7 @@ See our *[blog](https://medium.com/@andreynovitskiy/volga-open-source-data-engin
  
 Features:
 
-- Utilizes *[custom scalable stream processing engine](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
+- Utilizes *[custom scalable stream processing engine](https://github.com/volga-project/volga/blob/master/tests/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
 **[ZeroMQ](https://zeromq.org/)** for messaging and **[Rust](https://www.rust-lang.org/)** for some perf-critical parts (*exeprimental*). 
 Kappa architecture - no Flink or Spark
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
@@ -261,7 +261,7 @@ ray start --head
 Make sure your program's entry point is in the same virtual env where you launched the cluster.
 You can run sample e2e tests to see the engine's workflow:
 - [test_volga_e2e.py](https://github.com/anovv/volga/blob/master/volga/client/test_volga_e2e.py) - Sample high-level online/offline pipeline
-- [test_streaming_e2e.py](https://github.com/anovv/volga/blob/master/volga/streaming/runtime/master/test/test_streaming_e2e.py) - Sample low-level streaming job
+- [test_streaming_e2e.py](https://github.com/volga-project/volga/blob/master/tests/test_streaming_e2e.py) - Sample low-level streaming job
 ```
 python test_volga_e2e.py
 
