@@ -176,9 +176,9 @@ impl PyDataWriter {
         self.data_writer.close();
     }
 
-    pub fn write_bytes(&self, channel_id: String, b: &PyBytes, timeout_ms: i32, retry_step_micros: u64) -> Option<u128> {
+    pub fn write_bytes(&self, channel_id: String, b: &PyBytes, block: bool, timeout_ms: i32, retry_step_micros: u64) -> Option<u128> {
         let bytes = b.as_bytes().to_vec();
-        self.data_writer.write_bytes(&channel_id, Box::new(bytes), timeout_ms, retry_step_micros)
+        self.data_writer.write_bytes(&channel_id, Box::new(bytes), block, timeout_ms, retry_step_micros)
     }
 }
 
@@ -246,9 +246,9 @@ pub struct PyIOLoop {
 impl PyIOLoop {
 
     #[new]
-    pub fn new() -> PyIOLoop {
+    pub fn new(name: String) -> PyIOLoop {
         PyIOLoop{
-            io_loop: IOLoop::new(),
+            io_loop: IOLoop::new(name),
         }
     }
 
@@ -258,6 +258,14 @@ impl PyIOLoop {
 
     pub fn register_data_reader(&self, dr: &PyDataReader) {
         self.io_loop.register_handler(dr.data_reader.clone());
+    }
+
+    pub fn register_transfer_sender(&self, ts: &PyTransferSender) {
+        self.io_loop.register_handler(ts.transfer_sender.clone());
+    }
+
+    pub fn register_transfer_receiver(&self, tr: &PyTransferReceiver) {
+        self.io_loop.register_handler(tr.transfer_receiver.clone());
     }
 
     pub fn start(&self, num_io_threads: usize) {

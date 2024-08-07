@@ -93,6 +93,10 @@ impl RemoteTransferHandler {
 
 impl IOHandler for RemoteTransferHandler {
 
+    fn get_name(&self) -> String {
+        self.name.clone()
+    }
+
     fn get_handler_type(&self) -> IOHandlerType {
         if self.direction == Direction::Sender {
             IOHandlerType::TransferSender
@@ -147,7 +151,6 @@ impl IOHandler for RemoteTransferHandler {
         let this_runnning = self.running.clone();
         let this_peers = self.channel_id_to_node_id.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
-        let is_sender = self.direction == Direction::Sender;
 
         // we put stuff fromm all local recv chans into corresponding remote out chans
         let output_loop = move || {

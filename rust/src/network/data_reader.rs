@@ -80,6 +80,10 @@ impl DataReader {
 }
 
 impl IOHandler for DataReader {
+    
+    fn get_name(&self) -> String {
+        self.name.clone()
+    }
 
     fn get_handler_type(&self) -> IOHandlerType {
         IOHandlerType::DataReader

@@ -1,15 +1,14 @@
-from typing import List
+from typing import List, Optional
 
 import msgpack
 
-from volga.streaming.api.message.message import Record
 from volga.streaming.runtime.network_rust.channel import Channel, ChannelMessage
 from volga_rust import RustDataReader
 
-from volga.streaming.runtime.network_rust.metrics import MetricsRecorder
+from volga.streaming.runtime.network_rust.io_loop import IOHandler, RustIOHandler
 
 
-class DataReader:
+class DataReader(IOHandler):
 
     def __init__(
         self,
@@ -17,18 +16,22 @@ class DataReader:
         job_name: str,
         channels: List[Channel]
     ):
-        rust_channels = [channel.to_rust_channel() for channel in channels]
-        self._rust_data_reader = RustDataReader(name, job_name, rust_channels)
-        self._metrics_recorder = MetricsRecorder(name, job_name)
+        super().__init__(name, job_name, channels)
+        self._rust_data_reader = RustDataReader(name, job_name, self._rust_channels)
 
-    def read_message(self) -> List[ChannelMessage]:
+    def get_rust_io_handler(self) -> RustIOHandler:
+        return self._rust_data_reader
+
+    def read_message(self) -> Optional[List[ChannelMessage]]:
         b = self._rust_data_reader.read_bytes()
+        if b is None:
+            return None
         return msgpack.loads(b)
 
     def start(self):
+        super().start()
         self._rust_data_reader.start()
-        self._metrics_recorder.start()
 
     def close(self):
+        super().close()
         self._rust_data_reader.close()
-        self._metrics_recorder.close()

@@ -74,17 +74,17 @@ class MetricsRecorder:
     def _read_and_flush(self):
         filename = self._metrics_filename()
         try:
-            with open(filename, "r+") as f:
+            with open(filename, "rb+") as f:
                 # Acquire file lock
                 fd = f.fileno()
                 fcntl.flock(fd, fcntl.LOCK_EX)
                 b = f.read()
-                metrics = msgpack.loads(b)
-                f.truncate(0) # clean up
+                if b is not None and len(b) != 0:
+                    metrics = msgpack.loads(b)
+                    f.truncate(0) # clean up
+                    self._record_metrics_to_prom(metrics)
         except IOError:
             return
-
-        self._record_metrics_to_prom(metrics)
 
     def _record_metrics_to_prom(self, metrics: Dict):
         for metric_key in metrics:
@@ -92,11 +92,12 @@ class MetricsRecorder:
             if metric_name not in self.counters:
                 raise RuntimeError(f'Unknown metric: {metric_name}')
             value = metrics[metric_key]
-            self.counters[metric_name].inc(value=value, tags={
-                TagKeys.CHANNEL_OR_PEER_ID.value: channel_or_peer_id,
-                TagKeys.JOB_NAME.value: self._job_name,
-                TagKeys.HANDLER_NAME.value: self._handler_name
-            })
+            if value != 0:
+                self.counters[metric_name].inc(value=value, tags={
+                    TagKeys.CHANNEL_OR_PEER_ID.value: channel_or_peer_id,
+                    TagKeys.JOB_NAME.value: self._job_name,
+                    TagKeys.HANDLER_NAME.value: self._handler_name
+                })
 
     # TODO this should be in sync with rust
     @staticmethod

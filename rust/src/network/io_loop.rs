@@ -22,6 +22,8 @@ pub enum IOHandlerType {
 
 pub trait IOHandler {
 
+    fn get_name(&self) -> String;
+
     fn get_handler_type(&self) -> IOHandlerType;
 
     fn get_channels(&self) -> &Vec<Channel>;
@@ -36,6 +38,7 @@ pub trait IOHandler {
 }
 
 pub struct IOLoop {
+    name: String,
     handlers: Arc<Mutex<Vec<Arc<dyn IOHandler + Send + Sync>>>>,
     running: Arc<AtomicBool>,
     zmq_context: Arc<zmq::Context>,
@@ -45,8 +48,9 @@ pub struct IOLoop {
 
 impl IOLoop {
 
-    pub fn new() -> IOLoop {
+    pub fn new(name: String) -> IOLoop {
         let io_loop = IOLoop{
+            name,
             handlers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
             zmq_context: Arc::new(zmq::Context::new()),
@@ -63,8 +67,14 @@ impl IOLoop {
     pub fn start_io_threads(&self, num_threads: usize) {
         // since zmq::Sockets are not thread safe we will have a model where each socket can be polled by only 1 IO thread
         // each IO thread can have multiple sockets associated with it
-
+        let name = self.name.clone();
+        println!("Started loop {name}");
         let locked_handlers = self.handlers.lock().unwrap();
+
+        if locked_handlers.len() == 0 {
+            panic!("{name} loop started with no registered handlers");
+        }
+
         let sockets_metadata = self.sockets_metadata_manager.create_for_handlers(&locked_handlers);
 
         let num_threads = min(num_threads, sockets_metadata.len());
@@ -110,10 +120,9 @@ impl IOLoop {
                         poll_list.push(socket.as_poll_item(zmq::POLLIN|zmq::POLLOUT));
                     }
 
-                    zmq::poll(&mut poll_list, -1).unwrap();
+                    zmq::poll(&mut poll_list, 1).unwrap();
 
                     for i in 0..poll_list.len() {
-                        // let channel_id = &sockets_manager.get_sockets_and_metas()[i].1.channel_id;
                         let handler = handlers[i].clone();
                         let (socket, sm)  = &sockets_manager.get_sockets_and_metas()[i];
                         if poll_list[i].is_readable() {
@@ -146,10 +155,13 @@ impl IOLoop {
     }
 
     pub fn close(&self) {
+        let name = &self.name;
         self.running.store(false, Ordering::Relaxed);
         while !self.io_threads.is_empty() {
             let handle = self.io_threads.pop();
             handle.unwrap().join().unwrap();
         }
+        // TODO destroy zmq context
+        println!("Closed loop {name}");
     }
 }

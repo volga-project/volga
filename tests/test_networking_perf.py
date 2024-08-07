@@ -12,16 +12,16 @@ job_name = f"job-{now}"
 
 data_reader = RustDataReader('test_reader', job_name, [lc])
 data_writer = RustDataWriter('test_writer', job_name, [lc])
-io_loop = RustIOLoop()
+io_loop = RustIOLoop('test_loop')
 io_loop.register_data_writer(data_writer)
 io_loop.register_data_reader(data_reader)
 data_writer.start()
 data_reader.start()
 io_loop.start(1)
 
-num_msgs = 10000000
+num_msgs = 10000
 msg_size = 1024
-batch_size = 1000
+batch_size = 1
 
 msgs = [str(random.randint(0, 9)) * msg_size] * num_msgs
 msgs_b = [b'a' * msg_size] * num_msgs
@@ -35,7 +35,7 @@ def send():
             res = None
             t = time.time()
             while res is None:
-                res = data_writer.write_bytes(lc.channel_id, b, 1000, 1)
+                res = data_writer.write_bytes(lc.channel_id, b, True, 1000, 1)
 
             t = time.time() - t
             print(f'Written in {t}s')
@@ -44,7 +44,7 @@ def send():
         b = msgpack.dumps(batch)
         res = None
         while res is None:
-            res = data_writer.write_bytes(lc.channel_id, b, 1000, 1)
+            res = data_writer.write_bytes(lc.channel_id, b, True, 1000, 1)
 
 def send_b():
     for b in msgs_b:

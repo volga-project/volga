@@ -50,7 +50,7 @@ fn test_one_to_one(local: bool) {
 
     let mut remote_transfer_handlers = Vec::new();
 
-    let io_loop = IOLoop::new();
+    let io_loop = IOLoop::new(String::from("io_loop"));
     io_loop.register_handler(data_reader.clone());
     io_loop.register_handler(data_writer.clone());
     if !local {
@@ -101,7 +101,7 @@ fn test_one_to_one(local: bool) {
     let j_handle = std::thread::spawn(move|| {
         let mut backp = 0;
         for msg in local_to_send.as_ref() {
-            backp += moved_data_writer.write_bytes(channel.get_channel_id(), msg.clone(), 1000, 0).unwrap();
+            backp += moved_data_writer.write_bytes(channel.get_channel_id(), msg.clone(), true, 1000, 0).unwrap();
         }
         backp
     });

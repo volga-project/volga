@@ -9,8 +9,8 @@ pub const NUM_BUFFERS_RECVD: &str = "volga_num_buffers_recvd";
 
 pub const NUM_BUFFERS_RESENT: &str = "volga_num_buffers_resent";
 
-pub const NUM_BYTES_SENT: &str = "volga_num_buffers_sent";
-pub const NUM_BYTES_RECVD: &str = "volga_num_buffers_recvd";
+pub const NUM_BYTES_SENT: &str = "volga_num_bytes_sent";
+pub const NUM_BYTES_RECVD: &str = "volga_num_bytes_recvd";
 
 
 const METRICS_PATH_PREFIX: &str = "/tmp/volga/rust/metrics";

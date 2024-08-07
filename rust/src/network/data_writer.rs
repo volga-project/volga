@@ -50,10 +50,18 @@ impl DataWriter {
         }
     }
 
-    pub fn write_bytes(&self, channel_id: &String, b: Box<Bytes>, timeout_ms: i32, retry_step_micros: u64) -> Option<u128> {
+    pub fn write_bytes(&self, channel_id: &String, b: Box<Bytes>, block: bool, timeout_ms: i32, retry_step_micros: u64) -> Option<u128> {
         let t: u128 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
         let mut num_retries = 0;
         loop {
+            if !block {
+                let succ = self.buffer_queues.try_push(channel_id, b.clone());
+                if succ {
+                    return Some(0);
+                } else {
+                    return None
+                }
+            }
             let _t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
             if _t - t > timeout_ms as u128 * 1000 {
                 return None
@@ -74,6 +82,10 @@ impl DataWriter {
 }
 
 impl IOHandler for DataWriter {
+
+    fn get_name(&self) -> String {
+        self.name.clone()
+    }
 
     fn get_handler_type(&self) -> IOHandlerType {
         IOHandlerType::DataWriter
