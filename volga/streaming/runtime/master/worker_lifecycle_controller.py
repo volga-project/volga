@@ -7,7 +7,7 @@ import ray
 from ray.actor import ActorHandle
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
-from volga.streaming.runtime.network.channel import LocalChannel, RemoteChannel, gen_ipc_addr
+from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
 VALID_PORT_RANGE = (30000, 65000)

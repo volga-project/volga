@@ -12,7 +12,6 @@ from volga.streaming.runtime.master.resource_manager.resource_manager import \
     Resources, RESOURCE_KEY_CPU, RESOURCE_KEY_GPU, RESOURCE_KEY_MEM
 from volga.streaming.runtime.network.channel import Channel
 
-
 logger = logging.getLogger(__name__)
 
 
