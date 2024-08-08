@@ -16,6 +16,7 @@ from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 
 from decimal import Decimal
 
+
 class TestStreamingJobE2E(unittest.TestCase):
 
     def __init__(self, ctx: StreamingContext):
@@ -38,7 +39,7 @@ class TestStreamingJobE2E(unittest.TestCase):
             # TODO for some reason volga transforms tuples to lists, figure out why
             return listify(res)
 
-        # TODO increasing this 10x fails ray memory ser (in SinkCacheActor) , too big?
+        # TODO increasing this 10x fails ray memory ser (in SinkCacheActor), too big?
         s1_num_events = 100000
         s2_num_events = 100000
         s1 = [(i, f'a{i}') for i in range(s1_num_events)]
@@ -179,12 +180,12 @@ if __name__ == '__main__':
         ctx = StreamingContext(job_config=job_config)
         t = TestStreamingJobE2E(ctx)
         # TODO should reset context on each call
-        # t.test_join_streams()
+        t.test_join_streams()
         # t.test_window()
         # t.test_delayed_collection_source()
         # t.test_parallel_collection_source()
 
-        t.test_wordcount()
+        # t.test_wordcount()
 
         job_master = ctx.job_master
     finally:
