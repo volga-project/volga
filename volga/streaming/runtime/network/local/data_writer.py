@@ -35,6 +35,7 @@ class DataWriter(IOHandler):
         self.running = False
         self._metrics_recorder = MetricsRecorder(name, job_name)
 
+        # TODO reporting should be per channel?
         self._num_msgs_sent = 0
         self._last_report_ts = time.time()
         self._start_ts = None
@@ -51,6 +52,7 @@ class DataWriter(IOHandler):
     def try_write_message(self, channel_id: str, message: ChannelMessage) -> bool:
         res = self._try_write_message(channel_id, message)
         if res:
+            # TODO reporting should be per channel?
             self._num_msgs_sent += 1
             if time.time() - self._last_report_ts > 1:
                 tx = self._num_msgs_sent/(time.time() - self._start_ts)

@@ -7,6 +7,7 @@ from volga.streaming.runtime.network.local.data_writer import DataWriter
 import time
 import ray
 
+
 @ray.remote(max_concurrency=4)
 class TestWriter:
     def __init__(
