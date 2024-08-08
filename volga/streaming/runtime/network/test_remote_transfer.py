@@ -1,3 +1,5 @@
+import os
+import signal
 import unittest
 import time
 import random
@@ -141,7 +143,79 @@ class TestRemoteTransfer(unittest.TestCase):
 
         ray.shutdown()
 
+    def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
+        job_name = f'job-{int(time.time())}'
+        num_msgs = 1000000
+        msg_size = 1024
+        batch_size = 1000
+        writer_delay_s = 0
+        to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
+
+        ray.init(address=ray_addr, runtime_env=runtime_env)
+        readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id = self._init_ray_actors(
+            num_writers=1,
+            num_msgs_per_writer=num_msgs,
+            batch_size=batch_size,
+            writer_delay_s=writer_delay_s,
+            multinode=multinode,
+            job_name=job_name
+        )
+        start_ray_io_handler_actors([*readers, *writers, source_transfer_actor, target_transfer_actor])
+
+        writers[0].send_items.remote(to_send)
+        fut = readers[0].receive_items.remote()
+
+        time.sleep(1)
+        i = 0
+        timeout = 120
+        t = time.time()
+        while len(ray.get(readers[0].get_items.remote())) != len(to_send):
+            if t - time.time() > timeout:
+                raise RuntimeError('Timeout waiting for finish')
+            if i%2 == 0:
+                ray.kill(source_transfer_actor)
+                time.sleep(0.2)
+                ray.kill(target_transfer_actor)
+                print('graceful kill')
+            else:
+                source_transfer_actor_pid = ray.get(source_transfer_actor.get_pid.remote())
+                time.sleep(0.2)
+                target_transfer_actor_pid = ray.get(target_transfer_actor.get_pid.remote())
+                os.kill(source_transfer_actor_pid, signal.SIGKILL)
+                os.kill(target_transfer_actor_pid, signal.SIGKILL)
+                print('SIGKILL kill')
+
+            time.sleep(1)
+
+            if multinode:
+                source_transfer_actor = TransferActor.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=source_node_id,
+                        soft=False
+                    )
+                ).remote(job_name, 'source_transfer_actor', None, channels)
+
+                target_transfer_actor = TransferActor.options(
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(
+                        node_id=target_node_id,
+                        soft=False
+                    )
+                ).remote(job_name, 'target_transfer_actor', channels, None)
+            else:
+                source_transfer_actor = TransferActor.remote(job_name, 'source_transfer_actor', None, channels)
+                target_transfer_actor = TransferActor.remote(job_name, 'target_transfer_actor', channels, None)
+
+            start_ray_io_handler_actors([source_transfer_actor, target_transfer_actor])
+            print('re-started')
+            i += 1
+            time.sleep(5)
+
+        rcvd = ray.get(fut)
+        assert to_send == rcvd
+        print('assert ok')
+
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_n_to_n_on_ray(n=4)
+    # t.test_n_to_n_on_ray(n=4)
+    t.test_transfer_actor_interruption()
