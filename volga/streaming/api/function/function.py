@@ -12,6 +12,7 @@ from ray.actor import ActorHandle
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
 from volga.streaming.common.utils import collection_chunk_at_index
+from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplit
 
 
 class Function(ABC):
@@ -33,7 +34,22 @@ class SourceContext(ABC):
     @abstractmethod
     def collect(self, element: Any):
         # Emits one element from the source, without attaching a timestamp
-        pass
+        raise NotImplementedError()
+
+    @abstractmethod
+    def set_master_handle(self, job_master: ActorHandle):
+        raise NotImplementedError()
+
+    @abstractmethod
+    def get_current_split(self) -> SourceSplit:
+        # Returns current split
+        raise NotImplementedError()
+
+    @abstractmethod
+    def poll_next_split(self) -> SourceSplit:
+        # Polls next split, marks current as done
+        # TODO we should asyncify this
+        raise NotImplementedError()
 
 
 class SourceFunction(Function):

@@ -4,6 +4,7 @@ from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 
 
+# TODO do we need to separate RuntimeContext and StreamingRuntimeContext? Can we merge?
 class StreamingRuntimeContext(RuntimeContext):
 
     def __init__(

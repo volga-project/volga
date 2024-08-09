@@ -3,12 +3,16 @@ import logging
 from abc import ABC, abstractmethod
 from typing import List, Any, Dict, Optional
 
+from ray.actor import ActorHandle
+import ray
+
 from volga.streaming.api.collector.collector import Collector, CollectionCollector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import Function, SourceContext, SourceFunction, MapFunction, \
     FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
 from volga.streaming.api.message.message import Record, KeyRecord
 from volga.streaming.api.operators.timestamp_assigner import TimestampAssigner
+from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitEnumerator, SourceSplit, SourceSplitType
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +119,8 @@ class SourceOperator(ISourceOperator):
             self.num_records = num_records
             self.num_fetched_records = 0
             self.finished = False
+            self.current_split: Optional[SourceSplit] = None
+            self.job_master: Optional[ActorHandle] = None
 
         def collect(self, value: Any):
             for collector in self.collectors:
@@ -124,18 +130,43 @@ class SourceOperator(ISourceOperator):
                 collector.collect(record)
             self.num_fetched_records += 1
 
-            # notify reached bounds
+            # two ways notify reached bounds
+            # 1. if source function implements num_records (bounded non-split source)
             if self.num_records == self.num_fetched_records:
                 # set finished state
                 self.finished = True
+
+            # 2. if source is a split-source
+            if self.current_split is not None and self.current_split.type == SourceSplitType.END_OF_INPUT:
+                self.finished = True
+
+        def get_current_split(self) -> SourceSplit:
+            if self.current_split is None:
+                self.current_split = self.poll_next_split()
+            return self.current_split
+
+        def poll_next_split(self) -> SourceSplit:
+            split = ray.get(self.job_master.poll_next_source_split.remote(
+                operator_id=self.runtime_context.operator_id,
+                task_id=self.runtime_context.task_id
+            ))
+            self.current_split = split
+            return self.current_split
+
+        def set_master_handle(self, job_master: ActorHandle):
+            self.job_master = job_master
 
     def __init__(self, func: SourceFunction):
         super().__init__(func)
         self.source_context: Optional[SourceOperator.SourceContextImpl] = None
         self.timestamp_assigner: Optional[TimestampAssigner] = None
+        self.split_enumerator: Optional[SourceSplitEnumerator] = None
 
     def set_timestamp_assigner(self, timestamp_assigner: TimestampAssigner):
         self.timestamp_assigner = timestamp_assigner
+
+    def set_split_enumerator(self, split_enumerator: SourceSplitEnumerator):
+        self.split_enumerator = split_enumerator
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
@@ -147,7 +178,7 @@ class SourceOperator(ISourceOperator):
         try:
             num_records = self.func.num_records()
         except NotImplementedError:
-            # unbounded source
+            # unbounded source or split-based source
             pass
         self.source_context = SourceOperator.SourceContextImpl(
             collectors,
