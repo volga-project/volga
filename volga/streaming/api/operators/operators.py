@@ -147,8 +147,8 @@ class SourceOperator(ISourceOperator):
 
         def poll_next_split(self) -> SourceSplit:
             split = ray.get(self.job_master.poll_next_source_split.remote(
-                operator_id=self.runtime_context.operator_id,
-                task_id=self.runtime_context.task_id
+                self.runtime_context.operator_id,
+                self.runtime_context.task_id
             ))
             self.current_split = split
             return self.current_split

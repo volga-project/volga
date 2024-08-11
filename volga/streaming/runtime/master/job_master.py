@@ -17,7 +17,7 @@ from volga.streaming.runtime.master.source_splits.source_splits_manager import S
 logger = logging.getLogger("ray")
 
 
-@ray.remote(max_concurrency=1000)
+@ray.remote
 class JobMaster:
 
     def __init__(self, job_config: Optional[Dict]):

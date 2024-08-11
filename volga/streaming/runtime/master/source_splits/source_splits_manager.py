@@ -16,6 +16,7 @@ class SourceSplit(BaseModel):
 
 
 class SourceSplitEnumerator(ABC):
+
     @abstractmethod
     def poll_next_split(self, task_id: int) -> SourceSplit:
         raise NotImplementedError()
