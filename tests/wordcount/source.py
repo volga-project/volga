@@ -39,6 +39,7 @@ class WordCountSourceSplitEnumerator(SourceSplitEnumerator):
                 words[word] += 1
             else:
                 words[word] = 1
+            self.counts_per_word[word] -= 1
             index += 1
             num_msgs += 1
 

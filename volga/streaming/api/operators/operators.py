@@ -136,13 +136,14 @@ class SourceOperator(ISourceOperator):
                 # set finished state
                 self.finished = True
 
-            # 2. if source is a split-source
-            if self.current_split is not None and self.current_split.type == SourceSplitType.END_OF_INPUT:
-                self.finished = True
-
         def get_current_split(self) -> SourceSplit:
             if self.current_split is None:
                 self.current_split = self.poll_next_split()
+
+            # two ways notify reached bounds
+            # 2. if source is a split-source and we have reached END_OF_INPUT
+            if self.current_split.type == SourceSplitType.END_OF_INPUT:
+                self.finished = True
             return self.current_split
 
         def poll_next_split(self) -> SourceSplit:
@@ -151,6 +152,11 @@ class SourceOperator(ISourceOperator):
                 self.runtime_context.task_id
             ))
             self.current_split = split
+
+            # two ways notify reached bounds
+            # 2. if source is a split-source and we have reached END_OF_INPUT
+            if self.current_split.type == SourceSplitType.END_OF_INPUT:
+                self.finished = True
             return self.current_split
 
         def set_master_handle(self, job_master: ActorHandle):

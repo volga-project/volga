@@ -6,22 +6,61 @@ import ray
 import yaml
 from pathlib import Path
 
-from tests.wordcount.source import WordCountSource
+from tests.wordcount.source import WordCountSource, WordCountSourceSplitEnumerator
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.function.function import SinkToCacheFunction
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
+from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitType
 
 
 class TestWordCount(unittest.TestCase):
+
+    def test_word_count_source_split_enumerator(self):
+        count_per_word = 5
+        num_msgs_per_split = 2
+        dictionary = ['a', 'b', 'c', 'd', 'e']
+
+        e = WordCountSourceSplitEnumerator(
+            count_per_word=count_per_word,
+            num_msgs_per_split=num_msgs_per_split,
+            dictionary=dictionary
+        )
+        splits = []
+        while True:
+            split = e.poll_next_split(task_id=1)
+            splits.append(split)
+            if split.type == SourceSplitType.END_OF_INPUT:
+                break
+        counts = {}
+
+        words_left = len(dictionary) * count_per_word
+        for split in splits:
+            if split.type != SourceSplitType.END_OF_INPUT:
+                num_words = 0
+                for word in split.data:
+                    count = split.data[word]
+                    num_words += count
+                    if word in counts:
+                        counts[word] += count
+                    else:
+                        counts[word] = count
+                assert num_words == min(words_left, num_msgs_per_split)
+                words_left -= num_words
+
+        assert len(counts) == len(dictionary)
+        for w in counts:
+            assert counts[w] == count_per_word
+
+        print('assert ok')
 
     def test(self):
         job_config = yaml.safe_load(Path('../../volga/streaming/runtime/sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 10000
+        count_per_word = 1000
         word_length = 32
-        num_msgs_per_split = 1000
+        num_msgs_per_split = 100
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
 
@@ -31,27 +70,35 @@ class TestWordCount(unittest.TestCase):
         # TODO # we do not want to sink on each update, only the last one, make custom sink_function
         sink_function = SinkToCacheFunction(sink_cache)
 
-        # TODO set_parallelism > 1 fail assert
+        # TODO set_parallelism > 1 fails assert
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=1,
+            parallelism=5,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary
         )
-        source.map(lambda wrd: (wrd, 1)) \
+        s = source.map(lambda wrd: (wrd, 1)) \
             .key_by(lambda e: e[0]) \
-            .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1])) \
-            .sink(sink_function)
+            .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))
+        s1 = s.sink(sink_function)
+        s2 = s.sink(print)
         ctx.execute()
 
         res = ray.get(sink_cache.get_values.remote())
+        # print(res[0:4])
+        # raise
         counts = {}
         for (word, count) in res:
-            counts[word] = max(counts.get(word, count), count)
+            if word in counts:
+                curr_count = counts[word]
+                counts[word] = max(curr_count, count)
+            else:
+                counts[word] = count
 
         assert len(counts) == dict_size
         for w in counts:
+            # print(counts[w])
             assert counts[w] == count_per_word
 
         print('assert ok')
@@ -60,4 +107,5 @@ class TestWordCount(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestWordCount()
+    # t.test_word_count_source_split_enumerator()
     t.test()

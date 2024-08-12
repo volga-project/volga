@@ -114,7 +114,6 @@ class StreamTask(ABC):
             runtime_context=runtime_context
         )
         if isinstance(self.processor, SourceProcessor):
-            print('Bam')
             self.processor.set_master_handle(self.job_master)
 
     def close(self):
