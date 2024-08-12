@@ -4,19 +4,17 @@ from abc import ABC, abstractmethod
 from threading import Thread
 from typing import Optional
 
-import zmq
+from ray.actor import ActorHandle
 
 from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.message.message import Record, record_from_channel_message
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
-from volga.streaming.runtime.network_deprecated.buffer.buffering_policy import PeriodicPartialFlushPolicy
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
 from volga.streaming.runtime.network.local.data_writer import DataWriter
 from volga.streaming.runtime.worker.task.streaming_runtime_context import StreamingRuntimeContext
 from volga.streaming.runtime.core.collector.output_collector import OutputCollector
-from volga.streaming.runtime.core.processor.processor import Processor, TwoInputProcessor
-
+from volga.streaming.runtime.core.processor.processor import Processor, TwoInputProcessor, SourceProcessor
 
 logger = logging.getLogger("ray")
 
@@ -25,9 +23,11 @@ class StreamTask(ABC):
 
     def __init__(
         self,
+        job_master: ActorHandle,
         processor: Processor,
         execution_vertex: ExecutionVertex
     ):
+        self.job_master = job_master
         self.processor = processor
         self.execution_vertex = execution_vertex
         self.thread = Thread(target=self.run, daemon=True)
@@ -113,6 +113,8 @@ class StreamTask(ABC):
             collectors=self.collectors,
             runtime_context=runtime_context
         )
+        if isinstance(self.processor, SourceProcessor):
+            self.processor.set_master_handle(self.job_master)
 
     def close(self):
         # logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
@@ -155,12 +157,14 @@ class TwoInputStreamTask(InputStreamTask):
 
     def __init__(
         self,
+        job_master: ActorHandle,
         processor: Processor,
         execution_vertex: ExecutionVertex,
         left_stream_name: str,
         right_stream_name: str,
     ):
         super().__init__(
+            job_master=job_master,
             processor=processor,
             execution_vertex=execution_vertex
         )

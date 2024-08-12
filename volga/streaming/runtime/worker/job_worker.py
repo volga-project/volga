@@ -76,11 +76,13 @@ class JobWorker:
         stream_processor = Processor.build_processor(self.execution_vertex.stream_operator)
         if isinstance(stream_processor, SourceProcessor):
             task = SourceStreamTask(
+                job_master=self.job_master,
                 processor=stream_processor,
                 execution_vertex=self.execution_vertex
             )
         elif isinstance(stream_processor, OneInputProcessor):
             task = OneInputStreamTask(
+                job_master=self.job_master,
                 processor=stream_processor,
                 execution_vertex=self.execution_vertex
             )
@@ -94,6 +96,7 @@ class JobWorker:
             left_stream_name = str(input_op_ids[0])
             right_stream_name = str(input_op_ids[1])
             task = TwoInputStreamTask(
+                job_master=self.job_master,
                 processor=stream_processor,
                 execution_vertex=self.execution_vertex,
                 left_stream_name=left_stream_name,

@@ -16,6 +16,7 @@ from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 
 from decimal import Decimal
 
+
 class TestStreamingJobE2E(unittest.TestCase):
 
     def __init__(self, ctx: StreamingContext):
@@ -38,7 +39,7 @@ class TestStreamingJobE2E(unittest.TestCase):
             # TODO for some reason volga transforms tuples to lists, figure out why
             return listify(res)
 
-        # TODO increasing this 10x fails ray memory ser (in SinkCacheActor) , too big?
+        # TODO increasing this 10x fails ray memory ser (in SinkCacheActor), too big?
         s1_num_events = 100000
         s2_num_events = 100000
         s1 = [(i, f'a{i}') for i in range(s1_num_events)]
@@ -105,33 +106,33 @@ class TestStreamingJobE2E(unittest.TestCase):
         # TODO assert
 
     def test_wordcount(self):
-        num_word_types = 20
-        num_words_per_type = 10000
+        dict_size = 20
+        num_gen_per_word = 10000
         word_length = 32
 
-        word_types = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(num_word_types)]
+        dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
 
-        num_words_left_per_type = {i: num_words_per_type for i in range(len(word_types))}
+        num_gen_left_per_word = {i: num_gen_per_word for i in range(len(dictionary))}
 
         # TODO make generator
-        words = []
+        gen_words = []
         # randomly order
-        while len(num_words_left_per_type) != 0:
-            index = random.randrange(len(num_words_left_per_type))
-            i = list(num_words_left_per_type.keys())[index]
-            words.append(word_types[i])
-            num_words_left_per_type[i] -= 1
-            if num_words_left_per_type[i] == 0:
-                del num_words_left_per_type[i]
+        while len(num_gen_left_per_word) != 0:
+            index = random.randrange(len(num_gen_left_per_word))
+            i = list(num_gen_left_per_word.keys())[index]
+            gen_words.append(dictionary[i])
+            num_gen_left_per_word[i] -= 1
+            if num_gen_left_per_word[i] == 0:
+                del num_gen_left_per_word[i]
 
-        assert len(words) == num_word_types * num_words_per_type
+        assert len(gen_words) == dict_size * num_gen_per_word
         _counts = {}
-        for w in words:
+        for w in gen_words:
             _counts[w] = _counts.get(w, 0) + 1
 
-        assert len(_counts) == num_word_types
+        assert len(_counts) == dict_size
         for w in _counts:
-            assert _counts[w] == num_words_per_type
+            assert _counts[w] == num_gen_per_word
 
         sink_cache = SinkCacheActor.remote()
 
@@ -139,7 +140,7 @@ class TestStreamingJobE2E(unittest.TestCase):
         sink_function = SinkToCacheFunction(sink_cache)
 
         # TODO set_parallelism > 1 fail assert
-        source = self.ctx.from_collection(words).set_parallelism(1)
+        source = self.ctx.from_collection(gen_words).set_parallelism(1)
         source.map(lambda wrd: (wrd, 1))\
             .key_by(lambda e: e[0])\
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))\
@@ -152,9 +153,9 @@ class TestStreamingJobE2E(unittest.TestCase):
         for (word, count) in res:
             counts[word] = max(counts.get(word, count), count)
 
-        assert len(counts) == num_word_types
+        assert len(counts) == dict_size
         for w in counts:
-            assert counts[w] == num_words_per_type
+            assert counts[w] == num_gen_per_word
 
         print('assert ok')
 

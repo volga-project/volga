@@ -61,11 +61,12 @@ class RemoteChannel(Channel):
 
     def to_rust_channel(self) -> RustRemoteChannel:
         return RustRemoteChannel(
+            self.channel_id,
             self.source_local_ipc_addr,
-            self.target_local_ipc_addr,
             self.source_node_ip,
-            self.target_node_ip,
             self.source_node_id,
+            self.target_local_ipc_addr,
+            self.target_node_ip,
             self.target_node_id,
             self.port
         )

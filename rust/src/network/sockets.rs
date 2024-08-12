@@ -117,7 +117,7 @@ impl SocketsMeatadataManager {
         for channel in channels {
             match channel {
                 Channel::Local{channel_id, ipc_addr} => {
-                    let ipc_path = ipc_path_from_addr(ipc_addr);
+                    let ipc_path = parse_ipc_path_from_addr(ipc_addr);
                     fs::create_dir_all(ipc_path).unwrap();
                     let socket_meta = SocketMetadata{
                         owner: SocketOwner::Client,
@@ -133,7 +133,7 @@ impl SocketsMeatadataManager {
                     target_local_ipc_addr, 
                     ..
                 } => {
-                    let ipc_path = ipc_path_from_addr(
+                    let ipc_path = parse_ipc_path_from_addr(
                         if is_reader {target_local_ipc_addr} else {source_local_ipc_addr}
                     );
                     fs::create_dir_all(ipc_path).unwrap();
@@ -173,11 +173,11 @@ impl SocketsMeatadataManager {
                     let local_socket_kind;
 
                     if is_sender {
-                        ipc_path = ipc_path_from_addr(source_local_ipc_addr);
+                        ipc_path = parse_ipc_path_from_addr(source_local_ipc_addr);
                         local_addr = source_local_ipc_addr;
                         local_socket_kind = SocketKind::Connect;
                     } else {
-                        ipc_path = ipc_path_from_addr(target_local_ipc_addr);
+                        ipc_path = parse_ipc_path_from_addr(target_local_ipc_addr);
                         local_addr = target_local_ipc_addr;
                         local_socket_kind = SocketKind::Bind;
                     }
@@ -222,9 +222,34 @@ impl SocketsMeatadataManager {
     }
 }
 
-fn ipc_path_from_addr(ipc_addr: &String) -> String {
+
+// TODO this should be in sync with Py's Channel ipc_addr format
+fn parse_ipc_path_from_addr(ipc_addr: &String) -> String {
     let parts = ipc_addr.split("/");
-    let suff = parts.last().unwrap();
+    let last = parts.last();
+    if last.is_none() {
+        panic!("Malformed ipc addr: {ipc_addr}");
+    } 
+    let suff = last.unwrap();
     let end = ipc_addr.len() - suff.len();
-    ipc_addr.get(6..end).unwrap().to_string()
+    let path = ipc_addr.get(6..end);
+    if path.is_none() {
+        panic!("Malformed ipc addr: {ipc_addr}");
+    }
+    path.unwrap().to_string()
+}
+
+
+#[cfg(test)]
+mod tests {
+
+    use super::*;
+
+    #[test]
+    fn test_parse_ipc_path() {
+        let ipc_addr = String::from("ipc:///tmp/source_local_0");
+        let res = parse_ipc_path_from_addr(&ipc_addr);
+        let expected = String::from("/tmp/");
+        assert_eq!(res, expected);
+    }
 }

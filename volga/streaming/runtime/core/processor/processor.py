@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List
 
+from ray.actor import ActorHandle
+
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.message.message import Record
@@ -91,3 +93,8 @@ class SourceProcessor(StreamProcessor):
 
     def process(self, record: Record):
         self.operator.fetch()
+
+    def set_master_handle(self, job_master: ActorHandle):
+        assert isinstance(self.operator, ISourceOperator)
+        source_context = self.operator.get_source_context()
+        source_context.set_master_handle(job_master)
