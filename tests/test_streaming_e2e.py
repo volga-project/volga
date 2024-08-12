@@ -9,7 +9,7 @@ import yaml
 
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.function.aggregate_function import AggregationType
-from volga.streaming.api.function.function import SinkToCacheFunction
+from volga.streaming.api.function.function import SinkToCacheListFunction, SinkToCacheDictFunction
 from volga.streaming.api.operators.timestamp_assigner import EventTimeAssigner
 from volga.streaming.api.operators.window_operator import SlidingWindowConfig
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
@@ -49,7 +49,7 @@ class TestStreamingJobE2E(unittest.TestCase):
         source2 = self.ctx.from_collection(s2).set_parallelism(4)
 
         sink_cache = SinkCacheActor.remote()
-        sink_function = SinkToCacheFunction(sink_cache)
+        sink_function = SinkToCacheListFunction(sink_cache)
         k1 = lambda x: x[0]
         k2 = lambda x: x[0]
         how = lambda x, y: (x, y)
@@ -62,7 +62,7 @@ class TestStreamingJobE2E(unittest.TestCase):
         start_ts = time.time()
         ctx.execute()
         print(f'Finished in {time.time() - start_ts}s')
-        res = ray.get(sink_cache.get_values.remote())
+        res = ray.get(sink_cache.get_list.remote())
 
         expected = dummy_join(s1, s2, k1, k2, how)
         assert len(res) == len(expected)
@@ -136,8 +136,7 @@ class TestStreamingJobE2E(unittest.TestCase):
 
         sink_cache = SinkCacheActor.remote()
 
-        # TODO # we do not want to sink on each update, only the last one, make custom sink_function
-        sink_function = SinkToCacheFunction(sink_cache)
+        sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
         # TODO set_parallelism > 1 fail assert
         source = self.ctx.from_collection(gen_words).set_parallelism(1)
@@ -148,10 +147,7 @@ class TestStreamingJobE2E(unittest.TestCase):
             # .sink(lambda x: None)
         ctx.execute()
 
-        res = ray.get(sink_cache.get_values.remote())
-        counts = {}
-        for (word, count) in res:
-            counts[word] = max(counts.get(word, count), count)
+        counts = ray.get(sink_cache.get_dict.remote())
 
         assert len(counts) == dict_size
         for w in counts:
@@ -166,10 +162,10 @@ class TestStreamingJobE2E(unittest.TestCase):
         s = self.ctx.from_collection(ins)
         s.set_parallelism(parallelism)
         sink_cache = SinkCacheActor.remote()
-        sink_function = SinkToCacheFunction(sink_cache)
+        sink_function = SinkToCacheListFunction(sink_cache)
         s.sink(sink_function)
         ctx.execute()
-        res = ray.get(sink_cache.get_values.remote())
+        res = ray.get(sink_cache.get_list.remote())
         assert sorted(res) == ins
 
 if __name__ == '__main__':

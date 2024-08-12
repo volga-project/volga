@@ -4,7 +4,7 @@ import time
 from abc import ABC, abstractmethod
 from math import ceil
 from threading import Thread
-from typing import Any
+from typing import Any, Dict, List, Union, Callable, Tuple
 
 from ray import cloudpickle
 from ray.actor import ActorHandle
@@ -282,28 +282,31 @@ class SimpleSinkFunction(SinkFunction):
         return self.func(value)
 
 
-class SinkToCacheFunction(SinkFunction):
+class SinkToCacheFunctionBase(SinkFunction, ABC):
 
     DUMPER_PERIOD_S = 1
 
     def __init__(self, cache_actor: ActorHandle):
         self.cache_actor = cache_actor
-        self.buffer = []
+        self.buffer = self.init_buffer()
         self.dumper_thread = None
         self.running = False
 
+    @abstractmethod
     def sink(self, value):
-        self.buffer.append(value)
+        raise NotImplementedError()
 
-    def _dump_buffer_if_needed(self):
-        if len(self.buffer) == 0:
-            return
-        self.cache_actor.extend_values.remote(self.buffer)
-        self.buffer = []
+    @abstractmethod
+    def init_buffer(self) -> Union[List, Dict]:
+        raise NotImplementedError()
+
+    @abstractmethod
+    def dump_buffer_if_needed(self):
+        raise NotImplementedError()
 
     def _dump_buffer_loop(self):
         while self.running:
-            self._dump_buffer_if_needed()
+            self.dump_buffer_if_needed()
             time.sleep(self.DUMPER_PERIOD_S)
 
     def open(self, runtime_context: RuntimeContext):
@@ -313,6 +316,41 @@ class SinkToCacheFunction(SinkFunction):
 
     def close(self):
         self.running = False
-        self._dump_buffer_if_needed()
+        self.dump_buffer_if_needed()
         if self.dumper_thread is not None:
             self.dumper_thread.join(timeout=5)
+
+
+class SinkToCacheDictFunction(SinkToCacheFunctionBase):
+
+    def __init__(self, cache_actor: ActorHandle, key_value_extractor: Callable[[Any], Tuple]):
+        super().__init__(cache_actor)
+        self._key_value_extractor = key_value_extractor
+
+    def sink(self, value):
+        key, value = self._key_value_extractor(value)
+        self.buffer[key] = value
+
+    def init_buffer(self) -> Dict:
+        return {}
+
+    def dump_buffer_if_needed(self):
+        if len(self.buffer) == 0:
+            return
+        self.cache_actor.extend_dict.remote(self.buffer)
+        self.buffer = {}
+
+
+class SinkToCacheListFunction(SinkToCacheFunctionBase):
+
+    def sink(self, value):
+        self.buffer.append(value)
+
+    def init_buffer(self) -> List:
+        return []
+
+    def dump_buffer_if_needed(self):
+        if len(self.buffer) == 0:
+            return
+        self.cache_actor.extend_list.remote(self.buffer)
+        self.buffer = []

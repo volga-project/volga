@@ -46,7 +46,7 @@ class SimpleInMemoryActorStorage(ColdStorage, HotStorage):
             keys_dict = keys[0]
         else:
             keys_dict = None
-        return ray.get(self.cache_actor.get_values.remote(dataset_name, keys_dict, start_ts, end_ts))
+        return ray.get(self.cache_actor.get_list.remote(dataset_name, keys_dict, start_ts, end_ts))
 
     def get_latest_data(self, dataset_name: str, keys: List[Dict[str, Any]]) -> Optional[List[Any]]:
         if keys is not None:
