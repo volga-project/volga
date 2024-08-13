@@ -58,9 +58,9 @@ class TestWordCount(unittest.TestCase):
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 10000
+        count_per_word = 1000000
         word_length = 32
-        num_msgs_per_split = 1000
+        num_msgs_per_split = 100000
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
 
@@ -85,6 +85,7 @@ class TestWordCount(unittest.TestCase):
         ctx.execute()
 
         counts = ray.get(sink_cache.get_dict.remote())
+        print(counts)
         assert len(counts) == dict_size
         for w in counts:
             assert counts[w] == count_per_word

@@ -1,5 +1,8 @@
+import zlib
 from abc import ABC, abstractmethod
 from typing import Any, List
+
+import joblib
 
 
 class Partition(ABC):
@@ -30,7 +33,8 @@ class KeyPartition(Partition):
 
     def partition(self, record: Any, num_partition: int) -> List[int]:
         # TODO support key group
-        self.__partitions[0] = abs(hash(record.key)) % num_partition
+        hash = int(joblib.hash(record.key, hash_name='md5'), base=16) # TODO measure perf overhead
+        self.__partitions[0] = hash % num_partition
         return self.__partitions
 
 

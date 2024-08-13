@@ -107,7 +107,7 @@ class StreamTask(ABC):
 
         runtime_context = StreamingRuntimeContext(execution_vertex=execution_vertex)
 
-        self.io_loop.start()
+        self.io_loop.start() # TODO pass num io threads
 
         self.processor.open(
             collectors=self.collectors,
