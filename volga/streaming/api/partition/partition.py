@@ -3,6 +3,7 @@ from abc import ABC, abstractmethod
 from typing import Any, List
 
 import joblib
+import xxhash
 
 
 class Partition(ABC):
@@ -31,10 +32,13 @@ class KeyPartition(Partition):
     def __init__(self):
         self.__partitions = [-1]
 
+    # make sure we set PYTHONHASHSEED same across all workers
     def partition(self, record: Any, num_partition: int) -> List[int]:
         # TODO support key group
-        hash = int(joblib.hash(record.key, hash_name='md5'), base=16) # TODO measure perf overhead
-        self.__partitions[0] = hash % num_partition
+        _hash = abs(hash(record.key)) # TODO measure perf overhead - this is the best so far
+        # _hash = xxhash.xxh64(record.key).intdigest() # TODO this is slightly slower (10%)
+        # _hash = int(joblib.hash(record.key, hash_name='md5'), base=16) # TODO this is 2x slower
+        self.__partitions[0] = _hash % num_partition
         return self.__partitions
 
 

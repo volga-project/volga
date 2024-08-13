@@ -138,8 +138,7 @@ class TestStreamingJobE2E(unittest.TestCase):
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
-        # TODO set_parallelism > 1 fail assert
-        source = self.ctx.from_collection(gen_words).set_parallelism(1)
+        source = self.ctx.from_collection(gen_words).set_parallelism(2)
         source.map(lambda wrd: (wrd, 1))\
             .key_by(lambda e: e[0])\
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))\
