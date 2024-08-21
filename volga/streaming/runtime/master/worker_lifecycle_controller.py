@@ -1,13 +1,15 @@
 import logging
-import random
 import time
 from random import randint
-from typing import Dict, List, Any
+from typing import List
 
 import ray
 from ray.actor import ActorHandle
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
+from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
+from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
@@ -27,16 +29,27 @@ class WorkerNodeInfo:
 
 class WorkerLifecycleController:
 
-    def __init__(self, job_master: ActorHandle):
+    def __init__(
+        self,
+        job_master: ActorHandle,
+        resource_manager: ResourceManager,
+        node_assign_strategy: NodeAssignStrategy
+    ):
         self.job_master = job_master
+        self.resource_manager = resource_manager
+        self.node_assign_strategy = node_assign_strategy
         self._reserved_node_ports = {}
 
     def create_workers(self, execution_graph: ExecutionGraph):
         workers = {}
         vertex_ids = []
+        logger.info(f'Assigning workers to nodes...')
+        node_assignment = self.resource_manager.assign_resources(execution_graph, self.node_assign_strategy)
+        logger.info(f'Assigned workers to nodes: \n{node_assignment}')
         logger.info(f'Creating {len(execution_graph.execution_vertices_by_id)} workers...')
         for vertex_id in execution_graph.execution_vertices_by_id:
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
+            host_node = node_assignment[vertex_id]
             resources = vertex.resources
 
             # set consistent seed for hash function for all workers
@@ -46,7 +59,11 @@ class WorkerLifecycleController:
             options_kwargs = {
                 'max_restarts': -1,
                 'max_concurrency': 10,
-                'runtime_env': worker_runtime_env
+                'runtime_env': worker_runtime_env,
+                'scheduling_strategy': NodeAffinitySchedulingStrategy(
+                    node_id=host_node.node_id,
+                    soft=False
+                )
             }
             if resources.num_cpus is not None:
                 options_kwargs['num_cpus'] = resources.num_cpus

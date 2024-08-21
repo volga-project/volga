@@ -58,7 +58,7 @@ class TestWordCount(unittest.TestCase):
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 100000
+        count_per_word = 200000
         word_length = 32
         num_msgs_per_split = 10000
 
@@ -69,7 +69,7 @@ class TestWordCount(unittest.TestCase):
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
-        # TODO set_parallelism > 1 fails assert
+        # TODO parallelism > 1 fails assert
         source = WordCountSource(
             streaming_context=ctx,
             parallelism=5,
@@ -85,7 +85,14 @@ class TestWordCount(unittest.TestCase):
         ctx.execute()
 
         counts = ray.get(sink_cache.get_dict.remote())
+        print(counts)
         assert len(counts) == dict_size
+        total = 0
+        for w in counts:
+            total += counts[w]
+
+        print(f'Total: {total}, expected: {count_per_word * dict_size}, diff: {count_per_word * dict_size - total}')
+
         for w in counts:
             assert counts[w] == count_per_word
 
