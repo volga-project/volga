@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 import ray
 
@@ -13,7 +13,7 @@ from volga.streaming.runtime.master.context.job_master_runtime_context import Jo
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import ParallelismFirst
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
 from volga.streaming.runtime.master.scheduler.job_scheduler import JobScheduler
-from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitManager, SourceSplit
+from volga.streaming.runtime.sources.source_splits_manager import SourceSplitManager, SourceSplit
 
 logger = logging.getLogger("ray")
 

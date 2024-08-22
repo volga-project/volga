@@ -2,7 +2,7 @@ from volga.streaming.api.function.function import SourceFunction
 from volga.streaming.api.operators.operators import SourceOperator
 from volga.streaming.api.operators.timestamp_assigner import TimestampAssigner
 from volga.streaming.api.stream.data_stream import DataStream
-from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitEnumerator
+from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnumerator
 
 
 class StreamSource(DataStream):

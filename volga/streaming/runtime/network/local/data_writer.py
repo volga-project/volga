@@ -11,7 +11,7 @@ from volga_rust import RustDataWriter
 from volga.streaming.runtime.network.io_loop import IOHandler, RustIOHandler
 from volga.streaming.runtime.network.metrics import MetricsRecorder
 
-FLUSH_TIMEOUT_S = 0.1 # TODO this should be in a config
+FLUSH_TIMEOUT_S = 1 # TODO this should be in a config
 
 
 class DataWriter(IOHandler):
@@ -24,6 +24,7 @@ class DataWriter(IOHandler):
         channels: List[Channel],
         batch_size: int = 1000
     ):
+        # print(f'[{name}] {channels}')
         super().__init__(name, job_name, channels)
         self._rust_data_writer = RustDataWriter(name, job_name, self._rust_channels)
         self._source_stream_name = source_stream_name
@@ -94,6 +95,7 @@ class DataWriter(IOHandler):
                 b = msgpack.dumps(batch)
                 res = self._rust_data_writer.write_bytes(channel_id, b, False, 0, 0)
                 if res is not None:
+                    # print(f'[{self.name}] Flushed {len(batch)}')
                     self._batch_per_channel[channel_id] = []
                     self._last_write_ts_per_channel[channel_id] = time.perf_counter()
             lock.release()

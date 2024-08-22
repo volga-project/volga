@@ -1,8 +1,8 @@
-from typing import Optional, List, Dict
+from typing import Optional, List
 
 from volga.streaming.api.function.function import SourceFunction, SourceContext
 from volga.streaming.api.stream.stream_source import StreamSource
-from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitEnumerator, SourceSplit, \
+from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnumerator, SourceSplit, \
     SourceSplitType
 
 

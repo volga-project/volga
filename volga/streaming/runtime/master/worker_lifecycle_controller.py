@@ -45,10 +45,21 @@ class WorkerLifecycleController:
         vertex_ids = []
         logger.info(f'Assigning workers to nodes...')
         node_assignment = self.resource_manager.assign_resources(execution_graph, self.node_assign_strategy)
-        logger.info(f'Assigned workers to nodes: \n{node_assignment}')
+
+        vertices_per_node = {}
+        for vertex_id in node_assignment:
+            node = node_assignment[vertex_id]
+            if node.node_name in vertices_per_node:
+                vertices_per_node[node.node_name].append(vertex_id)
+            else:
+                vertices_per_node[node.node_name] = [vertex_id]
+
+        logger.info(f'Assigned workers to nodes: {vertices_per_node}')
         logger.info(f'Creating {len(execution_graph.execution_vertices_by_id)} workers...')
         for vertex_id in execution_graph.execution_vertices_by_id:
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
+            if vertex_id not in node_assignment:
+                raise RuntimeError(f'Can not find vertex_id {vertex_id} in node assignment {node_assignment}')
             host_node = node_assignment[vertex_id]
             resources = vertex.resources
 
@@ -181,7 +192,8 @@ class WorkerLifecycleController:
     def _gen_port(self, key: str) -> int:
         if key not in self._reserved_node_ports:
             port = randint(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1])
-            self._reserved_node_ports[key] = [port]
+            self._reserved_node_ports[key] = port
+            return port
         else:
             return self._reserved_node_ports[key]
 
