@@ -27,7 +27,6 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     ]
 }
 
-
 class TestWordCount(unittest.TestCase):
 
     def test_word_count_source_split_enumerator(self):
@@ -73,15 +72,14 @@ class TestWordCount(unittest.TestCase):
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 200000
+        count_per_word = 100000
         word_length = 32
         num_msgs_per_split = 10000
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
 
-        # ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
-
-        ray.init(address='auto', ignore_reinit_error=True)
+        ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
+        # ray.init(address='auto', ignore_reinit_error=True)
         sink_cache = SinkCacheActor.remote()
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))

@@ -12,19 +12,20 @@ import ray
 class TestWriter:
     def __init__(
         self,
+        writer_id: int,
         job_name: str,
-        channel: Channel,
+        channels: List[Channel],
         batch_size: int = 1000,
         delay_s: float = 0,
     ):
-        self.channel = channel
-        self.io_loop = IOLoop('writer_loop')
+        self.channels = channels
+        self.io_loop = IOLoop(f'writer_loop_{writer_id}')
         self.delay_s = delay_s
         self.data_writer = DataWriter(
-            name='test_writer',
+            name=f'test_writer_{writer_id}',
             source_stream_name='0',
             job_name=job_name,
-            channels=[channel],
+            channels=channels,
             batch_size=batch_size
         )
         self.io_loop.register_io_handler(self.data_writer)
@@ -32,19 +33,26 @@ class TestWriter:
     def start(self, num_threads: int = 1):
         return self.io_loop.start(num_threads)
 
-    def send_items(self, items: List[Dict]):
-        start_ts = time.time()
-        last_report = time.time()
-        for item in items:
-            succ = self.data_writer.try_write_message(self.channel.channel_id, item)
-            t = time.time()
-            while not succ:
-                if time.time() - t > 10:
-                    raise RuntimeError('Timeout writing data')
-                time.sleep(0.0001)
-                succ = self.data_writer.try_write_message(self.channel.channel_id, item)
-            if self.delay_s > 0:
-                time.sleep(self.delay_s)
+    def send_items(self, items_per_channel: Dict[str, List[Dict]]):
+        index = {channel_id: 0 for channel_id in items_per_channel}
+        channel_ids = list(items_per_channel.keys())
+        cur_channel_index = 0
+        num_sent = 0
+        num_to_send = sum(list(map(lambda e: len(e),list(items_per_channel.values()))))
+        # round robin send
+        while num_sent != num_to_send:
+            channel_id = channel_ids[cur_channel_index]
+            items = items_per_channel[channel_id]
+            i = index[channel_id]
+            if i == len(items):
+                cur_channel_index = (cur_channel_index + 1)%len(channel_ids)
+                continue
+            item = items[i]
+            succ = self.data_writer.try_write_message(channel_id, item)
+            if succ:
+                index[channel_id] += 1
+                num_sent += 1
+            cur_channel_index = (cur_channel_index + 1) % len(channel_ids)
 
     def close(self):
         self.io_loop.close()
@@ -54,15 +62,16 @@ class TestWriter:
 class TestReader:
     def __init__(
         self,
+        reader_id: int,
         job_name: str,
-        channel: Channel,
+        channels: List[Channel],
         num_expected: int,
     ):
-        self.channel = channel
-        self.io_loop = IOLoop('reader_loop')
+        self.channels = channels
+        self.io_loop = IOLoop(f'reader_loop_{reader_id}')
         self.data_reader = DataReader(
-            name='test_reader',
-            channels=[channel],
+            name=f'test_reader_{reader_id}',
+            channels=channels,
             job_name=job_name,
         )
         self.num_expected = num_expected

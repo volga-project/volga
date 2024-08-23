@@ -66,7 +66,7 @@ class TestRemoteTransfer(unittest.TestCase):
                         node_id=source_node_id,
                         soft=False
                     )
-                ).remote(job_name, channel, batch_size, writer_delay_s)
+                ).remote(_id, job_name, [channel], batch_size, writer_delay_s)
 
                 # schedule on target node
                 reader = TestReader.options(
@@ -74,10 +74,10 @@ class TestRemoteTransfer(unittest.TestCase):
                         node_id=target_node_id,
                         soft=False
                     )
-                ).remote(job_name, channel, num_msgs_per_writer)
+                ).remote(_id, job_name, [channel], num_msgs_per_writer)
             else:
-                reader = TestReader.remote(job_name, channel, num_msgs_per_writer)
-                writer = TestWriter.remote(job_name, channel, batch_size, writer_delay_s)
+                reader = TestReader.remote(_id, job_name, [channel], num_msgs_per_writer)
+                writer = TestWriter.remote(_id, job_name, [channel], batch_size, writer_delay_s)
             readers.append(reader)
             writers.append(writer)
         if multinode:
@@ -99,7 +99,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
-    def test_n_to_n_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
+    def test_n_to_n_parallel_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
         num_msgs_per_writer = 1000000
         msg_size = 1024
         batch_size = 1000
@@ -119,7 +119,7 @@ class TestRemoteTransfer(unittest.TestCase):
         futs = []
         start_ts = time.time()
         for _id in range(n):
-            writers[_id].send_items.remote(to_send)
+            writers[_id].send_items.remote({channels[_id].channel_id: to_send})
             futs.append(readers[_id].receive_items.remote())
 
         # wait for finish
@@ -162,7 +162,7 @@ class TestRemoteTransfer(unittest.TestCase):
         )
         start_ray_io_handler_actors([*readers, *writers, source_transfer_actor, target_transfer_actor])
 
-        writers[0].send_items.remote(to_send)
+        writers[0].send_items.remote({channels[0].channel_id: to_send})
         fut = readers[0].receive_items.remote()
 
         time.sleep(1)
@@ -217,5 +217,5 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    # t.test_n_to_n_on_ray(n=4)
-    t.test_transfer_actor_interruption()
+    t.test_n_to_n_parallel_on_ray(n=5)
+    # t.test_transfer_actor_interruption()

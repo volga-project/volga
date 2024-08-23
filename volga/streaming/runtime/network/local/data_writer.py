@@ -43,7 +43,7 @@ class DataWriter(IOHandler):
     def get_rust_io_handler(self) -> RustIOHandler:
         return self._rust_data_writer
 
-    def write_record(self, channel_id: str, record: Record) -> bool:
+    def try_write_record(self, channel_id: str, record: Record) -> bool:
         # add sender operator_id
         record.set_stream_name(self._source_stream_name)
         message = record.to_channel_message()

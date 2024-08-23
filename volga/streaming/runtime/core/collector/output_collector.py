@@ -20,6 +20,17 @@ class OutputCollector(Collector):
 
     def collect(self, record: Record):
         partitions = self.partition.partition(record=record, num_partition=len(self.output_channel_ids))
-        for partition in partitions:
-            self.data_writer.write_record(self.output_channel_ids[partition], record)
+        partitions_to_send = partitions.copy()
 
+        cur_partition_index = 0
+
+        # TODO backpressure and timeouts should go here
+        while len(partitions_to_send) != 0:
+            partition = partitions_to_send[cur_partition_index]
+            succ = self.data_writer.try_write_record(self.output_channel_ids[partition], record)
+            if succ:
+                del partitions_to_send[cur_partition_index]
+                if len(partitions_to_send) == 0:
+                    break
+
+            cur_partition_index = (cur_partition_index + 1)%len(partitions_to_send)
