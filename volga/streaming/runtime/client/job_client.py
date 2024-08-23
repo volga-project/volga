@@ -43,7 +43,9 @@ class JobClient:
     ):
         job_master = self.submit(job_graph=job_graph, job_config=job_config)
         ray.get(job_master.wait_sources_finished.remote())
-        time.sleep(1)
+        OPTIMISTIC_FINISH_TIME_S = 5 # we assume all workers finish within this time after sources reported finish
+        # TODO implement proper job finish where all workers report finish
+        time.sleep(OPTIMISTIC_FINISH_TIME_S)
         ray.get(job_master.destroy.remote())
 
 

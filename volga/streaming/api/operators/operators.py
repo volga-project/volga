@@ -12,7 +12,7 @@ from volga.streaming.api.function.function import Function, SourceContext, Sourc
     FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
 from volga.streaming.api.message.message import Record, KeyRecord
 from volga.streaming.api.operators.timestamp_assigner import TimestampAssigner
-from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitEnumerator, SourceSplit, SourceSplitType
+from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnumerator, SourceSplit, SourceSplitType
 
 logger = logging.getLogger(__name__)
 

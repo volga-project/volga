@@ -91,12 +91,15 @@ class ExecutionGraph:
         self.execution_edges: List[ExecutionEdge] = []
 
         # parallelism groups for same operator
-        self._execution_vertices_groups_by_job_vertex_id: Dict[int, List[ExecutionVertex]] = {}
+        self.execution_vertices_by_job_vertex: Dict[int, List[ExecutionVertex]] = {}
+
+        self._max_parallelism = None
 
     @classmethod
     def from_job_graph(cls, job_graph: JobGraph) -> 'ExecutionGraph':
 
         execution_graph = ExecutionGraph(job_graph.job_name)
+        execution_graph._max_parallelism = job_graph.get_max_parallelism()
 
         # create exec vertices
         for job_vertex in job_graph.job_vertices:
@@ -109,10 +112,10 @@ class ExecutionGraph:
                     stream_operator=job_vertex.stream_operator
                 )
 
-                if job_vertex.vertex_id in execution_graph._execution_vertices_groups_by_job_vertex_id:
-                    execution_graph._execution_vertices_groups_by_job_vertex_id[job_vertex.vertex_id].append(execution_vertex)
+                if job_vertex.vertex_id in execution_graph.execution_vertices_by_job_vertex:
+                    execution_graph.execution_vertices_by_job_vertex[job_vertex.vertex_id].append(execution_vertex)
                 else:
-                    execution_graph._execution_vertices_groups_by_job_vertex_id[job_vertex.vertex_id] = [execution_vertex]
+                    execution_graph.execution_vertices_by_job_vertex[job_vertex.vertex_id] = [execution_vertex]
 
                 execution_graph.execution_vertices_by_id[execution_vertex.execution_vertex_id] = execution_vertex
 
@@ -121,9 +124,9 @@ class ExecutionGraph:
             source_job_vertex_id = job_edge.source_vertex_id
             target_job_vertex_id = job_edge.target_vertex_id
 
-            for source_exec_vertex in execution_graph._execution_vertices_groups_by_job_vertex_id[source_job_vertex_id]:
+            for source_exec_vertex in execution_graph.execution_vertices_by_job_vertex[source_job_vertex_id]:
 
-                target_exec_vertices = execution_graph._execution_vertices_groups_by_job_vertex_id[target_job_vertex_id]
+                target_exec_vertices = execution_graph.execution_vertices_by_job_vertex[target_job_vertex_id]
 
                 for target_exec_vertex in target_exec_vertices:
                     partition = job_edge.partition
@@ -167,6 +170,11 @@ class ExecutionGraph:
 
     def get_non_source_workers(self) -> List[ActorHandle]:
         return [v.worker for v in self.get_non_source_vertices()]
+
+    def get_max_parallelism(self):
+        if self._max_parallelism is None:
+            raise RuntimeError('Execution graph is not inited')
+        return self._max_parallelism
 
     def set_resources(self, resource_config: ResourceConfig):
         for execution_vertex in self.execution_vertices_by_id.values():

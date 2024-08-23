@@ -1,13 +1,16 @@
 import logging
-import random
 import time
 from random import randint
-from typing import Dict, List, Any
+from typing import List, Tuple, Dict
 
 import ray
 from ray.actor import ActorHandle
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
+from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
+from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
+from volga.streaming.runtime.master.transfer_controller import TransferController
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
@@ -27,16 +30,39 @@ class WorkerNodeInfo:
 
 class WorkerLifecycleController:
 
-    def __init__(self, job_master: ActorHandle):
+    def __init__(
+        self,
+        job_master: ActorHandle,
+        resource_manager: ResourceManager,
+        node_assign_strategy: NodeAssignStrategy
+    ):
         self.job_master = job_master
+        self.resource_manager = resource_manager
+        self.node_assign_strategy = node_assign_strategy
         self._reserved_node_ports = {}
+        self.transfer_controller = TransferController()
 
     def create_workers(self, execution_graph: ExecutionGraph):
         workers = {}
         vertex_ids = []
+        logger.info(f'Assigning workers to nodes...')
+        node_assignment = self.resource_manager.assign_resources(execution_graph, self.node_assign_strategy)
+
+        vertices_per_node = {}
+        for vertex_id in node_assignment:
+            node = node_assignment[vertex_id]
+            if node.node_name in vertices_per_node:
+                vertices_per_node[node.node_name].append(vertex_id)
+            else:
+                vertices_per_node[node.node_name] = [vertex_id]
+
+        logger.info(f'Assigned workers to nodes: {vertices_per_node}')
         logger.info(f'Creating {len(execution_graph.execution_vertices_by_id)} workers...')
         for vertex_id in execution_graph.execution_vertices_by_id:
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
+            if vertex_id not in node_assignment:
+                raise RuntimeError(f'Can not find vertex_id {vertex_id} in node assignment {node_assignment}')
+            host_node = node_assignment[vertex_id]
             resources = vertex.resources
 
             # set consistent seed for hash function for all workers
@@ -46,7 +72,11 @@ class WorkerLifecycleController:
             options_kwargs = {
                 'max_restarts': -1,
                 'max_concurrency': 10,
-                'runtime_env': worker_runtime_env
+                'runtime_env': worker_runtime_env,
+                'scheduling_strategy': NodeAffinitySchedulingStrategy(
+                    node_id=host_node.node_id,
+                    soft=False
+                )
             }
             if resources.num_cpus is not None:
                 options_kwargs['num_cpus'] = resources.num_cpus
@@ -79,6 +109,10 @@ class WorkerLifecycleController:
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
         logger.info(f'Initing {len(execution_graph.execution_vertices_by_id)} workers...')
         job_name = execution_graph.job_name
+
+        # in and out remote channels per each node, needed for transfer actors
+        remote_channels_per_node: Dict[str, Tuple[List[RemoteChannel], List[RemoteChannel]]] = {}
+
         # create channels
         for edge in execution_graph.execution_edges:
             source_worker_network_info: WorkerNodeInfo = edge.source_execution_vertex.worker_node_info
@@ -93,21 +127,35 @@ class WorkerLifecycleController:
                 )
             else:
                 # unique ports per node-node connection
+                source_node_id = source_worker_network_info.node_id
+                target_node_id = target_worker_network_info.node_id
                 port = self._gen_port(
-                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}'
+                    key=f'{source_node_id}-{target_node_id}'
                 )
                 channel = RemoteChannel(
                     channel_id=edge.id,
-                    source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_worker_network_info.node_id),
+                    source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_node_id),
                     source_node_ip=source_worker_network_info.node_ip,
-                    source_node_id=source_worker_network_info.node_id,
-                    target_local_ipc_addr=gen_ipc_addr(job_name, edge.id, target_worker_network_info.node_id),
+                    source_node_id=source_node_id,
+                    target_local_ipc_addr=gen_ipc_addr(job_name, edge.id, target_node_id),
                     target_node_ip=target_worker_network_info.node_ip,
-                    target_node_id=target_worker_network_info.node_id,
+                    target_node_id=target_node_id,
                     port=port,
                 )
+                if source_node_id not in remote_channels_per_node:
+                    remote_channels_per_node[source_node_id] = ([], [])
+
+                remote_channels_per_node[source_node_id][1].append(channel)
+
+                if target_node_id not in remote_channels_per_node:
+                    remote_channels_per_node[target_node_id] = ([], [])
+
+                remote_channels_per_node[target_node_id][0].append(channel)
 
             edge.set_channel(channel)
+
+        # init transfer actors if needed
+        self.transfer_controller.create_transfer_actors(job_name, remote_channels_per_node)
 
         # init workers
         f = []
@@ -121,6 +169,11 @@ class WorkerLifecycleController:
 
     def start_workers(self, execution_graph: ExecutionGraph):
         logger.info(f'Starting workers...')
+        # start transfer actors if needed
+        t = time.time()
+        self.transfer_controller.start_transfer_actors()
+        logger.info(f'Started transfer actors in {time.time() - t}s')
+
         # start source workers first
         f = []
         for w in execution_graph.get_source_workers():
@@ -164,7 +217,8 @@ class WorkerLifecycleController:
     def _gen_port(self, key: str) -> int:
         if key not in self._reserved_node_ports:
             port = randint(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1])
-            self._reserved_node_ports[key] = [port]
+            self._reserved_node_ports[key] = port
+            return port
         else:
             return self._reserved_node_ports[key]
 

@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Optional, Dict, List
+from typing import Optional, Dict
 
 import ray
 
@@ -10,9 +10,10 @@ from volga.streaming.api.operators.operators import ISourceOperator, SourceOpera
 from volga.streaming.runtime.config.streaming_config import StreamingConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
+from volga.streaming.runtime.master.resource_manager.node_assign_strategy import ParallelismFirst
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
 from volga.streaming.runtime.master.scheduler.job_scheduler import JobScheduler
-from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitManager, SourceSplit
+from volga.streaming.runtime.sources.source_splits_manager import SourceSplitManager, SourceSplit
 
 logger = logging.getLogger("ray")
 
@@ -24,15 +25,20 @@ class JobMaster:
         streaming_config = StreamingConfig.from_dict(job_config)
         self.master_config = streaming_config.master_config
         self.runtime_context = JobMasterRuntimeContext(streaming_config)
+
+        self.resource_manager = ResourceManager()
+        node_assign_strategy = ParallelismFirst() # TODO config this
         self.job_scheduler = JobScheduler(
             job_master=ray.get_runtime_context().current_actor,
+            resource_manager=self.resource_manager,
+            node_assign_strategy=node_assign_strategy,
             runtime_context=self.runtime_context
         )
-        self.resource_manager = ResourceManager()
         self.source_split_manager: Optional[SourceSplitManager] = None
 
         self.running = True
         self.sources_finished = {} # source vertex id to bool
+        self.resource_manager.init()
 
     def submit_job(self, job_graph: JobGraph) -> bool:
         execution_graph = ExecutionGraph.from_job_graph(job_graph)

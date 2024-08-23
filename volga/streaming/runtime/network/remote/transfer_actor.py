@@ -15,13 +15,14 @@ class TransferActor:
         self,
         job_name: str,
         name: str,
-        in_channels: Optional[List[RemoteChannel]],
-        out_channels: Optional[List[RemoteChannel]],
+        in_channels: Optional[List[RemoteChannel]] = None,
+        out_channels: Optional[List[RemoteChannel]] = None,
     ):
         if in_channels is None and out_channels is None:
             raise ValueError('Transfer actor should have at least one of in_channels or out_channels')
+
         self._loop = IOLoop(f'io-loop-{name}')
-        if out_channels is not None:
+        if out_channels is not None and len(out_channels) != 0:
             self._sender = TransferSender(
                 job_name=job_name,
                 name=f'{name}-sender',
@@ -32,7 +33,7 @@ class TransferActor:
             # sink node
             self._sender = None
 
-        if in_channels is not None:
+        if in_channels is not None and len(in_channels) != 0:
             self._receiver = TransferReceiver(
                 job_name=job_name,
                 name=f'{name}-receiver',

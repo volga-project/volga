@@ -110,6 +110,10 @@ class JobGraph:
     def get_source_vertices(self) -> List[JobVertex]:
         return list(filter(lambda v: v.vertex_type == VertexType.SOURCE, self.job_vertices))
 
+    def get_max_parallelism(self) -> int:
+        jv = max(self.job_vertices, key=lambda _jv: _jv.parallelism)
+        return jv.parallelism
+
     def gen_digraph(self):
         try:
             import pygraphviz as pgv

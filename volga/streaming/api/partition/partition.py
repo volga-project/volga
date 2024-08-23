@@ -1,9 +1,6 @@
-import zlib
 from abc import ABC, abstractmethod
 from typing import Any, List
 
-import joblib
-import xxhash
 
 
 class Partition(ABC):

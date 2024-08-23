@@ -6,11 +6,26 @@ import ray
 import yaml
 from pathlib import Path
 
-from tests.wordcount.source import WordCountSource, WordCountSourceSplitEnumerator
+import volga
+from volga.streaming.runtime.sources.wordcount.source import WordCountSource, WordCountSourceSplitEnumerator
 from volga.streaming.api.context.streaming_context import StreamingContext
-from volga.streaming.api.function.function import SinkToCacheListFunction, SinkToCacheDictFunction
+from volga.streaming.api.function.function import SinkToCacheDictFunction
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
-from volga.streaming.runtime.master.source_splits.source_splits_manager import SourceSplitType
+from volga.streaming.runtime.sources.source_splits_manager import SourceSplitType
+
+RAY_ADDR = 'ray://127.0.0.1:12345'
+REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
+    'pip': [
+        'pydantic==1.10.13',
+        'simplejson==3.19.2',
+        'orjson==3.10.6',
+        'aenum==3.1.15'
+    ],
+    'py_modules': [
+        volga,
+        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl'
+    ]
+}
 
 
 class TestWordCount(unittest.TestCase):
@@ -54,25 +69,27 @@ class TestWordCount(unittest.TestCase):
         print('assert ok')
 
     def test(self):
-        job_config = yaml.safe_load(Path('../../volga/streaming/runtime/sample-job-config.yaml').read_text())
+        job_config = yaml.safe_load(Path('../volga/streaming/runtime/sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 100000
+        count_per_word = 200000
         word_length = 32
         num_msgs_per_split = 10000
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
+
+        # ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
 
         ray.init(address='auto', ignore_reinit_error=True)
         sink_cache = SinkCacheActor.remote()
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
-        # TODO set_parallelism > 1 fails assert
+        # TODO parallelism > 1 fails assert
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=5,
+            parallelism=4,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary
@@ -85,7 +102,14 @@ class TestWordCount(unittest.TestCase):
         ctx.execute()
 
         counts = ray.get(sink_cache.get_dict.remote())
+        print(counts)
         assert len(counts) == dict_size
+        total = 0
+        for w in counts:
+            total += counts[w]
+
+        print(f'Total: {total}, expected: {count_per_word * dict_size}, diff: {count_per_word * dict_size - total}')
+
         for w in counts:
             assert counts[w] == count_per_word
 

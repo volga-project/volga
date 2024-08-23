@@ -19,6 +19,9 @@ class Channel(ABC):
     def to_rust_channel(self) -> Union[RustLocalChannel|RustRemoteChannel]:
         raise NotImplementedError()
 
+    def __repr__(self):
+        return f'{self.__class__.__name__}({self.__dict__})'
+
 
 # connects two actors on the same node via a zmq.PAIR ipc connection
 class LocalChannel(Channel):
