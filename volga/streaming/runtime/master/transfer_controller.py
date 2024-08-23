@@ -6,6 +6,7 @@ from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.remote.transfer_actor import TransferActor
 import ray
 
+
 # TODO add watch/restart functionality
 class TransferController:
 

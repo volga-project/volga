@@ -24,7 +24,6 @@ class DataWriter(IOHandler):
         channels: List[Channel],
         batch_size: int = 1000
     ):
-        # print(f'[{name}] {channels}')
         super().__init__(name, job_name, channels)
         self._rust_data_writer = RustDataWriter(name, job_name, self._rust_channels)
         self._source_stream_name = source_stream_name
