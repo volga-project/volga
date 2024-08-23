@@ -1,7 +1,7 @@
 import logging
 import time
 from random import randint
-from typing import List
+from typing import List, Tuple, Dict
 
 import ray
 from ray.actor import ActorHandle
@@ -10,6 +10,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
+from volga.streaming.runtime.master.transfer_controller import TransferController
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
@@ -39,6 +40,7 @@ class WorkerLifecycleController:
         self.resource_manager = resource_manager
         self.node_assign_strategy = node_assign_strategy
         self._reserved_node_ports = {}
+        self.transfer_controller = TransferController()
 
     def create_workers(self, execution_graph: ExecutionGraph):
         workers = {}
@@ -107,6 +109,10 @@ class WorkerLifecycleController:
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
         logger.info(f'Initing {len(execution_graph.execution_vertices_by_id)} workers...')
         job_name = execution_graph.job_name
+
+        # in and out remote channels per each node, needed for transfer actors
+        remote_channels_per_node: Dict[str, Tuple[List[RemoteChannel], List[RemoteChannel]]] = {}
+
         # create channels
         for edge in execution_graph.execution_edges:
             source_worker_network_info: WorkerNodeInfo = edge.source_execution_vertex.worker_node_info
@@ -121,21 +127,35 @@ class WorkerLifecycleController:
                 )
             else:
                 # unique ports per node-node connection
+                source_node_id = source_worker_network_info.node_id
+                target_node_id = target_worker_network_info.node_id
                 port = self._gen_port(
-                    key=f'{source_worker_network_info.node_id}-{target_worker_network_info.node_id}'
+                    key=f'{source_node_id}-{target_node_id}'
                 )
                 channel = RemoteChannel(
                     channel_id=edge.id,
-                    source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_worker_network_info.node_id),
+                    source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_node_id),
                     source_node_ip=source_worker_network_info.node_ip,
-                    source_node_id=source_worker_network_info.node_id,
-                    target_local_ipc_addr=gen_ipc_addr(job_name, edge.id, target_worker_network_info.node_id),
+                    source_node_id=source_node_id,
+                    target_local_ipc_addr=gen_ipc_addr(job_name, edge.id, target_node_id),
                     target_node_ip=target_worker_network_info.node_ip,
-                    target_node_id=target_worker_network_info.node_id,
+                    target_node_id=target_node_id,
                     port=port,
                 )
+                if source_node_id not in remote_channels_per_node:
+                    remote_channels_per_node[source_node_id] = ([], [])
+
+                remote_channels_per_node[source_node_id][1].append(channel)
+
+                if target_node_id not in remote_channels_per_node:
+                    remote_channels_per_node[target_node_id] = ([], [])
+
+                remote_channels_per_node[target_node_id][0].append(channel)
 
             edge.set_channel(channel)
+
+        # init transfer actors if needed
+        self.transfer_controller.create_transfer_actors(job_name, remote_channels_per_node)
 
         # init workers
         f = []
@@ -149,6 +169,11 @@ class WorkerLifecycleController:
 
     def start_workers(self, execution_graph: ExecutionGraph):
         logger.info(f'Starting workers...')
+        # start transfer actors if needed
+        t = time.time()
+        self.transfer_controller.start_transfer_actors()
+        logger.info(f'Started transfer actors in {time.time() - t}s')
+
         # start source workers first
         f = []
         for w in execution_graph.get_source_workers():
