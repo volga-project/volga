@@ -78,13 +78,13 @@ class TestWordCount(unittest.TestCase):
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
 
-        ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
-        # ray.init(address='auto', ignore_reinit_error=True)
+        # ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
+        ray.init(address='auto', ignore_reinit_error=True)
         sink_cache = SinkCacheActor.remote()
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
-        # TODO parallelism > 1 fails assert
+        # TODO parallelism > 1 fails assert for remote channels
         source = WordCountSource(
             streaming_context=ctx,
             parallelism=4,

@@ -129,9 +129,8 @@ class WorkerLifecycleController:
                 # unique ports per node-node connection
                 source_node_id = source_worker_network_info.node_id
                 target_node_id = target_worker_network_info.node_id
-                port = self._gen_port(
-                    key=f'{source_node_id}-{target_node_id}'
-                )
+                port = self.gen_port(f'{source_node_id}-{target_node_id}', self._reserved_node_ports)
+
                 channel = RemoteChannel(
                     channel_id=edge.id,
                     source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_node_id),
@@ -214,11 +213,12 @@ class WorkerLifecycleController:
         for w in workers:
             w.exit.remote()
 
-    def _gen_port(self, key: str) -> int:
-        if key not in self._reserved_node_ports:
+    @staticmethod
+    def gen_port(key: str, reserved_node_ports: Dict) -> int:
+        if key not in reserved_node_ports:
             port = randint(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1])
-            self._reserved_node_ports[key] = port
+            reserved_node_ports[key] = port
             return port
         else:
-            return self._reserved_node_ports[key]
+            return reserved_node_ports[key]
 

@@ -8,6 +8,7 @@ from typing import Optional, Tuple, Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from volga.streaming.runtime.master.worker_lifecycle_controller import WorkerLifecycleController
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.remote.transfer_actor import TransferActor
 from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors
@@ -143,6 +144,113 @@ class TestRemoteTransfer(unittest.TestCase):
 
         ray.shutdown()
 
+    def test_n_all_to_all_on_local_ray(self, n: int, num_transfer_actors: int):
+        if num_transfer_actors > n or n%num_transfer_actors != 0:
+            raise RuntimeError('n%num_transfer_actors should be 0')
+        num_msgs = 1000000
+        msg_size = 32
+        to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
+        batch_size = 1000
+        writer_delay_s = 0
+
+        job_name = f'job-{int(time.time())}'
+
+        ray.init(address='auto')
+        reader_channels = {}
+        writer_channels = {}
+        readers = {}
+        writers = {}
+
+        source_transfer_actors = {}
+        source_transfer_actor_channels = {}
+
+        target_transfer_actors = {}
+        target_transfer_actor_channels = {}
+
+        node_ip = '127.0.0.1'
+        reserved_ports = {}
+
+        for reader_id in range(n):
+            for writer_id in range(n):
+                channel_id = f'ch-{reader_id}-{writer_id}'
+                source_node_id = f'source-{reader_id%num_transfer_actors}'
+                target_node_id = f'target-{writer_id%num_transfer_actors}'
+                channel = RemoteChannel(
+                    channel_id=channel_id,
+                    source_local_ipc_addr=f'ipc:///tmp/source_local_{channel_id}',
+                    source_node_ip=node_ip,
+                    source_node_id=source_node_id,
+                    target_local_ipc_addr=f'ipc:///tmp/target_local_{channel_id}',
+                    target_node_ip=node_ip,
+                    target_node_id=target_node_id,
+                    port=WorkerLifecycleController.gen_port(f'{source_node_id}-{target_node_id}', reserved_ports)
+                )
+                if reader_id not in reader_channels:
+                    reader_channels[reader_id] = [channel]
+                else:
+                    reader_channels[reader_id].append(channel)
+
+                if writer_id not in writer_channels:
+                    writer_channels[writer_id] = [channel]
+                else:
+                    writer_channels[writer_id].append(channel)
+
+                if source_node_id not in source_transfer_actor_channels:
+                    source_transfer_actor_channels[source_node_id] = [channel]
+                else:
+                    source_transfer_actor_channels[source_node_id].append(channel)
+
+                if target_node_id not in target_transfer_actor_channels:
+                    target_transfer_actor_channels[target_node_id] = [channel]
+                else:
+                    target_transfer_actor_channels[target_node_id].append(channel)
+
+        for reader_id in reader_channels:
+            reader = TestReader.options(num_cpus=0).remote(reader_id, job_name, reader_channels[reader_id], n*num_msgs)
+            readers[reader_id] = reader
+
+        for writer_id in writer_channels:
+            writer = TestWriter.options(num_cpus=0).remote(writer_id, job_name, writer_channels[writer_id], batch_size, writer_delay_s)
+            writers[writer_id] = writer
+
+        for source_node_id in source_transfer_actor_channels:
+            out_channels = source_transfer_actor_channels[source_node_id]
+            source_transfer_actor = TransferActor.options(num_cpus=0).remote(job_name, f'source_transfer_actor_{source_node_id}', None, out_channels)
+            source_transfer_actors[source_node_id] = source_transfer_actor
+
+        for target_node_id in target_transfer_actor_channels:
+            in_channels = target_transfer_actor_channels[target_node_id]
+            target_transfer_actor = TransferActor.options(num_cpus=0).remote(job_name, f'target_transfer_actor_{target_node_id}', in_channels, None)
+            target_transfer_actors[target_node_id] = target_transfer_actor
+
+        actors = list(readers.values()) + list(writers.values()) + list(source_transfer_actors.values()) + list(target_transfer_actors.values())
+        start_ray_io_handler_actors(actors)
+        # start_ts = time.time()
+        read_futs = {}
+        for writer_id in writers:
+            writers[writer_id].send_items.remote({channel.channel_id: to_send for channel in writer_channels[writer_id]})
+
+        for reader_id in readers:
+            read_futs[reader_id] = readers[reader_id].receive_items.remote()
+
+        # wait for finish
+        for reader_id in read_futs:
+            rcvd = ray.get(read_futs[reader_id])
+            assert n * len(to_send) == len(rcvd)
+            print(f'assert {reader_id} ok')
+        # t = time.time() - start_ts
+        # throughput = (n * num_msgs_per_writer) / t
+        # print(f'Finised in {t}s, throughput: {throughput} msg/s')
+        time.sleep(1)
+
+        for reader_id in readers:
+            ray.get(readers[reader_id].close.remote())
+
+        for writer_id in writers:
+            ray.get(writers[writer_id].close.remote())
+
+        ray.shutdown()
+
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
         job_name = f'job-{int(time.time())}'
         num_msgs = 1000000
@@ -217,5 +325,6 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_n_to_n_parallel_on_ray(n=5)
+    # t.test_n_to_n_parallel_on_ray(n=5)
     # t.test_transfer_actor_interruption()
+    t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
