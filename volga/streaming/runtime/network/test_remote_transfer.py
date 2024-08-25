@@ -10,8 +10,13 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.master.worker_lifecycle_controller import WorkerLifecycleController
 from volga.streaming.runtime.network.channel import RemoteChannel
-from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DataWriterConfig
+from volga.streaming.runtime.network.io_loop import IOLoop
+from volga.streaming.runtime.network.local.data_reader import DataReader
+from volga.streaming.runtime.network.local.data_writer import DataWriter
+from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DataWriterConfig, \
+    DEFAULT_DATA_READER_CONFIG
 from volga.streaming.runtime.network.remote.transfer_actor import TransferActor
+from volga.streaming.runtime.network.remote.transfer_io_handlers import TransferSender, TransferReceiver
 from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors
 
 
@@ -329,9 +334,75 @@ class TestRemoteTransfer(unittest.TestCase):
         assert to_send == rcvd
         print('assert ok')
 
+    def test_backpressure(self):
+        channel = RemoteChannel(
+            channel_id='1',
+            source_local_ipc_addr=f'ipc:///tmp/source_local',
+            source_node_ip='127.0.0.1',
+            source_node_id='1',
+            target_local_ipc_addr=f'ipc:///tmp/target_local',
+            target_node_ip='127.0.0.1',
+            target_node_id='2',
+            port=1234
+        )
+
+        io_loop = IOLoop(name='test_ioloop')
+
+        job_name = f'job-{int(time.time())}'
+        writer_config = DEFAULT_DATA_WRITER_CONFIG
+        max_buffers_per_channel = 5
+        batch_size = 1
+        writer_config.max_buffers_per_channel = max_buffers_per_channel
+        writer_config.batch_size = batch_size
+
+        reader_config = DEFAULT_DATA_READER_CONFIG
+        output_queue_size = 8
+        reader_config.output_queue_size = output_queue_size
+
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', job_name=job_name, channels=[channel], config=writer_config)
+        data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], config=reader_config)
+        transfer_sender = TransferSender(job_name=job_name, name='test-sender', channels=[channel])
+        transfer_receiver = TransferReceiver(job_name=job_name, name='test-sender', channels=[channel])
+
+        io_loop.register_io_handler(data_writer)
+        io_loop.register_io_handler(data_reader)
+        io_loop.register_io_handler(transfer_sender)
+        io_loop.register_io_handler(transfer_receiver)
+        io_loop.start()
+        try:
+            for i in range(max_buffers_per_channel + output_queue_size):
+                time.sleep(0.1)
+                s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+                assert s is True
+
+            time.sleep(0.1)
+            s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+            # should backpressure
+            assert s is False
+
+            # read one
+            time.sleep(0.1)
+            data_reader.read_message()
+            time.sleep(0.1)
+            s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+            # should not backpressure
+            assert s is True
+
+            time.sleep(0.1)
+            s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+            # should backpressure
+            assert s is False
+
+            # TODO test queue lengths
+            print('assert ok')
+        finally:
+            io_loop.close()
+
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=5)
-    # t.test_transfer_actor_interruptionы()
-    t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
+    # t.test_transfer_actor_interruption()
+    # t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
+    t.test_backpressure()
+

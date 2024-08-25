@@ -8,7 +8,10 @@ import time
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.network.channel import LocalChannel
-from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG
+from volga.streaming.runtime.network.io_loop import IOLoop
+from volga.streaming.runtime.network.local.data_reader import DataReader
+from volga.streaming.runtime.network.local.data_writer import DataWriter
+from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DEFAULT_DATA_READER_CONFIG
 from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, start_ray_io_handler_actors
 
 
@@ -145,9 +148,64 @@ class TestLocalTransfer(unittest.TestCase):
 
         ray.shutdown()
 
+    def test_backpressure(self):
+        channel = LocalChannel(
+            channel_id='1',
+            ipc_addr='ipc:///tmp/zmqtest',
+        )
+
+        io_loop = IOLoop(name='test_ioloop')
+
+        job_name = f'job-{int(time.time())}'
+        writer_config = DEFAULT_DATA_WRITER_CONFIG
+        max_buffers_per_channel = 5
+        batch_size = 1
+        writer_config.max_buffers_per_channel = max_buffers_per_channel
+        writer_config.batch_size = batch_size
+
+        reader_config = DEFAULT_DATA_READER_CONFIG
+        output_queue_size = 8
+        reader_config.output_queue_size = output_queue_size
+
+
+        data_writer = DataWriter(name='test_writer', source_stream_name='0', job_name=job_name, channels=[channel], config=writer_config)
+        data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], config=reader_config)
+        io_loop.register_io_handler(data_writer)
+        io_loop.register_io_handler(data_reader)
+        io_loop.start()
+        try:
+            for _ in range(max_buffers_per_channel + output_queue_size):
+                time.sleep(0.1)
+                s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+                assert s is True
+
+            time.sleep(0.1)
+            s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+            # should backpressure
+            assert s is False
+
+            # read one
+            time.sleep(0.1)
+            data_reader.read_message()
+            time.sleep(0.1)
+            s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+            # should not backpressure
+            assert s is True
+
+            time.sleep(0.1)
+            s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
+            # should backpressure
+            assert s is False
+
+            # TODO test queue lengths
+            print('assert ok')
+        finally:
+            io_loop.close()
+
 
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
     # t.test_one_to_one_on_ray()
-    t.test_n_all_to_all_on_local_ray(n=5)
+    # t.test_n_all_to_all_on_local_ray(n=5)
+    t.test_backpressure()
