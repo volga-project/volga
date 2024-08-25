@@ -2,7 +2,7 @@ use std::{any::Any, borrow::{Borrow, BorrowMut}, hash::Hash, sync::{Arc, RwLock}
 
 use pyo3::{pyclass, pymethods, types::PyBytes, IntoPy, Py, PyAny, PyResult, PyTryFrom, Python};
 
-use super::{channel::Channel, data_reader::{self, DataReader}, data_writer::DataWriter, io_loop::{Direction, IOHandler, IOLoop}, remote_transfer_handler::RemoteTransferHandler};
+use super::{channel::Channel, data_reader::{self, DataReader, DataReaderConfig}, data_writer::{DataWriter, DataWriterConfig}, io_loop::{Direction, IOHandler, IOLoop, ZmqConfig}, remote_transfer_handler::{RemoteTransferHandler, TransferConfig}};
 
 pub trait ToRustChannel {
     fn to_rust_channel(&self) -> Channel;
@@ -108,7 +108,7 @@ pub struct PyDataReader {
 impl PyDataReader {
 
     #[new]
-    pub fn new(name: String, job_name: String, channels: Vec<&PyAny>) -> PyDataReader {
+    pub fn new(name: String, job_name: String, config: &DataReaderConfig, channels: Vec<&PyAny>) -> PyDataReader {
         let mut rust_channels = Vec::new();
         for ch in channels {
             let ext: Result<PyLocalChannel, pyo3::PyErr> = ch.extract();
@@ -119,7 +119,7 @@ impl PyDataReader {
                 rust_channels.push(ext.unwrap().to_rust_channel());
             }
         };
-        let data_reader = DataReader::new(name, job_name, rust_channels);
+        let data_reader = DataReader::new(name, job_name, config.clone(), rust_channels);
         PyDataReader{data_reader: Arc::new(data_reader)}
     }
 
@@ -153,7 +153,7 @@ pub struct PyDataWriter {
 impl PyDataWriter {
 
     #[new]
-    pub fn new(name: String, job_name: String, channels: Vec<&PyAny>) -> PyDataWriter {
+    pub fn new(name: String, job_name: String, config: &DataWriterConfig, channels: Vec<&PyAny>) -> PyDataWriter {
         let mut rust_channels = Vec::new();
         for ch in channels {
             let ext: Result<PyLocalChannel, pyo3::PyErr> = ch.extract();
@@ -164,7 +164,7 @@ impl PyDataWriter {
                 rust_channels.push(ext.unwrap().to_rust_channel());
             }
         };
-        let data_writer = DataWriter::new(name, job_name, rust_channels);
+        let data_writer = DataWriter::new(name, job_name, config.clone(), rust_channels);
         PyDataWriter{data_writer: Arc::new(data_writer)}
     }
 
@@ -192,12 +192,12 @@ pub struct PyTransferSender {
 #[pymethods]
 impl PyTransferSender {
     #[new]
-    pub fn new(name: String, job_name: String, channels: Vec<PyRemoteChannel>) -> PyTransferSender {
+    pub fn new(name: String, job_name: String, config: &TransferConfig, channels: Vec<PyRemoteChannel>) -> PyTransferSender {
         let mut rust_channels = Vec::new();
         for ch in channels {
             rust_channels.push(ch.to_rust_channel());
         };
-        let transfer_sender = RemoteTransferHandler::new(name, job_name, rust_channels, Direction::Sender);
+        let transfer_sender = RemoteTransferHandler::new(name, job_name, rust_channels, config.clone(), Direction::Sender);
         PyTransferSender{transfer_sender: Arc::new(transfer_sender)}
     }
 
@@ -219,12 +219,12 @@ pub struct PyTransferReceiver {
 #[pymethods]
 impl PyTransferReceiver {
     #[new]
-    pub fn new(name: String, job_name: String, channels: Vec<PyRemoteChannel>) -> PyTransferReceiver {
+    pub fn new(name: String, job_name: String, config: &TransferConfig, channels: Vec<PyRemoteChannel>) -> PyTransferReceiver {
         let mut rust_channels = Vec::new();
         for ch in channels {
             rust_channels.push(ch.to_rust_channel());
         };
-        let transfer_receiver = RemoteTransferHandler::new(name, job_name, rust_channels, Direction::Receiver);
+        let transfer_receiver = RemoteTransferHandler::new(name, job_name, rust_channels, config.clone(), Direction::Receiver);
         PyTransferReceiver{transfer_receiver: Arc::new(transfer_receiver)}
     }
 
@@ -246,9 +246,9 @@ pub struct PyIOLoop {
 impl PyIOLoop {
 
     #[new]
-    pub fn new(name: String) -> PyIOLoop {
+    pub fn new(name: String, zmq_config: &ZmqConfig) -> PyIOLoop {
         PyIOLoop{
-            io_loop: IOLoop::new(name),
+            io_loop: IOLoop::new(name, zmq_config.clone()),
         }
     }
 

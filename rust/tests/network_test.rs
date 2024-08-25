@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
 
-use volga_rust::network::{channel::Channel, data_reader::DataReader, data_writer::DataWriter, io_loop::{Direction, IOHandler, IOLoop}, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
+use volga_rust::network::{channel::Channel, data_reader::DataReader, data_writer::DataWriter, io_loop::{Direction, IOHandler, IOLoop}, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
 
 #[test]
@@ -17,6 +17,8 @@ fn test_one_to_one_remote() {
 // TODO add transfer handler disconnect/reconnect test 
 
 fn test_one_to_one(local: bool) {
+    let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config.yaml");
+
     let channel;
     if local {
         channel = Channel::Local { 
@@ -40,17 +42,19 @@ fn test_one_to_one(local: bool) {
     let data_reader = Arc::new(DataReader::new(
         String::from("data_reader"),
         job_name.clone(),
+        network_config.data_reader,
         vec![channel.clone()],
     ));
     let data_writer = Arc::new(DataWriter::new(
         String::from("data_writer"),
         job_name.clone(),
+        network_config.data_writer,
         vec![channel.clone()],
     ));
 
     let mut remote_transfer_handlers = Vec::new();
 
-    let io_loop = IOLoop::new(String::from("io_loop"));
+    let io_loop = IOLoop::new(String::from("io_loop"), network_config.zmq);
     io_loop.register_handler(data_reader.clone());
     io_loop.register_handler(data_writer.clone());
     if !local {
@@ -58,12 +62,14 @@ fn test_one_to_one(local: bool) {
             String::from("transfer_sender"),
             job_name.clone(),
             vec![channel.clone()],
+            network_config.transfer.clone(),
             Direction::Sender
         ));
         let transfer_receiver = Arc::new(RemoteTransferHandler::new(
             String::from("transfer_sender"),
             job_name.clone(),
             vec![channel.clone()],
+            network_config.transfer.clone(),
             Direction::Receiver
         ));
         io_loop.register_handler(transfer_sender.clone());

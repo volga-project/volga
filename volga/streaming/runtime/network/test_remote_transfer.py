@@ -10,6 +10,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.master.worker_lifecycle_controller import WorkerLifecycleController
 from volga.streaming.runtime.network.channel import RemoteChannel
+from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DataWriterConfig
 from volga.streaming.runtime.network.remote.transfer_actor import TransferActor
 from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors
 
@@ -21,8 +22,8 @@ class TestRemoteTransfer(unittest.TestCase):
         num_writers: int,
         num_msgs_per_writer: int,
         writer_delay_s: float = 0,
-        batch_size: int = 1000,
         multinode: bool = False,
+        writer_config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG,
         job_name: Optional[str] = None,
     ) -> Tuple:
         if job_name is None:
@@ -67,7 +68,7 @@ class TestRemoteTransfer(unittest.TestCase):
                         node_id=source_node_id,
                         soft=False
                     )
-                ).remote(_id, job_name, [channel], batch_size, writer_delay_s)
+                ).remote(_id, job_name, [channel], writer_config, writer_delay_s)
 
                 # schedule on target node
                 reader = TestReader.options(
@@ -78,7 +79,7 @@ class TestRemoteTransfer(unittest.TestCase):
                 ).remote(_id, job_name, [channel], num_msgs_per_writer)
             else:
                 reader = TestReader.remote(_id, job_name, [channel], num_msgs_per_writer)
-                writer = TestWriter.remote(_id, job_name, [channel], batch_size, writer_delay_s)
+                writer = TestWriter.remote(_id, job_name, [channel], writer_config, writer_delay_s)
             readers.append(reader)
             writers.append(writer)
         if multinode:
@@ -104,6 +105,8 @@ class TestRemoteTransfer(unittest.TestCase):
         num_msgs_per_writer = 1000000
         msg_size = 1024
         batch_size = 1000
+        writer_config = DEFAULT_DATA_WRITER_CONFIG
+        writer_config.batch_size = batch_size
         to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs_per_writer)]
 
         ray.init(address=ray_addr, runtime_env=runtime_env)
@@ -112,7 +115,7 @@ class TestRemoteTransfer(unittest.TestCase):
             num_writers=n,
             num_msgs_per_writer=num_msgs_per_writer,
             multinode=multinode,
-            batch_size=batch_size
+            writer_config=writer_config
         )
         start_ray_io_handler_actors([*readers, *writers, source_transfer_actor, target_transfer_actor])
 
@@ -147,10 +150,12 @@ class TestRemoteTransfer(unittest.TestCase):
     def test_n_all_to_all_on_local_ray(self, n: int, num_transfer_actors: int):
         if num_transfer_actors > n or n%num_transfer_actors != 0:
             raise RuntimeError('n%num_transfer_actors should be 0')
-        num_msgs = 1000000
+        num_msgs = 100000
         msg_size = 32
         to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
-        batch_size = 1000
+        batch_size = 100
+        writer_config = DEFAULT_DATA_WRITER_CONFIG
+        writer_config.batch_size = batch_size
         writer_delay_s = 0
 
         job_name = f'job-{int(time.time())}'
@@ -210,7 +215,7 @@ class TestRemoteTransfer(unittest.TestCase):
             readers[reader_id] = reader
 
         for writer_id in writer_channels:
-            writer = TestWriter.options(num_cpus=0).remote(writer_id, job_name, writer_channels[writer_id], batch_size, writer_delay_s)
+            writer = TestWriter.options(num_cpus=0).remote(writer_id, job_name, writer_channels[writer_id], writer_config, writer_delay_s)
             writers[writer_id] = writer
 
         for source_node_id in source_transfer_actor_channels:
@@ -256,6 +261,8 @@ class TestRemoteTransfer(unittest.TestCase):
         num_msgs = 1000000
         msg_size = 1024
         batch_size = 1000
+        writer_config = DEFAULT_DATA_WRITER_CONFIG
+        writer_config.batch_size = batch_size
         writer_delay_s = 0
         to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
 
@@ -263,9 +270,9 @@ class TestRemoteTransfer(unittest.TestCase):
         readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id = self._init_ray_actors(
             num_writers=1,
             num_msgs_per_writer=num_msgs,
-            batch_size=batch_size,
             writer_delay_s=writer_delay_s,
             multinode=multinode,
+            writer_config=writer_config,
             job_name=job_name
         )
         start_ray_io_handler_actors([*readers, *writers, source_transfer_actor, target_transfer_actor])
@@ -326,5 +333,5 @@ class TestRemoteTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=5)
-    # t.test_transfer_actor_interruption()
+    # t.test_transfer_actor_interruptionы()
     t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)

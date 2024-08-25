@@ -2,9 +2,26 @@ use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, AtomicI3
 
 use super::{buffer_utils::{get_buffer_id, new_buffer_drop_meta}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
 use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQueue};
+use pyo3::{pyclass, pymethods};
+use serde::{Deserialize, Serialize};
 
-const OUTPUT_QUEUE_SIZE: usize = 10;
-// const RECV_CHANNEL_SIZE: usize = 10;
+// const DEFAULT_OUTPUT_QUEUE_SIZE: usize = 10;
+
+#[derive(Serialize, Deserialize, Clone)]
+#[pyclass(name="RustDataReaderConfig")]
+pub struct DataReaderConfig {
+    output_queue_size: usize
+}
+
+#[pymethods]
+impl DataReaderConfig { 
+    #[new]
+    pub fn new(output_queue_size: usize) -> Self {
+        DataReaderConfig{
+            output_queue_size
+        }
+    }
+}
 
 pub struct DataReader {
     name: String,
@@ -22,12 +39,14 @@ pub struct DataReader {
     metrics_recorder: Arc<MetricsRecorder>,
 
     running: Arc<AtomicBool>,
-    dispatcher_thread_handle: Arc<ArrayQueue<JoinHandle<()>>> // array queue so we do not mutate DataReader and kepp ownership
+    dispatcher_thread_handle: Arc<ArrayQueue<JoinHandle<()>>>, // array queue so we do not mutate DataReader and kepp ownership
+
+    config: Arc<DataReaderConfig>
 }
 
 impl DataReader {
 
-    pub fn new(name: String, job_name: String, channels: Vec<Channel>) -> DataReader {
+    pub fn new(name: String, job_name: String, data_reader_config: DataReaderConfig, channels: Vec<Channel>) -> DataReader {
         let n_channels = channels.len();
         let mut send_chans = HashMap::with_capacity(n_channels);
         let mut recv_chans = HashMap::with_capacity(n_channels);
@@ -42,18 +61,21 @@ impl DataReader {
             out_of_order_buffers.insert(ch.get_channel_id().clone(), Arc::new(RwLock::new(HashMap::new())));   
         }
 
+        // parse config
+
         DataReader{
             name: name.clone(),
             job_name: job_name.clone(),
             channels,
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),
-            out_queue: Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_QUEUE_SIZE))),
+            out_queue: Arc::new(Mutex::new(VecDeque::with_capacity(data_reader_config.output_queue_size))),
             watermarks: Arc::new(RwLock::new(watermarks)),
             out_of_order_buffers: Arc::new(RwLock::new(out_of_order_buffers)),
             metrics_recorder: Arc::new(MetricsRecorder::new(name.clone(), job_name.clone())),
             running: Arc::new(AtomicBool::new(false)),
-            dispatcher_thread_handle: Arc::new(ArrayQueue::new(1))
+            dispatcher_thread_handle: Arc::new(ArrayQueue::new(1)),
+            config: Arc::new(data_reader_config),
         }
     }
 
@@ -117,6 +139,7 @@ impl IOHandler for DataReader {
         let this_watermarks = self.watermarks.clone();
         let this_out_of_order_buffers = self.out_of_order_buffers.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
+        let this_config = self.config.clone();
 
         let f = move || {
 
@@ -128,7 +151,7 @@ impl IOHandler for DataReader {
                 let locked_out_of_order_buffers = this_out_of_order_buffers.read().unwrap();
                 for channel_id in locked_recv_chans.keys() {
                     let mut locked_out_queue = this_out_queue.lock().unwrap();
-                    if locked_out_queue.len() == OUTPUT_QUEUE_SIZE {
+                    if locked_out_queue.len() == this_config.output_queue_size {
                         // full
                         drop(locked_out_queue);
                         continue
@@ -166,7 +189,7 @@ impl IOHandler for DataReader {
                                 locked_out_of_order.insert(buffer_id as i32, b.clone());
                                 let mut next_wm = wm + 1;
                                 while locked_out_of_order.contains_key(&next_wm) {
-                                    if locked_out_queue.len() == OUTPUT_QUEUE_SIZE {
+                                    if locked_out_queue.len() == this_config.output_queue_size {
                                         // full
                                         break;
                                     }

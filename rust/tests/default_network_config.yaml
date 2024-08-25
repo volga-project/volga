@@ -1,0 +1,13 @@
+data_writer:
+  in_flight_timeout_s: 1
+  max_buffers_per_channel: 10
+data_reader:
+  output_queue_size: 10
+transfer:
+  transfer_queue_size: 10
+zmq:
+  sndhwm: 10
+  rcvhwm: 10
+  sndbuf: 512
+  rcvbuf: 512
+  linger: 0

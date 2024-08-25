@@ -3,4 +3,5 @@ master_config:
     default_worker_resources:
       CPU: '1'
   scheduler_config: {}
+
 worker_config_template: {}

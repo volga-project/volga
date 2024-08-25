@@ -1,6 +1,6 @@
 use std::{collections::{HashMap, HashSet}, fs, rc::Rc, sync::{Arc, Mutex, RwLock}};
 
-use super::{channel::Channel, io_loop::{Direction, IOHandler, IOHandlerType}};
+use super::{channel::Channel, io_loop::{Direction, IOHandler, IOHandlerType, ZmqConfig}};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SocketOwner {
@@ -36,9 +36,15 @@ impl SocketsManager {
         SocketsManager{sockets_and_metas: Vec::new()}
     }
 
-    pub fn create_sockets(&mut self, zmq_context: &zmq::Context, socket_metas: &Vec<SocketMetadata>) {
+    pub fn create_sockets(&mut self, zmq_context: &zmq::Context, socket_metas: &Vec<SocketMetadata>, zmq_config: ZmqConfig) {
         for sm in socket_metas {
             let socket = zmq_context.socket(zmq::PAIR).unwrap();
+            socket.set_sndbuf(zmq_config.sndbuf).unwrap();
+            socket.set_rcvbuf(zmq_config.rcvbuf).unwrap();
+            socket.set_sndhwm(zmq_config.sndhwm).unwrap();
+            socket.set_rcvhwm(zmq_config.rcvhwm).unwrap();
+            socket.set_linger(zmq_config.linger).unwrap();
+
             self.sockets_and_metas.push((socket, sm.clone()));
         }
     }

@@ -1,10 +1,31 @@
 use std::{cmp::min, collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread::JoinHandle};
 
 use crossbeam::{channel::{Sender, Receiver}, queue::SegQueue};
+use pyo3::{pyclass, pymethods};
+use serde::{Deserialize, Serialize};
 
 use super::{channel::Channel, sockets::{SocketMetadata, SocketsManager, SocketsMeatadataManager}};
 
 pub type Bytes = Vec<u8>;
+
+
+#[derive(Serialize, Deserialize, Clone)]
+#[pyclass(name="RustZmqConfig")]
+pub struct ZmqConfig {
+    pub sndhwm: i32,
+    pub rcvhwm: i32,
+    pub sndbuf: i32,
+    pub rcvbuf: i32,
+    pub linger: i32
+}
+
+#[pymethods]
+impl ZmqConfig { 
+    #[new]
+    pub fn new(sndhwm: i32, rcvhwm: i32, sndbuf: i32, rcvbuf: i32, linger: i32) -> Self {
+        ZmqConfig{sndhwm, rcvhwm, sndbuf, rcvbuf, linger}
+    }
+}
 
 #[derive(PartialEq, Eq)]
 pub enum Direction {
@@ -44,20 +65,22 @@ pub struct IOLoop {
     zmq_context: Arc<zmq::Context>,
     io_threads: Arc<SegQueue<JoinHandle<()>>>,
     sockets_metadata_manager: Arc<SocketsMeatadataManager>,
+    zmq_config: ZmqConfig
 }
 
 impl IOLoop {
 
-    pub fn new(name: String) -> IOLoop {
-        let io_loop = IOLoop{
+    pub fn new(name: String, zmq_config: ZmqConfig) -> IOLoop {
+        IOLoop{
             name,
             handlers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
             zmq_context: Arc::new(zmq::Context::new()),
             io_threads: Arc::new(SegQueue::new()),
-            sockets_metadata_manager: Arc::new(SocketsMeatadataManager::new())
-        };
-        io_loop
+            sockets_metadata_manager: Arc::new(SocketsMeatadataManager::new()),
+            // zmq_config: Arc::new(zmq_config)
+            zmq_config: zmq_config
+        }
     }
 
     pub fn register_handler(&self, handler: Arc<dyn IOHandler + Send + Sync>) {
@@ -98,11 +121,13 @@ impl IOLoop {
             let this_runnning = self.running.clone();
             let this_zmqctx = self.zmq_context.clone();
             let this_socket_metadata_manager = self.sockets_metadata_manager.clone();
+            // let this_zmq_config = self.zmq_config.clone();
             let new_sms = sms.to_vec();
+            let this_zmq_config = self.zmq_config.clone();
 
             let f = move |metas: &Vec<SocketMetadata>| {
                 let mut sockets_manager = SocketsManager::new();
-                sockets_manager.create_sockets(&this_zmqctx, metas);
+                sockets_manager.create_sockets(&this_zmqctx, metas, this_zmq_config);
                 sockets_manager.bind_and_connect();
                 let mut handlers = Vec::new();
                 for i in 0..sockets_manager.get_sockets_and_metas().len() {

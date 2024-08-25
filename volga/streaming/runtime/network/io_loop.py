@@ -3,6 +3,7 @@ from typing import List, Union
 
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.metrics import MetricsRecorder
+from volga.streaming.runtime.network.network_config import ZmqConfig, DEFAULT_ZMQ_CONFIG
 
 from volga_rust import RustIOLoop, RustDataWriter, RustDataReader, RustTransferSender, RustTransferReceiver
 
@@ -15,7 +16,7 @@ class IOHandler(ABC):
         self,
         name: str,
         job_name: str,
-        channels: List[Channel]
+        channels: List[Channel],
     ):
         self.name = name
         self.job_name = job_name
@@ -39,8 +40,12 @@ class IOHandler(ABC):
 
 class IOLoop:
 
-    def __init__(self, name: str):
-        self._rust_io_loop = RustIOLoop(name)
+    def __init__(
+        self,
+        name: str,
+        config: ZmqConfig = DEFAULT_ZMQ_CONFIG
+    ):
+        self._rust_io_loop = RustIOLoop(name, config.to_rust())
         self._handlers: List[IOHandler] = []
 
     def register_io_handler(self, handler: IOHandler):

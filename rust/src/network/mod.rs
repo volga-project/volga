@@ -9,3 +9,4 @@ pub mod buffer_utils;
 pub mod buffer_queues;
 pub mod remote_transfer_handler;
 pub mod metrics;
+pub mod network_config;

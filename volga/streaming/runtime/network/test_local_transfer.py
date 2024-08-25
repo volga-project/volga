@@ -8,6 +8,7 @@ import time
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.network.channel import LocalChannel
+from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG
 from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, start_ray_io_handler_actors
 
 
@@ -23,6 +24,8 @@ class TestLocalTransfer(unittest.TestCase):
         msg_size = 128
         to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
         batch_size = 100
+        writer_config = DEFAULT_DATA_WRITER_CONFIG
+        writer_config.batch_size = batch_size
         writer_delay_s = 0
 
         job_name = f'job-{int(time.time())}'
@@ -47,7 +50,7 @@ class TestLocalTransfer(unittest.TestCase):
                 node_id=node['NodeID'],
                 soft=False
             )
-        ).remote(0, job_name, [channel], batch_size, writer_delay_s)
+        ).remote(0, job_name, [channel], writer_config, writer_delay_s)
 
         start_ray_io_handler_actors([reader, writer])
 
@@ -77,6 +80,8 @@ class TestLocalTransfer(unittest.TestCase):
         msg_size = 32
         to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
         batch_size = 1000
+        writer_config = DEFAULT_DATA_WRITER_CONFIG
+        writer_config.batch_size = batch_size
         writer_delay_s = 0
 
         job_name = f'job-{int(time.time())}'
@@ -109,7 +114,7 @@ class TestLocalTransfer(unittest.TestCase):
             readers[reader_id] = reader
 
         for writer_id in writer_channels:
-            writer = TestWriter.options(num_cpus=0).remote(writer_id, job_name, writer_channels[writer_id], batch_size, writer_delay_s)
+            writer = TestWriter.options(num_cpus=0).remote(writer_id, job_name, writer_channels[writer_id], writer_config, writer_delay_s)
             writers[writer_id] = writer
 
         actors = list(readers.values()) + list(writers.values())

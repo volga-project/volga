@@ -1,10 +1,28 @@
 use std::{collections::HashMap, hash::Hash, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::JoinHandle};
 
 use crossbeam::{channel::{unbounded, bounded, Receiver, Sender}, queue::ArrayQueue};
+use pyo3::{pyclass, pymethods};
+use serde::{Deserialize, Serialize};
 
 use super::{buffer_utils::{get_buffer_id, get_channeld_id}, channel::{self, Channel}, io_loop::{Bytes, Direction, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::{SocketMetadata, SocketOwner}};
 
-const TRANSFER_QUEUE_SIZE: usize = 10; // TODO should we separate local and remote channel sizes?
+// const TRANSFER_QUEUE_SIZE: usize = 10; // TODO should we separate local and remote channel sizes?
+
+#[derive(Serialize, Deserialize, Clone)]
+#[pyclass(name="RustTransferConfig")]
+pub struct TransferConfig {
+    transfer_queue_size: usize
+}
+
+#[pymethods]
+impl TransferConfig { 
+    #[new]
+    pub fn new(transfer_queue_size: usize) -> Self {
+        TransferConfig{
+            transfer_queue_size
+        }
+    }
+}
 
 pub struct RemoteTransferHandler {
     name: String,
@@ -23,12 +41,14 @@ pub struct RemoteTransferHandler {
     metrics_recorder: Arc<MetricsRecorder>,
 
     running: Arc<AtomicBool>,
-    io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>> // array queue so we do not mutate DataReader and keep ownership
+    io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>>, // array queue so we do not mutate DataReader and keep ownership
+
+    config: Arc<TransferConfig>
 }
 
 impl RemoteTransferHandler {
 
-    pub fn new(name: String, job_name: String, channels: Vec<Channel>, direction: Direction) -> Self {
+    pub fn new(name: String, job_name: String, channels: Vec<Channel>, config: TransferConfig, direction: Direction) -> Self {
 
         let is_sender = direction == Direction::Sender;
 
@@ -62,13 +82,13 @@ impl RemoteTransferHandler {
                     //     remote_recv_chans.insert(peer_node_id.clone(), unbounded());
                     // }
 
-                    local_send_chans.insert(channel_id.clone(), bounded(TRANSFER_QUEUE_SIZE));
-                    local_recv_chans.insert(channel_id.clone(), bounded(TRANSFER_QUEUE_SIZE));
+                    local_send_chans.insert(channel_id.clone(), bounded(config.transfer_queue_size));
+                    local_recv_chans.insert(channel_id.clone(), bounded(config.transfer_queue_size));
                     if !remote_send_chans.contains_key(peer_node_id) {
-                        remote_send_chans.insert(peer_node_id.clone(), bounded(TRANSFER_QUEUE_SIZE));
+                        remote_send_chans.insert(peer_node_id.clone(), bounded(config.transfer_queue_size));
                     }
                     if !remote_recv_chans.contains_key(peer_node_id) {
-                        remote_recv_chans.insert(peer_node_id.clone(), bounded(TRANSFER_QUEUE_SIZE));
+                        remote_recv_chans.insert(peer_node_id.clone(), bounded(config.transfer_queue_size));
                     }
                 }
             }
@@ -86,7 +106,8 @@ impl RemoteTransferHandler {
             channel_id_to_node_id: Arc::new(RwLock::new(channel_id_to_node_id)),
             metrics_recorder: Arc::new(MetricsRecorder::new(name.clone(), job_name.clone())),
             running: Arc::new(AtomicBool::new(false)),
-            io_thread_handles: Arc::new(ArrayQueue::new(2))
+            io_thread_handles: Arc::new(ArrayQueue::new(2)),
+            config: Arc::new(config)
         }
     }
 }

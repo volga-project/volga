@@ -6,6 +6,7 @@ import msgpack
 
 from volga.streaming.api.message.message import Record
 from volga.streaming.runtime.network.channel import Channel, ChannelMessage
+from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DataWriterConfig
 from volga_rust import RustDataWriter
 
 from volga.streaming.runtime.network.io_loop import IOHandler, RustIOHandler
@@ -22,15 +23,15 @@ class DataWriter(IOHandler):
         source_stream_name: str,
         job_name: str,
         channels: List[Channel],
-        batch_size: int = 1000
+        config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG
     ):
         super().__init__(name, job_name, channels)
-        self._rust_data_writer = RustDataWriter(name, job_name, self._rust_channels)
+        self._rust_data_writer = RustDataWriter(name, job_name, config.to_rust(), self._rust_channels)
         self._source_stream_name = source_stream_name
         self._batch_per_channel = {channel.channel_id: [] for channel in channels}
         self._lock_per_channel = {channel.channel_id: threading.Lock() for channel in channels}
         self._last_write_ts_per_channel = {channel.channel_id: -1 for channel in channels}
-        self._batch_size = batch_size
+        self._batch_size = config.batch_size
         self._flusher_thread = threading.Thread(target=self._flusher_loop)
         self.running = False
         self._metrics_recorder = MetricsRecorder(name, job_name)

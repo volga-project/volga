@@ -1,10 +1,30 @@
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queues::{BufferQueues, MAX_BUFFERS_PER_CHANNEL}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
+use super::{buffer_queues::{BufferQueues}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
+use pyo3::{pyclass, pymethods};
+use serde::{Deserialize, Serialize};
 
-const IN_FLIGHT_TIMEOUT_S: usize = 1; // how long to wait before re-sending un-acked buffers
+// const IN_FLIGHT_TIMEOUT_S: usize = 1; // how long to wait before re-sending un-acked buffers
+
+#[derive(Serialize, Deserialize, Clone)]
+#[pyclass(name="RustDataWriterConfig")]
+pub struct DataWriterConfig {
+    in_flight_timeout_s: usize,
+    max_buffers_per_channel: usize
+}
+
+#[pymethods]
+impl DataWriterConfig { 
+    #[new]
+    pub fn new(in_flight_timeout_s: usize, max_buffers_per_channel: usize) -> Self {
+        DataWriterConfig{
+            in_flight_timeout_s,
+            max_buffers_per_channel
+        }
+    }
+}
 
 pub struct DataWriter {
     name: String,
@@ -19,20 +39,23 @@ pub struct DataWriter {
     metrics_recorder: Arc<MetricsRecorder>,
 
     running: Arc<AtomicBool>,
-    io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>> // array queue so we do not mutate DataReader and keep ownership
+    io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>>, // array queue so we do not mutate DataReader and keep ownership
+
+    // config options
+    config: Arc<DataWriterConfig>
 }
 
 impl DataWriter {
 
-    pub fn new(name: String, job_name: String, channels: Vec<Channel>) -> DataWriter {
+    pub fn new(name: String, job_name: String, config: DataWriterConfig, channels: Vec<Channel>) -> DataWriter {
         let n_channels = channels.len();
         let mut send_chans = HashMap::with_capacity(n_channels);
         let mut recv_chans = HashMap::with_capacity(n_channels);
         let mut in_flight = HashMap::with_capacity(n_channels);
 
         for ch in &channels {
-            send_chans.insert(ch.get_channel_id().clone(), bounded(MAX_BUFFERS_PER_CHANNEL));
-            recv_chans.insert(ch.get_channel_id().clone(), bounded(MAX_BUFFERS_PER_CHANNEL));
+            send_chans.insert(ch.get_channel_id().clone(), bounded(config.max_buffers_per_channel));
+            recv_chans.insert(ch.get_channel_id().clone(), bounded(config.max_buffers_per_channel));
             in_flight.insert(ch.get_channel_id().clone(), Arc::new(RwLock::new(HashMap::new())));
         }
 
@@ -42,11 +65,12 @@ impl DataWriter {
             channels: channels.to_vec(),
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),
-            buffer_queues: Arc::new(BufferQueues::new(channels.to_vec())),
+            buffer_queues: Arc::new(BufferQueues::new(channels.to_vec(), config.max_buffers_per_channel)),
             in_flight: Arc::new(RwLock::new(in_flight)),
             metrics_recorder: Arc::new(MetricsRecorder::new(name.clone(), job_name.clone())),
             running: Arc::new(AtomicBool::new(false)),
-            io_thread_handles: Arc::new(ArrayQueue::new(2))
+            io_thread_handles: Arc::new(ArrayQueue::new(2)),
+            config: Arc::new(config)
         }
     }
 
@@ -117,6 +141,8 @@ impl IOHandler for DataWriter {
         let this_in_flights = self.in_flight.clone();
         let this_runnning = self.running.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
+        
+        let this_config = self.config.clone();
 
         let output_loop = move || {
 
@@ -132,7 +158,7 @@ impl IOHandler for DataWriter {
                     for in_flight_buffer_id in locked_in_flight.keys() {
                         let ts_and_b = locked_in_flight.get(in_flight_buffer_id).unwrap();
                         let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-                        if now_ts - ts_and_b.0 > IN_FLIGHT_TIMEOUT_S as u128 {
+                        if now_ts - ts_and_b.0 > this_config.in_flight_timeout_s as u128 {
                             let send_chan = locked_send_chans.get(channel_id).unwrap();
                             let sender = send_chan.0.clone();
                             if !sender.is_full() {
@@ -146,7 +172,7 @@ impl IOHandler for DataWriter {
                     }
 
                     // stop sending new buffers if in-flight limit is reached
-                    if locked_in_flight.len() == MAX_BUFFERS_PER_CHANNEL {
+                    if locked_in_flight.len() == this_config.max_buffers_per_channel {
                         continue;
                     }
                     

@@ -6,6 +6,7 @@ from volga.streaming.runtime.network.local.data_reader import DataReader
 from volga.streaming.runtime.network.local.data_writer import DataWriter
 import time
 import ray
+from volga.streaming.runtime.network.network_config import DataWriterConfig, DEFAULT_DATA_WRITER_CONFIG
 
 
 @ray.remote(max_concurrency=4)
@@ -15,7 +16,7 @@ class TestWriter:
         writer_id: int,
         job_name: str,
         channels: List[Channel],
-        batch_size: int = 1000,
+        writer_config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG,
         delay_s: float = 0,
     ):
         self.channels = channels
@@ -26,7 +27,7 @@ class TestWriter:
             source_stream_name='0',
             job_name=job_name,
             channels=channels,
-            batch_size=batch_size
+            config=writer_config
         )
         self.io_loop.register_io_handler(self.data_writer)
 

@@ -3,23 +3,24 @@ use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicU32, 
 use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta}, channel::{Channel}, io_loop::Bytes};
 
 
-pub const MAX_BUFFERS_PER_CHANNEL: usize = 10000;
+// pub const MAX_BUFFERS_PER_CHANNEL: usize = 10;
 
 pub struct BufferQueue {
     v: VecDeque<Box<Bytes>>,
     index: u32,
     buffer_id_seq: u32,
-    pop_requests: HashSet<u32>
+    pop_requests: HashSet<u32>,
+    max_buffers_per_channel: usize
 }
 
 impl BufferQueue {
 
-    pub fn new() -> Self {
-        BufferQueue{v: VecDeque::with_capacity(MAX_BUFFERS_PER_CHANNEL), index: 0, buffer_id_seq: 0, pop_requests: HashSet::new()}
+    pub fn new(max_buffers_per_channel: usize) -> Self {
+        BufferQueue{v: VecDeque::with_capacity(max_buffers_per_channel), index: 0, buffer_id_seq: 0, pop_requests: HashSet::new(), max_buffers_per_channel: max_buffers_per_channel}
     }
 
     pub fn try_push(&mut self, channel_id: String, b: Box<Bytes>) -> bool {
-        if self.v.len() == MAX_BUFFERS_PER_CHANNEL {
+        if self.v.len() == self.max_buffers_per_channel {
             return false;
         }
         let buffer_id = self.buffer_id_seq;
@@ -67,11 +68,11 @@ pub struct BufferQueues {
 }
 
 impl BufferQueues {
-    pub fn new(channels: Vec<Channel>) -> BufferQueues {
+    pub fn new(channels: Vec<Channel>, max_buffers_per_channel: usize) -> BufferQueues {
         let n_channels = channels.len();
         let mut in_queues = HashMap::with_capacity(n_channels);
         for ch in channels {
-            in_queues.insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(BufferQueue::new())));
+            in_queues.insert(ch.get_channel_id().clone(), Arc::new(Mutex::new(BufferQueue::new(max_buffers_per_channel))));
         }
 
         BufferQueues{in_queues: Arc::new(RwLock::new(in_queues))}
