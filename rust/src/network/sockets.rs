@@ -48,6 +48,7 @@ impl SocketsManager {
             socket.set_sndhwm(zmq_config.sndhwm).unwrap();
             socket.set_rcvhwm(zmq_config.rcvhwm).unwrap();
             socket.set_linger(zmq_config.linger).unwrap();
+            // socket.set_connect_timeout(4).unwrap();
 
             self.sockets_and_metas.push((socket, sm.clone()));
         }

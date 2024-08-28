@@ -1,5 +1,5 @@
 use core::time;
-use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::{self, JoinHandle}, time::Instant};
+use std::{sync::{atomic::{AtomicBool, Ordering}, Arc}, thread::{self, JoinHandle}, time::SystemTime};
 
 use crossbeam::queue::SegQueue;
 use crossbeam_skiplist::SkipMap;
@@ -36,7 +36,7 @@ impl SocketsMonitor {
             if sm.kind == SocketKind::Connect {
                 let fd = socket.get_fd().unwrap();
                 let monitor_endpoint = format!("inproc://monitor.s-{fd}");
-                socket.monitor(&monitor_endpoint, zmq::SocketEvent::ALL as i32).unwrap();
+                socket.monitor(&monitor_endpoint, zmq::SocketEvent::CONNECTED as i32).unwrap();
                 v.push((sm.clone(), monitor_endpoint));
             }
         }
@@ -44,9 +44,9 @@ impl SocketsMonitor {
     }
 
     pub fn wait_for_monitor_ready(&self) {
-        let timeout_s = 5;
-        let start = Instant::now().elapsed().as_secs();
-        while Instant::now().elapsed().as_secs() - start < timeout_s {
+        let timeout_ms = 5000;
+        let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+        while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < timeout_ms {
             if self.ready.load(Ordering::Relaxed) {
                 return
             }
@@ -56,9 +56,9 @@ impl SocketsMonitor {
     }
 
     pub fn wait_for_all_connected(&self) -> Option<String> {
-        let timeout_s = 5;
-        let start = Instant::now().elapsed().as_secs();
-        while Instant::now().elapsed().as_secs() - start < timeout_s {
+        let timeout_ms = 5000;
+        let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+        while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < timeout_ms {
             if self.all_connected() {
                 return None
             }
@@ -113,9 +113,9 @@ impl SocketsMonitor {
         let f = move || {
             // wait for all io  threads to register sockets
             let mut all_registered = false;
-            let register_timeout_s = 5;
-            let start = Instant::now().elapsed().as_secs();
-            while Instant::now().elapsed().as_secs() - start < register_timeout_s {
+            let register_timeout_ms = 5000;
+            let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+            while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < register_timeout_ms {
                 if this_registered_sockets.len() == num_expected_io_threads {
                     all_registered = true;
                     break;
@@ -133,6 +133,7 @@ impl SocketsMonitor {
                     if sm.kind == SocketKind::Connect {
                         let monitor_socket = this_zmqctx.socket(zmq::PAIR).unwrap();
                         monitor_socket.connect(&monitor_endpoint).unwrap();
+
                         monitors.push((monitor_socket, sm.clone()));
                         this_sockets_connected_status.insert(sm.clone(), AtomicBool::new(false));
                     }

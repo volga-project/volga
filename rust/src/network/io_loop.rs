@@ -128,7 +128,8 @@ impl IOLoop {
             let this_running = self.running.clone();
             let this_zmqctx = self.zmq_context.clone();
             let this_socket_metadata_manager = self.sockets_metadata_manager.clone();
-            
+            let this_name = self.name.clone();
+
             let new_sms = sms.to_vec();
             let this_zmq_config = self.zmq_config.clone();
 
@@ -137,7 +138,6 @@ impl IOLoop {
                 sockets_manager.create_sockets(&this_zmqctx, metas, this_zmq_config);
                 this_sockets_monitor.register_sockets(this_thread_id, sockets_manager.get_sockets_and_metas());
                 this_sockets_monitor.wait_for_monitor_ready();
-                thread::sleep(time::Duration::from_millis(1000));
                 sockets_manager.bind_and_connect();
                 let err = this_sockets_monitor.wait_for_all_connected();
                 if err.is_some() {
@@ -194,6 +194,7 @@ impl IOLoop {
         self.sockets_monitor.wait_for_monitor_ready();
         let err = self.sockets_monitor.wait_for_all_connected();
         let io_loop_name = self.name.clone();
+        self.sockets_monitor.close();
         println!("[Loop {io_loop_name}] All sockets connected");
         err
     }
