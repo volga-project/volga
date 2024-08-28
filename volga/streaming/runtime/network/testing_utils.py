@@ -1,4 +1,4 @@
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.io_loop import IOLoop
@@ -31,7 +31,7 @@ class TestWriter:
         )
         self.io_loop.register_io_handler(self.data_writer)
 
-    def start(self, num_threads: int = 1):
+    def start(self, num_threads: int = 1) -> Optional[str]:
         return self.io_loop.start(num_threads)
 
     def send_items(self, items_per_channel: Dict[str, List[Dict]]):
@@ -79,7 +79,7 @@ class TestReader:
         self.io_loop.register_io_handler(self.data_reader)
         self.res = []
 
-    def start(self, num_threads: int = 1):
+    def start(self, num_threads: int = 1) -> Optional[str]:
         return self.io_loop.start(num_threads)
 
     def receive_items(self) -> List[Any]:
@@ -107,4 +107,8 @@ class TestReader:
 
 def start_ray_io_handler_actors(handler_actors: List):
     futs = [h.start.remote() for h in handler_actors]
-    ray.get(futs)
+    res = ray.get(futs)
+    for i in range(len(res)):
+        err = res[i]
+        if err is not None:
+            raise RuntimeError(f'Failed to start {handler_actors[i].__class__.__name__}, err: {err}')

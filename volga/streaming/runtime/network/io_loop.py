@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import List, Union
+from typing import List, Union, Optional
 
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.metrics import MetricsRecorder
@@ -45,6 +45,7 @@ class IOLoop:
         name: str,
         config: ZmqConfig = DEFAULT_ZMQ_CONFIG
     ):
+        self.name = name
         self._rust_io_loop = RustIOLoop(name, config.to_rust())
         self._handlers: List[IOHandler] = []
 
@@ -60,10 +61,10 @@ class IOLoop:
         elif isinstance(rust_io_handler, RustTransferReceiver):
             self._rust_io_loop.register_transfer_receiver(rust_io_handler)
 
-    def start(self, num_threads: int = 1):
+    def start(self, num_threads: int = 1) -> Optional[str]:
         for handler in self._handlers:
             handler.start()
-        self._rust_io_loop.start(num_threads)
+        return self._rust_io_loop.start(num_threads)
 
     def close(self):
         for handler in self._handlers:

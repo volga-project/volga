@@ -1,7 +1,7 @@
 import logging
 import time
 from threading import Thread
-from typing import Tuple
+from typing import Tuple, Optional
 
 import ray
 from ray.actor import ActorHandle
@@ -33,13 +33,16 @@ class JobWorker:
     def init(self, execution_vertex: ExecutionVertex):
         self.execution_vertex = execution_vertex
 
-    def start_or_rollback(self):
+    def start_or_rollback(self) -> Optional[str]:
         self.task = self._create_stream_task()
-        self.task.start_or_recover()
+        err = self.task.start_or_recover()
+        if err is not None:
+            return err
 
         # watch task state
         self.task_watcher_thread = Thread(target=self._watch_task_state_loop)
         self.task_watcher_thread.start()
+        return None
 
     def _watch_task_state_loop(self):
         while self.running:

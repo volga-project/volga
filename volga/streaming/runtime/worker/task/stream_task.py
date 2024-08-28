@@ -42,11 +42,14 @@ class StreamTask(ABC):
     def run(self):
         pass
 
-    def start_or_recover(self):
-        self._prepare_task()
+    def start_or_recover(self) -> Optional[str]:
+        err = self._prepare_task()
+        if err is not None:
+            return err
         self.thread.start()
+        return None
 
-    def _prepare_task(self):
+    def _prepare_task(self) -> Optional[str]:
         # writer
         if len(self.execution_vertex.output_edges) != 0:
             output_channels = self.execution_vertex.get_output_channels()
@@ -80,9 +83,9 @@ class StreamTask(ABC):
                 )
                 self.io_loop.register_io_handler(self.data_reader)
 
-        self._open_processor()
+        return self._open_processor()
 
-    def _open_processor(self):
+    def _open_processor(self) -> Optional[str]:
         execution_vertex = self.execution_vertex
         output_edges = execution_vertex.output_edges
         # grouped by each operator in target vertex
@@ -107,14 +110,16 @@ class StreamTask(ABC):
 
         runtime_context = StreamingRuntimeContext(execution_vertex=execution_vertex)
 
-        self.io_loop.start() # TODO pass num io threads
-
+        err = self.io_loop.start() # TODO pass num io threads
+        if err is not None:
+            return err
         self.processor.open(
             collectors=self.collectors,
             runtime_context=runtime_context
         )
         if isinstance(self.processor, SourceProcessor):
             self.processor.set_master_handle(self.job_master)
+        return None
 
     def close(self):
         # logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')

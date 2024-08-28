@@ -173,23 +173,21 @@ class WorkerLifecycleController:
         self.transfer_controller.start_transfer_actors()
         logger.info(f'Started transfer actors in {time.time() - t}s')
 
-        # start source workers first
-        f = []
-        for w in execution_graph.get_source_workers():
-            f.append(w.start_or_rollback.remote())
-
-        t = time.time()
-        ray.wait(f)
-        logger.info(f'Started source workers in {time.time() - t}s')
-
-        # start rest
-        f = []
-        for w in execution_graph.get_non_source_workers():
-            f.append(w.start_or_rollback.remote())
-
-        t = time.time()
-        ray.wait(f)
-        logger.info(f'Started non-source workers in {time.time() - t}s')
+        # start workers, source first, non-source after
+        for workers in [execution_graph.get_source_workers(), execution_graph.get_non_source_workers()]:
+            f = []
+            for i in range(len(workers)):
+                f.append(workers[i].start_or_rollback.remote())
+            errs = ray.get(f)
+            has_err = False
+            big_err = "Unable to start workers:"
+            for err in errs:
+                if err is not None:
+                    has_err = True
+                    big_err += f"\n{err}"
+            if has_err:
+                raise RuntimeError(big_err)
+        logger.info(f'Started workers in {time.time() - t}s')
 
     def delete_workers(self, vertices: List[ExecutionVertex]):
         # close workers first

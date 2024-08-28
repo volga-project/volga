@@ -23,12 +23,13 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     ],
     'py_modules': [
         volga,
-        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64_v2.whl'
+        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64_v3.whl'
     ]
 }
 
 class TestWordCount(unittest.TestCase):
 
+    # TODO move this to wordcount source
     def test_word_count_source_split_enumerator(self):
         count_per_word = 5
         num_msgs_per_split = 2

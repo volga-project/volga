@@ -368,7 +368,9 @@ class TestRemoteTransfer(unittest.TestCase):
         io_loop.register_io_handler(data_reader)
         io_loop.register_io_handler(transfer_sender)
         io_loop.register_io_handler(transfer_receiver)
-        io_loop.start()
+        err = io_loop.start()
+        if err is not None:
+            raise RuntimeError(f"Unable to start io_loop {io_loop.name}: {err}")
         try:
             for i in range(max_buffers_per_channel + output_queue_size):
                 time.sleep(0.1)
@@ -401,8 +403,8 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    # t.test_n_to_n_parallel_on_ray(n=5)
+    t.test_n_to_n_parallel_on_ray(n=4)
     # t.test_transfer_actor_interruption()
-    # t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
+    t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
     t.test_backpressure()
 

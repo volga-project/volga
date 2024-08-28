@@ -172,7 +172,9 @@ class TestLocalTransfer(unittest.TestCase):
         data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], config=reader_config)
         io_loop.register_io_handler(data_writer)
         io_loop.register_io_handler(data_reader)
-        io_loop.start()
+        err = io_loop.start()
+        if err is not None:
+            raise RuntimeError(f"Unable to start io_loop {io_loop.name}: {err}")
         try:
             for _ in range(max_buffers_per_channel + output_queue_size):
                 time.sleep(0.1)
@@ -206,6 +208,6 @@ class TestLocalTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    # t.test_one_to_one_on_ray()
-    # t.test_n_all_to_all_on_local_ray(n=5)
+    t.test_one_to_one_on_ray()
+    t.test_n_all_to_all_on_local_ray(n=4)
     t.test_backpressure()

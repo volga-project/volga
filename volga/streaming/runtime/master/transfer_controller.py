@@ -63,4 +63,12 @@ class TransferController:
         for node_id in self.transfer_actors:
             actor = self.transfer_actors[node_id]
             f.append(actor.start.remote())
-        ray.get(f)
+        errs = ray.get(f)
+        has_err = False
+        big_err = "Unable to start transfer actors:"
+        for err in errs:
+            if err is not None:
+                has_err = True
+                big_err += f"\n{err}"
+        if has_err:
+            raise RuntimeError(big_err)

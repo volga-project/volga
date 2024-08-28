@@ -47,7 +47,7 @@ class TransferActor:
     def get_pid(self):
         return os.getpid()
 
-    def start(self, num_threads: int = 1):
+    def start(self, num_threads: int = 1) -> Optional[str]:
         return self._loop.start(num_threads)
 
     def close(self):

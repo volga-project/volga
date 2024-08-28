@@ -1,6 +1,6 @@
 use std::{any::Any, borrow::{Borrow, BorrowMut}, hash::Hash, sync::{Arc, RwLock}};
 
-use pyo3::{pyclass, pymethods, types::PyBytes, IntoPy, Py, PyAny, PyResult, PyTryFrom, Python};
+use pyo3::{pyclass, pymethods, types::{PyBytes, PyTuple}, IntoPy, Py, PyAny, PyResult, PyTryFrom, Python};
 
 use super::{channel::Channel, data_reader::{self, DataReader, DataReaderConfig}, data_writer::{DataWriter, DataWriterConfig}, io_loop::{Direction, IOHandler, IOLoop, ZmqConfig}, remote_transfer_handler::{RemoteTransferHandler, TransferConfig}};
 
@@ -268,7 +268,7 @@ impl PyIOLoop {
         self.io_loop.register_handler(tr.transfer_receiver.clone());
     }
 
-    pub fn start(&self, num_io_threads: usize) {
+    pub fn start(&self, num_io_threads: usize) -> Option<String> {
         self.io_loop.start_io_threads(num_io_threads)
     }
 
