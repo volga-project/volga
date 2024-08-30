@@ -40,15 +40,36 @@ impl SocketsManager {
         SocketsManager{sockets_and_metas: Vec::new()}
     }
 
-    pub fn create_sockets(&mut self, zmq_context: &zmq::Context, socket_metas: &Vec<SocketMetadata>, zmq_config: ZmqConfig) {
+    pub fn create_sockets(&mut self, zmq_context: &zmq::Context, socket_metas: &Vec<SocketMetadata>, zmq_config: Option<&ZmqConfig>) {
         for sm in socket_metas {
             let socket = zmq_context.socket(zmq::PAIR).unwrap();
-            socket.set_sndbuf(zmq_config.sndbuf).unwrap();
-            socket.set_rcvbuf(zmq_config.rcvbuf).unwrap();
-            socket.set_sndhwm(zmq_config.sndhwm).unwrap();
-            socket.set_rcvhwm(zmq_config.rcvhwm).unwrap();
-            socket.set_linger(zmq_config.linger).unwrap();
-            // socket.set_connect_timeout(4).unwrap();
+            if zmq_config.is_some() {
+                let config = zmq_config.unwrap();
+                if config.sndbuf.is_some() {
+                    println!("bam sndbuf");
+                    socket.set_sndbuf(config.sndbuf.unwrap()).unwrap();
+                }
+                if config.rcvbuf.is_some() {
+                    println!("bam rcvbuf");
+                    socket.set_rcvbuf(config.rcvbuf.unwrap()).unwrap();
+                }
+                if config.sndhwm.is_some() {
+                    println!("bam sndhwm");
+                    socket.set_sndhwm(config.sndhwm.unwrap()).unwrap();
+                }
+                if config.rcvhwm.is_some() {
+                    println!("bam rcvhwm");
+                    socket.set_rcvhwm(config.rcvhwm.unwrap()).unwrap();
+                }
+                if config.linger.is_some() {
+                    println!("bam linger");
+                    socket.set_linger(config.linger.unwrap()).unwrap();
+                }
+                if config.connect_timeout_s.is_some() {
+                    println!("bam connect_timeout_s");
+                    socket.set_connect_timeout(config.connect_timeout_s.unwrap()).unwrap();
+                }
+            }
 
             self.sockets_and_metas.push((socket, sm.clone()));
         }
@@ -57,7 +78,13 @@ impl SocketsManager {
     pub fn bind_and_connect(&mut self) {
         for (socket, sm) in &self.sockets_and_metas {
             if sm.kind == SocketKind::Bind {
-                socket.bind(&sm.addr).unwrap();
+                // TODO handle Address already in use
+                let b = socket.bind(&sm.addr);
+                if b.is_err() {
+                    let addr =  &sm.addr;
+                    let err = b.err().unwrap().message();
+                    panic!("Unable to bind addr {addr}: {err}")
+                }
             } else {
                 socket.connect(&sm.addr).unwrap();
             }

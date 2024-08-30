@@ -71,17 +71,7 @@ impl RemoteTransferHandler {
                 } => {
                     let peer_node_id =  if is_sender {target_node_id} else {source_node_id};
                     channel_id_to_node_id.insert(channel_id.clone(), peer_node_id.clone());
-
-                    // TODO channels should be bounded to be able to backpressure
-                    // local_send_chans.insert(channel_id.clone(), unbounded());
-                    // local_recv_chans.insert(channel_id.clone(), unbounded());
-                    // if !remote_send_chans.contains_key(peer_node_id) {
-                    //     remote_send_chans.insert(peer_node_id.clone(), unbounded());
-                    // }
-                    // if !remote_recv_chans.contains_key(peer_node_id) {
-                    //     remote_recv_chans.insert(peer_node_id.clone(), unbounded());
-                    // }
-
+                    
                     local_send_chans.insert(channel_id.clone(), bounded(config.transfer_queue_size));
                     local_recv_chans.insert(channel_id.clone(), bounded(config.transfer_queue_size));
                     if !remote_send_chans.contains_key(peer_node_id) {

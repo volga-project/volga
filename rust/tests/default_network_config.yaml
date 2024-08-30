@@ -11,3 +11,4 @@ zmq:
   sndbuf: 512
   rcvbuf: 512
   linger: 0
+  connect_timeout_s: 4

@@ -6,7 +6,7 @@ pub struct NetworkConfig {
     pub data_reader: DataReaderConfig,
     pub data_writer: DataWriterConfig,
     pub transfer: TransferConfig,
-    pub zmq: ZmqConfig,
+    pub zmq: Option<ZmqConfig>,
 }
 
 impl NetworkConfig {

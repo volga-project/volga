@@ -13,18 +13,19 @@ pub type Bytes = Vec<u8>;
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustZmqConfig")]
 pub struct ZmqConfig {
-    pub sndhwm: i32,
-    pub rcvhwm: i32,
-    pub sndbuf: i32,
-    pub rcvbuf: i32,
-    pub linger: i32
+    pub sndhwm: Option<i32>,
+    pub rcvhwm: Option<i32>,
+    pub sndbuf: Option<i32>,
+    pub rcvbuf: Option<i32>,
+    pub linger: Option<i32>,
+    pub connect_timeout_s: Option<i32>
 }
 
 #[pymethods]
 impl ZmqConfig { 
     #[new]
-    pub fn new(sndhwm: i32, rcvhwm: i32, sndbuf: i32, rcvbuf: i32, linger: i32) -> Self {
-        ZmqConfig{sndhwm, rcvhwm, sndbuf, rcvbuf, linger}
+    pub fn new(sndhwm: Option<i32>, rcvhwm: Option<i32>, sndbuf: Option<i32>, rcvbuf: Option<i32>, linger: Option<i32>, connect_timeout_s: Option<i32>) -> Self {
+        ZmqConfig{sndhwm, rcvhwm, sndbuf, rcvbuf, linger, connect_timeout_s}
     }
 }
 
@@ -66,13 +67,13 @@ pub struct IOLoop {
     zmq_context: Arc<zmq::Context>,
     io_threads: Arc<SegQueue<JoinHandle<()>>>,
     sockets_metadata_manager: Arc<SocketsMeatadataManager>,
-    zmq_config: ZmqConfig,
+    zmq_config: Option<ZmqConfig>,
     sockets_monitor: Arc<SocketsMonitor>,
 }
 
 impl IOLoop {
 
-    pub fn new(name: String, zmq_config: ZmqConfig) -> IOLoop {
+    pub fn new(name: String, zmq_config: Option<ZmqConfig>) -> IOLoop {
         let zmq_ctx = Arc::new(zmq::Context::new());
         IOLoop{
             name,
@@ -135,7 +136,7 @@ impl IOLoop {
 
             let f = move |metas: &Vec<SocketMetadata>| {
                 let mut sockets_manager = SocketsManager::new();
-                sockets_manager.create_sockets(&this_zmqctx, metas, this_zmq_config);
+                sockets_manager.create_sockets(&this_zmqctx, metas, this_zmq_config.as_ref());
                 this_sockets_monitor.register_sockets(this_thread_id, sockets_manager.get_sockets_and_metas());
                 this_sockets_monitor.wait_for_monitor_ready();
                 sockets_manager.bind_and_connect();
@@ -195,7 +196,9 @@ impl IOLoop {
         let err = self.sockets_monitor.wait_for_all_connected();
         let io_loop_name = self.name.clone();
         self.sockets_monitor.close();
-        println!("[Loop {io_loop_name}] All sockets connected");
+        if err.is_none() {
+            println!("[Loop {io_loop_name}] All sockets connected");
+        }
         err
     }
 

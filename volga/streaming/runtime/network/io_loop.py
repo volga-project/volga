@@ -43,10 +43,11 @@ class IOLoop:
     def __init__(
         self,
         name: str,
-        config: ZmqConfig = DEFAULT_ZMQ_CONFIG
+        config: Optional[ZmqConfig] = DEFAULT_ZMQ_CONFIG
     ):
         self.name = name
-        self._rust_io_loop = RustIOLoop(name, config.to_rust())
+        rust_config = None if config is None else config.to_rust()
+        self._rust_io_loop = RustIOLoop(name, rust_config)
         self._handlers: List[IOHandler] = []
 
     def register_io_handler(self, handler: IOHandler):

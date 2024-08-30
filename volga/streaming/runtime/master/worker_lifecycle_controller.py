@@ -129,7 +129,7 @@ class WorkerLifecycleController:
                 # unique ports per node-node connection
                 source_node_id = source_worker_network_info.node_id
                 target_node_id = target_worker_network_info.node_id
-                port = self.gen_port(f'{source_node_id}-{target_node_id}', self._reserved_node_ports)
+                port = self.gen_port(f'{source_node_id}-{target_node_id}', target_node_id, self._reserved_node_ports)
 
                 channel = RemoteChannel(
                     channel_id=edge.id,
@@ -212,11 +212,28 @@ class WorkerLifecycleController:
             w.exit.remote()
 
     @staticmethod
-    def gen_port(key: str, reserved_node_ports: Dict) -> int:
-        if key not in reserved_node_ports:
-            port = randint(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1])
-            reserved_node_ports[key] = port
+    def gen_port(conn_id: str, node_id: str, reserved_node_ports: Dict[str, Tuple[int, str]]) -> int:
+        port_pool_per_node = [*range(1234, 1237 + 1)] # TODO config this
+        if conn_id not in reserved_node_ports:
+            port = None
+            # gen next from pool
+            for _port in port_pool_per_node:
+                # scan all reserved_node_ports to see if it is used for this node_id
+                used = False
+                for _conn_id in reserved_node_ports:
+                    _node_id = reserved_node_ports[_conn_id][1]
+                    _reserved_port = reserved_node_ports[_conn_id][0]
+                    if node_id == _node_id and _reserved_port == _port:
+                        used = True
+                        break
+                if not used:
+                    port = _port
+                    break
+            if port is None:
+                raise RuntimeError(f'Port pool is too small for node {node_id}, all used')
+
+            reserved_node_ports[conn_id] = (port, node_id)
             return port
         else:
-            return reserved_node_ports[key]
+            return reserved_node_ports[conn_id][0]
 

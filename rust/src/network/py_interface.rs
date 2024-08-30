@@ -246,9 +246,9 @@ pub struct PyIOLoop {
 impl PyIOLoop {
 
     #[new]
-    pub fn new(name: String, zmq_config: &ZmqConfig) -> PyIOLoop {
+    pub fn new(name: String, zmq_config: Option<ZmqConfig>) -> PyIOLoop {
         PyIOLoop{
-            io_loop: IOLoop::new(name, zmq_config.clone()),
+            io_loop: IOLoop::new(name, zmq_config),
         }
     }
 

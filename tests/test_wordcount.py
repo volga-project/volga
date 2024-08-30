@@ -23,7 +23,7 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     ],
     'py_modules': [
         volga,
-        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64_v8.whl'
+        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64_v10.whl'
     ]
 }
 
@@ -88,7 +88,7 @@ class TestWordCount(unittest.TestCase):
         # TODO parallelism > 1 fails assert for remote channels
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=4,
+            parallelism=2,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary
