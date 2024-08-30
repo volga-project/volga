@@ -5,9 +5,23 @@ from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
 from volga.streaming.runtime.network.local.data_writer import DataWriter
 import time
+import volga
 import ray
 from volga.streaming.runtime.network.network_config import DataWriterConfig, DEFAULT_DATA_WRITER_CONFIG
 
+RAY_ADDR = 'ray://127.0.0.1:12345'
+REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
+    'pip': [
+        'pydantic==1.10.13',
+        'simplejson==3.19.2',
+        'orjson==3.10.6',
+        'aenum==3.1.15'
+    ],
+    'py_modules': [
+        volga,
+        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl'
+    ]
+}
 
 @ray.remote(max_concurrency=4)
 class TestWriter:

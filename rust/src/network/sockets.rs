@@ -46,27 +46,21 @@ impl SocketsManager {
             if zmq_config.is_some() {
                 let config = zmq_config.unwrap();
                 if config.sndbuf.is_some() {
-                    println!("bam sndbuf");
                     socket.set_sndbuf(config.sndbuf.unwrap()).unwrap();
                 }
                 if config.rcvbuf.is_some() {
-                    println!("bam rcvbuf");
                     socket.set_rcvbuf(config.rcvbuf.unwrap()).unwrap();
                 }
                 if config.sndhwm.is_some() {
-                    println!("bam sndhwm");
                     socket.set_sndhwm(config.sndhwm.unwrap()).unwrap();
                 }
                 if config.rcvhwm.is_some() {
-                    println!("bam rcvhwm");
                     socket.set_rcvhwm(config.rcvhwm.unwrap()).unwrap();
                 }
                 if config.linger.is_some() {
-                    println!("bam linger");
                     socket.set_linger(config.linger.unwrap()).unwrap();
                 }
                 if config.connect_timeout_s.is_some() {
-                    println!("bam connect_timeout_s");
                     socket.set_connect_timeout(config.connect_timeout_s.unwrap()).unwrap();
                 }
             }

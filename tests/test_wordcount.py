@@ -7,25 +7,12 @@ import yaml
 from pathlib import Path
 
 import volga
+from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.streaming.runtime.sources.wordcount.source import WordCountSource, WordCountSourceSplitEnumerator
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.function.function import SinkToCacheDictFunction
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitType
-
-RAY_ADDR = 'ray://127.0.0.1:12345'
-REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
-    'pip': [
-        'pydantic==1.10.13',
-        'simplejson==3.19.2',
-        'orjson==3.10.6',
-        'aenum==3.1.15'
-    ],
-    'py_modules': [
-        volga,
-        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64_v10.whl'
-    ]
-}
 
 class TestWordCount(unittest.TestCase):
 

@@ -18,21 +18,10 @@ from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_C
     DEFAULT_DATA_READER_CONFIG
 from volga.streaming.runtime.network.remote.transfer_actor import TransferActor
 from volga.streaming.runtime.network.remote.transfer_io_handlers import TransferSender, TransferReceiver
-from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors
+from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors, RAY_ADDR, \
+    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 
-RAY_ADDR = 'ray://127.0.0.1:12345'
-REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
-    'pip': [
-        'pydantic==1.10.13',
-        'simplejson==3.19.2',
-        'orjson==3.10.6',
-        'aenum==3.1.15'
-    ],
-    'py_modules': [
-        volga,
-        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64_v10.whl'
-    ]
-}
+
 class TestRemoteTransfer(unittest.TestCase):
 
     def _init_ray_actors(
@@ -417,7 +406,8 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    # t.test_n_to_n_parallel_on_ray(n=1)
     # t.test_transfer_actor_interruption()
     # t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
     # t.test_backpressure()
