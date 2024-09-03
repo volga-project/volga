@@ -14,6 +14,7 @@ from volga.streaming.api.function.function import SinkToCacheDictFunction
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitType
 
+
 class TestWordCount(unittest.TestCase):
 
     # TODO move this to wordcount source
