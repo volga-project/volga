@@ -1,0 +1,16 @@
+name: volga-maturin-build
+on:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: mkdir -p rust_builds
+      - uses: PyO3/maturin-action@v1
+        with:
+          args: -i python3.10 --target-dir rust_builds
+      - uses: actions/upload-artifact@v4
+        with:
+          name: volga-rust-x86_64-py310
+          path: rust_builds
