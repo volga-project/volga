@@ -3,6 +3,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 
+from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.master.resource_manager.resource_manager import Node, Resources
 
 
@@ -27,6 +28,7 @@ class NodeAssignStrategy(ABC):
         return res
 
 
+# places operator instances on the same node
 class ParallelismFirst(NodeAssignStrategy):
 
     def __init__(self):
@@ -61,6 +63,50 @@ class ParallelismFirst(NodeAssignStrategy):
                 node = self._find_matched_node(nodes, exec_vertex.resources)
                 if node is None:
                     raise RuntimeError(f'Not enough resources, total capacity: {total_capacity}, required capacity: {required_capacity}')
+                assert exec_vertex.execution_vertex_id not in res
+                node.allocate_execution_vertex(exec_vertex)
+                res[exec_vertex.execution_vertex_id] = node
+
+        return res
+
+
+# places operator instances on different nodes, not shared
+class OperatorFirst(NodeAssignStrategy):
+
+    def __init__(self):
+        self.node_to_operator = {}
+
+    def _find_matched_node(self, nodes: List[Node], vertex: ExecutionVertex) -> Optional[Node]:
+        i = 0
+        resources = vertex.resources
+        operator_id = vertex.job_vertex.vertex_id
+        while i < len(nodes):
+            node = nodes[i]
+            belongs_to_this_operator = (node.node_id not in self.node_to_operator) or self.node_to_operator[node.node_id] == operator_id
+            if belongs_to_this_operator and self._has_enough_resources(resources, node):
+                self.node_to_operator[node.node_id] = operator_id
+                return node
+            i+=1
+
+        if i >= len(nodes):
+            return None
+
+    def assign_resources(self, nodes: List[Node], execution_graph: 'ExecutionGraph') -> Dict[str, Node]:
+        total_capacity = Resources.combine(list(map(lambda n: n.resources, nodes)))
+        exec_vertices_by_job_vertex_id: Dict[
+            int, List['ExecutionVertex']] = execution_graph.execution_vertices_by_job_vertex
+        all_vertices = list(itertools.chain(*exec_vertices_by_job_vertex_id.values()))
+        required_capacity = Resources.combine(list(map(lambda v: v.resources, all_vertices)))
+
+        res = {}
+
+        for job_vertex_id in exec_vertices_by_job_vertex_id:
+            exec_vertices = exec_vertices_by_job_vertex_id[job_vertex_id]
+            for exec_vertex in exec_vertices:
+                node = self._find_matched_node(nodes, exec_vertex)
+                if node is None:
+                    raise RuntimeError(
+                        f'Not enough resources, total capacity: {total_capacity}, required capacity: {required_capacity}')
                 assert exec_vertex.execution_vertex_id not in res
                 node.allocate_execution_vertex(exec_vertex)
                 res[exec_vertex.execution_vertex_id] = node

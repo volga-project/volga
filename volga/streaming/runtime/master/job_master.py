@@ -10,7 +10,7 @@ from volga.streaming.api.operators.operators import ISourceOperator, SourceOpera
 from volga.streaming.runtime.config.streaming_config import StreamingConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
-from volga.streaming.runtime.master.resource_manager.node_assign_strategy import ParallelismFirst
+from volga.streaming.runtime.master.resource_manager.node_assign_strategy import ParallelismFirst, OperatorFirst
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
 from volga.streaming.runtime.master.scheduler.job_scheduler import JobScheduler
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitManager, SourceSplit
@@ -27,7 +27,8 @@ class JobMaster:
         self.runtime_context = JobMasterRuntimeContext(streaming_config)
 
         self.resource_manager = ResourceManager()
-        node_assign_strategy = ParallelismFirst() # TODO config this
+        # node_assign_strategy = ParallelismFirst() # TODO config this
+        node_assign_strategy = OperatorFirst()
         self.job_scheduler = JobScheduler(
             job_master=ray.get_runtime_context().current_actor,
             resource_manager=self.resource_manager,

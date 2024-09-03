@@ -1,6 +1,5 @@
 import logging
 import time
-from random import randint
 from typing import List, Tuple, Dict
 
 import ray
@@ -14,10 +13,7 @@ from volga.streaming.runtime.master.transfer_controller import TransferControlle
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker
 
-VALID_PORT_RANGE = (30000, 65000)
 
-
-# logger = logging.getLogger(__name__)
 logger = logging.getLogger("ray")
 
 
@@ -103,7 +99,7 @@ class WorkerLifecycleController:
             worker_infos.append((vertex_id, ni.node_id, ni.node_ip))
 
         logger.info(f'Created {len(workers)} workers')
-        logger.info(f'Workers writer node info: {worker_infos}')
+        logger.info(f'Workers node info: {worker_infos}')
 
     # construct channels based on Ray assigned actor IPs and update execution_graph
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
