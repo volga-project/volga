@@ -27,8 +27,7 @@ class JobMaster:
         self.runtime_context = JobMasterRuntimeContext(streaming_config)
 
         self.resource_manager = ResourceManager()
-        # node_assign_strategy = ParallelismFirst() # TODO config this
-        node_assign_strategy = OperatorFirst()
+        node_assign_strategy = OperatorFirst() # TODO config this
         self.job_scheduler = JobScheduler(
             job_master=ray.get_runtime_context().current_actor,
             resource_manager=self.resource_manager,

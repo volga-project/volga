@@ -164,25 +164,7 @@ class WorkerLifecycleController:
 
     def start_workers(self, execution_graph: ExecutionGraph):
         logger.info(f'Starting workers...')
-        # start transfer actors if needed
         t = time.time()
-        # self.transfer_controller.start_transfer_actors()
-        # logger.info(f'Started transfer actors in {time.time() - t}s')
-        #
-        # # start workers, source first, non-source after
-        # for workers in [execution_graph.get_source_workers(), execution_graph.get_non_source_workers()]:
-        #     f = []
-        #     for i in range(len(workers)):
-        #         f.append(workers[i].start_or_rollback.remote())
-        #     errs = ray.get(f)
-        #     has_err = False
-        #     big_err = "Unable to start workers:"
-        #     for err in errs:
-        #         if err is not None:
-        #             has_err = True
-        #             big_err += f"\n{err}"
-        #     if has_err:
-        #         raise RuntimeError(big_err)
         futs = {}
         for node_id in self.transfer_controller.transfer_actors:
             actor, name = self.transfer_controller.transfer_actors[node_id]

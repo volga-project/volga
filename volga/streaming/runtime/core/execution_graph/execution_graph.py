@@ -165,12 +165,6 @@ class ExecutionGraph:
     def get_non_source_vertices(self) -> List[ExecutionVertex]:
         return [v for v in self.execution_vertices_by_id.values() if v.job_vertex.vertex_type != VertexType.SOURCE]
 
-    # def get_source_workers(self) -> List[ActorHandle]:
-    #     return [v.worker for v in self.get_source_vertices()]
-    #
-    # def get_non_source_workers(self) -> List[ActorHandle]:
-    #     return [v.worker for v in self.get_non_source_vertices()]
-
     def get_max_parallelism(self):
         if self._max_parallelism is None:
             raise RuntimeError('Execution graph is not inited')

@@ -76,7 +76,7 @@ class TestWordCount(unittest.TestCase):
         # TODO parallelism > 1 fails assert for remote channels
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=1,
+            parallelism=4,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary

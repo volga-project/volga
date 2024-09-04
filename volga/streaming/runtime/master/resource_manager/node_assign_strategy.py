@@ -28,6 +28,7 @@ class NodeAssignStrategy(ABC):
         return res
 
 
+# TODO this does not work properly with remote connections, why?
 # places operator instances on the same node
 class ParallelismFirst(NodeAssignStrategy):
 

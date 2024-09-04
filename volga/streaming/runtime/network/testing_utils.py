@@ -9,7 +9,8 @@ import volga
 import ray
 from volga.streaming.runtime.network.network_config import DataWriterConfig, DEFAULT_DATA_WRITER_CONFIG
 
-RAY_ADDR = 'ray://127.0.0.1:12345'
+# RAY_ADDR = 'ray://127.0.0.1:12345'
+RAY_ADDR = 'ray://ray-cluster-kuberay-head-hvbdn.ray-cluster-kuberay-head-svc:10001'
 REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     'pip': [
         'pydantic==1.10.13',

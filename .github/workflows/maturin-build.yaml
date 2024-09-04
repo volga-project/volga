@@ -6,7 +6,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: mkdir -p rust_builds
+      - run: cd rust && mkdir -p rust_builds
       - uses: PyO3/maturin-action@v1
         with:
           args: -i python3.10 --target-dir rust_builds
