@@ -6,11 +6,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: mkdir -p $GITHUB_WORKSPACE/volga/rust/rust_builds
+      - run: mkdir -p $GITHUB_WORKSPACE/volga/volga/rust/rust_builds
       - uses: PyO3/maturin-action@v1
         with:
-          args: -i python3.10 --target-dir volga/rust/rust_builds -m volga/rust/Cargo.toml
+          args: -i python3.10 --target-dir volga/volga/rust/rust_builds -m volga/volga/rust/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
           name: volga-rust-x86_64-py310
-          path: $GITHUB_WORKSPACE/volga/rust/rust_builds/
+          path: $GITHUB_WORKSPACE/volga/volga/rust/rust_builds/
