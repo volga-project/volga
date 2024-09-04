@@ -9,7 +9,7 @@ jobs:
       - run: mkdir -p $GITHUB_WORKSPACE/volga/rust/rust_builds
       - uses: PyO3/maturin-action@v1
         with:
-          args: -i python3.10 --target-dir $GITHUB_WORKSPACE/volga/rust/rust_builds -m $GITHUB_WORKSPACE/volga/rust/Cargo.toml
+          args: -i python3.10 --target-dir volga/rust/rust_builds -m volga/rust/Cargo.toml
       - uses: actions/upload-artifact@v4
         with:
           name: volga-rust-x86_64-py310
