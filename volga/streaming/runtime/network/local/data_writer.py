@@ -12,8 +12,6 @@ from volga_rust import RustDataWriter
 from volga.streaming.runtime.network.io_loop import IOHandler, RustIOHandler
 from volga.streaming.runtime.network.metrics import MetricsRecorder
 
-FLUSH_TIMEOUT_S = 1 # TODO this should be in a config
-
 
 class DataWriter(IOHandler):
 
@@ -33,6 +31,7 @@ class DataWriter(IOHandler):
         self._last_write_ts_per_channel = {channel.channel_id: -1 for channel in channels}
         self._batch_size = config.batch_size
         self._flusher_thread = threading.Thread(target=self._flusher_loop)
+        self._flush_period_s = config.flush_period_s
         self.running = False
         self._metrics_recorder = MetricsRecorder(name, job_name)
 
@@ -87,7 +86,7 @@ class DataWriter(IOHandler):
         for channel_id in self._lock_per_channel:
             lock = self._lock_per_channel[channel_id]
             lock.acquire()
-            if time.perf_counter() - self._last_write_ts_per_channel[channel_id] >= FLUSH_TIMEOUT_S:
+            if time.perf_counter() - self._last_write_ts_per_channel[channel_id] >= self._flush_period_s:
                 batch = self._batch_per_channel[channel_id]
                 if len(batch) == 0:
                     lock.release()
@@ -103,7 +102,7 @@ class DataWriter(IOHandler):
     def _flusher_loop(self):
         while self.running:
             self.try_flush_if_needed()
-            time.sleep(FLUSH_TIMEOUT_S)
+            time.sleep(self._flush_period_s)
 
     def start(self):
         self._start_ts = time.time()
