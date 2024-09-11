@@ -10,7 +10,7 @@ import ray
 from volga.streaming.runtime.network.network_config import DataWriterConfig, DEFAULT_DATA_WRITER_CONFIG
 
 # RAY_ADDR = 'ray://127.0.0.1:12345'
-RAY_ADDR = 'ray://ray-cluster-kuberay-head-hvbdn.ray-cluster-kuberay-head-svc:10001'
+RAY_ADDR = 'ray://ray-cluster-kuberay-head-svc:10001'
 REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     'pip': [
         'pydantic==1.10.13',
@@ -20,9 +20,11 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     ],
     'py_modules': [
         volga,
-        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl'
+        '/Users/anov/Desktop/volga-rust-builds/volga_rust-0.1.0-cp310-cp310-manylinux_2_35_x86_64.whl'
+        # '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl'
     ]
 }
+
 
 @ray.remote(max_concurrency=4)
 class TestWriter:

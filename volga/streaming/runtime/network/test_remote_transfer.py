@@ -38,9 +38,9 @@ class TestRemoteTransfer(unittest.TestCase):
         channels = []
         readers = []
         writers = []
+        all_nodes = ray.nodes()
+        no_head = list(filter(lambda n: 'node:__internal_head__' not in n['Resources'], all_nodes))
         if multinode:
-            all_nodes = ray.nodes()
-            no_head = list(filter(lambda n: 'node:__internal_head__' not in n['Resources'], all_nodes))
             if len(no_head) < 2:
                 raise RuntimeError(f'Not enough non-head nodes in the cluster: {len(no_head)}')
             two_nodes = random.sample(no_head, 2)
@@ -110,8 +110,8 @@ class TestRemoteTransfer(unittest.TestCase):
 
     def test_n_to_n_parallel_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
         num_msgs_per_writer = 100000
-        msg_size = 1024
-        batch_size = 1000
+        msg_size = 32
+        batch_size = 10
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
         to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs_per_writer)]

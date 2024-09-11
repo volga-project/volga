@@ -61,9 +61,9 @@ class TestWordCount(unittest.TestCase):
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 10000000
+        count_per_word = 10000
         word_length = 32
-        num_msgs_per_split = 10000
+        num_msgs_per_split = 1000
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
 

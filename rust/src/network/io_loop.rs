@@ -1,5 +1,5 @@
 use core::time;
-use std::{cmp::min, collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, sleep, JoinHandle}};
+use std::{cmp::min, collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, sleep, JoinHandle}, time::Duration};
 
 use crossbeam::{channel::{Sender, Receiver}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};

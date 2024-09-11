@@ -10,6 +10,7 @@ from typing import Optional, Any, Tuple
 import ray
 import zmq
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from volga.streaming.runtime.network.testing_utils import RAY_ADDR
 
 from volga.streaming.runtime.network_deprecated.buffer.buffering_config import BufferingConfig
 from volga.streaming.runtime.network_deprecated.buffer.buffering_policy import BufferingPolicy, PeriodicPartialFlushPolicy, \
@@ -307,6 +308,6 @@ class TestRemoteTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_locally(n=3)
-    t.test_n_to_n_on_ray(n=1)
-    # t.test_n_to_n_on_ray(n=1, ray_addr='ray://127.0.0.1:12345', runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
+    # t.test_n_to_n_on_ray(n=1)
+    t.test_n_to_n_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_transfer_actor_interruption()
