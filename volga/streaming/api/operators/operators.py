@@ -12,6 +12,8 @@ from volga.streaming.api.function.function import Function, SourceContext, Sourc
     FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
 from volga.streaming.api.message.message import Record, KeyRecord
 from volga.streaming.api.operators.timestamp_assigner import TimestampAssigner
+from volga.streaming.common.utils import now_ts_ms
+from volga.streaming.runtime.master.stats.stats_manager import WorkerLatencyStatsState, WorkerThroughputStatsState
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnumerator, SourceSplit, SourceSplitType
 
 logger = logging.getLogger(__name__)
@@ -121,14 +123,21 @@ class SourceOperator(ISourceOperator):
             self.finished = False
             self.current_split: Optional[SourceSplit] = None
             self.job_master: Optional[ActorHandle] = None
+            self.throughput_stats = WorkerThroughputStatsState.init()
 
         def collect(self, value: Any):
+            source_emit_ts = None
+            # throttle source_emit_ts setting - it is used to calculate latency stats, we dont want it on every message
+            if (self.num_fetched_records + 1)%100 == 0:
+                source_emit_ts = now_ts_ms()
+
             for collector in self.collectors:
-                record = Record(value)
+                record = Record(value=value, event_time=None, source_emit_ts=source_emit_ts)
                 if self.timestamp_assigner is not None:
                     record = self.timestamp_assigner.assign_timestamp(record)
                 collector.collect(record)
             self.num_fetched_records += 1
+            self.throughput_stats.inc()
 
             # two ways notify reached bounds
             # 1. if source function implements num_records (bounded non-split source)
@@ -244,7 +253,7 @@ class KeyByOperator(StreamOperator, OneInputOperator):
 
     def process_element(self, record: Record):
         key = self.func.key_by(record.value)
-        self.collect(KeyRecord(key, record.value, record.event_time))
+        self.collect(KeyRecord(key, record.value, record.event_time, record.source_emit_ts))
 
 
 class ReduceOperator(StreamOperator, OneInputOperator):
@@ -275,8 +284,13 @@ class SinkOperator(StreamOperator, OneInputOperator):
     def __init__(self, sink_func: SinkFunction):
         assert isinstance(sink_func, SinkFunction)
         super().__init__(sink_func)
+        self.latency_stats = WorkerLatencyStatsState.init()
 
     def process_element(self, record: Record):
+        ts = now_ts_ms()
+        if record.source_emit_ts is not None:
+            latency = record.source_emit_ts - ts
+            self.latency_stats.observe(latency, ts)
         self.func.sink(record.value)
 
 

@@ -8,13 +8,17 @@ from ray.actor import ActorHandle
 
 from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.message.message import Record, record_from_channel_message
+from volga.streaming.api.operators.chained import ChainedOperator
+from volga.streaming.api.operators.operators import ISourceOperator, SourceOperator, SinkOperator
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
+from volga.streaming.runtime.master.stats.stats_manager import WorkerStatsUpdate
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
 from volga.streaming.runtime.network.local.data_writer import DataWriter
 from volga.streaming.runtime.worker.task.streaming_runtime_context import StreamingRuntimeContext
 from volga.streaming.runtime.core.collector.output_collector import OutputCollector
-from volga.streaming.runtime.core.processor.processor import Processor, TwoInputProcessor, SourceProcessor
+from volga.streaming.runtime.core.processor.processor import Processor, TwoInputProcessor, SourceProcessor, \
+    StreamProcessor
 
 logger = logging.getLogger("ray")
 
@@ -129,6 +133,25 @@ class StreamTask(ABC):
         if self.thread is not None:
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')
+
+    def collect_stats(self) -> WorkerStatsUpdate:
+        if isinstance(self.processor, SourceProcessor):
+            assert isinstance(self.processor.operator, ISourceOperator)
+            source_context = self.processor.operator.get_source_context()
+            assert isinstance(source_context, SourceOperator.SourceContextImpl)
+            worker_throughput_stats = source_context.throughput_stats
+            return worker_throughput_stats.collect()
+
+        assert isinstance(self.processor, StreamProcessor)
+        operator = self.processor.operator
+        if isinstance(operator, ChainedOperator):
+            operator = operator.tail_operator
+
+        if isinstance(operator, SinkOperator):
+            latency_stats = operator.latency_stats
+            return latency_stats.collect()
+
+        raise RuntimeError('Trying to collect stats from worker that does not implement it')
 
 
 class SourceStreamTask(StreamTask):

@@ -6,6 +6,7 @@ from volga.streaming.runtime.master.context.job_master_runtime_context import Jo
 from volga.streaming.runtime.master.job_lifecycle.job_status import JobStatus
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
+from volga.streaming.runtime.master.stats.stats_manager import StatsManager
 from volga.streaming.runtime.master.worker_lifecycle_controller import WorkerLifecycleController
 
 # logger = logging.getLogger(__name__)
@@ -18,11 +19,12 @@ class JobScheduler:
         self,
         job_master: ActorHandle,
         resource_manager: ResourceManager,
+        stats_manager: StatsManager,
         node_assign_strategy: NodeAssignStrategy,
         runtime_context: JobMasterRuntimeContext
     ):
         self.runtime_context = runtime_context
-        self.worker_lifecycle_controller = WorkerLifecycleController(job_master, resource_manager, node_assign_strategy)
+        self.worker_lifecycle_controller = WorkerLifecycleController(job_master, resource_manager, stats_manager, node_assign_strategy)
 
     def schedule_job(self) -> bool:
         self._prepare_job_submission()

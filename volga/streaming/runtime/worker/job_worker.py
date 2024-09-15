@@ -9,6 +9,7 @@ from ray.actor import ActorHandle
 from volga.streaming.api.operators.operators import SourceOperator, ISourceOperator
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.core.processor.processor import Processor, SourceProcessor, OneInputProcessor
+from volga.streaming.runtime.master.stats.stats_manager import WorkerStatsUpdate
 from volga.streaming.runtime.worker.task.stream_task import StreamTask, SourceStreamTask, \
     OneInputStreamTask, TwoInputStreamTask
 
@@ -117,3 +118,6 @@ class JobWorker:
 
     def exit(self):
         ray.actor.exit_actor()
+
+    def collect_stats(self) -> WorkerStatsUpdate:
+        return self.task.collect_stats()

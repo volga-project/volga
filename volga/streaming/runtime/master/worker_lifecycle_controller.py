@@ -5,10 +5,12 @@ from typing import List, Tuple, Dict
 import ray
 from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+from volga.streaming.api.job_graph.job_graph import VertexType
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
+from volga.streaming.runtime.master.stats.stats_manager import StatsManager
 from volga.streaming.runtime.master.transfer_controller import TransferController
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker
@@ -30,10 +32,12 @@ class WorkerLifecycleController:
         self,
         job_master: ActorHandle,
         resource_manager: ResourceManager,
+        stats_manager: StatsManager,
         node_assign_strategy: NodeAssignStrategy
     ):
         self.job_master = job_master
         self.resource_manager = resource_manager
+        self.stats_manager = stats_manager
         self.node_assign_strategy = node_assign_strategy
         self._reserved_node_ports = {}
         self.transfer_controller = TransferController()
@@ -84,6 +88,9 @@ class WorkerLifecycleController:
             vertex_ids.append(vertex_id)
             workers[vertex_id] = worker
             vertex.set_worker(worker)
+
+            if vertex.job_vertex.vertex_type == VertexType.SOURCE or vertex.job_vertex.vertex_type == VertexType.SINK:
+                self.stats_manager.register_worker(worker)
 
         worker_hosts_info = ray.get([workers[vertex_id].get_host_info.remote() for vertex_id in vertex_ids])
         worker_infos = []

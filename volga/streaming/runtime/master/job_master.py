@@ -13,6 +13,7 @@ from volga.streaming.runtime.master.context.job_master_runtime_context import Jo
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import ParallelismFirst, OperatorFirst
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
 from volga.streaming.runtime.master.scheduler.job_scheduler import JobScheduler
+from volga.streaming.runtime.master.stats.stats_manager import StatsManager
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitManager, SourceSplit
 
 logger = logging.getLogger("ray")
@@ -27,10 +28,12 @@ class JobMaster:
         self.runtime_context = JobMasterRuntimeContext(streaming_config)
 
         self.resource_manager = ResourceManager()
+        self.stats_manager = StatsManager()
         node_assign_strategy = OperatorFirst() # TODO config this
         self.job_scheduler = JobScheduler(
             job_master=ray.get_runtime_context().current_actor,
             resource_manager=self.resource_manager,
+            stats_manager=self.stats_manager,
             node_assign_strategy=node_assign_strategy,
             runtime_context=self.runtime_context
         )
@@ -57,7 +60,10 @@ class JobMaster:
 
         self._init_source_split_manager_if_needed()
 
-        return self.job_scheduler.schedule_job()
+        res = self.job_scheduler.schedule_job()
+        if res:
+            self.stats_manager.start()
+        return res
 
     def notify_source_finished(self, task_id: str):
         if task_id not in self.sources_finished:
@@ -114,4 +120,5 @@ class JobMaster:
 
     def destroy(self):
         self.running = False
+        self.stats_manager.stop()
         self.job_scheduler.destroy_job()
