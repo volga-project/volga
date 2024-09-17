@@ -6,6 +6,8 @@ import ray
 from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from volga.streaming.api.job_graph.job_graph import VertexType
+from volga.streaming.api.operators.chained import ChainedOperator
+from volga.streaming.api.operators.operators import SinkOperator
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
@@ -89,7 +91,13 @@ class WorkerLifecycleController:
             workers[vertex_id] = worker
             vertex.set_worker(worker)
 
-            if vertex.job_vertex.vertex_type == VertexType.SOURCE or vertex.job_vertex.vertex_type == VertexType.SINK:
+            if isinstance(vertex.job_vertex.stream_operator, ChainedOperator):
+                # chained operator with sink case
+                is_sink = isinstance(vertex.job_vertex.stream_operator.tail_operator, SinkOperator)
+            else:
+                is_sink = vertex.job_vertex.vertex_type == VertexType.SINK
+
+            if is_sink:
                 self.stats_manager.register_worker(worker)
 
         worker_hosts_info = ray.get([workers[vertex_id].get_host_info.remote() for vertex_id in vertex_ids])

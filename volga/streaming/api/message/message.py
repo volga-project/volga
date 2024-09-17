@@ -67,7 +67,8 @@ class KeyRecord(Record):
             'key': self.key,
             'value': self.value,
             'stream_name': self.stream_name,
-            'event_time': self.event_time
+            'event_time': self.event_time,
+            'source_emit_ts': self.source_emit_ts
         }
 
 

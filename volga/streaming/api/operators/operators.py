@@ -123,7 +123,7 @@ class SourceOperator(ISourceOperator):
             self.finished = False
             self.current_split: Optional[SourceSplit] = None
             self.job_master: Optional[ActorHandle] = None
-            self.throughput_stats = WorkerThroughputStatsState.init()
+            self.throughput_stats = WorkerThroughputStatsState.create()
 
         def collect(self, value: Any):
             source_emit_ts = None
@@ -216,7 +216,7 @@ class MapOperator(StreamOperator, OneInputOperator):
         super().__init__(map_func)
 
     def process_element(self, record):
-        self.collect(Record(value=self.func.map(record.value), event_time=record.event_time))
+        self.collect(Record(value=self.func.map(record.value), event_time=record.event_time, source_emit_ts=record.source_emit_ts))
 
 
 class FlatMapOperator(StreamOperator, OneInputOperator):
@@ -273,7 +273,7 @@ class ReduceOperator(StreamOperator, OneInputOperator):
             old_value = self.reduce_state[key]
             new_value = self.func.reduce(old_value, value)
             self.reduce_state[key] = new_value
-            self.collect(Record(value=new_value, event_time=record.event_time))
+            self.collect(Record(value=new_value, event_time=record.event_time, source_emit_ts=record.source_emit_ts))
         else:
             self.reduce_state[key] = value
             self.collect(record)
@@ -284,12 +284,16 @@ class SinkOperator(StreamOperator, OneInputOperator):
     def __init__(self, sink_func: SinkFunction):
         assert isinstance(sink_func, SinkFunction)
         super().__init__(sink_func)
+        self.latency_stats = None
+        
+    def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
+        super().open(collectors, runtime_context)
         self.latency_stats = WorkerLatencyStatsState.init()
 
     def process_element(self, record: Record):
-        ts = now_ts_ms()
         if record.source_emit_ts is not None:
-            latency = record.source_emit_ts - ts
+            ts = now_ts_ms()
+            latency = ts - record.source_emit_ts
             self.latency_stats.observe(latency, ts)
         self.func.sink(record.value)
 
@@ -335,12 +339,14 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         if left is not None:
             lv = left.value
             event_time = left.event_time
+            source_emit_ts = left.source_emit_ts
             left_records.append(left)
             for right_r in right_records:
-                self.collect(Record(value=self.func.join(lv, right_r.value), event_time=event_time))
+                self.collect(Record(value=self.func.join(lv, right_r.value), event_time=event_time, source_emit_ts=source_emit_ts))
         else:
             rv = right.value
             right_records.append(right)
             for left_r in left_records:
                 event_time = left_r.event_time
-                self.collect(Record(value=self.func.join(left_r.value, rv), event_time=event_time))
+                source_emit_ts = left_r.source_emit_ts
+                self.collect(Record(value=self.func.join(left_r.value, rv), event_time=event_time, source_emit_ts=source_emit_ts))
