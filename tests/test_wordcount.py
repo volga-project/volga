@@ -73,10 +73,9 @@ class TestWordCount(unittest.TestCase):
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
-        # TODO parallelism > 1 fails assert for remote channels
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=2,
+            parallelism=4,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary

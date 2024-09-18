@@ -97,7 +97,7 @@ class WorkerLifecycleController:
             else:
                 is_sink = vertex.job_vertex.vertex_type == VertexType.SINK
 
-            if is_sink:
+            if is_sink or vertex.job_vertex.vertex_type == VertexType.SOURCE:
                 self.stats_manager.register_worker(worker)
 
         worker_hosts_info = ray.get([workers[vertex_id].get_host_info.remote() for vertex_id in vertex_ids])
