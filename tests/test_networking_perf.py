@@ -15,9 +15,9 @@ data_writer = RustDataWriter('test_writer', job_name, [lc])
 io_loop = RustIOLoop('test_loop')
 io_loop.register_data_writer(data_writer)
 io_loop.register_data_reader(data_reader)
-data_writer.start()
-data_reader.start()
-io_loop.start(1)
+data_writer.connect_and_start()
+data_reader.connect_and_start()
+io_loop.connect_and_start(1)
 
 num_msgs = 10000
 msg_size = 1024

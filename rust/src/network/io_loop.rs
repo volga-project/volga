@@ -1,5 +1,5 @@
 use core::time;
-use std::{cmp::min, collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, sleep, JoinHandle}, time::Duration};
+use std::{cmp::min, collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, sleep, JoinHandle}, time::{Duration, SystemTime}};
 
 use crossbeam::{channel::{Sender, Receiver}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};
@@ -92,13 +92,13 @@ impl IOLoop {
         self.handlers.lock().unwrap().push(handler);
     }
 
-    pub fn start_io_threads(&self, num_threads: usize) -> Option<String> {
+    fn _run_io_threads(&self, num_threads: usize, connection_timeout_ms: u128) {
         self.sockets_monitor.start(num_threads);
         
         // since zmq::Sockets are not thread safe we will have a model where each socket can be polled by only 1 IO thread
         // each IO thread can have multiple sockets associated with it
         let name = self.name.clone();
-        println!("Started loop {name}");
+        println!("[Loop {name}] Launched {num_threads} io threads");
         let locked_handlers = self.handlers.lock().unwrap();
 
         if locked_handlers.len() == 0 {
@@ -121,7 +121,7 @@ impl IOLoop {
             }
         }
 
-        self.running.store(true, Ordering::Relaxed);
+        // self.running.store(true, Ordering::Relaxed);
 
         for (thread_id, sms) in sockets_meta_per_thread.iter() {
             let this_thread_id = thread_id.clone();
@@ -140,10 +140,12 @@ impl IOLoop {
                 this_sockets_monitor.register_sockets(this_thread_id, sockets_manager.get_sockets_and_metas());
                 this_sockets_monitor.wait_for_monitor_ready();
                 sockets_manager.bind_and_connect();
-                let err = this_sockets_monitor.wait_for_all_connected();
+                let err = this_sockets_monitor.wait_for_all_connected(Some(connection_timeout_ms));
                 if err.is_some() {
                     return
                 }
+
+                Self::_wait_to_start_running(this_running.clone());
 
                 let mut handlers = Vec::new();
                 for i in 0..sockets_manager.get_sockets_and_metas().len() {
@@ -192,8 +194,34 @@ impl IOLoop {
                 ).unwrap()
             );
         }
+    }
+
+    fn _wait_to_start_running(running: Arc<AtomicBool>) -> bool {
+        let timeout_ms = 5000;
+        let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+        while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < timeout_ms {
+            if running.load(Ordering::Relaxed) {
+                return true
+            }
+            thread::sleep(time::Duration::from_millis(100));
+        }
+        false
+    }
+
+    pub fn start(&self) {
+        let err = self.sockets_monitor.wait_for_all_connected(None);
+        if err.is_some() {
+            panic!("Can not start io loop - connection error")
+        }
+        let name = &self.name;
+        self.running.store(true, Ordering::Relaxed);
+        println!("[Loop {name}] Started data flow");
+    }
+
+    pub fn connect(&self, num_io_threads: usize, timeout_ms: u128) -> Option<String> {
+        self._run_io_threads(num_io_threads, timeout_ms);
         self.sockets_monitor.wait_for_monitor_ready();
-        let err = self.sockets_monitor.wait_for_all_connected();
+        let err = self.sockets_monitor.wait_for_all_connected(Some(timeout_ms));
         let io_loop_name = self.name.clone();
         self.sockets_monitor.close();
         if err.is_none() {

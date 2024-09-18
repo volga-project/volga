@@ -178,8 +178,8 @@ with ray.init(address='auto'):
     ray.get(push.initialize.remote(peer_port, push_snd_hwm, push_rcv_hwm, push_snd_buf, push_rcv_buf))
     pull = Pull.remote()
     ray.get(pull.initialize.remote(peer_addr, pull_snd_hwm, pull_rcv_hwm, pull_snd_buf, pull_rcv_buf))
-    push.start.remote(to_send, push_loop_timeout_s)
-    received = ray.get(pull.start.remote(pull_start_delay_s, pull_loop_timeout_s))
+    push.connect_and_start.remote(to_send, push_loop_timeout_s)
+    received = ray.get(pull.connect_and_start.remote(pull_start_delay_s, pull_loop_timeout_s))
 
     # calculate backpressure stats
     backpressure_intervals, push_total_time = ray.get(push.get_backpressure_stats.remote())

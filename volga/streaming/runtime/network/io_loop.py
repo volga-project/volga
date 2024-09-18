@@ -62,10 +62,13 @@ class IOLoop:
         elif isinstance(rust_io_handler, RustTransferReceiver):
             self._rust_io_loop.register_transfer_receiver(rust_io_handler)
 
-    def start(self, num_threads: int = 1) -> Optional[str]:
+    def connect_and_start(self, num_threads: int = 1, timout_ms: int = 5000) -> Optional[str]:
         for handler in self._handlers:
             handler.start()
-        return self._rust_io_loop.start(num_threads)
+        res = self._rust_io_loop.connect(num_threads, timout_ms)
+        if res is None:
+            self._rust_io_loop.start()
+        return res
 
     def close(self):
         for handler in self._handlers:

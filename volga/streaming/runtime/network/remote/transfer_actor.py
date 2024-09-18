@@ -48,7 +48,7 @@ class TransferActor:
         return os.getpid()
 
     def start(self, num_threads: int = 1) -> Optional[str]:
-        return self._loop.start(num_threads)
+        return self._loop.connect_and_start(num_threads)
 
     def close(self):
         self._loop.close()

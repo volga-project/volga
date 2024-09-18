@@ -84,11 +84,12 @@ fn test_one_to_one(local: bool) {
     data_reader.start();
     data_writer.start();
 
-    let err = io_loop.start_io_threads(1);
+    let err = io_loop.connect(1, 5000);
     if err.is_some() {
         let err = err.unwrap();
         panic!("{err}")
     }
+    io_loop.start();
 
     let num_msgs = 100000;
     let payload_size = 128;

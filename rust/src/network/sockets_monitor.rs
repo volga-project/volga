@@ -55,10 +55,13 @@ impl SocketsMonitor {
         panic!("Timeout waiting for monitor to be ready");
     }
 
-    pub fn wait_for_all_connected(&self) -> Option<String> {
-        let timeout_ms = 5000;
+    pub fn wait_for_all_connected(&self, timeout_ms: Option<u128>) -> Option<String> {
+        let timeout = 1000 as u128; // default
+        if timeout_ms.is_some() {
+            let timeout = timeout_ms.unwrap();
+        }
         let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-        while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < timeout_ms {
+        while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < timeout {
             if self.all_connected() {
                 return None
             }

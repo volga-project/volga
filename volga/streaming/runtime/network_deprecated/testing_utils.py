@@ -254,7 +254,7 @@ def insert_random(q: deque, el: Any, out_of_orderness: float):
     q.insert(i, el)
 
 def start_ray_io_handler_actors(handler_actors: List):
-    futs = [h.start.remote() for h in handler_actors]
+    futs = [h.connect_and_start.remote() for h in handler_actors]
     res = ray.get(futs)
     for i in range(len(res)):
         succ, err = res[i]

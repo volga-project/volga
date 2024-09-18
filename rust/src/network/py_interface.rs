@@ -268,8 +268,12 @@ impl PyIOLoop {
         self.io_loop.register_handler(tr.transfer_receiver.clone());
     }
 
-    pub fn start(&self, num_io_threads: usize) -> Option<String> {
-        self.io_loop.start_io_threads(num_io_threads)
+    pub fn connect(&self, num_io_threads: usize, timeout_ms: u128) -> Option<String> {
+        self.io_loop.connect(num_io_threads, timeout_ms)
+    }
+
+    pub fn start(&self) {
+        self.io_loop.start()
     }
 
     pub fn close(&self) {

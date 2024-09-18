@@ -21,7 +21,7 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     'py_modules': [
         volga,
         # '/Users/anov/Desktop/volga-rust-builds/volga_rust-0.1.0-cp310-cp310-manylinux_2_35_x86_64.whl'
-        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl'
+        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64_v1.whl'
     ]
 }
 
@@ -49,7 +49,7 @@ class TestWriter:
         self.io_loop.register_io_handler(self.data_writer)
 
     def start(self, num_threads: int = 1) -> Optional[str]:
-        return self.io_loop.start(num_threads)
+        return self.io_loop.connect_and_start(num_threads)
 
     def send_items(self, items_per_channel: Dict[str, List[Dict]]):
         index = {channel_id: 0 for channel_id in items_per_channel}
@@ -97,7 +97,7 @@ class TestReader:
         self.res = []
 
     def start(self, num_threads: int = 1) -> Optional[str]:
-        return self.io_loop.start(num_threads)
+        return self.io_loop.connect_and_start(num_threads)
 
     def receive_items(self) -> List[Any]:
         start_ts = time.time()

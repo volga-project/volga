@@ -172,7 +172,7 @@ class TestLocalTransfer(unittest.TestCase):
         data_reader = DataReader(name='test_reader', job_name=job_name, channels=[channel], config=reader_config)
         io_loop.register_io_handler(data_writer)
         io_loop.register_io_handler(data_reader)
-        err = io_loop.start()
+        err = io_loop.connect_and_start()
         if err is not None:
             raise RuntimeError(f"Unable to start io_loop {io_loop.name}: {err}")
         try:

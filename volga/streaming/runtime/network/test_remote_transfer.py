@@ -135,9 +135,9 @@ class TestRemoteTransfer(unittest.TestCase):
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
     def test_n_to_n_parallel_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_msgs_per_writer = 1000
+        num_msgs_per_writer = 1000000
         msg_size = 32
-        batch_size = 1
+        batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
         to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs_per_writer)]
@@ -397,7 +397,7 @@ class TestRemoteTransfer(unittest.TestCase):
         io_loop.register_io_handler(data_reader)
         io_loop.register_io_handler(transfer_sender)
         io_loop.register_io_handler(transfer_receiver)
-        err = io_loop.start()
+        err = io_loop.connect_and_start()
         if err is not None:
             raise RuntimeError(f"Unable to start io_loop {io_loop.name}: {err}")
         try:
@@ -432,8 +432,8 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
-    # t.test_n_to_n_parallel_on_ray(n=1)
+    # t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
+    t.test_n_to_n_parallel_on_ray(n=1)
     # t.test_transfer_actor_interruption()
     # t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
     # t.test_backpressure()

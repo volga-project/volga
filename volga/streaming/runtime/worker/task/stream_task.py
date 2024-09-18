@@ -114,7 +114,7 @@ class StreamTask(ABC):
 
         runtime_context = StreamingRuntimeContext(execution_vertex=execution_vertex)
 
-        err = self.io_loop.start() # TODO pass num io threads
+        err = self.io_loop.connect_and_start() # TODO pass num io threads
         if err is not None:
             return err
         self.processor.open(

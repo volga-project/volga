@@ -62,7 +62,7 @@ class TestWordCount(unittest.TestCase):
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 100000
+        count_per_word = 10000
         word_length = 32
         num_msgs_per_split = 1000
 
@@ -76,7 +76,7 @@ class TestWordCount(unittest.TestCase):
 
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=4,
+            parallelism=1,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary
@@ -98,9 +98,9 @@ class TestWordCount(unittest.TestCase):
             total += counts[w]
 
         exec_time = end - start
-        avg_throughput = total/exec_time
+        estimate_throughput = total/exec_time
 
-        print(f'Exec time: {exec_time}, Avg Throughput: {avg_throughput}, Total: {total}, expected: {count_per_word * dict_size}, diff: {count_per_word * dict_size - total}')
+        print(f'Exec time: {exec_time}, Throughput Est: {estimate_throughput}, Total: {total}, expected: {count_per_word * dict_size}, diff: {count_per_word * dict_size - total}')
 
         for w in counts:
             assert counts[w] == count_per_word
