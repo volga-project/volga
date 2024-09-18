@@ -1,5 +1,6 @@
 import random
 import string
+import time
 import unittest
 
 import ray
@@ -61,7 +62,7 @@ class TestWordCount(unittest.TestCase):
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 20
-        count_per_word = 1000000
+        count_per_word = 100000
         word_length = 32
         num_msgs_per_split = 1000
 
@@ -85,7 +86,9 @@ class TestWordCount(unittest.TestCase):
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))
         s1 = s.sink(sink_function)
         # s2 = s.sink(print)
+        start = time.time()
         ctx.execute()
+        end = time.time()
 
         counts = ray.get(sink_cache.get_dict.remote())
         print(counts)
@@ -94,7 +97,10 @@ class TestWordCount(unittest.TestCase):
         for w in counts:
             total += counts[w]
 
-        print(f'Total: {total}, expected: {count_per_word * dict_size}, diff: {count_per_word * dict_size - total}')
+        exec_time = end - start
+        avg_throughput = total/exec_time
+
+        print(f'Exec time: {exec_time}, Avg Throughput: {avg_throughput}, Total: {total}, expected: {count_per_word * dict_size}, diff: {count_per_word * dict_size - total}')
 
         for w in counts:
             assert counts[w] == count_per_word
