@@ -1,6 +1,7 @@
-use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, AtomicI32, Ordering}, Arc, Mutex, RwLock}, thread::JoinHandle};
+use core::time;
+use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, AtomicI32, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}};
 
-use super::{buffer_utils::{get_buffer_id, new_buffer_drop_meta}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
+use super::{buffer_utils::{get_buffer_id, new_buffer_drop_meta}, channel::{AckMessage, Channel}, io_loop::{Bytes, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata, utils::sleep_thread};
 use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
@@ -142,13 +143,13 @@ impl IOHandler for DataReader {
         let this_config = self.config.clone();
 
         let f = move || {
+                
+            let locked_recv_chans = this_recv_chans.read().unwrap();
+            let locked_send_chans = this_send_chans.read().unwrap();
+            let locked_watermarks = this_watermarks.read().unwrap();
+            let locked_out_of_order_buffers = this_out_of_order_buffers.read().unwrap();
 
             while this_runnning.load(Ordering::Relaxed) {
-                
-                let locked_recv_chans = this_recv_chans.read().unwrap();
-                let locked_send_chans = this_send_chans.read().unwrap();
-                let locked_watermarks = this_watermarks.read().unwrap();
-                let locked_out_of_order_buffers = this_out_of_order_buffers.read().unwrap();
                 for channel_id in locked_recv_chans.keys() {
                     let mut locked_out_queue = this_out_queue.lock().unwrap();
                     if locked_out_queue.len() == this_config.output_queue_size {
@@ -212,6 +213,8 @@ impl IOHandler for DataReader {
                         }
                     }
                 }
+
+                sleep_thread();
             }
         };
 

@@ -5,6 +5,8 @@ use crossbeam::{channel::{Sender, Receiver}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
+use crate::network::utils::sleep_thread;
+
 use super::{channel::Channel, sockets::{SocketMetadata, SocketsManager, SocketsMeatadataManager}, sockets_monitor::SocketsMonitor};
 
 pub type Bytes = Vec<u8>;

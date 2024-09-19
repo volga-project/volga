@@ -163,6 +163,8 @@ impl SocketsMonitor {
                         }
                     }
                 }
+
+                thread::sleep(time::Duration::from_millis(1));
             }
         };
         let thread_name = format!("volga_monitor_thread");

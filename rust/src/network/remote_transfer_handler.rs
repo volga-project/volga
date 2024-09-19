@@ -1,10 +1,11 @@
-use std::{collections::HashMap, hash::Hash, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::JoinHandle};
+use core::time;
+use std::{collections::HashMap, hash::Hash, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{self, JoinHandle}};
 
 use crossbeam::{channel::{unbounded, bounded, Receiver, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::{get_buffer_id, get_channeld_id}, channel::{self, Channel}, io_loop::{Bytes, Direction, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::{SocketMetadata, SocketOwner}};
+use super::{buffer_utils::{get_buffer_id, get_channeld_id}, channel::{self, Channel}, io_loop::{Bytes, Direction, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::{SocketMetadata, SocketOwner}, utils::sleep_thread};
 
 // const TRANSFER_QUEUE_SIZE: usize = 10; // TODO should we separate local and remote channel sizes?
 
@@ -185,6 +186,8 @@ impl IOHandler for RemoteTransferHandler {
                         sender.send(b).unwrap();
                     }
                 }
+
+                sleep_thread();
             }
         };
 
@@ -217,6 +220,8 @@ impl IOHandler for RemoteTransferHandler {
                         this_metrics_recorder.inc(NUM_BYTES_RECVD, peer_node_id, size as u64);
                     }
                 }
+
+                sleep_thread();
             }
         };
 

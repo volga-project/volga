@@ -1,6 +1,7 @@
+use core::time;
 use std::{collections::{HashMap, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queues::{BufferQueues}, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata};
+use super::{buffer_queues::BufferQueues, buffer_utils::get_buffer_id, channel::{AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata, utils::sleep_thread};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
@@ -194,6 +195,8 @@ impl IOHandler for DataWriter {
                         }
                     }
                 }
+
+                sleep_thread();
             }
         };
 
@@ -203,11 +206,8 @@ impl IOHandler for DataWriter {
         let this_in_flights = self.in_flight.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
         let input_loop = move || {
-            loop {
-                let running = this_runnning.load(Ordering::Relaxed);
-                if !running {
-                    break;
-                }
+            while this_runnning.load(Ordering::Relaxed) {
+
                 let locked_in_flights = this_in_flights.write().unwrap();
                 let locked_recv_chans = this_recv_chans.read().unwrap();
                 for channel_id in  locked_recv_chans.keys() {
@@ -229,6 +229,8 @@ impl IOHandler for DataWriter {
                         this_metrics_recorder.inc(NUM_BYTES_RECVD, &channel_id, size as u64);
                     }
                 }
+                
+                sleep_thread();
             }
         };
 
