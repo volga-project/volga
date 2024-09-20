@@ -220,6 +220,7 @@ impl IOLoop {
         println!("[Loop {name}] Started data flow");
     }
 
+    // TODO num_io_threads > 1 fails, debug
     pub fn connect(&self, num_io_threads: usize, timeout_ms: u128) -> Option<String> {
         self._run_io_threads(num_io_threads, timeout_ms);
         self.sockets_monitor.wait_for_monitor_ready();
