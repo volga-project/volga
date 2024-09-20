@@ -153,6 +153,11 @@ fn test_one_to_one(local: bool) {
 
 #[test]
 fn test_one_to_n_local() {
+    test_one_to_n(true, 2);
+}
+
+#[test]
+fn test_one_to_n_remote() {
     test_one_to_n(false, 2);
 }
 
