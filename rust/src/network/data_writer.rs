@@ -35,8 +35,6 @@ pub struct DataWriter {
     recv_chans: Arc<RwLock<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>>,
     buffer_queues: Arc<BufferQueues>,
 
-    in_flight: Arc<RwLock<HashMap<String, Arc<RwLock<HashMap<u32, (u128, Box<Bytes>)>>>>>>,
-
     metrics_recorder: Arc<MetricsRecorder>,
 
     running: Arc<AtomicBool>,
@@ -52,12 +50,10 @@ impl DataWriter {
         let n_channels = channels.len();
         let mut send_chans = HashMap::with_capacity(n_channels);
         let mut recv_chans = HashMap::with_capacity(n_channels);
-        let mut in_flight = HashMap::with_capacity(n_channels);
 
         for ch in &channels {
             send_chans.insert(ch.get_channel_id().clone(), bounded(config.max_buffers_per_channel));
             recv_chans.insert(ch.get_channel_id().clone(), bounded(config.max_buffers_per_channel));
-            in_flight.insert(ch.get_channel_id().clone(), Arc::new(RwLock::new(HashMap::new())));
         }
 
         let bqs = BufferQueues::new(&channels, config.max_buffers_per_channel, config.in_flight_timeout_s);
@@ -69,7 +65,6 @@ impl DataWriter {
             send_chans: Arc::new(RwLock::new(send_chans)),
             recv_chans: Arc::new(RwLock::new(recv_chans)),
             buffer_queues: Arc::new(bqs),
-            in_flight: Arc::new(RwLock::new(in_flight)),
             metrics_recorder: Arc::new(MetricsRecorder::new(name.clone(), job_name.clone())),
             running: Arc::new(AtomicBool::new(false)),
             io_thread_handles: Arc::new(ArrayQueue::new(2)),
@@ -228,53 +223,6 @@ impl IOHandler for DataWriter {
                     this_metrics_recorder.inc(NUM_BUFFERS_SENT, &channel_id, 1);
                     this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
                 }
-
-
-                // for channel_id in  locked_send_chans.keys() {
-
-                //     // check if in-flight buffers need to be resent first
-                //     let locked_in_flight = locked_in_flights.get(channel_id).unwrap().read().unwrap();
-                //     for in_flight_buffer_id in locked_in_flight.keys() {
-                //         let ts_and_b = locked_in_flight.get(in_flight_buffer_id).unwrap();
-                //         let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-                //         if now_ts - ts_and_b.0 > this_config.in_flight_timeout_s as u128 {
-                //             let send_chan = locked_send_chans.get(channel_id).unwrap();
-                //             let sender = send_chan.0.clone();
-                //             if !sender.is_full() {
-                //                 sender.send(ts_and_b.1.clone()).unwrap();
-                //                 let size = ts_and_b.1.len();
-                //                 locked_in_flight.clone().insert(*in_flight_buffer_id, (now_ts, ts_and_b.1.clone()));
-                //                 this_metrics_recorder.inc(NUM_BUFFERS_RESENT, &channel_id, 1);
-                //                 this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
-                //             }
-                //         }
-                //     }
-
-                //     // stop sending new buffers if in-flight limit is reached
-                //     if locked_in_flight.len() == this_config.max_buffers_per_channel {
-                //         continue;
-                //     }
-                    
-                //     let send_chan = locked_send_chans.get(channel_id).unwrap();
-                //     let sender = send_chan.0.clone();
-                //     if !sender.is_full() {
-
-                //         let b = this_buffer_queues.schedule_next(channel_id);
-                //         if b.is_some() {
-                //             let b = b.unwrap();
-                //             let size = b.len();
-                //             sender.send(b.clone()).unwrap();
-                //             let buffer_id = get_buffer_id(b.clone());
-                //             let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-                //             locked_in_flight.clone().insert(buffer_id, (now_ts, b.clone()));
-
-                //             this_metrics_recorder.inc(NUM_BUFFERS_SENT, &channel_id, 1);
-                //             this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
-                //         }
-                //     }
-                // }
-
-                // sleep_thread();
             }
         };
 
@@ -309,30 +257,6 @@ impl IOHandler for DataWriter {
                 this_buffer_queues.handle_ack(channel_id, buffer_id);
                 this_metrics_recorder.inc(NUM_BUFFERS_RECVD, &channel_id, 1);
                 this_metrics_recorder.inc(NUM_BYTES_RECVD, &channel_id, size as u64);
-
-                // let locked_in_flights = this_in_flights.write().unwrap();
-                // let locked_recv_chans = this_recv_chans.read().unwrap();
-                // for channel_id in  locked_recv_chans.keys() {
-                //     // poll for acks
-                //     let recv_chan = locked_recv_chans.get(channel_id).unwrap();
-                //     let receiver = recv_chan.1.clone();
-                //     let b = receiver.try_recv();
-                //     if b.is_ok() {
-                //         let b = b.unwrap();
-                //         let size = b.len();
-                //         let ack = AckMessage::de(b);
-                //         let buffer_id = &ack.buffer_id;
-                //         // remove from in-flights
-                //         locked_in_flights.get(channel_id).unwrap().write().unwrap().remove(buffer_id);
-
-                //         // requets in-order pop
-                //         // this_buffer_queues.request_pop(channel_id, *buffer_id);
-                //         this_metrics_recorder.inc(NUM_BUFFERS_RECVD, &channel_id, 1);
-                //         this_metrics_recorder.inc(NUM_BYTES_RECVD, &channel_id, size as u64);
-                //     }
-                // }
-                
-                // sleep_thread();
             }
         };
 
