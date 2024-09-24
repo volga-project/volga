@@ -154,7 +154,7 @@ impl IOHandler for DataReader {
 
             while this_runnning.load(Ordering::Relaxed) {
 
-                let oper = sel.select_timeout(time::Duration::from_secs(1));
+                let oper = sel.select_timeout(time::Duration::from_millis(100));
                 if !oper.is_ok() {
                     continue;
                 }

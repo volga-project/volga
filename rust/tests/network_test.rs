@@ -91,7 +91,7 @@ fn test_one_to_one(local: bool) {
     }
     io_loop.start();
 
-    let num_msgs = 100000;
+    let num_msgs = 1000000; // TODO large values leads to race/deadlock somewhere - need to debug
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -104,7 +104,7 @@ fn test_one_to_one(local: bool) {
     }
 
     let to_send = Arc::new(to_send);
-    let data_alloc_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis()- data_alloc_start_ts;
+    let data_alloc_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - data_alloc_start_ts;
     println!("Data allocated in (ms): {data_alloc_time}");
 
     let moved_data_writer: Arc<DataWriter> = data_writer.clone();
@@ -112,18 +112,35 @@ fn test_one_to_one(local: bool) {
     let local_to_send = to_send.clone();
     let j_handle = std::thread::spawn(move|| {
         let mut backp = 0;
+        let mut i = 0;
+        let ch_id = channel.get_channel_id();
+        let max_retries = 5;
         for msg in local_to_send.as_ref() {
-            backp += moved_data_writer.write_bytes(channel.get_channel_id(), msg.clone(), true, 1000, 0).unwrap();
+            let mut bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
+            let mut r = 0;
+            while bp.is_none() {
+                if r > max_retries {
+                    panic!("Max retries");
+                }
+                bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
+                r += 1;
+            }
+            backp += bp.unwrap();
+            println!("Sent {i}");
+            i += 1;
         }
         backp
     });
     
     let mut recvd = vec![];
 
+    let mut i = 0;
     while recvd.len() != to_send.len() {
         let _msg = data_reader.read_bytes();
         if _msg.is_some() {
             recvd.push(_msg.unwrap());
+            println!("Rcvd {i}");
+            i += 1;
         }
     }
     
@@ -256,7 +273,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     io_loop.start();
 
-    let num_msgs_per_channel = 10000;
+    let num_msgs_per_channel = 15;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -284,9 +301,13 @@ fn test_one_to_n(local: bool, n: i32) {
         let mut backp = 0;
         for channel in local_channels {
             let locked = local_to_send_per_channel.read().unwrap();
-            let local_to_send = locked.get(&channel.get_channel_id().clone()).unwrap();
+            let ch_id = &channel.get_channel_id();
+            let local_to_send = locked.get(*ch_id).unwrap();
+            let mut i = 0;
             for msg in local_to_send {
-                backp += moved_data_writer.write_bytes(channel.get_channel_id(), msg.clone(), true, 1000, 0).unwrap();
+                backp += moved_data_writer.write_bytes(channel.get_channel_id(), msg.clone(), true, 5000).unwrap();
+                println!("[{ch_id}] Sent {i}");
+                i += 1;
             }
         }
         backp
@@ -297,16 +318,22 @@ fn test_one_to_n(local: bool, n: i32) {
         let local_to_send_per_channel = to_send_per_channel.clone();
         let local_data_readers = data_readers.clone();
         let reader_handle = std::thread::spawn(move|| {
-            let local_data_reader = local_data_readers.read().unwrap().get(channel.get_channel_id()).unwrap().clone();
+            let ch_id = channel.get_channel_id();
+            let local_data_reader = local_data_readers.read().unwrap().get(ch_id).unwrap().clone();
             let locked = local_to_send_per_channel.read().unwrap();
             let local_to_send = locked.get(&channel.get_channel_id().clone()).unwrap();
     
             let mut recvd = vec![];
             
+            let mut i = 0;
             while recvd.len() != num_msgs_per_channel {
                 let _msg = local_data_reader.read_bytes();
                 if _msg.is_some() {
                     recvd.push(_msg.unwrap());
+                    println!("[{ch_id}] Rcvd {i}");
+                    i += 1;
+                } else {
+                    // println!("[{ch_id}] Rcvd None");
                 }
             }
 

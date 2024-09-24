@@ -62,6 +62,11 @@ pub fn get_buffer_id(b: Box<Bytes>) -> u32 {
     buff_id
 }
 
+pub fn dummy_bytes(i: u32, channel_id: &String) -> Box<Bytes> {
+    let bs = i.to_ne_bytes().to_vec();
+    new_buffer_with_meta(Box::new(bs), channel_id.clone(), i)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
