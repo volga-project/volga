@@ -321,7 +321,7 @@ mod tests {
 
     #[test]
     fn test_buffer_queues() {
-        let num_channels = 10;
+        let num_channels = 1;
         let mut channels = vec![];
 
         for i in 0..num_channels {
@@ -333,7 +333,7 @@ mod tests {
         }
         let qs = Arc::new(BufferQueues::new(&channels, 10, 1));
 
-        let dummy_buffer_ids: Vec<u32> = (0..10).collect();
+        let dummy_buffer_ids: Vec<u32> = (0..1000000).collect();
         let dummy_buffer_ids = Arc::new(dummy_buffer_ids);
 
         let mut pushers = vec![];
@@ -344,7 +344,7 @@ mod tests {
             let _channel_id = channel.get_channel_id().clone();
             let pusher = thread::spawn(move || {
                 for buffer_id in bids_p.iter() {
-                    thread::sleep(time::Duration::from_millis(100));
+                    thread::sleep(time::Duration::from_micros(50));
                     println!("[{_channel_id}] Pushing {buffer_id}...");
                     qs_p.try_push(&_channel_id, dummy_bytes(*buffer_id, &_channel_id));
                     println!("[{_channel_id}] Pushed {buffer_id}")
@@ -370,7 +370,8 @@ mod tests {
                     let b = scheduled.1.recv().unwrap();
                     let buffer_id = get_buffer_id(b);
                     let popped = qs_c.handle_ack(&_channel_id, buffer_id);
-                    thread::sleep(time::Duration::from_millis(50));
+                    // thread::sleep(time::Duration::from_millis(50));
+                    thread::sleep(time::Duration::from_micros(100));
                     let s = format!("[{_channel_id}] Popped {:?}", popped);
                     println!("{s}");
                     if popped.len() == 0 {

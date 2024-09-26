@@ -115,17 +115,19 @@ fn test_one_to_one(local: bool) {
         let mut i = 0;
         let ch_id = channel.get_channel_id();
         let max_retries = 5;
+        let write_timeout_ms = 1000;
         for msg in local_to_send.as_ref() {
-            let mut bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
+            let mut write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
             let mut r = 0;
-            while bp.is_none() {
+            while write_res.is_none() {
                 if r > max_retries {
                     panic!("Max retries");
                 }
-                bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
                 r += 1;
+                backp += write_timeout_ms as u128;
+                write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
             }
-            backp += bp.unwrap();
+            backp += write_res.unwrap();
             println!("Sent {i}");
             i += 1;
         }
@@ -273,7 +275,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     io_loop.start();
 
-    let num_msgs_per_channel = 1000;
+    let num_msgs_per_channel = 10000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -309,37 +311,27 @@ fn test_one_to_n(local: bool, n: i32) {
 
         let locked = local_to_send_per_channel.read().unwrap();
         let max_retries = 5;
+        let write_timeout_ms = 1000;
         while num_sent != num_msgs_per_channel * &local_channels.len() {
             let channel = &local_channels[cur_channel_index];
             let ch_id = &channel.get_channel_id();
             let index = indexes_per_channel[*ch_id];
             let msg = &locked.get(*ch_id).unwrap()[index];
-            let mut bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
+            let mut write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
             let mut r = 0;
-            while bp.is_none() {
+            while write_res.is_none() {
                 if r > max_retries {
                     panic!("Max retries");
                 }
-                bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
                 r += 1;
+                backp += write_timeout_ms as u128;
+                write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
             }
-            backp += bp.unwrap();
+            backp += write_res.unwrap();
             println!("[{ch_id}] Sent {index}");   
             num_sent += 1;
             indexes_per_channel.insert(&ch_id, index + 1);
             cur_channel_index = (cur_channel_index + 1)%&local_channels.len();
-        }
-
-        for channel in local_channels {
-            let locked = local_to_send_per_channel.read().unwrap();
-            let ch_id = &channel.get_channel_id();
-            let local_to_send = locked.get(*ch_id).unwrap();
-            let mut i = 0;
-            for msg in local_to_send {
-                backp += moved_data_writer.write_bytes(channel.get_channel_id(), msg.clone(), true, 5000).unwrap();
-                println!("[{ch_id}] Sent {i}");
-                i += 1;
-            }
         }
         backp
     });
