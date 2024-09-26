@@ -1,5 +1,5 @@
 
-use std::{collections::HashMap, sync::{Arc, RwLock}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{mpsc::channel, Arc, RwLock}, time::{SystemTime, UNIX_EPOCH}};
 
 use volga_rust::network::{channel::{self, Channel}, data_reader::{self, DataReader}, data_writer::{self, DataWriter}, io_loop::{Direction, IOHandler, IOLoop}, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
@@ -273,7 +273,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     io_loop.start();
 
-    let num_msgs_per_channel = 15;
+    let num_msgs_per_channel = 1000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -299,6 +299,37 @@ fn test_one_to_n(local: bool, n: i32) {
     let local_to_send_per_channel = to_send_per_channel.clone();
     let writer_handle = std::thread::spawn(move|| {
         let mut backp = 0;
+
+        let mut num_sent = 0;
+        let mut cur_channel_index = 0;
+        let mut indexes_per_channel = HashMap::new();
+        for channel in &local_channels {
+            indexes_per_channel.insert(channel.get_channel_id(), 0);
+        }
+
+        let locked = local_to_send_per_channel.read().unwrap();
+        let max_retries = 5;
+        while num_sent != num_msgs_per_channel * &local_channels.len() {
+            let channel = &local_channels[cur_channel_index];
+            let ch_id = &channel.get_channel_id();
+            let index = indexes_per_channel[*ch_id];
+            let msg = &locked.get(*ch_id).unwrap()[index];
+            let mut bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
+            let mut r = 0;
+            while bp.is_none() {
+                if r > max_retries {
+                    panic!("Max retries");
+                }
+                bp = moved_data_writer.write_bytes(ch_id, msg.clone(), true, 1000);
+                r += 1;
+            }
+            backp += bp.unwrap();
+            println!("[{ch_id}] Sent {index}");   
+            num_sent += 1;
+            indexes_per_channel.insert(&ch_id, index + 1);
+            cur_channel_index = (cur_channel_index + 1)%&local_channels.len();
+        }
+
         for channel in local_channels {
             let locked = local_to_send_per_channel.read().unwrap();
             let ch_id = &channel.get_channel_id();
@@ -313,15 +344,15 @@ fn test_one_to_n(local: bool, n: i32) {
         backp
     });
 
-    let mut reader_handles = vec![];
-    for channel in channels.to_vec() {
+    let mut reader_handles: Vec<std::thread::JoinHandle<()>> = vec![];
+    for channel in &channels {
         let local_to_send_per_channel = to_send_per_channel.clone();
         let local_data_readers = data_readers.clone();
+        let ch_id = channel.get_channel_id().clone();
         let reader_handle = std::thread::spawn(move|| {
-            let ch_id = channel.get_channel_id();
-            let local_data_reader = local_data_readers.read().unwrap().get(ch_id).unwrap().clone();
+            let local_data_reader = local_data_readers.read().unwrap().get(&ch_id).unwrap().clone();
             let locked = local_to_send_per_channel.read().unwrap();
-            let local_to_send = locked.get(&channel.get_channel_id().clone()).unwrap();
+            let local_to_send = locked.get(&ch_id).unwrap();
     
             let mut recvd = vec![];
             
@@ -332,8 +363,6 @@ fn test_one_to_n(local: bool, n: i32) {
                     recvd.push(_msg.unwrap());
                     println!("[{ch_id}] Rcvd {i}");
                     i += 1;
-                } else {
-                    // println!("[{ch_id}] Rcvd None");
                 }
             }
 
@@ -341,7 +370,6 @@ fn test_one_to_n(local: bool, n: i32) {
             for i in 0..local_to_send.len() {
                 assert_eq!(local_to_send[i], recvd[i])
             }
-            let ch_id = channel.get_channel_id();
             println!("{ch_id} assert ok");
         });
         reader_handles.push(reader_handle);
@@ -353,7 +381,7 @@ fn test_one_to_n(local: bool, n: i32) {
     
     let total_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start_ts;
     let backp_s = writer_handle.join().unwrap()/1000;
-    let throughput = (((num_msgs_per_channel * channels.len()) as f64)/(total_ms as f64) * 1000.0) as u16;
+    let throughput = (((num_msgs_per_channel * &channels.len()) as f64)/(total_ms as f64) * 1000.0) as u16;
     println!("Transfered in (ms): {total_ms}");
     println!("Backpressure (ms): {backp_s}");
     println!("Throughput (msg/s): {throughput}");
