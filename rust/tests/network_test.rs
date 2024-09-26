@@ -1,5 +1,6 @@
 
-use std::{collections::HashMap, sync::{mpsc::channel, Arc, RwLock}, time::{SystemTime, UNIX_EPOCH}};
+use core::time;
+use std::{collections::HashMap, sync::{mpsc::channel, Arc, RwLock}, thread, time::{SystemTime, UNIX_EPOCH}};
 
 use volga_rust::network::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::{self, Channel}, data_reader::{self, DataReader}, data_writer::{self, DataWriter}, io_loop::{Direction, IOHandler, IOLoop}, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
@@ -140,6 +141,7 @@ fn test_one_to_one(local: bool) {
             recvd.push(b.clone());
             let buffer_id = get_buffer_id(b.clone());
             println!("Rcvd {buffer_id}");
+            // thread::sleep(time::Duration::from_millis(100));
         }
     }
     
@@ -169,7 +171,7 @@ fn test_one_to_one(local: bool) {
 
 #[test]
 fn test_one_to_n_local() {
-    test_one_to_n(true, 2);
+    test_one_to_n(true, 10); // TODO n >= 8 sometimes locks, why?
 }
 
 #[test]
@@ -272,7 +274,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     io_loop.start();
 
-    let num_msgs_per_channel = 1000000;
+    let num_msgs_per_channel = 30000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();

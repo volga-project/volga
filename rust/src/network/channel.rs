@@ -33,14 +33,20 @@ impl Channel {
     }
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub enum DataReaderResponseMessageKind {
+    Ack,
+    QueueConsumed
+}
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
-pub struct AckMessage {
+pub struct DataReaderResponseMessage {
+    pub kind: DataReaderResponseMessageKind,
     pub channel_id: String,
     pub buffer_id: u32
 }
 
-impl AckMessage {
+impl DataReaderResponseMessage {
 
     pub fn ser(&self) -> Box<Bytes>{
     
@@ -68,7 +74,7 @@ impl AckMessage {
     pub fn de(b: Box<Bytes>) -> Self {
         let mut _b = b.clone();
         _b.drain(0..CHANNEL_ID_META_BYTES_LENGTH);
-        let ack: AckMessage = bincode::deserialize(&_b).unwrap();
+        let ack: DataReaderResponseMessage = bincode::deserialize(&_b).unwrap();
         ack
     }
 }
@@ -80,9 +86,9 @@ mod tests {
 
     #[test]
     fn test_ack_serde() {
-        let ack = AckMessage{channel_id:String::from("ch_0"), buffer_id: 1234};
+        let ack = DataReaderResponseMessage{kind: DataReaderResponseMessageKind::Ack, channel_id:String::from("ch_0"), buffer_id: 1234};
         let b = ack.ser();
-        let _ack = AckMessage::de(b);
+        let _ack = DataReaderResponseMessage::de(b);
 
         assert_eq!(ack, _ack);
     }

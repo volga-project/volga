@@ -1,7 +1,7 @@
 use core::time;
 use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queues::BufferQueues, buffer_utils::get_buffer_id, channel::{self, AckMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata, utils::sleep_thread};
+use super::{buffer_queues::BufferQueues, buffer_utils::get_buffer_id, channel::{self, DataReaderResponseMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata, utils::sleep_thread};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Select, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
@@ -38,7 +38,7 @@ pub struct DataWriter {
     metrics_recorder: Arc<MetricsRecorder>,
 
     running: Arc<AtomicBool>,
-    io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>>, // array queue so we do not mutate DataReader and keep ownership
+    io_thread_handles: Arc<ArrayQueue<JoinHandle<()>>>, // array queue so we do not mutate DataWriter and keep ownership
 
     // config options
     config: Arc<DataWriterConfig>
@@ -193,7 +193,6 @@ impl IOHandler for DataWriter {
                     }
                 } else {
                     // receiver
-                    // let b = r.try_recv().expect("Can not receive");
                     let b = r.try_recv();
                     if !b.is_ok() {
                         println!("Unable to rcv");
@@ -203,7 +202,7 @@ impl IOHandler for DataWriter {
                     if ready_senders.contains_key(channel_id) {
                         // we have a match, send
                         let s = ready_senders.get(channel_id).copied().unwrap();
-                        s.send(b.clone()).expect("Unable to send");
+                        s.send(b.clone()).expect("Unable to send"); // TODO timeout?
                         sent_size = Some(b.len());
 
                         // re-register sender
@@ -253,7 +252,7 @@ impl IOHandler for DataWriter {
                 let recv = &locked_recv_chans.get(channel_id).unwrap().1;
                 let b = oper.recv(recv).unwrap();
                 let size = b.len();
-                let ack = AckMessage::de(b);
+                let ack = DataReaderResponseMessage::de(b);
                 let buffer_id = ack.buffer_id;
                 this_buffer_queues.handle_ack(channel_id, buffer_id);
                 this_metrics_recorder.inc(NUM_BUFFERS_RECVD, &channel_id, 1);
