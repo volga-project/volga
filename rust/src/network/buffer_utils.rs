@@ -3,9 +3,9 @@ use core::str;
 extern crate varint;
 use varint::{ VarintRead, VarintWrite };
 
-use std::io::Cursor;
+use std::{collections::HashMap, io::Cursor};
 
-use super::io_loop::Bytes;
+use super::{io_loop::Bytes, utils::random_string};
 
 pub const CHANNEL_ID_META_BYTES_LENGTH: usize = 16 * 4; // 16 chars
 
@@ -62,9 +62,12 @@ pub fn get_buffer_id(b: Box<Bytes>) -> u32 {
     buff_id
 }
 
-pub fn dummy_bytes(i: u32, channel_id: &String) -> Box<Bytes> {
-    let bs = i.to_ne_bytes().to_vec();
-    new_buffer_with_meta(Box::new(bs), channel_id.clone(), i)
+pub fn dummy_bytes(buffer_id: u32, channel_id: &String, payload_size: usize) -> Box<Bytes> {
+    let mut msg = HashMap::new();
+    msg.insert("key", buffer_id.to_string());
+    msg.insert("value", random_string(payload_size));
+    let bs = bincode::serialize(&msg).unwrap().to_vec();
+    new_buffer_with_meta(Box::new(bs), channel_id.clone(), buffer_id)
 }
 
 #[cfg(test)]

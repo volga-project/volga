@@ -346,7 +346,7 @@ mod tests {
                 for buffer_id in bids_p.iter() {
                     thread::sleep(time::Duration::from_micros(50));
                     println!("[{_channel_id}] Pushing {buffer_id}...");
-                    qs_p.try_push(&_channel_id, dummy_bytes(*buffer_id, &_channel_id));
+                    qs_p.try_push(&_channel_id, dummy_bytes(*buffer_id, &_channel_id, 1));
                     println!("[{_channel_id}] Pushed {buffer_id}")
                 }
             });

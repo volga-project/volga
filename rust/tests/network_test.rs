@@ -1,7 +1,7 @@
 
 use std::{collections::HashMap, sync::{mpsc::channel, Arc, RwLock}, time::{SystemTime, UNIX_EPOCH}};
 
-use volga_rust::network::{channel::{self, Channel}, data_reader::{self, DataReader}, data_writer::{self, DataWriter}, io_loop::{Direction, IOHandler, IOLoop}, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
+use volga_rust::network::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::{self, Channel}, data_reader::{self, DataReader}, data_writer::{self, DataWriter}, io_loop::{Direction, IOHandler, IOLoop}, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
 
 #[test]
@@ -97,10 +97,8 @@ fn test_one_to_one(local: bool) {
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
     let mut to_send = vec![];
     for i in 0..num_msgs {
-        let mut msg = HashMap::new();
-        msg.insert("key", i.to_string());
-        msg.insert("value", random_string(payload_size));
-        to_send.push(Box::new(bincode::serialize(&msg).unwrap().to_vec()));
+        let b = dummy_bytes(i as u32, channel.get_channel_id(), payload_size);
+        to_send.push(b);
     }
 
     let to_send = Arc::new(to_send);
@@ -112,12 +110,11 @@ fn test_one_to_one(local: bool) {
     let local_to_send = to_send.clone();
     let j_handle = std::thread::spawn(move|| {
         let mut backp = 0;
-        let mut i = 0;
         let ch_id = channel.get_channel_id();
         let max_retries = 5;
         let write_timeout_ms = 1000;
-        for msg in local_to_send.as_ref() {
-            let mut write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
+        for b in local_to_send.as_ref() {
+            let mut write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             let mut r = 0;
             while write_res.is_none() {
                 if r > max_retries {
@@ -125,24 +122,24 @@ fn test_one_to_one(local: bool) {
                 }
                 r += 1;
                 backp += write_timeout_ms as u128;
-                write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
+                write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
-            println!("Sent {i}");
-            i += 1;
+            let buffer_id = get_buffer_id(b.clone());
+            println!("Sent {buffer_id}");
         }
         backp
     });
     
     let mut recvd = vec![];
 
-    let mut i = 0;
     while recvd.len() != to_send.len() {
-        let _msg = data_reader.read_bytes();
-        if _msg.is_some() {
-            recvd.push(_msg.unwrap());
-            println!("Rcvd {i}");
-            i += 1;
+        let b = data_reader.read_bytes();
+        if b.is_some() {
+            let b = b.unwrap();
+            recvd.push(b.clone());
+            let buffer_id = get_buffer_id(b.clone());
+            println!("Rcvd {buffer_id}");
         }
     }
     
@@ -280,13 +277,11 @@ fn test_one_to_n(local: bool, n: i32) {
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
     let mut to_send_per_channel_map = HashMap::new();
-    for channel in channels.to_vec() {
+    for channel in &channels {
         let mut to_send = vec![];
         for i in 0..num_msgs_per_channel {
-            let mut msg = HashMap::new();
-            msg.insert("key", i.to_string());
-            msg.insert("value", random_string(payload_size));
-            to_send.push(Box::new(bincode::serialize(&msg).unwrap().to_vec()));
+            let b = dummy_bytes(i as u32, channel.get_channel_id(), payload_size);
+            to_send.push(b);
         }
         to_send_per_channel_map.insert(channel.get_channel_id().clone(), to_send);
     }
@@ -316,8 +311,9 @@ fn test_one_to_n(local: bool, n: i32) {
             let channel = &local_channels[cur_channel_index];
             let ch_id = &channel.get_channel_id();
             let index = indexes_per_channel[*ch_id];
-            let msg = &locked.get(*ch_id).unwrap()[index];
-            let mut write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
+            let b = &locked.get(*ch_id).unwrap()[index];
+            let buffer_id = get_buffer_id(b.clone());
+            let mut write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             let mut r = 0;
             while write_res.is_none() {
                 if r > max_retries {
@@ -325,10 +321,10 @@ fn test_one_to_n(local: bool, n: i32) {
                 }
                 r += 1;
                 backp += write_timeout_ms as u128;
-                write_res = moved_data_writer.write_bytes(ch_id, msg.clone(), write_timeout_ms);
+                write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
-            println!("[{ch_id}] Sent {index}");   
+            println!("[{ch_id}] Sent {buffer_id}");   
             num_sent += 1;
             indexes_per_channel.insert(&ch_id, index + 1);
             cur_channel_index = (cur_channel_index + 1)%&local_channels.len();
@@ -348,13 +344,13 @@ fn test_one_to_n(local: bool, n: i32) {
     
             let mut recvd = vec![];
             
-            let mut i = 0;
             while recvd.len() != num_msgs_per_channel {
-                let _msg = local_data_reader.read_bytes();
-                if _msg.is_some() {
-                    recvd.push(_msg.unwrap());
-                    println!("[{ch_id}] Rcvd {i}");
-                    i += 1;
+                let b = local_data_reader.read_bytes();
+                if b.is_some() {
+                    let b = b.unwrap();
+                    recvd.push(b.clone());
+                    let buffer_id = get_buffer_id(b.clone());
+                    println!("[{ch_id}] Rcvd {buffer_id}");
                 }
             }
 
