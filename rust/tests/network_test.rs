@@ -91,7 +91,7 @@ fn test_one_to_one(local: bool) {
     }
     io_loop.start();
 
-    let num_msgs = 1000000; // TODO large values leads to race/deadlock somewhere - need to debug
+    let num_msgs = 1000000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -144,10 +144,10 @@ fn test_one_to_one(local: bool) {
     }
     
     let total_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start_ts;
-    let backp_s = j_handle.join().unwrap()/1000;
+    let backp_ms = j_handle.join().unwrap();
     let throughput = ((num_msgs as f64)/(total_ms as f64) * 1000.0) as u16;
     println!("Transfered in (ms): {total_ms}");
-    println!("Backpressure (ms): {backp_s}");
+    println!("Backpressure (ms): {backp_ms}");
     println!("Throughput (msg/s): {throughput}");
     
     data_reader.close();
@@ -272,7 +272,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     io_loop.start();
 
-    let num_msgs_per_channel = 10000;
+    let num_msgs_per_channel = 1000000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -368,10 +368,10 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     
     let total_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start_ts;
-    let backp_s = writer_handle.join().unwrap()/1000;
+    let backp_ms = writer_handle.join().unwrap();
     let throughput = (((num_msgs_per_channel * &channels.len()) as f64)/(total_ms as f64) * 1000.0) as u16;
     println!("Transfered in (ms): {total_ms}");
-    println!("Backpressure (ms): {backp_s}");
+    println!("Backpressure (ms): {backp_ms}");
     println!("Throughput (msg/s): {throughput}");
     
     for (_, data_reader) in data_readers.read().unwrap().iter() {

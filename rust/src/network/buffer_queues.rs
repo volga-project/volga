@@ -151,14 +151,14 @@ impl BufferQueuesInner {
             let b = queue.get_resendable_in_flight();
             if b.is_some() {
                 let b = b.unwrap();
-                res.insert(channel_id, b);
+                res.insert(channel_id, b.clone());
             } else {
                 // if no in-flights, schedule only if in-flight limit is not reached
                 if !queue.has_reached_max_in_flights() {
                     let b = queue.schedule_next();
                     if b.is_some() {
                         let b = b.unwrap();
-                        res.insert(channel_id, b);
+                        res.insert(channel_id, b.clone());
                     }
                 }
             }

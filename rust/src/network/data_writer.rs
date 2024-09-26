@@ -72,20 +72,20 @@ impl DataWriter {
         }
     }
 
-    pub fn write_bytes(&self, channel_id: &String, b: Box<Bytes>, timeout_ms: i32) -> Option<u128> {
-        let t: u128 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
+    pub fn write_bytes(&self, channel_id: &String, b: Box<Bytes>, timeout_ms: u128) -> Option<u128> {
+        let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
         loop {
-            let _t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros();
-            if _t - t > timeout_ms as u128 * 1000 {
-                return None
-            }
             let succ = self.buffer_queues.try_push(channel_id, b.clone());
             if !succ {
+                let _t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+                if _t - t > timeout_ms {
+                    return None
+                }
                 continue;
             }
             break;
         }
-        let backpressured_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros() - t;
+        let backpressured_time: u128 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - t;
         Some(backpressured_time)
     }
 
@@ -173,7 +173,12 @@ impl IOHandler for DataWriter {
                     if buffers_ready_to_send.contains_key(channel_id) {
                         // we have a match, send
                         let b = buffers_ready_to_send.get(channel_id).unwrap();
-                        s.try_send(b.clone()).expect("Unable to send");
+                        let res = s.try_send(b.clone());
+                        if !res.is_ok() {
+                            println!("Unable to send");
+                            continue;
+                        }
+
                         sent_size = Some(b.len());
 
                         // remove stored data and re-register receiver
@@ -188,11 +193,17 @@ impl IOHandler for DataWriter {
                     }
                 } else {
                     // receiver
-                    let b = r.try_recv().expect("Can not receive");
+                    // let b = r.try_recv().expect("Can not receive");
+                    let b = r.try_recv();
+                    if !b.is_ok() {
+                        println!("Unable to rcv");
+                        continue;
+                    }
+                    let b = b.unwrap();
                     if ready_senders.contains_key(channel_id) {
                         // we have a match, send
                         let s = ready_senders.get(channel_id).copied().unwrap();
-                        s.try_send(b.clone()).expect("Unable to send");
+                        s.send(b.clone()).expect("Unable to send");
                         sent_size = Some(b.len());
 
                         // re-register sender
