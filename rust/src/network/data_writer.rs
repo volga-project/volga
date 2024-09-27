@@ -253,8 +253,7 @@ impl IOHandler for DataWriter {
                 let b = oper.recv(recv).unwrap();
                 let size = b.len();
                 let ack = DataReaderResponseMessage::de(b);
-                let buffer_id = ack.buffer_id;
-                this_buffer_queues.handle_ack(channel_id, buffer_id);
+                this_buffer_queues.handle_ack(&ack);
                 this_metrics_recorder.inc(NUM_BUFFERS_RECVD, &channel_id, 1);
                 this_metrics_recorder.inc(NUM_BYTES_RECVD, &channel_id, size as u64);
             }

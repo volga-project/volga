@@ -1,8 +1,8 @@
 data_writer:
   in_flight_timeout_s: 1
-  max_buffers_per_channel: 100
+  max_buffers_per_channel: 1000000
 data_reader:
-  output_queue_size: 100
+  output_queue_size: 1000000
 transfer:
   transfer_queue_size: 100
 zmq:

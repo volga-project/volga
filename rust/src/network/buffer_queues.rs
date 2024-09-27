@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool,
 
 use crossbeam::{channel::{unbounded, Receiver, Sender}, queue::ArrayQueue};
 
-use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta}, channel::{Channel}, io_loop::Bytes};
+use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta}, channel::{self, Channel, DataReaderResponseMessage}, io_loop::Bytes};
 
 struct BufferQueueInner {
     v: VecDeque<Box<Bytes>>,
@@ -297,10 +297,16 @@ impl BufferQueues {
         true
     }
 
-    pub fn handle_ack(&self, channel_id: &String, buffer_id: u32) -> Vec<u32> {
+    pub fn handle_ack(&self, ack: &DataReaderResponseMessage) -> Vec<u32> {
         let mut locked_bq = self.queues.lock().unwrap();
-        let popped = locked_bq.request_pop(channel_id, buffer_id);
-        locked_bq.remove_in_flight(channel_id, buffer_id);
+        let channel_id = &ack.channel_id;
+        let buffer_ids_range = &ack.buffer_ids_range;
+        let mut popped = vec![];
+        for buffer_id in buffer_ids_range.0..(buffer_ids_range.1 + 1) {
+            let mut _popped = locked_bq.request_pop(channel_id, buffer_id);
+            popped.append(&mut _popped);
+            locked_bq.remove_in_flight(channel_id, buffer_id);
+        }
         self.condvar.notify_one();
         popped
     }
@@ -369,7 +375,8 @@ mod tests {
                 while i < bids_c.len() {
                     let b = scheduled.1.recv().unwrap();
                     let buffer_id = get_buffer_id(b);
-                    let popped = qs_c.handle_ack(&_channel_id, buffer_id);
+                    let ack = DataReaderResponseMessage::new_ack(&_channel_id, buffer_id);
+                    let popped = qs_c.handle_ack(&ack);
                     // thread::sleep(time::Duration::from_millis(50));
                     thread::sleep(time::Duration::from_micros(100));
                     let s = format!("[{_channel_id}] Popped {:?}", popped);

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::CHANNEL_ID_META_BYTES_LENGTH, io_loop::Bytes};
+use super::{buffer_utils::CHANNEL_ID_META_BYTES_LENGTH, io_loop::Bytes, utils::consecutive_slices};
 
 #[derive(Clone)]
 pub enum Channel {
@@ -43,10 +43,42 @@ pub enum DataReaderResponseMessageKind {
 pub struct DataReaderResponseMessage {
     pub kind: DataReaderResponseMessageKind,
     pub channel_id: String,
-    pub buffer_id: u32
+    pub buffer_ids_range: (u32, u32)
 }
 
 impl DataReaderResponseMessage {
+
+    pub fn new_ack(channel_id: &String, buffer_id: u32) -> DataReaderResponseMessage {
+        DataReaderResponseMessage{
+            kind: DataReaderResponseMessageKind::Ack, 
+            channel_id: channel_id.clone(), 
+            buffer_ids_range: (buffer_id, buffer_id)
+        }
+    }
+
+    // takes a list of acks and create batched acks of sequential buffer_ids
+    pub fn batch_acks(acks: &Vec<DataReaderResponseMessage>) -> Vec<DataReaderResponseMessage> {
+        let mut buffer_ids = vec![];
+        let channel_id = &acks[0].channel_id;
+
+        for ack in acks {
+            for buffer_id in ack.buffer_ids_range.0..(ack.buffer_ids_range.1 + 1) {
+                buffer_ids.push(buffer_id);
+            }
+        }
+        buffer_ids.sort();
+        let grouped = consecutive_slices(&buffer_ids);
+        let mut res = vec![];
+        for group in grouped {
+            res.push(DataReaderResponseMessage{
+                kind: DataReaderResponseMessageKind::Ack, 
+                channel_id: channel_id.clone(), 
+                buffer_ids_range: (group[0], *group.last().unwrap())
+            });
+        }
+
+        res
+    }
 
     pub fn ser(&self) -> Box<Bytes>{
     
@@ -86,10 +118,62 @@ mod tests {
 
     #[test]
     fn test_ack_serde() {
-        let ack = DataReaderResponseMessage{kind: DataReaderResponseMessageKind::Ack, channel_id:String::from("ch_0"), buffer_id: 1234};
+        let ack = DataReaderResponseMessage::new_ack(&String::from("ch_0"), 1234);
         let b = ack.ser();
         let _ack = DataReaderResponseMessage::de(b);
 
         assert_eq!(ack, _ack);
+    }
+
+    #[test]
+    fn test_ack_batching() {
+        let channeld_id = &String::from("ch_0");
+        let mut acks = vec![];
+
+        // 0-0
+        let ack1 = DataReaderResponseMessage::new_ack(channeld_id, 0);
+        acks.push(ack1);
+
+        // 2-7
+        for i in 2..8 {
+            acks.push(DataReaderResponseMessage::new_ack(channeld_id, i));
+        }
+
+        // 9-12
+        acks.push(DataReaderResponseMessage{
+            kind: DataReaderResponseMessageKind::Ack,
+            channel_id: channeld_id.clone(),
+            buffer_ids_range: (9, 12)
+        });
+
+        // 14-23
+        for i in 14..20 {
+            acks.push(DataReaderResponseMessage::new_ack(channeld_id, i));
+        }
+
+        acks.push(DataReaderResponseMessage{
+            kind: DataReaderResponseMessageKind::Ack,
+            channel_id: channeld_id.clone(),
+            buffer_ids_range: (20, 22)
+        });
+        acks.push(DataReaderResponseMessage::new_ack(channeld_id, 23));
+
+
+        let bacthed = DataReaderResponseMessage::batch_acks(&acks);
+        assert_eq!(bacthed.len(), 4);
+
+        assert_eq!(bacthed[0].buffer_ids_range.0, 0);
+        assert_eq!(bacthed[0].buffer_ids_range.1, 0);
+
+        assert_eq!(bacthed[1].buffer_ids_range.0, 2);
+        assert_eq!(bacthed[1].buffer_ids_range.1, 7);
+
+        assert_eq!(bacthed[2].buffer_ids_range.0, 9);
+        assert_eq!(bacthed[2].buffer_ids_range.1, 12);
+
+        assert_eq!(bacthed[3].buffer_ids_range.0, 14);
+        assert_eq!(bacthed[3].buffer_ids_range.1, 23);
+
+        println!("asserts ok")
     }
 }
