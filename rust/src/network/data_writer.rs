@@ -1,7 +1,7 @@
 use core::time;
 use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queues::BufferQueues, buffer_utils::get_buffer_id, channel::{self, DataReaderResponseMessage, Channel}, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata, utils::sleep_thread};
+use super::{buffer_queues::BufferQueues, buffer_utils::get_buffer_id, channel::{self, Channel, DataReaderResponseMessage}, channels_router::ChannelsRouter, io_loop::{IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::SocketMetadata, utils::sleep_thread};
 use super::io_loop::Bytes;
 use crossbeam::{channel::{bounded, Receiver, Select, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
@@ -85,6 +85,8 @@ impl DataWriter {
             }
             break;
         }
+
+        // TODO this causes attempt to subtract with overflow sometimes, why?
         let backpressured_time: u128 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - t;
         Some(backpressured_time)
     }
@@ -132,93 +134,28 @@ impl IOHandler for DataWriter {
 
         let output_loop = move || {
 
-            let mut sel = Select::new();
             let locked_send_chans = this_send_chans.read().unwrap();
-            let mut indexes = HashMap::new();
 
-            // order matters here - register recv first, send second
-            for channel in this_channels.iter() {
-                let (_, r) = buffer_queues_chans.get(channel.get_channel_id()).unwrap();
-                let i = sel.recv(r);
-                indexes.insert(i, (channel.get_channel_id(), false));
-            }
-
+            let mut senders = HashMap::new();
+            let mut receivers: HashMap<&String, &Receiver<Box<Vec<u8>>>> = HashMap::new();
+            let mut receiver_to_sender_mapping = HashMap::new();
             for channel in this_channels.iter() {
                 let (s, _) = locked_send_chans.get(channel.get_channel_id()).unwrap();
-                let i = sel.send(s);
-                indexes.insert(i, (channel.get_channel_id(), true));
+                let (_, r) = buffer_queues_chans.get(channel.get_channel_id()).unwrap();
+                senders.insert(channel.get_channel_id(), s);
+                receivers.insert(channel.get_channel_id(), r);
+                receiver_to_sender_mapping.insert(channel.get_channel_id().clone(), vec![channel.get_channel_id().clone()]);
             }
 
-            // since select returns only one sender/receiver we keep track of ready senders/recived buffers to match them
-            let mut buffers_ready_to_send: HashMap<&String, Box<Vec<u8>>> = HashMap::new();
-            let mut ready_senders: HashMap<&String, &Sender<Box<Vec<u8>>>> = HashMap::new();
-
+            let mut s = ChannelsRouter::new(senders, receivers, &receiver_to_sender_mapping);
+            
             while this_running.load(Ordering::Relaxed) {
+                let result = s.iter();
 
-                let index = sel.ready_timeout(Duration::from_millis(100));
-                if !index.is_ok() {
-                    continue;
-                }
-
-                let index: usize = index.unwrap();
-                let (channel_id, is_sender) = indexes.get(&index).copied().unwrap();
-
-                let (s, _) = locked_send_chans.get(channel_id).unwrap();
-                let (_, r) = buffer_queues_chans.get(channel_id).unwrap();
-
-                let mut sent_size = None;
-
-                if is_sender {
-                    // sender
-                    if buffers_ready_to_send.contains_key(channel_id) {
-                        // we have a match, send
-                        let b = buffers_ready_to_send.get(channel_id).unwrap();
-                        let res = s.try_send(b.clone());
-                        if !res.is_ok() {
-                            println!("Unable to send");
-                            continue;
-                        }
-
-                        sent_size = Some(b.len());
-
-                        // remove stored data and re-register receiver
-                        buffers_ready_to_send.remove(channel_id);
-                        let i = sel.recv(r);
-                        indexes.insert(i, (channel_id, false));
-                    } else {
-                        // mark as ready and remove from selector until we have a matching receiver
-                        ready_senders.insert(channel_id, s);
-                        sel.remove(index);
-                        indexes.remove(&index);
-                    }
-                } else {
-                    // receiver
-                    let b = r.try_recv();
-                    if !b.is_ok() {
-                        println!("Unable to rcv");
-                        continue;
-                    }
-                    let b = b.unwrap();
-                    if ready_senders.contains_key(channel_id) {
-                        // we have a match, send
-                        let s = ready_senders.get(channel_id).copied().unwrap();
-                        s.send(b.clone()).expect("Unable to send"); // TODO timeout?
-                        sent_size = Some(b.len());
-
-                        // re-register sender
-                        ready_senders.remove(channel_id);
-                        let i = sel.send(s);
-                        indexes.insert(i, (channel_id, true));
-                    } else {
-                        // store received data and remove from selector until we have a matching sender
-                        buffers_ready_to_send.insert(channel_id, b);
-                        sel.remove(index);
-                        indexes.remove(&index);
-                    }
-                }
-
-                if sent_size.is_some() {
-                    let size = sent_size.unwrap();
+                if result.is_some() {
+                    let res = result.unwrap();
+                    let size = res.0;
+                    let channel_id = res.1;
 
                     this_metrics_recorder.inc(NUM_BUFFERS_SENT, &channel_id, 1);
                     this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);

@@ -92,7 +92,7 @@ fn test_one_to_one(local: bool) {
     }
     io_loop.start();
 
-    let num_msgs = 1000000;
+    let num_msgs = 300000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();

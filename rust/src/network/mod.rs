@@ -11,3 +11,4 @@ pub mod remote_transfer_handler;
 pub mod metrics;
 pub mod network_config;
 pub mod sockets_monitor;
+pub mod channels_router;
