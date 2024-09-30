@@ -75,6 +75,7 @@ impl IOLoop {
 
     pub fn new(name: String, zmq_config: Option<ZmqConfig>) -> IOLoop {
         let zmq_ctx = Arc::new(zmq::Context::new());
+        // zmq_ctx.set_io_threads(4).unwrap();
         IOLoop{
             name,
             handlers: Arc::new(Mutex::new(Vec::new())),
@@ -154,6 +155,8 @@ impl IOLoop {
                     handlers.push(handler);
                 }
 
+                let mut not_sent: HashMap<&SocketMetadata, Box<Bytes>> = HashMap::new();
+
                 // run loop
                 while this_running.load(Ordering::Relaxed) {
                     let mut poll_list = Vec::new();
@@ -170,19 +173,56 @@ impl IOLoop {
                         if poll_list[i].is_readable() {
                             // this goes on heap
                             let recv_chan = handler.get_recv_chan(sm);
-                            if !recv_chan.0.is_full() {
-                                let bytes = socket.recv_bytes(zmq::DONTWAIT).unwrap();
-                                let recv_chan = handler.get_recv_chan(sm);
-                                recv_chan.0.send(Box::new(bytes)).unwrap();
+                            loop {
+                                if recv_chan.0.is_full() {
+                                    break;
+                                }
+
+                                let b = socket.recv_bytes(zmq::DONTWAIT);
+                                if b.is_ok() {
+                                    let bytes = b.unwrap();
+                                    recv_chan.0.send(Box::new(bytes)).unwrap();
+                                } else {
+                                    break;
+                                }
                             }
+                            // if !recv_chan.0.is_full() {
+                            //     let bytes = socket.recv_bytes(zmq::DONTWAIT).unwrap();
+                            //     let recv_chan = handler.get_recv_chan(sm);
+                            //     recv_chan.0.send(Box::new(bytes)).unwrap();
+                            // }
                         }
 
                         if poll_list[i].is_writable() {
                             let send_chan = handler.get_send_chan(sm);
-                            if !send_chan.1.is_empty() {
-                                let bytes = send_chan.1.recv().unwrap();
-                                socket.send(bytes.as_ref(), zmq::DONTWAIT).unwrap();
+                            loop {
+                                let mut bytes: Option<Box<Bytes>> = None;
+                                if not_sent.contains_key(sm) {
+                                    bytes = Some(not_sent.get(sm).unwrap().clone());
+                                    not_sent.remove(sm);
+                                } else {
+                                    if send_chan.1.is_empty() {
+                                        break;
+                                    }
+                                    bytes = Some(send_chan.1.recv().unwrap());
+                                }
+
+                                if bytes.is_none() {
+                                    break;
+                                }
+
+                                let b = bytes.unwrap();
+                                
+                                let res = socket.send(b.as_ref(), zmq::DONTWAIT);
+                                if !res.is_ok() {
+                                    not_sent.insert(sm, b.clone());
+                                    break;
+                                }
                             }
+                            // if !send_chan.1.is_empty() {
+                            //     let bytes = send_chan.1.recv().unwrap();
+                            //     socket.send(bytes.as_ref(), zmq::DONTWAIT).unwrap();
+                            // }
                         }
                     }
                 }
@@ -218,6 +258,7 @@ impl IOLoop {
         println!("[Loop {name}] Started data flow");
     }
 
+    // TODO num_io_threads > 1 fails, debug
     pub fn connect(&self, num_io_threads: usize, timeout_ms: u128) -> Option<String> {
         self._run_io_threads(num_io_threads, timeout_ms);
         self.sockets_monitor.wait_for_monitor_ready();

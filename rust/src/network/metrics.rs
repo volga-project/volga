@@ -159,7 +159,7 @@ mod tests {
         let filename = format!("{path}/{io_handler_name}_metrics.metrics");
         let b = fs::read(filename.clone()).unwrap();
         fs::remove_file(filename).unwrap();
-        let mut res: HashMap<String, u64> = rmp_serde::from_slice(&b).unwrap();
+        let res: HashMap<String, u64> = rmp_serde::from_slice(&b).unwrap();
 
         let mut expected = HashMap::new();
         expected.insert(metric_key(NUM_BUFFERS_SENT, &channel_id), 4);

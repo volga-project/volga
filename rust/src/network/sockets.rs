@@ -109,7 +109,7 @@ impl SocketsMeatadataManager {
     }
     
     pub fn create_for_handlers(&self, handlers: &Vec<Arc<dyn IOHandler + Send + Sync>>) -> Vec<SocketMetadata> {
-        let mut sockets_metadata = Vec::new();
+        let mut socket_metas = Vec::new();
         for handler in handlers.iter() {
             let handler_type = handler.get_handler_type();
             let channels = handler.get_channels();
@@ -119,15 +119,15 @@ impl SocketsMeatadataManager {
             } else {
                 dir = Direction::Receiver;
             }
-            let sockets_meta;
+            let _socket_metas;
             if (handler_type == IOHandlerType::DataWriter) | (handler_type == IOHandlerType::DataReader) {
-                sockets_meta = SocketsMeatadataManager::create_local_sockets_meta(channels, dir);
+                _socket_metas = SocketsMeatadataManager::create_local_socket_metas(channels, dir);
             } else {
-                sockets_meta = self.create_remote_transfer_sockets_meta(channels, dir);
+                _socket_metas = self.create_remote_transfer_socket_metas(channels, dir);
             }
 
-            for sm in sockets_meta {
-                sockets_metadata.push(sm.clone());
+            for sm in _socket_metas {
+                socket_metas.push(sm.clone());
                 let mut locked_socket_meta_to_handler = self.socket_meta_to_handler.write().unwrap();
                 if locked_socket_meta_to_handler.contains_key(&sm) {
                     panic!("Duplicate socket metadata");
@@ -135,7 +135,7 @@ impl SocketsMeatadataManager {
                 locked_socket_meta_to_handler.insert(sm.clone(), handler.clone());
             }
         }
-        sockets_metadata
+        socket_metas
     }
 
     pub fn get_handler_for_meta(&self, sm: &SocketMetadata) -> Arc<dyn IOHandler + Send + Sync> {
@@ -143,7 +143,7 @@ impl SocketsMeatadataManager {
     }
 
     // used for DataReader/DataWriter
-    fn create_local_sockets_meta(channels: &Vec<Channel>, direction: Direction) -> Vec<SocketMetadata> {
+    fn create_local_socket_metas(channels: &Vec<Channel>, direction: Direction) -> Vec<SocketMetadata> {
         let mut v: Vec<SocketMetadata> = Vec::new();
         let is_reader = direction == Direction::Receiver;
         for channel in channels {
@@ -184,7 +184,7 @@ impl SocketsMeatadataManager {
 
 
     // used for RemoteTransferHandler (in any direction)
-    fn create_remote_transfer_sockets_meta(&self, channels: &Vec<Channel>, direction: Direction) -> Vec<SocketMetadata> {
+    fn create_remote_transfer_socket_metas(&self, channels: &Vec<Channel>, direction: Direction) -> Vec<SocketMetadata> {
         let mut v: Vec<SocketMetadata> = Vec::new();
         let is_sender = direction == Direction::Sender;
         for channel in channels {

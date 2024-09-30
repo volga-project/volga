@@ -25,6 +25,7 @@ class OutputCollector(Collector):
         cur_partition_index = 0
 
         # TODO backpressure and timeouts should go here
+        # TODO this hella busy-spins, need to add proper blocking
         while len(partitions_to_send) != 0:
             partition = partitions_to_send[cur_partition_index]
             succ = self.data_writer.try_write_record(self.output_channel_ids[partition], record)
