@@ -176,7 +176,7 @@ impl PyDataWriter {
         self.data_writer.close();
     }
 
-    pub fn write_bytes(&self, channel_id: String, b: &PyBytes, block: bool, timeout_ms: u128) -> Option<u128> {
+    pub fn write_bytes(&self, channel_id: String, b: &PyBytes, _noop1: bool, timeout_ms: u128, _noop2: u128) -> Option<u128> {
         let bytes = b.as_bytes().to_vec();
         self.data_writer.write_bytes(&channel_id, Box::new(bytes), timeout_ms)
     }
