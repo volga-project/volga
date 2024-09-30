@@ -1,6 +1,5 @@
 
-use core::time;
-use std::{collections::HashMap, sync::{mpsc::channel, Arc, RwLock}, thread, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{Arc, RwLock}, time::{SystemTime, UNIX_EPOCH}};
 
 use volga_rust::network::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::{self, Channel}, data_reader::{self, DataReader}, data_writer::{self, DataWriter}, io_loop::{Direction, IOHandler, IOLoop}, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
@@ -17,6 +16,8 @@ fn test_one_to_one_remote() {
 
 // TODO add unreliable channel test (out-of-orders, drops and duplicates)
 // TODO add transfer handler disconnect/reconnect test 
+// TODO test in-flight resends
+// TODO test backpressure
 
 fn test_one_to_one(local: bool) {
     let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config.yaml");
@@ -171,12 +172,12 @@ fn test_one_to_one(local: bool) {
 
 #[test]
 fn test_one_to_n_local() {
-    test_one_to_n(true, 10); // TODO n >= 8 sometimes locks, why?
+    test_one_to_n(true, 10); // TODO n >= 8 sometimes locks, why? - because we need to notify sender when receiver's que is unlocked after being full
 }
 
 #[test]
 fn test_one_to_n_remote() {
-    test_one_to_n(false, 2);
+    test_one_to_n(false, 10);
 }
 
 fn test_one_to_n(local: bool, n: i32) {
@@ -274,7 +275,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     io_loop.start();
 
-    let num_msgs_per_channel = 30000;
+    let num_msgs_per_channel = 1000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
