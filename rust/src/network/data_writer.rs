@@ -150,7 +150,7 @@ impl IOHandler for DataWriter {
             let mut s = ChannelsRouter::new(senders, receivers, &receiver_to_sender_mapping);
             
             while this_running.load(Ordering::Relaxed) {
-                let result = s.iter();
+                let result = s.iter(false);
 
                 if result.is_some() {
                     let res = result.unwrap();

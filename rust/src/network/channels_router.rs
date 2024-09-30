@@ -1,7 +1,7 @@
 use std::{collections::HashMap, time::Duration};
 use crossbeam::channel::{Receiver, Select, Sender};
 
-use super::io_loop::Bytes;
+use super::{buffer_utils::get_channeld_id, io_loop::Bytes};
 
 /**
  * Incapsulates logic to route data from in-channels receivers to corresponding out-channels senders based on receiver_to_sender_mapping
@@ -70,8 +70,11 @@ impl<'a> ChannelsRouter<'a> {
         }
     }
 
-    
-    pub fn iter(&mut self) -> Option<(usize, &String, &String)> {
+    /**
+     * use_message_channel_id_for_routing - in case of multiple matching senders for a receiver
+     * we also make sure that intented channel (get_channel_id(msg)) matches receiver key on per-message basis
+     */
+    pub fn iter(&mut self, use_message_channel_id_for_routing: bool) -> Option<(usize, &String, &String)> {
         let index = self.sel.ready_timeout(Duration::from_millis(100));
         if !index.is_ok() {
             return None;
@@ -85,7 +88,7 @@ impl<'a> ChannelsRouter<'a> {
         if is_sender {
             // sender
             let sender_key = key;
-            let receiver_key = self.ready_receiver_for_sender(sender_key);
+            let receiver_key = self.ready_receiver_for_sender(sender_key, use_message_channel_id_for_routing);
             let sender = self.senders.get(sender_key).unwrap();
             if receiver_key.is_some() {
                 let receiver_key = receiver_key.unwrap();
@@ -115,13 +118,18 @@ impl<'a> ChannelsRouter<'a> {
             // receiver
             let receiver_key = key;
             let receiver = self.receivers.get(receiver_key).unwrap();
-            let sender_key = self.ready_sender_for_receiver(receiver_key);
             let b = receiver.try_recv();
             if !b.is_ok() {
                 println!("Unable to rcv");
                 return None;
             }
             let b = b.unwrap();
+            let mut channel_id_for_routing = None;
+            if use_message_channel_id_for_routing {
+                channel_id_for_routing = Some(get_channeld_id(b.clone()));
+            }
+            let sender_key = self.ready_sender_for_receiver(receiver_key, channel_id_for_routing);
+            
             if sender_key.is_some() {
                 let sender_key = sender_key.unwrap();
                 // we have a match, send
@@ -146,19 +154,33 @@ impl<'a> ChannelsRouter<'a> {
     }
 
 
-    fn ready_sender_for_receiver(&self, receiver_key: &'a String) -> Option<&'a String> {
+    fn ready_sender_for_receiver(&self, receiver_key: &'a String, channel_id_for_routing: Option<String>) -> Option<&'a String> {
         for sender_key in self.receiver_to_sender_mapping.get(receiver_key).unwrap() {
             if self.ready_senders.contains_key(sender_key) {
+                if !channel_id_for_routing.is_none() {
+                    let channel_id = channel_id_for_routing.unwrap();
+                    if channel_id == *sender_key {
+                        return Some(sender_key)
+                    }
+                }
                 return Some(sender_key)
             }
         }
         None
     }
 
-    fn ready_receiver_for_sender(&self, sender_key: &'a String) -> Option<&'a String> {
+    fn ready_receiver_for_sender(&self, sender_key: &'a String, use_message_channel_id_for_routing: bool) -> Option<&'a String> {
         for receiver_key in self.sender_to_receiver_mapping.get(sender_key).unwrap() {
             if self.buffers_ready_to_send.contains_key(receiver_key) {
-                return Some(receiver_key)
+                if use_message_channel_id_for_routing {
+                    let b = self.buffers_ready_to_send.get(receiver_key).unwrap();
+                    let channel_id = get_channeld_id(b.clone());
+                    if channel_id == *sender_key {
+                        return Some(receiver_key)
+                    }
+                } else {
+                    return Some(receiver_key)
+                }
             }
         }
         None
@@ -299,7 +321,7 @@ mod tests {
 
             let mut switch = ChannelsRouter::new(senders, receivers, &receiver_to_sender_mapping);
             while _running.load(Ordering::Relaxed) {
-                switch.iter();
+                switch.iter(false);
             }
             println!("switcher ok")
         });

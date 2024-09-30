@@ -1,11 +1,11 @@
-use core::time;
-use std::{collections::HashMap, hash::Hash, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{self, JoinHandle}};
 
-use crossbeam::{channel::{unbounded, bounded, Receiver, Sender}, queue::ArrayQueue};
+use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::JoinHandle};
+
+use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::{get_buffer_id, get_channeld_id}, channel::{self, Channel}, io_loop::{Bytes, Direction, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::{SocketMetadata, SocketOwner}, utils::sleep_thread};
+use super::{buffer_utils::get_channeld_id, channel::Channel, channels_router::ChannelsRouter, io_loop::{Bytes, Direction, IOHandler, IOHandlerType}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, sockets::{SocketMetadata, SocketOwner}, utils::sleep_thread};
 
 // const TRANSFER_QUEUE_SIZE: usize = 10; // TODO should we separate local and remote channel sizes?
 
@@ -161,33 +161,43 @@ impl IOHandler for RemoteTransferHandler {
         let this_remote_send_chans = self.remote_send_chans.clone();
         let this_runnning = self.running.clone();
         let this_peers = self.channel_id_to_node_id.clone();
+        let this_channels = self.channels.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
 
         // we put stuff fromm all local recv chans into corresponding remote out chans
         let output_loop = move || {
 
-            while this_runnning.load(Ordering::Relaxed) {
+            let locked_local_recv_chans = this_local_recv_chans.read().unwrap();
+            let locked_remote_send_chans = this_remote_send_chans.read().unwrap();
+            let locked_peers = this_peers.read().unwrap();
 
-                let locked_local_recv_chans = this_local_recv_chans.read().unwrap();
-                let locked_remote_send_chans = this_remote_send_chans.read().unwrap();
-                let locked_peers = this_peers.read().unwrap();
+            let mut senders = HashMap::new();
+            let mut receivers: HashMap<&String, &Receiver<Box<Vec<u8>>>> = HashMap::new();
+            let mut receiver_to_sender_mapping = HashMap::new();
+            for channel in this_channels.iter() {
+                let peer_node_id = locked_peers.get(channel.get_channel_id()).unwrap();
 
-                for channel_id in locked_local_recv_chans.keys() {
-                    let peer_node_id = locked_peers.get(channel_id).unwrap();
-                    let send_chan = locked_remote_send_chans.get(peer_node_id).unwrap();
-                    let sender = send_chan.0.clone();
-                    let recv_chan = locked_local_recv_chans.get(channel_id).unwrap();
-                    let receiver = recv_chan.1.clone();
-                    if !sender.is_full() & !receiver.is_empty() {
-                        let b = receiver.recv().unwrap();
-                        let size = b.len();
-                        this_metrics_recorder.inc(NUM_BUFFERS_SENT, peer_node_id, 1);
-                        this_metrics_recorder.inc(NUM_BYTES_SENT, peer_node_id, size as u64);
-                        sender.send(b).unwrap();
-                    }
+                let (s, _) = locked_remote_send_chans.get(peer_node_id).unwrap();
+                if !senders.contains_key(peer_node_id) {
+                    senders.insert(peer_node_id, s);
                 }
+                let (_, r) = locked_local_recv_chans.get(channel.get_channel_id()).unwrap();
+                receivers.insert(channel.get_channel_id(), r);
 
-                sleep_thread();
+                receiver_to_sender_mapping.insert(channel.get_channel_id().clone(), vec![peer_node_id.clone()]);
+            }
+
+            let mut s = ChannelsRouter::new(senders, receivers, &receiver_to_sender_mapping);
+
+            while this_runnning.load(Ordering::Relaxed) {
+                let result = s.iter(false);
+                if result.is_some() {
+                    let res = result.unwrap();
+                    let size = res.0;
+                    let peer_node_id = res.1;
+                    this_metrics_recorder.inc(NUM_BUFFERS_SENT, peer_node_id, 1);
+                    this_metrics_recorder.inc(NUM_BYTES_SENT, peer_node_id, size as u64);
+                }
             }
         };
 
@@ -195,33 +205,49 @@ impl IOHandler for RemoteTransferHandler {
         let this_remote_recv_chans = self.remote_recv_chans.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
         let this_runnning = self.running.clone();
+        let this_channels = self.channels.clone();
+        let this_peers = self.channel_id_to_node_id.clone();
 
         let input_loop = move || {
 
-            while this_runnning.load(Ordering::Relaxed) {
+            let locked_local_send_chans = this_local_send_chans.read().unwrap();
+            let locked_remote_recv_chans = this_remote_recv_chans.read().unwrap();
+            let locked_peers = this_peers.read().unwrap();
 
-                let locked_local_send_chans = this_local_send_chans.read().unwrap();
-                let locked_remote_recv_chans = this_remote_recv_chans.read().unwrap();
+            let mut senders = HashMap::new();
+            let mut receivers: HashMap<&String, &Receiver<Box<Vec<u8>>>> = HashMap::new();
+            let mut receiver_to_sender_mapping: HashMap<String, Vec<String>> = HashMap::new();
+            for channel in this_channels.iter() {
+                let peer_node_id = locked_peers.get(channel.get_channel_id()).unwrap();
 
-                for peer_node_id in locked_remote_recv_chans.keys() {
-                    let recv_chan = locked_remote_recv_chans.get(peer_node_id).unwrap();
-                    let receiver = recv_chan.1.clone();
-                    if !receiver.is_empty() {
-                        let b = receiver.recv().unwrap();
-                        let size = b.len();
-                        let channel_id = get_channeld_id(b.clone());
-                        let send_chan = locked_local_send_chans.get(&channel_id).unwrap();
-                        let sender = send_chan.0.clone();
-
-                        // this will cause backpressure for all local channels sharing this remote channel
-                        // TODO we should implement credit-based flow control to avoid this
-                        sender.send(b).unwrap();
-                        this_metrics_recorder.inc(NUM_BUFFERS_RECVD, peer_node_id, 1);
-                        this_metrics_recorder.inc(NUM_BYTES_RECVD, peer_node_id, size as u64);
-                    }
+                let (s, _) = locked_local_send_chans.get(channel.get_channel_id()).unwrap();
+                senders.insert(channel.get_channel_id(), s);
+                let (_, r) = locked_remote_recv_chans.get(peer_node_id).unwrap();
+                if !receivers.contains_key(peer_node_id) {
+                    receivers.insert(peer_node_id, r);
                 }
 
-                sleep_thread();
+                if receiver_to_sender_mapping.contains_key(peer_node_id) {
+                    receiver_to_sender_mapping.get_mut(peer_node_id).unwrap().push(channel.get_channel_id().clone());
+                } else {
+                    receiver_to_sender_mapping.insert(peer_node_id.clone(), vec![channel.get_channel_id().clone()]);
+                }
+            }
+
+            let mut s = ChannelsRouter::new(senders, receivers, &receiver_to_sender_mapping);
+
+            while this_runnning.load(Ordering::Relaxed) {
+                // this may cause backpressure for all local channels sharing this remote channel
+                // TODO we should implement credit-based flow control to avoid this
+
+                let result = s.iter(true);                
+                if result.is_some() {
+                    let res = result.unwrap();
+                    let size = res.0;
+                    let peer_node_id = res.1;
+                    this_metrics_recorder.inc(NUM_BUFFERS_SENT, peer_node_id, 1);
+                    this_metrics_recorder.inc(NUM_BYTES_SENT, peer_node_id, size as u64);
+                }
             }
         };
 

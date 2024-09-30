@@ -222,6 +222,8 @@ impl IOHandler for DataReader {
 
         let output_loop = move || {
             let timeout_ms = 100;
+
+            // TODO unit tests for batching
             let max_batch_size = 500;
             let locked_send_chans = this_send_chans.read().unwrap();
             let mut last_resp = None;
