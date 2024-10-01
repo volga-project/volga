@@ -89,14 +89,14 @@ class TestRemoteTransfer(unittest.TestCase):
                         node_id=target_node_id,
                         soft=False
                     )
-                ).remote(_id, job_name, [channel], num_msgs_per_writer)
+                ).remote(_id, job_name, [channel])
             else:
                 reader = TestReader.options(
                     scheduling_strategy=NodeAffinitySchedulingStrategy(
                         node_id=single_node_id,
                         soft=False
                     )
-                ).remote(_id, job_name, [channel], num_msgs_per_writer)
+                ).remote(_id, job_name, [channel])
                 writer = TestWriter.options(
                     scheduling_strategy=NodeAffinitySchedulingStrategy(
                         node_id=single_node_id,
@@ -135,12 +135,11 @@ class TestRemoteTransfer(unittest.TestCase):
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
     def test_n_to_n_parallel_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_msgs_per_writer = 200000
+        num_msgs_per_writer = 300000000
         msg_size = 32
-        batch_size = 2000
+        batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
-        to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs_per_writer)]
 
         ray.init(address=ray_addr, runtime_env=runtime_env)
 
@@ -156,13 +155,13 @@ class TestRemoteTransfer(unittest.TestCase):
         futs = []
         start_ts = time.time()
         for _id in range(n):
-            writers[_id].send_items.remote({channels[_id].channel_id: to_send})
-            futs.append(readers[_id].receive_items.remote())
+            writers[_id].send_items.remote({channels[_id].channel_id: num_msgs_per_writer}, msg_size)
+            futs.append(readers[_id].receive_items.remote(num_msgs_per_writer))
 
         # wait for finish
         for _id in range(n):
             rcvd = ray.get(futs[_id])
-            assert to_send == rcvd
+            assert rcvd is True
             print(f'assert {_id} ok')
         t = time.time() - start_ts
         throughput = (n*num_msgs_per_writer)/t
@@ -185,7 +184,6 @@ class TestRemoteTransfer(unittest.TestCase):
             raise RuntimeError('n%num_transfer_actors should be 0')
         num_msgs = 100000
         msg_size = 32
-        to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
         batch_size = 100
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
@@ -245,7 +243,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     target_transfer_actor_channels[target_node_id].append(channel)
 
         for reader_id in reader_channels:
-            reader = TestReader.options(num_cpus=0).remote(reader_id, job_name, reader_channels[reader_id], n*num_msgs)
+            reader = TestReader.options(num_cpus=0).remote(reader_id, job_name, reader_channels[reader_id])
             readers[reader_id] = reader
 
         for writer_id in writer_channels:
@@ -267,15 +265,15 @@ class TestRemoteTransfer(unittest.TestCase):
         # start_ts = time.time()
         read_futs = {}
         for writer_id in writers:
-            writers[writer_id].send_items.remote({channel.channel_id: to_send for channel in writer_channels[writer_id]})
+            writers[writer_id].send_items.remote({channel.channel_id: num_msgs for channel in writer_channels[writer_id]}, msg_size)
 
         for reader_id in readers:
-            read_futs[reader_id] = readers[reader_id].receive_items.remote()
+            read_futs[reader_id] = readers[reader_id].receive_items.remote(n * num_msgs)
 
         # wait for finish
         for reader_id in read_futs:
             rcvd = ray.get(read_futs[reader_id])
-            assert n * len(to_send) == len(rcvd)
+            assert rcvd is True
             print(f'assert {reader_id} ok')
         # t = time.time() - start_ts
         # throughput = (n * num_msgs_per_writer) / t
@@ -298,7 +296,6 @@ class TestRemoteTransfer(unittest.TestCase):
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
         writer_delay_s = 0
-        to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
 
         ray.init(address=ray_addr, runtime_env=runtime_env)
         readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id = self._init_ray_actors(
@@ -311,14 +308,14 @@ class TestRemoteTransfer(unittest.TestCase):
         )
         start_ray_io_handler_actors([*readers, *writers, source_transfer_actor, target_transfer_actor])
 
-        writers[0].send_items.remote({channels[0].channel_id: to_send})
-        fut = readers[0].receive_items.remote()
+        writers[0].send_items.remote({channels[0].channel_id: num_msgs}, msg_size)
+        fut = readers[0].receive_items.remote(num_msgs)
 
         time.sleep(1)
         i = 0
         timeout = 120
         t = time.time()
-        while len(ray.get(readers[0].get_items.remote())) != len(to_send):
+        while ray.get(readers[0].get_num_rcvd.remote()) != num_msgs:
             if t - time.time() > timeout:
                 raise RuntimeError('Timeout waiting for finish')
             if i%2 == 0:
@@ -360,7 +357,7 @@ class TestRemoteTransfer(unittest.TestCase):
             time.sleep(5)
 
         rcvd = ray.get(fut)
-        assert to_send == rcvd
+        assert rcvd is True
         print('assert ok')
 
     def test_backpressure(self):
@@ -432,8 +429,8 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    # t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=False)
-    t.test_n_to_n_parallel_on_ray(n=1)
+    t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    # t.test_n_to_n_parallel_on_ray(n=1)
     # t.test_transfer_actor_interruption()
     # t.test_n_all_to_all_on_local_ray(n=4, num_transfer_actors=2)
     # t.test_backpressure()

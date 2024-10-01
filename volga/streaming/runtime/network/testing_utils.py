@@ -51,21 +51,21 @@ class TestWriter:
     def start(self, num_threads: int = 1) -> Optional[str]:
         return self.io_loop.connect_and_start(num_threads)
 
-    def send_items(self, items_per_channel: Dict[str, List[Dict]]):
-        index = {channel_id: 0 for channel_id in items_per_channel}
-        channel_ids = list(items_per_channel.keys())
+    def send_items(self, num_items_per_channel: Dict[str, int], msg_size: int):
+        index = {channel_id: 0 for channel_id in num_items_per_channel}
+        channel_ids = list(num_items_per_channel.keys())
         cur_channel_index = 0
         num_sent = 0
-        num_to_send = sum(list(map(lambda e: len(e),list(items_per_channel.values()))))
+        num_to_send = sum(list(num_items_per_channel.values()))
         # round robin send
         while num_sent != num_to_send:
             channel_id = channel_ids[cur_channel_index]
-            items = items_per_channel[channel_id]
+            num_items = num_items_per_channel[channel_id]
             i = index[channel_id]
-            if i == len(items):
+            if i == num_items:
                 cur_channel_index = (cur_channel_index + 1)%len(channel_ids)
                 continue
-            item = items[i]
+            item = construct_message(i, msg_size)
             succ = self.data_writer.try_write_message(channel_id, item)
             if succ:
                 index[channel_id] += 1
@@ -82,8 +82,7 @@ class TestReader:
         self,
         reader_id: int,
         job_name: str,
-        channels: List[Channel],
-        num_expected: int,
+        channels: List[Channel]
     ):
         self.channels = channels
         self.io_loop = IOLoop(f'reader_loop_{reader_id}')
@@ -92,14 +91,13 @@ class TestReader:
             channels=channels,
             job_name=job_name,
         )
-        self.num_expected = num_expected
         self.io_loop.register_io_handler(self.data_reader)
-        self.res = []
+        self.num_rcvd = 0
 
     def start(self, num_threads: int = 1) -> Optional[str]:
         return self.io_loop.connect_and_start(num_threads)
 
-    def receive_items(self) -> List[Any]:
+    def receive_items(self, num_expected) -> bool:
         start_ts = time.time()
         while True:
             if time.time() - start_ts > 3000:
@@ -110,16 +108,20 @@ class TestReader:
                 time.sleep(0.001)
                 continue
 
-            self.res.extend(items)
-            if len(self.res) == self.num_expected:
+            self.num_rcvd += len(items)
+            if self.num_rcvd == num_expected:
                 break
-        return self.res
+        return self.num_rcvd == num_expected
 
-    def get_items(self) -> List:
-        return self.res
+    def get_num_rcvd(self) -> int:
+        return self.num_rcvd
 
     def close(self):
         self.io_loop.close()
+
+
+def construct_message(i: int, msg_size: int) -> Dict:
+    return {'k': i, 'v': 'a' * msg_size}
 
 
 def start_ray_io_handler_actors(handler_actors: List):

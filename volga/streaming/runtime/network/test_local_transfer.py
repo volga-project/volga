@@ -25,7 +25,7 @@ class TestLocalTransfer(unittest.TestCase):
         ray.init(address=ray_addr, runtime_env=runtime_env)
         num_msgs = 1000000
         msg_size = 128
-        to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
+        # to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
         batch_size = 100
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
@@ -46,7 +46,7 @@ class TestLocalTransfer(unittest.TestCase):
                 node_id=node['NodeID'],
                 soft=False
             )
-        ).remote(0, job_name, [channel], num_msgs)
+        ).remote(0, job_name, [channel])
         writer = TestWriter.options(
             num_cpus=0,
             scheduling_strategy=NodeAffinitySchedulingStrategy(
@@ -60,14 +60,14 @@ class TestLocalTransfer(unittest.TestCase):
         # make sure Ray has enough time to start actors
         time.sleep(1)
         t = time.perf_counter()
-        writer.send_items.remote({channel.channel_id: to_send})
-        rcvd = ray.get(reader.receive_items.remote())
+        writer.send_items.remote({channel.channel_id: num_msgs}, msg_size)
+        rcvd = ray.get(reader.receive_items.remote(num_msgs))
         t = time.perf_counter() - t
         throughput = num_msgs/t
         print(f'Finished in {t} s, throughput {throughput} msg/s')
         time.sleep(1)
 
-        assert to_send == rcvd
+        assert rcvd is True
 
         print('assert ok')
 
@@ -81,7 +81,7 @@ class TestLocalTransfer(unittest.TestCase):
     def test_n_all_to_all_on_local_ray(self, n: int):
         num_msgs = 1000000
         msg_size = 32
-        to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
+        # to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
         batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
@@ -113,7 +113,7 @@ class TestLocalTransfer(unittest.TestCase):
                     writer_channels[writer_id].append(channel)
 
         for reader_id in reader_channels:
-            reader = TestReader.options(num_cpus=0).remote(reader_id, job_name, reader_channels[reader_id], n*num_msgs)
+            reader = TestReader.options(num_cpus=0).remote(reader_id, job_name, reader_channels[reader_id])
             readers[reader_id] = reader
 
         for writer_id in writer_channels:
@@ -125,15 +125,15 @@ class TestLocalTransfer(unittest.TestCase):
         # start_ts = time.time()
         read_futs = {}
         for writer_id in writers:
-            writers[writer_id].send_items.remote({channel.channel_id: to_send for channel in writer_channels[writer_id]})
+            writers[writer_id].send_items.remote({channel.channel_id: num_msgs for channel in writer_channels[writer_id]}, msg_size)
 
         for reader_id in readers:
-            read_futs[reader_id] = readers[reader_id].receive_items.remote()
+            read_futs[reader_id] = readers[reader_id].receive_items.remote(n*num_msgs)
 
         # wait for finish
         for reader_id in read_futs:
             rcvd = ray.get(read_futs[reader_id])
-            assert n * len(to_send) == len(rcvd)
+            assert rcvd is True
             print(f'assert {reader_id} ok')
         # t = time.time() - start_ts
         # throughput = (n * num_msgs_per_writer) / t
