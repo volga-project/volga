@@ -7,9 +7,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: PyO3/maturin-action@v1
-        working-directory: $GITHUB_WORKSPACE
         with:
           args: -i python3.10 -m rust/Cargo.toml
+          working-directory: $GITHUB_WORKSPACE
       - uses: actions/upload-artifact@v4
         with:
           name: volga-rust-x86_64-py310
