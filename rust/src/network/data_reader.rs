@@ -223,47 +223,59 @@ impl IOHandler for DataReader {
         let output_loop = move || {
             let timeout_ms = 100;
 
-            // TODO unit tests for batching
-            let max_batch_size = 500;
+            // TODO implement proper ack batching
+            // let max_batch_size = 500;
             let locked_send_chans = this_send_chans.read().unwrap();
-            let mut last_resp = None;
+            // let mut last_resp = None;
             while this_runnning.load(Ordering::Relaxed) {
                 let r = &this_response_queue.1;
-                let mut batch = vec![];
-                if last_resp.is_some() {
-                    batch.push(last_resp.unwrap());
-                }
-                let mut resp = r.try_recv();
-                while resp.is_ok() && batch.len() <= max_batch_size {
-                    let _resp = resp.unwrap();
-                    batch.push(_resp);
-                    resp = r.try_recv();
-                }
-                if batch.len() != 0 {
-                    let channel_id = &batch[0].channel_id;
-                    let batched = DataReaderResponseMessage::batch_acks(&batch);
-                    let (s, _) = locked_send_chans.get(channel_id).unwrap();
-                    for batched_message in batched {
-                        let b = &batched_message.ser();
-                        let size = b.len();
-                        s.send(b.clone()).expect("Unable to send scheduled response "); // TODO timeout?
-                        this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
-                    }
-                }
-
-                if resp.is_ok() {
-                    last_resp = Some(resp.unwrap());
+                let resp = r.recv_timeout(Duration::from_millis(timeout_ms));
+                if !resp.is_ok() {
                     continue;
-                } else {
-                    let _resp = r.recv_timeout(Duration::from_millis(timeout_ms));
-                    if _resp.is_ok() {
-                        last_resp = Some(_resp.unwrap());
-                    } else {
-                        last_resp = None;
-                    }
                 }
+                let resp = resp.unwrap();
+                let channel_id = &resp.channel_id;
+
+                let (s, _) = locked_send_chans.get(channel_id).unwrap();
+                let b = resp.ser();
+                let size = b.len();
+                s.send(b).expect("Unable to send scheduled response "); // TODO timeout?
+                this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
+                // let mut batch = vec![];
+                // if last_resp.is_some() {
+                //     batch.push(last_resp.unwrap());
+                // }
+                // let mut resp = r.try_recv();
+                // while resp.is_ok() && batch.len() <= max_batch_size {
+                //     let _resp = resp.unwrap();
+                //     batch.push(_resp);
+                //     resp = r.try_recv();
+                // }
+                // if batch.len() != 0 {
+                //     let channel_id = &batch[0].channel_id;
+                //     let batched = DataReaderResponseMessage::batch_acks(&batch);
+                //     let (s, _) = locked_send_chans.get(channel_id).unwrap();
+                //     for batched_message in batched {
+                //         let b = &batched_message.ser();
+                //         let size = b.len();
+                //         s.send(b.clone()).expect("Unable to send scheduled response "); // TODO timeout?
+                //         this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
+                //     }
+                // }
+
+                // if resp.is_ok() {
+                //     last_resp = Some(resp.unwrap());
+                //     continue;
+                // } else {
+                //     let _resp = r.recv_timeout(Duration::from_millis(timeout_ms));
+                //     if _resp.is_ok() {
+                //         last_resp = Some(_resp.unwrap());
+                //     } else {
+                //         last_resp = None;
+                //     }
+                // }
                 
-                thread::sleep(time::Duration::from_millis(100));
+                // thread::sleep(time::Duration::from_millis(100));
             }
         };
 
