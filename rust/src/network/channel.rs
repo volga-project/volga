@@ -56,7 +56,7 @@ impl DataReaderResponseMessage {
         }
     }
 
-    // takes a list of acks and create batched acks of sequential buffer_ids
+    // takes a list of acks and creates batched acks of sequential buffer_ids
     pub fn batch_acks(acks: &Vec<DataReaderResponseMessage>) -> Vec<DataReaderResponseMessage> {
         let mut buffer_ids = vec![];
         let channel_id = &acks[0].channel_id;

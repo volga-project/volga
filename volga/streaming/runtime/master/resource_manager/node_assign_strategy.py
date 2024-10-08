@@ -87,7 +87,7 @@ class OperatorFirst(NodeAssignStrategy):
             if belongs_to_this_operator and self._has_enough_resources(resources, node):
                 self.node_to_operator[node.node_id] = operator_id
                 return node
-            i+=1
+            i += 1
 
         if i >= len(nodes):
             return None

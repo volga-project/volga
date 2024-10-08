@@ -34,11 +34,9 @@ class TestWriter:
         job_name: str,
         channels: List[Channel],
         writer_config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG,
-        delay_s: float = 0,
     ):
         self.channels = channels
         self.io_loop = IOLoop(f'writer_loop_{writer_id}')
-        self.delay_s = delay_s
         self.data_writer = DataWriter(
             name=f'test_writer_{writer_id}',
             source_stream_name='0',

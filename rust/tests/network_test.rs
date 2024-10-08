@@ -177,7 +177,7 @@ fn test_one_to_n_local() {
 
 #[test]
 fn test_one_to_n_remote() {
-    test_one_to_n(false, 10);
+    test_one_to_n(false, 8);
 }
 
 fn test_one_to_n(local: bool, n: i32) {
@@ -275,7 +275,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     io_loop.start();
 
-    let num_msgs_per_channel = 1000;
+    let num_msgs_per_channel = 10000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
