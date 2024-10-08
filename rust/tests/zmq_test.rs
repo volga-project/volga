@@ -19,6 +19,7 @@ fn test_zmq_router_dealer() {
 
     for i in 0..num_readers {
         reader_identities.push(i.to_string());
+    }
 
     let mut writer_handles = HashMap::new();
     let mut reader_handles = HashMap::new();
