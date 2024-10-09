@@ -9,8 +9,8 @@ import volga
 import ray
 from volga.streaming.runtime.network.network_config import DataWriterConfig, DEFAULT_DATA_WRITER_CONFIG
 
-RAY_ADDR = 'ray://127.0.0.1:12345'
-# RAY_ADDR = 'ray://ray-cluster-kuberay-head-svc:10001'
+# RAY_ADDR = 'ray://127.0.0.1:12345'
+RAY_ADDR = 'ray://ray-cluster-kuberay-head-svc:10001'
 REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     'pip': [
         'pydantic==1.10.13',
@@ -20,8 +20,8 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
     ],
     'py_modules': [
         volga,
-        # '/Users/anov/Desktop/volga-rust-builds/volga_rust-0.1.0-cp310-cp310-manylinux_2_35_x86_64.whl'
-        '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl'
+        '/Users/anov/Desktop/volga-rust-builds/volga_rust-0.1.0-cp310-cp310-manylinux_2_35_x86_64.whl'
+        # '/Users/anov/IdeaProjects/volga/rust/target/wheels/volga_rust-0.1.0-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl'
     ]
 }
 
@@ -35,10 +35,11 @@ class TestWriter:
         channels: List[Channel],
         writer_config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG,
     ):
+        self.name = f'test_writer_{writer_id}'
         self.channels = channels
         self.io_loop = IOLoop(f'writer_loop_{writer_id}')
         self.data_writer = DataWriter(
-            name=f'test_writer_{writer_id}',
+            name=self.name,
             source_stream_name='0',
             job_name=job_name,
             channels=channels,
@@ -70,6 +71,9 @@ class TestWriter:
                 num_sent += 1
             cur_channel_index = (cur_channel_index + 1) % len(channel_ids)
 
+    def get_name(self):
+        return self.name
+
     def close(self):
         self.io_loop.close()
 
@@ -82,10 +86,11 @@ class TestReader:
         job_name: str,
         channels: List[Channel]
     ):
+        self.name=f'test_reader_{reader_id}'
         self.channels = channels
         self.io_loop = IOLoop(f'reader_loop_{reader_id}')
         self.data_reader = DataReader(
-            name=f'test_reader_{reader_id}',
+            name=self.name,
             channels=channels,
             job_name=job_name,
         )
@@ -114,6 +119,9 @@ class TestReader:
     def get_num_rcvd(self) -> int:
         return self.num_rcvd
 
+    def get_name(self):
+        return self.name
+
     def close(self):
         self.io_loop.close()
 
@@ -123,9 +131,21 @@ def construct_message(i: int, msg_size: int) -> Dict:
 
 
 def start_ray_io_handler_actors(handler_actors: List):
+    name_futs = [h.get_name.remote() for h in handler_actors]
+    names = ray.get(name_futs)
+
+    # TODO there is some sort of race condition - if we delete above name_futs getting some actors fail to bind/connect
+    # TODO maybe we need to give them a certain timeout to "warm-up"?
     futs = [h.start.remote() for h in handler_actors]
     res = ray.get(futs)
+    errs = {}
     for i in range(len(res)):
         err = res[i]
+        name = names[i]
         if err is not None:
-            raise RuntimeError(f'Failed to start {handler_actors[i].__class__.__name__}, err: {err}')
+            errs[name] = err
+        # if err is not None:
+        #     raise RuntimeError(f'Failed to start {handler_actors[i].__class__.__name__}, err: {err}')
+    if len(errs) != 0:
+        raise RuntimeError(f'Failed to start: {errs}')
+

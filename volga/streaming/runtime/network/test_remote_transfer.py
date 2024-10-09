@@ -177,10 +177,10 @@ class TestRemoteTransfer(unittest.TestCase):
         ray.shutdown()
 
     # reader/writer + transfer per node, star topology (nw*nr)
-    def test_nw_to_nr_star_on_ray(self, nw: int, nr: int, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_msgs = 1000000
+    def test_nw_to_nr_star_on_ray(self, nw: int, nr: int, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False) -> Tuple:
+        num_msgs = 100000
         msg_size = 32
-        batch_size = 100
+        batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
 
@@ -329,13 +329,17 @@ class TestRemoteTransfer(unittest.TestCase):
         print(f'Finished in {t}s, throughput: {throughput} msg/s')
         time.sleep(1)
 
+        close_futs = []
         for reader_id in readers:
-            ray.get(readers[reader_id].close.remote())
+            close_futs.append(readers[reader_id].close.remote())
 
         for writer_id in writers:
-            ray.get(writers[writer_id].close.remote())
+            close_futs.append(writers[writer_id].close.remote())
+
+        ray.get(close_futs)
 
         ray.shutdown()
+        return throughput, t
 
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
         job_name = f'job-{int(time.time())}'
@@ -478,6 +482,36 @@ if __name__ == '__main__':
     # t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=1)
     # t.test_transfer_actor_interruption()
-    t.test_nw_to_nr_star_on_ray(nw=2, nr=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    res = {}
+    for i in range(1, 15):
+        try:
+            res[i] = t.test_nw_to_nr_star_on_ray(nw=i, nr=i, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+            time.sleep(2)
+        except Exception as e:
+            res[i] = (-1, -1)
+            print(f'Failed {i}<->{i}: {e}')
+
+    for i in res:
+        throughput, t = res[i]
+        if throughput < 0:
+            print(f'{i}<->{i}: Failed')
+        else:
+            print(f'{i}<->{i}: {throughput} msg/s, {t} s')
+
     # t.test_backpressure()
 
+# 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
+# 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s
+# 3<->3: 198417.67251588262 msg/s, 4.535886287689209 s
+# 4<->4: 288623.8268141708 msg/s, 5.543547868728638 s
+# 5<->5: 353878.0211981364 msg/s, 7.0645811557769775 s
+# 6<->6: 377512.22861806024 msg/s, 9.536114931106567 s
+# 7<->7: 445156.1366645908 msg/s, 11.007373809814453 s
+# 8<->8: 487622.0946902425 msg/s, 13.124917984008789 s
+# 9<->9: 557218.074788173 msg/s, 14.5364990234375 s
+# 10<->10: 571694.5873933224 msg/s, 17.491857051849365 s
+# 11<->11: 688648.7879781058 msg/s, 17.570640087127686 s
+# 12<->12: 724608.2452501928 msg/s, 19.872807264328003 s
+# 13<->13: 809510.9968577144 msg/s, 20.876801013946533 s
+# 14<->14: 874072.8980508689 msg/s, 22.42375898361206 s
+# 15<->15: 918634.05002135 msg/s, 24.492887020111084 s

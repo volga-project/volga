@@ -20,7 +20,7 @@ class TransferActor:
     ):
         if in_channels is None and out_channels is None:
             raise ValueError('Transfer actor should have at least one of in_channels or out_channels')
-
+        self.name = name
         self._loop = IOLoop(f'io-loop-{name}')
         if out_channels is not None and len(out_channels) != 0:
             self._sender = TransferSender(
@@ -46,6 +46,9 @@ class TransferActor:
 
     def get_pid(self):
         return os.getpid()
+
+    def get_name(self):
+        return self.name
 
     def start(self, num_threads: int = 1) -> Optional[str]:
         return self._loop.connect_and_start(num_threads)

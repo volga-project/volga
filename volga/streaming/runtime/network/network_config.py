@@ -49,5 +49,5 @@ DEFAULT_ZMQ_CONFIG = ZmqConfig(
     sndbuf=512*1024,
     rcvbuf=512*1024,
     linger=0,
-    connect_timeout_s=4
+    connect_timeout_s=5
 )
