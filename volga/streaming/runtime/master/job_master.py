@@ -29,8 +29,8 @@ class JobMaster:
 
         self.resource_manager = ResourceManager()
         self.stats_manager = StatsManager()
-        # node_assign_strategy = OperatorFirst() # TODO config this
-        node_assign_strategy = ParallelismFirst()
+        node_assign_strategy = OperatorFirst() # TODO config this
+        # node_assign_strategy = ParallelismFirst()
         self.job_scheduler = JobScheduler(
             job_master=ray.get_runtime_context().current_actor,
             resource_manager=self.resource_manager,

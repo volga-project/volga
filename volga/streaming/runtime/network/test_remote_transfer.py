@@ -1,5 +1,6 @@
 import os
 import signal
+import socket
 import unittest
 import time
 import random
@@ -133,7 +134,7 @@ class TestRemoteTransfer(unittest.TestCase):
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
     def test_n_to_n_parallel_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_msgs_per_writer = 300000000
+        num_msgs_per_writer = 5000000
         msg_size = 32
         batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
@@ -202,6 +203,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
         reserved_ports = {}
 
+
         all_nodes = ray.nodes()
         no_head = list(filter(lambda n: 'node:__internal_head__' not in n['Resources'], all_nodes))
 
@@ -234,7 +236,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     target_node_ip = '127.0.0.1'
 
                 # use '' as node_id because we run test on one node and can not have duplicate ports
-                port = WorkerLifecycleController.gen_port(f'{source_node_id}-{target_node_id}', '', reserved_ports)
+                port = WorkerLifecycleController.gen_port(f'{source_node_id}-{target_node_id}', target_node_id, reserved_ports, {})
                 channel = RemoteChannel(
                     channel_id=channel_id,
                     source_local_ipc_addr=f'ipc:///tmp/source_local_{channel_id}',
@@ -476,28 +478,34 @@ class TestRemoteTransfer(unittest.TestCase):
         finally:
             io_loop.close()
 
+    def throughput_benchmark(self):
+        res = {}
+        for i in range(25, 71, 5):
+            n = i
+            if i == 0:
+                n = 1
+            try:
+                res[i] = self.test_nw_to_nr_star_on_ray(nw=n, nr=n, ray_addr=RAY_ADDR,
+                                                     runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+                time.sleep(2)
+            except Exception as e:
+                res[i] = (-1, -1)
+                print(f'Failed {i}<->{i}: {e}')
+
+        for i in res:
+            throughput, t = res[i]
+            if throughput < 0:
+                print(f'{i}<->{i}: Failed')
+            else:
+                print(f'{i}<->{i}: {throughput} msg/s, {t} s')
+
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=1)
     # t.test_transfer_actor_interruption()
-    res = {}
-    for i in range(1, 15):
-        try:
-            res[i] = t.test_nw_to_nr_star_on_ray(nw=i, nr=i, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
-            time.sleep(2)
-        except Exception as e:
-            res[i] = (-1, -1)
-            print(f'Failed {i}<->{i}: {e}')
-
-    for i in res:
-        throughput, t = res[i]
-        if throughput < 0:
-            print(f'{i}<->{i}: Failed')
-        else:
-            print(f'{i}<->{i}: {throughput} msg/s, {t} s')
-
+    t.throughput_benchmark()
     # t.test_backpressure()
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
@@ -515,3 +523,10 @@ if __name__ == '__main__':
 # 13<->13: 809510.9968577144 msg/s, 20.876801013946533 s
 # 14<->14: 874072.8980508689 msg/s, 22.42375898361206 s
 # 15<->15: 918634.05002135 msg/s, 24.492887020111084 s
+
+# 0<->0: 78195.00091631038 msg/s, 1.2788541316986084 s
+# 5<->5: 270598.81952627556 msg/s, 9.238769054412842 s
+# 10<->10: 505774.6804948192 msg/s, 19.771650075912476 s
+# 15<->15: 752058.2860982413 msg/s, 29.917893886566162 s
+# 20<->20: 926800.8961873061 msg/s, 43.15921592712402 s
+

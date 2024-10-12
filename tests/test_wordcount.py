@@ -61,22 +61,22 @@ class TestWordCount(unittest.TestCase):
         job_config = yaml.safe_load(Path('../volga/streaming/runtime/sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
 
-        dict_size = 20
-        count_per_word = 100000000
+        dict_size = 10
+        count_per_word = 100000
         word_length = 32
         num_msgs_per_split = 100000
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
 
-        # ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
-        ray.init(address='auto', ignore_reinit_error=True)
+        ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
+        # ray.init(address='auto', ignore_reinit_error=True)
         sink_cache = SinkCacheActor.remote()
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=2,
+            parallelism=6,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary
@@ -85,7 +85,7 @@ class TestWordCount(unittest.TestCase):
             .key_by(lambda e: e[0]) \
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))
         s1 = s.sink(sink_function)
-        # s2 = s.sink(print)
+        # s2 = s.sink(lambda e: None)
         start = time.time()
         ctx.execute()
         end = time.time()

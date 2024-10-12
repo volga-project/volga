@@ -1,7 +1,8 @@
 import logging
 import time
+import socket
 from threading import Thread
-from typing import Tuple, Optional
+from typing import Tuple, Optional, List
 
 import ray
 from ray.actor import ActorHandle
@@ -13,8 +14,21 @@ from volga.streaming.runtime.master.stats.stats_manager import WorkerStatsUpdate
 from volga.streaming.runtime.worker.task.stream_task import StreamTask, SourceStreamTask, \
     OneInputStreamTask, TwoInputStreamTask
 
-# logger = logging.getLogger(__name__)
-logger = logging.getLogger("ray")
+logger = logging.getLogger('ray')
+
+
+VALID_PORT_RANGE = (10000, 20000)
+
+
+class WorkerNodeInfo:
+
+    def __init__(self, node_ip: str, node_id: str, na_ports: List[int]):
+        self.node_ip = node_ip
+        self.node_id = node_id
+        self.na_ports = na_ports # list of not-available ports
+
+    def __repr__(self):
+        return f'(node_id={self.node_id}, node_ip={self.node_ip}, num_na_ports={len(self.na_ports)})'
 
 
 @ray.remote
@@ -27,14 +41,31 @@ class JobWorker:
         self.task_watcher_thread = None
         self.running = True
 
-    def get_host_info(self) -> Tuple[str, str]:
+    def get_host_info(self) -> WorkerNodeInfo:
         ctx = ray.get_runtime_context()
-        return ctx.get_node_id(), ray.util.get_node_ip_address()
+        node_id = ctx.get_node_id()
+        node_ip = ray.util.get_node_ip_address()
+        na_ports = []
+        for port in range(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1] + 1):
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                sock.bind(('0.0.0.0', port))
+            except:
+                na_ports.append(port)
+            sock.close()
+        if len(na_ports) == VALID_PORT_RANGE[1] - VALID_PORT_RANGE[0] + 1:
+            raise RuntimeError(f'No available ports on node {node_ip}')
+        return WorkerNodeInfo(node_ip, node_id, na_ports)
 
     def init(self, execution_vertex: ExecutionVertex):
         self.execution_vertex = execution_vertex
 
     def start_or_rollback(self) -> Optional[str]:
+        # TODO there is some sort of race condition between starting transfer actors and workers -
+        # TODO we need to start transfer actors first and asynchronously other workers after a small delay -
+        # TODO figure out how to synchronize this
+        time.sleep(1)
+
         self.task = self._create_stream_task()
         err = self.task.start_or_recover()
         if err is not None:

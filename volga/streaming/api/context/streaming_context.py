@@ -104,13 +104,14 @@ class StreamingContext:
         self.job_master = job_client.submit(job_graph=optimized_jg, job_config=self.job_config)
 
     # blocks until job is finished
-    def execute(self):
+    def execute(self, chain=True):
         jg = JobGraphBuilder(stream_sinks=self.stream_sinks).build()
         logger.info(f'Built job graph for {jg.job_name}')
         logger.info(f'\n {jg.gen_digraph()}')
-        optimizer = JobGraphOptimizer(jg)
-        optimized_jg = optimizer.optimize()
-        logger.info(f'Optimized job graph {jg.job_name}')
-        logger.info(f'\n {optimized_jg.gen_digraph()}')
+        if chain:
+            optimizer = JobGraphOptimizer(jg)
+            jg = optimizer.optimize()
+            logger.info(f'Optimized job graph {jg.job_name}')
+            logger.info(f'\n {jg.gen_digraph()}')
         job_client = JobClient()
-        job_client.execute(job_graph=optimized_jg, job_config=self.job_config)
+        job_client.execute(job_graph=jg, job_config=self.job_config)

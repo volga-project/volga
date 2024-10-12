@@ -16,17 +16,10 @@ from volga.streaming.runtime.master.resource_manager.resource_manager import Res
 from volga.streaming.runtime.master.stats.stats_manager import StatsManager
 from volga.streaming.runtime.master.transfer_controller import TransferController
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
-from volga.streaming.runtime.worker.job_worker import JobWorker
+from volga.streaming.runtime.worker.job_worker import JobWorker, WorkerNodeInfo, VALID_PORT_RANGE
 
 
 logger = logging.getLogger("ray")
-
-
-class WorkerNodeInfo:
-
-    def __init__(self, node_ip: str, node_id: str):
-        self.node_ip = node_ip
-        self.node_id = node_id
 
 
 class WorkerLifecycleController:
@@ -43,6 +36,7 @@ class WorkerLifecycleController:
         self.stats_manager = stats_manager
         self.node_assign_strategy = node_assign_strategy
         self._reserved_node_ports = {}
+        self._na_ports_per_node = {}
         self.transfer_controller = TransferController()
 
     def create_workers(self, execution_graph: ExecutionGraph):
@@ -101,21 +95,16 @@ class WorkerLifecycleController:
             if is_sink or vertex.job_vertex.vertex_type == VertexType.SOURCE:
                 self.stats_manager.register_worker(worker)
 
-        worker_hosts_info = ray.get([workers[vertex_id].get_host_info.remote() for vertex_id in vertex_ids])
-        worker_infos = []
+        worker_hosts_infos = ray.get([workers[vertex_id].get_host_info.remote() for vertex_id in vertex_ids])
         for i in range(len(vertex_ids)):
             vertex_id = vertex_ids[i]
-            node_id, node_ip = worker_hosts_info[i]
+            node_info: WorkerNodeInfo = worker_hosts_infos[i]
+            self._na_ports_per_node[node_info.node_id] = node_info.na_ports
             vertex = execution_graph.execution_vertices_by_id[vertex_id]
-            ni = WorkerNodeInfo(
-                node_ip=node_ip,
-                node_id=node_id,
-            )
-            vertex.set_worker_node_info(ni)
-            worker_infos.append((vertex_id, ni.node_id, ni.node_ip))
+            vertex.set_worker_node_info(node_info)
 
         logger.info(f'Created {len(workers)} workers')
-        logger.info(f'Workers node info: {worker_infos}')
+        logger.info(f'Workers node info: {worker_hosts_infos}')
 
     # construct channels based on Ray assigned actor IPs and update execution_graph
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
@@ -141,7 +130,7 @@ class WorkerLifecycleController:
                 # unique ports per node-node connection
                 source_node_id = source_worker_network_info.node_id
                 target_node_id = target_worker_network_info.node_id
-                port = self.gen_port(f'{source_node_id}-{target_node_id}', target_node_id, self._reserved_node_ports)
+                port = self.gen_port(f'{source_node_id}-{target_node_id}', target_node_id, self._reserved_node_ports, self._na_ports_per_node)
 
                 channel = RemoteChannel(
                     channel_id=edge.id,
@@ -227,31 +216,33 @@ class WorkerLifecycleController:
         for w in workers:
             w.exit.remote()
 
-    # TODO fix this
     @staticmethod
-    def gen_port(conn_id: str, node_id: str, reserved_node_ports: Dict[str, Tuple[int, str]]) -> int:
-        return random.randint(50000, 60000)
-        # port_pool_per_node = [*range(10000, 20000)] # TODO config this
-        # if conn_id not in reserved_node_ports:
-        #     port = None
-        #     # gen next from pool
-        #     for _port in port_pool_per_node:
-        #         # scan all reserved_node_ports to see if it is used for this node_id
-        #         used = False
-        #         for _conn_id in reserved_node_ports:
-        #             _node_id = reserved_node_ports[_conn_id][1]
-        #             _reserved_port = reserved_node_ports[_conn_id][0]
-        #             if node_id == _node_id and _reserved_port == _port:
-        #                 used = True
-        #                 break
-        #         if not used:
-        #             port = _port
-        #             break
-        #     if port is None:
-        #         raise RuntimeError(f'Port pool is too small for node {node_id}, all used')
-        #
-        #     reserved_node_ports[conn_id] = (port, node_id)
-        #     return port
-        # else:
-        #     return reserved_node_ports[conn_id][0]
+    def gen_port(conn_id: str, host_node_id: str, reserved_node_ports: Dict[str, Tuple[int, str]], na_ports: Dict[str, List[int]]) -> int:
+        port_pool_per_node = [*range(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1] + 1)]
+        if conn_id not in reserved_node_ports:
+            port = None
+            # gen next from pool
+            for _port in port_pool_per_node:
+                # check if the port is available
+                if host_node_id in na_ports and _port in na_ports[host_node_id]:
+                    continue
+
+                # scan all reserved_node_ports to see if it is used for this node_id
+                used = False
+                for _conn_id in reserved_node_ports:
+                    _node_id = reserved_node_ports[_conn_id][1]
+                    _reserved_port = reserved_node_ports[_conn_id][0]
+                    if host_node_id == _node_id and _reserved_port == _port:
+                        used = True
+                        break
+                if not used:
+                    port = _port
+                    break
+            if port is None:
+                raise RuntimeError(f'All ports are used for {host_node_id}')
+
+            reserved_node_ports[conn_id] = (port, host_node_id)
+            return port
+        else:
+            return reserved_node_ports[conn_id][0]
 
