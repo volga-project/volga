@@ -395,7 +395,9 @@ mod tests {
         while !pushers.is_empty() {
             let p = pushers.pop().unwrap();
             p.join().unwrap();
-        }while !consumers.is_empty() {
+        }
+        
+        while !consumers.is_empty() {
             let c = consumers.pop().unwrap();
             c.join().unwrap();
         }

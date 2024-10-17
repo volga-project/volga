@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 pub mod network;
+pub mod newtork_v2;
 use network::{data_reader::DataReaderConfig, data_writer::DataWriterConfig, io_loop::ZmqConfig, py_interface::*, remote_transfer_handler::TransferConfig};
 
 #[pymodule]
