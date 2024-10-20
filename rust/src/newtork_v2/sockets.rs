@@ -45,7 +45,6 @@ pub struct SocketManager {
     socket_to_subscriber: HashMap<String, Arc<dyn SocketServiceSubscriber + Send + Sync>>,
     // socket_to_in_chan: HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>,
     // socket_to_out_chan: HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>,
-    socket_identity_generator: HashMap<String, usize>,
     sockets: Vec<(zmq::Socket, SocketMetadata)>,
     subscribers: Vec<Arc<dyn SocketServiceSubscriber + Send + Sync>>,
     zmq_context: Arc<zmq::Context>,
@@ -55,7 +54,7 @@ pub struct SocketManager {
 impl SocketManager {
 
     pub fn new(subscribers: Vec<Arc<dyn SocketServiceSubscriber + Send + Sync>>, zmq_context: Arc<zmq::Context>, zmq_config: Option<ZmqConfig>) -> Self {
-        SocketManager{socket_to_subscriber: HashMap::new(), socket_identity_generator: HashMap::new(), sockets: Vec::new(), subscribers, zmq_context, zmq_config}
+        SocketManager{socket_to_subscriber: HashMap::new(), sockets: Vec::new(), subscribers, zmq_context, zmq_config}
     }
 
     // fn gen_socket_identity(&mut self, subscriber_id: &String) -> String {
@@ -347,19 +346,31 @@ impl SocketManager {
         }
     }
 
-    pub fn get_subscriber_in_chan(&self, sm: &SocketMetadata) -> &(Sender<SocketMessage>, Receiver<SocketMessage>) {
+    pub fn get_subscriber_in_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
-        subscriber.get_in_chan()
+        subscriber.get_in_chan(sm)
         // self.socket_to_in_chan.get(&sm.identity).unwrap()
     }
 
-    pub fn get_subscriber_out_chan(&self, sm: &SocketMetadata) -> &(Sender<SocketMessage>, Receiver<SocketMessage>) {
+    pub fn get_subscriber_out_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
-        subscriber.get_out_chan()
+        subscriber.get_out_chan(sm)
         // self.socket_to_out_chan.get(&sm.identity).unwrap()
     }
 }
 
+pub fn channels_to_socket_identities(socket_metas: Vec<SocketMetadata>) -> HashMap<String, String> {
+    let mut res = HashMap::new();
+    for sm in socket_metas {
+        for channel_id in sm.channel_ids {
+            if res.contains_key(&channel_id) {
+                panic!("Duplicate channel id {channel_id}");
+            }
+            res.insert(channel_id.clone(), sm.identity.clone());
+        }
+    }
+    res
+}
 
 // TODO this should be in sync with Py's Channel ipc_addr format
 pub fn parse_ipc_path_from_addr(ipc_addr: &String) -> String {

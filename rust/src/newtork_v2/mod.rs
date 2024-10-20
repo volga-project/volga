@@ -6,4 +6,6 @@ pub mod sockets;
 pub mod socket_service;
 pub mod socket_monitor;
 pub mod data_writer;
+pub mod data_reader;
 pub mod metrics;
+pub mod network_config;

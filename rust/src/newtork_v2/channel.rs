@@ -81,7 +81,7 @@ impl DataReaderResponseMessage {
         res
     }
 
-    pub fn ser(&self) -> Box<Bytes>{
+    pub fn ser(&self) -> Bytes{
     
         let mut b = bincode::serialize(&self).unwrap();
        
@@ -101,10 +101,10 @@ impl DataReaderResponseMessage {
         }
 
         res.append(&mut b);
-        Box::new(res)
+        res
     }
 
-    pub fn de(b: Box<Bytes>) -> Self {
+    pub fn de(b: Bytes) -> Self {
         let mut _b = b.clone();
         _b.drain(0..CHANNEL_ID_META_BYTES_LENGTH);
         let ack: DataReaderResponseMessage = bincode::deserialize(&_b).unwrap();

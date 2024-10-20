@@ -191,7 +191,7 @@ impl SocketMonitor {
         Some(zmq::SocketEvent::from_raw(event))
     }
 
-    pub fn close(&self) {
+    pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
         while !self.monitor_thread_handle.is_empty() {
             let handle = self.monitor_thread_handle.pop();

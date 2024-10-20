@@ -197,7 +197,7 @@ impl BufferQueuesInner {
 pub struct BufferQueues {
     queues: Arc<Mutex<BufferQueuesInner>>,
     condvar: Arc<Condvar>,
-    out_chan: Arc<(Sender<Bytes>, Receiver<Bytes>)>,
+    out_chan: Arc<(Sender<(String, Bytes)>, Receiver<(String, Bytes)>)>,
     running: Arc<AtomicBool>,
     thread_handles: Arc<ArrayQueue<JoinHandle<()>>>, // array queue so we do not mutate DataReader and keep ownership
 }
@@ -206,23 +206,17 @@ impl BufferQueues {
     pub fn new(channels: &Vec<Channel>, max_buffers_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueues {
         let bqs = BufferQueuesInner::new(channels, max_buffers_per_channel, in_flight_timeout_s);
         
-        // let n_channels = channels.clone().len();
-        // let mut chans = HashMap::with_capacity(n_channels);
-        // for ch in channels {
-        //     chans.insert(ch.get_channel_id().clone(), unbounded());
-        // }
-
         BufferQueues{
             queues: Arc::new(Mutex::new(bqs)), 
             condvar: Arc::new(Condvar::new()), 
             out_chan: Arc::new(bounded(CROSSBEAM_DEFAULT_CHANNEL_SIZE)),
-            // chans: Arc::new(chans), 
             running: Arc::new(AtomicBool::new(false)),
             thread_handles: Arc::new(ArrayQueue::new(2))
         }
     }
 
     // TODO test this
+    // TODO can we use crossbeam tick here instead of a separate thread?
     fn start_timer(&self) {
         let this_queues = self.queues.clone();
         let this_running = self.running.clone();
@@ -256,7 +250,7 @@ impl BufferQueues {
                     let s = &this_out_chan.0;
                     // TODO update test to use 1 output channel
                     while this_running.load(Ordering::Relaxed) {
-                        let res = s.send_timeout(b.clone(), Duration::from_millis(100));
+                        let res = s.send_timeout((channel_id.clone(), b.clone()), Duration::from_millis(100));
                         if res.is_ok() {
                             break;
                         }
@@ -321,7 +315,7 @@ impl BufferQueues {
         popped
     }
 
-    pub fn get_out_chan(&self) -> &(Sender<Bytes>, Receiver<Bytes>) {
+    pub fn get_out_chan(&self) -> &(Sender<(String, Bytes)>, Receiver<(String, Bytes)>) {
         &self.out_chan
     }
 }
@@ -331,7 +325,7 @@ mod tests {
 
     use std::{thread, time};
 
-    use crate::newtork_v2::buffer_utils::{dummy_bytes, get_channeld_id};
+    use crate::newtork_v2::buffer_utils::dummy_bytes;
 
     use super::*;
 
@@ -369,46 +363,14 @@ mod tests {
             pushers.push(pusher);
         }
 
-
-        // let mut consumers = vec![];
-
-
-        // for channel in channels {
-        //     let _channel_id = channel.get_channel_id().clone();
-        //     let qs_c = qs.clone();
-        //     let bids_c = dummy_buffer_ids.clone();
-        //     let bq_out_chan = qs.get_out_chan().clone();
-        //     let consumer = thread::spawn(move || {
-            
-        //         let scheduled = bq_out_chans.get(&_channel_id).unwrap();
-        //         let mut i = 0;
-        //         while i < bids_c.len() {
-        //             let b = scheduled.1.recv().unwrap();
-        //             let buffer_id = get_buffer_id(&b);
-        //             let ack = DataReaderResponseMessage::new_ack(&_channel_id, buffer_id);
-        //             let popped = qs_c.handle_ack(&ack);
-        //             // thread::sleep(time::Duration::from_millis(50));
-        //             thread::sleep(time::Duration::from_micros(100));
-        //             let s = format!("[{_channel_id}] Popped {:?}", popped);
-        //             println!("{s}");
-        //             if popped.len() == 0 {
-        //                 continue;
-        //             } else {
-        //                 i += 1;
-        //             }
-        //         }
-        //     });
-        //     consumers.push(consumer);
-        // }
         let qs_c = qs.clone();
         let bids_c = dummy_buffer_ids.clone();
         let consumer = thread::spawn(move || {
             let mut i = 0;
             let bq_out_chan = qs_c.get_out_chan();
             while i < bids_c.len() {
-                let b = bq_out_chan.1.recv().unwrap();
+                let (channel_id, b) = bq_out_chan.1.recv().unwrap();
                 let buffer_id = get_buffer_id(&b);
-                let channel_id = get_channeld_id(&b);
                 let ack = DataReaderResponseMessage::new_ack(&channel_id, buffer_id);
                 let popped = qs_c.handle_ack(&ack);
                 // thread::sleep(time::Duration::from_millis(50));

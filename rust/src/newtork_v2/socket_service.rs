@@ -44,9 +44,9 @@ pub type SocketMessage = (Option<String>, Bytes);
 // TODO description
 pub trait SocketServiceSubscriber {
 
-    fn get_id(&self) -> String;
+    fn get_id(&self) -> &String;
 
-    fn get_name(&self) -> String;
+    fn get_name(&self) -> &String;
 
     fn get_type(&self) -> SocketServiceSubscriberType;
 
@@ -54,9 +54,9 @@ pub trait SocketServiceSubscriber {
 
     fn get_sockets_metas(&self) -> &Vec<SocketMetadata>;
 
-    fn get_in_chan(&self) -> &(Sender<SocketMessage>, Receiver<SocketMessage>);
+    fn get_in_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>);
 
-    fn get_out_chan(&self) -> &(Sender<SocketMessage>, Receiver<SocketMessage>);
+    fn get_out_chan(&self,  sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>);
 
     fn start(&self);
 
@@ -145,23 +145,49 @@ impl SocketService {
                 return
             }
 
-            Self::_wait_to_start_running(this_running.clone());
+            Self::_wait_to_start_running(this_running.clone()); // TODO why is this needed?
 
+            let sockets = socket_manager.get_sockets();
+            // send HI from all DEALERS to ROUTERS - needed for ROUTERS to properly set identities and start working
+            let mut num_dealers = 0;
+            for (socket, socket_meta) in sockets {
+                if socket_meta.kind == SocketKind::Dealer {
+                    socket.send("HI", 0).expect("Unable to send HI");
+                    num_dealers += 1;
+                }
+            }
+            println!("[SocketService {name}] Sent HI from {num_dealers} DEALERs");
+
+            // wait for all the ROUTERS to receive HI
+            // TODO add timeout
+            let mut num_routers = 0;
+            for (socket, socket_meta) in sockets {
+                if socket_meta.kind == SocketKind::Router {
+                    let _identity = socket.recv_string(0).expect("Router failed receiving identity on HI").unwrap();
+                    let hi = socket.recv_string(0).expect("Router failed receiving HI").unwrap();
+                    if hi != "HI" {
+                        panic!("HI is not HI: {hi}");
+                    }
+                    num_routers += 1;
+                }
+            }
+            println!("[SocketService {name}] Received HI on {num_routers} ROUTERs");
+            
+            let mut poll_list = Vec::new();
+            for (socket, _) in sockets {
+                poll_list.push(socket.as_poll_item(zmq::POLLIN|zmq::POLLOUT));
+            }
+            
             // contains bytes (+optional destination identity for DEALER) read from subscriber but not sent due to full socket
             let mut not_sent: HashMap<&SocketMetadata, SocketMessage> = HashMap::new();
 
             // run loop
             while this_running.load(Ordering::Relaxed) {
-                let mut poll_list = Vec::new();
-                let s = socket_manager.get_sockets();
-                for (socket, _) in s {
-                    poll_list.push(socket.as_poll_item(zmq::POLLIN|zmq::POLLOUT));
-                }
 
                 zmq::poll(&mut poll_list, 1).unwrap();
 
                 for i in 0..poll_list.len() {
-                    let (socket, sm)  = &s[i];
+                    let (socket, sm)  = &sockets[i];
                     if poll_list[i].is_readable() {
                         let in_chan = socket_manager.get_subscriber_in_chan(sm);
                         loop {
@@ -280,22 +306,21 @@ impl SocketService {
         println!("[Loop {name}] Started data flow");
     }
 
-    // TODO num_io_threads > 1 fails, debug
     pub fn connect(&self, timeout_ms: u128) -> Option<String> {
         self.run_io_thread(timeout_ms);
         self.sockets_monitor.wait_for_monitor_ready();
         let err = self.sockets_monitor.wait_for_all_connected(Some(timeout_ms));
         let io_loop_name = self.name.clone();
-        self.sockets_monitor.close();
+        self.sockets_monitor.stop();
         if err.is_none() {
             println!("[Loop {io_loop_name}] All sockets connected");
         }
         err
     }
 
-    pub fn close(&self) {
+    pub fn stop(&self) {
         let name = &self.name;
-        self.sockets_monitor.close();
+        self.sockets_monitor.stop();
         self.running.store(false, Ordering::Relaxed);
         while !self.io_thread_handle.is_empty() {
             let handle = self.io_thread_handle.pop();
