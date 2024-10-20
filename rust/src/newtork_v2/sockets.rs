@@ -315,12 +315,10 @@ impl SocketManager {
             for socket_meta in metas {
                 let socket = self.create_socket(&socket_meta);
                 let socket_identity = &socket_meta.identity;
-                self.socket_to_subscriber.insert(socket_meta.identity.clone(), subscriber.clone());
-                // if self.socket_to_in_chan.contains_key(socket_identity) {
-                //     panic!("Duplicate socket identity {socket_identity}");
-                // }
-                // self.socket_to_in_chan.insert(socket_identity.clone(), *in_chan);
-                // self.socket_to_out_chan.insert(socket_identity.clone(), *out_chan);
+                if self.socket_to_subscriber.contains_key(socket_identity) {
+                    panic!("Duplicate socket identity {socket_identity}");
+                }
+                self.socket_to_subscriber.insert(socket_identity.clone(), subscriber.clone());
                 self.sockets.push((socket, socket_meta.clone()));
             }
         }
@@ -349,13 +347,11 @@ impl SocketManager {
     pub fn get_subscriber_in_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
         subscriber.get_in_chan(sm)
-        // self.socket_to_in_chan.get(&sm.identity).unwrap()
     }
 
     pub fn get_subscriber_out_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
         subscriber.get_out_chan(sm)
-        // self.socket_to_out_chan.get(&sm.identity).unwrap()
     }
 }
 

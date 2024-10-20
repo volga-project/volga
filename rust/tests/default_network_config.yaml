@@ -6,8 +6,8 @@ data_reader:
 transfer:
   transfer_queue_size: 10000
 zmq:
-  sndhwm: 1000
-  rcvhwm: 1000
+  sndhwm: 500
+  rcvhwm: 500
   sndbuf: 5120
   rcvbuf: 5120
   linger: 0

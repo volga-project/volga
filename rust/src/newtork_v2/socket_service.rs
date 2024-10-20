@@ -9,7 +9,7 @@ use crate::newtork_v2::sockets::{SocketManager, SocketMetadata, SocketKind};
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 
-pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize  = 1000;
+pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize  = 100;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustZmqConfig")]
@@ -149,10 +149,11 @@ impl SocketService {
 
             let sockets = socket_manager.get_sockets();
             // send HI from all DEALERS to ROUTERS - needed for ROUTERS to properly set identities and start working
+            let hi = "HI";
             let mut num_dealers = 0;
             for (socket, socket_meta) in sockets {
                 if socket_meta.kind == SocketKind::Dealer {
-                    socket.send("HI", 0).expect("Unable to send HI");
+                    socket.send(hi, 0).expect("Unable to send HI");
                     num_dealers += 1;
                 }
             }
@@ -164,8 +165,8 @@ impl SocketService {
             for (socket, socket_meta) in sockets {
                 if socket_meta.kind == SocketKind::Router {
                     let _identity = socket.recv_string(0).expect("Router failed receiving identity on HI").unwrap();
-                    let hi = socket.recv_string(0).expect("Router failed receiving HI").unwrap();
-                    if hi != "HI" {
+                    let _hi = socket.recv_string(0).expect("Router failed receiving HI").unwrap();
+                    if _hi != hi {
                         panic!("HI is not HI: {hi}");
                     }
                     num_routers += 1;
@@ -173,25 +174,32 @@ impl SocketService {
             }
             println!("[SocketService {name}] Received HI on {num_routers} ROUTERs");
             
-            let mut poll_list = Vec::new();
-            for (socket, _) in sockets {
-                poll_list.push(socket.as_poll_item(zmq::POLLIN|zmq::POLLOUT));
-            }
-            
             // contains bytes (+optional destination identity for DEALER) read from subscriber but not sent due to full socket
             let mut not_sent: HashMap<&SocketMetadata, SocketMessage> = HashMap::new();
 
+            let lim = 1000;
+
             // run loop
             while this_running.load(Ordering::Relaxed) {
+                let mut poll_list = Vec::new();
+                for (socket, _) in sockets {
+                    poll_list.push(socket.as_poll_item(zmq::POLLIN|zmq::POLLOUT));
+                }
 
                 zmq::poll(&mut poll_list, 1).unwrap();
 
                 for i in 0..poll_list.len() {
                     let (socket, sm)  = &sockets[i];
                     if poll_list[i].is_readable() {
+                        // println!("bam");
                         let in_chan = socket_manager.get_subscriber_in_chan(sm);
+                        let mut j = 0;
                         loop {
                             if in_chan.0.is_full() {
+                                break;
+                            }
+
+                            if j > lim {
                                 break;
                             }
                             
@@ -218,6 +226,7 @@ impl SocketService {
                             if b.is_some() {
                                 let socket_message = (identity, b.unwrap());
                                 in_chan.0.send(socket_message).unwrap();
+                                j += 1;
                             } else {
                                 break;
                             }
@@ -226,7 +235,12 @@ impl SocketService {
 
                     if poll_list[i].is_writable() {
                         let out_chan = socket_manager.get_subscriber_out_chan(sm);
+                        let mut j = 0;
                         loop {
+                            if j > lim {
+                                break;
+                            }
+
                             let mut b: Option<Bytes> = None;
                             let mut identity: Option<String> = None;
                             if not_sent.contains_key(sm) {
@@ -235,9 +249,11 @@ impl SocketService {
                                 b = Some(_bytes.clone());
                                 not_sent.remove(sm);
                             } else {
+                                let id = &sm.identity;
                                 if out_chan.1.is_empty() {
                                     break;
                                 }
+                                println!("good {id}");
                                 let (_identity, _bytes) = out_chan.1.recv().unwrap();
                                 identity = _identity;
                                 b = Some(_bytes);
@@ -273,6 +289,7 @@ impl SocketService {
                                 not_sent.insert(sm, (identity, bytes));
                                 break;
                             }
+                            j += 1;
                         }
                     }
                 }

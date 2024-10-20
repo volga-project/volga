@@ -207,12 +207,15 @@ impl SocketServiceSubscriber for DataWriter {
                 if !ch_and_b.is_ok() {
                     continue;
                 }
-                let locked_out_chans = this_out_chans.read().unwrap();
                 let (channel_id, b) = ch_and_b.unwrap();
                 let socket_identity = channel_id_to_socket_id.get(&channel_id).unwrap();
+
+                let locked_out_chans = this_out_chans.read().unwrap();
                 let out_chan = locked_out_chans.get(socket_identity).unwrap();
+                let sender = &out_chan.0.clone();
+                drop(locked_out_chans);
+
                 let socket_message: (Option<String>, Bytes) = (None, b.clone());
-                let sender = &out_chan.0;
                 let res = sender.try_send(socket_message);
                 if !res.is_ok() {
                     // we have a backpressure here which blocks all other channels. Ideally this should not happen
@@ -221,7 +224,7 @@ impl SocketServiceSubscriber for DataWriter {
                     while this_running.load(Ordering::Relaxed) {
                         println!("Wasteful backpressure channel_id: {channel_id}, socket_identity: {socket_identity}");
                         let socket_message: (Option<String>, Bytes) = (None, b.clone());
-                        let res = sender.send_timeout(socket_message, Duration::from_millis(100));
+                        let res = sender.send_timeout(socket_message, Duration::from_millis(1000));
                         if !res.is_ok() {
                             continue;
                         }
@@ -260,8 +263,8 @@ impl SocketServiceSubscriber for DataWriter {
                 let index = oper.index();
                 let socket_identity = &socket_identities[index];
                 let recv = &locked_in_chans.get(socket_identity).unwrap().1;
-                // let channel_id = this_channels[index].get_channel_id();
-                // let recv = &locked_recv_chans.get(channel_id).unwrap().1;
+                // TODO drop lock?
+
                 let (_, b) = oper.recv(recv).unwrap();
                 let size = b.len();
                 let ack = DataReaderResponseMessage::de(b);

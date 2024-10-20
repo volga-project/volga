@@ -79,15 +79,6 @@ impl SocketMonitor {
         Some(err)
     }
 
-    pub fn mark_ready(&self) {
-        self.ready.store(true, Ordering::Relaxed);
-    }
-
-    pub fn mark_connected(&self, sm: SocketMetadata) {
-        let this_sockets_connected_status = self.sockets_connected_status.clone();
-        this_sockets_connected_status.get(&sm).unwrap().value().store(true, Ordering::Relaxed);
-    }
-
     pub fn all_connected(&self) -> bool {
         let this_sockets_connected_status = self.sockets_connected_status.clone();
         Self::_all_connected(this_sockets_connected_status.as_ref())
@@ -117,12 +108,14 @@ impl SocketMonitor {
             let mut registered = false;
             let register_timeout_ms = 5000;
             let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-            let locked_registered_sockets = this_registered_sockets.lock().unwrap();
             while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < register_timeout_ms {
+                let locked_registered_sockets = this_registered_sockets.lock().unwrap();
                 if locked_registered_sockets.len() != 0 {
+                    drop(locked_registered_sockets);
                     registered = true;
                     break;
                 }
+                drop(locked_registered_sockets);
                 thread::sleep(time::Duration::from_millis(100));
             }
             if !registered {
@@ -130,6 +123,7 @@ impl SocketMonitor {
             }
             
             // create and connect monitors
+            let locked_registered_sockets = this_registered_sockets.lock().unwrap();
             let mut monitors = Vec::new();
             for (sm, monitor_endpoint) in locked_registered_sockets.iter() {
                 if sm.kind == SocketKind::Dealer {
