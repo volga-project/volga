@@ -211,6 +211,11 @@ impl SocketServiceSubscriber for DataReader {
                     let locked_out_of_orders = locked_out_of_order_buffers.get(channel_id).unwrap();
                     let mut locked_out_of_order = locked_out_of_orders.write().unwrap(); 
                     
+                    // TODO
+                    if locked_out_of_order.len() > 1 {
+                        panic!("REMOVE THIS PANIC FROM PROD!!! - we have out of order data");
+                    }
+
                     if locked_out_of_order.contains_key(&(buffer_id as i32)) {
                         // duplicate
                         Self::schedule_ack(channel_id, buffer_id, &this_response_queue.0);
@@ -228,6 +233,8 @@ impl SocketServiceSubscriber for DataReader {
                             let payload = new_buffer_drop_meta(stored_b.clone());
 
                             let result_queue_sender = &this_result_queue.0;
+
+                            // TODO this blocks acks ?
                             result_queue_sender.send(payload).unwrap();
 
                             // send ack
@@ -264,12 +271,16 @@ impl SocketServiceSubscriber for DataReader {
 
                 let s = &this_out_chan.0;
                 let b = resp.ser();
+                let (bid1, bid2) = resp.buffer_ids_range;
                 let size = b.len();
                 let socket_msg = (Some(socket_identity.clone()), b);
                 let res = s.try_send(socket_msg.clone());
                 if !res.is_ok() {
+                    // let _b = &socket_msg.1;
+                    // let bid = get_buffer_id(_b);
+                    println!("DataReader out chan should not bp: start {bid1}-{bid2}");
                     s.send(socket_msg.clone()).unwrap();
-                    println!("DataReader out chan should not backpressure");
+                    println!("DataReader out chan should not bp: end");
                 }
                 this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
             }

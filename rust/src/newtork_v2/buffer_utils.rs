@@ -77,12 +77,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_buffer_utils() {
+    fn test_buffer_utils_v2() {
 
         let s = String::from("a");
         let b = bincode::serialize(&s).unwrap();
-        // let b = Box::new(bytes);
-        // let l = b.len();
         let ch_id = String::from("ch_0");
         let buffer_id = 12345;
         let _b = new_buffer_with_meta(b, ch_id.clone(), buffer_id);

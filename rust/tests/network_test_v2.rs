@@ -1,5 +1,5 @@
 
-use std::{collections::HashMap, sync::{Arc, RwLock}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{Arc, RwLock}, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use volga_rust::newtork_v2::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::DataReader, data_writer::DataWriter, network_config::NetworkConfig, socket_service::{SocketService, SocketServiceSubscriber}};
 
@@ -112,7 +112,6 @@ fn test_one_to_one(local: bool) {
             backp += write_res.unwrap();
             // let buffer_id = get_buffer_id(b);
             // println!("Sent {buffer_id}");
-            // println!("Sent ---");
         }
         backp
     });
@@ -127,7 +126,6 @@ fn test_one_to_one(local: bool) {
             // let buffer_id = get_buffer_id(&b);
             // println!("Rcvd {buffer_id}");
             // thread::sleep(time::Duration::from_millis(100));
-            // println!("Rcvd ---");
         }
     }
     
@@ -138,6 +136,9 @@ fn test_one_to_one(local: bool) {
     println!("Backpressure (ms): {backp_ms}");
     println!("Throughput (msg/s): {throughput}");
     
+
+    thread::sleep(Duration::from_millis(1000));
+
     data_reader.stop();
     data_writer.stop();
     // if !local {

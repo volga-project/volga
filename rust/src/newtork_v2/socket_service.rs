@@ -9,7 +9,7 @@ use crate::newtork_v2::{buffer_utils::get_buffer_id, sockets::{SocketKind, Socke
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 
-pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize  = 10000;
+pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize = 15000;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustZmqConfig")]
@@ -191,7 +191,7 @@ impl SocketService {
                     if poll_list[i].is_readable() {
                         let in_chan = in_chans.get(&sm.identity).unwrap();
                         let mut j = 0;
-                        loop {
+                        while this_running.load(Ordering::Relaxed) {
                             if in_chan.0.is_full() {
                                 break;
                             }
@@ -225,19 +225,19 @@ impl SocketService {
                                 // let bid = get_buffer_id(&_b);
                                 let socket_message = (identity, _b);
                                 in_chan.0.try_send(socket_message).expect("In chan should not be full");
-                                j += 1;
                                 // println!("Rcvd {bid}");
                                 // println!("Rcvd ---");
                             } else {
                                 break;
                             }
+                            j += 1;
                         }
                     }
 
                     if poll_list[i].is_writable() {
                         let out_chan = out_chans.get(&sm.identity).unwrap();
                         let mut j = 0;
-                        loop {
+                        while this_running.load(Ordering::Relaxed) {
                             if j > lim {
                                 break;
                             }
@@ -250,7 +250,8 @@ impl SocketService {
                                 b = Some(_bytes.clone());
                                 not_sent.remove(sm);
                             } else {
-                                let id = &sm.identity;
+                                // let id = &sm.identity;
+                                // println!("good {id}");
                                 if out_chan.1.is_empty() {
                                     break;
                                 }
