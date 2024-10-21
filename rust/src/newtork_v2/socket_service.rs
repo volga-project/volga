@@ -5,11 +5,11 @@ use crossbeam::{channel::{Receiver, Sender}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use crate::newtork_v2::sockets::{SocketManager, SocketMetadata, SocketKind};
+use crate::newtork_v2::{buffer_utils::get_buffer_id, sockets::{SocketKind, SocketManager, SocketMetadata}};
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 
-pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize  = 100;
+pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize  = 10000;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustZmqConfig")]
@@ -31,14 +31,6 @@ impl ZmqConfig {
     }
 }
 
-#[derive(PartialEq, Eq)]
-pub enum SocketServiceSubscriberType {
-    DataReader,
-    DataWriter,
-    TransferSender,
-    TransferReceiver
-}
-
 pub type SocketMessage = (Option<String>, Bytes);
 
 // TODO description
@@ -47,8 +39,6 @@ pub trait SocketServiceSubscriber {
     fn get_id(&self) -> &String;
 
     fn get_name(&self) -> &String;
-
-    fn get_type(&self) -> SocketServiceSubscriberType;
 
     fn get_channels(&self) -> &Vec<Channel>;
 
@@ -177,7 +167,15 @@ impl SocketService {
             // contains bytes (+optional destination identity for DEALER) read from subscriber but not sent due to full socket
             let mut not_sent: HashMap<&SocketMetadata, SocketMessage> = HashMap::new();
 
-            let lim = 1000;
+            let lim = 7;
+
+            let mut in_chans = HashMap::new();
+            let mut out_chans = HashMap::new();
+
+            for (_, sm) in sockets {
+                in_chans.insert(sm.identity.clone(), socket_manager.get_subscriber_in_chan(sm));
+                out_chans.insert(sm.identity.clone(), socket_manager.get_subscriber_out_chan(sm));
+            }
 
             // run loop
             while this_running.load(Ordering::Relaxed) {
@@ -191,8 +189,7 @@ impl SocketService {
                 for i in 0..poll_list.len() {
                     let (socket, sm)  = &sockets[i];
                     if poll_list[i].is_readable() {
-                        // println!("bam");
-                        let in_chan = socket_manager.get_subscriber_in_chan(sm);
+                        let in_chan = in_chans.get(&sm.identity).unwrap();
                         let mut j = 0;
                         loop {
                             if in_chan.0.is_full() {
@@ -224,9 +221,13 @@ impl SocketService {
                             }
 
                             if b.is_some() {
-                                let socket_message = (identity, b.unwrap());
-                                in_chan.0.send(socket_message).unwrap();
+                                let _b = b.unwrap();
+                                // let bid = get_buffer_id(&_b);
+                                let socket_message = (identity, _b);
+                                in_chan.0.try_send(socket_message).expect("In chan should not be full");
                                 j += 1;
+                                // println!("Rcvd {bid}");
+                                // println!("Rcvd ---");
                             } else {
                                 break;
                             }
@@ -234,7 +235,7 @@ impl SocketService {
                     }
 
                     if poll_list[i].is_writable() {
-                        let out_chan = socket_manager.get_subscriber_out_chan(sm);
+                        let out_chan = out_chans.get(&sm.identity).unwrap();
                         let mut j = 0;
                         loop {
                             if j > lim {
@@ -253,10 +254,11 @@ impl SocketService {
                                 if out_chan.1.is_empty() {
                                     break;
                                 }
-                                println!("good {id}");
-                                let (_identity, _bytes) = out_chan.1.recv().unwrap();
+                                let (_identity, _bytes) = out_chan.1.try_recv().expect("Out chan should not be empty");
                                 identity = _identity;
+                                // let bid = get_buffer_id(&_bytes);
                                 b = Some(_bytes);
+                                // println!("Sent {bid}");
                             }
 
                             if b.is_none() {

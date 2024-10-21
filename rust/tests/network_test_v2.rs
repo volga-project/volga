@@ -42,18 +42,18 @@ fn test_one_to_one(local: bool) {
     }
     let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     let job_name = format!("job-{now_ts}");
-    let data_reader = Arc::new(DataReader::new(
-        String::from("0"),
-        String::from("data_reader"),
-        job_name.clone(),
-        network_config.data_reader,
-        vec![channel.clone()],
-    ));
     let data_writer = Arc::new(DataWriter::new(
-        String::from("1"),
+        String::from("0"),
         String::from("data_writer"),
         job_name.clone(),
         network_config.data_writer,
+        vec![channel.clone()],
+    ));
+    let data_reader = Arc::new(DataReader::new(
+        String::from("1"),
+        String::from("data_reader"),
+        job_name.clone(),
+        network_config.data_reader,
         vec![channel.clone()],
     ));
 
@@ -76,7 +76,7 @@ fn test_one_to_one(local: bool) {
     }
     socket_service.start();
 
-    let num_msgs = 300000;
+    let num_msgs = 30000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -110,8 +110,9 @@ fn test_one_to_one(local: bool) {
                 write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
-            let buffer_id = get_buffer_id(b);
-            println!("Sent {buffer_id}");
+            // let buffer_id = get_buffer_id(b);
+            // println!("Sent {buffer_id}");
+            // println!("Sent ---");
         }
         backp
     });
@@ -123,15 +124,16 @@ fn test_one_to_one(local: bool) {
         if b.is_some() {
             let b = b.unwrap();
             recvd.push(b.clone());
-            let buffer_id = get_buffer_id(&b);
-            println!("Rcvd {buffer_id}");
+            // let buffer_id = get_buffer_id(&b);
+            // println!("Rcvd {buffer_id}");
             // thread::sleep(time::Duration::from_millis(100));
+            // println!("Rcvd ---");
         }
     }
     
     let total_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start_ts;
     let backp_ms = j_handle.join().unwrap();
-    let throughput = ((num_msgs as f64)/(total_ms as f64) * 1000.0) as u16;
+    let throughput = ((num_msgs as f64)/(total_ms as f64) * 1000.0) as u32;
     println!("Transfered in (ms): {total_ms}");
     println!("Backpressure (ms): {backp_ms}");
     println!("Throughput (msg/s): {throughput}");

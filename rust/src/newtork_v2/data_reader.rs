@@ -5,7 +5,7 @@ use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQue
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes}, channel::{Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, SocketServiceSubscriberType, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes}, channel::{Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustDataReaderConfig")]
@@ -154,10 +154,6 @@ impl SocketServiceSubscriber for DataReader {
         &self.name
     }
 
-    fn get_type(&self) -> SocketServiceSubscriberType {
-        SocketServiceSubscriberType::DataReader
-    }
-
     fn get_channels(&self) -> &Vec<Channel> {
         &self.channels
     }
@@ -175,7 +171,6 @@ impl SocketServiceSubscriber for DataReader {
     }
 
     fn start(&self) {
-        // start dispatcher thread: takes message from channels, in shared out_queue
         self.running.store(true, Ordering::Relaxed);
         self.metrics_recorder.start();
 
@@ -270,7 +265,12 @@ impl SocketServiceSubscriber for DataReader {
                 let s = &this_out_chan.0;
                 let b = resp.ser();
                 let size = b.len();
-                s.try_send((Some(socket_identity.clone()), b)).expect("DataReader out chan should not backpressure");
+                let socket_msg = (Some(socket_identity.clone()), b);
+                let res = s.try_send(socket_msg.clone());
+                if !res.is_ok() {
+                    s.send(socket_msg.clone()).unwrap();
+                    println!("DataReader out chan should not backpressure");
+                }
                 this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
             }
         };
@@ -286,7 +286,10 @@ impl SocketServiceSubscriber for DataReader {
         self.running.store(false, Ordering::Relaxed);
         while self.io_thread_handles.len() != 0 {
             let handle = self.io_thread_handles.pop();
-            handle.unwrap().join().unwrap();
+            let r = handle.unwrap().join();
+            if r.is_err() {
+                println!("Panic joining DataReader thread: {:?}", r.err().unwrap().downcast_ref::<String>())
+            }
         }
         self.metrics_recorder.close();
     }

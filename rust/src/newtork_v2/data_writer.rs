@@ -1,7 +1,7 @@
 
 use std::{collections::{HashMap, HashSet}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use super::{buffer_queues::BufferQueues, buffer_utils::Bytes, channel::{self, to_local_and_remote, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, SocketServiceSubscriberType, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_queues::BufferQueues, buffer_utils::Bytes, channel::{self, to_local_and_remote, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 use crossbeam::{channel::{bounded, Receiver, Select, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
@@ -164,10 +164,6 @@ impl SocketServiceSubscriber for DataWriter {
         &self.name
     }
 
-    fn get_type(&self) -> SocketServiceSubscriberType {
-        SocketServiceSubscriberType::DataWriter
-    }
-
     fn get_channels(&self) -> &Vec<Channel> {
         &self.channels
     }
@@ -190,7 +186,6 @@ impl SocketServiceSubscriber for DataWriter {
         self.metrics_recorder.start();
         self.buffer_queues.start();
         
-        // let this_channels = self.channels.clone();
         let this_out_chans = self.out_chans.clone();
         let buffer_queues_out_chan = self.buffer_queues.get_out_chan().clone();
         let this_running = self.running.clone();
@@ -201,7 +196,13 @@ impl SocketServiceSubscriber for DataWriter {
         let output_loop = move || {
 
             let channel_id_to_socket_id = channels_to_socket_identities(this_socket_metas);
-            
+            let mut out_chans = HashMap::new();
+            let locked_out_chans = this_out_chans.read().unwrap();
+            for (socket_identity, (s, r)) in locked_out_chans.iter() {
+                out_chans.insert(socket_identity.clone(), (s.clone(), r.clone()));
+            }
+            drop(locked_out_chans);
+
             while this_running.load(Ordering::Relaxed) {
                 let ch_and_b = buffer_queues_out_chan.1.recv_timeout(Duration::from_millis(100));
                 if !ch_and_b.is_ok() {
@@ -210,10 +211,8 @@ impl SocketServiceSubscriber for DataWriter {
                 let (channel_id, b) = ch_and_b.unwrap();
                 let socket_identity = channel_id_to_socket_id.get(&channel_id).unwrap();
 
-                let locked_out_chans = this_out_chans.read().unwrap();
-                let out_chan = locked_out_chans.get(socket_identity).unwrap();
+                let out_chan = out_chans.get(socket_identity).unwrap();
                 let sender = &out_chan.0.clone();
-                drop(locked_out_chans);
 
                 let socket_message: (Option<String>, Bytes) = (None, b.clone());
                 let res = sender.try_send(socket_message);
@@ -225,8 +224,8 @@ impl SocketServiceSubscriber for DataWriter {
                         println!("Wasteful backpressure channel_id: {channel_id}, socket_identity: {socket_identity}");
                         let socket_message: (Option<String>, Bytes) = (None, b.clone());
                         let res = sender.send_timeout(socket_message, Duration::from_millis(1000));
-                        if !res.is_ok() {
-                            continue;
+                        if res.is_ok() {
+                            break;
                         }
                     }
                 }
@@ -246,13 +245,18 @@ impl SocketServiceSubscriber for DataWriter {
         let input_loop = move || {
 
             let mut sel = Select::new();
+            let mut in_chans = HashMap::new();
             let locked_in_chans = this_in_chans.read().unwrap();
-            let socket_identities = locked_in_chans.keys().cloned().collect::<Vec<String>>();
+            for (socket_identity, (s, r)) in locked_in_chans.iter() {
+                in_chans.insert(socket_identity.clone(), (s.clone(), r.clone()));
+            }
+            drop(locked_in_chans);
+
+            let socket_identities = in_chans.keys().cloned().collect::<Vec<String>>();
             for socket_identity in &socket_identities {
-                let (_, r) = locked_in_chans.get(socket_identity).unwrap();
+                let (_, r) = in_chans.get(socket_identity).unwrap();
                 sel.recv(r);
             }
-
             while this_runnning.load(Ordering::Relaxed) {
 
                 let oper = sel.select_timeout(Duration::from_millis(100));
@@ -262,8 +266,7 @@ impl SocketServiceSubscriber for DataWriter {
                 let oper = oper.unwrap();
                 let index = oper.index();
                 let socket_identity = &socket_identities[index];
-                let recv = &locked_in_chans.get(socket_identity).unwrap().1;
-                // TODO drop lock?
+                let recv = &in_chans.get(socket_identity).unwrap().1;
 
                 let (_, b) = oper.recv(recv).unwrap();
                 let size = b.len();
