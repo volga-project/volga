@@ -4,8 +4,9 @@ use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mute
 use crossbeam::{channel::{Receiver, Sender}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
+use zmq::DONTWAIT;
 
-use crate::newtork_v2::{buffer_utils::get_buffer_id, sockets::{SocketKind, SocketManager, SocketMetadata}};
+use crate::newtork_v2::{buffer_utils::get_buffer_id, channel::DataReaderResponseMessage, sockets::{SocketKind, SocketManager, SocketMetadata}};
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 
@@ -167,7 +168,7 @@ impl SocketService {
             // contains bytes (+optional destination identity for DEALER) read from subscriber but not sent due to full socket
             let mut not_sent: HashMap<&SocketMetadata, SocketMessage> = HashMap::new();
 
-            let lim = 7;
+            let lim = 5;
 
             let mut in_chans = HashMap::new();
             let mut out_chans = HashMap::new();
@@ -235,8 +236,9 @@ impl SocketService {
                     }
 
                     if poll_list[i].is_writable() {
-                        let out_chan = out_chans.get(&sm.identity).unwrap();
                         let mut j = 0;
+                        
+                        let out_chan = out_chans.get(&sm.identity).unwrap();
                         while this_running.load(Ordering::Relaxed) {
                             if j > lim {
                                 break;
@@ -250,16 +252,13 @@ impl SocketService {
                                 b = Some(_bytes.clone());
                                 not_sent.remove(sm);
                             } else {
-                                // let id = &sm.identity;
-                                // println!("good {id}");
                                 if out_chan.1.is_empty() {
                                     break;
                                 }
+
                                 let (_identity, _bytes) = out_chan.1.try_recv().expect("Out chan should not be empty");
                                 identity = _identity;
-                                // let bid = get_buffer_id(&_bytes);
-                                b = Some(_bytes);
-                                // println!("Sent {bid}");
+                                b = Some(_bytes.clone());
                             }
 
                             if b.is_none() {
@@ -273,6 +272,7 @@ impl SocketService {
                                     panic!("socket kind mismatch");
                                 }
                                 let _identity = identity.clone().unwrap();
+                    
                                 // send identity frame first
                                 let res = socket.send(&_identity, zmq::SNDMORE);
                                 if !res.is_ok() {

@@ -371,7 +371,7 @@ mod tests {
             while i < bids_c.len() {
                 let (channel_id, b) = bq_out_chan.1.recv().unwrap();
                 let buffer_id = get_buffer_id(&b);
-                let ack = DataReaderResponseMessage::new_ack(&channel_id, buffer_id);
+                let ack = DataReaderResponseMessage::new_ack(&String::from("sid_0"), &channel_id, buffer_id);
                 let popped = qs_c.handle_ack(&ack);
                 // thread::sleep(time::Duration::from_millis(50));
                 thread::sleep(time::Duration::from_micros(100));

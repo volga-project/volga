@@ -286,6 +286,7 @@ impl SocketServiceSubscriber for DataWriter {
     }
 
     fn stop (&self) {
+        // TODO wait for un-acked messages, wait for in/out chans to get empty
         self.buffer_queues.close();
         self.running.store(false, Ordering::Relaxed);
         while self.io_thread_handles.len() != 0 {

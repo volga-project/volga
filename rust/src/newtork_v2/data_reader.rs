@@ -131,9 +131,9 @@ impl DataReader {
     }
 
 
-    fn schedule_ack(channel_id: &String, buffer_id: u32, sender: &Sender<DataReaderResponseMessage>) {
+    fn schedule_ack(socket_identity: &String, channel_id: &String, buffer_id: u32, sender: &Sender<DataReaderResponseMessage>) {
         // we assume ack channels are unbounded
-        let resp = DataReaderResponseMessage::new_ack(channel_id, buffer_id);
+        let resp = DataReaderResponseMessage::new_ack(socket_identity, channel_id, buffer_id);
         sender.send(resp).unwrap();
     }
 
@@ -193,7 +193,9 @@ impl SocketServiceSubscriber for DataReader {
                 if !res.is_ok() {
                     continue;
                 }
-                let (_, b) = res.unwrap();
+                let (socket_identity_opt, b) = res.unwrap();
+
+                let socket_identity = &socket_identity_opt.unwrap();
 
                 let size = b.len();
                 let channel_id = &get_channeld_id(&b);
@@ -203,7 +205,7 @@ impl SocketServiceSubscriber for DataReader {
 
                 let wm = locked_watermarks.get(channel_id).unwrap().load(Ordering::Relaxed);
                 if buffer_id as i32 <= wm {
-                    Self::schedule_ack(channel_id, buffer_id, &this_response_queue.0);
+                    Self::schedule_ack(socket_identity, channel_id, buffer_id, &this_response_queue.0);
                 } else {
                     // We don't want out_of_order to grow infinitely and should put a limit on it,
                     // however in theory it should not happen - sender will ony send maximum of it's buffer queue size
@@ -218,7 +220,7 @@ impl SocketServiceSubscriber for DataReader {
 
                     if locked_out_of_order.contains_key(&(buffer_id as i32)) {
                         // duplicate
-                        Self::schedule_ack(channel_id, buffer_id, &this_response_queue.0);
+                        Self::schedule_ack(socket_identity, channel_id, buffer_id, &this_response_queue.0);
                     } else {
                         locked_out_of_order.insert(buffer_id as i32, b.clone());
                         let mut next_wm = wm + 1;
@@ -238,7 +240,7 @@ impl SocketServiceSubscriber for DataReader {
                             result_queue_sender.send(payload).unwrap();
 
                             // send ack
-                            Self::schedule_ack(channel_id, stored_buffer_id, &this_response_queue.0);
+                            Self::schedule_ack(socket_identity, channel_id, stored_buffer_id, &this_response_queue.0);
                             locked_out_of_order.remove(&next_wm);
                             next_wm += 1;
                         }
@@ -256,8 +258,6 @@ impl SocketServiceSubscriber for DataReader {
         let this_socket_metas = self.socket_metas.clone();
 
         let output_loop = move || {
-            let channel_id_to_socket_id = channels_to_socket_identities(this_socket_metas);
-            
             // TODO implement proper ack batching
             while this_runnning.load(Ordering::Relaxed) {
                 let r = &this_response_queue.1;
@@ -267,7 +267,7 @@ impl SocketServiceSubscriber for DataReader {
                 }
                 let resp = resp.unwrap();
                 let channel_id = &resp.channel_id;
-                let socket_identity = channel_id_to_socket_id.get(channel_id).unwrap();
+                let socket_identity = &resp.socket_identity;
 
                 let s = &this_out_chan.0;
                 let b = resp.ser();
@@ -294,6 +294,7 @@ impl SocketServiceSubscriber for DataReader {
     }
 
     fn stop (&self) {
+        // TODO wait for acks to be sent, wait for in/out chans to get empty
         self.running.store(false, Ordering::Relaxed);
         while self.io_thread_handles.len() != 0 {
             let handle = self.io_thread_handles.pop();
