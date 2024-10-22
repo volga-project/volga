@@ -195,8 +195,7 @@ impl SocketServiceSubscriber for DataReader {
                 }
                 let (socket_identity_opt, b) = res.unwrap();
 
-                let socket_identity = &socket_identity_opt.unwrap();
-
+                let socket_identity = socket_identity_opt.unwrap();
                 let size = b.len();
                 let channel_id = &get_channeld_id(&b);
                 this_metrics_recorder.inc(NUM_BUFFERS_RECVD, channel_id, 1);
@@ -205,7 +204,7 @@ impl SocketServiceSubscriber for DataReader {
 
                 let wm = locked_watermarks.get(channel_id).unwrap().load(Ordering::Relaxed);
                 if buffer_id as i32 <= wm {
-                    Self::schedule_ack(socket_identity, channel_id, buffer_id, &this_response_queue.0);
+                    Self::schedule_ack(&socket_identity, channel_id, buffer_id, &this_response_queue.0);
                 } else {
                     // We don't want out_of_order to grow infinitely and should put a limit on it,
                     // however in theory it should not happen - sender will ony send maximum of it's buffer queue size
@@ -220,7 +219,7 @@ impl SocketServiceSubscriber for DataReader {
 
                     if locked_out_of_order.contains_key(&(buffer_id as i32)) {
                         // duplicate
-                        Self::schedule_ack(socket_identity, channel_id, buffer_id, &this_response_queue.0);
+                        Self::schedule_ack(&socket_identity, channel_id, buffer_id, &this_response_queue.0);
                     } else {
                         locked_out_of_order.insert(buffer_id as i32, b.clone());
                         let mut next_wm = wm + 1;
@@ -240,7 +239,7 @@ impl SocketServiceSubscriber for DataReader {
                             result_queue_sender.send(payload).unwrap();
 
                             // send ack
-                            Self::schedule_ack(socket_identity, channel_id, stored_buffer_id, &this_response_queue.0);
+                            Self::schedule_ack(&socket_identity, channel_id, stored_buffer_id, &this_response_queue.0);
                             locked_out_of_order.remove(&next_wm);
                             next_wm += 1;
                         }

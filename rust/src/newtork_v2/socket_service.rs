@@ -4,13 +4,12 @@ use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mute
 use crossbeam::{channel::{Receiver, Sender}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
-use zmq::DONTWAIT;
 
-use crate::newtork_v2::{buffer_utils::get_buffer_id, channel::DataReaderResponseMessage, sockets::{SocketKind, SocketManager, SocketMetadata}};
+use crate::newtork_v2::sockets::{SocketKind, SocketManager, SocketMetadata};
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 
-pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize = 15000;
+pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize = 10000;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustZmqConfig")]
@@ -168,7 +167,7 @@ impl SocketService {
             // contains bytes (+optional destination identity for DEALER) read from subscriber but not sent due to full socket
             let mut not_sent: HashMap<&SocketMetadata, SocketMessage> = HashMap::new();
 
-            let lim = 5;
+            let lim = 100;
 
             let mut in_chans = HashMap::new();
             let mut out_chans = HashMap::new();
@@ -201,33 +200,30 @@ impl SocketService {
                                 break;
                             }
                             
-                            let mut b: Option<Bytes> = None;
-                            let mut identity: Option<String> = None;
+                            let mut b_opt: Option<Bytes> = None;
+                            let mut identity_opt: Option<String> = None;
                             if sm.kind == SocketKind::Router {
                                 // zmq::ROUTER receives an identity frame first and actual data after, so we read twice
-                                let _identity = socket.recv_string(0);
-                                if _identity.is_ok() {
+                                let _identity_res = socket.recv_string(zmq::DONTWAIT);
+                                if _identity_res.is_ok() {
                                     // expect second frame to be ready right away
-                                    b = Some(socket.recv_bytes(zmq::DONTWAIT).expect("zmq DEALER data frame is empty while identity is present"));
-                                    identity = Some(_identity.unwrap().unwrap());
+                                    b_opt = Some(socket.recv_bytes(zmq::DONTWAIT).expect("zmq DEALER data frame is empty while identity is present"));
+                                    identity_opt = Some(_identity_res.unwrap().unwrap());
                                 }
                             } else if sm.kind == SocketKind::Dealer {
                                 // zmq::DELAER receives data directly
-                                let _b = socket.recv_bytes(zmq::DONTWAIT);
-                                if _b.is_ok() {
-                                    b = Some(_b.unwrap());
+                                let _b_opt = socket.recv_bytes(zmq::DONTWAIT);
+                                if _b_opt.is_ok() {
+                                    b_opt = Some(_b_opt.unwrap());
                                 }
                             } else {
                                 panic!("Unknown socket kind")
                             }
 
-                            if b.is_some() {
-                                let _b = b.unwrap();
-                                // let bid = get_buffer_id(&_b);
-                                let socket_message = (identity, _b);
+                            if b_opt.is_some() {
+                                let b = b_opt.unwrap();
+                                let socket_message = (identity_opt, b);
                                 in_chan.0.try_send(socket_message).expect("In chan should not be full");
-                                // println!("Rcvd {bid}");
-                                // println!("Rcvd ---");
                             } else {
                                 break;
                             }
@@ -244,52 +240,49 @@ impl SocketService {
                                 break;
                             }
 
-                            let mut b: Option<Bytes> = None;
-                            let mut identity: Option<String> = None;
+                            let mut b_opt: Option<Bytes> = None;
+                            let mut identity_opt: Option<String> = None;
                             if not_sent.contains_key(sm) {
-                                let (_identity, _bytes) = not_sent.get(sm).unwrap();
-                                identity = _identity.clone();
-                                b = Some(_bytes.clone());
+                                let (_identity_opt, _bytes) = not_sent.get(sm).unwrap();
+                                identity_opt = _identity_opt.clone();
+                                b_opt = Some(_bytes.clone());
                                 not_sent.remove(sm);
                             } else {
                                 if out_chan.1.is_empty() {
                                     break;
                                 }
 
-                                let (_identity, _bytes) = out_chan.1.try_recv().expect("Out chan should not be empty");
-                                identity = _identity;
-                                b = Some(_bytes.clone());
+                                let (_identity_opt, _bytes) = out_chan.1.try_recv().expect("Out chan should not be empty");
+                                identity_opt = _identity_opt;
+                                b_opt = Some(_bytes.clone());
                             }
 
-                            if b.is_none() {
+                            if b_opt.is_none() {
                                 break;
                             }
 
                             let mut identity_sent = false;
-                            if identity.is_some() {
-                                // this should be a Router socket
-                                if sm.kind != SocketKind::Router {
-                                    panic!("socket kind mismatch");
-                                }
-                                let _identity = identity.clone().unwrap();
+                            if sm.kind == SocketKind::Router {
+                                // Router socket should get identity frame
+                                let _identity = identity_opt.clone().unwrap();
                     
                                 // send identity frame first
-                                let res = socket.send(&_identity, zmq::SNDMORE);
+                                let res = socket.send(&_identity, zmq::DONTWAIT|zmq::SNDMORE);
                                 if !res.is_ok() {
-                                    not_sent.insert(sm, (Some(_identity), b.unwrap()));
+                                    not_sent.insert(sm, (identity_opt, b_opt.unwrap()));
                                     break;
                                 }
                                 identity_sent = true;
                             }
                             
-                            let bytes = b.unwrap();
-                            let res = socket.send(&bytes, zmq::DONTWAIT);
+                            let b = b_opt.unwrap();
+                            let res = socket.send(&b, zmq::DONTWAIT);
                             if !res.is_ok() {
                                 if identity_sent {
                                     // should not happen - panic
                                     panic!("Unable to send data after sending identity");
                                 }
-                                not_sent.insert(sm, (identity, bytes));
+                                not_sent.insert(sm, (identity_opt, b.clone()));
                                 break;
                             }
                             j += 1;
@@ -317,23 +310,23 @@ impl SocketService {
     }
 
     pub fn start(&self) {
+        let name = &self.name;
         let err = self.sockets_monitor.wait_for_all_connected(None);
         if err.is_some() {
-            panic!("Can not start io loop - connection error")
+            panic!("Can not start socket service {name} - connection error")
         }
-        let name = &self.name;
         self.running.store(true, Ordering::Relaxed);
-        println!("[Loop {name}] Started data flow");
+        println!("[Socket Service {name}] Started data flow");
     }
 
     pub fn connect(&self, timeout_ms: u128) -> Option<String> {
         self.run_io_thread(timeout_ms);
         self.sockets_monitor.wait_for_monitor_ready();
         let err = self.sockets_monitor.wait_for_all_connected(Some(timeout_ms));
-        let io_loop_name = self.name.clone();
+        let name = self.name.clone();
         self.sockets_monitor.stop();
         if err.is_none() {
-            println!("[Loop {io_loop_name}] All sockets connected");
+            println!("[Socket Service {name}] All sockets connected");
         }
         err
     }

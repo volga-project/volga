@@ -1,6 +1,8 @@
 
 use std::{collections::{HashMap, HashSet}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
+use crate::newtork_v2::buffer_utils::get_buffer_id;
+
 use super::{buffer_queues::BufferQueues, buffer_utils::Bytes, channel::{self, to_local_and_remote, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 use crossbeam::{channel::{bounded, Receiver, Select, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
@@ -214,15 +216,16 @@ impl SocketServiceSubscriber for DataWriter {
                 let out_chan = out_chans.get(socket_identity).unwrap();
                 let sender = &out_chan.0.clone();
 
-                let socket_message: (Option<String>, Bytes) = (None, b.clone());
+                let socket_message = (Some(socket_identity.clone()), b.clone());
                 let res = sender.try_send(socket_message);
                 if !res.is_ok() {
                     // we have a backpressure here which blocks all other channels. Ideally this should not happen
                     // since we rely on higher level credit-based flow control to handle backpressure. 
                     // TODO we should log blocking here and see in which cases this happens
                     while this_running.load(Ordering::Relaxed) {
-                        println!("Wasteful backpressure channel_id: {channel_id}, socket_identity: {socket_identity}");
-                        let socket_message: (Option<String>, Bytes) = (None, b.clone());
+                        let bid = get_buffer_id(&b);
+                        println!("Wasteful backpressure channel_id: {channel_id}, socket_identity: {socket_identity}, buffer_id: {bid}");
+                        let socket_message = (Some(socket_identity.clone()), b.clone());
                         let res = sender.send_timeout(socket_message, Duration::from_millis(1000));
                         if res.is_ok() {
                             break;
