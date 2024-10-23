@@ -1,5 +1,5 @@
 
-use std::{collections::HashMap, sync::{Arc, RwLock}, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{sync::Arc, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 
 use volga_rust::newtork_v2::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::DataReader, data_writer::DataWriter, network_config::NetworkConfig, socket_service::{SocketService, SocketServiceSubscriber}};
 
@@ -76,7 +76,7 @@ fn test_one_to_one(local: bool) {
     }
     socket_service.start();
 
-    let num_msgs = 30000;
+    let num_msgs = 100000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();

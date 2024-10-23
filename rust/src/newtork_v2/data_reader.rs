@@ -1,24 +1,26 @@
 
 use std::{collections::{HashMap, HashSet}, fs, sync::{atomic::{AtomicBool, AtomicI32, Ordering}, Arc, RwLock}, thread::{self, JoinHandle}, time::Duration};
 
-use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQueue};
+use crossbeam::{channel::{bounded, tick, unbounded, Receiver, Select, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes}, channel::{Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes}, channel::{self, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustDataReaderConfig")]
 pub struct DataReaderConfig {
-    output_queue_size: usize
+    output_queue_size: usize,
+    response_batch_period_ms: Option<usize>
 }
 
 #[pymethods]
 impl DataReaderConfig { 
     #[new]
-    pub fn new(output_queue_size: usize) -> Self {
+    pub fn new(output_queue_size: usize, response_batch_period_ms: Option<usize>) -> Self {
         DataReaderConfig{
-            output_queue_size
+            output_queue_size,
+            response_batch_period_ms
         }
     }
 }
@@ -255,33 +257,81 @@ impl SocketServiceSubscriber for DataReader {
         let this_response_queue = self.response_queue.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
         let this_socket_metas = self.socket_metas.clone();
+        let this_config = self.config.clone();
+        let this_channels = self.channels.clone();
 
         let output_loop = move || {
             // TODO implement proper ack batching
+            
+            let batch_period_ms = this_config.response_batch_period_ms;
+            
+            let mut responses_per_channel: HashMap<String, Vec<DataReaderResponseMessage>> = HashMap::new();
+            for channel in this_channels.iter() {
+                responses_per_channel.insert(channel.get_channel_id().clone(), Vec::new());
+            }
+
+            let r = &this_response_queue.1;
+
+            let mut sel = Select::new();
+            sel.recv(r);
+
+            let mut tick_size_ms = 100;
+            if batch_period_ms.is_some() {
+                tick_size_ms = batch_period_ms.unwrap();
+            }
+            let ticker = tick(Duration::from_millis(tick_size_ms as u64));
+            if batch_period_ms.is_some() {
+                sel.recv(&ticker);
+            }
+
             while this_runnning.load(Ordering::Relaxed) {
-                let r = &this_response_queue.1;
-                let resp = r.recv_timeout(Duration::from_millis(100));
-                if !resp.is_ok() {
+
+                let sel_res = sel.select_timeout(Duration::from_millis(100));
+                if !sel_res.is_ok() {
                     continue;
                 }
-                let resp = resp.unwrap();
-                let channel_id = &resp.channel_id;
-                let socket_identity = &resp.socket_identity;
-
-                let s = &this_out_chan.0;
-                let b = resp.ser();
-                let (bid1, bid2) = resp.buffer_ids_range;
-                let size = b.len();
-                let socket_msg = (Some(socket_identity.clone()), b);
-                let res = s.try_send(socket_msg.clone());
-                if !res.is_ok() {
-                    // let _b = &socket_msg.1;
-                    // let bid = get_buffer_id(_b);
-                    println!("DataReader out chan should not bp: start {bid1}-{bid2}");
-                    s.send(socket_msg.clone()).unwrap();
-                    println!("DataReader out chan should not bp: end");
+                let oper = sel_res.unwrap();
+                let index = oper.index();
+                if index == 0 {
+                    let resp = oper.recv(r).unwrap();
+                    let channel_id = &resp.channel_id;
+                    responses_per_channel.get_mut(channel_id).unwrap().push(resp);
+                } else {
+                    oper.recv(&ticker).unwrap();
                 }
-                this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
+
+                if batch_period_ms.is_some() && index != 1 {
+                    // batching enabled, wait for ticker to fire
+                    continue;
+                }
+
+                // batch responses and send to appropriate channels
+                for channel in this_channels.iter() {
+                    let channel_id = channel.get_channel_id();
+                    let resps = responses_per_channel.get(channel_id).unwrap();
+                    if resps.len() == 0 {
+                        continue;
+                    }
+                    let batched_resp = DataReaderResponseMessage::batch_acks(resps);
+                    for resp in batched_resp {
+                        let socket_identity = &resp.socket_identity;
+                        let s = &this_out_chan.0;
+                        let b = resp.ser();
+                        let size = b.len();
+                        let socket_msg = (Some(socket_identity.clone()), b);
+                        while this_runnning.load(Ordering::Relaxed) {
+                            let _res = s.send_timeout(socket_msg.clone(), Duration::from_millis(100));
+                            if _res.is_ok() {
+                                break;
+                            }
+                        }
+                        this_metrics_recorder.inc(NUM_BYTES_SENT, &channel_id, size as u64);
+                    }
+
+                    // reset temporary batch store
+                    responses_per_channel.insert(channel_id.clone(), Vec::new());
+                }
+                
             }
         };
 

@@ -3,6 +3,7 @@ data_writer:
   max_buffers_per_channel: 100000
 data_reader:
   output_queue_size: 100000
+  response_batch_period_ms: 100
 transfer:
   transfer_queue_size: 10000
 zmq:
