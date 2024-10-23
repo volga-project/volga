@@ -164,12 +164,12 @@ impl SocketServiceSubscriber for DataReader {
         &self.socket_metas
     }
 
-    fn get_in_chan(&self, _: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
-        (self.in_chan.0.clone(), self.in_chan.1.clone())
+    fn get_in_sender(&self, _: &SocketMetadata) -> Sender<SocketMessage> {
+        self.in_chan.0.clone()
     }
 
-    fn get_out_chan(&self, _: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
-        (self.out_chan.0.clone(), self.out_chan.1.clone())
+    fn get_out_receiver(&self, _: &SocketMetadata) -> Receiver<SocketMessage> {
+        self.out_chan.1.clone()
     }
 
     fn start(&self) {

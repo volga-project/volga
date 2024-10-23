@@ -344,14 +344,14 @@ impl SocketManager {
         }
     }
 
-    pub fn get_subscriber_in_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
+    pub fn get_subscriber_in_sender(&self, sm: &SocketMetadata) -> Sender<SocketMessage> {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
-        subscriber.get_in_chan(sm)
+        subscriber.get_in_sender(sm)
     }
 
-    pub fn get_subscriber_out_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
+    pub fn get_subscriber_out_receiver(&self, sm: &SocketMetadata) -> Receiver<SocketMessage> {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
-        subscriber.get_out_chan(sm)
+        subscriber.get_out_receiver(sm)
     }
 }
 

@@ -174,12 +174,12 @@ impl SocketServiceSubscriber for DataWriter {
         &self.socket_metas
     }
 
-    fn get_in_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
-        self.in_chans.read().unwrap().get(&sm.identity).unwrap().clone()
+    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<SocketMessage> {
+        self.in_chans.read().unwrap().get(&sm.identity).unwrap().clone().0
     }
 
-    fn get_out_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>) {
-        self.out_chans.read().unwrap().get(&sm.identity).unwrap().clone()
+    fn get_out_receiver(&self, sm: &SocketMetadata) -> Receiver<SocketMessage> {
+        self.out_chans.read().unwrap().get(&sm.identity).unwrap().clone().1
     }
 
     fn start(&self) {

@@ -44,9 +44,9 @@ pub trait SocketServiceSubscriber {
 
     fn get_sockets_metas(&self) -> &Vec<SocketMetadata>;
 
-    fn get_in_chan(&self, sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>);
+    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<SocketMessage>;
 
-    fn get_out_chan(&self,  sm: &SocketMetadata) -> (Sender<SocketMessage>, Receiver<SocketMessage>);
+    fn get_out_receiver(&self,  sm: &SocketMetadata) -> Receiver<SocketMessage>;
 
     fn start(&self);
 
@@ -169,12 +169,12 @@ impl SocketService {
 
             let lim = 100;
 
-            let mut in_chans = HashMap::new();
-            let mut out_chans = HashMap::new();
+            let mut in_senders = HashMap::new();
+            let mut out_receivers = HashMap::new();
 
             for (_, sm) in sockets {
-                in_chans.insert(sm.identity.clone(), socket_manager.get_subscriber_in_chan(sm));
-                out_chans.insert(sm.identity.clone(), socket_manager.get_subscriber_out_chan(sm));
+                in_senders.insert(sm.identity.clone(), socket_manager.get_subscriber_in_sender(sm));
+                out_receivers.insert(sm.identity.clone(), socket_manager.get_subscriber_out_receiver(sm));
             }
 
             // run loop
@@ -189,10 +189,10 @@ impl SocketService {
                 for i in 0..poll_list.len() {
                     let (socket, sm)  = &sockets[i];
                     if poll_list[i].is_readable() {
-                        let in_chan = in_chans.get(&sm.identity).unwrap();
+                        let in_sender = in_senders.get(&sm.identity).unwrap();
                         let mut j = 0;
                         while this_running.load(Ordering::Relaxed) {
-                            if in_chan.0.is_full() {
+                            if in_sender.is_full() {
                                 break;
                             }
 
@@ -223,7 +223,7 @@ impl SocketService {
                             if b_opt.is_some() {
                                 let b = b_opt.unwrap();
                                 let socket_message = (identity_opt, b);
-                                in_chan.0.try_send(socket_message).expect("In chan should not be full");
+                                in_sender.try_send(socket_message).expect("In chan should not be full");
                             } else {
                                 break;
                             }
@@ -234,7 +234,7 @@ impl SocketService {
                     if poll_list[i].is_writable() {
                         let mut j = 0;
                         
-                        let out_chan = out_chans.get(&sm.identity).unwrap();
+                        let out_receiver = out_receivers.get(&sm.identity).unwrap();
                         while this_running.load(Ordering::Relaxed) {
                             if j > lim {
                                 break;
@@ -248,11 +248,11 @@ impl SocketService {
                                 b_opt = Some(_bytes.clone());
                                 not_sent.remove(sm);
                             } else {
-                                if out_chan.1.is_empty() {
+                                if out_receiver.is_empty() {
                                     break;
                                 }
 
-                                let (_identity_opt, _bytes) = out_chan.1.try_recv().expect("Out chan should not be empty");
+                                let (_identity_opt, _bytes) = out_receiver.try_recv().expect("Out chan should not be empty");
                                 identity_opt = _identity_opt;
                                 b_opt = Some(_bytes.clone());
                             }
