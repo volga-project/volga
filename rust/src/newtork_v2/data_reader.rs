@@ -352,6 +352,6 @@ impl SocketServiceSubscriber for DataReader {
                 println!("Panic joining DataReader thread: {:?}", r.err().unwrap().downcast_ref::<String>())
             }
         }
-        self.metrics_recorder.close();
+        self.metrics_recorder.stop();
     }
 }

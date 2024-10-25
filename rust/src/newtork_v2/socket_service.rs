@@ -251,8 +251,8 @@ impl SocketService {
                                 if out_receiver.is_empty() {
                                     break;
                                 }
-
-                                let (_identity_opt, _bytes) = out_receiver.try_recv().expect("Out chan should not be empty");
+                                let iden = &sm.identity;
+                                let (_identity_opt, _bytes) = out_receiver.try_recv().expect(&format!("Out chan should not be empty {iden}"));
                                 identity_opt = _identity_opt;
                                 b_opt = Some(_bytes.clone());
                             }

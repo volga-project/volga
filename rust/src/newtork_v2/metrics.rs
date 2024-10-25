@@ -39,8 +39,8 @@ impl MetricsRecorder {
         }
     }
 
-    pub fn inc(&self, metric_name: &str, channel_or_peer_id: &str, value: u64) {
-        let metric_key = metric_key(metric_name, channel_or_peer_id);
+    pub fn inc(&self, metric_name: &str, channel_id_or_node_ip: &str, value: u64) {
+        let metric_key = metric_key(metric_name, channel_id_or_node_ip);
         let locked_read = self.counters.read().unwrap();
         if locked_read.contains_key(&metric_key) {
             let counter = locked_read.get(&metric_key).unwrap();
@@ -73,7 +73,7 @@ impl MetricsRecorder {
                 
     }
 
-    pub fn close(&self) {
+    pub fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
         let handle = self.flush_thread_handle.pop();
         handle.unwrap().join().unwrap();
@@ -185,7 +185,7 @@ mod tests {
         std::thread::sleep(Duration::from_secs(FLUSH_PERIOD_S));
         mr.inc(NUM_BUFFERS_RECVD, channel_id, 4);
         std::thread::sleep(Duration::from_millis(100));
-        mr.close();
+        mr.stop();
 
         let path = format!("{METRICS_PATH_PREFIX}/{job_name}");
         let filename = format!("{path}/{io_handler_name}_metrics.metrics");

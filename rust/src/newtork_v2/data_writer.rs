@@ -89,7 +89,10 @@ impl DataWriter {
     }
 
     fn configure_sockets_and_io_chans(id: &String, name: &String, channels: &Vec<Channel>) 
-    -> (Vec<SocketMetadata>, HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>) {
+    -> (Vec<SocketMetadata>, 
+        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, 
+        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>
+    ) {
         let mut socket_identity_generator = SocketIdentityGenerator::new(id.clone());
         let mut socket_metas = Vec::new();
         let mut in_chans = HashMap::new();
@@ -296,6 +299,6 @@ impl SocketServiceSubscriber for DataWriter {
             let handle = self.io_thread_handles.pop();
             handle.unwrap().join().unwrap();
         }
-        self.metrics_recorder.close();
+        self.metrics_recorder.stop();
     }
 }
