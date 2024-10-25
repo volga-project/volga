@@ -2,7 +2,7 @@
 use std::{collections::{HashMap, HashSet}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::JoinHandle, time::Duration};
 
 use crossbeam::{channel::{bounded, Receiver, Select, Sender}, queue::ArrayQueue};
-use pyo3::{exceptions::socket, pyclass, pymethods};
+use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
 use crate::network::metrics::NUM_BYTES_RECVD;
@@ -200,7 +200,7 @@ impl RemoteTransferHandler {
             // one ROUTER to receive from all remote connection, one DEALER per remote connection to send to local reader, 
             let mut ports = HashSet::new();
 
-            // group channels by traget ipc addrs (maps to reader sockets)
+            // group channels by target ipc addrs (maps to data readers on this node)
             let mut target_local_ipc_addrs: HashMap<String, Vec<String>> = HashMap::new();
             
             for channel in &remote_channels {
@@ -393,8 +393,8 @@ impl SocketServiceSubscriber for RemoteTransferHandler {
         self.metrics_recorder.start();
         
         let this_local_in_chans = self.local_in_chans.clone();
-        let this_local_out_chans = self.local_in_chans.clone();
-        let this_remote_in_chans = self.remote_out_chans.clone();
+        let this_local_out_chans = self.local_out_chans.clone();
+        let this_remote_in_chans = self.remote_in_chans.clone();
         let this_remote_out_chans = self.remote_out_chans.clone();
         let this_running = self.running.clone();
         let this_socket_metas = self.socket_metas.clone();
@@ -413,19 +413,19 @@ impl SocketServiceSubscriber for RemoteTransferHandler {
             let from_chan;
             let to_chans;
             if is_sender {
-                // one local out chan -> many remote in chans    
-                if local_out_chans.len() != 1 {
-                    panic!("Misconfigured local_out_chans");
+                // one local in chan -> many remote out chans    
+                if local_in_chans.len() != 1 {
+                    panic!("Misconfigured local_in_chans");
                 }    
-                from_chan = local_out_chans.values().next().unwrap(); 
-                to_chans = remote_in_chans;      
+                from_chan = local_in_chans.values().next().unwrap(); 
+                to_chans = remote_out_chans;      
             } else {
-                // one remote out chan -> many local in chans
-                if remote_out_chans.len() != 1 {
-                    panic!("Misconfigured remote_out_chans");
+                // one remote in chan -> many local out chans
+                if remote_in_chans.len() != 1 {
+                    panic!("Misconfigured remote_in_chans");
                 }    
-                from_chan = remote_out_chans.values().next().unwrap(); 
-                to_chans = local_in_chans; 
+                from_chan = remote_in_chans.values().next().unwrap(); 
+                to_chans = local_out_chans; 
             }
             run_one_to_many_loop(
                 from_chan,
@@ -439,8 +439,8 @@ impl SocketServiceSubscriber for RemoteTransferHandler {
         };
 
         let this_local_in_chans = self.local_in_chans.clone();
-        let this_local_out_chans = self.local_in_chans.clone();
-        let this_remote_in_chans = self.remote_out_chans.clone();
+        let this_local_out_chans = self.local_out_chans.clone();
+        let this_remote_in_chans = self.remote_in_chans.clone();
         let this_remote_out_chans = self.remote_out_chans.clone();
         let this_running = self.running.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
@@ -458,19 +458,19 @@ impl SocketServiceSubscriber for RemoteTransferHandler {
             let to_chan;
 
             if is_sender {
-                // many remote out chans -> one local in chan
-                from_chans = remote_out_chans;
-                if local_in_chans.len() != 1 {
-                    panic!("Misconfigured local_in_chans");
+                // many remote in chans -> one local out chan
+                from_chans = remote_in_chans;
+                if local_out_chans.len() != 1 {
+                    panic!("Misconfigured local_out_chans");
                 }
-                to_chan = local_in_chans.values().next().unwrap();
+                to_chan = local_out_chans.values().next().unwrap();
             } else {
-                // many local out chans -> one remote in chan
-                from_chans = local_out_chans;
-                if remote_in_chans.len() != 1 {
-                    panic!("Misconfigured remote_in_chans");
+                // many local in chans -> one remote out chan
+                from_chans = local_in_chans;
+                if remote_out_chans.len() != 1 {
+                    panic!("Misconfigured remote_out_chans");
                 }
-                to_chan = remote_in_chans.values().next().unwrap();
+                to_chan = remote_out_chans.values().next().unwrap();
             }
             run_many_to_one_loop(
                 from_chans,

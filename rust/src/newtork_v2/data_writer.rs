@@ -1,9 +1,9 @@
 
-use std::{collections::{HashMap, HashSet}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
+use std::{collections::{HashMap, HashSet}, fs, sync::{atomic::{AtomicBool, Ordering}, Arc, RwLock}, thread::JoinHandle, time::{Duration, SystemTime}};
 
 use crate::newtork_v2::buffer_utils::get_buffer_id;
 
-use super::{buffer_queues::BufferQueues, buffer_utils::Bytes, channel::{self, to_local_and_remote, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_queues::BufferQueues, buffer_utils::Bytes, channel::{to_local_and_remote, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 use crossbeam::{channel::{bounded, Receiver, Select, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
@@ -89,7 +89,8 @@ impl DataWriter {
     }
 
     fn configure_sockets_and_io_chans(id: &String, name: &String, channels: &Vec<Channel>) 
-    -> (Vec<SocketMetadata>, 
+    -> (
+        Vec<SocketMetadata>, 
         HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, 
         HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>
     ) {
