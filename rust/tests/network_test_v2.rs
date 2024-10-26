@@ -145,7 +145,7 @@ fn test_one_to_one(local: bool) {
             let b = b.unwrap();
             recvd.push(b.clone());
             let buffer_id = get_buffer_id(&b);
-            println!("Rcvd {buffer_id}");
+            // println!("Rcvd {buffer_id}");
             // thread::sleep(time::Duration::from_millis(100));
         }
     }

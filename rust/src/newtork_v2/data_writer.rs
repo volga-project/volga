@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, fs, sync::{atomic::{AtomicBool, Order
 
 use crate::newtork_v2::buffer_utils::get_buffer_id;
 
-use super::{buffer_queues::BufferQueues, buffer_utils::Bytes, channel::{to_local_and_remote, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_queues::BufferQueues, buffer_utils::Bytes, channel::{to_local_and_remote, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_RESENT, NUM_BUFFERS_SENT, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 use crossbeam::{channel::{bounded, Receiver, Select, Sender}, queue::ArrayQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
@@ -33,8 +33,8 @@ pub struct DataWriter {
     job_name: String,
     channels: Arc<Vec<Channel>>,
     socket_metas: Vec<SocketMetadata>,
-    in_chans: Arc<RwLock<HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>>>,
-    out_chans: Arc<RwLock<HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>>>,
+    in_chans: Arc<RwLock<HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>>>,
+    out_chans: Arc<RwLock<HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>>>,
     buffer_queues: Arc<BufferQueues>,
 
     metrics_recorder: Arc<MetricsRecorder>,
@@ -91,8 +91,8 @@ impl DataWriter {
     fn configure_sockets_and_io_chans(id: &String, name: &String, channels: &Vec<Channel>) 
     -> (
         Vec<SocketMetadata>, 
-        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, 
-        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>
+        HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>, 
+        HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>
     ) {
         let mut socket_identity_generator = SocketIdentityGenerator::new(id.clone());
         let mut socket_metas = Vec::new();
@@ -178,11 +178,11 @@ impl SocketServiceSubscriber for DataWriter {
         &self.socket_metas
     }
 
-    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<SocketMessage> {
+    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<Bytes> {
         self.in_chans.read().unwrap().get(&sm.identity).unwrap().clone().0
     }
 
-    fn get_out_receiver(&self, sm: &SocketMetadata) -> Receiver<SocketMessage> {
+    fn get_out_receiver(&self, sm: &SocketMetadata) -> Receiver<Bytes> {
         self.out_chans.read().unwrap().get(&sm.identity).unwrap().clone().1
     }
 
@@ -220,8 +220,8 @@ impl SocketServiceSubscriber for DataWriter {
                 let out_chan = out_chans.get(socket_identity).unwrap();
                 let sender = &out_chan.0.clone();
 
-                let socket_message = (Some(socket_identity.clone()), b.clone());
-                let res = sender.try_send(socket_message);
+                // Data Writer writes to DEALERs - no need to send socket_identity
+                let res = sender.try_send(b.clone());
                 if !res.is_ok() {
                     // we have a backpressure here which blocks all other channels. Ideally this should not happen
                     // since we rely on higher level credit-based flow control to handle backpressure. 
@@ -229,8 +229,8 @@ impl SocketServiceSubscriber for DataWriter {
                     while this_running.load(Ordering::Relaxed) {
                         let bid = get_buffer_id(&b);
                         println!("Wasteful backpressure channel_id: {channel_id}, socket_identity: {socket_identity}, buffer_id: {bid}");
-                        let socket_message = (Some(socket_identity.clone()), b.clone());
-                        let res = sender.send_timeout(socket_message, Duration::from_millis(1000));
+                        
+                        let res = sender.send_timeout(b.clone(), Duration::from_millis(1000));
                         if res.is_ok() {
                             break;
                         }
@@ -275,7 +275,7 @@ impl SocketServiceSubscriber for DataWriter {
                 let socket_identity = &socket_identities[index];
                 let recv = &in_chans.get(socket_identity).unwrap().1;
 
-                let (_, b) = oper.recv(recv).unwrap();
+                let b = oper.recv(recv).unwrap();
                 let size = b.len();
                 let ack = DataReaderResponseMessage::de(b);
                 let channel_id = &ack.channel_id;

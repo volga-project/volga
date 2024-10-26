@@ -5,7 +5,7 @@ use crossbeam::{channel::{Receiver, Sender}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use crate::newtork_v2::sockets::{SocketKind, SocketManager, SocketMetadata};
+use crate::newtork_v2::{buffer_utils::get_channeld_id, sockets::{SocketKind, SocketManager, SocketMetadata}};
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 
@@ -31,8 +31,6 @@ impl ZmqConfig {
     }
 }
 
-pub type SocketMessage = (Option<String>, Bytes);
-
 // TODO description
 pub trait SocketServiceSubscriber {
 
@@ -44,9 +42,9 @@ pub trait SocketServiceSubscriber {
 
     fn get_sockets_metas(&self) -> &Vec<SocketMetadata>;
 
-    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<SocketMessage>;
+    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<Bytes>;
 
-    fn get_out_receiver(&self,  sm: &SocketMetadata) -> Receiver<SocketMessage>;
+    fn get_out_receiver(&self,  sm: &SocketMetadata) -> Receiver<Bytes>;
 
     fn start(&self);
 
@@ -67,6 +65,12 @@ pub struct SocketService {
     io_thread_handle: Arc<SegQueue<JoinHandle<()>>>,
     zmq_config: Option<ZmqConfig>,
     sockets_monitor: Arc<SocketMonitor>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct DealerToRouterRegisterMessage {
+    identity: String,
+    channel_ids: Vec<String> 
 }
 
 impl SocketService {
@@ -135,37 +139,59 @@ impl SocketService {
                 return
             }
 
-            Self::_wait_to_start_running(this_running.clone()); // TODO why is this needed?
+            Self::_wait_to_start_running(this_running.clone());
 
             let sockets = socket_manager.get_sockets();
-            // send HI from all DEALERS to ROUTERS - needed for ROUTERS to properly set identities and start working
-            let hi = "HI";
+            // send message from all DEALERS to their ROUTERS - needed for ROUTERS to properly set input identities, map channels and start working
+            // let hi = "HI";
             let mut num_dealers = 0;
             for (socket, socket_meta) in sockets {
                 if socket_meta.kind == SocketKind::Dealer {
-                    socket.send(hi, 0).expect("Unable to send HI");
+                    let register_message = DealerToRouterRegisterMessage{
+                        identity: socket_meta.identity.clone(), channel_ids: socket_meta.channel_ids.clone()
+                    };  
+                    let _encoded = serde_json::to_string(&register_message).unwrap();
+                    socket.send(&_encoded, 0).expect("Unable to send register message");
                     num_dealers += 1;
                 }
             }
-            println!("[SocketService {name}] Sent HI from {num_dealers} DEALERs");
+            println!("[SocketService {name}] Sent register messages from {num_dealers} DEALERs");
 
-            // wait for all the ROUTERS to receive HI
+            // wait for all the ROUTERS to receive register message and construct channel<->socket_identity mapping
+            let mut channels_to_identities: HashMap<String, HashMap<String, String>> = HashMap::new(); // for each router socket identity, mapping of it's channel ids to sending dealer's identities
+
             // TODO add timeout
             let mut num_routers = 0;
             for (socket, socket_meta) in sockets {
                 if socket_meta.kind == SocketKind::Router {
-                    let _identity = socket.recv_string(0).expect("Router failed receiving identity on HI").unwrap();
-                    let _hi = socket.recv_string(0).expect("Router failed receiving HI").unwrap();
-                    if _hi != hi {
-                        panic!("HI is not HI: {hi}");
+                    let mut channel_id_to_identity = HashMap::new();
+                    // TODO timeout
+                    while channel_id_to_identity.len() != socket_meta.channel_ids.len() {
+                        // wait until we recive hi from all dealers using this router
+                        let _identity = socket.recv_string(0).expect("Router failed receiving identity on register").unwrap();
+                        let _encoded = socket.recv_string(0).expect("Router failed receiving register message").unwrap();
+                        
+                        let register_message: DealerToRouterRegisterMessage = serde_json::from_str(&_encoded).unwrap();
+                        if _identity != register_message.identity {
+                            panic!("Routre recived inconsistent identity on register");
+                        }
+                        for channel_id in register_message.channel_ids {
+                            if channel_id_to_identity.contains_key(&channel_id) {
+                                panic!("Routre recived duplicate channel ids on register")
+                            }
+                            channel_id_to_identity.insert(channel_id.clone(), _identity.clone());
+                        }
                     }
+                    
+                    channels_to_identities.insert(socket_meta.identity.clone(), channel_id_to_identity);
+                    
                     num_routers += 1;
                 }
             }
-            println!("[SocketService {name}] Received HI on {num_routers} ROUTERs");
+            println!("[SocketService {name}] Received register messages on {num_routers} ROUTERs");
             
             // contains bytes (+optional destination identity for DEALER) read from subscriber but not sent due to full socket
-            let mut not_sent: HashMap<&SocketMetadata, SocketMessage> = HashMap::new();
+            let mut not_sent: HashMap<&SocketMetadata, Bytes> = HashMap::new();
 
             let lim = 100;
 
@@ -201,14 +227,12 @@ impl SocketService {
                             }
                             
                             let mut b_opt: Option<Bytes> = None;
-                            let mut identity_opt: Option<String> = None;
                             if sm.kind == SocketKind::Router {
                                 // zmq::ROUTER receives an identity frame first and actual data after, so we read twice
                                 let _identity_res = socket.recv_string(zmq::DONTWAIT);
                                 if _identity_res.is_ok() {
                                     // expect second frame to be ready right away
                                     b_opt = Some(socket.recv_bytes(zmq::DONTWAIT).expect("zmq DEALER data frame is empty while identity is present"));
-                                    identity_opt = Some(_identity_res.unwrap().unwrap());
                                 }
                             } else if sm.kind == SocketKind::Dealer {
                                 // zmq::DELAER receives data directly
@@ -222,8 +246,7 @@ impl SocketService {
 
                             if b_opt.is_some() {
                                 let b = b_opt.unwrap();
-                                let socket_message = (identity_opt, b);
-                                in_sender.try_send(socket_message).expect("In chan should not be full");
+                                in_sender.try_send(b).expect("In chan should not be full");
                             } else {
                                 break;
                             }
@@ -241,10 +264,9 @@ impl SocketService {
                             }
 
                             let mut b_opt: Option<Bytes> = None;
-                            let mut identity_opt: Option<String> = None;
                             if not_sent.contains_key(sm) {
-                                let (_identity_opt, _bytes) = not_sent.get(sm).unwrap();
-                                identity_opt = _identity_opt.clone();
+                                let _bytes = not_sent.get(sm).unwrap();
+                                // identity_opt = _identity_opt.clone();
                                 b_opt = Some(_bytes.clone());
                                 not_sent.remove(sm);
                             } else {
@@ -252,8 +274,8 @@ impl SocketService {
                                     break;
                                 }
                                 let iden = &sm.identity;
-                                let (_identity_opt, _bytes) = out_receiver.try_recv().expect(&format!("Out chan should not be empty {iden}"));
-                                identity_opt = _identity_opt;
+                                let _bytes = out_receiver.try_recv().expect(&format!("Out chan should not be empty {iden}"));
+                                // identity_opt = _identity_opt;
                                 b_opt = Some(_bytes.clone());
                             }
 
@@ -262,27 +284,30 @@ impl SocketService {
                             }
 
                             let mut identity_sent = false;
+                            let b = b_opt.unwrap();
+
                             if sm.kind == SocketKind::Router {
-                                // Router socket should get identity frame
-                                let _identity = identity_opt.clone().unwrap();
-                    
+                                // Find delivery identity
+                                let channel_id = get_channeld_id(&b);
+                                let identity = channels_to_identities.get(&sm.identity).unwrap().get(&channel_id).unwrap();
+                                
                                 // send identity frame first
-                                let res = socket.send(&_identity, zmq::DONTWAIT|zmq::SNDMORE);
+                                let res = socket.send(&identity, zmq::DONTWAIT|zmq::SNDMORE);
                                 if !res.is_ok() {
-                                    not_sent.insert(sm, (identity_opt, b_opt.unwrap()));
+                                    not_sent.insert(sm, b.clone());
                                     break;
                                 }
                                 identity_sent = true;
                             }
                             
-                            let b = b_opt.unwrap();
+                            // let b = b_opt.unwrap();
                             let res = socket.send(&b, zmq::DONTWAIT);
                             if !res.is_ok() {
                                 if identity_sent {
                                     // should not happen - panic
                                     panic!("Unable to send data after sending identity");
                                 }
-                                not_sent.insert(sm, (identity_opt, b.clone()));
+                                not_sent.insert(sm, b.clone());
                                 break;
                             }
                             j += 1;

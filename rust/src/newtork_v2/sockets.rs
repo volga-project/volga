@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crossbeam::channel::{Receiver, Sender};
 
-use super::socket_service::{SocketMessage, SocketServiceSubscriber, ZmqConfig};
+use super::{buffer_utils::Bytes, socket_service::{SocketServiceSubscriber, ZmqConfig}};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SocketKind {
@@ -128,12 +128,12 @@ impl SocketManager {
         }
     }
 
-    pub fn get_subscriber_in_sender(&self, sm: &SocketMetadata) -> Sender<SocketMessage> {
+    pub fn get_subscriber_in_sender(&self, sm: &SocketMetadata) -> Sender<Bytes> {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
         subscriber.get_in_sender(sm)
     }
 
-    pub fn get_subscriber_out_receiver(&self, sm: &SocketMetadata) -> Receiver<SocketMessage> {
+    pub fn get_subscriber_out_receiver(&self, sm: &SocketMetadata) -> Receiver<Bytes> {
         let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
         subscriber.get_out_receiver(sm)
     }

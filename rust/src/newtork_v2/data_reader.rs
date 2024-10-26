@@ -5,7 +5,7 @@ use crossbeam::{channel::{bounded, tick, unbounded, Receiver, Select, Sender}, q
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes}, channel::{self, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes}, channel::{self, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustDataReaderConfig")]
@@ -31,8 +31,8 @@ pub struct DataReader {
     job_name: String,
     channels: Arc<Vec<Channel>>,
 
-    in_chan: Arc<(Sender<SocketMessage>, Receiver<SocketMessage>)>,
-    out_chan: Arc<(Sender<SocketMessage>, Receiver<SocketMessage>)>,
+    in_chan: Arc<(Sender<Bytes>, Receiver<Bytes>)>,
+    out_chan: Arc<(Sender<Bytes>, Receiver<Bytes>)>,
     socket_metas: Vec<SocketMetadata>,
     
     result_queue: Arc<(Sender<Bytes>, Receiver<Bytes>)>,
@@ -132,9 +132,9 @@ impl DataReader {
     }
 
 
-    fn schedule_ack(socket_identity: &String, channel_id: &String, buffer_id: u32, sender: &Sender<DataReaderResponseMessage>) {
+    fn schedule_ack(channel_id: &String, buffer_id: u32, sender: &Sender<DataReaderResponseMessage>) {
         // we assume ack channels are unbounded
-        let resp = DataReaderResponseMessage::new_ack(socket_identity, channel_id, buffer_id);
+        let resp = DataReaderResponseMessage::new_ack(channel_id, buffer_id);
         sender.send(resp).unwrap();
     }
 
@@ -163,11 +163,11 @@ impl SocketServiceSubscriber for DataReader {
         &self.socket_metas
     }
 
-    fn get_in_sender(&self, _: &SocketMetadata) -> Sender<SocketMessage> {
+    fn get_in_sender(&self, _: &SocketMetadata) -> Sender<Bytes> {
         self.in_chan.0.clone()
     }
 
-    fn get_out_receiver(&self, _: &SocketMetadata) -> Receiver<SocketMessage> {
+    fn get_out_receiver(&self, _: &SocketMetadata) -> Receiver<Bytes> {
         self.out_chan.1.clone()
     }
 
@@ -194,10 +194,8 @@ impl SocketServiceSubscriber for DataReader {
                 if !res.is_ok() {
                     continue;
                 }
-                let (socket_identity_opt, b) = res.unwrap();
-
-                let socket_identity = socket_identity_opt.unwrap();
-                let size = b.len();
+                let b = res.unwrap();
+                let size: usize = b.len();
                 let channel_id = &get_channeld_id(&b);
                 this_metrics_recorder.inc(NUM_BUFFERS_RECVD, channel_id, 1);
                 this_metrics_recorder.inc(NUM_BYTES_RECVD, channel_id, size as u64);
@@ -205,7 +203,7 @@ impl SocketServiceSubscriber for DataReader {
 
                 let wm = locked_watermarks.get(channel_id).unwrap().load(Ordering::Relaxed);
                 if buffer_id as i32 <= wm {
-                    Self::schedule_ack(&socket_identity, channel_id, buffer_id, &this_response_queue.0);
+                    Self::schedule_ack(channel_id, buffer_id, &this_response_queue.0);
                 } else {
                     // We don't want out_of_order to grow infinitely and should put a limit on it,
                     // however in theory it should not happen - sender will ony send maximum of it's buffer queue size
@@ -220,7 +218,7 @@ impl SocketServiceSubscriber for DataReader {
 
                     if locked_out_of_order.contains_key(&(buffer_id as i32)) {
                         // duplicate
-                        Self::schedule_ack(&socket_identity, channel_id, buffer_id, &this_response_queue.0);
+                        Self::schedule_ack(channel_id, buffer_id, &this_response_queue.0);
                     } else {
                         locked_out_of_order.insert(buffer_id as i32, b.clone());
                         let mut next_wm = wm + 1;
@@ -240,7 +238,7 @@ impl SocketServiceSubscriber for DataReader {
                             result_queue_sender.send(payload).unwrap();
 
                             // send ack
-                            Self::schedule_ack(&socket_identity, channel_id, stored_buffer_id, &this_response_queue.0);
+                            Self::schedule_ack(channel_id, stored_buffer_id, &this_response_queue.0);
                             locked_out_of_order.remove(&next_wm);
                             next_wm += 1;
                         }
@@ -313,13 +311,11 @@ impl SocketServiceSubscriber for DataReader {
                     }
                     let batched_resp = DataReaderResponseMessage::batch_acks(resps);
                     for resp in batched_resp {
-                        let socket_identity = &resp.socket_identity;
                         let s = &this_out_chan.0;
                         let b = resp.ser();
                         let size = b.len();
-                        let socket_msg = (Some(socket_identity.clone()), b);
                         while this_runnning.load(Ordering::Relaxed) {
-                            let _res = s.send_timeout(socket_msg.clone(), Duration::from_millis(100));
+                            let _res = s.send_timeout(b.clone(), Duration::from_millis(100));
                             if _res.is_ok() {
                                 break;
                             }

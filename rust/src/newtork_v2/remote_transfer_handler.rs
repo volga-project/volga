@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::network::metrics::NUM_BYTES_RECVD;
 
-use super::{buffer_utils::get_channeld_id, channel::{to_local_and_remote, Channel}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_SENT}, socket_service::{SocketMessage, SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_utils::{get_channeld_id, Bytes}, channel::{to_local_and_remote, Channel}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_SENT}, socket_service::{SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustTransferConfig")]
@@ -33,11 +33,11 @@ pub struct RemoteTransferHandler {
     channels: Vec<Channel>,
     socket_metas: Vec<SocketMetadata>,
 
-    local_in_chans: Arc<RwLock<HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>>>,
-    local_out_chans: Arc<RwLock<HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>>>,
+    local_in_chans: Arc<RwLock<HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>>>,
+    local_out_chans: Arc<RwLock<HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>>>,
 
-    remote_in_chans: Arc<RwLock<HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>>>,
-    remote_out_chans: Arc<RwLock<HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>>>,
+    remote_in_chans: Arc<RwLock<HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>>>,
+    remote_out_chans: Arc<RwLock<HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>>>,
 
     node_ip: String,
 
@@ -86,10 +86,10 @@ impl RemoteTransferHandler {
     fn configure_sockets_and_io_chans(id: &String, name: &String, channels: &Vec<Channel>, is_sender: bool) 
     -> (
         Vec<SocketMetadata>, 
-        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, // local in
-        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, // local out
-        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, // remote in
-        HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>, // remote out
+        HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>, // local in
+        HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>, // local out
+        HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>, // remote in
+        HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>, // remote out
         String, // this node_id
         String // this node_ip
     ) {
@@ -188,8 +188,8 @@ impl RemoteTransferHandler {
                     identity: socket_identity.clone(),
                     owner_id: id.clone(),
                     kind: SocketKind::Dealer,
-                    channel_ids: channel_ids,
-                    addr: addr,
+                    channel_ids,
+                    addr,
                 };    
 
                 remote_in_chans.insert(socket_identity.clone(), bounded(CROSSBEAM_DEFAULT_CHANNEL_SIZE));
@@ -267,8 +267,8 @@ impl RemoteTransferHandler {
 }
 
 fn run_one_to_many_loop(
-    from_chan: &(Sender<SocketMessage>, Receiver<SocketMessage>),
-    to_chans: HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>,
+    from_chan: &(Sender<Bytes>, Receiver<Bytes>),
+    to_chans: HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>,
     socket_metas: Vec<SocketMetadata>,
     running: Arc<AtomicBool>,
     metrics_recorder: Arc<MetricsRecorder>,
@@ -277,7 +277,7 @@ fn run_one_to_many_loop(
 ) {
     let to_socket_identities = to_chans.keys().cloned().collect::<Vec<String>>();
     let to_socket_metas = socket_metas.into_iter().filter(|sm| to_socket_identities.contains(&sm.identity)).collect();
-    let channel_id_to_to_socket = channels_to_socket_identities(to_socket_metas);    
+    let channel_id_to_to_socket = channels_to_socket_identities(to_socket_metas);
 
     while running.load(Ordering::Relaxed) {
         let rcvd_res = from_chan.1.recv_timeout(Duration::from_millis(100));
@@ -285,9 +285,9 @@ fn run_one_to_many_loop(
             continue;
         }
 
-        let socket_message = rcvd_res.unwrap();
-        let channel_id = get_channeld_id(&socket_message.1);
-        let size = socket_message.1.len();
+        let b = rcvd_res.unwrap();
+        let channel_id = get_channeld_id(&b);
+        let size = b.len();
 
         let to_socket_identity = channel_id_to_to_socket.get(&channel_id).unwrap();   
         let to_chan = to_chans.get(to_socket_identity).unwrap();
@@ -295,7 +295,7 @@ fn run_one_to_many_loop(
         // TODO this will block whole shared channel, log? We count on higher level credit-based flow control to handle backpressure,
         // so idealy this should not happen
         while running.load(Ordering::Relaxed) {
-            let res = to_chan.0.send_timeout(socket_message.clone(), Duration::from_millis(100));
+            let res = to_chan.0.send_timeout(b.clone(), Duration::from_millis(100));
             if res.is_ok() {
                 break;
             }
@@ -306,8 +306,8 @@ fn run_one_to_many_loop(
 }
 
 fn run_many_to_one_loop(
-    from_chans: HashMap<String, (Sender<SocketMessage>, Receiver<SocketMessage>)>,
-    to_chan: &(Sender<SocketMessage>, Receiver<SocketMessage>),
+    from_chans: HashMap<String, (Sender<Bytes>, Receiver<Bytes>)>,
+    to_chan: &(Sender<Bytes>, Receiver<Bytes>),
     running: Arc<AtomicBool>,
     metrics_recorder: Arc<MetricsRecorder>,
     is_sender: bool,
@@ -329,11 +329,12 @@ fn run_many_to_one_loop(
 
         let oper = sel_res.unwrap();
         let index = oper.index();
-        let socket_message = oper.recv(&from_receivers[index]).unwrap();
-        let size = socket_message.1.len();
+
+        let b = oper.recv(&from_receivers[index]).unwrap();
+        let size = b.len();
 
         while running.load(Ordering::Relaxed) {
-            let res = to_chan.0.send_timeout(socket_message.clone(), Duration::from_millis(100));
+            let res = to_chan.0.send_timeout(b.clone(), Duration::from_millis(100));
             if res.is_ok() {
                 break;
             }
@@ -361,7 +362,7 @@ impl SocketServiceSubscriber for RemoteTransferHandler {
         &self.socket_metas
     }
 
-    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<SocketMessage> {
+    fn get_in_sender(&self, sm: &SocketMetadata) -> Sender<Bytes> {
         let local_in_chans = self.local_in_chans.read().unwrap();
         if local_in_chans.contains_key(&sm.identity) {
             return local_in_chans.get(&sm.identity).unwrap().0.clone();
@@ -374,7 +375,7 @@ impl SocketServiceSubscriber for RemoteTransferHandler {
         panic!("Can not find in chan")
     }
 
-    fn get_out_receiver(&self, sm: &SocketMetadata) -> Receiver<SocketMessage> {
+    fn get_out_receiver(&self, sm: &SocketMetadata) -> Receiver<Bytes> {
         let local_out_chans = self.local_out_chans.read().unwrap();
         if local_out_chans.contains_key(&sm.identity) {
             return local_out_chans.get(&sm.identity).unwrap().1.clone();
