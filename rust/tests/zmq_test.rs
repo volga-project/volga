@@ -1,7 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fmt::format;
-// use rand::{thread_rng, Rng};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use std::{str, thread};
 
 use volga_rust::network::utils::random_string;
@@ -118,21 +116,6 @@ fn reader(reader_identity: &str, writer_addreses: Vec<String>) -> u32{
         }
     }
 
-
-    // loop {
-    //     let msg = sock.recv_string(0).unwrap().unwrap();
-    //     if msg.eq("DONE") {
-    //         break;
-    //     }
-    //     num_rcvd += 1;
-    //     println!("Reader {} rcvd {}", identity, num_rcvd);
-    //     // let msg = sock.recv_string(0).unwrap().unwrap();
-    //     // println!("Reader {} rcvd {}", identity, msg);
-    //     // sock.send("ACK1", 0).unwrap();
-    //     // sock.send("ACK2", 0).unwrap();
-    //     // sock.send("ACK", 0).unwrap();
-    // }
-    // // println!("Reader {} rcvd total {}", identity, num_rcvd);
     return num_rcvd
 }
 
@@ -175,16 +158,6 @@ fn writer(addr: &str, reader_identities: Vec<String>, num_to_send: u32, msg_size
 
     let mut num_sent = num_to_send;
     loop {
-        // let identity = sock
-        //     .recv_string(0)
-        //     .expect("writer failed receiving identity")
-        //     .unwrap();
-        // let rcvd_msg = sock
-        //     .recv_string(0)
-        //     .expect("writer failed receiving message")
-        //     .unwrap();
-
-        // println!("Writer rcvd {} from {}", rcvd_msg, identity);
 
         let identity = reader_identities.get(index).unwrap();
         let message = random_string(msg_size);

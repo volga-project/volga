@@ -253,7 +253,6 @@ impl SocketServiceSubscriber for DataReader {
         let this_out_chan = self.out_chan.clone();
         let this_response_queue = self.response_queue.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
-        let this_socket_metas = self.socket_metas.clone();
         let this_config = self.config.clone();
         let this_channels = self.channels.clone();
 

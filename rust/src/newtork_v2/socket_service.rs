@@ -142,8 +142,8 @@ impl SocketService {
             Self::_wait_to_start_running(this_running.clone());
 
             let sockets = socket_manager.get_sockets();
+            
             // send message from all DEALERS to their ROUTERS - needed for ROUTERS to properly set input identities, map channels and start working
-            // let hi = "HI";
             let mut num_dealers = 0;
             for (socket, socket_meta) in sockets {
                 if socket_meta.kind == SocketKind::Dealer {
@@ -266,7 +266,6 @@ impl SocketService {
                             let mut b_opt: Option<Bytes> = None;
                             if not_sent.contains_key(sm) {
                                 let _bytes = not_sent.get(sm).unwrap();
-                                // identity_opt = _identity_opt.clone();
                                 b_opt = Some(_bytes.clone());
                                 not_sent.remove(sm);
                             } else {
@@ -275,7 +274,6 @@ impl SocketService {
                                 }
                                 let iden = &sm.identity;
                                 let _bytes = out_receiver.try_recv().expect(&format!("Out chan should not be empty {iden}"));
-                                // identity_opt = _identity_opt;
                                 b_opt = Some(_bytes.clone());
                             }
 
@@ -300,7 +298,6 @@ impl SocketService {
                                 identity_sent = true;
                             }
                             
-                            // let b = b_opt.unwrap();
                             let res = socket.send(&b, zmq::DONTWAIT);
                             if !res.is_ok() {
                                 if identity_sent {

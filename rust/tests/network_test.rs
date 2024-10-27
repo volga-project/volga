@@ -128,7 +128,9 @@ fn test_one_to_one(local: bool) {
             }
             backp += write_res.unwrap();
             let buffer_id = get_buffer_id(b.clone());
-            println!("Sent {buffer_id}");
+            if buffer_id%1000 == 0 {
+                println!("Sent {buffer_id}");
+            }
         }
         backp
     });
@@ -141,7 +143,9 @@ fn test_one_to_one(local: bool) {
             let b = b.unwrap();
             recvd.push(b.clone());
             let buffer_id = get_buffer_id(b.clone());
-            println!("Rcvd {buffer_id}");
+            if buffer_id%1000 == 0 {
+                println!("Rcvd {buffer_id}");
+            }
             // thread::sleep(time::Duration::from_millis(100));
         }
     }
@@ -177,7 +181,7 @@ fn test_one_to_n_local() {
 
 #[test]
 fn test_one_to_n_remote() {
-    test_one_to_n(false, 8);
+    test_one_to_n(false, 10);
 }
 
 fn test_one_to_n(local: bool, n: i32) {
@@ -327,7 +331,10 @@ fn test_one_to_n(local: bool, n: i32) {
                 write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
-            println!("[{ch_id}] Sent {buffer_id}");   
+
+            if buffer_id%1000 == 0 {
+                println!("[{ch_id}] Sent {buffer_id}");   
+            }
             num_sent += 1;
             indexes_per_channel.insert(&ch_id, index + 1);
             cur_channel_index = (cur_channel_index + 1)%&local_channels.len();
@@ -353,7 +360,9 @@ fn test_one_to_n(local: bool, n: i32) {
                     let b = b.unwrap();
                     recvd.push(b.clone());
                     let buffer_id = get_buffer_id(b.clone());
-                    println!("[{ch_id}] Rcvd {buffer_id}");
+                    if buffer_id%1000 == 0 {
+                        println!("[{ch_id}] Rcvd {buffer_id}");
+                    }
                 }
             }
 
@@ -361,6 +370,7 @@ fn test_one_to_n(local: bool, n: i32) {
             for i in 0..local_to_send.len() {
                 assert_eq!(local_to_send[i], recvd[i])
             }
+            
             println!("{ch_id} assert ok");
         });
         reader_handles.push(reader_handle);

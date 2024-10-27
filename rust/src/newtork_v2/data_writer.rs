@@ -138,6 +138,9 @@ impl DataWriter {
             }
 
             if ipc_addrs.len() != 1 {
+                for ipc_addr in ipc_addrs {
+                    println!("{ipc_addr}");
+                }
                 panic!("Duplicate ipc addrs for {name}")
             }
             let ipc_addr = ipc_addrs.iter().next().unwrap().clone();
@@ -228,11 +231,12 @@ impl SocketServiceSubscriber for DataWriter {
                     // TODO we should log blocking here and see in which cases this happens
                     while this_running.load(Ordering::Relaxed) {
                         let bid = get_buffer_id(&b);
-                        println!("Wasteful backpressure channel_id: {channel_id}, socket_identity: {socket_identity}, buffer_id: {bid}");
                         
-                        let res = sender.send_timeout(b.clone(), Duration::from_millis(1000));
+                        let res = sender.send_timeout(b.clone(), Duration::from_millis(500));
                         if res.is_ok() {
                             break;
+                        } else {
+                            println!("Wasteful backpressure channel_id: {channel_id}, socket_identity: {socket_identity}, buffer_id: {bid}");
                         }
                     }
                 }

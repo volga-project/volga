@@ -7,9 +7,10 @@ data_reader:
 transfer:
   transfer_queue_size: 10000
 zmq:
-  sndhwm: 500
-  rcvhwm: 500
-  sndbuf: 5120
-  rcvbuf: 5120
+  sndhwm: 10000
+  rcvhwm: 10000
+  sndbuf: 51200
+  rcvbuf: 51200
   linger: 0
-  connect_timeout_s: 4
+  connect_timeout_s: 5
+  num_io_threads: 4

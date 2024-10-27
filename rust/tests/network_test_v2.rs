@@ -182,13 +182,13 @@ fn test_one_to_n_local_v2() {
     test_one_to_n(true, 10); // TODO n >= 8 sometimes locks, why? - because we need to notify sender when receiver's que is unlocked after being full - is it still the case?
 }
 
-// #[test]
-// fn test_one_to_n_remote() {
-//     test_one_to_n(false, 8);
-// }
+#[test]
+fn test_one_to_n_remote_v2() {
+    test_one_to_n(false, 10);
+}
 
 fn test_one_to_n(local: bool, n: i32) {
-
+    let mut handler_id = 0;
     let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     let job_name = format!("job-{now_ts}");
     let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config.yaml");
@@ -208,9 +208,9 @@ fn test_one_to_n(local: bool, n: i32) {
             channel_id = format!("remote_ch_{i}");
             channel = Channel::Remote { 
                 channel_id: channel_id.clone(),
-                source_local_ipc_addr: format!("ipc:///tmp/source_local_{i}"), 
+                source_local_ipc_addr: format!("ipc:///tmp/source_local"), 
                 source_node_ip: String::from("127.0.0.1"), 
-                source_node_id: format!("source_node_{i}"), // TODO this does not properly configure sockets if source_node_id is same, why?
+                source_node_id: format!("source_node"),
                 target_local_ipc_addr: format!("ipc:///tmp/target_local_{i}"), 
                 target_node_ip: String::from("127.0.0.1"), 
                 target_node_id: format!("target_node_{i}"), 
@@ -220,57 +220,64 @@ fn test_one_to_n(local: bool, n: i32) {
         }
         channels.push(channel.clone());
         let data_reader = Arc::new(DataReader::new(
-            format!("{i}"),
+            format!("{handler_id}"),
             format!("data_reader_{i}"),
             job_name.clone(),
             network_config.data_reader.clone(),
             vec![channel.clone()],
         ));
         data_readers.insert(channel_id.clone(), data_reader);
+        handler_id += 1;
     }
     
     let data_readers = Arc::new(RwLock::new(data_readers));
 
     let data_writer = Arc::new(DataWriter::new(
-        format!("{n}"),
+        format!("{handler_id}"),
         String::from("data_writer"),
         job_name.clone(),
         network_config.data_writer,
         channels.to_vec(),
     ));
+    handler_id += 1;
 
-    // let mut remote_transfer_handlers = Vec::new();
+    let mut remote_transfer_handlers = Vec::new();
 
     let socket_service = SocketService::new(String::from("socket_service"), network_config.zmq);
     for (_, data_reader) in data_readers.read().unwrap().iter() {
         socket_service.subscribe(data_reader.clone());
     }
     socket_service.subscribe(data_writer.clone());
-    // if !local {
-    //     let transfer_sender = Arc::new(RemoteTransferHandler::new(
-    //         String::from("transfer_sender"),
-    //         job_name.clone(),
-    //         channels.to_vec(),
-    //         network_config.transfer.clone(),
-    //         Direction::Sender
-    //     ));
-    //     for channel in channels.to_vec() { 
-    //         let ch_id = channel.get_channel_id().clone();
-    //         let transfer_receiver = Arc::new(RemoteTransferHandler::new(
-    //             format!("transfer_receiver_{ch_id}"),
-    //             job_name.clone(),
-    //             vec![channel.clone()],
-    //             network_config.transfer.clone(),
-    //             Direction::Receiver
-    //         ));
-    //         io_loop.register_handler(transfer_receiver.clone());
-    //         transfer_receiver.start();
-    //         remote_transfer_handlers.push(transfer_receiver.clone());
-    //     }
-    //     io_loop.register_handler(transfer_sender.clone());
-    //     remote_transfer_handlers.push(transfer_sender.clone());
-    //     transfer_sender.start();
-    // }
+    if !local {
+        let transfer_sender = Arc::new(RemoteTransferHandler::new(
+            format!("{handler_id}"),
+            String::from("transfer_sender"),
+            job_name.clone(),
+            channels.to_vec(),
+            network_config.transfer.clone(),
+            true
+        ));
+
+        handler_id += 1;
+        for channel in channels.to_vec() { 
+            let ch_id = channel.get_channel_id().clone();
+            let transfer_receiver = Arc::new(RemoteTransferHandler::new(
+                format!("{handler_id}"),
+                format!("transfer_receiver_{ch_id}"),
+                job_name.clone(),
+                vec![channel.clone()],
+                network_config.transfer.clone(),
+                false
+            ));
+            handler_id += 1;
+            socket_service.subscribe(transfer_receiver.clone());
+            transfer_receiver.start();
+            remote_transfer_handlers.push(transfer_receiver.clone());
+        }
+        socket_service.subscribe(transfer_sender.clone());
+        remote_transfer_handlers.push(transfer_sender.clone());
+        transfer_sender.start();
+    }
 
     for (_, data_reader) in data_readers.read().unwrap().iter() {
         data_reader.start();
