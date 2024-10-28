@@ -1,56 +1,49 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
+use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering}, Arc, Condvar, Mutex, RwLock}, thread::{self, JoinHandle}, time::{self, Duration, SystemTime}};
 
-use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
+use crossbeam::{channel::{unbounded, Receiver, Sender}, queue::ArrayQueue};
 
-use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta, Bytes}, channel::{Channel, DataReaderResponseMessage}, io_loop::CROSSBEAM_DEFAULT_CHANNEL_SIZE};
-
-// TODO test in-flight resend
-// TODO class description
+use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta}, channel::{self, Channel, DataReaderResponseMessage}, io_loop::Bytes};
 
 struct BufferQueueInner {
-    v: VecDeque<Bytes>,
+    v: VecDeque<Box<Bytes>>,
     index: usize,
     buffer_id_seq: u32,
     pop_requests: HashSet<u32>,
-    max_capacity_bytes: usize,
-    cur_occupied_bytes: usize,
-    in_flights: HashMap<u32, (u128, Bytes)>,
+    max_buffers_per_channel: usize,
+    in_flights: HashMap<u32, (u128, Box<Bytes>)>,
     in_flight_timeout_s: usize
 }
 
 impl BufferQueueInner {
 
-    pub fn can_push(&self, b: &Bytes) -> bool {
-        self.cur_occupied_bytes + b.len() <= self.max_capacity_bytes
+    pub fn is_full(&self) -> bool {
+        self.v.len() == self.max_buffers_per_channel
     }
 
-    pub fn new(max_capacity_bytes: usize, in_flight_timeout_s: usize) -> Self {
+    pub fn new(max_buffers_per_channel: usize, in_flight_timeout_s: usize) -> Self {
         BufferQueueInner{
-            v: VecDeque::new(), 
+            v: VecDeque::with_capacity(max_buffers_per_channel), 
             index: 0, 
             buffer_id_seq: 0, 
             pop_requests: HashSet::new(),
-            max_capacity_bytes,
-            cur_occupied_bytes: 0,
+            max_buffers_per_channel,
             in_flights: HashMap::new(),
             in_flight_timeout_s
         }
     }
 
-    pub fn push(&mut self, channel_id: String, b: Bytes) {
-        if !self.can_push(&b) {
-            panic!("Pushing when max capacity reached");
+    pub fn push(&mut self, channel_id: String, b: Box<Bytes>) {
+        if self.v.len() == self.max_buffers_per_channel {
+            panic!("Pushing when max capacity");
         }
         let buffer_id = self.buffer_id_seq;
         let new_b = new_buffer_with_meta(b, channel_id.clone(), buffer_id);
-        let size = new_b.len();
         self.v.push_back(new_b);
         self.buffer_id_seq = buffer_id + 1;
-        self.cur_occupied_bytes += size;
     }
 
     // returns value from queue at schedule index without popping
-    pub fn schedule_next(&mut self) -> Option<Bytes> {
+    pub fn schedule_next(&mut self) -> Option<Box<Bytes>> {
         let len = self.v.len();
         if len == 0 {
             return None;
@@ -62,7 +55,7 @@ impl BufferQueueInner {
         }
         let res = self.v.get(index).unwrap();
         self.index += 1;
-        Some(res.to_vec())
+        Some(res.clone())
     }
 
     pub fn has_next_schedulable(&self) -> bool {
@@ -75,10 +68,9 @@ impl BufferQueueInner {
         let mut popped = vec![];
         while self.v.len() != 0 {
             let peek_buffer = self.v.get(0).unwrap();
-            let peek_buffer_id = get_buffer_id(peek_buffer);
+            let peek_buffer_id = get_buffer_id(peek_buffer.clone());
             if self.pop_requests.contains(&peek_buffer_id) {
-                let b = self.v.pop_front().unwrap();
-                self.cur_occupied_bytes -= b.len();
+                self.v.pop_front();
                 self.pop_requests.remove(&peek_buffer_id);
                 self.index -= 1;
                 popped.push(peek_buffer_id);
@@ -89,11 +81,11 @@ impl BufferQueueInner {
         popped
     }
 
-    pub fn get_resendable_in_flight(&self) -> Option<Bytes> {
+    pub fn get_resendable_in_flight(&self) -> Option<Box<Bytes>> {
         for (_, ts_and_b) in &self.in_flights {
             let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
             if now_ts - ts_and_b.0 > self.in_flight_timeout_s as u128 {
-                return Some(ts_and_b.1.to_vec());
+                return Some(ts_and_b.1.clone());
             }
         }
         None
@@ -105,17 +97,13 @@ impl BufferQueueInner {
     }
 
     pub fn has_reached_max_in_flights(&self) -> bool {
-        let mut in_flight_size_bytes = 0;
-        for (_, ts_and_b) in &self.in_flights {
-            in_flight_size_bytes += ts_and_b.1.len();
-        }
-        in_flight_size_bytes >= self.max_capacity_bytes
+        self.in_flights.len() == self.max_buffers_per_channel
     }
 
-    pub fn add_in_flight(&mut self, b: Bytes) {
-        let buffer_id = get_buffer_id(&b);
+    pub fn add_in_flight(&mut self, b: Box<Bytes>) {
+        let buffer_id = get_buffer_id(b.clone());
         let now_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
-        self.in_flights.insert(buffer_id, (now_ts, b));
+        self.in_flights.insert(buffer_id, (now_ts, b.clone()));
     }
 
     pub fn remove_in_flight(&mut self, buffer_id: u32) {
@@ -128,14 +116,14 @@ pub struct BufferQueuesInner {
 }
 
 impl BufferQueuesInner {
-    pub fn new(channels: &Vec<Channel>, max_capapcity_bytes_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueuesInner {
+    pub fn new(channels: &Vec<Channel>, max_buffers_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueuesInner {
         let n_channels = channels.len();
         let mut queues = HashMap::with_capacity(n_channels);
         for ch in channels {
-            queues.insert(ch.get_channel_id().clone(), BufferQueueInner::new(max_capapcity_bytes_per_channel, in_flight_timeout_s));
+            queues.insert(ch.get_channel_id().clone(), BufferQueueInner::new(max_buffers_per_channel, in_flight_timeout_s));
         }
 
-        BufferQueuesInner{queues}
+        BufferQueuesInner{queues: queues}
     }
 
     pub fn has_at_least_one_resendable_in_flight(&self) -> bool {
@@ -156,21 +144,21 @@ impl BufferQueuesInner {
         false
     }
 
-    pub fn schedule(&mut self) -> HashMap<&String, Bytes> {
+    pub fn schedule(&mut self) -> HashMap<&String, Box<Bytes>> {
         let mut res = HashMap::new();
         for (channel_id, queue) in self.queues.iter_mut() {
             // check in-flights first
             let b = queue.get_resendable_in_flight();
             if b.is_some() {
                 let b = b.unwrap();
-                res.insert(channel_id, b);
+                res.insert(channel_id, b.clone());
             } else {
                 // if no in-flights, schedule only if in-flight limit is not reached
                 if !queue.has_reached_max_in_flights() {
                     let b = queue.schedule_next();
                     if b.is_some() {
                         let b = b.unwrap();
-                        res.insert(channel_id, b);
+                        res.insert(channel_id, b.clone());
                     }
                 }
             }
@@ -178,16 +166,12 @@ impl BufferQueuesInner {
         res
     }
 
-    // pub fn is_full(&self, channel_id: &String) -> bool {
-    //     let buffer_queue = self.queues.get(channel_id).unwrap();
-    //     buffer_queue.is_full()
-    // }
-    pub fn can_push(&self, channel_id: &String, b: &Bytes) -> bool {
+    pub fn is_full(&self, channel_id: &String) -> bool {
         let buffer_queue = self.queues.get(channel_id).unwrap();
-        buffer_queue.can_push(b)
+        buffer_queue.is_full()
     }
 
-    pub fn push(&mut self, channel_id: &String, b: Bytes) {
+    pub fn push(&mut self, channel_id: &String, b: Box<Bytes>) {
         let buffer_queue = self.queues.get_mut(channel_id).unwrap();
         buffer_queue.push(channel_id.clone(), b)
     }
@@ -197,7 +181,7 @@ impl BufferQueuesInner {
         buffer_queue.request_pop(buffer_id)
     }
 
-    pub fn add_in_flight(&mut self, channel_id: &String, b: Bytes) {
+    pub fn add_in_flight(&mut self, channel_id: &String, b: Box<Bytes>) {
         let buffer_queue = self.queues.get_mut(channel_id).unwrap();
         buffer_queue.add_in_flight(b);
     }
@@ -211,26 +195,30 @@ impl BufferQueuesInner {
 pub struct BufferQueues {
     queues: Arc<Mutex<BufferQueuesInner>>,
     condvar: Arc<Condvar>,
-    out_chan: Arc<(Sender<(String, Bytes)>, Receiver<(String, Bytes)>)>,
+    chans: Arc<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>>,
     running: Arc<AtomicBool>,
     thread_handles: Arc<ArrayQueue<JoinHandle<()>>>, // array queue so we do not mutate DataReader and keep ownership
 }
 
 impl BufferQueues {
-    pub fn new(channels: &Vec<Channel>, max_capacity_bytes_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueues {
-        let bqs = BufferQueuesInner::new(channels, max_capacity_bytes_per_channel, in_flight_timeout_s);
+    pub fn new(channels: &Vec<Channel>, max_buffers_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueues {
+        let bqs = BufferQueuesInner::new(channels, max_buffers_per_channel, in_flight_timeout_s);
         
+        let n_channels = channels.clone().len();
+        let mut chans = HashMap::with_capacity(n_channels);
+        for ch in channels {
+            chans.insert(ch.get_channel_id().clone(), unbounded());
+        }
+
         BufferQueues{
             queues: Arc::new(Mutex::new(bqs)), 
             condvar: Arc::new(Condvar::new()), 
-            out_chan: Arc::new(bounded(CROSSBEAM_DEFAULT_CHANNEL_SIZE)),
+            chans: Arc::new(chans), 
             running: Arc::new(AtomicBool::new(false)),
             thread_handles: Arc::new(ArrayQueue::new(2))
         }
     }
 
-    // TODO test this
-    // TODO can we use crossbeam tick here instead of a separate thread?
     fn start_timer(&self) {
         let this_queues = self.queues.clone();
         let this_running = self.running.clone();
@@ -253,22 +241,16 @@ impl BufferQueues {
 
         let this_queues = self.queues.clone();
         let this_running = self.running.clone();
-        let this_out_chan = self.out_chan.clone();
+        let this_chans = self.chans.clone();
         let this_condvar = self.condvar.clone();
         let scheduler_loop = move || {
 
             while this_running.load(Ordering::Relaxed) {
                 let mut locked_queues = this_queues.lock().unwrap();
-                let schedulable = locked_queues.schedule();
-                for (channel_id, b) in schedulable {
-                    let s = &this_out_chan.0;
-                    // TODO update test to use 1 output channel
-                    while this_running.load(Ordering::Relaxed) {
-                        let res = s.send_timeout((channel_id.clone(), b.clone()), Duration::from_millis(100));
-                        if res.is_ok() {
-                            break;
-                        }
-                    }
+                let bs = locked_queues.schedule();
+                for (channel_id, b) in bs {
+                    let (s, _) = this_chans.get(channel_id).unwrap();
+                    s.try_send(b).expect("Unable to send to buffer channel");
                 }
 
                 while !locked_queues.has_at_least_one_schedulable() {
@@ -300,10 +282,10 @@ impl BufferQueues {
         }
     }
 
-    pub fn try_push(&self, channel_id: &String, b: Bytes) -> bool {
+    pub fn try_push(&self, channel_id: &String, b: Box<Bytes>) -> bool {
         let timeout_ms = 100;
         let mut locked_bq = self.queues.lock().unwrap();
-        while !locked_bq.can_push(channel_id, &b) {
+        while locked_bq.is_full(channel_id) {
             let res = self.condvar.wait_timeout(locked_bq, Duration::from_millis(timeout_ms)).unwrap();
             if res.1.timed_out() {
                 return false;
@@ -329,8 +311,8 @@ impl BufferQueues {
         popped
     }
 
-    pub fn get_out_chan(&self) -> &(Sender<(String, Bytes)>, Receiver<(String, Bytes)>) {
-        &self.out_chan
+    pub fn get_chans(&self) -> Arc<HashMap<String, (Sender<Box<Bytes>>, Receiver<Box<Bytes>>)>> {
+        self.chans.clone()
     }
 }
 
@@ -339,12 +321,12 @@ mod tests {
 
     use std::{thread, time};
 
-    use crate::newtork_v2::buffer_utils::dummy_bytes;
+    use crate::network_deprecated::buffer_utils::dummy_bytes;
 
     use super::*;
 
     #[test]
-    fn test_buffer_queues_v2() {
+    fn test_buffer_queues() {
         let num_channels = 1;
         let mut channels = vec![];
 
@@ -357,7 +339,7 @@ mod tests {
         }
         let qs = Arc::new(BufferQueues::new(&channels, 10, 1));
 
-        let dummy_buffer_ids: Vec<u32> = (0..100000).collect();
+        let dummy_buffer_ids: Vec<u32> = (0..1000000).collect();
         let dummy_buffer_ids = Arc::new(dummy_buffer_ids);
 
         let mut pushers = vec![];
@@ -377,27 +359,37 @@ mod tests {
             pushers.push(pusher);
         }
 
-        let qs_c = qs.clone();
-        let bids_c = dummy_buffer_ids.clone();
-        let consumer = thread::spawn(move || {
-            let mut i = 0;
-            let bq_out_chan = qs_c.get_out_chan();
-            while i < bids_c.len() {
-                let (channel_id, b) = bq_out_chan.1.recv().unwrap();
-                let buffer_id = get_buffer_id(&b);
-                let ack = DataReaderResponseMessage::new_ack(&channel_id, buffer_id);
-                let popped = qs_c.handle_ack(&ack);
-                // thread::sleep(time::Duration::from_millis(50));
-                thread::sleep(time::Duration::from_micros(100));
-                let s = format!("[{channel_id}] Popped {:?}", popped);
-                println!("{s}");
-                if popped.len() == 0 {
-                    continue;
-                } else {
-                    i += 1;
+
+        let mut consumers = vec![];
+
+
+        for channel in channels {
+            let _channel_id = channel.get_channel_id().clone();
+            let qs_c = qs.clone();
+            let bids_c = dummy_buffer_ids.clone();
+            let bq_out_chans = qs.get_chans().clone();
+            let consumer = thread::spawn(move || {
+            
+                let scheduled = bq_out_chans.get(&_channel_id).unwrap();
+                let mut i = 0;
+                while i < bids_c.len() {
+                    let b = scheduled.1.recv().unwrap();
+                    let buffer_id = get_buffer_id(b);
+                    let ack = DataReaderResponseMessage::new_ack(&_channel_id, buffer_id);
+                    let popped = qs_c.handle_ack(&ack);
+                    // thread::sleep(time::Duration::from_millis(50));
+                    thread::sleep(time::Duration::from_micros(100));
+                    let s = format!("[{_channel_id}] Popped {:?}", popped);
+                    println!("{s}");
+                    if popped.len() == 0 {
+                        continue;
+                    } else {
+                        i += 1;
+                    }
                 }
-            }
-        });
+            });
+            consumers.push(consumer);
+        }
         qs.start();
 
         while !pushers.is_empty() {
@@ -405,7 +397,10 @@ mod tests {
             p.join().unwrap();
         }
         
-        consumer.join().unwrap();
+        while !consumers.is_empty() {
+            let c = consumers.pop().unwrap();
+            c.join().unwrap();
+        }
         qs.close();
     }
 }

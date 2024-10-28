@@ -1,16 +1,16 @@
 
-use std::{collections::HashMap, sync::{Arc, RwLock}, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{Arc, RwLock}, time::{SystemTime, UNIX_EPOCH}};
 
-use volga_rust::newtork_v2::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::{DataReader, DataReaderConfig}, data_writer::{DataWriter, DataWriterConfig}, network_config::NetworkConfig, remote_transfer_handler::{RemoteTransferHandler, TransferConfig}, io_loop::{IOLoop, IOHandler}};
+use volga_rust::network_deprecated::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::DataReader, data_writer::{self, DataWriter}, io_loop::{Direction, IOHandler, IOLoop}, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, utils::random_string};
 
 
 #[test]
-fn test_one_to_one_local_v2() {
+fn test_one_to_one_local_deprecated() {
     test_one_to_one(true);
 }
 
 #[test]
-fn test_one_to_one_remote_v2() {
+fn test_one_to_one_remote_deprecated() {
     test_one_to_one(false);
 }
 
@@ -18,14 +18,10 @@ fn test_one_to_one_remote_v2() {
 // TODO add transfer handler disconnect/reconnect test 
 // TODO test in-flight resends
 // TODO test backpressure
-fn _setup_one_to_one_reader_writer(local: bool, network_config: NetworkConfig) -> (
-    Channel,
-    Arc<DataReader>,
-    Arc<DataWriter>,
-    Option<Arc<RemoteTransferHandler>>,
-    Option<Arc<RemoteTransferHandler>>,
-    IOLoop
-) {
+
+fn test_one_to_one(local: bool) {
+    let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config_deprecated.yaml");
+
     let channel;
     if local {
         channel = Channel::Local { 
@@ -46,94 +42,58 @@ fn _setup_one_to_one_reader_writer(local: bool, network_config: NetworkConfig) -
     }
     let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     let job_name = format!("job-{now_ts}");
-    let data_writer = Arc::new(DataWriter::new(
-        String::from("0"),
-        String::from("data_writer"),
-        job_name.clone(),
-        network_config.data_writer,
-        vec![channel.clone()],
-    ));
     let data_reader = Arc::new(DataReader::new(
-        String::from("1"),
         String::from("data_reader"),
         job_name.clone(),
         network_config.data_reader,
         vec![channel.clone()],
     ));
+    let data_writer = Arc::new(DataWriter::new(
+        String::from("data_writer"),
+        job_name.clone(),
+        network_config.data_writer,
+        vec![channel.clone()],
+    ));
+
+    let mut remote_transfer_handlers = Vec::new();
 
     let io_loop = IOLoop::new(String::from("io_loop"), network_config.zmq);
     io_loop.register_handler(data_reader.clone());
     io_loop.register_handler(data_writer.clone());
-
-    let mut transfer_sender_opt: Option<Arc<RemoteTransferHandler>> = None;
-    let mut transfer_receiver_opt: Option<Arc<RemoteTransferHandler>> = None;
     if !local {
         let transfer_sender = Arc::new(RemoteTransferHandler::new(
-            String::from("2"),
             String::from("transfer_sender"),
             job_name.clone(),
             vec![channel.clone()],
             network_config.transfer.clone(),
-            true
+            Direction::Sender
         ));
         let transfer_receiver = Arc::new(RemoteTransferHandler::new(
-            String::from("3"),
             String::from("transfer_receiver"),
             job_name.clone(),
             vec![channel.clone()],
             network_config.transfer.clone(),
-            false
+            Direction::Receiver
         ));
         io_loop.register_handler(transfer_sender.clone());
         io_loop.register_handler(transfer_receiver.clone());
-        transfer_sender_opt = Some(transfer_sender);
-        transfer_receiver_opt = Some(transfer_receiver);
+        remote_transfer_handlers.push(transfer_sender.clone());
+        remote_transfer_handlers.push(transfer_receiver.clone());
+        transfer_sender.start();
+        transfer_receiver.start();
     }
 
-    let err = io_loop.connect(5000);
+    data_reader.start();
+    data_writer.start();
+
+    let err = io_loop.connect(1, 5000);
     if err.is_some() {
         let err = err.unwrap();
         panic!("{err}")
     }
-
-    (
-        channel,
-        data_reader,
-        data_writer,
-        transfer_sender_opt,
-        transfer_receiver_opt,
-        io_loop
-    )
-}
-
-fn test_one_to_one(local: bool) {
-    let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config.yaml");
-    let (
-        channel,
-        data_reader,
-        data_writer,
-        transfer_sender_opt,
-        transfer_receiver_opt,
-        io_loop
-    ) = _setup_one_to_one_reader_writer(local, network_config);
-
-    data_reader.start();
-    data_writer.start();
-    let mut remote_transfer_handlers: Vec<Arc<RemoteTransferHandler>> = Vec::new();
-    if transfer_sender_opt.is_some() {
-        let transfer_sender = transfer_sender_opt.unwrap();
-        transfer_sender.start();
-        remote_transfer_handlers.push(transfer_sender);
-    }
-
-    if transfer_receiver_opt.is_some() {
-        let transfer_receiver = transfer_receiver_opt.unwrap();
-        transfer_receiver.start();
-        remote_transfer_handlers.push(transfer_receiver);
-    }
     io_loop.start();
 
-    let num_msgs = 100000;
+    let num_msgs = 300000;
     let payload_size = 128;
 
     let data_alloc_start_ts = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -163,12 +123,11 @@ fn test_one_to_one(local: bool) {
                     panic!("Max retries");
                 }
                 r += 1;
-                backp += write_timeout_ms;
+                backp += write_timeout_ms as u128;
                 write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
-            let buffer_id = get_buffer_id(b);
-
+            let buffer_id = get_buffer_id(b.clone());
             if buffer_id%1000 == 0 {
                 println!("Sent {buffer_id}");
             }
@@ -183,7 +142,7 @@ fn test_one_to_one(local: bool) {
         if b.is_some() {
             let b = b.unwrap();
             recvd.push(b.clone());
-            let buffer_id = get_buffer_id(&b);
+            let buffer_id = get_buffer_id(b.clone());
             if buffer_id%1000 == 0 {
                 println!("Rcvd {buffer_id}");
             }
@@ -193,20 +152,20 @@ fn test_one_to_one(local: bool) {
     
     let total_ms = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start_ts;
     let backp_ms = j_handle.join().unwrap();
-    let throughput = ((num_msgs as f64)/(total_ms as f64) * 1000.0) as u32;
+    let throughput = ((num_msgs as f64)/(total_ms as f64) * 1000.0) as u16;
     println!("Transfered in (ms): {total_ms}");
     println!("Backpressure (ms): {backp_ms}");
     println!("Throughput (msg/s): {throughput}");
-
-    data_reader.stop();
-    data_writer.stop();
+    
+    data_reader.close();
+    data_writer.close();
     if !local {
         while remote_transfer_handlers.len() != 0 {
-            remote_transfer_handlers.pop().unwrap().stop();
+            remote_transfer_handlers.pop().unwrap().close();
         }
     }
 
-    io_loop.stop();
+    io_loop.close();
     assert_eq!(to_send.len(), recvd.len());
     for i in 0..to_send.len() {
         assert_eq!(to_send[i], recvd[i])
@@ -216,20 +175,20 @@ fn test_one_to_one(local: bool) {
 }
 
 #[test]
-fn test_one_to_n_local_v2() {
-    test_one_to_n(true, 10); // TODO n >= 8 sometimes locks, why? - because we need to notify sender when receiver's que is unlocked after being full - is it still the case?
+fn test_one_to_n_local_deprecated() {
+    test_one_to_n(true, 10); // TODO n >= 8 sometimes locks, why? - because we need to notify sender when receiver's que is unlocked after being full
 }
 
 #[test]
-fn test_one_to_n_remote_v2() {
+fn test_one_to_n_remote_deprecated() {
     test_one_to_n(false, 10);
 }
 
 fn test_one_to_n(local: bool, n: i32) {
-    let mut handler_id = 0;
+
     let now_ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis();
     let job_name = format!("job-{now_ts}");
-    let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config.yaml");
+    let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config_deprecated.yaml");
     let mut channels = vec![];
     let mut data_readers = HashMap::new();
     let mut base_port = 2345;
@@ -246,9 +205,9 @@ fn test_one_to_n(local: bool, n: i32) {
             channel_id = format!("remote_ch_{i}");
             channel = Channel::Remote { 
                 channel_id: channel_id.clone(),
-                source_local_ipc_addr: format!("ipc:///tmp/source_local"), 
+                source_local_ipc_addr: format!("ipc:///tmp/source_local_{i}"), 
                 source_node_ip: String::from("127.0.0.1"), 
-                source_node_id: format!("source_node"),
+                source_node_id: format!("source_node_{i}"), // TODO this does not properly configure sockets if source_node_id is same, why?
                 target_local_ipc_addr: format!("ipc:///tmp/target_local_{i}"), 
                 target_node_ip: String::from("127.0.0.1"), 
                 target_node_id: format!("target_node_{i}"), 
@@ -258,26 +217,22 @@ fn test_one_to_n(local: bool, n: i32) {
         }
         channels.push(channel.clone());
         let data_reader = Arc::new(DataReader::new(
-            format!("{handler_id}"),
-            format!("data_reader_{i}"),
+            String::from("data_reader"),
             job_name.clone(),
             network_config.data_reader.clone(),
             vec![channel.clone()],
         ));
         data_readers.insert(channel_id.clone(), data_reader);
-        handler_id += 1;
     }
     
     let data_readers = Arc::new(RwLock::new(data_readers));
 
     let data_writer = Arc::new(DataWriter::new(
-        format!("{handler_id}"),
         String::from("data_writer"),
         job_name.clone(),
         network_config.data_writer,
         channels.to_vec(),
     ));
-    handler_id += 1;
 
     let mut remote_transfer_handlers = Vec::new();
 
@@ -288,26 +243,21 @@ fn test_one_to_n(local: bool, n: i32) {
     io_loop.register_handler(data_writer.clone());
     if !local {
         let transfer_sender = Arc::new(RemoteTransferHandler::new(
-            format!("{handler_id}"),
             String::from("transfer_sender"),
             job_name.clone(),
             channels.to_vec(),
             network_config.transfer.clone(),
-            true
+            Direction::Sender
         ));
-
-        handler_id += 1;
         for channel in channels.to_vec() { 
             let ch_id = channel.get_channel_id().clone();
             let transfer_receiver = Arc::new(RemoteTransferHandler::new(
-                format!("{handler_id}"),
                 format!("transfer_receiver_{ch_id}"),
                 job_name.clone(),
                 vec![channel.clone()],
                 network_config.transfer.clone(),
-                false
+                Direction::Receiver
             ));
-            handler_id += 1;
             io_loop.register_handler(transfer_receiver.clone());
             transfer_receiver.start();
             remote_transfer_handlers.push(transfer_receiver.clone());
@@ -322,7 +272,7 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     data_writer.start();
 
-    let err = io_loop.connect(5000);
+    let err = io_loop.connect(1, 5000);
     if err.is_some() {
         let err = err.unwrap();
         panic!("{err}")
@@ -369,7 +319,7 @@ fn test_one_to_n(local: bool, n: i32) {
             let ch_id = &channel.get_channel_id();
             let index = indexes_per_channel[*ch_id];
             let b = &locked.get(*ch_id).unwrap()[index];
-            let buffer_id = get_buffer_id(&b);
+            let buffer_id = get_buffer_id(b.clone());
             let mut write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             let mut r = 0;
             while write_res.is_none() {
@@ -377,12 +327,13 @@ fn test_one_to_n(local: bool, n: i32) {
                     panic!("Max retries");
                 }
                 r += 1;
-                backp += write_timeout_ms;
+                backp += write_timeout_ms as u128;
                 write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
+
             if buffer_id%1000 == 0 {
-                println!("[{ch_id}] Sent {buffer_id}");
+                println!("[{ch_id}] Sent {buffer_id}");   
             }
             num_sent += 1;
             indexes_per_channel.insert(&ch_id, index + 1);
@@ -408,7 +359,7 @@ fn test_one_to_n(local: bool, n: i32) {
                 if b.is_some() {
                     let b = b.unwrap();
                     recvd.push(b.clone());
-                    let buffer_id = get_buffer_id(&b);
+                    let buffer_id = get_buffer_id(b.clone());
                     if buffer_id%1000 == 0 {
                         println!("[{ch_id}] Rcvd {buffer_id}");
                     }
@@ -419,6 +370,7 @@ fn test_one_to_n(local: bool, n: i32) {
             for i in 0..local_to_send.len() {
                 assert_eq!(local_to_send[i], recvd[i])
             }
+            
             println!("{ch_id} assert ok");
         });
         reader_handles.push(reader_handle);
@@ -436,118 +388,17 @@ fn test_one_to_n(local: bool, n: i32) {
     println!("Throughput (msg/s): {throughput}");
     
     for (_, data_reader) in data_readers.read().unwrap().iter() {
-        data_reader.stop();
+        data_reader.close();
     }
-    data_writer.stop();
+    data_writer.close();
     if !local {
         while remote_transfer_handlers.len() != 0 {
-            remote_transfer_handlers.pop().unwrap().stop();
+            remote_transfer_handlers.pop().unwrap().close();
         }
     }
 
-    io_loop.stop();
+    io_loop.close();
 
     println!("TEST OK");
 
-}
-
-
-#[test]
-fn test_backpressure_local() {
-    test_backpressure(true);
-}
-
-#[test]
-fn test_backpressure_remote() {
-    test_backpressure(false);
-}
-
-// TODO this does not work, why?
-fn test_backpressure(local: bool) {
-    
-    let network_config = NetworkConfig {
-        data_reader: DataReaderConfig {
-            output_queue_capacity_bytes: 120,
-            response_batch_period_ms: Some(100)
-        },
-        data_writer: DataWriterConfig {
-            in_flight_timeout_s: 1,
-            max_capacity_bytes_per_channel: 120
-        },
-        transfer: TransferConfig {
-            transfer_queue_size: 10 // no-op
-        },
-        zmq: None
-    };
-
-    let (
-        channel,
-        data_reader,
-        data_writer,
-        transfer_sender_opt,
-        transfer_receiver_opt,
-        io_loop
-    ) = _setup_one_to_one_reader_writer(local, network_config.clone());
-
-    data_reader.start();
-    data_writer.start();
-    let mut remote_transfer_handlers: Vec<Arc<RemoteTransferHandler>> = Vec::new();
-    if transfer_sender_opt.is_some() {
-        let transfer_sender = transfer_sender_opt.unwrap();
-        transfer_sender.start();
-        remote_transfer_handlers.push(transfer_sender);
-    }
-
-    if transfer_receiver_opt.is_some() {
-        let transfer_receiver = transfer_receiver_opt.unwrap();
-        transfer_receiver.start();
-        remote_transfer_handlers.push(transfer_receiver);
-    }
-    io_loop.start();
-
-    let total_size = network_config.data_reader.output_queue_capacity_bytes + network_config.data_writer.max_capacity_bytes_per_channel;
-    let channel_id = channel.get_channel_id();
-    let payload_size = 5;
-
-    let mut buffer_id = 0;
-    let mut capacity = total_size;
-    loop {
-        let b = dummy_bytes(buffer_id, channel_id, payload_size);
-        let size = b.len();
-        if capacity >= size {
-            let res = data_writer.write_bytes(channel_id, b, 200);
-            assert!(res.is_some());
-            capacity -= size;
-            buffer_id += 1;
-            thread::sleep(Duration::from_millis(100));
-        } else {
-            break;
-        }
-    }
-
-    // should bp now
-    let b = dummy_bytes(buffer_id, channel_id, payload_size);
-    let res = data_writer.write_bytes(channel_id, b, 200);
-    buffer_id += 1;
-    assert!(res.is_none());
-    thread::sleep(Duration::from_millis(100));
-    // read
-    let read = data_reader.read_bytes();
-    assert!(read.is_some());
-    thread::sleep(Duration::from_millis(100));
-    // should not bp
-    let b = dummy_bytes(buffer_id, channel_id, payload_size);
-    let res = data_writer.write_bytes(channel_id, b, 200);
-    assert!(res.is_some());
-
-    data_reader.stop();
-    data_writer.stop();
-    if !local {
-        while remote_transfer_handlers.len() != 0 {
-            remote_transfer_handlers.pop().unwrap().stop();
-        }
-    }
-
-    io_loop.stop();
-    println!("TEST OK");
 }

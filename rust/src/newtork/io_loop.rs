@@ -5,7 +5,7 @@ use crossbeam::{channel::{Receiver, Sender}, queue::SegQueue};
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use crate::newtork_v2::{buffer_utils::get_channeld_id, sockets::{SocketKind, SocketManager, SocketMetadata}};
+use crate::newtork::{buffer_utils::get_channeld_id, sockets::{SocketKind, SocketManager, SocketMetadata}};
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 

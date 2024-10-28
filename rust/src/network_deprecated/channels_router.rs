@@ -208,7 +208,7 @@ mod tests {
 
     use crossbeam::channel::unbounded;
 
-    use crate::network::buffer_utils::dummy_bytes;
+    use crate::network_deprecated::buffer_utils::dummy_bytes;
 
     use super::*;
 

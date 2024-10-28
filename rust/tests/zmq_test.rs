@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::SystemTime;
 use std::{str, thread};
 
-use volga_rust::network::utils::random_string;
+use volga_rust::network_deprecated::utils::random_string;
 
 
 #[test]
