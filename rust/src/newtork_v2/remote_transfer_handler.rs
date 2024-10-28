@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::network::metrics::NUM_BYTES_RECVD;
 
-use super::{buffer_utils::{get_channeld_id, Bytes}, channel::{to_local_and_remote, Channel}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_SENT}, socket_service::{SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_utils::{get_channeld_id, Bytes}, channel::{to_local_and_remote, Channel}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BUFFERS_SENT, NUM_BYTES_SENT}, io_loop::{IOHandler, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustTransferConfig")]
@@ -344,7 +344,7 @@ fn run_many_to_one_loop(
     }
 }
 
-impl SocketServiceSubscriber for RemoteTransferHandler {
+impl IOHandler for RemoteTransferHandler {
 
     fn get_id(&self) -> &String {
         &self.id

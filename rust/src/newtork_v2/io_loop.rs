@@ -32,7 +32,7 @@ impl ZmqConfig {
 }
 
 // TODO description
-pub trait SocketServiceSubscriber {
+pub trait IOHandler {
 
     fn get_id(&self) -> &String;
 
@@ -53,13 +53,13 @@ pub trait SocketServiceSubscriber {
 
 
 /**
- * SocketServiceSubscriber - DataWriter, DataReader, TransferSender, TransferReceiver
+ * IOHandler - DataWriter, DataReader, TransferSender, TransferReceiver
  * 
  * Spawns a thread which polls sockets .. TODO
  */
-pub struct SocketService {
+pub struct IOLoop {
     name: String,
-    subscribers: Arc<Mutex<Vec<Arc<dyn SocketServiceSubscriber + Send + Sync>>>>,
+    handlers: Arc<Mutex<Vec<Arc<dyn IOHandler + Send + Sync>>>>,
     running: Arc<AtomicBool>,
     zmq_context: Arc<zmq::Context>,
     io_thread_handle: Arc<SegQueue<JoinHandle<()>>>,
@@ -73,9 +73,9 @@ struct DealerToRouterRegisterMessage {
     channel_ids: Vec<String> 
 }
 
-impl SocketService {
+impl IOLoop {
 
-    pub fn new(name: String, zmq_config: Option<ZmqConfig>) -> SocketService {
+    pub fn new(name: String, zmq_config: Option<ZmqConfig>) -> IOLoop {
         let zmq_ctx = Arc::new(zmq::Context::new());
         let mut num_io_threads = 1;
         if zmq_config.is_some() {
@@ -85,9 +85,9 @@ impl SocketService {
             }
         }
         zmq_ctx.set_io_threads(num_io_threads).unwrap();
-        SocketService{
+        IOLoop{
             name,
-            subscribers: Arc::new(Mutex::new(Vec::new())),
+            handlers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
             zmq_context: zmq_ctx.clone(),
             io_thread_handle: Arc::new(SegQueue::new()),
@@ -97,8 +97,8 @@ impl SocketService {
         }
     }
 
-    pub fn subscribe(&self, handler: Arc<dyn SocketServiceSubscriber + Send + Sync>) {
-        self.subscribers.lock().unwrap().push(handler);
+    pub fn register_handler(&self, handler: Arc<dyn IOHandler + Send + Sync>) {
+        self.handlers.lock().unwrap().push(handler);
     }
 
     fn run_io_thread(&self, connection_timeout_ms: u128) {
@@ -107,15 +107,15 @@ impl SocketService {
         // since zmq::Sockets are not thread safe we will have a model where each socket can be polled by only 1 IO thread
         // each IO thread can have multiple sockets associated with it
         let name = self.name.clone();
-        println!("[SocketService {name}] Launched");
-        let locked_subscribers = self.subscribers.lock().unwrap();
+        println!("[IOLoop {name}] Launched");
+        let locked_handlers = self.handlers.lock().unwrap();
 
-        if locked_subscribers.len() == 0 {
-            panic!("{name} SocketService started with no subscribers");
+        if locked_handlers.len() == 0 {
+            panic!("{name} IOLoop started with no handlers");
         }
-        drop(locked_subscribers);
+        drop(locked_handlers);
 
-        let this_subscribers = self.subscribers.clone();
+        let this_handlers = self.handlers.clone();
         let this_sockets_monitor = self.sockets_monitor.clone();
         let this_running = self.running.clone();
         let this_name = self.name.clone();
@@ -124,10 +124,10 @@ impl SocketService {
         let this_zmqctx = self.zmq_context.clone();
 
         let f = move || {
-            let locked_subscribers = this_subscribers.lock().unwrap();
+            let locked_handlers = this_handlers.lock().unwrap();
             
-            let mut socket_manager = SocketManager::new(locked_subscribers.clone(), this_zmqctx, this_zmq_config);
-            drop(locked_subscribers);
+            let mut socket_manager = SocketManager::new(locked_handlers.clone(), this_zmqctx, this_zmq_config);
+            drop(locked_handlers);
             
             socket_manager.create_sockets();
             this_sockets_monitor.register_sockets(socket_manager.get_sockets());
@@ -155,7 +155,7 @@ impl SocketService {
                     num_dealers += 1;
                 }
             }
-            println!("[SocketService {name}] Sent register messages from {num_dealers} DEALERs");
+            println!("[IOLoop {name}] Sent register messages from {num_dealers} DEALERs");
 
             // wait for all the ROUTERS to receive register message and construct channel<->socket_identity mapping
             let mut channels_to_identities: HashMap<String, HashMap<String, String>> = HashMap::new(); // for each router socket identity, mapping of it's channel ids to sending dealer's identities
@@ -188,9 +188,9 @@ impl SocketService {
                     num_routers += 1;
                 }
             }
-            println!("[SocketService {name}] Received register messages on {num_routers} ROUTERs");
+            println!("[IOLoop {name}] Received register messages on {num_routers} ROUTERs");
             
-            // contains bytes (+optional destination identity for DEALER) read from subscriber but not sent due to full socket
+            // contains bytes (+optional destination identity for DEALER) read from handler but not sent due to full socket
             let mut not_sent: HashMap<&SocketMetadata, Bytes> = HashMap::new();
 
             let lim = 100;
@@ -199,8 +199,8 @@ impl SocketService {
             let mut out_receivers = HashMap::new();
 
             for (_, sm) in sockets {
-                in_senders.insert(sm.identity.clone(), socket_manager.get_subscriber_in_sender(sm));
-                out_receivers.insert(sm.identity.clone(), socket_manager.get_subscriber_out_receiver(sm));
+                in_senders.insert(sm.identity.clone(), socket_manager.get_handler_in_sender(sm));
+                out_receivers.insert(sm.identity.clone(), socket_manager.get_handler_out_receiver(sm));
             }
 
             // run loop
@@ -335,10 +335,10 @@ impl SocketService {
         let name = &self.name;
         let err = self.sockets_monitor.wait_for_all_connected(None);
         if err.is_some() {
-            panic!("Can not start socket service {name} - connection error")
+            panic!("Can not start IOLoop {name} - connection error")
         }
         self.running.store(true, Ordering::Relaxed);
-        println!("[Socket Service {name}] Started data flow");
+        println!("[IOLoop {name}] Started data flow");
     }
 
     pub fn connect(&self, timeout_ms: u128) -> Option<String> {
@@ -348,7 +348,7 @@ impl SocketService {
         let name = self.name.clone();
         self.sockets_monitor.stop();
         if err.is_none() {
-            println!("[Socket Service {name}] All sockets connected");
+            println!("[IOLoop {name}] All sockets connected");
         }
         err
     }
@@ -362,6 +362,6 @@ impl SocketService {
             handle.unwrap().join().unwrap();
         }
         // TODO destroy zmq context
-        println!("Closed loop {name}");
+        println!("Stopped loop {name}");
     }
 }

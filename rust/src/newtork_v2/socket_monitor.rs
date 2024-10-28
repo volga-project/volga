@@ -104,7 +104,7 @@ impl SocketMonitor {
         self.running.store(true, Ordering::Relaxed);
 
         let f = move || {
-            // wait for socket service to register sockets
+            // wait for ioloop to register sockets
             let mut registered = false;
             let register_timeout_ms = 5000;
             let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
@@ -119,7 +119,7 @@ impl SocketMonitor {
                 thread::sleep(time::Duration::from_millis(100));
             }
             if !registered {
-                panic!("Socket service did not register sockets for monitoring within timeout");
+                panic!("IOLoop did not register sockets for monitoring within timeout");
             }
             
             // create and connect monitors
@@ -135,7 +135,7 @@ impl SocketMonitor {
                 }
             }
 
-            // set ready so socket service can start sockets after we registered monitors
+            // set ready so io loop can start sockets after we registered monitors
             this_ready.store(true, Ordering::Relaxed);
 
             // start reading monitor sockets events

@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crossbeam::channel::{Receiver, Sender};
 
-use super::{buffer_utils::Bytes, socket_service::{SocketServiceSubscriber, ZmqConfig}};
+use super::{buffer_utils::Bytes, io_loop::{IOHandler, ZmqConfig}};
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SocketKind {
@@ -42,17 +42,17 @@ impl SocketIdentityGenerator {
 
 // TODO description
 pub struct SocketManager {
-    socket_to_subscriber: HashMap<String, Arc<dyn SocketServiceSubscriber + Send + Sync>>,
+    socket_to_handler: HashMap<String, Arc<dyn IOHandler + Send + Sync>>,
     sockets: Vec<(zmq::Socket, SocketMetadata)>,
-    subscribers: Vec<Arc<dyn SocketServiceSubscriber + Send + Sync>>,
+    handlers: Vec<Arc<dyn IOHandler + Send + Sync>>,
     zmq_context: Arc<zmq::Context>,
     zmq_config: Option<ZmqConfig>
 }
 
 impl SocketManager {
 
-    pub fn new(subscribers: Vec<Arc<dyn SocketServiceSubscriber + Send + Sync>>, zmq_context: Arc<zmq::Context>, zmq_config: Option<ZmqConfig>) -> Self {
-        SocketManager{socket_to_subscriber: HashMap::new(), sockets: Vec::new(), subscribers, zmq_context, zmq_config}
+    pub fn new(handlers: Vec<Arc<dyn IOHandler + Send + Sync>>, zmq_context: Arc<zmq::Context>, zmq_config: Option<ZmqConfig>) -> Self {
+        SocketManager{socket_to_handler: HashMap::new(), sockets: Vec::new(), handlers, zmq_context, zmq_config}
     }
 
     fn create_socket(&self, socket_meta: &SocketMetadata) -> zmq::Socket {
@@ -91,18 +91,16 @@ impl SocketManager {
     }
     
     pub fn create_sockets(&mut self) {
-        let subscribers = self.subscribers.clone();
-        for subscriber in subscribers {
-            let metas = subscriber.get_sockets_metas();
-            // let in_chan = subscriber.get_in_chan();
-            // let out_chan = subscriber.get_out_chan();
+        let handlers = self.handlers.clone();
+        for handler in handlers {
+            let metas = handler.get_sockets_metas();
             for socket_meta in metas {
                 let socket = self.create_socket(&socket_meta);
                 let socket_identity = &socket_meta.identity;
-                if self.socket_to_subscriber.contains_key(socket_identity) {
+                if self.socket_to_handler.contains_key(socket_identity) {
                     panic!("Duplicate socket identity {socket_identity}");
                 }
-                self.socket_to_subscriber.insert(socket_identity.clone(), subscriber.clone());
+                self.socket_to_handler.insert(socket_identity.clone(), handler.clone());
                 self.sockets.push((socket, socket_meta.clone()));
             }
         }
@@ -128,14 +126,14 @@ impl SocketManager {
         }
     }
 
-    pub fn get_subscriber_in_sender(&self, sm: &SocketMetadata) -> Sender<Bytes> {
-        let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
-        subscriber.get_in_sender(sm)
+    pub fn get_handler_in_sender(&self, sm: &SocketMetadata) -> Sender<Bytes> {
+        let handler = self.socket_to_handler.get(&sm.identity).unwrap();
+        handler.get_in_sender(sm)
     }
 
-    pub fn get_subscriber_out_receiver(&self, sm: &SocketMetadata) -> Receiver<Bytes> {
-        let subscriber = self.socket_to_subscriber.get(&sm.identity).unwrap();
-        subscriber.get_out_receiver(sm)
+    pub fn get_handler_out_receiver(&self, sm: &SocketMetadata) -> Receiver<Bytes> {
+        let handler = self.socket_to_handler.get(&sm.identity).unwrap();
+        handler.get_out_receiver(sm)
     }
 }
 

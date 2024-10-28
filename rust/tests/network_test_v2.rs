@@ -1,7 +1,7 @@
 
 use std::{collections::HashMap, sync::{Arc, RwLock}, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 
-use volga_rust::newtork_v2::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::{DataReader, DataReaderConfig}, data_writer::{DataWriter, DataWriterConfig}, network_config::NetworkConfig, remote_transfer_handler::{RemoteTransferHandler, TransferConfig}, socket_service::{SocketService, SocketServiceSubscriber}};
+use volga_rust::newtork_v2::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::{DataReader, DataReaderConfig}, data_writer::{DataWriter, DataWriterConfig}, network_config::NetworkConfig, remote_transfer_handler::{RemoteTransferHandler, TransferConfig}, io_loop::{IOLoop, IOHandler}};
 
 
 #[test]
@@ -24,7 +24,7 @@ fn _setup_one_to_one_reader_writer(local: bool, network_config: NetworkConfig) -
     Arc<DataWriter>,
     Option<Arc<RemoteTransferHandler>>,
     Option<Arc<RemoteTransferHandler>>,
-    SocketService
+    IOLoop
 ) {
     let channel;
     if local {
@@ -61,9 +61,9 @@ fn _setup_one_to_one_reader_writer(local: bool, network_config: NetworkConfig) -
         vec![channel.clone()],
     ));
 
-    let socket_service = SocketService::new(String::from("socket_service"), network_config.zmq);
-    socket_service.subscribe(data_reader.clone());
-    socket_service.subscribe(data_writer.clone());
+    let io_loop = IOLoop::new(String::from("io_loop"), network_config.zmq);
+    io_loop.register_handler(data_reader.clone());
+    io_loop.register_handler(data_writer.clone());
 
     let mut transfer_sender_opt: Option<Arc<RemoteTransferHandler>> = None;
     let mut transfer_receiver_opt: Option<Arc<RemoteTransferHandler>> = None;
@@ -84,13 +84,13 @@ fn _setup_one_to_one_reader_writer(local: bool, network_config: NetworkConfig) -
             network_config.transfer.clone(),
             false
         ));
-        socket_service.subscribe(transfer_sender.clone());
-        socket_service.subscribe(transfer_receiver.clone());
+        io_loop.register_handler(transfer_sender.clone());
+        io_loop.register_handler(transfer_receiver.clone());
         transfer_sender_opt = Some(transfer_sender);
         transfer_receiver_opt = Some(transfer_receiver);
     }
 
-    let err = socket_service.connect(5000);
+    let err = io_loop.connect(5000);
     if err.is_some() {
         let err = err.unwrap();
         panic!("{err}")
@@ -102,7 +102,7 @@ fn _setup_one_to_one_reader_writer(local: bool, network_config: NetworkConfig) -
         data_writer,
         transfer_sender_opt,
         transfer_receiver_opt,
-        socket_service
+        io_loop
     )
 }
 
@@ -114,7 +114,7 @@ fn test_one_to_one(local: bool) {
         data_writer,
         transfer_sender_opt,
         transfer_receiver_opt,
-        socket_service
+        io_loop
     ) = _setup_one_to_one_reader_writer(local, network_config);
 
     data_reader.start();
@@ -131,7 +131,7 @@ fn test_one_to_one(local: bool) {
         transfer_receiver.start();
         remote_transfer_handlers.push(transfer_receiver);
     }
-    socket_service.start();
+    io_loop.start();
 
     let num_msgs = 100000;
     let payload_size = 128;
@@ -206,7 +206,7 @@ fn test_one_to_one(local: bool) {
         }
     }
 
-    socket_service.stop();
+    io_loop.stop();
     assert_eq!(to_send.len(), recvd.len());
     for i in 0..to_send.len() {
         assert_eq!(to_send[i], recvd[i])
@@ -281,11 +281,11 @@ fn test_one_to_n(local: bool, n: i32) {
 
     let mut remote_transfer_handlers = Vec::new();
 
-    let socket_service = SocketService::new(String::from("socket_service"), network_config.zmq);
+    let io_loop = IOLoop::new(String::from("io_loop"), network_config.zmq);
     for (_, data_reader) in data_readers.read().unwrap().iter() {
-        socket_service.subscribe(data_reader.clone());
+        io_loop.register_handler(data_reader.clone());
     }
-    socket_service.subscribe(data_writer.clone());
+    io_loop.register_handler(data_writer.clone());
     if !local {
         let transfer_sender = Arc::new(RemoteTransferHandler::new(
             format!("{handler_id}"),
@@ -308,11 +308,11 @@ fn test_one_to_n(local: bool, n: i32) {
                 false
             ));
             handler_id += 1;
-            socket_service.subscribe(transfer_receiver.clone());
+            io_loop.register_handler(transfer_receiver.clone());
             transfer_receiver.start();
             remote_transfer_handlers.push(transfer_receiver.clone());
         }
-        socket_service.subscribe(transfer_sender.clone());
+        io_loop.register_handler(transfer_sender.clone());
         remote_transfer_handlers.push(transfer_sender.clone());
         transfer_sender.start();
     }
@@ -322,12 +322,12 @@ fn test_one_to_n(local: bool, n: i32) {
     }
     data_writer.start();
 
-    let err = socket_service.connect(5000);
+    let err = io_loop.connect(5000);
     if err.is_some() {
         let err = err.unwrap();
         panic!("{err}")
     }
-    socket_service.start();
+    io_loop.start();
 
     let num_msgs_per_channel = 10000;
     let payload_size = 128;
@@ -445,7 +445,7 @@ fn test_one_to_n(local: bool, n: i32) {
         }
     }
 
-    socket_service.stop();
+    io_loop.stop();
 
     println!("TEST OK");
 
@@ -462,6 +462,7 @@ fn test_backpressure_remote() {
     test_backpressure(false);
 }
 
+// TODO this does not work, why?
 fn test_backpressure(local: bool) {
     
     let network_config = NetworkConfig {
@@ -485,7 +486,7 @@ fn test_backpressure(local: bool) {
         data_writer,
         transfer_sender_opt,
         transfer_receiver_opt,
-        socket_service
+        io_loop
     ) = _setup_one_to_one_reader_writer(local, network_config.clone());
 
     data_reader.start();
@@ -502,7 +503,7 @@ fn test_backpressure(local: bool) {
         transfer_receiver.start();
         remote_transfer_handlers.push(transfer_receiver);
     }
-    socket_service.start();
+    io_loop.start();
 
     let total_size = network_config.data_reader.output_queue_capacity_bytes + network_config.data_writer.max_capacity_bytes_per_channel;
     let channel_id = channel.get_channel_id();
@@ -547,6 +548,6 @@ fn test_backpressure(local: bool) {
         }
     }
 
-    socket_service.stop();
+    io_loop.stop();
     println!("TEST OK");
 }

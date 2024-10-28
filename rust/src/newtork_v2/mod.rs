@@ -3,7 +3,7 @@ pub mod buffer_utils;
 pub mod channel;
 pub mod utils;
 pub mod sockets;
-pub mod socket_service;
+pub mod io_loop;
 pub mod socket_monitor;
 pub mod data_writer;
 pub mod data_reader;

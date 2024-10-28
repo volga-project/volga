@@ -5,7 +5,7 @@ use crossbeam::{channel::{bounded, tick, unbounded, Receiver, Select, Sender}, q
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes, MemoryBoundQueue}, channel::{self, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes, MemoryBoundQueue}, channel::{self, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, io_loop::{IOHandler, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustDataReaderConfig")]
@@ -135,7 +135,7 @@ impl DataReader {
     }
 }
 
-impl SocketServiceSubscriber for DataReader {
+impl IOHandler for DataReader {
 
     fn get_id(&self) -> &String {
         &self.id

@@ -2,7 +2,7 @@ use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool,
 
 use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 
-use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta, Bytes}, channel::{Channel, DataReaderResponseMessage}, socket_service::CROSSBEAM_DEFAULT_CHANNEL_SIZE};
+use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta, Bytes}, channel::{Channel, DataReaderResponseMessage}, io_loop::CROSSBEAM_DEFAULT_CHANNEL_SIZE};
 
 // TODO test in-flight resend
 // TODO class description
