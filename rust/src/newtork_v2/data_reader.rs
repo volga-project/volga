@@ -5,25 +5,26 @@ use crossbeam::{channel::{bounded, tick, unbounded, Receiver, Select, Sender}, q
 use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
-use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes}, channel::{self, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
+use super::{buffer_utils::{get_buffer_id, get_channeld_id, new_buffer_drop_meta, Bytes, MemoryBoundQueue}, channel::{self, Channel, DataReaderResponseMessage}, metrics::{MetricsRecorder, NUM_BUFFERS_RECVD, NUM_BYTES_RECVD, NUM_BYTES_SENT}, socket_service::{SocketServiceSubscriber, CROSSBEAM_DEFAULT_CHANNEL_SIZE}, sockets::{channels_to_socket_identities, parse_ipc_path_from_addr, SocketIdentityGenerator, SocketKind, SocketMetadata}};
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustDataReaderConfig")]
 pub struct DataReaderConfig {
-    output_queue_size: usize,
-    response_batch_period_ms: Option<usize>
+    pub output_queue_capacity_bytes: usize,
+    pub response_batch_period_ms: Option<usize>
 }
 
 #[pymethods]
 impl DataReaderConfig { 
     #[new]
-    pub fn new(output_queue_size: usize, response_batch_period_ms: Option<usize>) -> Self {
+    pub fn new(output_queue_capacity_bytes: usize, response_batch_period_ms: Option<usize>) -> Self {
         DataReaderConfig{
-            output_queue_size,
+            output_queue_capacity_bytes,
             response_batch_period_ms
         }
     }
 }
+
 
 pub struct DataReader {
     id: String,
@@ -35,7 +36,7 @@ pub struct DataReader {
     out_chan: Arc<(Sender<Bytes>, Receiver<Bytes>)>,
     socket_metas: Vec<SocketMetadata>,
     
-    result_queue: Arc<(Sender<Bytes>, Receiver<Bytes>)>,
+    result_queue: Arc<MemoryBoundQueue>,
 
     response_queue: Arc<(Sender<DataReaderResponseMessage>, Receiver<DataReaderResponseMessage>)>,
 
@@ -65,6 +66,8 @@ impl DataReader {
             out_of_order_buffers.insert(ch.get_channel_id().clone(), Arc::new(RwLock::new(HashMap::new())));   
         }
 
+        let running = Arc::new(AtomicBool::new(false));
+
         DataReader{
             id,
             name: name.clone(),
@@ -73,26 +76,19 @@ impl DataReader {
             in_chan: Arc::new(bounded(CROSSBEAM_DEFAULT_CHANNEL_SIZE)),
             out_chan: Arc::new(bounded(CROSSBEAM_DEFAULT_CHANNEL_SIZE)),
             socket_metas,
-            result_queue: Arc::new(bounded(data_reader_config.output_queue_size)),
-            response_queue: Arc::new(unbounded()), // TODO bound this?
+            result_queue: Arc::new(MemoryBoundQueue::new(data_reader_config.output_queue_capacity_bytes, running.clone())),
+            response_queue: Arc::new(unbounded()),
             watermarks: Arc::new(RwLock::new(watermarks)),
             out_of_order_buffers: Arc::new(RwLock::new(out_of_order_buffers)),
             metrics_recorder: Arc::new(MetricsRecorder::new(name.clone(), job_name.clone())),
-            running: Arc::new(AtomicBool::new(false)),
+            running,
             io_thread_handles: Arc::new(ArrayQueue::new(2)),
             config: Arc::new(data_reader_config),
         }
     }
 
     pub fn read_bytes(&self) -> Option<Bytes> {
-        let out_queue_recvr = &self.result_queue.1;
-        let b = out_queue_recvr.try_recv();
-        if b.is_ok() {
-            let b = b.unwrap();
-            Some(b)
-        } else {
-            None
-        }
+        self.result_queue.pop()
     }
     
     fn configure_sockets(id: &String, name: &String, channels: &Vec<Channel>) -> Vec<SocketMetadata> {
@@ -106,7 +102,7 @@ impl DataReader {
                 Channel::Local{channel_id, ipc_addr} => {
                     ipc_addrs.insert(ipc_addr.clone());       
                 },
-                Channel::Remote { channel_id, source_local_ipc_addr, source_node_ip, source_node_id, target_local_ipc_addr, .. } => {
+                Channel::Remote {channel_id, source_local_ipc_addr, source_node_ip, source_node_id, target_local_ipc_addr, .. } => {
                     ipc_addrs.insert(target_local_ipc_addr.clone());       
                 }
             }
@@ -136,12 +132,6 @@ impl DataReader {
         // we assume ack channels are unbounded
         let resp = DataReaderResponseMessage::new_ack(channel_id, buffer_id);
         sender.send(resp).unwrap();
-    }
-
-    fn schedule_queue_update(channel_id: &String, buffer_id: u32, sender: &Sender<DataReaderResponseMessage>) {
-        // we assume ack channels are unbounded
-        // let resp = DataReaderResponseMessage{kind: DataReaderResponseMessageKind::QueueConsumed, channel_id: channel_id.clone(), buffer_id};
-        // sender.send(resp);
     }
 }
 
@@ -175,7 +165,7 @@ impl SocketServiceSubscriber for DataReader {
         self.running.store(true, Ordering::Relaxed);
         self.metrics_recorder.start();
 
-        let this_runnning = self.running.clone();
+        let this_running = self.running.clone();
         let this_in_chan = self.in_chan.clone();
         let this_result_queue = self.result_queue.clone();
         let this_response_queue = self.response_queue.clone();
@@ -188,7 +178,7 @@ impl SocketServiceSubscriber for DataReader {
             let locked_watermarks = this_watermarks.read().unwrap();
             let locked_out_of_order_buffers = this_out_of_order_buffers.read().unwrap();
 
-            while this_runnning.load(Ordering::Relaxed) {
+            while this_running.load(Ordering::Relaxed) {
 
                 let res = this_in_chan.1.recv_timeout(Duration::from_millis(100));
                 if !res.is_ok() {
@@ -212,9 +202,9 @@ impl SocketServiceSubscriber for DataReader {
                     let mut locked_out_of_order = locked_out_of_orders.write().unwrap(); 
                     
                     // TODO
-                    if locked_out_of_order.len() > 1 {
-                        panic!("REMOVE THIS PANIC FROM PROD!!! - we have out of order data");
-                    }
+                    // if locked_out_of_order.len() > 1 {
+                    //     panic!("REMOVE THIS PANIC FROM PROD!!! - we have out of order data");
+                    // }
 
                     if locked_out_of_order.contains_key(&(buffer_id as i32)) {
                         // duplicate
@@ -223,20 +213,16 @@ impl SocketServiceSubscriber for DataReader {
                         locked_out_of_order.insert(buffer_id as i32, b.clone());
                         let mut next_wm = wm + 1;
                         while locked_out_of_order.contains_key(&next_wm) {
-                            if this_result_queue.1.len() == this_config.output_queue_size {
-                                // full
+
+                            let stored_b = locked_out_of_order.get(&next_wm).unwrap();
+                            let payload = new_buffer_drop_meta(stored_b.clone());
+                            let pushed = this_result_queue.try_push(payload);
+                            if !pushed {
+                                // result queue is full 
                                 break;
                             }
 
-                            let stored_b = locked_out_of_order.get(&next_wm).unwrap();
                             let stored_buffer_id = get_buffer_id(stored_b);
-                            let payload = new_buffer_drop_meta(stored_b.clone());
-
-                            let result_queue_sender = &this_result_queue.0;
-
-                            // TODO this blocks acks ?
-                            result_queue_sender.send(payload).unwrap();
-
                             // send ack
                             Self::schedule_ack(channel_id, stored_buffer_id, &this_response_queue.0);
                             locked_out_of_order.remove(&next_wm);
@@ -249,7 +235,7 @@ impl SocketServiceSubscriber for DataReader {
         };
 
 
-        let this_runnning = self.running.clone();
+        let this_running = self.running.clone();
         let this_out_chan = self.out_chan.clone();
         let this_response_queue = self.response_queue.clone();
         let this_metrics_recorder = self.metrics_recorder.clone();
@@ -280,7 +266,7 @@ impl SocketServiceSubscriber for DataReader {
                 sel.recv(&ticker);
             }
 
-            while this_runnning.load(Ordering::Relaxed) {
+            while this_running.load(Ordering::Relaxed) {
 
                 let sel_res = sel.select_timeout(Duration::from_millis(100));
                 if !sel_res.is_ok() {
@@ -313,7 +299,7 @@ impl SocketServiceSubscriber for DataReader {
                         let s = &this_out_chan.0;
                         let b = resp.ser();
                         let size = b.len();
-                        while this_runnning.load(Ordering::Relaxed) {
+                        while this_running.load(Ordering::Relaxed) {
                             let _res = s.send_timeout(b.clone(), Duration::from_millis(100));
                             if _res.is_ok() {
                                 break;

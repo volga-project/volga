@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{data_reader::DataReaderConfig, data_writer::DataWriterConfig, remote_transfer_handler::TransferConfig, socket_service::ZmqConfig};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub struct NetworkConfig {
     pub data_reader: DataReaderConfig,
     pub data_writer: DataWriterConfig,

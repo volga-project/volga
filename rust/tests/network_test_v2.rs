@@ -1,7 +1,7 @@
 
 use std::{collections::HashMap, sync::{Arc, RwLock}, thread, time::{Duration, SystemTime, UNIX_EPOCH}};
 
-use volga_rust::newtork_v2::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::DataReader, data_writer::DataWriter, network_config::NetworkConfig, remote_transfer_handler::RemoteTransferHandler, socket_service::{SocketService, SocketServiceSubscriber}};
+use volga_rust::newtork_v2::{buffer_utils::{dummy_bytes, get_buffer_id}, channel::Channel, data_reader::{DataReader, DataReaderConfig}, data_writer::{DataWriter, DataWriterConfig}, network_config::NetworkConfig, remote_transfer_handler::{RemoteTransferHandler, TransferConfig}, socket_service::{SocketService, SocketServiceSubscriber}};
 
 
 #[test]
@@ -18,10 +18,14 @@ fn test_one_to_one_remote_v2() {
 // TODO add transfer handler disconnect/reconnect test 
 // TODO test in-flight resends
 // TODO test backpressure
-
-fn test_one_to_one(local: bool) {
-    let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config.yaml");
-
+fn _setup_one_to_one_reader_writer(local: bool, network_config: NetworkConfig) -> (
+    Channel,
+    Arc<DataReader>,
+    Arc<DataWriter>,
+    Option<Arc<RemoteTransferHandler>>,
+    Option<Arc<RemoteTransferHandler>>,
+    SocketService
+) {
     let channel;
     if local {
         channel = Channel::Local { 
@@ -57,11 +61,12 @@ fn test_one_to_one(local: bool) {
         vec![channel.clone()],
     ));
 
-    let mut remote_transfer_handlers = Vec::new();
-
     let socket_service = SocketService::new(String::from("socket_service"), network_config.zmq);
     socket_service.subscribe(data_reader.clone());
     socket_service.subscribe(data_writer.clone());
+
+    let mut transfer_sender_opt: Option<Arc<RemoteTransferHandler>> = None;
+    let mut transfer_receiver_opt: Option<Arc<RemoteTransferHandler>> = None;
     if !local {
         let transfer_sender = Arc::new(RemoteTransferHandler::new(
             String::from("2"),
@@ -81,19 +86,50 @@ fn test_one_to_one(local: bool) {
         ));
         socket_service.subscribe(transfer_sender.clone());
         socket_service.subscribe(transfer_receiver.clone());
-        remote_transfer_handlers.push(transfer_sender.clone());
-        remote_transfer_handlers.push(transfer_receiver.clone());
-        transfer_sender.start();
-        transfer_receiver.start();
+        transfer_sender_opt = Some(transfer_sender);
+        transfer_receiver_opt = Some(transfer_receiver);
     }
-
-    data_reader.start();
-    data_writer.start();
 
     let err = socket_service.connect(5000);
     if err.is_some() {
         let err = err.unwrap();
         panic!("{err}")
+    }
+
+    (
+        channel,
+        data_reader,
+        data_writer,
+        transfer_sender_opt,
+        transfer_receiver_opt,
+        socket_service
+    )
+}
+
+fn test_one_to_one(local: bool) {
+    let network_config = NetworkConfig::new("/Users/anov/IdeaProjects/volga/rust/tests/default_network_config.yaml");
+    let (
+        channel,
+        data_reader,
+        data_writer,
+        transfer_sender_opt,
+        transfer_receiver_opt,
+        socket_service
+    ) = _setup_one_to_one_reader_writer(local, network_config);
+
+    data_reader.start();
+    data_writer.start();
+    let mut remote_transfer_handlers: Vec<Arc<RemoteTransferHandler>> = Vec::new();
+    if transfer_sender_opt.is_some() {
+        let transfer_sender = transfer_sender_opt.unwrap();
+        transfer_sender.start();
+        remote_transfer_handlers.push(transfer_sender);
+    }
+
+    if transfer_receiver_opt.is_some() {
+        let transfer_receiver = transfer_receiver_opt.unwrap();
+        transfer_receiver.start();
+        remote_transfer_handlers.push(transfer_receiver);
     }
     socket_service.start();
 
@@ -127,12 +163,15 @@ fn test_one_to_one(local: bool) {
                     panic!("Max retries");
                 }
                 r += 1;
-                backp += write_timeout_ms as u128;
+                backp += write_timeout_ms;
                 write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
-            // let buffer_id = get_buffer_id(b);
-            // println!("Sent {buffer_id}");
+            let buffer_id = get_buffer_id(b);
+
+            if buffer_id%1000 == 0 {
+                println!("Sent {buffer_id}");
+            }
         }
         backp
     });
@@ -145,7 +184,9 @@ fn test_one_to_one(local: bool) {
             let b = b.unwrap();
             recvd.push(b.clone());
             let buffer_id = get_buffer_id(&b);
-            // println!("Rcvd {buffer_id}");
+            if buffer_id%1000 == 0 {
+                println!("Rcvd {buffer_id}");
+            }
             // thread::sleep(time::Duration::from_millis(100));
         }
     }
@@ -156,9 +197,6 @@ fn test_one_to_one(local: bool) {
     println!("Transfered in (ms): {total_ms}");
     println!("Backpressure (ms): {backp_ms}");
     println!("Throughput (msg/s): {throughput}");
-    
-
-    thread::sleep(Duration::from_millis(1000));
 
     data_reader.stop();
     data_writer.stop();
@@ -339,7 +377,7 @@ fn test_one_to_n(local: bool, n: i32) {
                     panic!("Max retries");
                 }
                 r += 1;
-                backp += write_timeout_ms as u128;
+                backp += write_timeout_ms;
                 write_res = moved_data_writer.write_bytes(ch_id, b.clone(), write_timeout_ms);
             }
             backp += write_res.unwrap();
@@ -401,14 +439,114 @@ fn test_one_to_n(local: bool, n: i32) {
         data_reader.stop();
     }
     data_writer.stop();
-    // if !local {
-    //     while remote_transfer_handlers.len() != 0 {
-    //         remote_transfer_handlers.pop().unwrap().close();
-    //     }
-    // }
+    if !local {
+        while remote_transfer_handlers.len() != 0 {
+            remote_transfer_handlers.pop().unwrap().stop();
+        }
+    }
 
     socket_service.stop();
 
     println!("TEST OK");
 
+}
+
+
+#[test]
+fn test_backpressure_local() {
+    test_backpressure(true);
+}
+
+#[test]
+fn test_backpressure_remote() {
+    test_backpressure(false);
+}
+
+fn test_backpressure(local: bool) {
+    
+    let network_config = NetworkConfig {
+        data_reader: DataReaderConfig {
+            output_queue_capacity_bytes: 120,
+            response_batch_period_ms: Some(100)
+        },
+        data_writer: DataWriterConfig {
+            in_flight_timeout_s: 1,
+            max_capacity_bytes_per_channel: 120
+        },
+        transfer: TransferConfig {
+            transfer_queue_size: 10 // no-op
+        },
+        zmq: None
+    };
+
+    let (
+        channel,
+        data_reader,
+        data_writer,
+        transfer_sender_opt,
+        transfer_receiver_opt,
+        socket_service
+    ) = _setup_one_to_one_reader_writer(local, network_config.clone());
+
+    data_reader.start();
+    data_writer.start();
+    let mut remote_transfer_handlers: Vec<Arc<RemoteTransferHandler>> = Vec::new();
+    if transfer_sender_opt.is_some() {
+        let transfer_sender = transfer_sender_opt.unwrap();
+        transfer_sender.start();
+        remote_transfer_handlers.push(transfer_sender);
+    }
+
+    if transfer_receiver_opt.is_some() {
+        let transfer_receiver = transfer_receiver_opt.unwrap();
+        transfer_receiver.start();
+        remote_transfer_handlers.push(transfer_receiver);
+    }
+    socket_service.start();
+
+    let total_size = network_config.data_reader.output_queue_capacity_bytes + network_config.data_writer.max_capacity_bytes_per_channel;
+    let channel_id = channel.get_channel_id();
+    let payload_size = 5;
+
+    let mut buffer_id = 0;
+    let mut capacity = total_size;
+    loop {
+        let b = dummy_bytes(buffer_id, channel_id, payload_size);
+        let size = b.len();
+        if capacity >= size {
+            let res = data_writer.write_bytes(channel_id, b, 200);
+            assert!(res.is_some());
+            capacity -= size;
+            buffer_id += 1;
+            thread::sleep(Duration::from_millis(100));
+        } else {
+            break;
+        }
+    }
+
+    // should bp now
+    let b = dummy_bytes(buffer_id, channel_id, payload_size);
+    let res = data_writer.write_bytes(channel_id, b, 200);
+    buffer_id += 1;
+    assert!(res.is_none());
+    thread::sleep(Duration::from_millis(100));
+    // read
+    let read = data_reader.read_bytes();
+    assert!(read.is_some());
+    thread::sleep(Duration::from_millis(100));
+    // should not bp
+    let b = dummy_bytes(buffer_id, channel_id, payload_size);
+    let res = data_writer.write_bytes(channel_id, b, 200);
+    assert!(res.is_some());
+
+    data_reader.stop();
+    data_writer.stop();
+    if !local {
+        while remote_transfer_handlers.len() != 0 {
+            remote_transfer_handlers.pop().unwrap().stop();
+        }
+    }
+
+    socket_service.stop();
+    println!("TEST OK");
 }

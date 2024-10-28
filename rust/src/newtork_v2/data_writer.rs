@@ -12,17 +12,17 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustDataWriterConfig")]
 pub struct DataWriterConfig {
-    in_flight_timeout_s: usize,
-    max_buffers_per_channel: usize
+    pub in_flight_timeout_s: usize,
+    pub max_capacity_bytes_per_channel: usize
 }
 
 #[pymethods]
 impl DataWriterConfig { 
     #[new]
-    pub fn new(in_flight_timeout_s: usize, max_buffers_per_channel: usize) -> Self {
+    pub fn new(in_flight_timeout_s: usize, max_capacity_bytes_per_channel: usize) -> Self {
         DataWriterConfig{
             in_flight_timeout_s,
-            max_buffers_per_channel
+            max_capacity_bytes_per_channel
         }
     }
 }
@@ -51,7 +51,7 @@ impl DataWriter {
     pub fn new(id: String, name: String, job_name: String, config: DataWriterConfig, channels: Vec<Channel>) -> DataWriter {
         let (socket_metas, in_chans, out_chans) = DataWriter::configure_sockets_and_io_chans(&id, &name, &channels);
 
-        let bqs = BufferQueues::new(&channels, config.max_buffers_per_channel, config.in_flight_timeout_s);
+        let bqs = BufferQueues::new(&channels, config.max_capacity_bytes_per_channel, config.in_flight_timeout_s);
 
         DataWriter{
             id: id.clone(),
@@ -69,12 +69,12 @@ impl DataWriter {
         }
     }
 
-    pub fn write_bytes(&self, channel_id: &String, b: Bytes, timeout_ms: u128) -> Option<u128> {
-        let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+    pub fn write_bytes(&self, channel_id: &String, b: Bytes, timeout_ms: usize) -> Option<usize> {
+        let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as usize;
         loop {
             let succ = self.buffer_queues.try_push(channel_id, b.clone());
             if !succ {
-                let _t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
+                let _t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as usize;
                 if _t - t > timeout_ms {
                     return None
                 }
@@ -83,8 +83,7 @@ impl DataWriter {
             break;
         }
 
-        // TODO this causes attempt to subtract with overflow sometimes, why?
-        let backpressured_time: u128 = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - t;
+        let backpressured_time = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() as usize - t;
         Some(backpressured_time)
     }
 

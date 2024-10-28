@@ -1,9 +1,10 @@
-use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering}, Arc, Condvar, Mutex, RwLock}, thread::{self, JoinHandle}, time::{self, Duration, SystemTime}};
+use std::{collections::{HashMap, HashSet, VecDeque}, sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex}, thread::{self, JoinHandle}, time::{Duration, SystemTime}};
 
-use crossbeam::{channel::{bounded, unbounded, Receiver, Sender}, queue::ArrayQueue};
+use crossbeam::{channel::{bounded, Receiver, Sender}, queue::ArrayQueue};
 
-use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta, Bytes}, channel::{self, Channel, DataReaderResponseMessage}, socket_service::CROSSBEAM_DEFAULT_CHANNEL_SIZE};
+use super::{buffer_utils::{get_buffer_id, new_buffer_with_meta, Bytes}, channel::{Channel, DataReaderResponseMessage}, socket_service::CROSSBEAM_DEFAULT_CHANNEL_SIZE};
 
+// TODO test in-flight resend
 // TODO class description
 
 struct BufferQueueInner {
@@ -11,37 +12,41 @@ struct BufferQueueInner {
     index: usize,
     buffer_id_seq: u32,
     pop_requests: HashSet<u32>,
-    max_buffers_per_channel: usize,
+    max_capacity_bytes: usize,
+    cur_occupied_bytes: usize,
     in_flights: HashMap<u32, (u128, Bytes)>,
     in_flight_timeout_s: usize
 }
 
 impl BufferQueueInner {
 
-    pub fn is_full(&self) -> bool {
-        self.v.len() == self.max_buffers_per_channel
+    pub fn can_push(&self, b: &Bytes) -> bool {
+        self.cur_occupied_bytes + b.len() <= self.max_capacity_bytes
     }
 
-    pub fn new(max_buffers_per_channel: usize, in_flight_timeout_s: usize) -> Self {
+    pub fn new(max_capacity_bytes: usize, in_flight_timeout_s: usize) -> Self {
         BufferQueueInner{
-            v: VecDeque::with_capacity(max_buffers_per_channel), 
+            v: VecDeque::new(), 
             index: 0, 
             buffer_id_seq: 0, 
             pop_requests: HashSet::new(),
-            max_buffers_per_channel,
+            max_capacity_bytes,
+            cur_occupied_bytes: 0,
             in_flights: HashMap::new(),
             in_flight_timeout_s
         }
     }
 
     pub fn push(&mut self, channel_id: String, b: Bytes) {
-        if self.v.len() == self.max_buffers_per_channel {
-            panic!("Pushing when max capacity");
+        if !self.can_push(&b) {
+            panic!("Pushing when max capacity reached");
         }
         let buffer_id = self.buffer_id_seq;
         let new_b = new_buffer_with_meta(b, channel_id.clone(), buffer_id);
+        let size = new_b.len();
         self.v.push_back(new_b);
         self.buffer_id_seq = buffer_id + 1;
+        self.cur_occupied_bytes += size;
     }
 
     // returns value from queue at schedule index without popping
@@ -72,7 +77,8 @@ impl BufferQueueInner {
             let peek_buffer = self.v.get(0).unwrap();
             let peek_buffer_id = get_buffer_id(peek_buffer);
             if self.pop_requests.contains(&peek_buffer_id) {
-                self.v.pop_front();
+                let b = self.v.pop_front().unwrap();
+                self.cur_occupied_bytes -= b.len();
                 self.pop_requests.remove(&peek_buffer_id);
                 self.index -= 1;
                 popped.push(peek_buffer_id);
@@ -99,7 +105,11 @@ impl BufferQueueInner {
     }
 
     pub fn has_reached_max_in_flights(&self) -> bool {
-        self.in_flights.len() == self.max_buffers_per_channel
+        let mut in_flight_size_bytes = 0;
+        for (_, ts_and_b) in &self.in_flights {
+            in_flight_size_bytes += ts_and_b.1.len();
+        }
+        in_flight_size_bytes >= self.max_capacity_bytes
     }
 
     pub fn add_in_flight(&mut self, b: Bytes) {
@@ -118,14 +128,14 @@ pub struct BufferQueuesInner {
 }
 
 impl BufferQueuesInner {
-    pub fn new(channels: &Vec<Channel>, max_buffers_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueuesInner {
+    pub fn new(channels: &Vec<Channel>, max_capapcity_bytes_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueuesInner {
         let n_channels = channels.len();
         let mut queues = HashMap::with_capacity(n_channels);
         for ch in channels {
-            queues.insert(ch.get_channel_id().clone(), BufferQueueInner::new(max_buffers_per_channel, in_flight_timeout_s));
+            queues.insert(ch.get_channel_id().clone(), BufferQueueInner::new(max_capapcity_bytes_per_channel, in_flight_timeout_s));
         }
 
-        BufferQueuesInner{queues: queues}
+        BufferQueuesInner{queues}
     }
 
     pub fn has_at_least_one_resendable_in_flight(&self) -> bool {
@@ -168,9 +178,13 @@ impl BufferQueuesInner {
         res
     }
 
-    pub fn is_full(&self, channel_id: &String) -> bool {
+    // pub fn is_full(&self, channel_id: &String) -> bool {
+    //     let buffer_queue = self.queues.get(channel_id).unwrap();
+    //     buffer_queue.is_full()
+    // }
+    pub fn can_push(&self, channel_id: &String, b: &Bytes) -> bool {
         let buffer_queue = self.queues.get(channel_id).unwrap();
-        buffer_queue.is_full()
+        buffer_queue.can_push(b)
     }
 
     pub fn push(&mut self, channel_id: &String, b: Bytes) {
@@ -203,8 +217,8 @@ pub struct BufferQueues {
 }
 
 impl BufferQueues {
-    pub fn new(channels: &Vec<Channel>, max_buffers_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueues {
-        let bqs = BufferQueuesInner::new(channels, max_buffers_per_channel, in_flight_timeout_s);
+    pub fn new(channels: &Vec<Channel>, max_capacity_bytes_per_channel: usize, in_flight_timeout_s: usize) -> BufferQueues {
+        let bqs = BufferQueuesInner::new(channels, max_capacity_bytes_per_channel, in_flight_timeout_s);
         
         BufferQueues{
             queues: Arc::new(Mutex::new(bqs)), 
@@ -289,7 +303,7 @@ impl BufferQueues {
     pub fn try_push(&self, channel_id: &String, b: Bytes) -> bool {
         let timeout_ms = 100;
         let mut locked_bq = self.queues.lock().unwrap();
-        while locked_bq.is_full(channel_id) {
+        while !locked_bq.can_push(channel_id, &b) {
             let res = self.condvar.wait_timeout(locked_bq, Duration::from_millis(timeout_ms)).unwrap();
             if res.1.timed_out() {
                 return false;

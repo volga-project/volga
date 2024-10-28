@@ -12,7 +12,7 @@ use super::{buffer_utils::{get_channeld_id, Bytes}, channel::{to_local_and_remot
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustTransferConfig")]
 pub struct TransferConfig {
-    transfer_queue_size: usize
+    pub transfer_queue_size: usize // TODO this is no-op
 }
 
 #[pymethods]
