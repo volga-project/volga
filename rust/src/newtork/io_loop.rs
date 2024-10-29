@@ -86,14 +86,13 @@ impl IOLoop {
         }
         zmq_ctx.set_io_threads(num_io_threads).unwrap();
         IOLoop{
-            name,
+            name: name.clone(),
             handlers: Arc::new(Mutex::new(Vec::new())),
             running: Arc::new(AtomicBool::new(false)), 
             zmq_context: zmq_ctx.clone(),
             io_thread_handle: Arc::new(SegQueue::new()),
             zmq_config,
-
-            sockets_monitor: Arc::new(SocketMonitor::new(zmq_ctx.clone())),
+            sockets_monitor: Arc::new(SocketMonitor::new(name.clone(), zmq_ctx.clone())),
         }
     }
 
@@ -131,10 +130,7 @@ impl IOLoop {
             drop(locked_handlers);
             
             socket_manager.create_sockets();
-            let sockets = socket_manager.get_sockets();
-            let n = sockets.len();
-            this_sockets_monitor.register_sockets(sockets);
-            println!("[IOLoop] {_name} registered {n} sockets");
+            this_sockets_monitor.register_sockets(socket_manager.get_sockets());
 
             this_sockets_monitor.wait_for_monitor_ready();
             socket_manager.bind_and_connect();
@@ -318,7 +314,7 @@ impl IOLoop {
                 }
             }
         };
-        let thread_name = format!("{this_name}_io_thread");
+        let thread_name = format!("{this_name}_io_loop_thread");
         self.io_thread_handle.push(
             std::thread::Builder::new().name(thread_name).spawn(f).unwrap()
         );

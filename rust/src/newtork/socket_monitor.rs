@@ -8,23 +8,27 @@ use super::sockets::{SocketKind, SocketMetadata};
 
 // TODO class description
 pub struct SocketMonitor {
+    name: String,
     sockets_connected_status: Arc<SkipMap<SocketMetadata, AtomicBool>>,
     registered_sockets: Arc<Mutex<Vec<(SocketMetadata, String)>>>,
     zmq_context: Arc<zmq::Context>,
     monitor_thread_handle: Arc<SegQueue<JoinHandle<()>>>,
     running: Arc<AtomicBool>,
+    registered: Arc<AtomicBool>,
     ready: Arc<AtomicBool>
 }
 
 impl SocketMonitor {
 
-    pub fn new(zmq_context: Arc<zmq::Context>) -> Self {
+    pub fn new(name: String, zmq_context: Arc<zmq::Context>) -> Self {
         SocketMonitor{
+            name,
             sockets_connected_status: Arc::new(SkipMap::new()), 
             registered_sockets: Arc::new(Mutex::new(Vec::new())), 
             zmq_context: zmq_context,
             monitor_thread_handle: Arc::new(SegQueue::new()),
             running: Arc::new(AtomicBool::new(false)),
+            registered: Arc::new(AtomicBool::new(false)),
             ready: Arc::new(AtomicBool::new(false))
         }
     }
@@ -40,9 +44,11 @@ impl SocketMonitor {
                 locked_registered_sockets.push((sm.clone(), monitor_endpoint));
             }
         }
+        self.registered.store(true, Ordering::Relaxed);
     }
 
     pub fn wait_for_monitor_ready(&self) {
+        let name = &self.name;
         let timeout_ms = 5000;
         let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
         while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < timeout_ms {
@@ -51,7 +57,7 @@ impl SocketMonitor {
             }
             thread::sleep(time::Duration::from_millis(100));
         }
-        panic!("Timeout waiting for monitor to be ready");
+        panic!("[SocketMonitor {name}] Timeout waiting for monitor to be ready");
     }
 
     pub fn wait_for_all_connected(&self, timeout_ms: Option<u128>) -> Option<String> {
@@ -100,26 +106,31 @@ impl SocketMonitor {
         let this_registered_sockets = self.registered_sockets.clone();
         let this_sockets_connected_status = self.sockets_connected_status.clone();
         let this_ready = self.ready.clone();
+        let this_name = self.name.clone();
+        let this_registered = self.registered.clone();
 
         self.running.store(true, Ordering::Relaxed);
 
         let f = move || {
             // wait for ioloop to register sockets
-            let mut registered = false;
+            // let mut registered = false;
             let register_timeout_ms = 5000;
             let start = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis();
             while SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_millis() - start < register_timeout_ms {
-                let locked_registered_sockets = this_registered_sockets.lock().unwrap();
-                if locked_registered_sockets.len() != 0 {
-                    drop(locked_registered_sockets);
-                    registered = true;
+                // let locked_registered_sockets = this_registered_sockets.lock().unwrap();
+                // if locked_registered_sockets.len() != 0 {
+                //     drop(locked_registered_sockets);
+                //     registered = true;
+                //     break;
+                // }
+                // drop(locked_registered_sockets);
+                if this_registered.load(Ordering::Relaxed) {
                     break;
                 }
-                drop(locked_registered_sockets);
                 thread::sleep(time::Duration::from_millis(100));
             }
-            if !registered {
-                panic!("IOLoop did not register sockets for monitoring within timeout");
+            if !this_registered.load(Ordering::Relaxed) {
+                panic!("[SocketMonitor {this_name}] IOLoop did not register sockets for monitoring within timeout");
             }
             
             // create and connect monitors
@@ -158,7 +169,8 @@ impl SocketMonitor {
                 thread::sleep(time::Duration::from_millis(1));
             }
         };
-        let thread_name = format!("volga_monitor_thread");
+        let name = self.name.clone();
+        let thread_name = format!("volga_{name}_monitor_thread");
         self.monitor_thread_handle.push(
             std::thread::Builder::new().name(thread_name).spawn(f).unwrap()
         );
