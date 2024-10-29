@@ -74,8 +74,8 @@ class TestLocalTransfer(unittest.TestCase):
 
         print('assert ok')
 
-        ray.get(reader.close.remote())
-        ray.get(writer.close.remote())
+        ray.get(reader.stop.remote())
+        ray.get(writer.stop.remote())
 
         time.sleep(1)
 
@@ -145,11 +145,8 @@ class TestLocalTransfer(unittest.TestCase):
         # print(f'Finised in {t}s, throughput: {throughput} msg/s')
         time.sleep(1)
 
-        for reader_id in readers:
-            ray.get(readers[reader_id].close.remote())
-
-        for writer_id in writers:
-            ray.get(writers[writer_id].close.remote())
+        ray.get([readers[reader_id].stop.remote() for reader_id in readers])
+        ray.get([writers[writer_id].stop.remote() for writer_id in writers])
 
         ray.shutdown()
 

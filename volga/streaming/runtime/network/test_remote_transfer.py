@@ -178,11 +178,11 @@ class TestRemoteTransfer(unittest.TestCase):
         print(f'Finised in {t}s, throughput: {throughput} msg/s')
         time.sleep(1)
 
-        ray.get([r.close.remote() for r in readers])
-        ray.get([w.close.remote() for w in writers])
+        ray.get([r.stop.remote() for r in readers])
+        ray.get([w.stop.remote() for w in writers])
 
-        ray.get(source_transfer_actor.close.remote())
-        ray.get(target_transfer_actor.close.remote())
+        ray.get(source_transfer_actor.stop.remote())
+        ray.get(target_transfer_actor.stop.remote())
 
         ray.shutdown()
 
@@ -339,14 +339,14 @@ class TestRemoteTransfer(unittest.TestCase):
         print(f'Finished in {t}s, throughput: {throughput} msg/s')
         time.sleep(1)
 
-        close_futs = []
+        stop_futs = []
         for reader_id in readers:
-            close_futs.append(readers[reader_id].close.remote())
+            stop_futs.append(readers[reader_id].stop.remote())
 
         for writer_id in writers:
-            close_futs.append(writers[writer_id].close.remote())
+            stop_futs.append(writers[writer_id].stop.remote())
 
-        ray.get(close_futs)
+        ray.get(stop_futs)
 
         ray.shutdown()
         return throughput, t
