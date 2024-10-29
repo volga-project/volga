@@ -119,6 +119,7 @@ impl IOLoop {
         let this_sockets_monitor = self.sockets_monitor.clone();
         let this_running = self.running.clone();
         let this_name = self.name.clone();
+        let _name = this_name.clone();
 
         let this_zmq_config = self.zmq_config.clone();
         let this_zmqctx = self.zmq_context.clone();
@@ -130,7 +131,11 @@ impl IOLoop {
             drop(locked_handlers);
             
             socket_manager.create_sockets();
-            this_sockets_monitor.register_sockets(socket_manager.get_sockets());
+            let sockets = socket_manager.get_sockets();
+            let n = sockets.len();
+            this_sockets_monitor.register_sockets(sockets);
+            println!("[IOLoop] {_name} registered {n} sockets");
+
             this_sockets_monitor.wait_for_monitor_ready();
             socket_manager.bind_and_connect();
 

@@ -14,13 +14,14 @@ class DataReader(IOHandler):
 
     def __init__(
         self,
+        handler_id: str,
         name: str,
         job_name: str,
         channels: List[Channel],
         config: DataReaderConfig = DEFAULT_DATA_READER_CONFIG
     ):
-        super().__init__(name, job_name, channels)
-        self._rust_data_reader = RustDataReader(name, job_name, config.to_rust(), self._rust_channels)
+        super().__init__(handler_id, name, job_name, channels)
+        self._rust_data_reader = RustDataReader(handler_id, name, job_name, config.to_rust(), self._rust_channels)
 
         self._num_msgs_read = 0
         self._last_report_ts = time.time()
@@ -46,6 +47,6 @@ class DataReader(IOHandler):
         super().start()
         self._rust_data_reader.start()
 
-    def close(self):
-        super().close()
-        self._rust_data_reader.close()
+    def stop(self):
+        super().stop()
+        self._rust_data_reader.stop()

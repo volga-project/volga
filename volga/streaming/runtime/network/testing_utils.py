@@ -39,6 +39,7 @@ class TestWriter:
         self.channels = channels
         self.io_loop = IOLoop(f'writer_loop_{writer_id}')
         self.data_writer = DataWriter(
+            handler_id=str(writer_id),
             name=self.name,
             source_stream_name='0',
             job_name=job_name,
@@ -47,8 +48,8 @@ class TestWriter:
         )
         self.io_loop.register_io_handler(self.data_writer)
 
-    def start(self, num_threads: int = 1) -> Optional[str]:
-        return self.io_loop.connect_and_start(num_threads)
+    def start(self) -> Optional[str]:
+        return self.io_loop.connect_and_start()
 
     def send_items(self, num_items_per_channel: Dict[str, int], msg_size: int):
         index = {channel_id: 0 for channel_id in num_items_per_channel}
@@ -56,7 +57,7 @@ class TestWriter:
         cur_channel_index = 0
         num_sent = 0
         num_to_send = sum(list(num_items_per_channel.values()))
-        # round robin send
+        # round-robin send
         while num_sent != num_to_send:
             channel_id = channel_ids[cur_channel_index]
             num_items = num_items_per_channel[channel_id]
@@ -74,8 +75,8 @@ class TestWriter:
     def get_name(self):
         return self.name
 
-    def close(self):
-        self.io_loop.close()
+    def stop(self):
+        self.io_loop.stop()
 
 
 @ray.remote(max_concurrency=4)
@@ -90,6 +91,7 @@ class TestReader:
         self.channels = channels
         self.io_loop = IOLoop(f'reader_loop_{reader_id}')
         self.data_reader = DataReader(
+            handler_id=str(reader_id),
             name=self.name,
             channels=channels,
             job_name=job_name,
@@ -97,8 +99,8 @@ class TestReader:
         self.io_loop.register_io_handler(self.data_reader)
         self.num_rcvd = 0
 
-    def start(self, num_threads: int = 1) -> Optional[str]:
-        return self.io_loop.connect_and_start(num_threads)
+    def start(self) -> Optional[str]:
+        return self.io_loop.connect_and_start()
 
     def receive_items(self, num_expected) -> bool:
         start_ts = time.time()
@@ -122,8 +124,8 @@ class TestReader:
     def get_name(self):
         return self.name
 
-    def close(self):
-        self.io_loop.close()
+    def stop(self):
+        self.io_loop.stop()
 
 
 def construct_message(i: int, msg_size: int) -> Dict:
@@ -144,8 +146,6 @@ def start_ray_io_handler_actors(handler_actors: List):
         name = names[i]
         if err is not None:
             errs[name] = err
-        # if err is not None:
-        #     raise RuntimeError(f'Failed to start {handler_actors[i].__class__.__name__}, err: {err}')
     if len(errs) != 0:
         raise RuntimeError(f'Failed to start: {errs}')
 

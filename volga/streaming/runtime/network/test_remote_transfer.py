@@ -60,6 +60,7 @@ class TestRemoteTransfer(unittest.TestCase):
             source_node_ip = '127.0.0.1'
             target_node_ip = '127.0.0.1'
         port = 1234
+        handler_id = 0
 
         for _id in range(num_writers):
             channel = RemoteChannel(
@@ -80,7 +81,8 @@ class TestRemoteTransfer(unittest.TestCase):
                         node_id=source_node_id,
                         soft=False
                     )
-                ).remote(_id, job_name, [channel], writer_config)
+                ).remote(handler_id, job_name, [channel], writer_config)
+                handler_id += 1
 
                 # schedule on target node
                 reader = TestReader.options(
@@ -88,20 +90,25 @@ class TestRemoteTransfer(unittest.TestCase):
                         node_id=target_node_id,
                         soft=False
                     )
-                ).remote(_id, job_name, [channel])
+                ).remote(handler_id, job_name, [channel])
+                handler_id += 1
             else:
                 reader = TestReader.options(
                     scheduling_strategy=NodeAffinitySchedulingStrategy(
                         node_id=single_node_id,
                         soft=False
                     )
-                ).remote(_id, job_name, [channel])
+                ).remote(handler_id, job_name, [channel])
+                handler_id += 1
+
                 writer = TestWriter.options(
                     scheduling_strategy=NodeAffinitySchedulingStrategy(
                         node_id=single_node_id,
                         soft=False
                     )
-                ).remote(_id, job_name, [channel], writer_config)
+                ).remote(handler_id, job_name, [channel], writer_config)
+                handler_id += 1
+
             readers.append(reader)
             writers.append(writer)
         if multinode:
@@ -110,26 +117,31 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=source_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'source_transfer_actor', None, channels)
+            ).remote(job_name, 'source_transfer_actor', None, handler_id, None, channels)
+            handler_id += 1
             target_transfer_actor = TransferActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=target_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'target_transfer_actor', channels, None)
+            ).remote(job_name, 'target_transfer_actor', handler_id, None, channels, None)
+            handler_id += 1
         else:
             source_transfer_actor = TransferActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=single_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'source_transfer_actor', None, channels)
+            ).remote(job_name, 'source_transfer_actor', None, handler_id, None, channels)
+            handler_id += 1
+
             target_transfer_actor = TransferActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=single_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'target_transfer_actor', channels, None)
+            ).remote(job_name, 'target_transfer_actor', handler_id, None, channels, None)
+            handler_id += 1
 
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
@@ -152,25 +164,22 @@ class TestRemoteTransfer(unittest.TestCase):
         time.sleep(1)
         futs = []
         start_ts = time.time()
-        for _id in range(n):
-            writers[_id].send_items.remote({channels[_id].channel_id: num_msgs_per_writer}, msg_size)
-            futs.append(readers[_id].receive_items.remote(num_msgs_per_writer))
+        for i in range(n):
+            writers[i].send_items.remote({channels[i].channel_id: num_msgs_per_writer}, msg_size)
+            futs.append(readers[i].receive_items.remote(num_msgs_per_writer))
 
         # wait for finish
-        for _id in range(n):
-            rcvd = ray.get(futs[_id])
+        for i in range(n):
+            rcvd = ray.get(futs[i])
             assert rcvd is True
-            print(f'assert {_id} ok')
+            print(f'assert {i} ok')
         t = time.time() - start_ts
         throughput = (n*num_msgs_per_writer)/t
         print(f'Finised in {t}s, throughput: {throughput} msg/s')
         time.sleep(1)
 
-        for r in readers:
-            ray.get(r.close.remote())
-
-        for w in writers:
-            ray.get(w.close.remote())
+        ray.get([r.close.remote() for r in readers])
+        ray.get([w.close.remote() for w in writers])
 
         ray.get(source_transfer_actor.close.remote())
         ray.get(target_transfer_actor.close.remote())
@@ -202,7 +211,6 @@ class TestRemoteTransfer(unittest.TestCase):
         target_transfer_actor_channels = {}
 
         reserved_ports = {}
-
 
         all_nodes = ray.nodes()
         no_head = list(filter(lambda n: 'node:__internal_head__' not in n['Resources'], all_nodes))
@@ -473,10 +481,9 @@ class TestRemoteTransfer(unittest.TestCase):
             # should backpressure
             assert s is False
 
-            # TODO test queue lengths
             print('assert ok')
         finally:
-            io_loop.close()
+            io_loop.stop()
 
     def throughput_benchmark(self):
         res = {}

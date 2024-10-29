@@ -113,7 +113,7 @@ class MetricsRecorder:
         self.running = True
         self.flusher_thread.start()
 
-    def close(self):
+    def stop(self):
         self.running = False
         self.flusher_thread.join(5)
         self._read_and_flush()
