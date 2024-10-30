@@ -42,14 +42,14 @@ class ZmqConfig(BaseModel):
         return RustZmqConfig(self.sndhwm, self.rcvhwm, self.sndbuf, self.rcvbuf, self.linger, self.connect_timeout_s, self.num_io_threads)
 
 
-DEFAULT_DATA_READER_CONFIG = DataReaderConfig(output_queue_capacity_bytes=1000*1000, response_batch_period_ms=100)
-DEFAULT_DATA_WRITER_CONFIG = DataWriterConfig(in_flight_timeout_s=1, max_capacity_bytes_per_channel=1000*1000, batch_size=1000, flush_period_s=1)
+DEFAULT_DATA_READER_CONFIG = DataReaderConfig(output_queue_capacity_bytes=1000*1000*10, response_batch_period_ms=100)
+DEFAULT_DATA_WRITER_CONFIG = DataWriterConfig(in_flight_timeout_s=1, max_capacity_bytes_per_channel=1000*1000*20, batch_size=1000, flush_period_s=1)
 DEFAULT_TRANSFER_CONFIG = TransferConfig(transfer_queue_size=1000)
 DEFAULT_ZMQ_CONFIG = ZmqConfig(
-    sndhwm=1000,
-    rcvhwm=1000,
-    sndbuf=512*1024,
-    rcvbuf=512*1024,
+    sndhwm=None,
+    rcvhwm=None,
+    sndbuf=None,
+    rcvbuf=None,
     linger=0,
     connect_timeout_s=5,
     num_io_threads=4

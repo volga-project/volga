@@ -93,7 +93,7 @@ class DataWriter(IOHandler):
                     lock.release()
                     continue
                 b = msgpack.dumps(batch)
-                res = self._rust_data_writer.write_bytes(channel_id, b, False, 0, 0)
+                res = self._rust_data_writer.write_bytes(channel_id, b, 100)
                 if res is not None:
                     # print(f'[{self.name}] Flushed {len(batch)}')
                     self._batch_per_channel[channel_id] = []

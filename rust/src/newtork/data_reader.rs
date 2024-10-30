@@ -109,7 +109,7 @@ impl DataReader {
         }
 
         if ipc_addrs.len() != 1 {
-            panic!("Duplicate ipc addrs for {name}")
+            panic!("Misconfigured channel addrs: Data reader {name} expects only 1 ipc addr")
         }
         let ipc_addr = ipc_addrs.iter().next().unwrap().clone();
         let ipc_path = parse_ipc_path_from_addr(&ipc_addr);

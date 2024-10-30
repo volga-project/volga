@@ -5,12 +5,12 @@ use volga_rust::network_deprecated::{buffer_utils::{dummy_bytes, get_buffer_id},
 
 
 #[test]
-fn test_one_to_one_local_deprecated() {
+fn deprecated_one_to_one_local() {
     test_one_to_one(true);
 }
 
 #[test]
-fn test_one_to_one_remote_deprecated() {
+fn deprecated_one_to_one_remote() {
     test_one_to_one(false);
 }
 
@@ -175,12 +175,12 @@ fn test_one_to_one(local: bool) {
 }
 
 #[test]
-fn test_one_to_n_local_deprecated() {
+fn deprecated_one_to_n_local() {
     test_one_to_n(true, 10); // TODO n >= 8 sometimes locks, why? - because we need to notify sender when receiver's que is unlocked after being full
 }
 
 #[test]
-fn test_one_to_n_remote_deprecated() {
+fn deprecated_one_to_n_remote() {
     test_one_to_n(false, 10);
 }
 

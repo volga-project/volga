@@ -23,10 +23,10 @@ class TestLocalTransfer(unittest.TestCase):
             ipc_addr='ipc:///tmp/zmqtest',
         )
         ray.init(address=ray_addr, runtime_env=runtime_env)
-        num_msgs = 1000000
+        num_msgs = 10000000
         msg_size = 128
         # to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
-        batch_size = 100
+        batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
 
@@ -83,7 +83,7 @@ class TestLocalTransfer(unittest.TestCase):
 
     def test_n_all_to_all_on_local_ray(self, n: int):
         num_msgs = 1000000
-        msg_size = 32
+        msg_size = 128
         # to_send = [{'i': str(random.randint(0, 9)) * msg_size} for _ in range(num_msgs)]
         batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
@@ -105,7 +105,7 @@ class TestLocalTransfer(unittest.TestCase):
                 channel_id = f'ch-r{reader_id}-w{writer_id}'
                 channel = LocalChannel(
                     channel_id=channel_id,
-                    ipc_addr=f'ipc:///tmp/zmqtest-{channel_id}',
+                    ipc_addr=f'ipc:///tmp/zmqtest-{reader_id}',
                 )
                 if reader_id not in reader_channels:
                     reader_channels[reader_id] = [channel]
@@ -213,6 +213,6 @@ class TestLocalTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    t.test_one_to_one_on_ray()
-    # t.test_n_all_to_all_on_local_ray(n=4)
+    # t.test_one_to_one_on_ray()
+    t.test_n_all_to_all_on_local_ray(n=4)
     # t.test_backpressure()

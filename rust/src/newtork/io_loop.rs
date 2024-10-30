@@ -1,4 +1,4 @@
-use core::time;
+use core::{str, time};
 use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex}, thread::{self, JoinHandle}, time::SystemTime};
 
 use crossbeam::{channel::{Receiver, Sender}, queue::SegQueue};
@@ -151,50 +151,20 @@ impl IOLoop {
                     let register_message = DealerToRouterRegisterMessage{
                         identity: socket_meta.identity.clone(), channel_ids: socket_meta.channel_ids.clone()
                     };  
-                    let _encoded = serde_json::to_string(&register_message).unwrap();
+                    let _encoded = serde_json::to_vec(&register_message).unwrap();
                     socket.send(&_encoded, 0).expect("Unable to send register message");
+                    // println!("Sent {_encoded}");
                     num_dealers += 1;
                 }
             }
             println!("[IOLoop {name}] Sent register messages from {num_dealers} DEALERs");
-
-            // wait for all the ROUTERS to receive register message and construct channel<->socket_identity mapping
-            let mut channels_to_identities: HashMap<String, HashMap<String, String>> = HashMap::new(); // for each router socket identity, mapping of it's channel ids to sending dealer's identities
-
-            // TODO add timeout
-            let mut num_routers = 0;
-            for (socket, socket_meta) in sockets {
-                if socket_meta.kind == SocketKind::Router {
-                    let mut channel_id_to_identity = HashMap::new();
-                    // TODO timeout
-                    while channel_id_to_identity.len() != socket_meta.channel_ids.len() {
-                        // wait until we recive hi from all dealers using this router
-                        let _identity = socket.recv_string(0).expect("Router failed receiving identity on register").unwrap();
-                        let _encoded = socket.recv_string(0).expect("Router failed receiving register message").unwrap();
-                        
-                        let register_message: DealerToRouterRegisterMessage = serde_json::from_str(&_encoded).unwrap();
-                        if _identity != register_message.identity {
-                            panic!("Routre recived inconsistent identity on register");
-                        }
-                        for channel_id in register_message.channel_ids {
-                            if channel_id_to_identity.contains_key(&channel_id) {
-                                panic!("Routre recived duplicate channel ids on register")
-                            }
-                            channel_id_to_identity.insert(channel_id.clone(), _identity.clone());
-                        }
-                    }
-                    
-                    channels_to_identities.insert(socket_meta.identity.clone(), channel_id_to_identity);
-                    
-                    num_routers += 1;
-                }
-            }
-            println!("[IOLoop {name}] Received register messages on {num_routers} ROUTERs");
             
-            // contains bytes (+optional destination identity for DEALER) read from handler but not sent due to full socket
+            // channel<->socket_identity mapping for all ROUTERs
+            let mut channels_to_identities: HashMap<String, HashMap<String, String>> = HashMap::new(); // for each router socket identity, mapping of it's channel ids to sending dealer's identities
+            
             let mut not_sent: HashMap<&SocketMetadata, Bytes> = HashMap::new();
 
-            let lim = 100;
+            let lim = 100; // how many messages we try to read/write from a socket when poller is awakened
 
             let mut in_senders = HashMap::new();
             let mut out_receivers = HashMap::new();
@@ -230,10 +200,16 @@ impl IOLoop {
                             let mut b_opt: Option<Bytes> = None;
                             if sm.kind == SocketKind::Router {
                                 // zmq::ROUTER receives an identity frame first and actual data after, so we read twice
-                                let _identity_res = socket.recv_string(zmq::DONTWAIT);
-                                if _identity_res.is_ok() {
+                                let identity_res = socket.recv_string(zmq::DONTWAIT);
+                                if identity_res.is_ok() {
                                     // expect second frame to be ready right away
-                                    b_opt = Some(socket.recv_bytes(zmq::DONTWAIT).expect("zmq DEALER data frame is empty while identity is present"));
+                                    let bytes = socket.recv_bytes(zmq::DONTWAIT).expect("zmq DEALER data frame is empty while identity is present");
+                                    let identity = identity_res.unwrap().unwrap();
+                                    if Self::_init_router_if_needed(&mut channels_to_identities, &sm, &identity, &bytes) {
+                                        continue;
+                                    }
+                                   
+                                    b_opt = Some(bytes);
                                 }
                             } else if sm.kind == SocketKind::Dealer {
                                 // zmq::DELAER receives data directly
@@ -318,6 +294,37 @@ impl IOLoop {
         self.io_thread_handle.push(
             std::thread::Builder::new().name(thread_name).spawn(f).unwrap()
         );
+    }
+
+    fn _init_router_if_needed(channels_to_identities: &mut HashMap<String, HashMap<String, String>>, receiver_sm: &SocketMetadata, sedner_id: &String, bytes: &Vec<u8>) -> bool {
+        
+        if 
+            channels_to_identities.contains_key(&receiver_sm.identity) &&
+            channels_to_identities.get(&receiver_sm.identity).unwrap().len() == receiver_sm.channel_ids.len()
+        {
+            return false // all inited
+        }
+
+        let res: Result<DealerToRouterRegisterMessage, serde_json::Error> = serde_json::from_slice(bytes);
+        if !res.is_ok() {
+            return false // not a register message
+        }
+        let register_message: DealerToRouterRegisterMessage = res.unwrap();
+
+        if !channels_to_identities.contains_key(&receiver_sm.identity) {
+            channels_to_identities.insert(receiver_sm.identity.clone(), HashMap::new());
+        }
+
+        if sedner_id != &register_message.identity {
+            panic!("Router received inconsistent identity on register");
+        }
+        for channel_id in register_message.channel_ids {
+            if channels_to_identities.get(&receiver_sm.identity).unwrap().contains_key(&channel_id) {
+                panic!("Routre received duplicate channel ids on register")
+            }
+            channels_to_identities.get_mut(&receiver_sm.identity).unwrap().insert(channel_id.clone(), sedner_id.clone());
+        }
+        true
     }
 
     fn _wait_to_start_running(running: Arc<AtomicBool>) -> bool {
