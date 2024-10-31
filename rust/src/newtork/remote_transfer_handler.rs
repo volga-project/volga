@@ -61,7 +61,6 @@ impl RemoteTransferHandler {
             node_ip
         ) = RemoteTransferHandler::configure_sockets_and_io_chans(&id, &name, &channels, is_sender);
 
-
         RemoteTransferHandler{
             id,
             name: name.clone(), 
@@ -138,7 +137,7 @@ impl RemoteTransferHandler {
             }
 
             if ipc_addrs.len() != 1 {
-                panic!("Duplicate ipc addrs for {name}")
+                panic!("Misconfigured channel addrs: RemoteTransferHandler {name} expects 1 ipc addr")
             }
             let ipc_addr = ipc_addrs.iter().next().unwrap().clone();
             let ipc_path = parse_ipc_path_from_addr(&ipc_addr);
@@ -171,12 +170,12 @@ impl RemoteTransferHandler {
                 }
 
                 if ports.len() != 1 {
-                    panic!("Duplicate ports for {name}")
+                    panic!("Misconfigured channel addrs: RemoteTransferHandler {name} expects 1 port")
                 }
                 let port = ports.iter().next().unwrap();
 
                 if target_node_ips.len() != 1 {
-                    panic!("Duplicate target_node_ip for {name}")
+                    panic!("Misconfigured channel addrs: RemoteTransferHandler {name} expects 1 target_node_ip")
                 }
                 let target_node_ip = target_node_ips.iter().next().unwrap();
 
@@ -242,7 +241,7 @@ impl RemoteTransferHandler {
             }
 
             if ports.len() != 1 {
-                panic!("Duplicate ports for {name}")
+                panic!("Misconfigured channel ports: RemoteTransferHandler {name} expects 1 port")
             }
             let port = ports.iter().next().unwrap();
             let addr = format!("tcp://0.0.0.0:{port}");

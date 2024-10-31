@@ -12,7 +12,8 @@ from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
 from volga.streaming.runtime.network.local.data_writer import DataWriter
 from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DEFAULT_DATA_READER_CONFIG
-from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, start_ray_io_handler_actors
+from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, start_ray_io_handler_actors, RAY_ADDR, \
+    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 
 
 class TestLocalTransfer(unittest.TestCase):
@@ -213,6 +214,6 @@ class TestLocalTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestLocalTransfer()
-    # t.test_one_to_one_on_ray()
+    t.test_one_to_one_on_ray()
     t.test_n_all_to_all_on_local_ray(n=4)
-    # t.test_backpressure()
+    # t.test_backpressure() # TODO this does not work

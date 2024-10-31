@@ -140,7 +140,7 @@ impl DataWriter {
                 for ipc_addr in ipc_addrs {
                     println!("{ipc_addr}");
                 }
-                panic!("Duplicate ipc addrs for {name}")
+                panic!("Misconfigured channel addrs: DataWriter {name} expects 1 ipc addr")
             }
             let ipc_addr = ipc_addrs.iter().next().unwrap().clone();
             let ipc_path = parse_ipc_path_from_addr(&ipc_addr);

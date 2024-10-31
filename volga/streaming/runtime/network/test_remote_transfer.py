@@ -65,7 +65,7 @@ class TestRemoteTransfer(unittest.TestCase):
         for _id in range(num_writers):
             channel = RemoteChannel(
                 channel_id=f'ch_{_id}',
-                source_local_ipc_addr=f'ipc:///tmp/source_local_{_id}',
+                source_local_ipc_addr=f'ipc:///tmp/source_local',
                 source_node_ip=source_node_ip,
                 source_node_id=source_node_id,
                 target_local_ipc_addr=f'ipc:///tmp/target_local_{_id}',
@@ -117,14 +117,14 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=source_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'source_transfer_actor', None, handler_id, None, channels)
+            ).remote(job_name, 'source_transfer_actor', None, str(handler_id), None, channels)
             handler_id += 1
             target_transfer_actor = TransferActor.options(
                 scheduling_strategy=NodeAffinitySchedulingStrategy(
                     node_id=target_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'target_transfer_actor', handler_id, None, channels, None)
+            ).remote(job_name, 'target_transfer_actor', str(handler_id), None, channels, None)
             handler_id += 1
         else:
             source_transfer_actor = TransferActor.options(
@@ -132,7 +132,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=single_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'source_transfer_actor', None, handler_id, None, channels)
+            ).remote(job_name, 'source_transfer_actor', None, str(handler_id), None, channels)
             handler_id += 1
 
             target_transfer_actor = TransferActor.options(
@@ -140,7 +140,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=single_node_id,
                     soft=False
                 )
-            ).remote(job_name, 'target_transfer_actor', handler_id, None, channels, None)
+            ).remote(job_name, 'target_transfer_actor', str(handler_id), None, channels, None)
             handler_id += 1
 
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
@@ -188,7 +188,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
     # reader/writer + transfer per node, star topology (nw*nr)
     def test_nw_to_nr_star_on_ray(self, nw: int, nr: int, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False) -> Tuple:
-        num_msgs = 100000
+        num_msgs = 10000000
         msg_size = 32
         batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
@@ -201,6 +201,10 @@ class TestRemoteTransfer(unittest.TestCase):
         writer_channels = {}
         readers = {}
         writers = {}
+
+        reader_ids = [*range(nr)]
+        writer_ids = [*range(nr, nr + nw)]
+
         nodes_per_reader = {}
         nodes_per_writer = {}
 
@@ -210,8 +214,6 @@ class TestRemoteTransfer(unittest.TestCase):
         target_transfer_actors = {}
         target_transfer_actor_channels = {}
 
-        reserved_ports = {}
-
         all_nodes = ray.nodes()
         no_head = list(filter(lambda n: 'node:__internal_head__' not in n['Resources'], all_nodes))
 
@@ -219,17 +221,17 @@ class TestRemoteTransfer(unittest.TestCase):
             if len(no_head) < nr + nw:
                 raise RuntimeError(f'Not enough non-head nodes in the cluster: {len(no_head)}, expected {nr + nw}')
             node_index = 0
-            for reader_id in range(nr):
+            for reader_id in reader_ids:
                 nodes_per_reader[reader_id] = no_head[node_index]
                 node_index += 1
 
-            for writer_id in range(nw):
+            for writer_id in writer_ids:
                 nodes_per_writer[writer_id] = no_head[node_index]
                 node_index += 1
 
-        for reader_id in range(nr):
-            for writer_id in range(nw):
-                channel_id = f'ch-{writer_id}-{reader_id}'
+        for reader_id in reader_ids:
+            for writer_id in writer_ids:
+                channel_id = f'ch-w{writer_id}-r{reader_id}'
                 if multinode:
                     source_node = nodes_per_writer[writer_id]
                     target_node = nodes_per_reader[reader_id]
@@ -243,17 +245,15 @@ class TestRemoteTransfer(unittest.TestCase):
                     source_node_ip = '127.0.0.1'
                     target_node_ip = '127.0.0.1'
 
-                # use '' as node_id because we run test on one node and can not have duplicate ports
-                port = WorkerLifecycleController.gen_port(f'{source_node_id}-{target_node_id}', target_node_id, reserved_ports, {})
                 channel = RemoteChannel(
                     channel_id=channel_id,
-                    source_local_ipc_addr=f'ipc:///tmp/source_local_{channel_id}',
+                    source_local_ipc_addr=f'ipc:///tmp/source_local_{writer_id}',
                     source_node_ip=source_node_ip,
                     source_node_id=source_node_id,
-                    target_local_ipc_addr=f'ipc:///tmp/target_local_{channel_id}',
+                    target_local_ipc_addr=f'ipc:///tmp/target_local_{reader_id}',
                     target_node_ip=target_node_ip,
                     target_node_id=target_node_id,
-                    port=port
+                    port=2345
                 )
                 if reader_id not in reader_channels:
                     reader_channels[reader_id] = [channel]
@@ -275,6 +275,7 @@ class TestRemoteTransfer(unittest.TestCase):
                 else:
                     target_transfer_actor_channels[target_node_id].append(channel)
 
+        handler_id = 0
         for reader_id in reader_channels:
             options = {'num_cpus': 0}
             if multinode:
@@ -283,8 +284,9 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=node_id,
                     soft=False
                 )
-            reader = TestReader.options(**options).remote(reader_id, job_name, reader_channels[reader_id])
+            reader = TestReader.options(**options).remote(str(handler_id), job_name, reader_channels[reader_id])
             readers[reader_id] = reader
+            handler_id += 1
 
         for writer_id in writer_channels:
             options = {'num_cpus': 0}
@@ -294,8 +296,9 @@ class TestRemoteTransfer(unittest.TestCase):
                     node_id=node_id,
                     soft=False
                 )
-            writer = TestWriter.options(**options).remote(writer_id, job_name, writer_channels[writer_id], writer_config)
+            writer = TestWriter.options(**options).remote(str(handler_id), job_name, writer_channels[writer_id], writer_config)
             writers[writer_id] = writer
+            handler_id += 1
 
         for source_node_id in source_transfer_actor_channels:
             options = {'num_cpus': 0}
@@ -305,8 +308,9 @@ class TestRemoteTransfer(unittest.TestCase):
                     soft=False
                 )
             out_channels = source_transfer_actor_channels[source_node_id]
-            source_transfer_actor = TransferActor.options(**options).remote(job_name, f'source_transfer_actor_{source_node_id}', None, out_channels)
+            source_transfer_actor = TransferActor.options(**options).remote(job_name, f'source_transfer_actor_{source_node_id}', None, str(handler_id), None, out_channels)
             source_transfer_actors[source_node_id] = source_transfer_actor
+            handler_id += 1
 
         for target_node_id in target_transfer_actor_channels:
             options = {'num_cpus': 0}
@@ -316,8 +320,9 @@ class TestRemoteTransfer(unittest.TestCase):
                     soft=False
                 )
             in_channels = target_transfer_actor_channels[target_node_id]
-            target_transfer_actor = TransferActor.options(**options).remote(job_name, f'target_transfer_actor_{target_node_id}', in_channels, None)
+            target_transfer_actor = TransferActor.options(**options).remote(job_name, f'target_transfer_actor_{target_node_id}', str(handler_id), None, in_channels, None)
             target_transfer_actors[target_node_id] = target_transfer_actor
+            handler_id += 1
 
         actors = list(readers.values()) + list(writers.values()) + list(source_transfer_actors.values()) + list(target_transfer_actors.values())
         start_ray_io_handler_actors(actors)
@@ -351,6 +356,7 @@ class TestRemoteTransfer(unittest.TestCase):
         ray.shutdown()
         return throughput, t
 
+    # TODO fix this to work with new rust engine
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
         job_name = f'job-{int(time.time())}'
         num_msgs = 1000000
@@ -420,6 +426,7 @@ class TestRemoteTransfer(unittest.TestCase):
         assert rcvd is True
         print('assert ok')
 
+    # TODO fix this to work with memory bound queues
     def test_backpressure(self):
         channel = RemoteChannel(
             channel_id='1',
@@ -509,11 +516,10 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    # t.test_n_to_n_parallel_on_ray(n=1, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
-    # t.test_n_to_n_parallel_on_ray(n=1)
-    # t.test_transfer_actor_interruption()
-    t.throughput_benchmark()
-    # t.test_backpressure()
+    # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    # t.test_n_to_n_parallel_on_ray(n=4)
+    t.test_nw_to_nr_star_on_ray(nr=4, nw=4, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    # t.throughput_benchmark()
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
 # 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s

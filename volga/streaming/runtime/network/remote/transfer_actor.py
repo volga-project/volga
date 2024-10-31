@@ -15,8 +15,8 @@ class TransferActor:
         self,
         job_name: str,
         name: str,
-        sender_id: Optional[str] = None,
         receiver_id: Optional[str] = None,
+        sender_id: Optional[str] = None,
         in_channels: Optional[List[RemoteChannel]] = None,
         out_channels: Optional[List[RemoteChannel]] = None,
     ):

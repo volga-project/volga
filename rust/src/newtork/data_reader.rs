@@ -56,6 +56,9 @@ impl DataReader {
 
     pub fn new(id: String, name: String, job_name: String, data_reader_config: DataReaderConfig, channels: Vec<Channel>) -> DataReader {
         let n_channels = channels.len();
+        if n_channels == 0 {
+            panic!("{name} inited with no channels");
+        }
         let socket_metas = DataReader::configure_sockets(&id, &name, &channels);
 
         let mut watermarks = HashMap::with_capacity(n_channels);
@@ -190,6 +193,10 @@ impl IOHandler for DataReader {
                 this_metrics_recorder.inc(NUM_BUFFERS_RECVD, channel_id, 1);
                 this_metrics_recorder.inc(NUM_BYTES_RECVD, channel_id, size as u64);
                 let buffer_id = get_buffer_id(&b);
+
+                if !locked_watermarks.contains_key(channel_id) {
+                    panic!("No ch {:?}", channel_id)
+                }
 
                 let wm = locked_watermarks.get(channel_id).unwrap().load(Ordering::Relaxed);
                 if buffer_id as i32 <= wm {
