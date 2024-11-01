@@ -80,15 +80,6 @@ impl SocketsMonitor {
         Some(err)
     }
 
-    pub fn mark_ready(&self) {
-        self.ready.store(true, Ordering::Relaxed);
-    }
-
-    pub fn mark_connected(&self, sm: SocketMetadata) {
-        let this_sockets_connected_status = self.sockets_connected_status.clone();
-        this_sockets_connected_status.get(&sm).unwrap().value().store(true, Ordering::Relaxed);
-    }
-
     pub fn all_connected(&self) -> bool {
         let this_sockets_connected_status = self.sockets_connected_status.clone();
         Self::_all_connected(this_sockets_connected_status.as_ref())

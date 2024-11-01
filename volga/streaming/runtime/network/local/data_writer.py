@@ -17,14 +17,15 @@ class DataWriter(IOHandler):
 
     def __init__(
         self,
+        handler_id: str,
         name: str,
         source_stream_name: str,
         job_name: str,
         channels: List[Channel],
         config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG
     ):
-        super().__init__(name, job_name, channels)
-        self._rust_data_writer = RustDataWriter(name, job_name, config.to_rust(), self._rust_channels)
+        super().__init__(handler_id, name, job_name, channels)
+        self._rust_data_writer = RustDataWriter(handler_id, name, job_name, config.to_rust(), self._rust_channels)
         self._source_stream_name = source_stream_name
         self._batch_per_channel = {channel.channel_id: [] for channel in channels}
         self._lock_per_channel = {channel.channel_id: threading.Lock() for channel in channels}
@@ -67,7 +68,7 @@ class DataWriter(IOHandler):
         batch.append(message)
         if len(batch) == self._batch_size:
             b = msgpack.dumps(batch)
-            res = self._rust_data_writer.write_bytes(channel_id, b, False, 0, 0)
+            res = self._rust_data_writer.write_bytes(channel_id, b, 100)
             if res is None:
                 batch.pop()
                 lock.release()
@@ -92,7 +93,7 @@ class DataWriter(IOHandler):
                     lock.release()
                     continue
                 b = msgpack.dumps(batch)
-                res = self._rust_data_writer.write_bytes(channel_id, b, False, 0, 0)
+                res = self._rust_data_writer.write_bytes(channel_id, b, 100)
                 if res is not None:
                     # print(f'[{self.name}] Flushed {len(batch)}')
                     self._batch_per_channel[channel_id] = []
@@ -111,9 +112,9 @@ class DataWriter(IOHandler):
         self._rust_data_writer.start()
         self._flusher_thread.start()
 
-    def close(self):
-        super().close()
+    def stop(self):
+        super().stop()
         self.running = False
         self._flusher_thread.join(5)
         self.try_flush_if_needed()
-        self._rust_data_writer.close()
+        self._rust_data_writer.stop()

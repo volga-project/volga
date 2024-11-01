@@ -35,7 +35,7 @@ class WorkerLifecycleController:
         self.resource_manager = resource_manager
         self.stats_manager = stats_manager
         self.node_assign_strategy = node_assign_strategy
-        self._reserved_node_ports = {}
+        self._reserved_ports = {}
         self._na_ports_per_node = {}
         self.transfer_controller = TransferController()
 
@@ -121,26 +121,29 @@ class WorkerLifecycleController:
             if source_worker_network_info is None or target_worker_network_info is None:
                 raise RuntimeError(f'No worker network info')
 
+            data_reader_ipc_unique_key = f'dr-{edge.target_execution_vertex.execution_vertex_id}'
+
             if source_worker_network_info.node_id == target_worker_network_info.node_id:
                 channel = LocalChannel(
                     channel_id=edge.id,
-                    ipc_addr=gen_ipc_addr(job_name=job_name, channel_id=edge.id),
+                    ipc_addr=gen_ipc_addr(job_name, data_reader_ipc_unique_key),
                 )
             else:
-                # unique ports per node-node connection
                 source_node_id = source_worker_network_info.node_id
                 target_node_id = target_worker_network_info.node_id
-                port = self.gen_port(f'{source_node_id}-{target_node_id}', target_node_id, self._reserved_node_ports, self._na_ports_per_node)
+
+                source_ipc_unique_key = f'dw-{edge.source_execution_vertex.execution_vertex_id}'
+                target_ipc_unique_key = data_reader_ipc_unique_key
 
                 channel = RemoteChannel(
                     channel_id=edge.id,
-                    source_local_ipc_addr=gen_ipc_addr(job_name, edge.id, source_node_id),
+                    source_local_ipc_addr=gen_ipc_addr(job_name, source_ipc_unique_key),
                     source_node_ip=source_worker_network_info.node_ip,
                     source_node_id=source_node_id,
-                    target_local_ipc_addr=gen_ipc_addr(job_name, edge.id, target_node_id),
+                    target_local_ipc_addr=gen_ipc_addr(job_name, target_ipc_unique_key),
                     target_node_ip=target_worker_network_info.node_ip,
                     target_node_id=target_node_id,
-                    port=port,
+                    port=self._gen_port(target_node_id),
                 )
                 if source_node_id not in remote_channels_per_node:
                     remote_channels_per_node[source_node_id] = ([], [])
@@ -216,33 +219,14 @@ class WorkerLifecycleController:
         for w in workers:
             w.exit.remote()
 
-    @staticmethod
-    def gen_port(conn_id: str, host_node_id: str, reserved_node_ports: Dict[str, Tuple[int, str]], na_ports: Dict[str, List[int]]) -> int:
-        port_pool_per_node = [*range(VALID_PORT_RANGE[0], VALID_PORT_RANGE[1] + 1)]
-        if conn_id not in reserved_node_ports:
-            port = None
-            # gen next from pool
-            for _port in port_pool_per_node:
-                # check if the port is available
-                if host_node_id in na_ports and _port in na_ports[host_node_id]:
-                    continue
+    def _gen_port(self, node_id: str) -> int:
+        if node_id in self._reserved_ports:
+            return self._reserved_ports[node_id]
 
-                # scan all reserved_node_ports to see if it is used for this node_id
-                used = False
-                for _conn_id in reserved_node_ports:
-                    _node_id = reserved_node_ports[_conn_id][1]
-                    _reserved_port = reserved_node_ports[_conn_id][0]
-                    if host_node_id == _node_id and _reserved_port == _port:
-                        used = True
-                        break
-                if not used:
-                    port = _port
-                    break
-            if port is None:
-                raise RuntimeError(f'All ports are used for {host_node_id}')
+        # gen first available port in range which is not in na ports
+        for port in range(VALID_PORT_RANGE[0], VALID_PORT_RANGE[-1] + 1):
+            if not port in self._na_ports_per_node[node_id]:
+                return port
 
-            reserved_node_ports[conn_id] = (port, host_node_id)
-            return port
-        else:
-            return reserved_node_ports[conn_id][0]
+        raise RuntimeError(f'Unable to generate port for {node_id}')
 

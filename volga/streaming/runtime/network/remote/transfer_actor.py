@@ -15,15 +15,22 @@ class TransferActor:
         self,
         job_name: str,
         name: str,
+        receiver_id: Optional[str] = None,
+        sender_id: Optional[str] = None,
         in_channels: Optional[List[RemoteChannel]] = None,
         out_channels: Optional[List[RemoteChannel]] = None,
     ):
+        if sender_id is None and receiver_id is None:
+            raise ValueError('Transfer actor should have at least one of sender_id or receiver_id')
+
         if in_channels is None and out_channels is None:
             raise ValueError('Transfer actor should have at least one of in_channels or out_channels')
         self.name = name
         self._loop = IOLoop(f'io-loop-{name}')
         if out_channels is not None and len(out_channels) != 0:
+            assert sender_id is not None
             self._sender = TransferSender(
+                handler_id=sender_id,
                 job_name=job_name,
                 name=f'{name}-sender',
                 channels=out_channels
@@ -34,7 +41,9 @@ class TransferActor:
             self._sender = None
 
         if in_channels is not None and len(in_channels) != 0:
+            assert receiver_id is not None
             self._receiver = TransferReceiver(
+                handler_id=receiver_id,
                 job_name=job_name,
                 name=f'{name}-receiver',
                 channels=in_channels
@@ -50,8 +59,8 @@ class TransferActor:
     def get_name(self):
         return self.name
 
-    def start(self, num_threads: int = 1) -> Optional[str]:
-        return self._loop.connect_and_start(num_threads)
+    def start(self) -> Optional[str]:
+        return self._loop.connect_and_start()
 
-    def close(self):
-        self._loop.close()
+    def stop(self):
+        self._loop.stop()

@@ -321,7 +321,7 @@ mod tests {
 
     use std::{thread, time};
 
-    use crate::network::buffer_utils::dummy_bytes;
+    use crate::network_deprecated::buffer_utils::dummy_bytes;
 
     use super::*;
 
@@ -395,7 +395,9 @@ mod tests {
         while !pushers.is_empty() {
             let p = pushers.pop().unwrap();
             p.join().unwrap();
-        }while !consumers.is_empty() {
+        }
+        
+        while !consumers.is_empty() {
             let c = consumers.pop().unwrap();
             c.join().unwrap();
         }

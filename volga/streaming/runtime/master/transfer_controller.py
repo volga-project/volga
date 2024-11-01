@@ -21,6 +21,7 @@ class TransferController:
         if len(remote_channels_per_node) == 0:
             return
 
+        node_index = 0
         for node_id in remote_channels_per_node:
             if node_id in self.transfer_actors:
                 raise RuntimeError(f'Duplicate node_id {node_id} during transfer actors init')
@@ -54,9 +55,22 @@ class TransferController:
                 )
             }
 
-            transfer_actor = TransferActor.options(**options_kwargs).remote(job_name, name, in_channels, out_channels)
+            if len(in_channels) == 0:
+                in_channels = None
+                receiver_id = None
+            else:
+                receiver_id = f'tr-{node_index}'
+
+            if len(out_channels) == 0:
+                out_channels = None
+                sender_id = None
+            else:
+                sender_id = f'ts-{node_index}'
+
+            transfer_actor = TransferActor.options(**options_kwargs).remote(job_name, name, receiver_id, sender_id, in_channels, out_channels)
 
             self.transfer_actors[node_id] = (transfer_actor, name)
+            node_index += 1
 
     def start_transfer_actors(self):
         f = []

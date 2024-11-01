@@ -1,14 +1,16 @@
 data_writer:
   in_flight_timeout_s: 1
-  max_buffers_per_channel: 100000
+  max_capacity_bytes_per_channel: 10000000
 data_reader:
-  output_queue_size: 100000
+  output_queue_capacity_bytes: 1000
+  response_batch_period_ms: 100
 transfer:
   transfer_queue_size: 10000
 zmq:
-  sndhwm: 1000
-  rcvhwm: 1000
-  sndbuf: 5120
-  rcvbuf: 5120
+  sndhwm: 10000
+  rcvhwm: 10000
+  sndbuf: 51200
+  rcvbuf: 51200
   linger: 0
-  connect_timeout_s: 4
+  connect_timeout_s: 5
+  num_io_threads: 4

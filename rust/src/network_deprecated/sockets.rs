@@ -25,13 +25,9 @@ pub struct SocketMetadata {
     pub addr: String,
 }
 
-// TODO implement waiting for connection
-
 // per-thread SocketsManager
 pub struct SocketsManager {
     sockets_and_metas: Vec<(zmq::Socket, SocketMetadata)>,
-    // monitor_sockets: HashMap<SocketMetadata, (zmq::Socket, String)>,
-    // sockets_connected_status: HashMap<SocketMetadata, bool>
 }
 
 impl SocketsManager {

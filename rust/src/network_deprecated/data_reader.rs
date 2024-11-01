@@ -225,12 +225,13 @@ impl IOHandler for DataReader {
 
             // TODO implement proper ack batching
             // let max_batch_size = 500;
-            let locked_send_chans = this_send_chans.read().unwrap();
             // let mut last_resp = None;
             while this_runnning.load(Ordering::Relaxed) {
+                let locked_send_chans = this_send_chans.read().unwrap();
                 let r = &this_response_queue.1;
                 let resp = r.recv_timeout(Duration::from_millis(timeout_ms));
                 if !resp.is_ok() {
+                    drop(locked_send_chans);
                     continue;
                 }
                 let resp = resp.unwrap();

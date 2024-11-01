@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
-pub mod network;
-use network::{data_reader::DataReaderConfig, data_writer::DataWriterConfig, io_loop::ZmqConfig, py_interface::*, remote_transfer_handler::TransferConfig};
+pub mod newtork;
+pub mod network_deprecated; // THIS IS FOR DEPRECATED TESTS TO COMPILE - REMOVE WHEN DEPRECATION IS FINAL
+use newtork::{data_reader::DataReaderConfig, data_writer::DataWriterConfig, io_loop::ZmqConfig, py_interface::*, remote_transfer_handler::TransferConfig};
 
 #[pymodule]
 fn volga_rust(_py: Python, m: &PyModule) -> PyResult<()> {

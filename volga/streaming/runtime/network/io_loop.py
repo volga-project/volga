@@ -14,10 +14,12 @@ class IOHandler(ABC):
 
     def __init__(
         self,
+        handler_id: str,
         name: str,
         job_name: str,
         channels: List[Channel],
     ):
+        self.handler_id = handler_id
         self.name = name
         self.job_name = job_name
         self._rust_channels = [channel.to_rust_channel() for channel in channels]
@@ -25,13 +27,11 @@ class IOHandler(ABC):
 
     @abstractmethod
     def start(self):
-        # pass
         self._metrics_recorder.start()
 
     @abstractmethod
-    def close(self):
-        # pass
-        self._metrics_recorder.close()
+    def stop(self):
+        self._metrics_recorder.stop()
 
     @abstractmethod
     def get_rust_io_handler(self) -> RustIOHandler:
@@ -62,15 +62,15 @@ class IOLoop:
         elif isinstance(rust_io_handler, RustTransferReceiver):
             self._rust_io_loop.register_transfer_receiver(rust_io_handler)
 
-    def connect_and_start(self, num_threads: int = 1, timeout_ms: int = 30000) -> Optional[str]:
+    def connect_and_start(self, timeout_ms: int = 30000) -> Optional[str]:
         for handler in self._handlers:
             handler.start()
-        res = self._rust_io_loop.connect(num_threads, timeout_ms)
+        res = self._rust_io_loop.connect(timeout_ms)
         if res is None:
             self._rust_io_loop.start()
         return res
 
-    def close(self):
+    def stop(self):
         for handler in self._handlers:
-            handler.close()
-        self._rust_io_loop.close()
+            handler.stop()
+        self._rust_io_loop.stop()
