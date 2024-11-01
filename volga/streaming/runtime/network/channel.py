@@ -75,9 +75,13 @@ class RemoteChannel(Channel):
         )
 
 
-def gen_ipc_addr(job_name: str, channel_id: str, node_id: Optional[str] = None) -> str:
+def gen_ipc_addr(job_name: str, unique_key: str) -> str:
     path = f'ipc://{IPC_DIR}/{job_name}'
-    if node_id is None:
-        return f'{path}/ipc_{channel_id}'
-    else:
-        return f'{path}/ipc_{channel_id}_{node_id}'
+    return f'{path}/ipc_{unique_key}'
+
+# def gen_ipc_addr(job_name: str, channel_id: str, node_id: Optional[str] = None) -> str:
+#     path = f'ipc://{IPC_DIR}/{job_name}'
+#     if node_id is None:
+#         return f'{path}/ipc_{channel_id}'
+#     else:
+#         return f'{path}/ipc_{channel_id}_{node_id}'

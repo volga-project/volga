@@ -62,7 +62,7 @@ class TestWordCount(unittest.TestCase):
         ctx = StreamingContext(job_config=job_config)
 
         dict_size = 10
-        count_per_word = 100000
+        count_per_word = 10000000
         word_length = 32
         num_msgs_per_split = 100000
 
@@ -76,7 +76,7 @@ class TestWordCount(unittest.TestCase):
 
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=6,
+            parallelism=4,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary

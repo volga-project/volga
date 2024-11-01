@@ -64,7 +64,8 @@ class StreamTask(ABC):
             if self.execution_vertex.job_vertex.vertex_type != VertexType.SINK:
                 # sinks do not pass data downstream so no writer
                 self.data_writer = DataWriter(
-                    name=f'data-writer-{self.execution_vertex.execution_vertex_id}',
+                    handler_id=f'dw-{self.execution_vertex.execution_vertex_id}',
+                    name=f'dw-{self.execution_vertex.execution_vertex_id}',
                     source_stream_name=str(self.execution_vertex.stream_operator.id),
                     job_name=self.execution_vertex.job_name,
                     channels=output_channels
@@ -81,7 +82,8 @@ class StreamTask(ABC):
             if self.execution_vertex.job_vertex.vertex_type != VertexType.SOURCE:
                 # sources do not read data from upstream so no reader
                 self.data_reader = DataReader(
-                    name=f'data-reader-{self.execution_vertex.execution_vertex_id}',
+                    handler_id=f'dr-{self.execution_vertex.execution_vertex_id}',
+                    name=f'dr-{self.execution_vertex.execution_vertex_id}',
                     job_name=self.execution_vertex.job_name,
                     channels=input_channels
                 )

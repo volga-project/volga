@@ -112,7 +112,8 @@ impl DataReader {
         }
 
         if ipc_addrs.len() != 1 {
-            panic!("Misconfigured channel addrs: Data reader {name} expects only 1 ipc addr")
+            let s = format!("Misconfigured channel addrs: Data reader {:?} expects only 1 ipc addr, got: {:?}", name,  ipc_addrs);
+            panic!("{s}")
         }
         let ipc_addr = ipc_addrs.iter().next().unwrap().clone();
         let ipc_path = parse_ipc_path_from_addr(&ipc_addr);
@@ -207,11 +208,6 @@ impl IOHandler for DataReader {
                     // before receiving ack and sending more (which happens only after all _out_of_order is processed)
                     let locked_out_of_orders = locked_out_of_order_buffers.get(channel_id).unwrap();
                     let mut locked_out_of_order = locked_out_of_orders.write().unwrap(); 
-                    
-                    // TODO
-                    // if locked_out_of_order.len() > 1 {
-                    //     panic!("REMOVE THIS PANIC FROM PROD!!! - we have out of order data");
-                    // }
 
                     if locked_out_of_order.contains_key(&(buffer_id as i32)) {
                         // duplicate
