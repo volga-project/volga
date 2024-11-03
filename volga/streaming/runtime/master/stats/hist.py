@@ -10,7 +10,6 @@ class Hist:
         assert sorted(buckets) == buckets
         self.buckets = buckets
         if hist is None:
-            # self.hist = {b: 0 for b in buckets}
             self.hist = collections.OrderedDict()
             for b in buckets:
                 self.hist[b] = 0

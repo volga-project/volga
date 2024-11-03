@@ -2,7 +2,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from threading import Thread
-from typing import Optional
+from typing import Optional, List
 
 from ray.actor import ActorHandle
 
@@ -136,13 +136,13 @@ class StreamTask(ABC):
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')
 
-    def collect_stats(self) -> WorkerStatsUpdate:
+    def collect_stats(self) -> List[WorkerStatsUpdate]:
         if isinstance(self.processor, SourceProcessor):
             assert isinstance(self.processor.operator, ISourceOperator)
             source_context = self.processor.operator.get_source_context()
             assert isinstance(source_context, SourceOperator.SourceContextImpl)
             worker_throughput_stats = source_context.throughput_stats
-            return worker_throughput_stats.collect()
+            return [worker_throughput_stats.collect()]
 
         assert isinstance(self.processor, StreamProcessor)
         operator = self.processor.operator
@@ -151,7 +151,7 @@ class StreamTask(ABC):
 
         if isinstance(operator, SinkOperator):
             latency_stats = operator.latency_stats
-            return latency_stats.collect()
+            return [latency_stats.collect()]
 
         raise RuntimeError('Trying to collect stats from worker that does not implement it')
 
