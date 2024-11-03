@@ -288,7 +288,7 @@ class SinkOperator(StreamOperator, OneInputOperator):
         
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
-        self.latency_stats = WorkerLatencyStatsState.init()
+        self.latency_stats = WorkerLatencyStatsState.create()
 
     def process_element(self, record: Record):
         if record.source_emit_ts is not None:

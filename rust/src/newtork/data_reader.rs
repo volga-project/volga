@@ -169,6 +169,7 @@ impl IOHandler for DataReader {
         self.running.store(true, Ordering::Relaxed);
         self.metrics_recorder.start();
 
+        let this_channels = self.channels.clone();
         let this_running = self.running.clone();
         let this_in_chan = self.in_chan.clone();
         let this_result_queue = self.result_queue.clone();
@@ -196,7 +197,7 @@ impl IOHandler for DataReader {
                 let buffer_id = get_buffer_id(&b);
 
                 if !locked_watermarks.contains_key(channel_id) {
-                    panic!("No ch {:?}", channel_id)
+                    panic!("No channel {:?}, we have {:?}", channel_id, this_channels);
                 }
 
                 let wm = locked_watermarks.get(channel_id).unwrap().load(Ordering::Relaxed);

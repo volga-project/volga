@@ -1,5 +1,8 @@
 from typing import List, Dict, Any, Optional
 
+from volga.streaming.common.utils import ms_to_s, now_ts_ms
+from volga.streaming.runtime.master.stats.stats_manager import WorkerLatencyStatsState, WorkerThroughputStatsState, \
+    WorkerStatsUpdate
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
@@ -65,7 +68,12 @@ class TestWriter:
             if i == num_items:
                 cur_channel_index = (cur_channel_index + 1)%len(channel_ids)
                 continue
-            item = construct_message(i, msg_size)
+
+            mark_latency = False
+            if num_sent % 100 == 0:
+                mark_latency = True
+
+            item = construct_message(i, msg_size, mark_latency)
             succ = self.data_writer.try_write_message(channel_id, item)
             if succ:
                 index[channel_id] += 1
@@ -99,6 +107,11 @@ class TestReader:
         self.io_loop.register_io_handler(self.data_reader)
         self.num_rcvd = 0
 
+        # stats
+
+        self.latency_stats = WorkerLatencyStatsState.create()
+        self.throughput_stats = WorkerThroughputStatsState.create()
+
     def start(self) -> Optional[str]:
         return self.io_loop.connect_and_start()
 
@@ -113,13 +126,24 @@ class TestReader:
                 time.sleep(0.001)
                 continue
 
+            for item in items:
+                if 'emit_ts' in item:
+                    ts = now_ts_ms()
+                    latency = ts - item['emit_ts']
+                    self.latency_stats.observe(latency, ts)
+
+            self.throughput_stats.inc(len(items))
             self.num_rcvd += len(items)
+
             if self.num_rcvd == num_expected:
                 break
         return self.num_rcvd == num_expected
 
     def get_num_rcvd(self) -> int:
         return self.num_rcvd
+
+    def collect_stats(self) -> List[WorkerStatsUpdate]:
+        return [self.throughput_stats.collect(), self.latency_stats.collect()]
 
     def get_name(self):
         return self.name
@@ -128,8 +152,11 @@ class TestReader:
         self.io_loop.stop()
 
 
-def construct_message(i: int, msg_size: int) -> Dict:
-    return {'k': i, 'v': 'a' * msg_size}
+def construct_message(i: int, msg_size: int, mark_latency: bool) -> Dict:
+    msg = {'k': i, 'v': 'a' * msg_size}
+    if mark_latency:
+        msg['emit_ts'] = now_ts_ms()
+    return msg
 
 
 def start_ray_io_handler_actors(handler_actors: List):

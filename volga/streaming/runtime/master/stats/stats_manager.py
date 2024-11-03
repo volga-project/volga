@@ -4,7 +4,7 @@ import threading
 import time
 import typing
 from threading import Thread
-from typing import Tuple, List, Dict
+from typing import Tuple, List, Dict, Optional
 
 import ray
 from pydantic import BaseModel
@@ -13,7 +13,7 @@ from volga.streaming.runtime.master.stats.hist import Hist
 
 REFRESH_PERIOD_S = 1
 
-LATENCY_BINS_MS = [*range(10, 10000, 10)]
+LATENCY_BINS_MS = [*range(0, 10)] + [*range(10, 10000, 10)]
 
 LATENCY_AGGREGATION_WINDOW_S = 5
 
@@ -22,7 +22,6 @@ assert LATENCY_AGGREGATION_WINDOW_S >= REFRESH_PERIOD_S
 THROUGHPUT_AGGREGATION_WINDOW_S = 2
 
 assert THROUGHPUT_AGGREGATION_WINDOW_S >= REFRESH_PERIOD_S
-
 
 
 class _LatencyStats(BaseModel):
@@ -50,7 +49,7 @@ class WorkerLatencyStatsState(_LatencyStats):
     lock: typing.Any
 
     @classmethod
-    def init(cls) -> 'WorkerLatencyStatsState':
+    def create(cls) -> 'WorkerLatencyStatsState':
         state = WorkerLatencyStatsState(latency_hists_per_s=collections.OrderedDict(), lock=threading.Lock())
         return state
 
@@ -84,18 +83,18 @@ class WorkerThroughputStatsState(_ThroughputStats):
     def create(cls) -> 'WorkerThroughputStatsState':
         return WorkerThroughputStatsState(num_messages_per_s=collections.OrderedDict(), lock=threading.Lock(), cur_bucket_id=-1, cur_bucket_val=0)
 
-    def inc(self):
+    def inc(self, count: int = 1):
         s = ms_to_s(now_ts_ms())
         if self.cur_bucket_id < 0:
             self.cur_bucket_id = s
         if self.cur_bucket_id == s:
-            self.cur_bucket_val += 1
+            self.cur_bucket_val += count
         else:
             self.lock.acquire()
             self.num_messages_per_s[self.cur_bucket_id] = self.cur_bucket_val
             self.lock.release()
             self.cur_bucket_id = s
-            self.cur_bucket_val = 1
+            self.cur_bucket_val = count
 
     def collect(self) -> WorkerThroughputStatsUpdate:
         self.lock.acquire()
@@ -154,7 +153,7 @@ class JobLatencyStatsState(_LatencyStats):
 
 class JobThroughputStatsState(_ThroughputStats):
 
-    aggregated_throughput: List[Tuple[float, Dict[str, int]]]
+    aggregated_throughput: List[Tuple[float, float]]
 
     def aggregate_updates(self, throughput_updates: List[WorkerThroughputStatsUpdate]):
         merged_num_messages = collections.OrderedDict()
@@ -177,9 +176,13 @@ class JobThroughputStatsState(_ThroughputStats):
         if len(secs) == 0:
             return
 
+        assert sorted(secs) == secs
+
         for s in secs:
-            if secs[-1] - s > THROUGHPUT_AGGREGATION_WINDOW_S:
+            if secs[-1] - s >= THROUGHPUT_AGGREGATION_WINDOW_S:
                 del self.num_messages_per_s[s]
+
+        assert len(self.num_messages_per_s) <= THROUGHPUT_AGGREGATION_WINDOW_S
 
         # calculate aggregated rate over window
         agg = sum(list(self.num_messages_per_s.values()))/THROUGHPUT_AGGREGATION_WINDOW_S
@@ -206,13 +209,14 @@ class StatsManager:
         res = ray.get(futs)
         latency_updates = []
         throughput_updates = []
-        for r in res:
-            if isinstance(r, WorkerLatencyStatsUpdate):
-                latency_updates.append(r)
-            elif isinstance(r, WorkerThroughputStatsUpdate):
-                throughput_updates.append(r)
-            else:
-                raise RuntimeError(f'Unknown stats update type {r.__class__.__name__}')
+        for updates in res:
+            for update in updates:
+                if isinstance(update, WorkerLatencyStatsUpdate):
+                    latency_updates.append(update)
+                elif isinstance(update, WorkerThroughputStatsUpdate):
+                    throughput_updates.append(update)
+                else:
+                    raise RuntimeError(f'Unknown stats update type {update.__class__.__name__}')
 
         self.job_latency_stats.aggregate_updates(latency_updates)
         self.job_throughput_stats.aggregate_updates(throughput_updates)
@@ -231,5 +235,19 @@ class StatsManager:
         self._stats_collector_thread.join(5)
         self._collect_stats_updates()
 
-    def get_final_stats(self) -> Dict:
-        raise NotImplementedError()
+    # returns avg throughput + dict of p95,75,50,avg latency averaged over the whole run
+    def get_final_aggregated_stats(self) -> Tuple[float, Dict[str, float]]:
+        historical_throughput_values = list(map(lambda e: e[1], self.job_throughput_stats.aggregated_throughput))
+        if len(historical_throughput_values) != 0:
+            avg_throughput = sum(historical_throughput_values)/len(historical_throughput_values)
+        else:
+            avg_throughput = 0
+
+        historical_latency_stats = list(map(lambda e: e[1], self.job_latency_stats.aggregated_latency_stats))
+        avg_latency_stats = {}
+        for k in ['p95', 'p75', 'p50', 'avg']:
+            lat_stats = list(map(lambda e: e[k], historical_latency_stats))
+            if len(lat_stats) != 0:
+                avg_latency_stats[k] = sum(lat_stats)/len(lat_stats)
+
+        return avg_throughput, avg_latency_stats

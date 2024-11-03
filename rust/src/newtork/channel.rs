@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::{buffer_utils::CHANNEL_ID_META_BYTES_LENGTH, buffer_utils::Bytes, utils::consecutive_slices};
 
 // TODO class description
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Channel {
     Local {
         channel_id: String,

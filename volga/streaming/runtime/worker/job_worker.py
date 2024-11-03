@@ -150,5 +150,5 @@ class JobWorker:
     def exit(self):
         ray.actor.exit_actor()
 
-    def collect_stats(self) -> WorkerStatsUpdate:
+    def collect_stats(self) -> List[WorkerStatsUpdate]:
         return self.task.collect_stats()
