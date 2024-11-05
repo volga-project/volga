@@ -1,4 +1,5 @@
-import collections
+# import collections
+from sortedcontainers import SortedDict
 import copy
 import threading
 import time
@@ -50,7 +51,7 @@ class WorkerLatencyStatsState(_LatencyStats):
 
     @classmethod
     def create(cls) -> 'WorkerLatencyStatsState':
-        state = WorkerLatencyStatsState(latency_hists_per_s=collections.OrderedDict(), lock=threading.Lock())
+        state = WorkerLatencyStatsState(latency_hists_per_s=SortedDict(), lock=threading.Lock())
         return state
 
     def observe(self, latency_ms: int, ts_ms: int):
@@ -68,7 +69,7 @@ class WorkerLatencyStatsState(_LatencyStats):
     def collect(self) -> WorkerLatencyStatsUpdate:
         self.lock.acquire()
         c = copy.deepcopy(self.latency_hists_per_s)
-        self.latency_hists_per_s = collections.OrderedDict()
+        self.latency_hists_per_s = SortedDict()
         self.lock.release()
         return WorkerLatencyStatsUpdate(latency_hists_per_s=c)
 
@@ -81,7 +82,7 @@ class WorkerThroughputStatsState(_ThroughputStats):
 
     @classmethod
     def create(cls) -> 'WorkerThroughputStatsState':
-        return WorkerThroughputStatsState(num_messages_per_s=collections.OrderedDict(), lock=threading.Lock(), cur_bucket_id=-1, cur_bucket_val=0)
+        return WorkerThroughputStatsState(num_messages_per_s=SortedDict(), lock=threading.Lock(), cur_bucket_id=-1, cur_bucket_val=0)
 
     def inc(self, count: int = 1):
         s = ms_to_s(now_ts_ms())
@@ -99,7 +100,7 @@ class WorkerThroughputStatsState(_ThroughputStats):
     def collect(self) -> WorkerThroughputStatsUpdate:
         self.lock.acquire()
         c = copy.deepcopy(self.num_messages_per_s)
-        self.num_messages_per_s = collections.OrderedDict()
+        self.num_messages_per_s = SortedDict()
         self.lock.release()
         return WorkerThroughputStatsUpdate(num_messages_per_s=c)
 
@@ -156,7 +157,7 @@ class JobThroughputStatsState(_ThroughputStats):
     aggregated_throughput: List[Tuple[float, float]]
 
     def aggregate_updates(self, throughput_updates: List[WorkerThroughputStatsUpdate]):
-        merged_num_messages = collections.OrderedDict()
+        merged_num_messages = SortedDict()
         for up in throughput_updates:
             for s in up.num_messages_per_s:
                 if s in merged_num_messages:
@@ -198,8 +199,8 @@ class StatsManager:
         self._workers = []
         self._stats_collector_thread = Thread(target=self._collect_loop)
         self.running = False
-        self.job_latency_stats = JobLatencyStatsState(latency_hists_per_s=collections.OrderedDict(), aggregated_latency_stats=[])
-        self.job_throughput_stats = JobThroughputStatsState(num_messages_per_s=collections.OrderedDict(), aggregated_throughput=[])
+        self.job_latency_stats = JobLatencyStatsState(latency_hists_per_s=SortedDict(), aggregated_latency_stats=[])
+        self.job_throughput_stats = JobThroughputStatsState(num_messages_per_s=SortedDict(), aggregated_throughput=[])
 
     def register_worker(self, worker):
         self._workers.append(worker)

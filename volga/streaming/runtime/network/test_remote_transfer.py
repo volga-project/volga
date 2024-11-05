@@ -12,7 +12,6 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.streaming.runtime.master.stats.stats_manager import StatsManager
-from volga.streaming.runtime.master.worker_lifecycle_controller import WorkerLifecycleController
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader

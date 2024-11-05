@@ -19,7 +19,8 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
         'pydantic==1.10.13',
         'simplejson==3.19.2',
         'orjson==3.10.6',
-        'aenum==3.1.15'
+        'aenum==3.1.15',
+        'sortedcontainers==2.4.0'
     ],
     'py_modules': [
         volga,
