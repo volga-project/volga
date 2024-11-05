@@ -121,19 +121,19 @@ class WorkerLifecycleController:
             if source_worker_network_info is None or target_worker_network_info is None:
                 raise RuntimeError(f'No worker network info')
 
-            data_reader_ipc_unique_key = f'dr-{edge.target_execution_vertex.execution_vertex_id}'
+            # data_reader_ipc_unique_key =
 
             if source_worker_network_info.node_id == target_worker_network_info.node_id:
                 channel = LocalChannel(
                     channel_id=edge.id,
-                    ipc_addr=gen_ipc_addr(job_name, data_reader_ipc_unique_key),
+                    ipc_addr=gen_ipc_addr(job_name, f'local-{edge.target_execution_vertex.execution_vertex_id}'),
                 )
             else:
                 source_node_id = source_worker_network_info.node_id
                 target_node_id = target_worker_network_info.node_id
 
-                source_ipc_unique_key = f'dw-{edge.source_execution_vertex.execution_vertex_id}'
-                target_ipc_unique_key = data_reader_ipc_unique_key
+                source_ipc_unique_key = f'source-{source_node_id}'# in remote setting all data writers write to one port, hence key per node
+                target_ipc_unique_key = f'target-{edge.target_execution_vertex.execution_vertex_id}'
 
                 channel = RemoteChannel(
                     channel_id=edge.id,

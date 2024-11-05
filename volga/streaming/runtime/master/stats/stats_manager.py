@@ -237,12 +237,14 @@ class StatsManager:
 
     # returns avg throughput + dict of p95,75,50,avg latency averaged over the whole run
     def get_final_aggregated_stats(self) -> Tuple[float, Dict[str, float]]:
+
         historical_throughput_values = list(map(lambda e: e[1], self.job_throughput_stats.aggregated_throughput))
         if len(historical_throughput_values) != 0:
             avg_throughput = sum(historical_throughput_values)/len(historical_throughput_values)
         else:
             avg_throughput = 0
 
+        # TODO disregard first 5-10 seconds of results for latency averaging - those are warm-up outliers
         historical_latency_stats = list(map(lambda e: e[1], self.job_latency_stats.aggregated_latency_stats))
         avg_latency_stats = {}
         for k in ['p95', 'p75', 'p50', 'avg']:

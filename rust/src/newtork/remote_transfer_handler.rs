@@ -137,7 +137,8 @@ impl RemoteTransferHandler {
             }
 
             if ipc_addrs.len() != 1 {
-                panic!("Misconfigured channel addrs: RemoteTransferHandler {name} expects 1 ipc addr")
+                let s = format!("Misconfigured channel addrs: RemoteTransferHandler {:?} expects 1 ipc addr, got: {:?}", name, ipc_addrs);
+                panic!("{s}")
             }
             let ipc_addr = ipc_addrs.iter().next().unwrap().clone();
             let ipc_path = parse_ipc_path_from_addr(&ipc_addr);

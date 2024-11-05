@@ -202,7 +202,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
     # reader/writer + transfer per node, star topology (nw*nr)
     def test_nw_to_nr_star_on_ray(self, nw: int, nr: int, num_workers_per_node: int, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False) -> Tuple:
-        num_msgs = 100000
+        num_msgs = 1000000
         msg_size = 32
         batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
@@ -540,7 +540,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
     def throughput_benchmark(self, num_workers_per_node: int):
         res = {}
-        for i in range(0, 4, 1):
+        for i in range(1, 9, 1):
             n = i
             if i == 0:
                 n = 1
@@ -553,6 +553,7 @@ class TestRemoteTransfer(unittest.TestCase):
                     runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV,
                     multinode=True
                 )
+                # TODO store results on disk
                 time.sleep(2)
             except Exception as e:
                 res[n] = (-1, -1, -1)
@@ -571,8 +572,8 @@ if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=2)
-    # t.test_nw_to_nr_star_on_ray(nr=4, nw=4, num_workers_per_node=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
-    t.throughput_benchmark(1)
+    t.test_nw_to_nr_star_on_ray(nr=8, nw=8, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    # t.throughput_benchmark(8)
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
 # 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s

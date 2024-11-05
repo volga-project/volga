@@ -7,7 +7,6 @@ import ray
 import yaml
 from pathlib import Path
 
-import volga
 from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.streaming.runtime.sources.wordcount.source import WordCountSource, WordCountSourceSplitEnumerator
 from volga.streaming.api.context.streaming_context import StreamingContext
@@ -76,7 +75,7 @@ class TestWordCount(unittest.TestCase):
 
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=4,
+            parallelism=8,
             count_per_word=count_per_word,
             num_msgs_per_split=num_msgs_per_split,
             dictionary=dictionary
