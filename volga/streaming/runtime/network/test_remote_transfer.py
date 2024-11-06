@@ -200,7 +200,7 @@ class TestRemoteTransfer(unittest.TestCase):
         ray.shutdown()
 
     # reader/writer + transfer per node, star topology (nw*nr)
-    def test_nw_to_nr_star_on_ray(self, nw: int, nr: int, num_workers_per_node: int, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False) -> Tuple:
+    def test_nw_to_nr_star_on_ray(self, nw: int, nr: int, num_workers_per_node: Optional[int] = None, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False) -> Tuple:
         num_msgs = 1000000
         msg_size = 32
         batch_size = 1000
@@ -265,8 +265,10 @@ class TestRemoteTransfer(unittest.TestCase):
                     source_node_ip = source_node['NodeManagerAddress']
                     target_node_ip = target_node['NodeManagerAddress']
                 else:
-                    source_node_id = f'source-{writer_id}'
-                    target_node_id = f'target-{reader_id}'
+                    # source_node_id = f'source-{writer_id}'
+                    # target_node_id = f'target-{reader_id}'
+                    source_node_id = f'source-node'
+                    target_node_id = f'target-node'
                     source_node_ip = '127.0.0.1'
                     target_node_ip = '127.0.0.1'
 
@@ -325,31 +327,41 @@ class TestRemoteTransfer(unittest.TestCase):
             writers[writer_id] = writer
             handler_id += 1
 
-        for source_node_id in source_transfer_actor_channels:
-            options = {'num_cpus': 0}
-            if multinode:
+        # configure  transfer actors:
+        if multinode:
+            for source_node_id in source_transfer_actor_channels:
+                options = {'num_cpus': 0}
                 options['scheduling_strategy'] = NodeAffinitySchedulingStrategy(
                     node_id=source_node_id,
                     soft=False
                 )
-            out_channels = source_transfer_actor_channels[source_node_id]
-            source_transfer_actor = TransferActor.options(**options).remote(job_name, f'source_transfer_actor_{source_node_id}', None, str(handler_id), None, out_channels)
-            source_transfer_actors[source_node_id] = source_transfer_actor
-            handler_id += 1
+                out_channels = source_transfer_actor_channels[source_node_id]
+                source_transfer_actor = TransferActor.options(**options).remote(job_name, f'source_transfer_actor_{source_node_id}', None, str(handler_id), None, out_channels)
+                source_transfer_actors[source_node_id] = source_transfer_actor
+                handler_id += 1
 
-        for target_node_id in target_transfer_actor_channels:
-            options = {'num_cpus': 0}
-            if multinode:
+            for target_node_id in target_transfer_actor_channels:
+                options = {'num_cpus': 0}
                 options['scheduling_strategy'] = NodeAffinitySchedulingStrategy(
                     node_id=target_node_id,
                     soft=False
                 )
-            in_channels = target_transfer_actor_channels[target_node_id]
-            target_transfer_actor = TransferActor.options(**options).remote(job_name, f'target_transfer_actor_{target_node_id}', str(handler_id), None, in_channels, None)
-            target_transfer_actors[target_node_id] = target_transfer_actor
-            handler_id += 1
+                in_channels = target_transfer_actor_channels[target_node_id]
+                target_transfer_actor = TransferActor.options(**options).remote(job_name, f'target_transfer_actor_{target_node_id}', str(handler_id), None, in_channels, None)
+                target_transfer_actors[target_node_id] = target_transfer_actor
+                handler_id += 1
 
-        actors = list(readers.values()) + list(writers.values()) + list(source_transfer_actors.values()) + list(target_transfer_actors.values())
+            actors = list(readers.values()) + list(writers.values()) + list(source_transfer_actors.values()) + list(target_transfer_actors.values())
+        else:
+            in_channels = list(source_transfer_actor_channels.values())[0]
+            out_channels = list(target_transfer_actor_channels.values())[0]
+            node_id = list(source_transfer_actor_channels.keys())[0]
+            options = {'num_cpus': 0}
+            transfer_actor = TransferActor.options(**options).remote(job_name, f'transfer_actor_{node_id}',
+                                                                            str(handler_id), str(handler_id + 1), in_channels, out_channels)
+            handler_id += 2
+            actors = list(readers.values()) + list(writers.values()) + [transfer_actor]
+
         start_ray_io_handler_actors(actors)
 
         stats_manager = StatsManager()
@@ -389,13 +401,7 @@ class TestRemoteTransfer(unittest.TestCase):
               f'Latency: {avg_latency} \n')
         time.sleep(1)
 
-        stop_futs = []
-        for reader_id in readers:
-            stop_futs.append(readers[reader_id].stop.remote())
-
-        for writer_id in writers:
-            stop_futs.append(writers[writer_id].stop.remote())
-
+        stop_futs = [actor.stop.remote() for actor in actors]
         ray.get(stop_futs)
 
         ray.shutdown()
@@ -571,7 +577,8 @@ if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=2)
-    t.test_nw_to_nr_star_on_ray(nr=8, nw=8, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    t.test_nw_to_nr_star_on_ray(nr=4, nw=4)
+    # t.test_nw_to_nr_star_on_ray(nr=8, nw=8, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.throughput_benchmark(8)
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s

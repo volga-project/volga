@@ -18,6 +18,8 @@ LATENCY_BINS_MS = [*range(0, 10)] + [*range(10, 10000, 10)]
 
 LATENCY_AGGREGATION_WINDOW_S = 5
 
+LATENCY_PERCENTILES = [99, 95, 75, 50]
+
 assert LATENCY_AGGREGATION_WINDOW_S >= REFRESH_PERIOD_S
 
 THROUGHPUT_AGGREGATION_WINDOW_S = 2
@@ -26,11 +28,11 @@ assert THROUGHPUT_AGGREGATION_WINDOW_S >= REFRESH_PERIOD_S
 
 
 class _LatencyStats(BaseModel):
-    latency_hists_per_s: typing.OrderedDict
+    latency_hists_per_s: SortedDict
 
 
 class _ThroughputStats(BaseModel):
-    num_messages_per_s: typing.OrderedDict
+    num_messages_per_s: SortedDict
 
 
 class WorkerStatsUpdate(BaseModel):
@@ -143,10 +145,9 @@ class JobLatencyStatsState(_LatencyStats):
         # calculate aggregates over window
         merged_window_hist = Hist.merge(list(self.latency_hists_per_s.values()))
 
-        percentiles = [95, 75, 50]
-        aggregates = merged_window_hist.percentiles(percentiles)
+        aggregates = merged_window_hist.percentiles(LATENCY_PERCENTILES)
         avg = merged_window_hist.avg()
-        d = {f'p{percentiles[i]}': aggregates[i] for i in range(len(percentiles))}
+        d = {f'p{LATENCY_PERCENTILES[i]}': aggregates[i] for i in range(len(LATENCY_PERCENTILES))}
         d['avg'] = avg
         self.aggregated_latency_stats.append((secs[-1], d))
         print(f'Latency: {d}')
@@ -236,7 +237,7 @@ class StatsManager:
         self._stats_collector_thread.join(5)
         self._collect_stats_updates()
 
-    # returns avg throughput + dict of p95,75,50,avg latency averaged over the whole run
+    # returns avg throughput + dict of p99,95,75,50,avg latency averaged over the whole run
     def get_final_aggregated_stats(self) -> Tuple[float, Dict[str, float]]:
 
         historical_throughput_values = list(map(lambda e: e[1], self.job_throughput_stats.aggregated_throughput))
@@ -248,7 +249,8 @@ class StatsManager:
         # TODO disregard first 5-10 seconds of results for latency averaging - those are warm-up outliers
         historical_latency_stats = list(map(lambda e: e[1], self.job_latency_stats.aggregated_latency_stats))
         avg_latency_stats = {}
-        for k in ['p95', 'p75', 'p50', 'avg']:
+        keys = list(map(lambda e: 'p' + str(e), LATENCY_PERCENTILES)) + ['avg']
+        for k in keys:
             lat_stats = list(map(lambda e: e[k], historical_latency_stats))
             if len(lat_stats) != 0:
                 avg_latency_stats[k] = sum(lat_stats)/len(lat_stats)
