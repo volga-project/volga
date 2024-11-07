@@ -150,7 +150,7 @@ class JobLatencyStatsState(_LatencyStats):
         d = {f'p{LATENCY_PERCENTILES[i]}': aggregates[i] for i in range(len(LATENCY_PERCENTILES))}
         d['avg'] = avg
         self.aggregated_latency_stats.append((secs[-1], d))
-        print(f'Latency: {d}')
+        print(f'[{secs[-1]}] Latency: {d}')
 
 
 class JobThroughputStatsState(_ThroughputStats):
@@ -190,8 +190,7 @@ class JobThroughputStatsState(_ThroughputStats):
         agg = sum(list(self.num_messages_per_s.values()))/THROUGHPUT_AGGREGATION_WINDOW_S
 
         self.aggregated_throughput.append((secs[-1], agg))
-
-        print(f'Throughput: {agg} msg/s')
+        print(f'[{secs[-1]}] Throughput: {agg} msg/s')
 
 
 class StatsManager:

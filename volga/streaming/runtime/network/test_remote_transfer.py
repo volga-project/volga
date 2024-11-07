@@ -179,7 +179,7 @@ class TestRemoteTransfer(unittest.TestCase):
             assert rcvd is True
             print(f'assert {i} ok')
 
-        avg_throughput, avg_latency = stats_manager.get_final_aggregated_stats()
+        avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
         stats_manager.stop()
 
         t = time.time() - start_ts
@@ -187,23 +187,28 @@ class TestRemoteTransfer(unittest.TestCase):
         print(f'Finished in {t}s \n'
               f'Avg Throughput: {avg_throughput} msg/s \n'
               f'Estimated Throughput: {estimated_throughput} msg/s \n'
-              f'Latency: {avg_latency} \n')
+              f'Latency: {latency_stats} \n')
         time.sleep(1)
 
-        ray.get([r.stop.remote() for r in readers])
-        ray.get([w.stop.remote() for w in writers])
-
-        ray.get(source_transfer_actor.stop.remote())
-        ray.get(target_transfer_actor.stop.remote())
-
+        stop_futs = [r.stop.remote() for r in readers] + [w.stop.remote() for w in writers] + [source_transfer_actor.stop.remote(), target_transfer_actor.stop.remote()]
+        ray.get(stop_futs)
 
         ray.shutdown()
 
+    # TODO add latency sampling rate variable
     # reader/writer + transfer per node, star topology (nw*nr)
-    def test_nw_to_nr_star_on_ray(self, nw: int, nr: int, num_workers_per_node: Optional[int] = None, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False) -> Tuple:
-        num_msgs = 1000000
-        msg_size = 32
-        batch_size = 1000
+    def test_nw_to_nr_star_on_ray(
+        self,
+        nw: int,
+        nr: int,
+        num_msgs: int = 1000000,
+        msg_size: int = 32,
+        batch_size: int = 1000,
+        num_workers_per_node: Optional[int] = None,
+        ray_addr: Optional[str] = None,
+        runtime_env: Optional[Any] = None,
+        multinode: bool = False
+    ) -> Tuple:
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
 
@@ -389,7 +394,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
         stats_manager.stop()
 
-        avg_throughput, avg_latency = stats_manager.get_final_aggregated_stats()
+        avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
         stats_manager.stop()
 
         t = time.time() - start_ts
@@ -398,14 +403,14 @@ class TestRemoteTransfer(unittest.TestCase):
         print(f'Finished in {t}s \n'
               f'Avg Throughput: {avg_throughput} msg/s \n'
               f'Estimated Throughput: {estimated_throughput} msg/s \n'
-              f'Latency: {avg_latency} \n')
+              f'Latency: {latency_stats} \n')
         time.sleep(1)
 
         stop_futs = [actor.stop.remote() for actor in actors]
         ray.get(stop_futs)
 
         ray.shutdown()
-        return avg_throughput, avg_latency, t
+        return avg_throughput, latency_stats, t
 
     # TODO fix this to work with new rust engine
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
@@ -543,76 +548,10 @@ class TestRemoteTransfer(unittest.TestCase):
         finally:
             io_loop.stop()
 
-    def throughput_benchmark(self, num_workers_per_node: int):
-        res = {}
-        for i in range(1, 9, 1):
-            n = i
-            if i == 0:
-                n = 1
-            try:
-                res[n] = self.test_nw_to_nr_star_on_ray(
-                    nw=n,
-                    nr=n,
-                    num_workers_per_node=num_workers_per_node,
-                    ray_addr=RAY_ADDR,
-                    runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV,
-                    multinode=True
-                )
-                # TODO store results on disk
-                time.sleep(2)
-            except Exception as e:
-                res[n] = (-1, -1, -1)
-                print(f'Failed {n}<->{n}: {e}')
-                ray.shutdown()
-
-        for n in res:
-            avg_throughput, latency_stats, t = res[n]
-            if avg_throughput < 0:
-                print(f'{n}<->{n}: Failed')
-            else:
-                print(f'{n}<->{n}: {avg_throughput} msg/s, {latency_stats}, {t} s')
-
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=2)
-    t.test_nw_to_nr_star_on_ray(nr=4, nw=4)
-    # t.test_nw_to_nr_star_on_ray(nr=8, nw=8, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
-    # t.throughput_benchmark(8)
-
-# 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
-# 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s
-# 3<->3: 198417.67251588262 msg/s, 4.535886287689209 s
-# 4<->4: 288623.8268141708 msg/s, 5.543547868728638 s
-# 5<->5: 353878.0211981364 msg/s, 7.0645811557769775 s
-# 6<->6: 377512.22861806024 msg/s, 9.536114931106567 s
-# 7<->7: 445156.1366645908 msg/s, 11.007373809814453 s
-# 8<->8: 487622.0946902425 msg/s, 13.124917984008789 s
-# 9<->9: 557218.074788173 msg/s, 14.5364990234375 s
-# 10<->10: 571694.5873933224 msg/s, 17.491857051849365 s
-# 11<->11: 688648.7879781058 msg/s, 17.570640087127686 s
-# 12<->12: 724608.2452501928 msg/s, 19.872807264328003 s
-# 13<->13: 809510.9968577144 msg/s, 20.876801013946533 s
-# 14<->14: 874072.8980508689 msg/s, 22.42375898361206 s
-# 15<->15: 918634.05002135 msg/s, 24.492887020111084 s
-
-# 0<->0: 78195.00091631038 msg/s, 1.2788541316986084 s
-# 5<->5: 270598.81952627556 msg/s, 9.238769054412842 s
-# 10<->10: 505774.6804948192 msg/s, 19.771650075912476 s
-# 15<->15: 752058.2860982413 msg/s, 29.917893886566162 s
-# 20<->20: 926800.8961873061 msg/s, 43.15921592712402 s
-
-# -- new --
-# 1<->1: 77391.47987838203 msg/s, 1.2921319007873535 s
-# 5<->5: 274153.7433745098 msg/s, 9.11897087097168 s
-# 10<->10: 527487.0838855837 msg/s, 18.957810163497925 s
-# 15<->15: 745625.5125779167 msg/s, 30.176006078720093 s
-# 20<->20: 943023.6885939682 msg/s, 42.41674995422363 s
-# 25<->25: 1054430.353377645 msg/s, 59.27371096611023 s
-# 30<->30: 1714816.090105296 msg/s, 52.48376226425171 s
-# 35<->35: 2121138.693458819 msg/s, 57.75199913978577 s
-# 40<->40: 2237966.1073087333 msg/s, 71.49348664283752 s
-# 45<->45: 2472339.831106908 msg/s, 81.90621590614319 s
-# 50<->50: 2785009.5203105453 msg/s, 89.76629996299744 s
-
+    t.test_nw_to_nr_star_on_ray(nr=5, nw=5)
+    # t.test_nw_to_nr_star_on_ray(nr=1, nw=1, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)

@@ -1,0 +1,77 @@
+[
+    {
+        "parallelism": 1,
+        "num_msgs": 1000000,
+        "msg_size": 32,
+        "batch_size": 1000,
+        "throughput": 432500.0,
+        "latency_ms": {
+            "p99": 100.0,
+            "p95": 70.0,
+            "p75": 2.0,
+            "p50": 1.0,
+            "avg": 9.4528
+        },
+        "run_duration_s": 1.0071449279785156
+    },
+    {
+        "parallelism": 1,
+        "num_msgs": 1000000,
+        "msg_size": 32,
+        "batch_size": 1000,
+        "throughput": 403000.0,
+        "latency_ms": {
+            "p99": 100.0,
+            "p95": 70.0,
+            "p75": 2.0,
+            "p50": 1.0,
+            "avg": 9.1619
+        },
+        "run_duration_s": 1.0108311176300049
+    },
+    {
+        "parallelism": 2,
+        "num_msgs": 1000000,
+        "msg_size": 32,
+        "batch_size": 1000,
+        "throughput": 1296000.0,
+        "latency_ms": {
+            "p99": 90.0,
+            "p95": 28.333333333333332,
+            "p75": 3.3333333333333335,
+            "p50": 2.3333333333333335,
+            "avg": 5.889820510292893
+        },
+        "run_duration_s": 3.0356059074401855
+    },
+    {
+        "parallelism": 3,
+        "num_msgs": 1000000,
+        "msg_size": 32,
+        "batch_size": 1000,
+        "throughput": 1759000.0,
+        "latency_ms": {
+            "p99": 80.0,
+            "p95": 33.333333333333336,
+            "p75": 4.0,
+            "p50": 4.0,
+            "avg": 7.389289433816498
+        },
+        "run_duration_s": 3.044571876525879
+    },
+    {
+        "parallelism": 4,
+        "num_msgs": 1000000,
+        "msg_size": 32,
+        "batch_size": 1000,
+        "throughput": 2765700.0,
+        "latency_ms": {
+            "p99": 62.0,
+            "p95": 17.8,
+            "p75": 7.0,
+            "p50": 5.4,
+            "avg": 7.430121950853945
+        },
+        "run_duration_s": 5.085887908935547
+    }
+]
