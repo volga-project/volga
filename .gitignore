@@ -1,4 +1,4 @@
-/target
+B/target
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -72,3 +72,5 @@ docs/_build/
 .python-version
 
 rust/target
+
+*volga_network_perf_benchmarks*

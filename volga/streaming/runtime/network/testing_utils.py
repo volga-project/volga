@@ -30,7 +30,7 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
 }
 
 
-@ray.remote(max_concurrency=4)
+@ray.remote(max_concurrency=999)
 class TestWriter:
     def __init__(
         self,
@@ -55,31 +55,36 @@ class TestWriter:
     def start(self) -> Optional[str]:
         return self.io_loop.connect_and_start()
 
-    def send_items(self, num_items_per_channel: Dict[str, int], msg_size: int):
-        index = {channel_id: 0 for channel_id in num_items_per_channel}
-        channel_ids = list(num_items_per_channel.keys())
+    # round robins messages to channels for timeout_s.
+    # returns dict containing number of sent messages per channel
+    def round_robin_send(self, channel_ids: List[str], msg_size: int, timeout_s: int, mark_latency_every: int = 100) -> Dict[str, int]:
+        num_sent_per_channel = {channel_id: 0 for channel_id in channel_ids}
         cur_channel_index = 0
-        num_sent = 0
-        num_to_send = sum(list(num_items_per_channel.values()))
         # round-robin send
-        while num_sent != num_to_send:
+        start_ts = time.time()
+        while time.time() - start_ts <= timeout_s:
             channel_id = channel_ids[cur_channel_index]
-            num_items = num_items_per_channel[channel_id]
-            i = index[channel_id]
-            if i == num_items:
-                cur_channel_index = (cur_channel_index + 1)%len(channel_ids)
-                continue
-
+            num_sent = num_sent_per_channel[channel_id]
             mark_latency = False
-            if num_sent % 100 == 0:
+            if num_sent % mark_latency_every == 0:
                 mark_latency = True
 
-            item = construct_message(i, msg_size, mark_latency)
-            succ = self.data_writer.try_write_message(channel_id, item)
+            msg = construct_message(num_sent, channel_id, msg_size, mark_latency)
+            succ = self.data_writer.try_write_message(channel_id, msg)
             if succ:
-                index[channel_id] += 1
-                num_sent += 1
+                num_sent_per_channel[channel_id] += 1
             cur_channel_index = (cur_channel_index + 1) % len(channel_ids)
+
+        # send terminal messages to all channels
+        for channel_id in channel_ids:
+            terminal_msg = construct_message(num_sent_per_channel[channel_id], channel_id, msg_size, False, True)
+            ts = time.time()
+            while not self.data_writer.try_write_message(channel_id, terminal_msg):
+                time.sleep(0.1)
+                if time.time() - ts > 5:
+                    raise RuntimeError(f'Timeout sending terminal message to channel {channel_id}')
+
+        return num_sent_per_channel
 
     def get_name(self):
         return self.name
@@ -88,7 +93,7 @@ class TestWriter:
         self.io_loop.stop()
 
 
-@ray.remote(max_concurrency=4)
+@ray.remote(max_concurrency=999)
 class TestReader:
     def __init__(
         self,
@@ -106,42 +111,49 @@ class TestReader:
             job_name=job_name,
         )
         self.io_loop.register_io_handler(self.data_reader)
-        self.num_rcvd = 0
+        self.terminal_messages_received =  {channel.channel_id: False for channel in self.channels}
 
         # stats
-
         self.latency_stats = WorkerLatencyStatsState.create()
         self.throughput_stats = WorkerThroughputStatsState.create()
 
     def start(self) -> Optional[str]:
         return self.io_loop.connect_and_start()
 
-    def receive_items(self, num_expected) -> bool:
+    def receive_items(self, timeout_s) -> Dict[str, int]:
+        num_rcvd_per_channel = {channel.channel_id: 0 for channel in self.channels}
         start_ts = time.time()
-        while True:
-            if time.time() - start_ts > 3000:
-                raise RuntimeError('Timeout reading data')
-
-            items = self.data_reader.read_message()
-            if items is None:
+        while time.time() - start_ts <= timeout_s:
+            msgs = self.data_reader.read_message()
+            if msgs is None:
                 time.sleep(0.001)
                 continue
 
-            for item in items:
-                if 'emit_ts' in item:
+            for msg in msgs:
+                channel_id = msg['channel_id']
+                if 'emit_ts' in msg:
                     ts = now_ts_ms()
-                    latency = ts - item['emit_ts']
+                    latency = ts - msg['emit_ts']
                     self.latency_stats.observe(latency, ts)
+                if 'is_terminal' in msg:
+                    if self.terminal_messages_received[channel_id]:
+                        raise RuntimeError(f'Duplicate terminal message for channel {channel_id}')
+                    self.terminal_messages_received[channel_id] = True
+                else:
+                    num_rcvd_per_channel[channel_id] += 1
+                if self.all_done():
+                    return num_rcvd_per_channel
 
-            self.throughput_stats.inc(len(items))
-            self.num_rcvd += len(items)
+            self.throughput_stats.inc(len(msgs))
 
-            if self.num_rcvd == num_expected:
-                break
-        return self.num_rcvd == num_expected
+        raise RuntimeError('Timeout reading data')
 
-    def get_num_rcvd(self) -> int:
-        return self.num_rcvd
+    def all_done(self) -> bool:
+        for channel_id in self.terminal_messages_received:
+            if not self.terminal_messages_received[channel_id]:
+                return False
+
+        return True
 
     def collect_stats(self) -> List[WorkerStatsUpdate]:
         return [self.throughput_stats.collect(), self.latency_stats.collect()]
@@ -153,10 +165,12 @@ class TestReader:
         self.io_loop.stop()
 
 
-def construct_message(i: int, msg_size: int, mark_latency: bool) -> Dict:
-    msg = {'k': i, 'v': 'a' * msg_size}
+def construct_message(msg_id: int, channel_id: str, msg_size: int, mark_latency: bool, is_terminal: bool = False) -> Dict:
+    msg = {'msg_id': msg_id, 'channel_id': channel_id, 'payload': 'a' * msg_size}
     if mark_latency:
         msg['emit_ts'] = now_ts_ms()
+    if is_terminal:
+        msg['is_terminal'] = True
     return msg
 
 

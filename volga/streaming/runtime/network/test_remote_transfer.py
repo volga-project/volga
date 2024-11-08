@@ -1,11 +1,9 @@
 import math
 import os
 import signal
-import socket
 import unittest
 import time
 import random
-import volga
 from typing import Optional, Tuple, Any
 
 import ray
@@ -147,7 +145,7 @@ class TestRemoteTransfer(unittest.TestCase):
         return readers, writers, source_transfer_actor, target_transfer_actor, channels, source_node_id, target_node_id
 
     def test_n_to_n_parallel_on_ray(self, n: int = 3, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
-        num_msgs_per_writer = 20000000
+        run_for_s = 10
         msg_size = 32
         batch_size = 1000
         writer_config = DEFAULT_DATA_WRITER_CONFIG
@@ -170,20 +168,45 @@ class TestRemoteTransfer(unittest.TestCase):
         futs = []
         start_ts = time.time()
         for i in range(n):
-            writers[i].send_items.remote({channels[i].channel_id: num_msgs_per_writer}, msg_size)
-            futs.append(readers[i].receive_items.remote(num_msgs_per_writer))
+            futs.append(writers[i].round_robin_send.remote([channels[i].channel_id], msg_size, run_for_s))
 
-        # wait for finish
         for i in range(n):
-            rcvd = ray.get(futs[i])
-            assert rcvd is True
-            print(f'assert {i} ok')
+            futs.append(readers[i].receive_items.remote(run_for_s + 5))
+
+        res = ray.get(futs)
+        num_msgs_sent_total = {}
+        num_msgs_rcvd_total = {}
+        i = 0
+        for _ in range(n):
+            num_msgs_sent = res[i]
+            for channel_id in num_msgs_sent:
+                if channel_id in num_msgs_sent_total:
+                    num_msgs_sent_total[channel_id] += num_msgs_sent[channel_id]
+                else:
+                    num_msgs_sent_total[channel_id] = num_msgs_sent[channel_id]
+            i += 1
+
+        for _ in range(n):
+            num_msgs_rcvd = res[i]
+            for channel_id in num_msgs_rcvd:
+                if channel_id in num_msgs_rcvd_total:
+                    num_msgs_rcvd_total[channel_id] += num_msgs_rcvd[channel_id]
+                else:
+                    num_msgs_rcvd_total[channel_id] = num_msgs_rcvd[channel_id]
+            i += 1
+
+        assert len(num_msgs_rcvd_total) == len(num_msgs_sent_total)
+        for channel_id in num_msgs_rcvd_total:
+            assert num_msgs_rcvd_total[channel_id] == num_msgs_sent_total[channel_id]
+        print('assert ok')
+
+        num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
         avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
         stats_manager.stop()
 
         t = time.time() - start_ts
-        estimated_throughput = (n*num_msgs_per_writer)/t
+        estimated_throughput = num_msgs/t
         print(f'Finished in {t}s \n'
               f'Avg Throughput: {avg_throughput} msg/s \n'
               f'Estimated Throughput: {estimated_throughput} msg/s \n'
@@ -192,7 +215,6 @@ class TestRemoteTransfer(unittest.TestCase):
 
         stop_futs = [r.stop.remote() for r in readers] + [w.stop.remote() for w in writers] + [source_transfer_actor.stop.remote(), target_transfer_actor.stop.remote()]
         ray.get(stop_futs)
-
         ray.shutdown()
 
     # TODO add latency sampling rate variable
@@ -201,9 +223,9 @@ class TestRemoteTransfer(unittest.TestCase):
         self,
         nw: int,
         nr: int,
-        num_msgs: int = 1000000,
         msg_size: int = 32,
         batch_size: int = 1000,
+        run_for_s: int = 10,
         num_workers_per_node: Optional[int] = None,
         ray_addr: Optional[str] = None,
         runtime_env: Optional[Any] = None,
@@ -270,8 +292,6 @@ class TestRemoteTransfer(unittest.TestCase):
                     source_node_ip = source_node['NodeManagerAddress']
                     target_node_ip = target_node['NodeManagerAddress']
                 else:
-                    # source_node_id = f'source-{writer_id}'
-                    # target_node_id = f'target-{reader_id}'
                     source_node_id = f'source-node'
                     target_node_id = f'target-node'
                     source_node_ip = '127.0.0.1'
@@ -375,32 +395,51 @@ class TestRemoteTransfer(unittest.TestCase):
         stats_manager.start()
 
         start_ts = time.time()
-        read_futs = {}
+        futs = []
         for writer_id in writers:
-            writers[writer_id].send_items.remote({channel.channel_id: num_msgs for channel in writer_channels[writer_id]}, msg_size)
+            futs.append(writers[writer_id].round_robin_send.remote([channel.channel_id for channel in writer_channels[writer_id]], msg_size, run_for_s))
 
         for reader_id in readers:
-            read_futs[reader_id] = readers[reader_id].receive_items.remote(nw * num_msgs)
+            futs.append(readers[reader_id].receive_items.remote(run_for_s + 5))
 
-        # wait for finish
-        _reader_ids = list(read_futs.keys())
-        _reader_futs = list(read_futs.values())
-        _all_rcvd = ray.get(_reader_futs)
-        for i in range(len(_reader_ids)):
-            reader_id = _reader_ids[i]
-            rcvd = _all_rcvd[i]
-            assert rcvd is True
-            print(f'assert {reader_id} ok')
+        res = ray.get(futs)
+        num_msgs_sent_total = {}
+        num_msgs_rcvd_total = {}
+        i = 0
+        for _ in range(len(writers)):
+            num_msgs_sent = res[i]
+            for channel_id in num_msgs_sent:
+                if channel_id in num_msgs_sent_total:
+                    num_msgs_sent_total[channel_id] += num_msgs_sent[channel_id]
+                else:
+                    num_msgs_sent_total[channel_id] = num_msgs_sent[channel_id]
+            i += 1
+
+        for _ in range(len(readers)):
+            num_msgs_rcvd = res[i]
+            for channel_id in num_msgs_rcvd:
+                if channel_id in num_msgs_rcvd_total:
+                    num_msgs_rcvd_total[channel_id] += num_msgs_rcvd[channel_id]
+                else:
+                    num_msgs_rcvd_total[channel_id] = num_msgs_rcvd[channel_id]
+            i += 1
+
+        assert len(num_msgs_rcvd_total) == len(num_msgs_sent_total)
+        for channel_id in num_msgs_rcvd_total:
+            assert num_msgs_rcvd_total[channel_id] == num_msgs_sent_total[channel_id]
+        print('assert ok')
+
+        num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
         stats_manager.stop()
 
         avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
         stats_manager.stop()
 
-        t = time.time() - start_ts
-        estimated_throughput = (nw * nr * num_msgs) / t
+        run_duration = time.time() - start_ts
+        estimated_throughput = num_msgs / run_duration
 
-        print(f'Finished in {t}s \n'
+        print(f'Finished in {run_duration}s \n'
               f'Avg Throughput: {avg_throughput} msg/s \n'
               f'Estimated Throughput: {estimated_throughput} msg/s \n'
               f'Latency: {latency_stats} \n')
@@ -410,7 +449,7 @@ class TestRemoteTransfer(unittest.TestCase):
         ray.get(stop_futs)
 
         ray.shutdown()
-        return avg_throughput, latency_stats, t
+        return avg_throughput, latency_stats, num_msgs
 
     # TODO fix this to work with new rust engine
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):
@@ -437,7 +476,7 @@ class TestRemoteTransfer(unittest.TestCase):
         i = 0
         timeout = 120
         t = time.time()
-        while ray.get(readers[0].get_num_rcvd.remote()) != num_msgs:
+        while not ray.get(readers[0].all_done.remote()):
             if t - time.time() > timeout:
                 raise RuntimeError('Timeout waiting for finish')
             if i%2 == 0:
@@ -552,6 +591,6 @@ class TestRemoteTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
-    # t.test_n_to_n_parallel_on_ray(n=2)
+    # t.test_n_to_n_parallel_on_ray(n=4)
     t.test_nw_to_nr_star_on_ray(nr=5, nw=5)
     # t.test_nw_to_nr_star_on_ray(nr=1, nw=1, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)

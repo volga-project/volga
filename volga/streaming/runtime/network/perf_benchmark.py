@@ -12,10 +12,15 @@ NUM_WORKERS_PER_NODE = 8 # in remote setting, we run on c5.2xlarge instances whi
 
 REMOTE_OR_LOCAL = False # true if we test on remote cluster, false on local
 
+RUN_DURATION_S = 10 # how long a single test run lasts
+
+STATS_STORE_DIR = 'volga_network_perf_benchmarks'
+
 PARAMS_MATRIX = {
     'parallelism': [*range(0, 5)],
     'msg_size': [32],
-    'batch_size': [1000]
+    # 'batch_size': [1000]
+    'batch_size': [1, 10, 50, 100, 250, 500, 1000]
 }
 
 
@@ -26,17 +31,15 @@ def store_run_stats(
     msg_size: int,
     batch_size: int,
     avg_throughput: float,
-    latency_stats: Dict,
-    run_duration: int,
+    latency_stats: Dict
 ):
     to_store = {
-        'parallelism': parallelism,
-        'num_msgs': num_msgs,
         'msg_size': msg_size,
         'batch_size': batch_size,
+        'parallelism': parallelism,
         'throughput': avg_throughput,
         'latency_ms': latency_stats,
-        'run_duration_s': run_duration
+        'num_msgs': num_msgs,
     }
 
     if os.path.isfile(res_file_name):
@@ -55,7 +58,7 @@ def store_run_stats(
 # TODO figure out how to parametrize batch_size+parallelism+msg_size variations
 def throughput_benchmark():
     t = TestRemoteTransfer()
-    res_file_name = f'volga_network_perf_benchmarks/benchmark_{int(time.time())}.json'
+    res_file_name = f'{STATS_STORE_DIR}/benchmark_{int(time.time())}.json'
     res = {}
 
     for msg_size in PARAMS_MATRIX['msg_size']:
@@ -74,15 +77,13 @@ def throughput_benchmark():
                         ray_addr = None
                         runtime_env = None
 
-                    num_msgs = 1000000 # TODO we should variate this based on parallelism to make run times even between different runs
-
-                    avg_throughput, latency_stats, run_duration = t.test_nw_to_nr_star_on_ray(
+                    avg_throughput, latency_stats, num_msgs = t.test_nw_to_nr_star_on_ray(
                         nw=parallelism,
                         nr=parallelism,
                         num_workers_per_node=NUM_WORKERS_PER_NODE,
-                        num_msgs=num_msgs,
                         msg_size=msg_size,
                         batch_size=batch_size,
+                        run_for_s=RUN_DURATION_S,
                         ray_addr=ray_addr,
                         runtime_env=runtime_env,
                         multinode=multinode
@@ -95,8 +96,7 @@ def throughput_benchmark():
                         msg_size=msg_size,
                         batch_size=batch_size,
                         avg_throughput=avg_throughput,
-                        latency_stats=latency_stats,
-                        run_duration=run_duration
+                        latency_stats=latency_stats
                     )
                     time.sleep(2)
                 except Exception as e:
