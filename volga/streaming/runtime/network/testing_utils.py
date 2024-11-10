@@ -1,4 +1,4 @@
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 from volga.streaming.common.utils import ms_to_s, now_ts_ms
 from volga.streaming.runtime.master.stats.stats_manager import WorkerLatencyStatsState, WorkerThroughputStatsState, \
@@ -57,7 +57,7 @@ class TestWriter:
 
     # round robins messages to channels for timeout_s.
     # returns dict containing number of sent messages per channel
-    def round_robin_send(self, channel_ids: List[str], msg_size: int, timeout_s: int, mark_latency_every: int = 100) -> Dict[str, int]:
+    def round_robin_send(self, channel_ids: List[str], msg_size: int, timeout_s: int, mark_latency_every: int = 1) -> Dict[str, int]:
         num_sent_per_channel = {channel_id: 0 for channel_id in channel_ids}
         cur_channel_index = 0
         # round-robin send
@@ -190,4 +190,3 @@ def start_ray_io_handler_actors(handler_actors: List):
             errs[name] = err
     if len(errs) != 0:
         raise RuntimeError(f'Failed to start: {errs}')
-

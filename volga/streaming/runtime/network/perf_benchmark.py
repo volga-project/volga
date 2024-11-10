@@ -3,7 +3,11 @@ import os
 import time
 from typing import Dict
 
+import pandas as pd
 import ray
+
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 from volga.streaming.runtime.network.test_remote_transfer import TestRemoteTransfer
 from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
@@ -12,15 +16,15 @@ NUM_WORKERS_PER_NODE = 8 # in remote setting, we run on c5.2xlarge instances whi
 
 REMOTE_OR_LOCAL = False # true if we test on remote cluster, false on local
 
-RUN_DURATION_S = 10 # how long a single test run lasts
+RUN_DURATION_S = 25 # how long a single test run lasts, this should be more than aggregation warmup thresh (10s by def)
 
 STATS_STORE_DIR = 'volga_network_perf_benchmarks'
 
 PARAMS_MATRIX = {
-    'parallelism': [*range(0, 5)],
-    'msg_size': [32],
+    'parallelism': [*range(1, 6)],
+    'msg_size': [32, 256, 1024],
     # 'batch_size': [1000]
-    'batch_size': [1, 10, 50, 100, 250, 500, 1000]
+    'batch_size': [1, 10, 100, 1000]
 }
 
 
@@ -65,7 +69,7 @@ def throughput_benchmark():
         for batch_size in PARAMS_MATRIX['batch_size']:
             for parallelism in PARAMS_MATRIX['parallelism']:
                 if parallelism == 0:
-                    parallelism = 1
+                    raise RuntimeError('parallelism can not be 0')
                 run_res = (-1, -1, -1)
                 try:
                     if REMOTE_OR_LOCAL:
@@ -114,7 +118,49 @@ def throughput_benchmark():
             print(f'{key}: {avg_throughput} msg/s, {latency_stats}, {run_duration} s')
 
 
-throughput_benchmark()
+def plot(filename: str):
+    with open(filename, 'r') as file:
+        data = json.load(file)
+        processed = []
+
+        for e in data:
+            for k in e['latency_ms']:
+                e[f'latency_{k}_ms'] = e['latency_ms'][k]
+            del e['latency_ms']
+            del e['num_msgs']
+            processed.append(e)
+
+        df = pd.DataFrame(processed)
+
+        # msg_sizes = df['msg_size'].unique().tolist()
+        # batch_sizes = df['batch_size'].unique().tolist()
+        # nrows = len(msg_sizes)
+        # ncols = len(batch_sizes)
+        # fig, axes = plt.subplots(nrows, ncols, sharex=True, figsize=(16, 8))
+        # fig.suptitle('Throughput stats')
+        # for col in range(len(msg_sizes)):
+        #     msg_size = msg_sizes[col]
+        #     for row in range(len(batch_sizes)):
+        #         batch_size = batch_sizes[row]
+        #         data = df[(df['msg_size'] == msg_size) & (df['batch_size'] == batch_size)]
+        #         seaborn.lineplot(ax=axes[row], data=data, x='parallelism', y='throughput')
+        #         throughput_data = throughput_data[['throughput', 'parallelism']]
+        #         print(msg_size, batch_size)
+        #         print(throughput_data)
+
+        throughput_df = df[['throughput', 'parallelism', 'msg_size', 'batch_size']]
+        g = sns.FacetGrid(throughput_df, row='msg_size', hue='batch_size')
+        g.map(sns.lineplot, 'parallelism', 'throughput')
+        g.add_legend()
+
+        latency_df = df[['latency_p99_ms', 'parallelism', 'msg_size', 'batch_size']]
+        g2 = sns.FacetGrid(latency_df, row='msg_size', hue='batch_size')
+        g2.map(sns.lineplot, 'parallelism', 'latency_p99_ms')
+        g2.add_legend()
+        plt.show()
+
+# throughput_benchmark()
+plot(f'{STATS_STORE_DIR}/benchmark_1731228815.json')
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
 # 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s

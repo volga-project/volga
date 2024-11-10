@@ -109,7 +109,7 @@ class WorkerThroughputStatsState(_ThroughputStats):
 
 class JobLatencyStatsState(_LatencyStats):
 
-    aggregated_latency_stats: List[Tuple[float, Dict[str, int]]]
+    historical_latency_stats: List[Tuple[float, Dict[str, int]]]
 
     def aggregate_updates(self, latency_updates: List[WorkerLatencyStatsUpdate]):
         if len(latency_updates) == 0:
@@ -149,13 +149,13 @@ class JobLatencyStatsState(_LatencyStats):
         avg = merged_window_hist.avg()
         d = {f'p{LATENCY_PERCENTILES[i]}': aggregates[i] for i in range(len(LATENCY_PERCENTILES))}
         d['avg'] = avg
-        self.aggregated_latency_stats.append((secs[-1], d))
+        self.historical_latency_stats.append((secs[-1], d))
         print(f'[{secs[-1]}] Latency: {d}')
 
 
 class JobThroughputStatsState(_ThroughputStats):
 
-    aggregated_throughput: List[Tuple[float, float]]
+    historical_throughput: List[Tuple[float, float]]
 
     def aggregate_updates(self, throughput_updates: List[WorkerThroughputStatsUpdate]):
         merged_num_messages = SortedDict()
@@ -189,7 +189,7 @@ class JobThroughputStatsState(_ThroughputStats):
         # calculate aggregated rate over window
         agg = sum(list(self.num_messages_per_s.values()))/THROUGHPUT_AGGREGATION_WINDOW_S
 
-        self.aggregated_throughput.append((secs[-1], agg))
+        self.historical_throughput.append((secs[-1], agg))
         print(f'[{secs[-1]}] Throughput: {agg} msg/s')
 
 
@@ -199,8 +199,8 @@ class StatsManager:
         self._workers = []
         self._stats_collector_thread = Thread(target=self._collect_loop)
         self.running = False
-        self.job_latency_stats = JobLatencyStatsState(latency_hists_per_s=SortedDict(), aggregated_latency_stats=[])
-        self.job_throughput_stats = JobThroughputStatsState(num_messages_per_s=SortedDict(), aggregated_throughput=[])
+        self.job_latency_stats = JobLatencyStatsState(latency_hists_per_s=SortedDict(), historical_latency_stats=[])
+        self.job_throughput_stats = JobThroughputStatsState(num_messages_per_s=SortedDict(), historical_throughput=[])
 
     def register_worker(self, worker):
         self._workers.append(worker)
@@ -236,22 +236,42 @@ class StatsManager:
         self._stats_collector_thread.join(5)
         self._collect_stats_updates()
 
-    # returns avg throughput + dict of p99,95,75,50,avg latency averaged over the whole run
-    def get_final_aggregated_stats(self) -> Tuple[float, Dict[str, float]]:
+    # throughput history and latency history
+    def get_historical_stats(self) -> Tuple[List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]]:
+        return self.job_throughput_stats.historical_throughput, self.job_latency_stats.historical_latency_stats
 
-        historical_throughput_values = list(map(lambda e: e[1], self.job_throughput_stats.aggregated_throughput))
-        if len(historical_throughput_values) != 0:
-            avg_throughput = sum(historical_throughput_values)/len(historical_throughput_values)
-        else:
-            avg_throughput = 0
+    def get_final_aggregated_stats(self) ->Tuple[float, Dict[str, float]]:
+        hist_throughput, hist_latency = self.get_historical_stats()
+        return aggregate_historical_stats(hist_throughput, hist_latency)
 
-        # TODO disregard first 5-10 seconds of results for latency averaging - those are warm-up outliers
-        historical_latency_stats = list(map(lambda e: e[1], self.job_latency_stats.aggregated_latency_stats))
-        avg_latency_stats = {}
-        keys = list(map(lambda e: 'p' + str(e), LATENCY_PERCENTILES)) + ['avg']
-        for k in keys:
-            lat_stats = list(map(lambda e: e[k], historical_latency_stats))
-            if len(lat_stats) != 0:
-                avg_latency_stats[k] = sum(lat_stats)/len(lat_stats)
 
-        return avg_throughput, avg_latency_stats
+# returns avg throughput + dict of p99,95,75,50,avg latency averaged over the whole run
+def aggregate_historical_stats(
+    hist_throughput: List[Tuple[float, float]],
+    hist_latency: List[Tuple[float, Dict[str, int]]],
+    warmup_thresh_s: int = 10 # disregard first seconds of hist data - those are warm-up outliers
+) -> Tuple[float, Dict[str, float]]:
+
+    historical_throughput_values = list(map(lambda e: e[1], hist_throughput))
+    if len(historical_throughput_values) - warmup_thresh_s < 10:
+        raise RuntimeError(f'We expect at least {warmup_thresh_s + 10} seconds of historical throughput data')
+
+    historical_throughput_values = historical_throughput_values[warmup_thresh_s:]
+    if len(historical_throughput_values) != 0:
+        avg_throughput = sum(historical_throughput_values)/len(historical_throughput_values)
+    else:
+        avg_throughput = 0
+
+    historical_latency_stats = list(map(lambda e: e[1], hist_latency))
+    if len(historical_latency_stats) - warmup_thresh_s < 10:
+        raise RuntimeError(f'We expect at least {warmup_thresh_s + 10} seconds of historical latency data')
+
+    historical_latency_stats = historical_latency_stats[warmup_thresh_s:]
+    avg_latency_stats = {}
+    keys = list(map(lambda e: 'p' + str(e), LATENCY_PERCENTILES)) + ['avg']
+    for k in keys:
+        lat_stats = list(map(lambda e: e[k], historical_latency_stats))
+        if len(lat_stats) != 0:
+            avg_latency_stats[k] = sum(lat_stats)/len(lat_stats)
+
+    return avg_throughput, avg_latency_stats
