@@ -224,8 +224,8 @@ class TestRemoteTransfer(unittest.TestCase):
         nw: int,
         nr: int,
         msg_size: int = 32,
-        batch_size: int = 1000,
-        run_for_s: int = 10,
+        batch_size: int = 10,
+        run_for_s: int = 25,
         num_workers_per_node: Optional[int] = None,
         ray_addr: Optional[str] = None,
         runtime_env: Optional[Any] = None,
@@ -400,7 +400,7 @@ class TestRemoteTransfer(unittest.TestCase):
             futs.append(writers[writer_id].round_robin_send.remote([channel.channel_id for channel in writer_channels[writer_id]], msg_size, run_for_s))
 
         for reader_id in readers:
-            futs.append(readers[reader_id].receive_items.remote(run_for_s + 5))
+            futs.append(readers[reader_id].receive_items.remote(run_for_s + 20))
 
         res = ray.get(futs)
         num_msgs_sent_total = {}
@@ -592,5 +592,5 @@ if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=4)
-    t.test_nw_to_nr_star_on_ray(nr=5, nw=5)
+    t.test_nw_to_nr_star_on_ray(nr=1, nw=1)
     # t.test_nw_to_nr_star_on_ray(nr=1, nw=1, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)

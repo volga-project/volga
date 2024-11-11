@@ -4,9 +4,7 @@ extern crate varint;
 use rand::Rng;
 use varint::{ VarintRead, VarintWrite };
 
-use std::{collections::{HashMap, VecDeque}, io::Cursor, sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex}, time::Duration};
-
-use super::utils::random_string;
+use std::{collections::VecDeque, io::Cursor, sync::{atomic::{AtomicBool, Ordering}, Arc, Condvar, Mutex}, time::Duration};
 
 pub type Bytes = Vec<u8>;
 

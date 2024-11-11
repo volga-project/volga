@@ -1,12 +1,13 @@
 import random
 import unittest
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 import ray
 import time
 
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from volga.streaming.runtime.master.stats.stats_manager import StatsManager
 from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
@@ -82,10 +83,13 @@ class TestLocalTransfer(unittest.TestCase):
         ray.get([reader.stop.remote(), writer.stop.remote()])
         ray.shutdown()
 
-    def test_n_all_to_all_on_local_ray(self, n: int):
-        run_for_s = 10
-        msg_size = 128
-        batch_size = 1000
+    def test_n_all_to_all_on_local_ray(
+        self,
+        n: int,
+        msg_size: int = 128,
+        batch_size: int = 1000,
+        run_for_s: int = 25,
+    ) -> Tuple:
 
         writer_config = DEFAULT_DATA_WRITER_CONFIG
         writer_config.batch_size = batch_size
@@ -128,6 +132,14 @@ class TestLocalTransfer(unittest.TestCase):
 
         actors = list(readers.values()) + list(writers.values())
         start_ray_io_handler_actors(actors)
+
+        stats_manager = StatsManager()
+        for reader_id in readers:
+            stats_manager.register_worker(readers[reader_id])
+
+        time.sleep(1)
+        stats_manager.start()
+
         write_futs = {}
         read_futs = {}
 
@@ -167,12 +179,21 @@ class TestLocalTransfer(unittest.TestCase):
         print('assert ok')
 
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
+
+        avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
+        stats_manager.stop()
+
         t = time.time() - start_ts
-        throughput = num_msgs / t
-        print(f'Finised in {t}s, throughput: {throughput} msg/s')
+        estimated_throughput = num_msgs / t
+        print(f'Finished in {t}s \n'
+              f'Avg Throughput: {avg_throughput} msg/s \n'
+              f'Estimated Throughput: {estimated_throughput} msg/s \n'
+              f'Latency: {latency_stats} \n')
 
         ray.get([readers[reader_id].stop.remote() for reader_id in readers] + [writers[writer_id].stop.remote() for writer_id in writers])
         ray.shutdown()
+
+        return avg_throughput, latency_stats, num_msgs
 
     # TODO fix this to work with memory bound queues
     def test_backpressure(self):
@@ -237,5 +258,5 @@ class TestLocalTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestLocalTransfer()
     # t.test_one_to_one_on_ray()
-    t.test_n_all_to_all_on_local_ray(n=4)
+    t.test_n_all_to_all_on_local_ray(n=1)
     # t.test_backpressure() # TODO this does not work

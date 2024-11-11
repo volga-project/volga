@@ -9,7 +9,7 @@ use crate::newtork::{buffer_utils::get_channeld_id, sockets::{SocketKind, Socket
 
 use super::{buffer_utils::Bytes, channel::Channel, socket_monitor::SocketMonitor};
 
-pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize = 10000;
+pub const CROSSBEAM_DEFAULT_CHANNEL_SIZE: usize = 1000;
 
 #[derive(Serialize, Deserialize, Clone)]
 #[pyclass(name="RustZmqConfig")]
