@@ -93,6 +93,7 @@ class WordCountSource(StreamSource):
         parallelism: int,
         dictionary: List[str],
         split_size: int,
+        # specify either count_per_word for limited num of sent words or run_for_s for limited time to run
         count_per_word: Optional[int] = None,
         run_for_s: Optional[int] = None
     ):

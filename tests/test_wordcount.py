@@ -35,7 +35,7 @@ class TestWordCount(unittest.TestCase):
 
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=1,
+            parallelism=6,
             dictionary=dictionary,
             split_size=split_size,
             run_for_s=30

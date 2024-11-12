@@ -43,7 +43,7 @@ class ZmqConfig(BaseModel):
 
 
 DEFAULT_DATA_READER_CONFIG = DataReaderConfig(output_queue_capacity_bytes=1000*1000*10, response_batch_period_ms=100)
-DEFAULT_DATA_WRITER_CONFIG = DataWriterConfig(in_flight_timeout_s=1, max_capacity_bytes_per_channel=1000*1000*20, batch_size=1000, flush_period_s=1)
+DEFAULT_DATA_WRITER_CONFIG = DataWriterConfig(in_flight_timeout_s=1, max_capacity_bytes_per_channel=1000*1000*20, batch_size=1, flush_period_s=1)
 DEFAULT_TRANSFER_CONFIG = TransferConfig(transfer_queue_size=1000)
 DEFAULT_ZMQ_CONFIG = ZmqConfig(
     sndhwm=None,

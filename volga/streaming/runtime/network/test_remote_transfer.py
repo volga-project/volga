@@ -592,5 +592,5 @@ if __name__ == '__main__':
     t = TestRemoteTransfer()
     # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=4)
-    t.test_nw_to_nr_star_on_ray(nr=1, nw=1)
+    t.test_nw_to_nr_star_on_ray(nr=4, nw=4)
     # t.test_nw_to_nr_star_on_ray(nr=1, nw=1, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
