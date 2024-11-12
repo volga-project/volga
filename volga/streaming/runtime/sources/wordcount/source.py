@@ -1,7 +1,8 @@
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from volga.streaming.api.function.function import SourceFunction, SourceContext
 from volga.streaming.api.stream.stream_source import StreamSource
+from volga.streaming.common.utils import now_ts_ms
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnumerator, SourceSplit, \
     SourceSplitType
 
@@ -9,41 +10,61 @@ from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnu
 # this lives on job_master
 class WordCountSourceSplitEnumerator(SourceSplitEnumerator):
 
-    def __init__(self, count_per_word: Optional[int], num_msgs_per_split: int, dictionary: List[str]):
-        self.counts_per_word = {word: count_per_word for word in dictionary}
-        self.num_msgs_per_split = num_msgs_per_split
+    def __init__(self, dictionary: List[str], split_size: int, count_per_word: Optional[int] = None, run_for_s: Optional[int] = None):
+        if run_for_s is None and count_per_word is None:
+            raise RuntimeError('Need to specify either count_per_word or run_for_s')
+        self.dictionary = dictionary
+        self.count_per_word = count_per_word
+        self.num_sent_per_word = {word: 0 for word in dictionary}
+        self.run_for_s = run_for_s
+        self.split_size = split_size
         self.done = False
+        self.started_at_ms = None
 
     def _all_done(self) -> bool:
+        if self.run_for_s:
+            # we are bounded by time , done when time is finished
+            if self.started_at_ms is None:
+                return False
+            return now_ts_ms() - self.started_at_ms > self.run_for_s * 1000
+
+        # bounded by num messages
         res = True
-        for w in self.counts_per_word:
-            if self.counts_per_word[w] != 0:
+        for w in self.num_sent_per_word:
+            if self.num_sent_per_word[w] != self.count_per_word:
                 res = False
         return res
 
     def poll_next_split(self, task_id: int) -> SourceSplit:
+        if self.started_at_ms is None:
+            self.started_at_ms = now_ts_ms()
+
         if self._all_done():
             return SourceSplit(type=SourceSplitType.END_OF_INPUT, data=None)
         words = {}
         num_msgs = 0
         index = 0
-        while num_msgs != self.num_msgs_per_split and not self._all_done():
-            all_words = list(self.counts_per_word.keys())
-            index = index%len(all_words)
-            word = all_words[index]
-            count = self.counts_per_word[word]
-            if count == 0:
-                index += 1
-                continue
+        while num_msgs != self.split_size and not self._all_done():
+            index = index%len(self.dictionary)
+            word = self.dictionary[index]
+            if self.run_for_s is None:
+                # limited by num messages
+                num_sent = self.num_sent_per_word[word]
+                if num_sent == self.count_per_word:
+                    index += 1
+                    continue
+                self.num_sent_per_word[word] += 1
             if word in words:
                 words[word] += 1
             else:
                 words[word] = 1
-            self.counts_per_word[word] -= 1
             index += 1
             num_msgs += 1
 
         return SourceSplit(type=SourceSplitType.MORE_AVAILABLE, data=words)
+
+    def get_num_sent(self) -> Dict[str, int]:
+        return self.num_sent_per_word
 
 
 # this lives on different job_workers
@@ -66,15 +87,24 @@ class WordCountSourceFunction(SourceFunction):
 
 class WordCountSource(StreamSource):
 
-    def __init__(self, streaming_context: 'StreamingContext', parallelism: int, count_per_word: Optional[int], num_msgs_per_split: int, dictionary: List[str]):
+    def __init__(
+        self,
+        streaming_context: 'StreamingContext',
+        parallelism: int,
+        dictionary: List[str],
+        split_size: int,
+        count_per_word: Optional[int] = None,
+        run_for_s: Optional[int] = None
+    ):
         super().__init__(
             streaming_context=streaming_context,
             source_function=WordCountSourceFunction()
         )
 
         self.split_enumerator(WordCountSourceSplitEnumerator(
+            dictionary=dictionary,
+            split_size=split_size,
             count_per_word=count_per_word,
-            num_msgs_per_split=num_msgs_per_split,
-            dictionary=dictionary
+            run_for_s=run_for_s
         ))
         self.set_parallelism(parallelism)

@@ -73,7 +73,7 @@ def store_run_stats(
 
 
 # TODO figure out how to parametrize batch_size+parallelism+msg_size variations
-def throughput_benchmark(rerun_file: Optional[str] = None):
+def throughput_benchmark(rerun_file: Optional[str] = None ):
     res = {}
     existing_runs = set()
     if rerun_file is None:
@@ -196,26 +196,22 @@ def plot(filename: str):
         #         print(msg_size, batch_size)
         #         print(throughput_data)
 
-        throughput_df = df[['throughput', 'parallelism', 'msg_size', 'batch_size']]
-        g1 = sns.FacetGrid(throughput_df, row='msg_size', hue='batch_size')
+        # throughput_df = df[['throughput', 'parallelism', 'msg_size', 'batch_size']]
+        g1 = sns.FacetGrid(df, row='msg_size', hue='batch_size')
         g1.map(sns.lineplot, 'parallelism', 'throughput')
         g1.add_legend()
 
-        latency_df = df[['latency_p99_ms', 'parallelism', 'msg_size', 'batch_size']]
-        g2 = sns.FacetGrid(latency_df, row='msg_size', hue='batch_size')
+        # latency_df = df[['latency_p99_ms', 'parallelism', 'msg_size', 'batch_size']]
+        g2 = sns.FacetGrid(df, row='msg_size', hue='batch_size')
         g2.map(sns.lineplot, 'parallelism', 'latency_p99_ms')
         g2.add_legend()
 
-        latency_df = df[['latency_p99_ms', 'throughput', 'msg_size', 'batch_size']]
-        g3 = sns.FacetGrid(latency_df, row='batch_size', hue='msg_size')
-        g3.map(sns.lineplot, 'throughput', 'latency_p99_ms')
-        g3.add_legend()
-
         plt.show()
 
-throughput_benchmark()
+# throughput_benchmark()
 # throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_1731245746.json')
 # plot(f'{STATS_STORE_DIR}/benchmark_1731245746.json')
+plot(f'{STATS_STORE_DIR}/benchmark_1731303329.json')
 
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
