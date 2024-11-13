@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Optional, Dict
+from typing import Optional, Dict, Any, Tuple
 
 import ray
 
@@ -41,7 +41,7 @@ class JobMaster:
         self.source_split_manager: Optional[SourceSplitManager] = None
 
         self.running = True
-        self.sources_finished = {} # source vertex id to bool
+        self.sources_finished = {}  # source vertex id to bool
         self.resource_manager.init()
 
     def submit_job(self, job_graph: JobGraph) -> bool:
@@ -123,3 +123,11 @@ class JobMaster:
         self.running = False
         self.stats_manager.stop()
         self.job_scheduler.destroy_job()
+
+    def get_num_sent(self) -> Any:
+        if self.source_split_manager is None:
+            raise RuntimeError('source_split_manager is not set')
+        return self.source_split_manager.get_num_sent()
+
+    def get_final_perf_stats(self) -> Tuple[float, Dict[str, float]]:
+        return self.stats_manager.get_final_aggregated_stats()

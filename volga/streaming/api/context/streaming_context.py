@@ -114,4 +114,4 @@ class StreamingContext:
             logger.info(f'Optimized job graph {jg.job_name}')
             logger.info(f'\n {jg.gen_digraph()}')
         job_client = JobClient()
-        job_client.execute(job_graph=jg, job_config=self.job_config)
+        self.job_master = job_client.execute(job_graph=jg, job_config=self.job_config)

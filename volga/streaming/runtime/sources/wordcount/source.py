@@ -47,13 +47,17 @@ class WordCountSourceSplitEnumerator(SourceSplitEnumerator):
         while num_msgs != self.split_size and not self._all_done():
             index = index%len(self.dictionary)
             word = self.dictionary[index]
-            if self.run_for_s is None:
+            if self.run_for_s is not None:
+                # limited by time
+                self.num_sent_per_word[word] += 1
+            else:
                 # limited by num messages
                 num_sent = self.num_sent_per_word[word]
                 if num_sent == self.count_per_word:
                     index += 1
                     continue
-                self.num_sent_per_word[word] += 1
+                else:
+                    self.num_sent_per_word[word] += 1
             if word in words:
                 words[word] += 1
             else:

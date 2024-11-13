@@ -2,43 +2,55 @@ import random
 import string
 import time
 import unittest
+from typing import Optional, Any
 
 import ray
 import yaml
 from pathlib import Path
 
 from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG
+
 from volga.streaming.runtime.sources.wordcount.source import WordCountSource
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.function.function import SinkToCacheDictFunction
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 
+DEFAULT_DICT_SIZE = 10  # num of words in a dict
+DEFAULT_SPLIT_SIZE = 100000  # num of words in a source split
+
 
 class TestWordCount(unittest.TestCase):
 
-    def test_wordcount(self):
+    def test_wordcount(
+        self,
+        parallelism: int = 1,
+        word_length: int = 32,
+        batch_size: int = 1000,
+        run_for_s: int = 25,
+        ray_addr: Optional[str] = None,
+        runtime_env: Optional[Any] = None,
+        run_assert: bool = False
+    ):
         job_config = yaml.safe_load(Path('../volga/streaming/runtime/sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
 
-        dict_size = 10
-        count_per_word = 10000000
-        word_length = 32
-        split_size = 100000
+        # TODO this is a hacky way to set newtork params per job, we need to pass network config properly
+        DEFAULT_DATA_WRITER_CONFIG.batch_size = batch_size
 
-        dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(dict_size)]
+        dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(DEFAULT_DICT_SIZE)]
 
-        # ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, ignore_reinit_error=True)
-        ray.init()
+        ray.init(address=ray_addr, runtime_env=runtime_env, ignore_reinit_error=True)
         sink_cache = SinkCacheActor.remote()
 
         sink_function = SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1])))
 
         source = WordCountSource(
             streaming_context=ctx,
-            parallelism=6,
+            parallelism=parallelism,
             dictionary=dictionary,
-            split_size=split_size,
-            run_for_s=30
+            split_size=DEFAULT_SPLIT_SIZE,
+            run_for_s=run_for_s,
             # count_per_word=count_per_word,
         )
         s = source.map(lambda wrd: (wrd, 1)) \
@@ -48,27 +60,37 @@ class TestWordCount(unittest.TestCase):
         start = time.time()
         ctx.execute()
         end = time.time()
+        job_master = ctx.job_master
+        num_sent = ray.get(job_master.get_num_sent.remote())
+        avg_throughput, latency_stats = ray.get(job_master.get_final_perf_stats.remote())
 
         counts = ray.get(sink_cache.get_dict.remote())
-        print(counts)
-        assert len(counts) == dict_size
-        total = 0
+        # print(counts)
+        # print(num_sent)
+        if run_assert:
+            assert len(counts) == DEFAULT_DICT_SIZE
+            for w in counts:
+                assert counts[w] == num_sent[w]
+            print('assert ok')
+
+        total_num_sent = 0
         for w in counts:
-            total += counts[w]
+            total_num_sent += counts[w]
 
-        exec_time = end - start
-        estimate_throughput = total/exec_time
+        run_duration = end - start
+        estimated_throughput = total_num_sent/run_duration
 
-        print(f'Exec time: {exec_time}, Throughput Est: {estimate_throughput}, Total: {total}, expected: {count_per_word * dict_size}, diff: {count_per_word * dict_size - total}')
+        print(f'Finished in {run_duration}s \n'
+              f'Avg Throughput: {avg_throughput} msg/s \n'
+              f'Estimated Throughput: {estimated_throughput} msg/s \n'
+              f'Latency: {latency_stats} \n')
 
-        # TODO assert for unbounded time-limited stream
-        # for w in counts:
-        #     assert counts[w] == count_per_word
-
-        print('assert ok')
         ray.shutdown()
+
+        return avg_throughput, latency_stats, total_num_sent
 
 
 if __name__ == '__main__':
     t = TestWordCount()
-    t.test_wordcount()
+    t.test_wordcount(parallelism=1, word_length=32, batch_size=1000, run_assert=True)
+    # t.test_wordcount(parallelism=1, word_length=32, batch_size=1000, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, run_assert=True)

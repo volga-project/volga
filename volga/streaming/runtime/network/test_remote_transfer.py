@@ -443,7 +443,6 @@ class TestRemoteTransfer(unittest.TestCase):
               f'Avg Throughput: {avg_throughput} msg/s \n'
               f'Estimated Throughput: {estimated_throughput} msg/s \n'
               f'Latency: {latency_stats} \n')
-        time.sleep(1)
 
         stop_futs = [actor.stop.remote() for actor in actors]
         ray.get(stop_futs)
