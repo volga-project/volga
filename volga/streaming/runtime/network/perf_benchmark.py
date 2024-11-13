@@ -11,6 +11,7 @@ import ray
 import seaborn as sns
 import matplotlib.pyplot as plt
 
+from tests.test_wordcount import TestWordCount
 from volga.streaming.runtime.network.test_local_transfer import TestLocalTransfer
 from volga.streaming.runtime.network.test_remote_transfer import TestRemoteTransfer
 from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
@@ -25,7 +26,7 @@ class RunScenario(enum.Enum):
     WORDCOUNT_CLUSTER = 'wordcount_cluster' # wordcount, tested on remote cluster
 
 
-RUN_SCENARIO = RunScenario.NETWORK_LOCAL
+RUN_SCENARIO = RunScenario.WORDCOUNT_LOCAL
 
 NUM_WORKERS_PER_NODE = 8 # in remote setting, we run on c5.2xlarge instances which have 8 vCPUs, hence the num of workers
 
@@ -35,9 +36,12 @@ STATS_STORE_DIR = 'volga_network_perf_benchmarks'
 
 PARAMS_MATRIX = {
     'parallelism': [*range(1, 11)],
+    # 'parallelism': [*range(1, 4)],
     'msg_size': [32, 256, 1024],
-    # 'batch_size': [1000]
+    # 'msg_size': [32],
     'batch_size': [1, 10, 100, 1000]
+
+    # 'batch_size': [1000]
 }
 
 
@@ -59,14 +63,21 @@ def store_run_stats(
         'num_msgs': num_msgs,
     }
 
+    meta = {
+        'scenario': RUN_SCENARIO.value
+    }
+
     if os.path.isfile(res_file_name):
         with open(res_file_name, 'r') as file:
             data = json.load(file)
     else:
         os.makedirs(os.path.dirname(res_file_name), exist_ok=True)
-        data = []
+        data = {
+            'meta': meta,
+            'stats': []
+        }
 
-    data.append(to_store)
+    data['stats'].append(to_store)
 
     with open(res_file_name, 'w') as file:
         json.dump(data, file, indent=4)
@@ -77,11 +88,11 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
     res = {}
     existing_runs = set()
     if rerun_file is None:
-        res_file_name = f'{STATS_STORE_DIR}/benchmark_{int(time.time())}.json'
+        res_file_name = f'{STATS_STORE_DIR}/benchmark_{RUN_SCENARIO.value}_{int(time.time())}.json'
     else:
         res_file_name = rerun_file
         with open(rerun_file, 'r') as file:
-            data = json.load(file)
+            data = json.load(file)['stats']
             for e in data:
                 existing_runs.add((e['msg_size'], e['batch_size'], e['parallelism']))
 
@@ -89,7 +100,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
     print(f'Skipping {len(existing_runs)} existing runs')
     num_runs -= len(existing_runs)
     print(f'Executing {num_runs} runs')
-    run_id = 0
+    run_id = 1
 
     for msg_size in PARAMS_MATRIX['msg_size']:
         for batch_size in PARAMS_MATRIX['batch_size']:
@@ -127,7 +138,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                             runtime_env=runtime_env,
                             multinode=multinode
                         )
-                    elif RunScenario.NETWORK_LOCAL:
+                    elif RUN_SCENARIO == RunScenario.NETWORK_LOCAL:
                         t = TestLocalTransfer()
                         avg_throughput, latency_stats, num_msgs = t.test_n_all_to_all_on_local_ray(
                             n=parallelism,
@@ -135,10 +146,26 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                             batch_size=batch_size,
                             run_for_s=RUN_DURATION_S
                         )
+                    elif RUN_SCENARIO == RunScenario.WORDCOUNT_LOCAL or RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
+                        t = TestWordCount()
+                        if RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
+                            ray_addr = RAY_ADDR
+                            runtime_env = REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+                        else:
+                            ray_addr = None
+                            runtime_env = None
+
+                        avg_throughput, latency_stats, num_msgs = t.test_wordcount(
+                            parallelism=parallelism,
+                            word_length=msg_size,
+                            batch_size=batch_size,
+                            run_for_s=RUN_DURATION_S,
+                            ray_addr=ray_addr,
+                            runtime_env=runtime_env
+                        )
                     else:
                         raise RuntimeError('Unsupported run scenario')
-
-
+                    run_res = (avg_throughput, latency_stats, num_msgs)
                     store_run_stats(
                         res_file_name=res_file_name,
                         parallelism=parallelism,
@@ -168,7 +195,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
 
 def plot(filename: str):
     with open(filename, 'r') as file:
-        data = json.load(file)
+        data = json.load(file)['stats']
         processed = []
 
         for e in data:
@@ -209,9 +236,8 @@ def plot(filename: str):
         plt.show()
 
 # throughput_benchmark()
-# throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_1731245746.json')
-# plot(f'{STATS_STORE_DIR}/benchmark_1731245746.json')
-plot(f'{STATS_STORE_DIR}/benchmark_1731303329.json')
+throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
 
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s

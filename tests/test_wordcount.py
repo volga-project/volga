@@ -32,7 +32,7 @@ class TestWordCount(unittest.TestCase):
         runtime_env: Optional[Any] = None,
         run_assert: bool = False
     ):
-        job_config = yaml.safe_load(Path('../volga/streaming/runtime/sample-job-config.yaml').read_text())
+        job_config = yaml.safe_load(Path('/Users/anov/IdeaProjects/volga/volga/streaming/runtime/sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
 
         # TODO this is a hacky way to set newtork params per job, we need to pass network config properly
