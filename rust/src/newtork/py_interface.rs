@@ -132,7 +132,11 @@ impl PyDataReader {
     }
 
     pub fn read_bytes(&self, py: Python) -> Option<Py<PyBytes>>{
-        let bytes = self.data_reader.read_bytes();
+        let dr = &self.data_reader;
+        // let bytes = dr.read_bytes();
+        let bytes = py.allow_threads(move || {
+            dr.read_bytes()
+        });
         if !bytes.is_none() {
             let bytes = bytes.unwrap();
             let pb = PyBytes::new(py, bytes.as_slice());
@@ -176,9 +180,13 @@ impl PyDataWriter {
         self.data_writer.stop();
     }
 
-    pub fn write_bytes(&self, channel_id: String, b: &PyBytes, timeout_ms: usize) -> Option<usize> {
+    pub fn write_bytes(&self, py: Python, channel_id: String, b: &PyBytes, timeout_ms: usize) -> Option<usize> {
         let bytes = b.as_bytes().to_vec();
-        self.data_writer.write_bytes(&channel_id, bytes, timeout_ms)
+        // self.data_writer.write_bytes(&channel_id, bytes, timeout_ms)
+        let t = py.allow_threads(move || {
+            self.data_writer.write_bytes(&channel_id, bytes, timeout_ms)
+        });
+        t
     }
 }
 
