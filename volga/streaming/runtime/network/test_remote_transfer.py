@@ -225,7 +225,7 @@ class TestRemoteTransfer(unittest.TestCase):
         nr: int,
         msg_size: int = 32,
         batch_size: int = 10,
-        run_for_s: int = 25,
+        run_for_s: int = 30,
         num_workers_per_node: Optional[int] = None,
         ray_addr: Optional[str] = None,
         runtime_env: Optional[Any] = None,
@@ -589,7 +589,6 @@ class TestRemoteTransfer(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestRemoteTransfer()
-    # t.test_n_to_n_parallel_on_ray(n=2, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
     # t.test_n_to_n_parallel_on_ray(n=4)
-    t.test_nw_to_nr_star_on_ray(nr=4, nw=4)
-    # t.test_nw_to_nr_star_on_ray(nr=1, nw=1, num_workers_per_node=8, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)
+    t.test_nw_to_nr_star_on_ray(nr=1, nw=1, msg_size=32, batch_size=1000, run_for_s=30)
+    # t.test_nw_to_nr_star_on_ray(nr=4, nw=4, msg_size=32, batch_size=1000, run_for_s=30, num_workers_per_node=4, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, multinode=True)

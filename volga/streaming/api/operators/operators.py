@@ -104,6 +104,10 @@ class ISourceOperator(StreamOperator, ABC):
     def operator_type(self):
         return OperatorType.SOURCE
 
+    @abstractmethod
+    def get_num_sent(self) -> Any:
+        raise NotImplementedError()
+
 
 class SourceOperator(ISourceOperator):
 
@@ -127,7 +131,7 @@ class SourceOperator(ISourceOperator):
 
         def collect(self, value: Any):
             source_emit_ts = None
-            # throttle source_emit_ts setting - it is used to calculate latency stats, we dont want it on every message
+            # throttle source_emit_ts setting - it is used to calculate latency stats, we don't want it on every message
             if (self.num_fetched_records + 1)%100 == 0:
                 source_emit_ts = now_ts_ms()
 
@@ -207,6 +211,10 @@ class SourceOperator(ISourceOperator):
 
     def get_source_context(self) -> SourceContext:
         return self.source_context
+
+    def get_num_sent(self) -> Any:
+        assert isinstance(self.func, SourceFunction)
+        return self.func.get_num_sent()
 
 
 class MapOperator(StreamOperator, OneInputOperator):

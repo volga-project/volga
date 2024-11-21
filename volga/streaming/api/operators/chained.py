@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import List
+from typing import List, Any
 
 from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
@@ -82,6 +82,10 @@ class ChainedSourceOperator(ChainedOperator, ISourceOperator):
 
     def get_source_context(self) -> SourceContext:
         return self.head_operator.get_source_context()
+
+    def get_num_sent(self) -> Any:
+        return self.head_operator.get_num_sent()
+
 
 
 class ForwardCollector(Collector):

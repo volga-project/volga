@@ -258,5 +258,5 @@ class TestLocalTransfer(unittest.TestCase):
 if __name__ == '__main__':
     t = TestLocalTransfer()
     # t.test_one_to_one_on_ray()
-    t.test_n_all_to_all_on_local_ray(n=1)
+    t.test_n_all_to_all_on_local_ray(n=4, msg_size=32, batch_size=1000, run_for_s=25)
     # t.test_backpressure() # TODO this does not work

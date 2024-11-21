@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 
 import ray
 
@@ -8,7 +8,7 @@ from volga.streaming.api.job_graph.job_graph import JobGraph
 from volga.streaming.api.operators.chained import ChainedSourceOperator
 from volga.streaming.api.operators.operators import ISourceOperator, SourceOperator
 from volga.streaming.runtime.config.streaming_config import StreamingConfig
-from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph
+from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import ParallelismFirst, OperatorFirst
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
@@ -42,6 +42,8 @@ class JobMaster:
 
         self.running = True
         self.sources_finished = {}  # source vertex id to bool
+        self.num_sent_per_source_worker = None
+
         self.resource_manager.init()
 
     def submit_job(self, job_graph: JobGraph) -> bool:
@@ -121,13 +123,35 @@ class JobMaster:
 
     def destroy(self):
         self.running = False
+        self.num_sent_per_source_worker = self._fetch_num_sent_from_source_workers()
         self.stats_manager.stop()
         self.job_scheduler.destroy_job()
 
-    def get_num_sent(self) -> Any:
-        if self.source_split_manager is None:
-            raise RuntimeError('source_split_manager is not set')
-        return self.source_split_manager.get_num_sent()
+    # num sent stats per source worker
+    def _fetch_num_sent_from_source_workers(self) -> Dict[str, Any]:
+        source_vertices: List[ExecutionVertex] = self.runtime_context.execution_graph.get_source_vertices()
+        res = {}
+        ids = []
+        source_workers = []
+        for v in source_vertices:
+            source_workers.append(v.worker)
+            ids.append(v.execution_vertex_id)
+
+        print(ids)
+        print(source_workers)
+
+        ns = ray.get([w.get_num_sent.remote() for w in source_workers])
+        for i in range(len(ids)):
+            res[ids[i]] = ns[i]
+        return res
+
+    # this is cached so we can read it even after the job is destroyed
+    def get_num_sent_per_source_worker(self) -> Dict[str, Any]:
+        assert self.num_sent_per_source_worker is not None
+        return self.num_sent_per_source_worker
+        # if self.source_split_manager is None:
+        #     raise RuntimeError('source_split_manager is not set')
+        # return self.source_split_manager.get_num_sent()
 
     def get_final_perf_stats(self) -> Tuple[float, Dict[str, float]]:
         return self.stats_manager.get_final_aggregated_stats()

@@ -251,7 +251,8 @@ def aggregate_historical_stats(
 
     historical_throughput_values = list(map(lambda e: e[1], historical_throughput))
     if len(historical_throughput_values) - warmup_thresh_s < 10:
-        raise RuntimeError(f'We expect at least {warmup_thresh_s + 10} seconds of historical throughput data')
+        # warning
+        print(f'[WARNING] We expect at least {warmup_thresh_s + 10} seconds of historical throughput data')
 
     historical_throughput_values = historical_throughput_values[warmup_thresh_s:]
     if len(historical_throughput_values) != 0:
@@ -261,7 +262,8 @@ def aggregate_historical_stats(
 
     historical_latency_hists = list(map(lambda e: e[1], historical_latency_hists))
     if len(historical_latency_hists) - warmup_thresh_s < 10:
-        raise RuntimeError(f'We expect at least {warmup_thresh_s + 10} seconds of historical latency data')
+        # warning
+        print(f'[WARNING] We expect at least {warmup_thresh_s + 10} seconds of historical latency data')
 
     historical_latency_hists = historical_latency_hists[warmup_thresh_s:]
     merged = Hist.merge(historical_latency_hists)

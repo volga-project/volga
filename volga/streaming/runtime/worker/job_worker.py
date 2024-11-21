@@ -1,8 +1,9 @@
 import logging
+import sys
 import time
 import socket
 from threading import Thread
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Any
 
 import ray
 from ray.actor import ActorHandle
@@ -58,6 +59,7 @@ class JobWorker:
         return WorkerNodeInfo(node_ip, node_id, na_ports)
 
     def init(self, execution_vertex: ExecutionVertex):
+        sys.setrecursionlimit(10000)
         self.execution_vertex = execution_vertex
 
     def start_or_rollback(self) -> Optional[str]:
@@ -152,3 +154,8 @@ class JobWorker:
 
     def collect_stats(self) -> List[WorkerStatsUpdate]:
         return self.task.collect_stats()
+
+    def get_num_sent(self) -> Any:
+        # if not isinstance(self.task, SourceStreamTask):
+        #     raise RuntimeError('Only source implements get_num_sent')
+        return self.task.get_num_sent()

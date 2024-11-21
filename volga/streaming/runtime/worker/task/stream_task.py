@@ -2,7 +2,7 @@ import logging
 import time
 from abc import ABC, abstractmethod
 from threading import Thread
-from typing import Optional, List
+from typing import Optional, List, Any
 
 from ray.actor import ActorHandle
 
@@ -162,6 +162,12 @@ class SourceStreamTask(StreamTask):
         while self.running:
             record = Record(value=None) # empty message, this will trigger sourceFunction.fetch()
             self.processor.process(record)
+
+    def get_num_sent(self) -> Any:
+        assert isinstance(self.processor, SourceProcessor)
+        op = self.processor.operator
+        assert isinstance(op, ISourceOperator)
+        return op.get_num_sent()
 
 
 class InputStreamTask(StreamTask):

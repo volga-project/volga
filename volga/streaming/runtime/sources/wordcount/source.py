@@ -1,4 +1,4 @@
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Any
 
 from volga.streaming.api.function.function import SourceFunction, SourceContext
 from volga.streaming.api.stream.stream_source import StreamSource
@@ -6,11 +6,19 @@ from volga.streaming.common.utils import now_ts_ms
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnumerator, SourceSplit, \
     SourceSplitType
 
+# this is a split-based source where all workers are coordinated by master's SplitEnumeratorManager
+
 
 # this lives on job_master
 class WordCountSourceSplitEnumerator(SourceSplitEnumerator):
 
-    def __init__(self, dictionary: List[str], split_size: int, count_per_word: Optional[int] = None, run_for_s: Optional[int] = None):
+    def __init__(
+        self,
+        dictionary: List[str],
+        split_size: int, # if a split size is large enough, the run_for_s may not take effect as the whole run duration will be limited by a single split processing time
+        count_per_word: Optional[int] = None,
+        run_for_s: Optional[int] = None
+    ):
         if run_for_s is None and count_per_word is None:
             raise RuntimeError('Need to specify either count_per_word or run_for_s')
         self.dictionary = dictionary
@@ -67,15 +75,15 @@ class WordCountSourceSplitEnumerator(SourceSplitEnumerator):
 
         return SourceSplit(type=SourceSplitType.MORE_AVAILABLE, data=words)
 
-    def get_num_sent(self) -> Dict[str, int]:
-        return self.num_sent_per_word
+    # def get_num_sent(self) -> Dict[str, int]:
+    #     return self.num_sent_per_word
 
 
 # this lives on different job_workers
 class WordCountSourceFunction(SourceFunction):
 
     def init(self, parallel: int, index: int):
-        pass
+        self.num_sent_per_word = {}
 
     def fetch(self, ctx: SourceContext):
         split = ctx.get_current_split()
@@ -86,8 +94,14 @@ class WordCountSourceFunction(SourceFunction):
             count = words[word]
             for _ in range(count):
                 ctx.collect(word)
+            if word in self.num_sent_per_word:
+                self.num_sent_per_word[word] += count
+            else:
+                self.num_sent_per_word[word] = count
         ctx.poll_next_split()
 
+    def get_num_sent(self) -> Any:
+        return self.num_sent_per_word
 
 class WordCountSource(StreamSource):
 

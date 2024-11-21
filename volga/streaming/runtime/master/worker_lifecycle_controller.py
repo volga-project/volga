@@ -1,4 +1,5 @@
 import logging
+import sys
 import time
 import random
 from typing import List, Tuple, Dict
@@ -108,6 +109,7 @@ class WorkerLifecycleController:
 
     # construct channels based on Ray assigned actor IPs and update execution_graph
     def connect_and_init_workers(self, execution_graph: ExecutionGraph):
+        sys.setrecursionlimit(10000)
         logger.info(f'Initing {len(execution_graph.execution_vertices_by_id)} workers...')
         job_name = execution_graph.job_name
 
@@ -120,8 +122,6 @@ class WorkerLifecycleController:
             target_worker_network_info: WorkerNodeInfo = edge.target_execution_vertex.worker_node_info
             if source_worker_network_info is None or target_worker_network_info is None:
                 raise RuntimeError(f'No worker network info')
-
-            # data_reader_ipc_unique_key =
 
             if source_worker_network_info.node_id == target_worker_network_info.node_id:
                 channel = LocalChannel(
@@ -202,7 +202,7 @@ class WorkerLifecycleController:
         workers = [v.worker for v in vertices]
 
         # wait for actors to properly close
-        timeout = 5
+        timeout = 5 # TODO config this
         refs = [w.close.remote() for w in workers]
         closed_finished_refs, closed_pending_refs = ray.wait(
             refs,

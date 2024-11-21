@@ -236,8 +236,8 @@ def plot(filename: str):
         plt.show()
 
 # throughput_benchmark()
-throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
-# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
+# throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
+plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
 
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s

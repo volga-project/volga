@@ -117,4 +117,5 @@ class ResourceManager:
         if self.nodes is None:
             raise RuntimeError('ResourceManager not inited')
 
+        # TODO skip head node for distributed mode
         return strategy.assign_resources(self.nodes, execution_graph)
