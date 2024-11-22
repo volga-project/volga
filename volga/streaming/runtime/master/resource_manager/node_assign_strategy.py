@@ -1,3 +1,4 @@
+import enum
 import itertools
 import time
 from abc import ABC, abstractmethod
@@ -5,6 +6,11 @@ from typing import List, Dict, Optional
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.master.resource_manager.resource_manager import Node, Resources
+
+
+class NodeNodeAssignStrategyName(enum.Enum):
+    PARALLELISM_FIRST = 'parallelism_first'
+    OPERATOR_FIRST = 'operator_first'
 
 
 class NodeAssignStrategy(ABC):
@@ -26,6 +32,15 @@ class NodeAssignStrategy(ABC):
         if required_resources.num_gpus is not None:
             res &= (node_res.num_gpus is not None and required_resources.num_gpus <= node_res.num_gpus)
         return res
+
+    @staticmethod
+    def by_name(name: str) -> 'NodeAssignStrategy':
+        if name == NodeNodeAssignStrategyName.OPERATOR_FIRST.value:
+            return OperatorFirst()
+        elif name == NodeNodeAssignStrategyName.PARALLELISM_FIRST.value:
+            return ParallelismFirst()
+        else:
+            raise RuntimeError(f'Unknown NodeAssignStrategy name {name}, expected one of {[n.value for n in NodeNodeAssignStrategyName]}')
 
 
 # TODO this does not work properly with remote connections, debug
@@ -113,3 +128,4 @@ class OperatorFirst(NodeAssignStrategy):
                 res[exec_vertex.execution_vertex_id] = node
 
         return res
+

@@ -14,6 +14,7 @@ class StreamingWorkerConfig(BaseModel):
 class StreamingMasterConfig(BaseModel):
     resource_config: ResourceConfig
     scheduler_config: SchedulerConfig
+    node_assign_strategy: str
 
 
 class StreamingConfig(BaseModel):
