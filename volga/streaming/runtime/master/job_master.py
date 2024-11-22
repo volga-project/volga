@@ -7,13 +7,14 @@ import ray
 from volga.streaming.api.job_graph.job_graph import JobGraph
 from volga.streaming.api.operators.chained import ChainedSourceOperator
 from volga.streaming.api.operators.operators import ISourceOperator, SourceOperator
-from volga.streaming.runtime.config.streaming_config import StreamingConfig
+from volga.streaming.runtime.config.streaming_config import StreamingConfig, StreamingWorkerConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import ParallelismFirst, OperatorFirst
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
 from volga.streaming.runtime.master.scheduler.job_scheduler import JobScheduler
 from volga.streaming.runtime.master.stats.stats_manager import StatsManager
+from volga.streaming.runtime.network.network_config import DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitManager, SourceSplit
 
 logger = logging.getLogger("ray")
@@ -24,6 +25,8 @@ class JobMaster:
 
     def __init__(self, job_config: Optional[Dict]):
         streaming_config = StreamingConfig.from_dict(job_config)
+        if streaming_config.worker_config.network_config is None:
+            streaming_config.worker_config.network_config = DEFAULT_NETWORK_CONFIG
         self.master_config = streaming_config.master_config
         self.runtime_context = JobMasterRuntimeContext(streaming_config)
 

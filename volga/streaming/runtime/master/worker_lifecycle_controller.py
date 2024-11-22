@@ -10,6 +10,7 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.operators.chained import ChainedOperator
 from volga.streaming.api.operators.operators import SinkOperator
+from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfig
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
@@ -30,7 +31,8 @@ class WorkerLifecycleController:
         job_master: ActorHandle,
         resource_manager: ResourceManager,
         stats_manager: StatsManager,
-        node_assign_strategy: NodeAssignStrategy
+        node_assign_strategy: NodeAssignStrategy,
+        worker_config: StreamingWorkerConfig
     ):
         self.job_master = job_master
         self.resource_manager = resource_manager
@@ -38,6 +40,7 @@ class WorkerLifecycleController:
         self.node_assign_strategy = node_assign_strategy
         self._reserved_ports = {}
         self._na_ports_per_node = {}
+        self.worker_config = worker_config
         self.transfer_controller = TransferController()
 
     def create_workers(self, execution_graph: ExecutionGraph):
@@ -82,7 +85,7 @@ class WorkerLifecycleController:
                 options_kwargs['num_gpus'] = resources.num_gpus
             if resources.memory is not None:
                 options_kwargs['memory'] = resources.memory
-            worker = JobWorker.options(**options_kwargs).remote(job_master=self.job_master)
+            worker = JobWorker.options(**options_kwargs).remote(job_master=self.job_master, worker_config=self.worker_config)
             vertex_ids.append(vertex_id)
             workers[vertex_id] = worker
             vertex.set_worker(worker)

@@ -1,3 +1,4 @@
+import json
 import random
 import string
 import time
@@ -9,7 +10,7 @@ import yaml
 from pathlib import Path
 
 from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
-from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG
+from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DEFAULT_NETWORK_CONFIG
 
 from volga.streaming.runtime.sources.wordcount.source import WordCountSource
 from volga.streaming.api.context.streaming_context import StreamingContext
@@ -35,8 +36,9 @@ class TestWordCount(unittest.TestCase):
         job_config = yaml.safe_load(Path('/Users/anov/IdeaProjects/volga/volga/streaming/runtime/sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
 
-        # TODO this is a hacky way to set network params per job, we need to pass network config properly
-        DEFAULT_DATA_WRITER_CONFIG.batch_size = batch_size # TODO this does not change it
+        network_config = DEFAULT_NETWORK_CONFIG
+        network_config.data_writer.batch_size = batch_size
+        job_config['network_config'] = json.loads(network_config.json())
 
         dictionary = [''.join(random.choices(string.ascii_letters, k=word_length)) for _ in range(DEFAULT_DICT_SIZE)]
 
@@ -54,11 +56,7 @@ class TestWordCount(unittest.TestCase):
         s = source.map(lambda wrd: (wrd, 1)) \
             .key_by(lambda e: e[0]) \
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))
-        # s = source.map(lambda wrd: (wrd, 1)) \
-        #     .key_by(lambda e: e[0])
-            # .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))
         s.sink(SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1]))))
-        # s.sink(lambda e: e)
 
         start = time.time()
         ctx.execute()

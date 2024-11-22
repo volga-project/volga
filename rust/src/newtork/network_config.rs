@@ -6,7 +6,7 @@ use super::{data_reader::DataReaderConfig, data_writer::DataWriterConfig, remote
 pub struct NetworkConfig {
     pub data_reader: DataReaderConfig,
     pub data_writer: DataWriterConfig,
-    pub transfer: TransferConfig,
+    pub transfer: TransferConfig, // TODO deprecate this
     pub zmq: Option<ZmqConfig>,
 }
 

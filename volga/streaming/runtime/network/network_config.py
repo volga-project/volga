@@ -42,6 +42,12 @@ class ZmqConfig(BaseModel):
         return RustZmqConfig(self.sndhwm, self.rcvhwm, self.sndbuf, self.rcvbuf, self.linger, self.connect_timeout_s, self.num_io_threads)
 
 
+class NetworkConfig(BaseModel):
+    data_reader: DataReaderConfig
+    data_writer: DataWriterConfig
+    zmq: ZmqConfig
+
+
 DEFAULT_DATA_READER_CONFIG = DataReaderConfig(output_queue_capacity_bytes=1000*1000*10, response_batch_period_ms=100)
 DEFAULT_DATA_WRITER_CONFIG = DataWriterConfig(in_flight_timeout_s=1, max_capacity_bytes_per_channel=1000*1000*20, batch_size=1000, flush_period_s=1)
 DEFAULT_TRANSFER_CONFIG = TransferConfig(transfer_queue_size=1000)
@@ -54,3 +60,5 @@ DEFAULT_ZMQ_CONFIG = ZmqConfig(
     connect_timeout_s=5,
     num_io_threads=4
 )
+
+DEFAULT_NETWORK_CONFIG = NetworkConfig(data_reader=DEFAULT_DATA_READER_CONFIG, data_writer=DEFAULT_DATA_WRITER_CONFIG, zmq=DEFAULT_ZMQ_CONFIG)

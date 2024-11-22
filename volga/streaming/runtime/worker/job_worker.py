@@ -9,6 +9,7 @@ import ray
 from ray.actor import ActorHandle
 
 from volga.streaming.api.operators.operators import SourceOperator, ISourceOperator
+from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.core.processor.processor import Processor, SourceProcessor, OneInputProcessor
 from volga.streaming.runtime.master.stats.stats_manager import WorkerStatsUpdate
@@ -35,12 +36,13 @@ class WorkerNodeInfo:
 @ray.remote
 class JobWorker:
 
-    def __init__(self, job_master: ActorHandle):
+    def __init__(self, job_master: ActorHandle, worker_config: StreamingWorkerConfig):
         self.job_master = job_master
         self.execution_vertex = None
         self.task = None
         self.task_watcher_thread = None
         self.running = True
+        self.worker_config = worker_config
 
     def get_host_info(self) -> WorkerNodeInfo:
         ctx = ray.get_runtime_context()
@@ -115,13 +117,15 @@ class JobWorker:
             task = SourceStreamTask(
                 job_master=self.job_master,
                 processor=stream_processor,
-                execution_vertex=self.execution_vertex
+                execution_vertex=self.execution_vertex,
+                worker_config=self.worker_config
             )
         elif isinstance(stream_processor, OneInputProcessor):
             task = OneInputStreamTask(
                 job_master=self.job_master,
                 processor=stream_processor,
-                execution_vertex=self.execution_vertex
+                execution_vertex=self.execution_vertex,
+                worker_config=self.worker_config
             )
         else:
             input_op_ids = set()
@@ -137,7 +141,8 @@ class JobWorker:
                 processor=stream_processor,
                 execution_vertex=self.execution_vertex,
                 left_stream_name=left_stream_name,
-                right_stream_name=right_stream_name
+                right_stream_name=right_stream_name,
+                worker_config=self.worker_config
             )
         return task
 
@@ -156,6 +161,4 @@ class JobWorker:
         return self.task.collect_stats()
 
     def get_num_sent(self) -> Any:
-        # if not isinstance(self.task, SourceStreamTask):
-        #     raise RuntimeError('Only source implements get_num_sent')
         return self.task.get_num_sent()

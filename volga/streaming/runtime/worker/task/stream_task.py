@@ -10,6 +10,7 @@ from volga.streaming.api.job_graph.job_graph import VertexType
 from volga.streaming.api.message.message import Record, record_from_channel_message
 from volga.streaming.api.operators.chained import ChainedOperator
 from volga.streaming.api.operators.operators import ISourceOperator, SourceOperator, SinkOperator
+from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.master.stats.stats_manager import WorkerStatsUpdate
 from volga.streaming.runtime.network.io_loop import IOLoop
@@ -29,7 +30,8 @@ class StreamTask(ABC):
         self,
         job_master: ActorHandle,
         processor: Processor,
-        execution_vertex: ExecutionVertex
+        execution_vertex: ExecutionVertex,
+        worker_config: StreamingWorkerConfig
     ):
         self.job_master = job_master
         self.processor = processor
@@ -39,8 +41,8 @@ class StreamTask(ABC):
         self.data_reader: Optional[DataReader] = None
         self.running = True
         self.collectors = []
-        # TODO pass network config
-        self.io_loop = IOLoop(f'io-loop-{execution_vertex.execution_vertex_id}')
+        self.worker_config = worker_config
+        self.io_loop = IOLoop(f'io-loop-{execution_vertex.execution_vertex_id}', worker_config.network_config.zmq)
 
     @abstractmethod
     def run(self):
@@ -68,7 +70,8 @@ class StreamTask(ABC):
                     name=f'dw-{self.execution_vertex.execution_vertex_id}',
                     source_stream_name=str(self.execution_vertex.stream_operator.id),
                     job_name=self.execution_vertex.job_name,
-                    channels=output_channels
+                    channels=output_channels,
+                    config=self.worker_config.network_config.data_writer
                 )
                 self.io_loop.register_io_handler(self.data_writer)
 
@@ -85,7 +88,8 @@ class StreamTask(ABC):
                     handler_id=f'dr-{self.execution_vertex.execution_vertex_id}',
                     name=f'dr-{self.execution_vertex.execution_vertex_id}',
                     job_name=self.execution_vertex.job_name,
-                    channels=input_channels
+                    channels=input_channels,
+                    config=self.worker_config.network_config.data_reader
                 )
                 self.io_loop.register_io_handler(self.data_reader)
 
@@ -198,11 +202,13 @@ class TwoInputStreamTask(InputStreamTask):
         execution_vertex: ExecutionVertex,
         left_stream_name: str,
         right_stream_name: str,
+        worker_config: StreamingWorkerConfig
     ):
         super().__init__(
             job_master=job_master,
             processor=processor,
-            execution_vertex=execution_vertex
+            execution_vertex=execution_vertex,
+            worker_config=worker_config
         )
 
         assert isinstance(self.processor, TwoInputProcessor)

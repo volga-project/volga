@@ -24,7 +24,10 @@ class JobScheduler:
         runtime_context: JobMasterRuntimeContext
     ):
         self.runtime_context = runtime_context
-        self.worker_lifecycle_controller = WorkerLifecycleController(job_master, resource_manager, stats_manager, node_assign_strategy)
+        self.worker_lifecycle_controller = WorkerLifecycleController(
+            job_master, resource_manager, stats_manager, node_assign_strategy,
+            runtime_context.streaming_config.worker_config
+        )
 
     def schedule_job(self) -> bool:
         self._prepare_job_submission()
