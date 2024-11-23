@@ -116,6 +116,7 @@ class JobMaster:
             all_sources_finished &= self.sources_finished[v]
         return all_sources_finished
 
+    # TODO set timeout for this
     def wait_sources_finished(self):
         while self.running:
             if self._all_sources_finished():
@@ -139,9 +140,6 @@ class JobMaster:
             source_workers.append(v.worker)
             ids.append(v.execution_vertex_id)
 
-        print(ids)
-        print(source_workers)
-
         ns = ray.get([w.get_num_sent.remote() for w in source_workers])
         for i in range(len(ids)):
             res[ids[i]] = ns[i]
@@ -151,9 +149,6 @@ class JobMaster:
     def get_num_sent_per_source_worker(self) -> Dict[str, Any]:
         assert self.num_sent_per_source_worker is not None
         return self.num_sent_per_source_worker
-        # if self.source_split_manager is None:
-        #     raise RuntimeError('source_split_manager is not set')
-        # return self.source_split_manager.get_num_sent()
 
     def get_final_perf_stats(self) -> Tuple[float, Dict[str, float]]:
         return self.stats_manager.get_final_aggregated_stats()

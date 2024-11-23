@@ -53,27 +53,25 @@ class SourceFunction(Function):
 
     @abstractmethod
     def init(self, parallel: int, index: int):
-        """
-        Args:
-            parallel: parallelism of source function
-            index: task index of this function and goes up from 0 to
-             parallel-1.
-        """
         pass
 
     @abstractmethod
     def fetch(self, ctx: SourceContext):
-        """Starts the source. Implementations can use the
-        :class:`SourceContext` to emit elements.
-        """
         pass
 
+    # TODO these two below (num_records and run_for_s) should be retires in favor of a proper shutdown mechanism (via terminal messages)
     def num_records(self) -> int:
         # if source is bounded, this should return expected number of records
         raise NotImplementedError()
 
+    def run_for_s(self) -> int:
+        # bound source by run duration
+        raise NotImplementedError()
+
+    @abstractmethod
     def get_num_sent(self) -> Any:
         raise NotImplementedError()
+
 
 
 class MapFunction(Function):

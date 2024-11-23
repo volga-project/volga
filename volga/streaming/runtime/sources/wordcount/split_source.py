@@ -75,12 +75,9 @@ class WordCountSourceSplitEnumerator(SourceSplitEnumerator):
 
         return SourceSplit(type=SourceSplitType.MORE_AVAILABLE, data=words)
 
-    # def get_num_sent(self) -> Dict[str, int]:
-    #     return self.num_sent_per_word
-
 
 # this lives on different job_workers
-class WordCountSourceFunction(SourceFunction):
+class WordCountSplitSourceFunction(SourceFunction):
 
     def init(self, parallel: int, index: int):
         self.num_sent_per_word = {}
@@ -103,7 +100,8 @@ class WordCountSourceFunction(SourceFunction):
     def get_num_sent(self) -> Any:
         return self.num_sent_per_word
 
-class WordCountSource(StreamSource):
+
+class WordCountSplitSource(StreamSource):
 
     def __init__(
         self,
@@ -117,7 +115,7 @@ class WordCountSource(StreamSource):
     ):
         super().__init__(
             streaming_context=streaming_context,
-            source_function=WordCountSourceFunction()
+            source_function=WordCountSplitSourceFunction()
         )
 
         self.split_enumerator(WordCountSourceSplitEnumerator(

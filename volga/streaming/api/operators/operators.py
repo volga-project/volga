@@ -118,18 +118,24 @@ class SourceOperator(ISourceOperator):
             runtime_context: RuntimeContext,
             timestamp_assigner: Optional[TimestampAssigner],
             num_records: Optional[int],
+            run_for_s: Optional[int],
         ):
             self.collectors = collectors
             self.runtime_context = runtime_context
             self.timestamp_assigner = timestamp_assigner
             self.num_records = num_records
+            self.run_for_s = run_for_s
             self.num_fetched_records = 0
             self.finished = False
             self.current_split: Optional[SourceSplit] = None
             self.job_master: Optional[ActorHandle] = None
             self.throughput_stats = WorkerThroughputStatsState.create()
+            self._started_at_ms = None
 
         def collect(self, value: Any):
+            if self._started_at_ms is None:
+                self._started_at_ms = now_ts_ms()
+
             source_emit_ts = None
             # throttle source_emit_ts setting - it is used to calculate latency stats, we don't want it on every message
             if (self.num_fetched_records + 1)%100 == 0:
@@ -143,19 +149,26 @@ class SourceOperator(ISourceOperator):
             self.num_fetched_records += 1
             self.throughput_stats.inc()
 
-            # two ways notify reached bounds
+            # three ways notify reached bounds
             # 1. if source function implements num_records (bounded non-split source)
             if self.num_records == self.num_fetched_records:
                 # set finished state
                 self.finished = True
 
+            # 2. Run duration exceeds run_for_s (if it's set)
+            if self.run_for_s is not None:
+                if now_ts_ms() - self._started_at_ms > self.run_for_s * 1000:
+                    # set finished state
+                    self.finished = True
+
         def get_current_split(self) -> SourceSplit:
             if self.current_split is None:
                 self.current_split = self.poll_next_split()
 
-            # two ways notify reached bounds
-            # 2. if source is a split-source and we have reached END_OF_INPUT
+            # three ways notify reached bounds
+            # 3. if source is a split-source and we have reached END_OF_INPUT
             if self.current_split.type == SourceSplitType.END_OF_INPUT:
+                # set finished state
                 self.finished = True
             return self.current_split
 
@@ -199,11 +212,20 @@ class SourceOperator(ISourceOperator):
         except NotImplementedError:
             # unbounded source or split-based source
             pass
+
+        run_for_s = None
+        try:
+            run_for_s = self.func.run_for_s()
+        except NotImplementedError:
+            # unbounded source or split-based source
+            pass
+
         self.source_context = SourceOperator.SourceContextImpl(
             collectors,
             runtime_context=runtime_context,
             timestamp_assigner=self.timestamp_assigner,
-            num_records=num_records
+            num_records=num_records,
+            run_for_s=run_for_s
         )
 
     def fetch(self):

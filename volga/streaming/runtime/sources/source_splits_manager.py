@@ -27,16 +27,8 @@ class SourceSplitManager:
         self.split_enumerators = split_enumerators
 
     def poll_next_split(self, operator_id: int, task_id: int) -> SourceSplit:
-        print(f'{operator_id} {task_id} polled')
+        print(f'[SourceSplitManager] POLLED SPLIT operator_id: {operator_id} task_id: {task_id}')
         if operator_id not in self.split_enumerators:
             raise RuntimeError(f'No split enumerator for operator_id {operator_id}, len: {len(self.split_enumerators)}')
         split_enumerator = self.split_enumerators[operator_id]
         return split_enumerator.poll_next_split(task_id)
-
-    # def get_num_sent(self) -> Any:
-    #     if len(self.split_enumerators) != 1:
-    #         # we can generalize this later
-    #         raise RuntimeError('WordCountSource exepcts exactly 1 split enumerator to aggregated number of sent messages')
-    #
-    #     split_enumerator = list(self.split_enumerators.values())[0]
-    #     return split_enumerator.get_num_sent()

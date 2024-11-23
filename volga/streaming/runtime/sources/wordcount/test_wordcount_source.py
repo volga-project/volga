@@ -1,7 +1,7 @@
 import unittest
 
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitType
-from volga.streaming.runtime.sources.wordcount.source import WordCountSourceSplitEnumerator
+from volga.streaming.runtime.sources.wordcount.split_source import WordCountSourceSplitEnumerator
 
 
 class TestWordCountSource(unittest.TestCase):

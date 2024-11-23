@@ -72,7 +72,7 @@ class WorkerLifecycleController:
             }
             options_kwargs = {
                 'max_restarts': -1,
-                'max_concurrency': 10,
+                'max_concurrency': 999,
                 'runtime_env': worker_runtime_env,
                 'scheduling_strategy': NodeAffinitySchedulingStrategy(
                     node_id=host_node.node_id,

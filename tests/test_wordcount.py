@@ -10,15 +10,16 @@ import yaml
 from pathlib import Path
 
 from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
-from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DEFAULT_NETWORK_CONFIG
+from volga.streaming.runtime.network.network_config import DEFAULT_NETWORK_CONFIG
 
-from volga.streaming.runtime.sources.wordcount.source import WordCountSource
+from volga.streaming.runtime.sources.wordcount.split_source import WordCountSplitSource
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.function.function import SinkToCacheDictFunction
 from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
+from volga.streaming.runtime.sources.wordcount.timed_source import WordCountSource
 
-DEFAULT_DICT_SIZE = 20  # num of words in a dict
-DEFAULT_SPLIT_SIZE = 1000000  # num of words in a source split
+DEFAULT_DICT_SIZE = 100  # num of words in a dict
+DEFAULT_SPLIT_SIZE = 10000000  # num of words in a source split
 
 
 class TestWordCount(unittest.TestCase):
@@ -45,7 +46,7 @@ class TestWordCount(unittest.TestCase):
         ray.init(address=ray_addr, runtime_env=runtime_env, ignore_reinit_error=True)
         sink_cache = SinkCacheActor.remote()
 
-        source = WordCountSource(
+        source = WordCountSplitSource(
             streaming_context=ctx,
             parallelism=parallelism,
             dictionary=dictionary,
@@ -53,6 +54,11 @@ class TestWordCount(unittest.TestCase):
             run_for_s=run_for_s,
             # count_per_word=count_per_word,
         )
+        # source = WordCountSource(
+        #     streaming_context=ctx,
+        #     dictionary=dictionary,
+        #     run_for_s=run_for_s
+        # )
         s = source.map(lambda wrd: (wrd, 1)) \
             .key_by(lambda e: e[0]) \
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))
@@ -103,5 +109,5 @@ class TestWordCount(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestWordCount()
-    t.test_wordcount(parallelism=1, word_length=32, batch_size=1, run_for_s=30, run_assert=True)
+    t.test_wordcount(parallelism=4, word_length=32, batch_size=1000, run_for_s=30, run_assert=True)
     # t.test_wordcount(parallelism=200, word_length=32, batch_size=1000, run_for_s=25, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, run_assert=False)
