@@ -116,11 +116,19 @@ class JobMaster:
             all_sources_finished &= self.sources_finished[v]
         return all_sources_finished
 
-    # TODO set timeout for this
-    def wait_sources_finished(self):
+    def wait_sources_finished(self, timeout_s: Optional[int] = None):
+        start_ts = time.time()
         while self.running:
             if self._all_sources_finished():
                 break
+            if timeout_s is not None and time.time() - start_ts > timeout_s:
+                not_finished = []
+                for v in self.sources_finished:
+                    if not self.sources_finished[v]:
+                        not_finished.append(v)
+
+                logger.info(f'Timeout waiting for sources to finish: {not_finished}')
+                return
             time.sleep(0.1)
         logger.info('All sources finished')
 

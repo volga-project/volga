@@ -46,26 +46,27 @@ class TestWordCount(unittest.TestCase):
         ray.init(address=ray_addr, runtime_env=runtime_env, ignore_reinit_error=True)
         sink_cache = SinkCacheActor.remote()
 
-        source = WordCountSplitSource(
-            streaming_context=ctx,
-            parallelism=parallelism,
-            dictionary=dictionary,
-            split_size=DEFAULT_SPLIT_SIZE,
-            run_for_s=run_for_s,
-            # count_per_word=count_per_word,
-        )
-        # source = WordCountSource(
+        # source = WordCountSplitSource(
         #     streaming_context=ctx,
+        #     parallelism=parallelism,
         #     dictionary=dictionary,
-        #     run_for_s=run_for_s
+        #     split_size=DEFAULT_SPLIT_SIZE,
+        #     run_for_s=run_for_s,
+        #     # count_per_word=count_per_word,
         # )
+        source = WordCountSource(
+            streaming_context=ctx,
+            dictionary=dictionary,
+            run_for_s=run_for_s
+        )
+        source.set_parallelism(parallelism)
         s = source.map(lambda wrd: (wrd, 1)) \
             .key_by(lambda e: e[0]) \
             .reduce(lambda old_value, new_value: (old_value[0], old_value[1] + new_value[1]))
         s.sink(SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0], e[1]))))
 
         start = time.time()
-        ctx.execute()
+        ctx.execute(timeout_s=(run_for_s + 5))
         end = time.time()
         job_master = ctx.job_master
         num_sent_per_source_worker = ray.get(job_master.get_num_sent_per_source_worker.remote())
@@ -82,13 +83,6 @@ class TestWordCount(unittest.TestCase):
         avg_throughput, latency_stats = ray.get(job_master.get_final_perf_stats.remote())
 
         counts = ray.get(sink_cache.get_dict.remote())
-        if run_assert:
-            print(counts)
-            print(num_sent)
-            assert len(counts) == DEFAULT_DICT_SIZE
-            for w in counts:
-                assert counts[w] == num_sent[w]
-            print('assert ok')
 
         total_num_sent = 0
         for w in counts:
@@ -102,6 +96,14 @@ class TestWordCount(unittest.TestCase):
               f'Estimated Throughput: {estimated_throughput} msg/s \n'
               f'Latency: {latency_stats} \n')
 
+        if run_assert:
+            print(counts)
+            print(num_sent)
+            assert len(counts) == DEFAULT_DICT_SIZE
+            for w in counts:
+                assert counts[w] == num_sent[w]
+            print('assert ok')
+
         ray.shutdown()
 
         return avg_throughput, latency_stats, total_num_sent
@@ -109,5 +111,5 @@ class TestWordCount(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestWordCount()
-    t.test_wordcount(parallelism=4, word_length=32, batch_size=1000, run_for_s=30, run_assert=True)
+    t.test_wordcount(parallelism=1, word_length=32, batch_size=1000, run_for_s=30, run_assert=True)
     # t.test_wordcount(parallelism=200, word_length=32, batch_size=1000, run_for_s=25, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, run_assert=False)

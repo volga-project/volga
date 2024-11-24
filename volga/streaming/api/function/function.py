@@ -10,7 +10,6 @@ from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.common.utils import collection_chunk_at_index
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplit
 
-
 class Function(ABC):
 
     def open(self, runtime_context: RuntimeContext):
@@ -59,13 +58,9 @@ class SourceFunction(Function):
     def fetch(self, ctx: SourceContext):
         pass
 
-    # TODO these two below (num_records and run_for_s) should be retires in favor of a proper shutdown mechanism (via terminal messages)
+    # TODO these should be retired in favor of a proper shutdown mechanism (via terminal_message)
     def num_records(self) -> int:
         # if source is bounded, this should return expected number of records
-        raise NotImplementedError()
-
-    def run_for_s(self) -> int:
-        # bound source by run duration
         raise NotImplementedError()
 
     @abstractmethod

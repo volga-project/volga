@@ -111,20 +111,20 @@ class ISourceOperator(StreamOperator, ABC):
 
 class SourceOperator(ISourceOperator):
 
+    TERMINAL_MESSAGE = 'TERMINAL_MESSAGE'
+
     class SourceContextImpl(SourceContext):
         def __init__(
             self,
             collectors: List[Collector],
             runtime_context: RuntimeContext,
             timestamp_assigner: Optional[TimestampAssigner],
-            num_records: Optional[int],
-            run_for_s: Optional[int],
+            num_records: Optional[int]
         ):
             self.collectors = collectors
             self.runtime_context = runtime_context
             self.timestamp_assigner = timestamp_assigner
             self.num_records = num_records
-            self.run_for_s = run_for_s
             self.num_fetched_records = 0
             self.finished = False
             self.current_split: Optional[SourceSplit] = None
@@ -133,6 +133,13 @@ class SourceOperator(ISourceOperator):
             self._started_at_ms = None
 
         def collect(self, value: Any):
+
+            # three ways notify reached bounds
+            # 1. receiving terminal message
+            if isinstance(value, str) and value == SourceOperator.TERMINAL_MESSAGE:
+                self.finished = True
+                return
+
             if self._started_at_ms is None:
                 self._started_at_ms = now_ts_ms()
 
@@ -150,16 +157,11 @@ class SourceOperator(ISourceOperator):
             self.throughput_stats.inc()
 
             # three ways notify reached bounds
-            # 1. if source function implements num_records (bounded non-split source)
+            # 2. if source function implements num_records (bounded non-split source)
+            # TODO this should be deprecated in favor of terminal message
             if self.num_records == self.num_fetched_records:
                 # set finished state
                 self.finished = True
-
-            # 2. Run duration exceeds run_for_s (if it's set)
-            if self.run_for_s is not None:
-                if now_ts_ms() - self._started_at_ms > self.run_for_s * 1000:
-                    # set finished state
-                    self.finished = True
 
         def get_current_split(self) -> SourceSplit:
             if self.current_split is None:
@@ -213,19 +215,11 @@ class SourceOperator(ISourceOperator):
             # unbounded source or split-based source
             pass
 
-        run_for_s = None
-        try:
-            run_for_s = self.func.run_for_s()
-        except NotImplementedError:
-            # unbounded source or split-based source
-            pass
-
         self.source_context = SourceOperator.SourceContextImpl(
             collectors,
             runtime_context=runtime_context,
             timestamp_assigner=self.timestamp_assigner,
-            num_records=num_records,
-            run_for_s=run_for_s
+            num_records=num_records
         )
 
     def fetch(self):

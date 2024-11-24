@@ -39,10 +39,11 @@ class JobClient:
     def execute(
         self,
         job_graph: JobGraph,
-        job_config: Optional[Dict] = None
+        job_config: Optional[Dict] = None,
+        timeout_s: Optional[int] = None
     ):
         job_master = self.submit(job_graph=job_graph, job_config=job_config)
-        ray.get(job_master.wait_sources_finished.remote())
+        ray.get(job_master.wait_sources_finished.remote(timeout_s))
         OPTIMISTIC_FINISH_TIME_S = 5 # we assume all workers finish within this time after sources reported finish
         # TODO implement proper job finish where all workers report finish
         time.sleep(OPTIMISTIC_FINISH_TIME_S)

@@ -1,8 +1,12 @@
 import enum
+import logging
 from abc import ABC, abstractmethod
 from typing import Dict, Any
 
 from pydantic import BaseModel
+
+
+logger = logging.getLogger("ray")
 
 
 class SourceSplitType(enum.Enum):
@@ -27,7 +31,7 @@ class SourceSplitManager:
         self.split_enumerators = split_enumerators
 
     def poll_next_split(self, operator_id: int, task_id: int) -> SourceSplit:
-        print(f'[SourceSplitManager] POLLED SPLIT operator_id: {operator_id} task_id: {task_id}')
+        logger.info(f'[SourceSplitManager] POLLED SPLIT operator_id: {operator_id} task_id: {task_id}')
         if operator_id not in self.split_enumerators:
             raise RuntimeError(f'No split enumerator for operator_id {operator_id}, len: {len(self.split_enumerators)}')
         split_enumerator = self.split_enumerators[operator_id]
