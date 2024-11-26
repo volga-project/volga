@@ -38,7 +38,7 @@ class DataReader(IOHandler):
         self._num_msgs_read += len(res)
         if time.time() - self._last_report_ts > 1:
             rx = self._num_msgs_read / (time.time() - self._start_ts)
-            print(f'[{self.name}] Recvd {self._num_msgs_read} msgs, rx: {rx} msg/s')
+            # print(f'[{self.name}] Recvd {self._num_msgs_read} msgs, rx: {rx} msg/s')
             self._last_report_ts = time.time()
         return res
 

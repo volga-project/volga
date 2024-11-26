@@ -58,7 +58,7 @@ class DataWriter(IOHandler):
             self._num_msgs_sent += 1
             if time.time() - self._last_report_ts > 1:
                 tx = self._num_msgs_sent/(time.time() - self._start_ts)
-                print(f'[{self.name}] Sent {self._num_msgs_sent} msgs, tx {tx} msg/s, last sent size: {self._last_sent_size}')
+                # print(f'[{self.name}] Sent {self._num_msgs_sent} msgs, tx {tx} msg/s, last sent size: {self._last_sent_size}')
                 self._last_report_ts = time.time()
         return res
 

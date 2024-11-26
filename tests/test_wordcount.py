@@ -19,7 +19,7 @@ from volga.streaming.api.stream.sink_cache_actor import SinkCacheActor
 from volga.streaming.runtime.sources.wordcount.timed_source import WordCountSource
 
 DEFAULT_DICT_SIZE = 100  # num of words in a dict
-DEFAULT_SPLIT_SIZE = 10000000  # num of words in a source split
+DEFAULT_SPLIT_SIZE = 1000000  # num of words in a source split
 
 
 class TestWordCount(unittest.TestCase):
@@ -111,5 +111,5 @@ class TestWordCount(unittest.TestCase):
 
 if __name__ == '__main__':
     t = TestWordCount()
-    t.test_wordcount(parallelism=1, word_length=32, batch_size=1000, run_for_s=30, run_assert=True)
-    # t.test_wordcount(parallelism=200, word_length=32, batch_size=1000, run_for_s=25, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, run_assert=False)
+    # t.test_wordcount(parallelism=6, word_length=32, batch_size=1000, run_for_s=30, run_assert=True)
+    t.test_wordcount(parallelism=200, word_length=32, batch_size=1, run_for_s=20, ray_addr=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, run_assert=False)
