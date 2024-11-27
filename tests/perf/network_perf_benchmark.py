@@ -18,6 +18,7 @@ from volga.streaming.runtime.network.test_local_transfer import TestLocalTransfe
 from volga.streaming.runtime.network.test_remote_transfer import TestRemoteTransfer
 from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 
+RETRIES_PER_RUN = 2
 
 # which test scenario to run
 class RunScenario(enum.Enum):
@@ -114,88 +115,91 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                     raise RuntimeError('parallelism can not be 0')
                 run_res = (-1, -1, -1)
                 print(f'Executing run {run_id}/{num_runs}: msg_size={msg_size}, batch_size={batch_size}, parallelism={parallelism}')
-                # TODO add re-run
-                try:
-                    if RUN_SCENARIO == RunScenario.NETWORK_REMOTE or RUN_SCENARIO == RunScenario.NETWORK_CLUSTER:
-                        if RUN_SCENARIO == RunScenario.NETWORK_CLUSTER:
-                            if port_fwd_pid is None:
-                                port_fwd_pid = kubectl_port_forward()
-                            multinode = True
-                            ray_addr = RAY_ADDR
-                            runtime_env = REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+                num_retires = 0
+                run_succ = False
+                while not run_succ and num_retires < RETRIES_PER_RUN:
+                    try:
+                        if RUN_SCENARIO == RunScenario.NETWORK_REMOTE or RUN_SCENARIO == RunScenario.NETWORK_CLUSTER:
+                            if RUN_SCENARIO == RunScenario.NETWORK_CLUSTER:
+                                if port_fwd_pid is None:
+                                    port_fwd_pid = kubectl_port_forward()
+                                multinode = True
+                                ray_addr = RAY_ADDR
+                                runtime_env = REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+                            else:
+                                multinode = False
+                                ray_addr = None
+                                runtime_env = None
+                                # test connectivity and restart cluster if needed
+                                # TODO test connectivity before restarting
+                                subprocess.run('ray stop && ray start --head', shell=True, check=True, capture_output=False,
+                                               encoding='utf-8')
+
+                            t = TestRemoteTransfer()
+                            avg_throughput, latency_stats, num_msgs = t.test_nw_to_nr_star_on_ray(
+                                nw=parallelism,
+                                nr=parallelism,
+                                num_workers_per_node=NUM_WORKERS_PER_NODE,
+                                msg_size=msg_size,
+                                batch_size=batch_size,
+                                run_for_s=RUN_DURATION_S,
+                                ray_addr=ray_addr,
+                                runtime_env=runtime_env,
+                                multinode=multinode
+                            )
+                        elif RUN_SCENARIO == RunScenario.NETWORK_LOCAL:
+                            t = TestLocalTransfer()
+                            avg_throughput, latency_stats, num_msgs = t.test_n_all_to_all_on_local_ray(
+                                n=parallelism,
+                                msg_size=msg_size,
+                                batch_size=batch_size,
+                                run_for_s=RUN_DURATION_S
+                            )
+                        elif RUN_SCENARIO == RunScenario.WORDCOUNT_LOCAL or RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
+                            t = TestWordCount()
+                            if RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
+                                if port_fwd_pid is None:
+                                    port_fwd_pid = kubectl_port_forward()
+
+                                ray_addr = RAY_ADDR
+                                runtime_env = REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+                            else:
+                                ray_addr = None
+                                runtime_env = None
+
+                            avg_throughput, latency_stats, num_msgs = t.test_wordcount(
+                                parallelism=parallelism,
+                                word_length=msg_size,
+                                batch_size=batch_size,
+                                run_for_s=RUN_DURATION_S,
+                                ray_addr=ray_addr,
+                                runtime_env=runtime_env
+                            )
                         else:
-                            multinode = False
-                            ray_addr = None
-                            runtime_env = None
-                            # test connectivity and restart cluster if needed
-                            # TODO test connectivity before restarting
-                            subprocess.run('ray stop && ray start --head', shell=True, check=True, capture_output=False,
-                                           encoding='utf-8')
-
-                        t = TestRemoteTransfer()
-                        avg_throughput, latency_stats, num_msgs = t.test_nw_to_nr_star_on_ray(
-                            nw=parallelism,
-                            nr=parallelism,
-                            num_workers_per_node=NUM_WORKERS_PER_NODE,
-                            msg_size=msg_size,
-                            batch_size=batch_size,
-                            run_for_s=RUN_DURATION_S,
-                            ray_addr=ray_addr,
-                            runtime_env=runtime_env,
-                            multinode=multinode
-                        )
-                    elif RUN_SCENARIO == RunScenario.NETWORK_LOCAL:
-                        t = TestLocalTransfer()
-                        avg_throughput, latency_stats, num_msgs = t.test_n_all_to_all_on_local_ray(
-                            n=parallelism,
-                            msg_size=msg_size,
-                            batch_size=batch_size,
-                            run_for_s=RUN_DURATION_S
-                        )
-                    elif RUN_SCENARIO == RunScenario.WORDCOUNT_LOCAL or RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
-                        t = TestWordCount()
-                        if RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
-                            if port_fwd_pid is None:
-                                port_fwd_pid = kubectl_port_forward()
-
-                            ray_addr = RAY_ADDR
-                            runtime_env = REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
-                        else:
-                            ray_addr = None
-                            runtime_env = None
-
-                        avg_throughput, latency_stats, num_msgs = t.test_wordcount(
+                            raise RuntimeError('Unsupported run scenario')
+                        run_res = (avg_throughput, latency_stats, num_msgs)
+                        store_run_stats(
+                            res_file_name=res_file_name,
                             parallelism=parallelism,
-                            word_length=msg_size,
+                            num_msgs=num_msgs,
+                            msg_size=msg_size,
                             batch_size=batch_size,
-                            run_for_s=RUN_DURATION_S,
-                            ray_addr=ray_addr,
-                            runtime_env=runtime_env
+                            avg_throughput=avg_throughput,
+                            latency_stats=latency_stats
                         )
-                    else:
-                        raise RuntimeError('Unsupported run scenario')
-                    run_res = (avg_throughput, latency_stats, num_msgs)
-                    store_run_stats(
-                        res_file_name=res_file_name,
-                        parallelism=parallelism,
-                        num_msgs=num_msgs,
-                        msg_size=msg_size,
-                        batch_size=batch_size,
-                        avg_throughput=avg_throughput,
-                        latency_stats=latency_stats
-                    )
-                    time.sleep(2)
-                except Exception as e:
-                    print(f'Failed p={parallelism}: {e}')
-                    ray.shutdown()
-
-                    # restart kubefwd
-                    if port_fwd_pid is not None:
-                        print(f'Killed old port fwd at pid {port_fwd_pid}')
-                        os.kill(port_fwd_pid, signal.SIGTERM)
-                    time.sleep(1)
-                    print('Restarting port fwd')
-                    port_fwd_pid = kubectl_port_forward()
+                        run_succ = True
+                        time.sleep(2)
+                    except Exception as e:
+                        num_retires += 1
+                        print(f'Failed p={parallelism}: {e}')
+                        ray.shutdown()
+                        # restart kubefwd
+                        if port_fwd_pid is not None:
+                            print(f'Killed old port fwd at pid {port_fwd_pid}')
+                            os.kill(port_fwd_pid, signal.SIGTERM)
+                        time.sleep(1)
+                        print('Restarting port fwd')
+                        port_fwd_pid = kubectl_port_forward()
 
                 key = f'msg_size={msg_size},batch_size={batch_size},p={parallelism}'
                 res[key] = run_res
