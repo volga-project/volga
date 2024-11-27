@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from volga.ray_utils import get_head_node_id
 from volga.streaming.runtime.master.stats.stats_manager import StatsManager
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.io_loop import IOLoop
@@ -19,7 +20,7 @@ from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_C
 from volga.streaming.runtime.network.remote.transfer_actor import TransferActor
 from volga.streaming.runtime.network.remote.transfer_io_handlers import TransferSender, TransferReceiver
 from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors, RAY_ADDR, \
-    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, StatsActor
 
 
 class TestRemoteTransfer(unittest.TestCase):
@@ -389,10 +390,13 @@ class TestRemoteTransfer(unittest.TestCase):
 
         start_ray_io_handler_actors(actors)
 
-        stats_manager = StatsManager()
-        for reader_id in readers:
-            stats_manager.register_worker(readers[reader_id])
-        stats_manager.start()
+        stats_actor_options = {'num_cpus': 0}
+        stats_actor_options['scheduling_strategy'] = NodeAffinitySchedulingStrategy(
+            node_id=get_head_node_id(),
+            soft=False
+        )
+        stats_actor = StatsActor.options(**stats_actor_options).remote([readers[reader_id] for reader_id in readers])
+        ray.get(stats_actor.start.remote())
 
         start_ts = time.time()
         futs = []
@@ -431,10 +435,8 @@ class TestRemoteTransfer(unittest.TestCase):
 
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
-        stats_manager.stop()
-
-        avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
-        stats_manager.stop()
+        ray.get(stats_actor.stop.remote())
+        avg_throughput, latency_stats = ray.get(stats_actor.get_final_aggregated_stats.remote())
 
         run_duration = time.time() - start_ts
         estimated_throughput = num_msgs / run_duration

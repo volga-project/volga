@@ -3,7 +3,9 @@ import time
 from typing import Optional, Dict
 
 from ray.actor import ActorHandle
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
+from volga.ray_utils import get_head_node_id
 from volga.streaming.api.job_graph.job_graph import JobGraph
 from volga.streaming.runtime.master.job_master import JobMaster
 
@@ -18,13 +20,21 @@ class JobClient:
     def submit(
         self,
         job_graph: JobGraph,
-        job_config: Optional[Dict] = None
+        job_config: Optional[Dict] = None,
+        master_on_head: bool = True
     ) -> ActorHandle:
         # TODO master resources
         options_kwargs = {
             'max_restarts': -1,
             'max_concurrency': 1000
         }
+
+        if master_on_head:
+            options_kwargs['num_cpus'] = 0
+            options_kwargs['scheduling_strategy'] = NodeAffinitySchedulingStrategy(
+                node_id=get_head_node_id(),
+                soft=False
+            )
 
         master = JobMaster.options(**options_kwargs).remote(
             job_config=job_config,

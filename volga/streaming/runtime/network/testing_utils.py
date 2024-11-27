@@ -2,7 +2,7 @@ from typing import List, Dict, Any, Optional, Tuple
 
 from volga.streaming.common.utils import ms_to_s, now_ts_ms
 from volga.streaming.runtime.master.stats.stats_manager import WorkerLatencyStatsState, WorkerThroughputStatsState, \
-    WorkerStatsUpdate
+    WorkerStatsUpdate, StatsManager
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
@@ -163,6 +163,25 @@ class TestReader:
 
     def stop(self):
         self.io_loop.stop()
+
+
+@ray.remote(max_concurrency=999)
+class StatsActor:
+
+    def __init__(self, readers: List):
+        self.stats_manager = StatsManager()
+        for reader in readers:
+            self.stats_manager.register_worker(reader)
+
+    def start(self):
+        self.stats_manager.start()
+
+    def stop(self):
+        self.stats_manager.stop()
+
+    def get_final_aggregated_stats(self) -> Tuple[float, Dict[str, float]]:
+        return self.stats_manager.get_final_aggregated_stats()
+
 
 
 def construct_message(msg_id: int, channel_id: str, msg_size: int, mark_latency: bool, is_terminal: bool = False) -> Dict:

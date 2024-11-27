@@ -7,6 +7,7 @@ import time
 from typing import Dict, Optional
 
 import pandas as pd
+import psutil
 import ray
 
 import seaborn as sns
@@ -26,25 +27,24 @@ class RunScenario(enum.Enum):
     WORDCOUNT_LOCAL = 'wordcount_local' # wordcount, tested locally
     WORDCOUNT_CLUSTER = 'wordcount_cluster' # wordcount, tested on a cluster
 
-KUBFWD_PID = None # pid of currently running kubfwd session
 
 RUN_SCENARIO = RunScenario.WORDCOUNT_CLUSTER
 
 # in remote setting, we run on c5.2xlarge instances which have 8 vCPUs. We reserve 2vCPUs per worker
 NUM_WORKERS_PER_NODE = 4
 
-RUN_DURATION_S = 25 # how long a single test run lasts, this should be more than aggregation warmup thresh (10s by def)
+RUN_DURATION_S = 40 # how long a single test run lasts, this should be more than aggregation warmup thresh (10s by def)
 
 STATS_STORE_DIR = 'volga_network_perf_benchmarks'
 
 PARAMS_MATRIX = {
-    'parallelism': [*range(1, 11)],
-    # 'parallelism': [*range(1, 4)],
+    # 'parallelism': [*range(1, 11)],
+    'parallelism': [1] + [*range(4, 41, 4)],
+    # 'parallelism': [4],
     # 'msg_size': [32, 256, 1024],
     'msg_size': [32],
     # 'batch_size': [1, 10, 100, 1000]
-
-    'batch_size': [1000]
+    'batch_size': [100]
 }
 
 
@@ -86,7 +86,6 @@ def store_run_stats(
         json.dump(data, file, indent=4)
 
 
-# TODO figure out how to parametrize batch_size+parallelism+msg_size variations
 def throughput_benchmark(rerun_file: Optional[str] = None ):
     res = {}
     existing_runs = set()
@@ -114,12 +113,13 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                 if parallelism == 0:
                     raise RuntimeError('parallelism can not be 0')
                 run_res = (-1, -1, -1)
-                print(f'Executing run {run_id}/{num_runs}...')
+                print(f'Executing run {run_id}/{num_runs}: msg_size={msg_size}, batch_size={batch_size}, parallelism={parallelism}')
+                # TODO add re-run
                 try:
                     if RUN_SCENARIO == RunScenario.NETWORK_REMOTE or RUN_SCENARIO == RunScenario.NETWORK_CLUSTER:
                         if RUN_SCENARIO == RunScenario.NETWORK_CLUSTER:
                             if port_fwd_pid is None:
-                                port_fwd_pid = kubetcl_port_forward()
+                                port_fwd_pid = kubectl_port_forward()
                             multinode = True
                             ray_addr = RAY_ADDR
                             runtime_env = REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
@@ -156,7 +156,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                         t = TestWordCount()
                         if RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
                             if port_fwd_pid is None:
-                                port_fwd_pid = kubetcl_port_forward()
+                                port_fwd_pid = kubectl_port_forward()
 
                             ray_addr = RAY_ADDR
                             runtime_env = REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
@@ -195,7 +195,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                         os.kill(port_fwd_pid, signal.SIGTERM)
                     time.sleep(1)
                     print('Restarting port fwd')
-                    port_fwd_pid = kubetcl_port_forward()
+                    port_fwd_pid = kubectl_port_forward()
 
                 key = f'msg_size={msg_size},batch_size={batch_size},p={parallelism}'
                 res[key] = run_res
@@ -257,26 +257,24 @@ def plot(filename: str):
 
 # list pids on port 12345
 # sudo lsof -n -i :12345 | grep LISTEN
-def kubetcl_port_forward() -> int:
+def kubectl_port_forward() -> int:
     p = subprocess.Popen('kubectl port-forward -n ray-system svc/ray-cluster-kuberay-head-svc 12345:10001', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-    pid = p.pid
+    # os.set_blocking(p.stdout.fileno(), False)
+    os.set_blocking(p.stderr.fileno(), False)
     time.sleep(5)
-    exists = False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        pass
-    else:
-        exists = True
-    if not exists:
-        raise RuntimeError(f'Unable to port-forward')
-    print('Started kubectl port-forward')
-    return pid
+    err = p.stderr.readline()
+    if len(err) != 0:
+        raise RuntimeError(f'Unable to port-forward: {err}')
+    print(f'Started kubectl port-forward pid: {p.pid}')
+    return p.pid
 
-# throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
-# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1731495482.json')
-throughput_benchmark()
 
+# throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
+plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
+# throughput_benchmark()
+# TODO master on head
+# TODO build rust --release
+# TODO record historical thrpt and lat
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
 # 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s
