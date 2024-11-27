@@ -236,10 +236,14 @@ class StatsManager:
         self._stats_collector_thread.join(5)
         self._collect_stats_updates()
 
-    def get_final_aggregated_stats(self) -> Tuple[float, Dict[str, float]]:
+    def get_final_aggregated_stats(self) -> Tuple[
+        float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
+    ]:
         historical_throughput = self.job_throughput_stats.historical_throughput
         historical_latency_hists = list(self.job_latency_stats.latency_hists_per_s.items())
-        return aggregate_historical_stats(historical_throughput, historical_latency_hists)
+        historical_windowed_latency_stats = self.job_latency_stats.historical_windowed_latency_stats
+        avg_throughput, agg_latency_stats = aggregate_historical_stats(historical_throughput, historical_latency_hists)
+        return avg_throughput, agg_latency_stats, historical_throughput, historical_windowed_latency_stats
 
 
 # returns avg throughput + dict of p99,95,75,50 latencies aggregated over the whole run

@@ -3,6 +3,6 @@ master_config:
     default_worker_resources:
       CPU: '2'
   scheduler_config: {}
-#  node_assign_strategy: 'parallelism_first'
-  node_assign_strategy: 'operator_first'
+  node_assign_strategy: 'parallelism_first'
+#  node_assign_strategy: 'operator_first'
 worker_config: {}

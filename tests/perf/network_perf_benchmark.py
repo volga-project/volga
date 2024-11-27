@@ -4,7 +4,7 @@ import os
 import signal
 import subprocess
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 
 import pandas as pd
 import psutil
@@ -20,6 +20,7 @@ from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_C
 
 RETRIES_PER_RUN = 2
 
+
 # which test scenario to run
 class RunScenario(enum.Enum):
     NETWORK_LOCAL = 'network_local' # local network (without transfer actors), tested locally, n-to-n
@@ -29,7 +30,7 @@ class RunScenario(enum.Enum):
     WORDCOUNT_CLUSTER = 'wordcount_cluster' # wordcount, tested on a cluster
 
 
-RUN_SCENARIO = RunScenario.WORDCOUNT_CLUSTER
+RUN_SCENARIO = RunScenario.WORDCOUNT_LOCAL
 
 # in remote setting, we run on c5.2xlarge instances which have 8 vCPUs. We reserve 2vCPUs per worker
 NUM_WORKERS_PER_NODE = 4
@@ -39,8 +40,8 @@ RUN_DURATION_S = 40 # how long a single test run lasts, this should be more than
 STATS_STORE_DIR = 'volga_network_perf_benchmarks'
 
 PARAMS_MATRIX = {
-    # 'parallelism': [*range(1, 11)],
-    'parallelism': [1] + [*range(4, 41, 4)],
+    'parallelism': [*range(1, 2)],
+    # 'parallelism': [1] + [*range(4, 41, 4)],
     # 'parallelism': [4],
     # 'msg_size': [32, 256, 1024],
     'msg_size': [32],
@@ -56,7 +57,9 @@ def store_run_stats(
     msg_size: int,
     batch_size: int,
     avg_throughput: float,
-    latency_stats: Dict
+    latency_stats: Dict,
+    hist_throughput: List,
+    hist_latency: List,
 ):
     to_store = {
         'msg_size': msg_size,
@@ -65,6 +68,8 @@ def store_run_stats(
         'throughput': avg_throughput,
         'latency_ms': latency_stats,
         'num_msgs': num_msgs,
+        'hist_throughput': hist_throughput,
+        'hist_latency': hist_latency
     }
 
     meta = {
@@ -136,7 +141,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                                                encoding='utf-8')
 
                             t = TestRemoteTransfer()
-                            avg_throughput, latency_stats, num_msgs = t.test_nw_to_nr_star_on_ray(
+                            avg_throughput, latency_stats, num_msgs, hist_throughput, hist_latency = t.test_nw_to_nr_star_on_ray(
                                 nw=parallelism,
                                 nr=parallelism,
                                 num_workers_per_node=NUM_WORKERS_PER_NODE,
@@ -149,7 +154,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                             )
                         elif RUN_SCENARIO == RunScenario.NETWORK_LOCAL:
                             t = TestLocalTransfer()
-                            avg_throughput, latency_stats, num_msgs = t.test_n_all_to_all_on_local_ray(
+                            avg_throughput, latency_stats, num_msgs, hist_throughput, hist_latency = t.test_n_all_to_all_on_local_ray(
                                 n=parallelism,
                                 msg_size=msg_size,
                                 batch_size=batch_size,
@@ -167,7 +172,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                                 ray_addr = None
                                 runtime_env = None
 
-                            avg_throughput, latency_stats, num_msgs = t.test_wordcount(
+                            avg_throughput, latency_stats, num_msgs, hist_throughput, hist_latency = t.test_wordcount(
                                 parallelism=parallelism,
                                 word_length=msg_size,
                                 batch_size=batch_size,
@@ -185,7 +190,9 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                             msg_size=msg_size,
                             batch_size=batch_size,
                             avg_throughput=avg_throughput,
-                            latency_stats=latency_stats
+                            latency_stats=latency_stats,
+                            hist_throughput=hist_throughput,
+                            hist_latency=hist_latency
                         )
                         run_succ = True
                         time.sleep(2)
@@ -274,11 +281,9 @@ def kubectl_port_forward() -> int:
 
 
 # throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
-plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
-# throughput_benchmark()
-# TODO master on head
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
+throughput_benchmark()
 # TODO build rust --release
-# TODO record historical thrpt and lat
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
 # 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s

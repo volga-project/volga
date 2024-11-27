@@ -158,5 +158,7 @@ class JobMaster:
         assert self.num_sent_per_source_worker is not None
         return self.num_sent_per_source_worker
 
-    def get_final_perf_stats(self) -> Tuple[float, Dict[str, float]]:
+    def get_final_perf_stats(self) -> Tuple[
+        float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
+    ]:
         return self.stats_manager.get_final_aggregated_stats()

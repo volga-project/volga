@@ -180,7 +180,7 @@ class TestLocalTransfer(unittest.TestCase):
 
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
-        avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
+        avg_throughput, latency_stats, hist_throughput, hist_latency = stats_manager.get_final_aggregated_stats()
         stats_manager.stop()
 
         t = time.time() - start_ts
@@ -193,7 +193,7 @@ class TestLocalTransfer(unittest.TestCase):
         ray.get([readers[reader_id].stop.remote() for reader_id in readers] + [writers[writer_id].stop.remote() for writer_id in writers])
         ray.shutdown()
 
-        return avg_throughput, latency_stats, num_msgs
+        return avg_throughput, latency_stats, num_msgs, hist_throughput, hist_latency
 
     # TODO fix this to work with memory bound queues
     def test_backpressure(self):

@@ -179,7 +179,9 @@ class StatsActor:
     def stop(self):
         self.stats_manager.stop()
 
-    def get_final_aggregated_stats(self) -> Tuple[float, Dict[str, float]]:
+    def get_final_aggregated_stats(self) -> Tuple[
+        float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
+    ]:
         return self.stats_manager.get_final_aggregated_stats()
 
 

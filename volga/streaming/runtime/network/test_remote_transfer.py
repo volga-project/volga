@@ -203,7 +203,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
-        avg_throughput, latency_stats = stats_manager.get_final_aggregated_stats()
+        avg_throughput, latency_stats, _, _ = stats_manager.get_final_aggregated_stats()
         stats_manager.stop()
 
         t = time.time() - start_ts
@@ -436,7 +436,7 @@ class TestRemoteTransfer(unittest.TestCase):
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
         ray.get(stats_actor.stop.remote())
-        avg_throughput, latency_stats = ray.get(stats_actor.get_final_aggregated_stats.remote())
+        avg_throughput, latency_stats, hist_throughput, hist_latency = ray.get(stats_actor.get_final_aggregated_stats.remote())
 
         run_duration = time.time() - start_ts
         estimated_throughput = num_msgs / run_duration
@@ -450,7 +450,7 @@ class TestRemoteTransfer(unittest.TestCase):
         ray.get(stop_futs)
 
         ray.shutdown()
-        return avg_throughput, latency_stats, num_msgs
+        return avg_throughput, latency_stats, num_msgs, hist_throughput, hist_latency
 
     # TODO fix this to work with new rust engine
     def test_transfer_actor_interruption(self, ray_addr: Optional[str] = None, runtime_env: Optional[Any] = None, multinode: bool = False):

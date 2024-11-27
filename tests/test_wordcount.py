@@ -3,7 +3,7 @@ import random
 import string
 import time
 import unittest
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 import ray
 import yaml
@@ -33,7 +33,7 @@ class TestWordCount(unittest.TestCase):
         ray_addr: Optional[str] = None,
         runtime_env: Optional[Any] = None,
         run_assert: bool = False
-    ):
+    ) -> Tuple:
         job_config = yaml.safe_load(Path('/Users/anov/IdeaProjects/volga/volga/streaming/runtime/sample-job-config.yaml').read_text())
         ctx = StreamingContext(job_config=job_config)
 
@@ -80,7 +80,7 @@ class TestWordCount(unittest.TestCase):
                 else:
                     num_sent[w] = _num_sent[w]
 
-        avg_throughput, latency_stats = ray.get(job_master.get_final_perf_stats.remote())
+        avg_throughput, latency_stats, hist_throughput, hist_latency = ray.get(job_master.get_final_perf_stats.remote())
 
         counts = ray.get(sink_cache.get_dict.remote())
 
@@ -106,7 +106,7 @@ class TestWordCount(unittest.TestCase):
 
         ray.shutdown()
 
-        return avg_throughput, latency_stats, total_num_sent
+        return avg_throughput, latency_stats, total_num_sent, hist_throughput, hist_latency
 
 
 if __name__ == '__main__':
