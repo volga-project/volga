@@ -135,7 +135,7 @@ class StreamTask(ABC):
         # logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
         self.running = False
         self.processor.close()
-        self.io_loop.close()
+        self.io_loop.stop()
         if self.thread is not None:
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')

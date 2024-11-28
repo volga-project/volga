@@ -35,16 +35,17 @@ RUN_SCENARIO = RunScenario.WORDCOUNT_LOCAL
 # in remote setting, we run on c5.2xlarge instances which have 8 vCPUs. We reserve 2vCPUs per worker
 NUM_WORKERS_PER_NODE = 4
 
-RUN_DURATION_S = 40 # how long a single test run lasts, this should be more than aggregation warmup thresh (10s by def)
+RUN_DURATION_S = 25 # how long a single test run lasts, this should be more than aggregation warmup thresh (10s by def)
 
 STATS_STORE_DIR = 'volga_network_perf_benchmarks'
 
 PARAMS_MATRIX = {
-    'parallelism': [*range(1, 2)],
-    # 'parallelism': [1] + [*range(4, 41, 4)],
-    # 'parallelism': [4],
-    # 'msg_size': [32, 256, 1024],
+    'parallelism': [*range(1, 11)],
+    # 'parallelism': [*range(100, 200, 8)],
+    # 'msg_size': [32, 1024],
     'msg_size': [32],
+    # 'msg_size': [32, 256, 1024],
+    # 'msg_size': [32],
     # 'batch_size': [1, 10, 100, 1000]
     'batch_size': [100]
 }
@@ -280,10 +281,9 @@ def kubectl_port_forward() -> int:
     return p.pid
 
 
-# throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
-# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
+# throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732780219.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732780219.json')
 throughput_benchmark()
-# TODO build rust --release
 
 # 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
 # 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s

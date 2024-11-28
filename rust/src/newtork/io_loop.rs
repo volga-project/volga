@@ -369,7 +369,8 @@ impl IOLoop {
             let handle = self.io_thread_handle.pop();
             handle.unwrap().join().unwrap();
         }
-        // TODO destroy zmq context
+        let mut zmq_ctx = self.zmq_context.as_ref().to_owned();
+        zmq_ctx.destroy().unwrap();
         println!("Stopped loop {name}");
     }
 }
