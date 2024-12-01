@@ -1,6 +1,6 @@
 ## Volga - Feature Engine for real-time AI/ML
 
-*[Volga](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)* is an open-source, self-serve, scalable data/feature engine tailored for modern real-time AI/ML applications.
+*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is an open-source, self-serve, scalable data/feature engine tailored for modern real-time AI/ML applications.
 It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations.
