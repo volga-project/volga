@@ -5,14 +5,14 @@ It features convenient pandas-like API to define data entities, online/offline p
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations.
 It aims to be a completely standalone and self-serve system removing any heavy-weight dependency on general data processors (Flink, Spark) 
-or cloud-based feature platforms (Tecton.ai, Fennel.ai) and can be run on a laptop or on a 1000-node cluster.
+or cloud-based feature platforms ([Tecton.ai](https://www.tecton.ai/), [Fennel.ai](https://fennel.ai/), [Chalk.ai](https://chalk.ai/)) and can be run on a laptop or on a 1000-node cluster.
 
-See our *[blog](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)* for more details on motivation and technical details.
+Subscribe to our *[blog](https://volgaai.substack.com/publish/home)* to follow the journey of developing a next-gen data processing system.
  
 Features:
 
 - Utilizes *[custom scalable stream processing engine](https://github.com/volga-project/volga/blob/master/tests/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
-**[ZeroMQ](https://zeromq.org/)** for messaging and **[Rust](https://www.rust-lang.org/)** for perf-critical parts. 
+**[ZeroMQ](https://zeromq.org/)** for messaging, **[Rust](https://www.rust-lang.org/)** and **[PyO3](https://github.com/PyO3/pyo3)** for perf-critical parts. 
 Kappa architecture - no Flink or Spark
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
@@ -31,7 +31,7 @@ Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/intr
 
 There are no self-serve open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor lock-in,
 setting up and managing complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
-(i.e Tecton.ai, Fennel.ai, Chalk.ai etc.). Volga fills this spot. More info *[here](https://medium.com/@andreynovitskiy/volga-open-source-data-engine-for-real-time-ai-part-1-b8d7b16cb9d2)*.
+(i.e Tecton.ai, Fennel.ai, Chalk.ai etc.). Volga fills this spot. More info *[in our blog](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)*.
 
 
 ## Quick start
@@ -279,9 +279,9 @@ your dev env back to these version
 
 ## Development
 
-Volga is in a proof of concept state and requires some key features to be prod-ready (checkpointing and state backend, 
+Volga is in a active development state and requires some key features to be prod-ready (checkpointing and state backend, 
 watermarks, etc.), you can see the backlog here
 
-**[BACKLOG](https://github.com/users/anovv/projects/1/views/1)**
+**[BACKLOG](https://github.com/orgs/volga-project/projects/2/views/1)**
 
 Any feedback is extremely valuable, issues and PRs are always welcome.
