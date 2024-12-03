@@ -7,7 +7,6 @@ import time
 from typing import Dict, Optional, List
 
 import pandas as pd
-import psutil
 import ray
 
 import seaborn as sns
@@ -30,24 +29,25 @@ class RunScenario(enum.Enum):
     WORDCOUNT_CLUSTER = 'wordcount_cluster' # wordcount, tested on a cluster
 
 
-RUN_SCENARIO = RunScenario.WORDCOUNT_LOCAL
+RUN_SCENARIO = RunScenario.WORDCOUNT_CLUSTER
 
-# in remote setting, we run on c5.2xlarge instances which have 8 vCPUs. We reserve 2vCPUs per worker
+# in network_cluster setting, we run on c5.2xlarge instances which have 8 vCPUs. We reserve 2vCPUs per worker
 NUM_WORKERS_PER_NODE = 4
 
 RUN_DURATION_S = 25 # how long a single test run lasts, this should be more than aggregation warmup thresh (10s by def)
 
 STATS_STORE_DIR = 'volga_network_perf_benchmarks'
-
+# 16 * 8 = 80 / 2 = 40 / 2 = 20
 PARAMS_MATRIX = {
-    'parallelism': [*range(1, 11)],
+    'parallelism': [1] + [*range(4, 33, 4)],
+    # 'parallelism': [*range(1, 11)],
     # 'parallelism': [*range(100, 200, 8)],
-    # 'msg_size': [32, 1024],
-    'msg_size': [32],
+    'msg_size': [32, 256, 1024],
+    # 'msg_size': [32],
     # 'msg_size': [32, 256, 1024],
     # 'msg_size': [32],
-    # 'batch_size': [1, 10, 100, 1000]
-    'batch_size': [100]
+    'batch_size': [1, 10, 100, 1000]
+    # 'batch_size': [100]
 }
 
 
@@ -93,7 +93,7 @@ def store_run_stats(
         json.dump(data, file, indent=4)
 
 
-def throughput_benchmark(rerun_file: Optional[str] = None ):
+def benchmark(rerun_file: Optional[str] = None):
     res = {}
     existing_runs = set()
     if rerun_file is None:
@@ -112,9 +112,9 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
     run_id = 1
     port_fwd_pid = None
 
-    for msg_size in PARAMS_MATRIX['msg_size']:
-        for batch_size in PARAMS_MATRIX['batch_size']:
-            for parallelism in PARAMS_MATRIX['parallelism']:
+    for parallelism in PARAMS_MATRIX['parallelism']:
+        for msg_size in PARAMS_MATRIX['msg_size']:
+            for batch_size in PARAMS_MATRIX['batch_size']:
                 if (msg_size, batch_size, parallelism) in existing_runs:
                     continue
                 if parallelism == 0:
@@ -161,6 +161,7 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                                 batch_size=batch_size,
                                 run_for_s=RUN_DURATION_S
                             )
+
                         elif RUN_SCENARIO == RunScenario.WORDCOUNT_LOCAL or RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
                             t = TestWordCount()
                             if RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
@@ -201,13 +202,14 @@ def throughput_benchmark(rerun_file: Optional[str] = None ):
                         num_retires += 1
                         print(f'Failed p={parallelism}: {e}')
                         ray.shutdown()
-                        # restart kubefwd
-                        if port_fwd_pid is not None:
-                            print(f'Killed old port fwd at pid {port_fwd_pid}')
-                            os.kill(port_fwd_pid, signal.SIGTERM)
-                        time.sleep(1)
-                        print('Restarting port fwd')
-                        port_fwd_pid = kubectl_port_forward()
+                        # restart kubefwd for cluster setting
+                        if RUN_SCENARIO == RunScenario.NETWORK_CLUSTER or RUN_SCENARIO == RunScenario.WORDCOUNT_CLUSTER:
+                            if port_fwd_pid is not None:
+                                print(f'Killed old port fwd at pid {port_fwd_pid}')
+                                os.kill(port_fwd_pid, signal.SIGTERM)
+                            time.sleep(1)
+                            print('Restarting port fwd')
+                            port_fwd_pid = kubectl_port_forward()
 
                 key = f'msg_size={msg_size},batch_size={batch_size},p={parallelism}'
                 res[key] = run_res
@@ -228,8 +230,17 @@ def plot(filename: str):
         processed = []
 
         for e in data:
+            # if e['parallelism'] == 96:
+            #     continue
+            cont = False
             for k in e['latency_ms']:
-                e[f'latency_{k}_ms'] = e['latency_ms'][k]
+                val = e['latency_ms'][k]
+                if val > 500:
+                    val = 500
+                    # cont = True
+                e[f'latency_{k}_ms'] = val
+            if cont:
+                continue
             del e['latency_ms']
             del e['num_msgs']
             processed.append(e)
@@ -262,6 +273,10 @@ def plot(filename: str):
         g2.map(sns.lineplot, 'parallelism', 'latency_p99_ms')
         g2.add_legend()
 
+        g3 = sns.FacetGrid(df, row='msg_size', hue='batch_size')
+        g3.map(sns.lineplot, 'parallelism', 'latency_avg_ms')
+        g3.add_legend()
+
         plt.show()
 
 # To list running port-forwards
@@ -280,42 +295,32 @@ def kubectl_port_forward() -> int:
     print(f'Started kubectl port-forward pid: {p.pid}')
     return p.pid
 
+def rem(res_file_name, to_rem):
+    with open(res_file_name, 'r') as file:
+        data = json.load(file)
 
-# throughput_benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732780219.json')
+    stats = data['stats']
+    proced = []
+    for e in stats:
+        tup = (e['msg_size'], e['batch_size'], e['parallelism'])
+        if tup not in to_rem:
+            proced.append(tup)
+
+    data['stats'] = proced
+    with open(res_file_name, 'w') as file:
+        json.dump(data, file, indent=4)
+
+
+# benchmark(f'{STATS_STORE_DIR}/benchmark_network_remote_1732895521.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
 # plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732780219.json')
-throughput_benchmark()
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1733049860.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1732888929.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_network_local_1732963400.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_network_cluster_1733121692.json')
+# benchmark(f'{STATS_STORE_DIR}/benchmark_network_local_1732963400.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1733144393.json')
+# benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_many_short_2.json')
 
-# 1<->1: 77279.62991009754 msg/s, 1.2940020561218262 s
-# 2<->2: 159084.37156745538 msg/s, 2.5143890380859375 s
-# 3<->3: 198417.67251588262 msg/s, 4.535886287689209 s
-# 4<->4: 288623.8268141708 msg/s, 5.543547868728638 s
-# 5<->5: 353878.0211981364 msg/s, 7.0645811557769775 s
-# 6<->6: 377512.22861806024 msg/s, 9.536114931106567 s
-# 7<->7: 445156.1366645908 msg/s, 11.007373809814453 s
-# 8<->8: 487622.0946902425 msg/s, 13.124917984008789 s
-# 9<->9: 557218.074788173 msg/s, 14.5364990234375 s
-# 10<->10: 571694.5873933224 msg/s, 17.491857051849365 s
-# 11<->11: 688648.7879781058 msg/s, 17.570640087127686 s
-# 12<->12: 724608.2452501928 msg/s, 19.872807264328003 s
-# 13<->13: 809510.9968577144 msg/s, 20.876801013946533 s
-# 14<->14: 874072.8980508689 msg/s, 22.42375898361206 s
-# 15<->15: 918634.05002135 msg/s, 24.492887020111084 s
-
-# 0<->0: 78195.00091631038 msg/s, 1.2788541316986084 s
-# 5<->5: 270598.81952627556 msg/s, 9.238769054412842 s
-# 10<->10: 505774.6804948192 msg/s, 19.771650075912476 s
-# 15<->15: 752058.2860982413 msg/s, 29.917893886566162 s
-# 20<->20: 926800.8961873061 msg/s, 43.15921592712402 s
-
-# -- new --
-# 1<->1: 77391.47987838203 msg/s, 1.2921319007873535 s
-# 5<->5: 274153.7433745098 msg/s, 9.11897087097168 s
-# 10<->10: 527487.0838855837 msg/s, 18.957810163497925 s
-# 15<->15: 745625.5125779167 msg/s, 30.176006078720093 s
-# 20<->20: 943023.6885939682 msg/s, 42.41674995422363 s
-# 25<->25: 1054430.353377645 msg/s, 59.27371096611023 s
-# 30<->30: 1714816.090105296 msg/s, 52.48376226425171 s
-# 35<->35: 2121138.693458819 msg/s, 57.75199913978577 s
-# 40<->40: 2237966.1073087333 msg/s, 71.49348664283752 s
-# 45<->45: 2472339.831106908 msg/s, 81.90621590614319 s
-# 50<->50: 2785009.5203105453 msg/s, 89.76629996299744 s
+rem(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_many_short_2_copy.json', [])
+plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_many_short_2_copy.json')

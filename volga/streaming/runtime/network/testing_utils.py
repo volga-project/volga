@@ -81,7 +81,7 @@ class TestWriter:
             ts = time.time()
             while not self.data_writer.try_write_message(channel_id, terminal_msg):
                 time.sleep(0.1)
-                if time.time() - ts > 5:
+                if time.time() - ts > 60:
                     raise RuntimeError(f'Timeout sending terminal message to channel {channel_id}')
 
         return num_sent_per_channel

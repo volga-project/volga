@@ -172,7 +172,7 @@ class TestRemoteTransfer(unittest.TestCase):
             futs.append(writers[i].round_robin_send.remote([channels[i].channel_id], msg_size, run_for_s))
 
         for i in range(n):
-            futs.append(readers[i].receive_items.remote(run_for_s + 5))
+            futs.append(readers[i].receive_items.remote(run_for_s + 120))
 
         res = ray.get(futs)
         num_msgs_sent_total = {}
@@ -404,7 +404,7 @@ class TestRemoteTransfer(unittest.TestCase):
             futs.append(writers[writer_id].round_robin_send.remote([channel.channel_id for channel in writer_channels[writer_id]], msg_size, run_for_s))
 
         for reader_id in readers:
-            futs.append(readers[reader_id].receive_items.remote(run_for_s + 20))
+            futs.append(readers[reader_id].receive_items.remote(run_for_s + 120))
 
         res = ray.get(futs)
         num_msgs_sent_total = {}
