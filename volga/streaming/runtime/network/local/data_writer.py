@@ -78,7 +78,7 @@ class DataWriter(IOHandler):
                 self._batch_per_channel[channel_id] = []
                 self._last_write_ts_per_channel[channel_id] = time.perf_counter()
                 lock.release()
-                self._last_sent_size = len(b)
+                self._last_sent_size = int(len(b)/len(batch))
                 return True
         else:
             self._last_write_ts_per_channel[channel_id] = time.perf_counter()

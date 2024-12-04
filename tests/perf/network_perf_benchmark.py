@@ -230,54 +230,58 @@ def plot(filename: str):
         processed = []
 
         for e in data:
-            # if e['parallelism'] == 96:
+            # if e['msg_size'] == 1024 and e['batch_size'] == 10:
             #     continue
-            cont = False
+            # if e['parallelism'] > 9:
+            #     continue
+            skip = False
             for k in e['latency_ms']:
                 val = e['latency_ms'][k]
-                if val > 500:
-                    val = 500
-                    # cont = True
+                # if val > 500:
+                #     # val = 300
+                #     skip = True
+                if val > 300:
+                    val = 300
+                    # skip = True
                 e[f'latency_{k}_ms'] = val
-            if cont:
+
+            if skip:
                 continue
             del e['latency_ms']
             del e['num_msgs']
             processed.append(e)
-
         df = pd.DataFrame(processed)
+        df['throughput_e6'] = df['throughput'] / 1000000
 
-        # msg_sizes = df['msg_size'].unique().tolist()
-        # batch_sizes = df['batch_size'].unique().tolist()
-        # nrows = len(msg_sizes)
-        # ncols = len(batch_sizes)
-        # fig, axes = plt.subplots(nrows, ncols, sharex=True, figsize=(16, 8))
-        # fig.suptitle('Throughput stats')
-        # for col in range(len(msg_sizes)):
-        #     msg_size = msg_sizes[col]
-        #     for row in range(len(batch_sizes)):
-        #         batch_size = batch_sizes[row]
-        #         data = df[(df['msg_size'] == msg_size) & (df['batch_size'] == batch_size)]
-        #         seaborn.lineplot(ax=axes[row], data=data, x='parallelism', y='throughput')
-        #         throughput_data = throughput_data[['throughput', 'parallelism']]
-        #         print(msg_size, batch_size)
-        #         print(throughput_data)
-
-        # throughput_df = df[['throughput', 'parallelism', 'msg_size', 'batch_size']]
+        titles = [
+            'payload_size=32 | msg_size=123',
+            'payload_size=256 | msg_size=573',
+            'payload_size=1024 | msg_size=2109',
+        ]
+        title_font_size = 9
         g1 = sns.FacetGrid(df, row='msg_size', hue='batch_size')
-        g1.map(sns.lineplot, 'parallelism', 'throughput')
-        g1.add_legend()
+        g1.map(sns.lineplot, 'parallelism', 'throughput_e6')
+        # g1.add_legend()
+        for idx, ax in enumerate(g1.axes.flat):
+            ax.set_title(titles[idx], fontsize=title_font_size)
 
-        # latency_df = df[['latency_p99_ms', 'parallelism', 'msg_size', 'batch_size']]
+        # df['latency_p99_ms'].mask((df['msg_size'] == 1024) & (df['batch_size'] == 10), 0, inplace=True)
         g2 = sns.FacetGrid(df, row='msg_size', hue='batch_size')
         g2.map(sns.lineplot, 'parallelism', 'latency_p99_ms')
-        g2.add_legend()
+        # g2.add_legend()
+        for idx, ax in enumerate(g2.axes.flat):
+            ax.set_title(titles[idx], fontsize=title_font_size)
 
+        # df['latency_avg_ms'].mask((df['msg_size'] == 1024) & (df['batch_size'] == 10), 0, inplace=True)
         g3 = sns.FacetGrid(df, row='msg_size', hue='batch_size')
         g3.map(sns.lineplot, 'parallelism', 'latency_avg_ms')
         g3.add_legend()
+        for idx, ax in enumerate(g3.axes.flat):
+            ax.set_title(titles[idx], fontsize=title_font_size)
 
+        # plt.savefig('local_lat_avg.png',dpi=400)
         plt.show()
+
 
 # To list running port-forwards
 # kubectl get svc -o json | jq '.items[] | {name:.metadata.name, p:.spec.ports[] } | select( .p.nodePort != null ) | "\(.name): localhost:\(.p.nodePort) -> \(.p.port) -> \(.p.targetPort)"'
@@ -286,7 +290,6 @@ def plot(filename: str):
 # sudo lsof -n -i :12345 | grep LISTEN
 def kubectl_port_forward() -> int:
     p = subprocess.Popen('kubectl port-forward -n ray-system svc/ray-cluster-kuberay-head-svc 12345:10001', shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-    # os.set_blocking(p.stdout.fileno(), False)
     os.set_blocking(p.stderr.fileno(), False)
     time.sleep(5)
     err = p.stderr.readline()
@@ -295,7 +298,9 @@ def kubectl_port_forward() -> int:
     print(f'Started kubectl port-forward pid: {p.pid}')
     return p.pid
 
-def rem(res_file_name, to_rem):
+
+# removes specified data points from saved file so we can re-run them
+def remove_data_points(res_file_name, to_rem):
     with open(res_file_name, 'r') as file:
         data = json.load(file)
 
@@ -304,7 +309,7 @@ def rem(res_file_name, to_rem):
     for e in stats:
         tup = (e['msg_size'], e['batch_size'], e['parallelism'])
         if tup not in to_rem:
-            proced.append(tup)
+            proced.append(e)
 
     data['stats'] = proced
     with open(res_file_name, 'w') as file:
@@ -315,12 +320,11 @@ def rem(res_file_name, to_rem):
 # plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732707615.json')
 # plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1732780219.json')
 # plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_1733049860.json')
-# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1732888929.json')
 # plot(f'{STATS_STORE_DIR}/benchmark_network_local_1732963400.json')
 # plot(f'{STATS_STORE_DIR}/benchmark_network_cluster_1733121692.json')
 # benchmark(f'{STATS_STORE_DIR}/benchmark_network_local_1732963400.json')
 # plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_1733144393.json')
 # benchmark(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_many_short_2.json')
 
-rem(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_many_short_2_copy.json', [])
-plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_many_short_2_copy.json')
+plot(f'{STATS_STORE_DIR}/benchmark_wordcount_cluster_final.json')
+# plot(f'{STATS_STORE_DIR}/benchmark_wordcount_local_final.json')
