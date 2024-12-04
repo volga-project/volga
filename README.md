@@ -1,4 +1,4 @@
-## Volga - Feature Engine for real-time AI/ML
+## Volga - Data Processing/Feature Calculation Engine for real-time AI/ML
 
 *[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is an open-source, self-serve, scalable data/feature engine tailored for modern real-time AI/ML applications.
 It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
