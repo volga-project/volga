@@ -1,19 +1,21 @@
 ## Volga - Data Processing/Feature Calculation Engine for real-time AI/ML
 
-*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is an open-source, self-serve, scalable data/feature engine tailored for modern real-time AI/ML applications.
-It features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
-consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
-real-time serving and on-demand request-time calculations.
-It aims to be a completely standalone and self-serve system removing any heavy-weight dependency on general data processors (Flink, Spark) 
+*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a **next-gen hybrid push+pull data processing/feature calculation engine for real-time AI/ML**.
+
+Subscribe to our *[blog](https://volgaai.substack.com/publish/home)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
+
+Volga aims to be a completely standalone and self-serve system removing any heavy-weight dependency on general data processors (Flink, Spark) 
 or cloud-based feature platforms ([Tecton.ai](https://www.tecton.ai/), [Fennel.ai](https://fennel.ai/), [Chalk.ai](https://chalk.ai/)) and can be run on a laptop or on a 1000-node cluster.
 
-Subscribe to our *[blog](https://volgaai.substack.com/publish/home)* to follow the journey of developing a next-gen data processing system.
- 
-Features:
+Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, features convenient pandas-like API to define data entities, online/offline pipelines and sources, 
+consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
+real-time serving and on-demand request-time calculations.
 
+Features:
+- Volga consists of two main parts: **custom Streaming Engine (the *Push part*)** and **Pull Workers (the *Pull Part*, also called On-Demand Workers)**.  
 - Utilizes *[custom scalable stream processing engine](https://github.com/volga-project/volga/blob/master/tests/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
 **[ZeroMQ](https://zeromq.org/)** for messaging, **[Rust](https://www.rust-lang.org/)** and **[PyO3](https://github.com/PyO3/pyo3)** for perf-critical parts. 
-Kappa architecture - no Flink or Spark
+Kappa architecture - no Flink or Spark.
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
 - Kubernetes ready, no vendor lock-in - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python
@@ -275,7 +277,7 @@ python test_streaming_e2e.py
 ```
 
 The development is done with Python 3.10.8 and Ray 2.22.0, in case of any import/installation related errors, please try rolling
-your dev env back to these version
+your dev env back to these versions.
 
 ## Development
 
