@@ -1,11 +1,13 @@
 ## Volga - Data Processing/Feature Calculation Engine for real-time AI/ML
 
 
-*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a **next-gen hybrid push+pull data processing/feature calculation engine for real-time AI/ML**. It is designed to allow you to easily build your own real-time ML feature platforms or general data pipelines without relying on heterogenous data processors (Flink/Spark/custom data processing layers) or third party services.
+*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a ***next-gen hybrid push+pull data processing/feature calculation engine for real-time AI/ML***. 
 
-Subscribe to our *[blog](https://volgaai.substack.com/publish/home)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
+It is designed to allow you to easily build your own real-time ML feature platforms or general data pipelines without relying on heterogenous data processors (Flink/Spark/custom data processing layers) or third party services.
 
-Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, features convenient *Pandas-like API to define data entities*, online/offline pipelines and sources, 
+Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
+
+Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, features convenient *Pandas-like API to define data entities*, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations. It can run on a laptop or a 1000-node cluster.
 
@@ -33,7 +35,7 @@ Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/intr
 
 There are no self-serve open-source feature calculation engines/platforms which allow consistent online-offline pipelines without vendor lock-in,
 setting up and managing complex infra like Spark or Flink simultaneously and/or dependency on proprietary closed-source tech 
-(i.e Tecton.ai, Fennel.ai, Chalk.ai etc.). Volga fills this spot. More info *[in our blog](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)*.
+(i.e Tecton.ai, Fennel.ai, Chalk.ai etc.). Volga fills this spot. More info *[in our blog](https://volgaai.substack.com)*.
 
 
 ## Quick start
