@@ -1,18 +1,15 @@
 ## Volga - Data Processing/Feature Calculation Engine for real-time AI/ML
 
-*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a **next-gen hybrid push+pull data processing/feature calculation engine for real-time AI/ML**.
+*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a **next-gen hybrid push+pull data processing/feature calculation engine for real-time AI/ML**. It is designed to allow you to easily build your own real-time ML feature platforms or general data pipelines without relying on heterogenous data processors (Flink/Spark/custom data processing layers) or third party services.
 
 Subscribe to our *[blog](https://volgaai.substack.com/publish/home)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
 
-Volga aims to be a completely standalone and self-serve system removing any heavy-weight dependency on general data processors (Flink, Spark) 
-or cloud-based feature platforms ([Tecton.ai](https://www.tecton.ai/), [Fennel.ai](https://fennel.ai/), [Chalk.ai](https://chalk.ai/)) and can be run on a laptop or on a 1000-node cluster.
-
 Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, features convenient *Pandas-like API to define data entities*, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
-real-time serving and on-demand request-time calculations.
+real-time serving and on-demand request-time calculations. It can run on a laptop or a 1000-node cluster.
 
 Features:
-- Volga consists of two main parts: **custom Streaming Engine (the *Push part*)** and **Pull Workers (the *Pull Part*, also called On-Demand Workers)**.  
+- Volga consists of two main parts: **custom Streaming Engine (the *Push part*)** and **Pull Workers (the *Pull part*, also called On-Demand Workers)**.  
 - Utilizes *[custom scalable stream processing engine](https://github.com/volga-project/volga/blob/master/tests/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
 **[ZeroMQ](https://zeromq.org/)** for messaging, **[Rust](https://www.rust-lang.org/)** and **[PyO3](https://github.com/PyO3/pyo3)** for perf-critical parts. 
 Kappa architecture - no Flink or Spark.
