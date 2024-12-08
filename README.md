@@ -10,7 +10,7 @@ It is designed to allow you to easily build your own real-time ML feature platfo
 Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
 
 Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, uses a ***hybrid push+pull architecture***, features convenient *Pandas-like API to define data entities*, online/offline pipelines and sources, 
-consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
+consistent online+offline feature calculation semantics, pluggable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations. It can run on a laptop or a 1000-node cluster.
 
 ![alt text](https://github.com/volga-project/volga/blob/master/.github/volga_arch.png?raw=true)
