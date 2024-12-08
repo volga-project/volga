@@ -171,8 +171,8 @@ while True:
 ...
 ```
 
-## On-Demand Features (Experimental work in progress)
-On-Demand features allow performing stateless transformations at request time, both in online and offline setting.
+## On-Demand Features (WIP)
+On-Demand features (the Pull part of the system) allow performing stateless transformations at request time, both in online and offline setting.
 This can be helpful in cases when transformation is too resource-heavy for streaming or when input data is available 
 only at request time (e.g. GPS coordinates, meta-model outputs, etc.)
 
