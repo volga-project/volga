@@ -1,7 +1,7 @@
-## Volga - Data Processing/Feature Calculation Engine for real-time AI/ML
+## Volga - Data Processing/Feature Calculation Engine for Real-Time AI/ML
 
 
-*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a ***next-gen hybrid push+pull data processing/feature calculation engine for real-time AI/ML***. 
+*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a ***next-gen open-source hybrid push+pull data processing/feature calculation engine for real-time AI/ML***. 
 
 It is designed to allow you to easily build your own real-time ML feature platforms or general data pipelines without relying on heterogenous data processors (Flink/Spark/custom data processing layers) or third party services.
 
