@@ -1,35 +1,33 @@
 ## Volga - Data Processing/Feature Calculation Engine for Real-Time AI/ML
 
 
-*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a ***next-gen open-source hybrid push+pull data processing/feature calculation engine for real-time AI/ML***. 
+*[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a ***next-gen open-source data processing/feature calculation engine for real-time AI/ML***. 
 
 It is designed to allow you to easily build your own real-time ML feature platforms or general data pipelines without relying on heterogenous data processors (Flink/Spark/custom data processing layers) or third party services.
 
 Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
 
-Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, features convenient *Pandas-like API to define data entities*, online/offline pipelines and sources, 
+Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, uses a ***hybrid push+pull architecture***, features convenient *Pandas-like API to define data entities*, online/offline pipelines and sources, 
 consistent online+offline feature calculation semantics, plugable and configurable hot and cold storage, feature lookups, 
 real-time serving and on-demand request-time calculations. It can run on a laptop or a 1000-node cluster.
 
 ![alt text](https://github.com/volga-project/volga/blob/master/.github/volga_arch.png?raw=true)
 
 Features:
-- Volga consists of two main parts: **custom Streaming Engine (the *Push part*)** and **Pull Workers (the *Pull part*, also called On-Demand Workers)**.  
-- Utilizes *[custom scalable stream processing engine](https://github.com/volga-project/volga/blob/master/tests/test_streaming_e2e.py)* using **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
-**[ZeroMQ](https://zeromq.org/)** for messaging, **[Rust](https://www.rust-lang.org/)** and **[PyO3](https://github.com/PyO3/pyo3)** for perf-critical parts. 
-Kappa architecture - no Flink or Spark.
+- Volga uses *hybrid push+pull architecture*: **custom Streaming Engine (the *Push part*)** and **On-Demand Workers (the *Pull part*)**.  
+- *[The Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)* uses **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
+**[ZeroMQ](https://zeromq.org/)** for messaging, **[Rust](https://www.rust-lang.org/)** and **[PyO3](https://github.com/PyO3/pyo3)** for performance and *Python-native runtime*. 
+Kappa architecture, no Flink or Spark.
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
-(cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure
-- Kubernetes ready, no vendor lock-in - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python
-- Pure Python, no heavy JVM setups - minimal setup and maintenance efforts in production
-- Standalone - launch on your laptop or a cluster with no heavy-weight external dependencies
-- Cold + Hot storage model allows for customizable offline storage and caches, fast real-time feature queries
+(cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as your custom ML infrastructure.
+- Kubernetes ready, no vendor lock-in - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python.
+- Python-native runtime, no heavy JVM setups - easily import all of the Python ecosystem to your pipeline, minimal setup and maintenance efforts in production.
+- Standalone - launch on your laptop or a cluster with no heavy-weight external dependencies.
+- Cold + Hot storage model allows for customizable offline storage and caches, fast real-time feature queries.
 - Easy to use declarative pandas-like API to simultaneously define online and offline feature pipelines, including 
 operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc.
-- [Experimental] Perform heavy embedding dot products, query meta-models or simply calculate users age in milliseconds at request time
- using *[On-Demand Features]()*
-
-Volga's API design was inspired by [Fennel](https://fennel.ai/docs/concepts/introduction).
+- Perform heavy embedding dot products, query meta-models or simply calculate users age in milliseconds at data request time/inference time
+ using *[On-Demand Features](https://volgaai.substack.com/p/volga-open-source-feature-engine-2)* (WIP).
 
 ## Why use Volga
 
