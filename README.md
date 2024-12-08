@@ -1,5 +1,7 @@
-## Volga - Data Processing/Feature Calculation Engine for Real-Time AI/ML
-
+<h2 align="center">Volga - Data Processing/Feature Calculation Engine for Real-Time AI/ML</h2>
+<p align="center">
+  <img src="[https://github.com/volga-project/volga/blob/master/.github/logo_white_bckgr_100.png]" width="100" height="100">
+</p>
 
 *[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)* is a ***next-gen open-source data processing/feature calculation engine for real-time AI/ML***. 
 
