@@ -1,4 +1,4 @@
-B/target
+/target
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -74,3 +74,4 @@ docs/_build/
 rust/target
 
 *volga_network_perf_benchmarks*
+golem
