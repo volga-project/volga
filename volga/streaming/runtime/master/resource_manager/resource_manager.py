@@ -7,7 +7,7 @@ from pydantic import BaseModel
 import ray
 
 
-logger = logging.getLogger("ray")
+logger = logging.getLogger('ray')
 
 RESOURCE_KEY_CPU = 'CPU'
 RESOURCE_KEY_MEM = 'MEM'
