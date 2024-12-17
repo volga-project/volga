@@ -9,9 +9,9 @@ import time
 
 from volga.common.time_utils import datetime_str_to_ts
 from volga.api.dataset.schema import Schema
-from volga.storage.cold.cold import ColdStorage
+from volga.storage.cold import ColdStorage
 from volga.storage.common.key_index import compose_main_key, KeyIndex
-from volga.storage.hot.hot import HotStorage
+from volga.storage.hot import HotStorage
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import SinkFunction
 

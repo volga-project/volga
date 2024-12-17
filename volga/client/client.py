@@ -7,9 +7,9 @@ from volga.common.time_utils import datetime_to_ts
 from volga.api.dataset.dataset import Dataset
 from volga.api.dataset.operators import Aggregate, OperatorNodeBase
 from volga.api.dataset.schema import Schema
-from volga.storage.cold.cold import ColdStorage
+from volga.storage.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
-from volga.storage.hot.hot import HotStorage
+from volga.storage.hot import HotStorage
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.data_stream import DataStream
 

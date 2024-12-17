@@ -8,7 +8,9 @@ import aiohttp
 import ray
 
 from volga.on_demand.actors.coordinator import OnDemandCoordinator
+from volga.on_demand.data.data_service import DataService
 from volga.on_demand.on_demand_config import DEFAULT_ON_DEMAND_CONFIG
+from volga.storage.scylla.api import store_many
 
 
 class TestOnDemandActors(unittest.TestCase):
@@ -25,14 +27,19 @@ class TestOnDemandActors(unittest.TestCase):
 
     def test_round_robin(self):
         config = DEFAULT_ON_DEMAND_CONFIG
-        config.num_workers_per_node = 5
+        config.num_workers_per_node = 2
         config.max_ongoing_requests_per_worker = 999999
-        num_requests = 1000
+        num_requests = 2
 
-        # this makes sure we do not mess order due to workers buffering work
-        assert num_requests < config.num_workers_per_node * config.max_ongoing_requests_per_worker
+        feature_name = 'test_feature'
+        keys = {'key1': '1', 'key2': '2'}
+        values = {'val1': 1, 'val2': 2}
+        keys_json = json.dumps(keys)
 
-        url = f'http://127.0.0.1:{config.proxy_port}/fetch_features'
+        DataService.init()
+        store_many(feature_name, [(keys, values)])
+
+        url = f'http://127.0.0.1:{config.proxy_port}/fetch_features/{feature_name}/{keys_json}'
 
         with ray.init():
             coordinator = OnDemandCoordinator.remote(config)
@@ -42,11 +49,11 @@ class TestOnDemandActors(unittest.TestCase):
 
             loop = asyncio.new_event_loop()
             results = loop.run_until_complete(self._fetch_many(url, num_requests))
-            worker_ids = set(list(map(lambda s: json.loads(s)['res'][1], results)))
+            print(results)
+            worker_ids = set(list(map(lambda s: json.loads(s)['worker_id'], results)))
             assert len(worker_ids) == config.num_workers_per_node
 
             print('assert ok')
-
 
 
 if __name__ == '__main__':
