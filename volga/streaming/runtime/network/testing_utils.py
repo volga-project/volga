@@ -124,7 +124,7 @@ class TestReader:
         num_rcvd_per_channel = {channel.channel_id: 0 for channel in self.channels}
         start_ts = time.time()
         while time.time() - start_ts <= timeout_s:
-            msgs = self.data_reader.read_message()
+            msgs = self.data_reader.read_message_batch()
             if msgs is None:
                 time.sleep(0.001)
                 continue

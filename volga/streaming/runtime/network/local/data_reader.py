@@ -30,7 +30,7 @@ class DataReader(IOHandler):
     def get_rust_io_handler(self) -> RustIOHandler:
         return self._rust_data_reader
 
-    def read_message(self) -> Optional[List[ChannelMessage]]:
+    def read_message_batch(self) -> Optional[List[ChannelMessage]]:
         b = self._rust_data_reader.read_bytes()
         if b is None:
             return None

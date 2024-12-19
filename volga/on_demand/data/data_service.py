@@ -1,7 +1,7 @@
 from typing import Dict, Any
 
-from volga.storage.scylla.api import fetch_latest
-from volga.storage.scylla.connection import create_session, sync_tables
+from volga.storage.cassandra.api import fetch_latest
+from volga.storage.cassandra.connection import create_session, sync_tables
 
 
 # TODO abstract data connector

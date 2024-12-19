@@ -237,7 +237,7 @@ class TestLocalTransfer(unittest.TestCase):
 
             # read one
             time.sleep(0.1)
-            data_reader.read_message()
+            data_reader.read_message_batch()
             time.sleep(0.1)
             s = data_writer.try_write_message(channel_id=channel.channel_id, message={'k': 'v'})
             # should not backpressure

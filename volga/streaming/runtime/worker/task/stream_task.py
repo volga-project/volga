@@ -180,7 +180,7 @@ class InputStreamTask(StreamTask):
 
     def run(self):
         while self.running:
-            messages = self.data_reader.read_message()
+            messages = self.data_reader.read_message_batch()
             if messages is None or len(messages) == 0:
                 time.sleep(self.READ_RETRY_PERIOD_S)
                 continue

@@ -91,7 +91,7 @@ class OnDemandProxy:
             host=self.host,
             port=self.config.proxy_port,
             loop='uvloop',
-            # log_level='warning',
+            log_level='warning',
         )
         uvicorn_server = uvicorn.Server(config=config)
         await uvicorn_server.serve(sockets=[sock])

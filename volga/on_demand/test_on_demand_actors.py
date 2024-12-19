@@ -10,7 +10,7 @@ import ray
 from volga.on_demand.actors.coordinator import OnDemandCoordinator
 from volga.on_demand.data.data_service import DataService
 from volga.on_demand.on_demand_config import DEFAULT_ON_DEMAND_CONFIG
-from volga.storage.scylla.api import store_many
+from volga.storage.cassandra.api import store_many
 
 
 class TestOnDemandActors(unittest.TestCase):
@@ -27,9 +27,9 @@ class TestOnDemandActors(unittest.TestCase):
 
     def test_round_robin(self):
         config = DEFAULT_ON_DEMAND_CONFIG
-        config.num_workers_per_node = 2
+        config.num_workers_per_node = 5
         config.max_ongoing_requests_per_worker = 999999
-        num_requests = 2
+        num_requests = 1000
 
         feature_name = 'test_feature'
         keys = {'key1': '1', 'key2': '2'}

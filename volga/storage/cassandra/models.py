@@ -1,7 +1,7 @@
 from cassandra.cqlengine import columns
 from cassandra.cqlengine.models import Model
 
-from volga.storage.scylla.consts import KEYSPACE
+from volga.storage.cassandra.consts import KEYSPACE
 
 
 class HotFeature(Model):
