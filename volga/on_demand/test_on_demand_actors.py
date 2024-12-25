@@ -10,7 +10,6 @@ import ray
 from volga.on_demand.actors.coordinator import OnDemandCoordinator
 from volga.on_demand.data.data_service import DataService
 from volga.on_demand.on_demand_config import DEFAULT_ON_DEMAND_CONFIG
-from volga.storage.cassandra.api import store_many
 
 
 class TestOnDemandActors(unittest.TestCase):
@@ -36,8 +35,8 @@ class TestOnDemandActors(unittest.TestCase):
         values = {'val1': 1, 'val2': 2}
         keys_json = json.dumps(keys)
 
-        DataService.init()
-        store_many(feature_name, [(keys, values)])
+        asyncio.run(DataService.init())
+        asyncio.run(DataService._instance.api.insert(feature_name, keys, values))
 
         url = f'http://127.0.0.1:{config.proxy_port}/fetch_features/{feature_name}/{keys_json}'
 

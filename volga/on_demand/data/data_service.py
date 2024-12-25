@@ -1,7 +1,6 @@
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
-from volga.storage.cassandra.api import fetch_latest
-from volga.storage.cassandra.connection import create_session, sync_tables
+from volga.storage.scylla.api import ScyllaPyHotFeatureStorageApi, AcsyllaHotFeatureStorageApi
 
 
 # TODO abstract data connector
@@ -10,16 +9,17 @@ class DataService:
     _instance = None
 
     def __init__(self):
-        create_session()
-        sync_tables()
+        # self.api = ScyllaPyHotFeatureStorageApi()
+        self.api = AcsyllaHotFeatureStorageApi()
 
     @staticmethod
-    def init():
+    async def init():
         if DataService._instance is None:
             DataService._instance = DataService()
+        await DataService._instance.api.init()
 
     @staticmethod
-    def fetch_latest(feature_name: str, keys: Dict[str, Any]) -> Dict:
+    async def fetch_latest(feature_name: str, keys: Dict[str, Any]) -> Optional[Dict]:
         assert DataService._instance is not None
-        return fetch_latest(feature_name, keys)
 
+        return await DataService._instance.api.fetch_latest(feature_name, keys)

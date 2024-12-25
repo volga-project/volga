@@ -161,9 +161,9 @@ class LocalFileSourceFunction(SourceFunction):
             self.done = True
 
 
-class DelayedCollectionSourceFunction(SourceFunction):
-    def __init__(self, all_values, delay_s):
-        self.delay_s = delay_s
+class PeriodicCollectionSourceFunction(SourceFunction):
+    def __init__(self, all_values, period_s):
+        self.period_s = period_s
         self.all_values = all_values
         self.values = None
         self.num_values = None
@@ -176,7 +176,7 @@ class DelayedCollectionSourceFunction(SourceFunction):
         for i in range(len(self.values)):
             ctx.collect(self.values[i])
             if i < len(self.values) - 1:
-                time.sleep(self.delay_s)
+                time.sleep(self.period_s)
         self.values = []
 
     def num_records(self) -> int:

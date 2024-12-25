@@ -1,4 +1,5 @@
-from typing import Dict, Any
+import asyncio
+from typing import Dict, Any, Optional
 
 import ray
 
@@ -13,8 +14,8 @@ class OnDemandWorker:
         self.config = config
         self.host_node_id = host_node_id
         self.worker_id = worker_id
-        DataService.init()
+        asyncio.run(DataService.init())
 
-    async def do_work(self, feature_name: str, keys: Dict[str, Any]) -> Dict:
-        feature_values = DataService.fetch_latest(feature_name=feature_name, keys=keys)
+    async def do_work(self, feature_name: str, keys: Dict[str, Any]) -> Optional[Dict]:
+        feature_values = await DataService.fetch_latest(feature_name=feature_name, keys=keys)
         return feature_values

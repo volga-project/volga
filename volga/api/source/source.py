@@ -64,7 +64,7 @@ class MockOnlineConnector(Connector):
         self.delay_s = delay_s
 
     def to_stream_source(self, ctx: StreamingContext) -> StreamSource:
-        return ctx.from_delayed_collection(self.items, delay_s=self.delay_s)
+        return ctx.from_periodic_collection(self.items, delay_s=self.delay_s)
 
 
 # produces connections
