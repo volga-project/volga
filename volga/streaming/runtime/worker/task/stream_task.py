@@ -63,7 +63,12 @@ class StreamTask(ABC):
             assert output_channels[0] is not None
             if self.data_writer is not None:
                 raise RuntimeError('Writer already inited')
-            if self.execution_vertex.job_vertex.vertex_type != VertexType.SINK:
+
+            # TODO we need a proper type for this, also handle case for chained source + sink - separate type?
+            is_chained_sink = isinstance(self.execution_vertex.stream_operator, ChainedOperator) and \
+                              isinstance(self.execution_vertex.stream_operator.tail_operator, SinkOperator)
+            print(f'Is chained sink {is_chained_sink}')
+            if self.execution_vertex.job_vertex.vertex_type != VertexType.SINK and not is_chained_sink:
                 # sinks do not pass data downstream so no writer
                 self.data_writer = DataWriter(
                     handler_id=f'dw-{self.execution_vertex.execution_vertex_id}',
@@ -120,7 +125,11 @@ class StreamTask(ABC):
 
         runtime_context = StreamingRuntimeContext(execution_vertex=execution_vertex)
 
-        err = self.io_loop.connect_and_start() # TODO pass num io threads
+        if self.io_loop.get_num_registered_handler() != 0:
+            err = self.io_loop.connect_and_start() # TODO pass num io threads
+        else:
+            err = None
+            logger.info("Skipped starting network IOLoop")
         if err is not None:
             return err
         self.processor.open(
@@ -135,7 +144,8 @@ class StreamTask(ABC):
         # logger.info(f'Closing task {self.execution_vertex.execution_vertex_id}...')
         self.running = False
         self.processor.close()
-        self.io_loop.stop()
+        if self.io_loop.get_num_registered_handler() != 0:
+            self.io_loop.stop()
         if self.thread is not None:
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')

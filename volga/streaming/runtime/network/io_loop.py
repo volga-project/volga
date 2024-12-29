@@ -70,6 +70,9 @@ class IOLoop:
             self._rust_io_loop.start()
         return res
 
+    def get_num_registered_handler(self) -> int:
+        return len(self._handlers)
+
     def stop(self):
         for handler in self._handlers:
             handler.stop()

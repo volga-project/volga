@@ -35,8 +35,13 @@ class TestOnDemandActors(unittest.TestCase):
         values = {'val1': 1, 'val2': 2}
         keys_json = json.dumps(keys)
 
-        asyncio.run(DataService.init())
-        asyncio.run(DataService._instance.api.insert(feature_name, keys, values))
+        loop = asyncio.get_event_loop()
+        loop.run_until_complete(DataService.init())
+        loop.run_until_complete(DataService._instance.api.insert(feature_name, keys, values))
+
+        # feature_values = loop.run_until_complete(DataService.fetch_latest(feature_name=feature_name, keys=keys))
+        # print(feature_values)
+        # return
 
         url = f'http://127.0.0.1:{config.proxy_port}/fetch_features/{feature_name}/{keys_json}'
 
@@ -48,9 +53,12 @@ class TestOnDemandActors(unittest.TestCase):
 
             loop = asyncio.new_event_loop()
             results = loop.run_until_complete(self._fetch_many(url, num_requests))
-            print(results)
+            # print(results)
             worker_ids = set(list(map(lambda s: json.loads(s)['worker_id'], results)))
-            assert len(worker_ids) == config.num_workers_per_node
+            if num_requests < config.num_workers_per_node:
+                assert len(worker_ids) == num_requests
+            else:
+                assert len(worker_ids) == config.num_workers_per_node
 
             print('assert ok')
 

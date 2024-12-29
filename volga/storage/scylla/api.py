@@ -1,7 +1,7 @@
 import json
 from typing import Dict, Optional
 
-from acsylla import create_cluster, create_statement
+from acsylla import create_cluster, create_statement, Session
 
 from volga.storage.scylla.consts import KEYSPACE, REPLICATION_FACTOR, HOT_FEATURE_TABLE_NAME
 
@@ -78,15 +78,17 @@ class ScyllaPyHotFeatureStorageApi(HotFeatureStorageApiBase):
 
 class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
 
-    def __init__(self, contact_points=None):
+    # TODO set queue_size_io
+    def __init__(self, contact_points=None, num_io_threads: int = 1): # TODO configure num io threads
         if contact_points is None:
             self.contact_points = ['127.0.0.1']
         else:
             self.contact_points = contact_points
-        self.session = None
+        self.session: Session = None
+        self.num_io_threads = num_io_threads
 
     async def init(self):
-        cluster = create_cluster(contact_points=self.contact_points, port=9042)
+        cluster = create_cluster(contact_points=self.contact_points, port=9042, num_threads_io=self.num_io_threads)
         self.session = await cluster.create_session()
         await self.session.execute(create_statement("""
                 CREATE KEYSPACE IF NOT EXISTS {}
@@ -104,13 +106,18 @@ class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
             """.format(HOT_FEATURE_TABLE_NAME)
         ))
 
-    async def insert(self, feature_name: str, keys: Dict, values: Dict):
+    async def insert(self, feature_name: str, keys: Dict, values: Dict, ts_micro: Optional[int] = None):
         keys_json = json.dumps(keys)
         values_json = json.dumps(values)
-        q = f'INSERT INTO {HOT_FEATURE_TABLE_NAME} (feature_name, keys_json, values_json) VALUES (?, ?, ?)'
+        if ts_micro is None:
+            q = f'INSERT INTO {HOT_FEATURE_TABLE_NAME} (feature_name, keys_json, values_json) VALUES (?, ?, ?)'
+        else:
+            q = f'INSERT INTO {HOT_FEATURE_TABLE_NAME} (feature_name, keys_json, values_json) VALUES (?, ?, ?) USING TIMESTAMP {ts_micro}'
         statement = create_statement(q, parameters=3)
         statement.bind_list([feature_name, keys_json, values_json])
-        return await self.session.execute(statement)
+
+        res = await self.session.execute(statement)
+        return res
 
     async def fetch_latest(self, feature_name: str, keys: Dict) -> Optional[Dict]:
         keys_json = json.dumps(keys)
@@ -123,8 +130,9 @@ class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
         if res.count == 0:
             return None
         else:
-            return res.first()
+            return res.first().as_dict()
 
     async def close(self):
-        pass
+        if self.session is not None:
+            await self.session.close()
 

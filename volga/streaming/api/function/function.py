@@ -63,10 +63,8 @@ class SourceFunction(Function):
         # if source is bounded, this should return expected number of records
         raise NotImplementedError()
 
-    @abstractmethod
     def get_num_sent(self) -> Any:
         raise NotImplementedError()
-
 
 
 class MapFunction(Function):

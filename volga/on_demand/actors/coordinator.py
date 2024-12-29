@@ -42,12 +42,15 @@ class OnDemandCoordinator:
                 continue
 
             # start workers
+            init_futs = []
             for worker_id in range(self.config.num_workers_per_node):
                 worker = OnDemandWorker.remote(node_id, worker_id, self.config)
                 if node_id in self.workers_per_node:
                     self.workers_per_node[node_id].append(worker)
                 else:
                     self.workers_per_node[node_id] = [worker]
+                init_futs.append(worker.init.remote())
+            ray.get(init_futs)
 
             logger.info(f'[OnDemand] Created {self.config.num_workers_per_node} workers for node {node_id}')
 
