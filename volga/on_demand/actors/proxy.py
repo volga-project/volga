@@ -1,20 +1,22 @@
 import asyncio
-import json
 import logging
 import socket
 import time
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
-import ray
 import uvicorn
 from ray.actor import ActorHandle
+from pydantic_core import from_json
 
 import ray.serve
 
+from volga.on_demand.on_demand import OnDemandRequest, OnDemandResponse
 from volga.on_demand.on_demand_config import OnDemandConfig
 from fastapi import FastAPI, APIRouter
 
 logger = logging.getLogger('ray')
+
+API_ROUTE = 'on_demand_compute'
 
 
 @ray.remote(max_concurrency=999)
@@ -28,25 +30,26 @@ class OnDemandProxy:
         router = APIRouter()
 
         # TODO move route init to separate class
-        router.add_api_route('/fetch_features/{feature_name}/{keys_json}', endpoint=self.proxy_to_worker, methods=["GET"])
+        api_route = f'/{API_ROUTE}/' + '{request_json}'
+        router.add_api_route(api_route, endpoint=self.proxy_to_worker, methods=["GET"])
         self.app.include_router(router)
         self.requests_per_worker = {worker_id: 0 for worker_id in range(len(workers))}
         self.last_ready_worker_id = -1
 
         self.lock = asyncio.Lock()
 
-    async def proxy_to_worker(self, feature_name: str, keys_json: str):
+    async def proxy_to_worker(self, request_json: str) -> OnDemandResponse:
         worker_id = await self._get_next_ready_worker_id(timeout_s=2)
         if worker_id is None:
             # timeout - all workers busy
             logger.info('[On Demand] All workers are busy')
-            return {} # TODO proper indicate busy workers to API
+            return None # TODO proper indicate busy workers to API
 
         worker = self.workers[worker_id]
-        keys = json.loads(keys_json)
-        feature_values = await worker.do_work.remote(feature_name, keys)
+        on_demand_request = OnDemandRequest(**from_json(request_json))
+        on_demand_response = await worker.do_work.remote(on_demand_request)
         await self._release_worker(worker_id)
-        return {'feature_name': feature_name, 'keys': keys, 'values': feature_values, 'worker_id': worker_id}
+        return on_demand_response
 
     # round-robins until there is a worker with available work slots
     async def _get_next_ready_worker_id(self, timeout_s: int) -> Optional[int]:

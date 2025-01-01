@@ -6,6 +6,7 @@ from ray.actor import ActorHandle
 
 from volga.on_demand.actors.proxy import OnDemandProxy
 from volga.on_demand.actors.worker import OnDemandWorker
+from volga.on_demand.on_demand import OnDemandSpec
 from volga.on_demand.on_demand_config import OnDemandConfig
 
 
@@ -63,6 +64,14 @@ class OnDemandCoordinator:
 
         logger.info(f'[OnDemand] All actors started')
         return self.proxy_per_node, self.workers_per_node
+
+    def register_on_demand_specs(self, specs: List[OnDemandSpec]):
+        assert len(self.workers_per_node) > 0
+        futs = []
+        for node_id in self.workers_per_node:
+            for worker in self.workers_per_node[node_id]:
+                futs.append(worker.register_on_demand_specs.remote(specs))
+        ray.get(futs)
 
     def delete_actors(self):
         # TODO
