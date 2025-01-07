@@ -36,6 +36,16 @@ class Record:
     def set_stream_name(self, stream_name):
         self.stream_name = stream_name
 
+    @staticmethod
+    def new_value(value: Any, record: 'Record') -> 'Record':
+        r = Record(
+            value=value,
+            source_emit_ts=record.source_emit_ts,
+            event_time=record.event_time
+        )
+        r.set_stream_name(record.stream_name)
+        return r
+
 
 class KeyRecord(Record):
     # Data record in a keyed data stream
@@ -70,6 +80,17 @@ class KeyRecord(Record):
             'event_time': self.event_time,
             'source_emit_ts': self.source_emit_ts
         }
+
+    @staticmethod
+    def from_record(key: Any, record: 'KeyRecord') -> 'KeyRecord':
+        r = KeyRecord(
+            key=key,
+            value=record.value,
+            source_emit_ts=record.source_emit_ts,
+            event_time=record.event_time
+        )
+        r.set_stream_name(record.stream_name)
+        return r
 
 
 # TODO we should have proper ser/de

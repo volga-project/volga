@@ -240,7 +240,7 @@ class MapOperator(StreamOperator, OneInputOperator):
         super().__init__(map_func)
 
     def process_element(self, record):
-        self.collect(Record(value=self.func.map(record.value), event_time=record.event_time, source_emit_ts=record.source_emit_ts))
+        self.collect(Record.new_value(self.func.map(record.value), record))
 
 
 class FlatMapOperator(StreamOperator, OneInputOperator):
@@ -248,14 +248,14 @@ class FlatMapOperator(StreamOperator, OneInputOperator):
     def __init__(self, flat_map_func: FlatMapFunction):
         assert isinstance(flat_map_func, FlatMapFunction)
         super().__init__(flat_map_func)
-        self.collection_collector = None
 
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
-        self.collection_collector = CollectionCollector(collectors)
 
     def process_element(self, record: Record):
-        self.func.flat_map(record.value, self.collection_collector)
+        values = self.func.flat_map(record.value)
+        for value in values:
+            self.collect(Record.new_value(value, record))
 
 
 class FilterOperator(StreamOperator, OneInputOperator):
@@ -277,7 +277,7 @@ class KeyByOperator(StreamOperator, OneInputOperator):
 
     def process_element(self, record: Record):
         key = self.func.key_by(record.value)
-        self.collect(KeyRecord(key, record.value, record.event_time, record.source_emit_ts))
+        self.collect(KeyRecord.from_record(key, record))
 
 
 class ReduceOperator(StreamOperator, OneInputOperator):
@@ -297,7 +297,7 @@ class ReduceOperator(StreamOperator, OneInputOperator):
             old_value = self.reduce_state[key]
             new_value = self.func.reduce(old_value, value)
             self.reduce_state[key] = new_value
-            self.collect(Record(value=new_value, event_time=record.event_time, source_emit_ts=record.source_emit_ts))
+            self.collect(Record.new_value(new_value, record))
         else:
             self.reduce_state[key] = value
             self.collect(record)

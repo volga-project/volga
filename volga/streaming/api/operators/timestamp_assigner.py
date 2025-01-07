@@ -14,6 +14,7 @@ class TimestampAssigner(ABC):
 
 class EventTimeAssigner(TimestampAssigner):
 
+    # TODO Decimal is not serializable - change type
     def __init__(self, func: Callable[[Record], Decimal]):
         self.func = func
 

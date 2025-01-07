@@ -1,30 +1,17 @@
 import asyncio
-import json
 import time
 import unittest
-from typing import List
-
-import aiohttp
 import ray
 
+
 from volga.on_demand.actors.coordinator import OnDemandCoordinator
+from volga.on_demand.client import OnDemandClient
 from volga.on_demand.data.data_service import DataService
 from volga.on_demand.on_demand import OnDemandArgs, OnDemandRequest, OnDemandSpec, FeatureValue, OnDemandResponse
 from volga.on_demand.on_demand_config import DEFAULT_ON_DEMAND_CONFIG
 
 
 class TestOnDemandActors(unittest.TestCase):
-
-    async def _fetch(self, session, url) -> OnDemandResponse:
-        async with session.get(url) as response:
-            raw = await response.text()
-            return OnDemandResponse(**json.loads(raw))
-
-    async def _fetch_many(self, url, num_requests) -> List[OnDemandResponse]:
-        async with aiohttp.ClientSession() as session:
-            tasks = [asyncio.ensure_future(self._fetch(session, url)) for _ in range(num_requests)]
-            responses = await asyncio.gather(*tasks)
-            return responses
 
     def test_serve(self):
         self._test_serve_or_udf(True)
@@ -43,7 +30,7 @@ class TestOnDemandActors(unittest.TestCase):
         keys = {'key1': '1', 'key2': '2'}
         values = {'val1': 1, 'val2': 2}
 
-        #udf
+        # udf
         main_feature_name = 'udf_feature'
         def _udf_increment_vals(feature_value: FeatureValue, increment) -> FeatureValue:
             feature_value.values['val1'] = feature_value.values['val1'] + increment
@@ -70,13 +57,12 @@ class TestOnDemandActors(unittest.TestCase):
                 udf_args={'increment': increment}
             )])
 
-        request_json = request.json()
-
         loop = asyncio.get_event_loop()
         loop.run_until_complete(DataService.init())
         loop.run_until_complete(DataService._instance.api.insert(feature_name, keys, values))
 
-        url = f'http://127.0.0.1:{config.proxy_port}/on_demand_compute/{request_json}'
+        client = OnDemandClient(config)
+        requests = [request for _ in range(num_requests)]
 
         with ray.init():
             coordinator = OnDemandCoordinator.remote(config)
@@ -88,7 +74,7 @@ class TestOnDemandActors(unittest.TestCase):
             time.sleep(1)
 
             loop = asyncio.new_event_loop()
-            responses = loop.run_until_complete(self._fetch_many(url, num_requests))
+            responses = loop.run_until_complete(client.request_many(requests))
             # worker = list(_workers_per_node.values())[0][0]
             # res = ray.get(worker.do_work.remote(request))
             # print(res)
@@ -97,17 +83,16 @@ class TestOnDemandActors(unittest.TestCase):
                 assert len(worker_ids) == num_requests
             else:
                 assert len(worker_ids) == config.num_workers_per_node
-            r = responses[0]
-            # print(r)
-            if serve_or_udf:
-                _keys = r.feature_values[feature_name].keys
-                _values = r.feature_values[feature_name].values
-                assert _keys == keys
-                assert _values == values
-            else:
-                _values = r.feature_values[main_feature_name].values
-                assert _values['val1'] == values['val1'] + increment
-                assert _values['val2'] == values['val2'] + increment
+            for r in responses:
+                if serve_or_udf:
+                    _keys = r.feature_values[feature_name].keys
+                    _values = r.feature_values[feature_name].values
+                    assert _keys == keys
+                    assert _values == values
+                else:
+                    _values = r.feature_values[main_feature_name].values
+                    assert _values['val1'] == values['val1'] + increment
+                    assert _values['val2'] == values['val2'] + increment
             print('assert ok')
 
 

@@ -16,7 +16,7 @@ class HotFeatureStorageApiBase:
     async def insert(self, feature_name: str, keys: Dict, values: Dict):
         raise NotImplementedError()
 
-    async def fetch_latest(self, feature_name: str, keys: Dict) -> Optional[Dict]:
+    async def fetch_latest(self, feature_name: str, keys: Dict) -> Dict:
         raise NotImplementedError()
 
     async def close(self):
@@ -59,7 +59,7 @@ class ScyllaPyHotFeatureStorageApi(HotFeatureStorageApiBase):
         params = {'feature_name': feature_name, 'keys_json': keys_json, 'values_json': values_json}
         return await self.scylla.execute(q, params)
 
-    async def fetch_latest(self, feature_name: str, keys: Dict) -> Optional[Dict]:
+    async def fetch_latest(self, feature_name: str, keys: Dict) -> Dict:
         q = f'SELECT * FROM {HOT_FEATURE_TABLE_NAME} WHERE feature_name=:feature_name AND keys_json=:keys_json'
         keys_json = json.dumps(keys)
         params = {'feature_name': feature_name, 'keys_json': keys_json}
@@ -68,12 +68,15 @@ class ScyllaPyHotFeatureStorageApi(HotFeatureStorageApiBase):
         assert len(res) <= 1
 
         if len(res) == 0:
-            return None
+            return {}
         else:
             return res[0]
 
     async def close(self):
         await self.scylla.shutdown()
+
+    async def _drop_tables(self):
+        raise NotImplementedError()
 
 
 class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
@@ -119,7 +122,7 @@ class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
         res = await self.session.execute(statement)
         return res
 
-    async def fetch_latest(self, feature_name: str, keys: Dict) -> Optional[Dict]:
+    async def fetch_latest(self, feature_name: str, keys: Dict) -> Dict:
         keys_json = json.dumps(keys)
         q = f'SELECT * FROM {HOT_FEATURE_TABLE_NAME} WHERE feature_name=? AND keys_json=?'
         statement = create_statement(q, parameters=2)
@@ -127,8 +130,8 @@ class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
         res = await self.session.execute(statement)
         assert res.count() <= 1
 
-        if res.count == 0:
-            return None
+        if res.count() == 0:
+            return {}
         else:
             return res.first().as_dict()
 
@@ -136,3 +139,7 @@ class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
         if self.session is not None:
             await self.session.close()
 
+    async def _drop_tables(self):
+        q = f'DROP TABLE {HOT_FEATURE_TABLE_NAME}'
+        statement = create_statement(q)
+        await self.session.execute(statement)

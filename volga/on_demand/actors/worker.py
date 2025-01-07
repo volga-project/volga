@@ -30,17 +30,34 @@ class OnDemandWorker:
         for spec in specs:
             self._on_demand_specs[spec.feature_name] = spec
 
-    # handle batch request - either serve or udf per requested feature
-    async def do_work(self, request: OnDemandRequest) -> OnDemandResponse:
+    # handle request (can contain multiple features) - either serve or udf per requested feature
+    async def do_work(self, request: OnDemandRequest, retries:int = 3) -> OnDemandResponse:
         feature_values = {}
-        futs = []
-        for arg in request.args:
-            if arg.serve_or_udf:
-                futs.append(self._serve(arg.feature_name, arg.keys))
-            else:
-                futs.append(self._udf(arg.feature_name, arg.dep_features_keys, arg.udf_args))
 
-        feature_values_list = await asyncio.gather(*futs)
+        num_attempts = 0
+        while True:
+            futs = []
+            for arg in request.args:
+                if arg.serve_or_udf:
+                    futs.append(self._serve(arg.feature_name, arg.keys))
+                else:
+                    futs.append(self._udf(arg.feature_name, arg.dep_features_keys, arg.udf_args))
+
+            feature_values_list = await asyncio.gather(*futs)
+            has_empty = False
+            for fv in feature_values_list:
+                if len(fv.keys) == 0:
+                    # retry
+                    has_empty = True
+                    break # inner
+            if has_empty:
+                if num_attempts >= retries:
+                    raise RuntimeError('Max retries fetching non-empty results')
+                else:
+                    num_attempts += 1
+                    await asyncio.sleep(0.5)
+            else:
+                break
 
         for i in range(len(request.args)):
             feature_name = request.args[i].feature_name
@@ -68,6 +85,12 @@ class OnDemandWorker:
             lambda v: FeatureValue.from_raw(v),
             feature_values_raw
         ))
+
+        # check if we have empty results
+        for fv in feature_values:
+            if len(fv.keys) == 0:
+                return FeatureValue(keys={}, values={})
+
         udf = spec.udf
         udf_kwargs = {}
 

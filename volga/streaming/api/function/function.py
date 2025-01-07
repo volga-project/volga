@@ -77,7 +77,7 @@ class MapFunction(Function):
 class FlatMapFunction(Function):
 
     @abstractmethod
-    def flat_map(self, value, collector):
+    def flat_map(self, value) -> List:
         # Takes an element from the input data set and transforms it into zero, one, or more elements.
         pass
 
@@ -190,46 +190,12 @@ class SimpleMapFunction(MapFunction):
 
 
 class SimpleFlatMapFunction(FlatMapFunction):
-    """
-    Wrap a python function as :class:`FlatMapFunction`
-
-    >>> assert SimpleFlatMapFunction(lambda x: x.split())
-    >>> def flat_func(x, collector):
-    ...     for item in x.split():
-    ...         collector.collect(item)
-    >>> assert SimpleFlatMapFunction(flat_func)
-    """
 
     def __init__(self, func):
-        """
-        Args:
-            func: a python function which takes an element from input augment
-            and transforms it into zero, one, or more elements.
-            Or takes an element from input augment, and used provided collector
-            to collect zero, one, or more elements.
-        """
         self.func = func
-        self.process_func = None
-        sig = inspect.signature(func)
-        assert (
-            len(sig.parameters) <= 2
-        ), "func should receive value [, collector] as arguments"
-        if len(sig.parameters) == 2:
 
-            def process(value, collector):
-                func(value, collector)
-
-            self.process_func = process
-        else:
-
-            def process(value, collector):
-                for elem in func(value):
-                    collector.collect(elem)
-
-            self.process_func = process
-
-    def flat_map(self, value, collector):
-        self.process_func(value, collector)
+    def flat_map(self, value) -> List:
+        return self.func(value)
 
 
 class SimpleFilterFunction(FilterFunction):

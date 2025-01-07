@@ -29,7 +29,6 @@ class DataWriter(IOHandler):
         self._source_stream_name = source_stream_name
         self._batch_per_channel = {channel.channel_id: [] for channel in channels}
         self._lock_per_channel = {channel.channel_id: threading.Lock() for channel in channels}
-        self._last_write_ts_per_channel = {channel.channel_id: -1 for channel in channels}
         self._batch_size = config.batch_size
         self._flusher_thread = threading.Thread(target=self._flusher_loop)
         self._flush_period_s = config.flush_period_s
@@ -60,6 +59,7 @@ class DataWriter(IOHandler):
                 tx = self._num_msgs_sent/(time.time() - self._start_ts)
                 # print(f'[{self.name}] Sent {self._num_msgs_sent} msgs, tx {tx} msg/s, last sent size: {self._last_sent_size}')
                 self._last_report_ts = time.time()
+
         return res
 
     def _try_write_message(self, channel_id: str, message: ChannelMessage) -> bool:
@@ -69,6 +69,7 @@ class DataWriter(IOHandler):
         batch.append(message)
         if len(batch) == self._batch_size:
             b = msgpack.dumps(batch)
+            # TODO indicate unsuccessful write (e.g. backpressure)?
             res = self._rust_data_writer.write_bytes(channel_id, b, 100)
             if res is None:
                 batch.pop()
@@ -76,12 +77,10 @@ class DataWriter(IOHandler):
                 return False
             else:
                 self._batch_per_channel[channel_id] = []
-                self._last_write_ts_per_channel[channel_id] = time.perf_counter()
                 lock.release()
                 self._last_sent_size = int(len(b)/len(batch))
                 return True
         else:
-            self._last_write_ts_per_channel[channel_id] = time.perf_counter()
             lock.release()
             return True
 
@@ -89,16 +88,15 @@ class DataWriter(IOHandler):
         for channel_id in self._lock_per_channel:
             lock = self._lock_per_channel[channel_id]
             lock.acquire()
-            if time.perf_counter() - self._last_write_ts_per_channel[channel_id] >= self._flush_period_s:
-                batch = self._batch_per_channel[channel_id]
-                if len(batch) == 0:
-                    lock.release()
-                    continue
-                b = msgpack.dumps(batch)
-                res = self._rust_data_writer.write_bytes(channel_id, b, 100)
-                if res is not None:
-                    self._batch_per_channel[channel_id] = []
-                    self._last_write_ts_per_channel[channel_id] = time.perf_counter()
+            batch = self._batch_per_channel[channel_id]
+            if len(batch) == 0:
+                lock.release()
+                continue
+            b = msgpack.dumps(batch)
+            # TODO indicate unsuccessful write (e.g. backpressure)?
+            res = self._rust_data_writer.write_bytes(channel_id, b, 0)
+            if res is not None:
+                self._batch_per_channel[channel_id] = []
             lock.release()
 
     def _flusher_loop(self):

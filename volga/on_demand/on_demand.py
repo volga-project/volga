@@ -35,9 +35,16 @@ class FeatureValue(BaseModel):
 
     @staticmethod
     def from_raw(v: Dict) -> 'FeatureValue':
+        keys = {}
+        values = {}
+
+        if len(v) != 0:
+            keys = json.loads(v['keys_json'])
+            values = json.loads(v['values_json'])
+
         return FeatureValue(
-            keys=json.loads(v['keys_json']),
-            values=json.loads(v['values_json']),
+            keys=keys,
+            values=values,
         )
 
 

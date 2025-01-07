@@ -73,7 +73,7 @@ class TestStreamingJobE2E(unittest.TestCase):
             *[('k1', i) for i in range(100)],
             *[('k2', i) for i in range(100)],
         ])
-        s = s.timestamp_assigner(EventTimeAssigner(lambda e: Decimal(time.time())))
+        s = s.timestamp_assigner(EventTimeAssigner(lambda e: time.time()))
         s.key_by(lambda e: e[0]).multi_window_agg([
             SlidingWindowConfig(
                 duration='1m',
@@ -127,9 +127,9 @@ if __name__ == '__main__':
         t = TestStreamingJobE2E(ctx)
         # TODO should reset context on each call
         # t.test_join_streams()
-        # t.test_window()
+        t.test_window()
         # t.test_delayed_collection_source()
-        t.test_parallel_collection_source()
+        # t.test_parallel_collection_source()
 
         job_master = ctx.job_master
     finally:

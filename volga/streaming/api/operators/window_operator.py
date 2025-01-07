@@ -77,9 +77,11 @@ class MultiWindowOperator(StreamOperator, OneInputOperator):
             aggs_per_window[w.name] = accum.aggs[w.agg_type]
 
         if self.output_func is None:
-            output_record = Record(value=aggs_per_window, event_time=record.event_time)
+            output_record = Record(value=aggs_per_window, event_time=record.event_time, source_emit_ts=record.source_emit_ts)
         else:
             output_record = self.output_func(aggs_per_window, record)
+
+        output_record.set_stream_name(record.stream_name)
         self.collect(output_record)
 
     def _create_windows(self) -> List[Window]:

@@ -4,7 +4,6 @@ import threading
 import time
 from typing import Optional, List, Callable, Dict
 
-from aiologic import Lock
 
 from volga.storage.scylla.api import AcsyllaHotFeatureStorageApi
 from volga.streaming.api.context.runtime_context import RuntimeContext
@@ -16,6 +15,7 @@ from cassandra.timestamps import MonotonicTimestampGenerator
 class ScyllaHotFeatureSinkFunction(SinkFunction):
 
     # TODO implement retries
+    # TODO configure queue size
     def __init__(self, feature_name: str, key_value_extractor: Callable, max_in_flight: int = 1000, max_retries: int = 4, contact_points: Optional[List[str]] = None):
         self.session = None
         self.ts_gen = None

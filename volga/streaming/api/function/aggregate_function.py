@@ -3,7 +3,6 @@ import enum
 from abc import abstractmethod
 from dataclasses import dataclass
 from typing import Tuple, List, Optional, Any, Dict, Callable
-from decimal import Decimal
 
 from pydantic import BaseModel
 
@@ -46,7 +45,7 @@ class AllAggregateFunction(AggregateFunction):
 
     @dataclass
     class _Acc:
-        aggs: Dict[AggregationType, Decimal]
+        aggs: Dict[AggregationType, float]
 
     def __init__(self, agg_type: AggregationType, agg_on_func: Callable):
         self.agg_on_func = agg_on_func
@@ -72,9 +71,9 @@ class AllAggregateFunction(AggregateFunction):
 
         if AggregationType.COUNT == self.agg_type or AggregationType.AVG == self.agg_type:
             if AggregationType.COUNT in accumulator.aggs:
-                accumulator.aggs[AggregationType.COUNT] += Decimal(1)
+                accumulator.aggs[AggregationType.COUNT] += 1
             else:
-                accumulator.aggs[AggregationType.COUNT] = Decimal(1)
+                accumulator.aggs[AggregationType.COUNT] = 1
             if AggregationType.COUNT == self.agg_type:
                 return
 
@@ -87,9 +86,9 @@ class AllAggregateFunction(AggregateFunction):
                 raise e
 
             if AggregationType.SUM in accumulator.aggs:
-                accumulator.aggs[AggregationType.SUM] += Decimal(v)
+                accumulator.aggs[AggregationType.SUM] += v
             else:
-                accumulator.aggs[AggregationType.SUM] = Decimal(v)
+                accumulator.aggs[AggregationType.SUM] = v
 
             if AggregationType.AVG == self.agg_type:
                 accumulator.aggs[AggregationType.AVG] = accumulator.aggs[AggregationType.SUM]/accumulator.aggs[AggregationType.COUNT]

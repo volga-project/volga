@@ -21,7 +21,7 @@ class TestScyllaHotFeatureSinkFunction(unittest.TestCase):
         s = ctx.from_collection(ins)
 
         # TODO if parallelism > 1 we also need to add key_by operator to make sure sink workers do not share keys -
-        # this will avoid data races when writing to hot storage
+        # TODO this will avoid data races when writing to hot storage
         parallelism = 1
         s.set_parallelism(parallelism)
 
