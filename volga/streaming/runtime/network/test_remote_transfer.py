@@ -10,7 +10,7 @@ import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.ray_utils import get_head_node_id
-from volga.streaming.runtime.master.stats.stats_manager import StatsManager
+from volga.streaming.common.stats import create_streaming_stats_manager, aggregate_streaming_historical_stats
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
@@ -19,8 +19,8 @@ from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_C
     DEFAULT_DATA_READER_CONFIG
 from volga.streaming.runtime.network.remote.transfer_actor import TransferActor
 from volga.streaming.runtime.network.remote.transfer_io_handlers import TransferSender, TransferReceiver
-from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors, RAY_ADDR, \
-    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, StatsActor
+from volga.streaming.runtime.network.testing_utils import TestWriter, TestReader, start_ray_io_handler_actors, \
+    StatsActor
 
 
 class TestRemoteTransfer(unittest.TestCase):
@@ -160,7 +160,7 @@ class TestRemoteTransfer(unittest.TestCase):
             writer_config=writer_config
         )
         start_ray_io_handler_actors([*readers, *writers, source_transfer_actor, target_transfer_actor])
-        stats_manager = StatsManager()
+        stats_manager = create_streaming_stats_manager()
         for reader in readers:
             stats_manager.register_worker(reader)
 
@@ -203,7 +203,8 @@ class TestRemoteTransfer(unittest.TestCase):
 
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
-        avg_throughput, latency_stats, _, _ = stats_manager.get_final_aggregated_stats()
+        historical_stats = stats_manager.get_historical_stats()
+        avg_throughput, latency_stats, _, _ = aggregate_streaming_historical_stats(historical_stats)
         stats_manager.stop()
 
         t = time.time() - start_ts
@@ -436,7 +437,9 @@ class TestRemoteTransfer(unittest.TestCase):
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
         ray.get(stats_actor.stop.remote())
-        avg_throughput, latency_stats, hist_throughput, hist_latency = ray.get(stats_actor.get_final_aggregated_stats.remote())
+        historical_stats = ray.get(stats_actor.get_historical_stats.remote())
+
+        avg_throughput, latency_stats, hist_throughput, hist_latency = aggregate_streaming_historical_stats(historical_stats)
 
         run_duration = time.time() - start_ts
         estimated_throughput = num_msgs / run_duration

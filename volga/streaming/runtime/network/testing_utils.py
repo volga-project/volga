@@ -1,8 +1,8 @@
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Optional, Tuple
 
-from volga.streaming.common.utils import ms_to_s, now_ts_ms
-from volga.streaming.runtime.master.stats.stats_manager import WorkerLatencyStatsState, WorkerThroughputStatsState, \
-    WorkerStatsUpdate, StatsManager
+from volga.streaming.common.stats import create_streaming_stats_manager, LATENCY_STATS_CONFIG, THROUGHPUT_STATS_CONFIG
+from volga.streaming.common.utils import now_ts_ms
+from volga.stats.stats_manager import HistoricalStats, StatsUpdate, HistogramStats, CounterStats
 from volga.streaming.runtime.network.channel import Channel
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
@@ -114,8 +114,8 @@ class TestReader:
         self.terminal_messages_received =  {channel.channel_id: False for channel in self.channels}
 
         # stats
-        self.latency_stats = WorkerLatencyStatsState.create()
-        self.throughput_stats = WorkerThroughputStatsState.create()
+        self.latency_stats = HistogramStats.create(LATENCY_STATS_CONFIG)
+        self.throughput_stats = CounterStats.create(THROUGHPUT_STATS_CONFIG)
 
     def start(self) -> Optional[str]:
         return self.io_loop.connect_and_start()
@@ -155,7 +155,7 @@ class TestReader:
 
         return True
 
-    def collect_stats(self) -> List[WorkerStatsUpdate]:
+    def collect_stats(self) -> List[StatsUpdate]:
         return [self.throughput_stats.collect(), self.latency_stats.collect()]
 
     def get_name(self):
@@ -169,7 +169,7 @@ class TestReader:
 class StatsActor:
 
     def __init__(self, readers: List):
-        self.stats_manager = StatsManager()
+        self.stats_manager = create_streaming_stats_manager()
         for reader in readers:
             self.stats_manager.register_worker(reader)
 
@@ -179,11 +179,13 @@ class StatsActor:
     def stop(self):
         self.stats_manager.stop()
 
-    def get_final_aggregated_stats(self) -> Tuple[
-        float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
-    ]:
-        return self.stats_manager.get_final_aggregated_stats()
+    # def get_final_aggregated_stats(self) -> Tuple[
+    #     float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
+    # ]:
+    #     return self.stats_manager.get_final_aggregated_stats()
 
+    def get_historical_stats(self) -> HistoricalStats:
+        return self.stats_manager.get_historical_stats()
 
 
 def construct_message(msg_id: int, channel_id: str, msg_size: int, mark_latency: bool, is_terminal: bool = False) -> Dict:

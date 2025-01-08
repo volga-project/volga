@@ -12,7 +12,7 @@ from volga.streaming.api.operators.chained import ChainedOperator
 from volga.streaming.api.operators.operators import ISourceOperator, SourceOperator, SinkOperator
 from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
-from volga.streaming.runtime.master.stats.stats_manager import WorkerStatsUpdate
+from volga.stats.stats_manager import StatsUpdate
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
 from volga.streaming.runtime.network.local.data_writer import DataWriter
@@ -150,7 +150,7 @@ class StreamTask(ABC):
             self.thread.join(timeout=5)
         logger.info(f'Closed task {self.execution_vertex.execution_vertex_id}')
 
-    def collect_stats(self) -> List[WorkerStatsUpdate]:
+    def collect_stats(self) -> List[StatsUpdate]:
         if isinstance(self.processor, SourceProcessor):
             assert isinstance(self.processor.operator, ISourceOperator)
             source_context = self.processor.operator.get_source_context()

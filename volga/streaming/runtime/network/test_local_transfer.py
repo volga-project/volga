@@ -7,14 +7,13 @@ import time
 
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from volga.streaming.runtime.master.stats.stats_manager import StatsManager
+from volga.streaming.common.stats import create_streaming_stats_manager, aggregate_streaming_historical_stats
 from volga.streaming.runtime.network.channel import LocalChannel
 from volga.streaming.runtime.network.io_loop import IOLoop
 from volga.streaming.runtime.network.local.data_reader import DataReader
 from volga.streaming.runtime.network.local.data_writer import DataWriter
 from volga.streaming.runtime.network.network_config import DEFAULT_DATA_WRITER_CONFIG, DEFAULT_DATA_READER_CONFIG
-from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, start_ray_io_handler_actors, RAY_ADDR, \
-    REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+from volga.streaming.runtime.network.testing_utils import TestReader, TestWriter, start_ray_io_handler_actors
 
 
 class TestLocalTransfer(unittest.TestCase):
@@ -133,7 +132,7 @@ class TestLocalTransfer(unittest.TestCase):
         actors = list(readers.values()) + list(writers.values())
         start_ray_io_handler_actors(actors)
 
-        stats_manager = StatsManager()
+        stats_manager = create_streaming_stats_manager()
         for reader_id in readers:
             stats_manager.register_worker(readers[reader_id])
 
@@ -180,7 +179,9 @@ class TestLocalTransfer(unittest.TestCase):
 
         num_msgs = sum(list(num_msgs_rcvd_total.values()))
 
-        avg_throughput, latency_stats, hist_throughput, hist_latency = stats_manager.get_final_aggregated_stats()
+        historical_stats = stats_manager.get_historical_stats()
+        avg_throughput, latency_stats, hist_throughput, hist_latency = aggregate_streaming_historical_stats(historical_stats)
+
         stats_manager.stop()
 
         t = time.time() - start_ts

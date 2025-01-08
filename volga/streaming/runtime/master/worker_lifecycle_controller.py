@@ -1,7 +1,6 @@
 import logging
 import sys
 import time
-import random
 from typing import List, Tuple, Dict
 
 import ray
@@ -15,7 +14,7 @@ from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfi
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
-from volga.streaming.runtime.master.stats.stats_manager import StatsManager
+from volga.stats.stats_manager import StatsManager
 from volga.streaming.runtime.master.transfer_controller import TransferController
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
 from volga.streaming.runtime.worker.job_worker import JobWorker, WorkerNodeInfo, VALID_PORT_RANGE

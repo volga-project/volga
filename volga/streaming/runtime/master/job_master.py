@@ -7,13 +7,15 @@ import ray
 from volga.streaming.api.job_graph.job_graph import JobGraph
 from volga.streaming.api.operators.chained import ChainedSourceOperator
 from volga.streaming.api.operators.operators import ISourceOperator, SourceOperator
+from volga.streaming.common.stats import LATENCY_STATS_CONFIG, THROUGHPUT_STATS_CONFIG, create_streaming_stats_manager, \
+    aggregate_streaming_historical_stats
 from volga.streaming.runtime.config.streaming_config import StreamingConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
 from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
 from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
 from volga.streaming.runtime.master.scheduler.job_scheduler import JobScheduler
-from volga.streaming.runtime.master.stats.stats_manager import StatsManager
+from volga.stats.stats_manager import StatsManager
 from volga.streaming.runtime.network.network_config import DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitManager, SourceSplit
 
@@ -31,7 +33,7 @@ class JobMaster:
         self.runtime_context = JobMasterRuntimeContext(streaming_config)
 
         self.resource_manager = ResourceManager()
-        self.stats_manager = StatsManager()
+        self.stats_manager = create_streaming_stats_manager()
         node_assign_strategy = NodeAssignStrategy.by_name(self.master_config.node_assign_strategy)
         self.job_scheduler = JobScheduler(
             job_master=ray.get_runtime_context().current_actor,
@@ -161,4 +163,4 @@ class JobMaster:
     def get_final_perf_stats(self) -> Tuple[
         float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
     ]:
-        return self.stats_manager.get_final_aggregated_stats()
+        return aggregate_streaming_historical_stats(self.stats_manager.get_historical_stats())

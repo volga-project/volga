@@ -6,14 +6,15 @@ from typing import List, Any, Dict, Optional
 from ray.actor import ActorHandle
 import ray
 
-from volga.streaming.api.collector.collector import Collector, CollectionCollector
+from volga.streaming.api.collector.collector import Collector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import Function, SourceContext, SourceFunction, MapFunction, \
     FlatMapFunction, FilterFunction, KeyFunction, ReduceFunction, SinkFunction, EmptyFunction, JoinFunction
 from volga.streaming.api.message.message import Record, KeyRecord
 from volga.streaming.api.operators.timestamp_assigner import TimestampAssigner
+from volga.streaming.common.stats import THROUGHPUT_STATS_CONFIG, LATENCY_STATS_CONFIG
 from volga.streaming.common.utils import now_ts_ms
-from volga.streaming.runtime.master.stats.stats_manager import WorkerLatencyStatsState, WorkerThroughputStatsState
+from volga.stats.stats_manager import HistogramStats, CounterStats
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitEnumerator, SourceSplit, SourceSplitType
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,7 @@ class SourceOperator(ISourceOperator):
             self.finished = False
             self.current_split: Optional[SourceSplit] = None
             self.job_master: Optional[ActorHandle] = None
-            self.throughput_stats = WorkerThroughputStatsState.create()
+            self.throughput_stats = CounterStats.create(THROUGHPUT_STATS_CONFIG)
             self._started_at_ms = None
 
         def collect(self, value: Any):
@@ -312,7 +313,7 @@ class SinkOperator(StreamOperator, OneInputOperator):
         
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         super().open(collectors, runtime_context)
-        self.latency_stats = WorkerLatencyStatsState.create()
+        self.latency_stats = HistogramStats.create(LATENCY_STATS_CONFIG)
 
     def process_element(self, record: Record):
         if record.source_emit_ts is not None:

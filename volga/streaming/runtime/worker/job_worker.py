@@ -3,16 +3,16 @@ import sys
 import time
 import socket
 from threading import Thread
-from typing import Tuple, Optional, List, Any
+from typing import Optional, List, Any
 
 import ray
 from ray.actor import ActorHandle
 
-from volga.streaming.api.operators.operators import SourceOperator, ISourceOperator
+from volga.streaming.api.operators.operators import ISourceOperator
 from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.core.processor.processor import Processor, SourceProcessor, OneInputProcessor
-from volga.streaming.runtime.master.stats.stats_manager import WorkerStatsUpdate
+from volga.stats.stats_manager import StatsUpdate
 from volga.streaming.runtime.worker.task.stream_task import StreamTask, SourceStreamTask, \
     OneInputStreamTask, TwoInputStreamTask
 
@@ -157,7 +157,7 @@ class JobWorker:
     def exit(self):
         ray.actor.exit_actor()
 
-    def collect_stats(self) -> List[WorkerStatsUpdate]:
+    def collect_stats(self) -> List[StatsUpdate]:
         return self.task.collect_stats()
 
     def get_num_sent(self) -> Any:
