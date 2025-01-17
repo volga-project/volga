@@ -171,7 +171,7 @@ class StatsActor:
     def __init__(self, readers: List):
         self.stats_manager = create_streaming_stats_manager()
         for reader in readers:
-            self.stats_manager.register_worker(reader)
+            self.stats_manager.register_target(reader)
 
     def start(self):
         self.stats_manager.start()

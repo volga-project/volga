@@ -12,7 +12,7 @@ from volga.streaming.api.operators.operators import ISourceOperator
 from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
 from volga.streaming.runtime.core.processor.processor import Processor, SourceProcessor, OneInputProcessor
-from volga.stats.stats_manager import StatsUpdate
+from volga.stats.stats_manager import StatsUpdate, ICollectStats
 from volga.streaming.runtime.worker.task.stream_task import StreamTask, SourceStreamTask, \
     OneInputStreamTask, TwoInputStreamTask
 
@@ -34,7 +34,7 @@ class WorkerNodeInfo:
 
 
 @ray.remote
-class JobWorker:
+class JobWorker(ICollectStats):
 
     def __init__(self, job_master: ActorHandle, worker_config: StreamingWorkerConfig):
         self.job_master = job_master

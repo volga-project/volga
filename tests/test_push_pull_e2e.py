@@ -34,8 +34,10 @@ class TestPushPullE2E(unittest.TestCase):
 
         assert push_period_s * 100 < 60 * agg_window_minutes # makes sure we receive expeected results for assertions later
 
+        on_demand_config = DEFAULT_ON_DEMAND_CONFIG
+
         # cleanup db
-        asyncio.get_event_loop().run_until_complete(DataService._cleanup_db())
+        asyncio.get_event_loop().run_until_complete(DataService._cleanup_db(on_demand_config.data_service_config))
 
         # streaming job def
         # this simulates an event where a user clicks all posts simultaneously
@@ -80,21 +82,19 @@ class TestPushPullE2E(unittest.TestCase):
             agg_on_func=(lambda e: e['user_id']),
         )], _window_output_func).sink(sink_function)
 
-
         # on-demand compute
-        config = DEFAULT_ON_DEMAND_CONFIG
-        config.num_workers_per_node = 5
-        config.max_ongoing_requests_per_worker = 999999
+        on_demand_config.num_workers_per_node = 5
+        on_demand_config.max_ongoing_requests_per_worker = 999999
 
-        coordinator = OnDemandCoordinator.remote(config)
-        ray.get(coordinator.start_actors.remote())
+        coordinator = OnDemandCoordinator.remote(on_demand_config)
+        ray.get(coordinator.start.remote())
 
         time.sleep(1) # wait for on-demand workers to spin up
 
         # submit streaming job after on-demand actors are ready
         ctx.submit()
 
-        client = OnDemandClient(config)
+        client = OnDemandClient(on_demand_config)
 
         requests = [
             OnDemandRequest(args=[OnDemandArgs(feature_name=feature_name, serve_or_udf=True, keys={'post_id': post_id})])

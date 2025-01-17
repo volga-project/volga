@@ -4,7 +4,7 @@ from typing import Optional, List
 
 from aiohttp import ClientSession
 
-from volga.on_demand.actors.proxy import API_ROUTE
+from volga.on_demand.actors.server import API_ROUTE
 from volga.on_demand.on_demand import OnDemandRequest, OnDemandResponse
 from volga.on_demand.on_demand_config import OnDemandConfig
 
@@ -13,7 +13,7 @@ class OnDemandClient:
 
     def __init__(self, config: OnDemandConfig):
         self.config = config
-        self.url_base = f'http://127.0.0.1:{config.proxy_port}/{API_ROUTE}/'
+        self.url_base = f'http://{config.client_url}:{config.server_port}/{API_ROUTE}/'
 
     async def request(self, request: OnDemandRequest, session: Optional[ClientSession] = None) -> OnDemandResponse:
         if session is None:

@@ -21,9 +21,7 @@ class TestOnDemandActors(unittest.TestCase):
 
     def _test_serve_or_udf(self, serve_or_udf: bool):
         config = DEFAULT_ON_DEMAND_CONFIG
-        config.num_workers_per_node = 5
-        config.max_ongoing_requests_per_worker = 999999
-        num_requests = 1000
+        num_requests = 100
 
         # serve
         feature_name = 'test_feature'
@@ -66,7 +64,7 @@ class TestOnDemandActors(unittest.TestCase):
 
         with ray.init():
             coordinator = OnDemandCoordinator.remote(config)
-            _proxy_per_node, _workers_per_node = ray.get(coordinator.start_actors.remote())
+            _servers_per_node = ray.get(coordinator.start.remote())
             if not serve_or_udf:
                 # register specs for udf case
                 ray.get(coordinator.register_on_demand_specs.remote([on_demand_spec]))
@@ -78,11 +76,11 @@ class TestOnDemandActors(unittest.TestCase):
             # worker = list(_workers_per_node.values())[0][0]
             # res = ray.get(worker.do_work.remote(request))
             # print(res)
-            worker_ids = set(list(map(lambda r: r.worker_id, responses)))
-            if num_requests < config.num_workers_per_node:
-                assert len(worker_ids) == num_requests
+            server_ids = set(list(map(lambda r: r.server_id, responses)))
+            if num_requests < config.num_servers_per_node:
+                assert len(server_ids) == num_requests
             else:
-                assert len(worker_ids) == config.num_workers_per_node
+                assert len(server_ids) == config.num_servers_per_node
             for r in responses:
                 if serve_or_udf:
                     _keys = r.feature_values[feature_name].keys

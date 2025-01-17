@@ -162,7 +162,7 @@ class TestRemoteTransfer(unittest.TestCase):
         start_ray_io_handler_actors([*readers, *writers, source_transfer_actor, target_transfer_actor])
         stats_manager = create_streaming_stats_manager()
         for reader in readers:
-            stats_manager.register_worker(reader)
+            stats_manager.register_target(reader)
 
         time.sleep(1)
         stats_manager.start()

@@ -50,7 +50,7 @@ class FeatureValue(BaseModel):
 
 class OnDemandResponse(BaseModel):
     feature_values: Dict[str, FeatureValue]
-    worker_id: int
+    server_id: int
 
 
 # decorator

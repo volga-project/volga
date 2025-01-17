@@ -1,3 +1,5 @@
+from abc import ABC, abstractmethod
+
 from sortedcontainers import SortedDict
 import copy
 import threading
@@ -201,10 +203,17 @@ class HistoricalStats(BaseModel):
     counters: Dict[str, HistoricalCounterStats]
 
 
+class ICollectStats(ABC):
+
+    @abstractmethod
+    def collect_stats(self) -> List[StatsUpdate]:
+        raise NotImplementedError()
+
+
 class StatsManager:
 
     def __init__(self, histograms: List[HistogramConfig], counters: List[CounterConfig], collect_period_s: int = 1):
-        self._workers = []
+        self._targets = []
         self._stats_collector_thread = Thread(target=self._collect_loop)
         self.running = False
         self.historical_stats = HistoricalStats(
@@ -234,11 +243,11 @@ class StatsManager:
         for config in counters:
             assert config.aggregation_window_s >= self.collect_period_s
 
-    def register_worker(self, worker): # TODO make interface for stats-collectable worker
-        self._workers.append(worker)
+    def register_target(self, target: ICollectStats):
+        self._targets.append(target)
 
     def _collect_stats_updates(self):
-        futs = [w.collect_stats.remote() for w in self._workers]
+        futs = [t.collect_stats.remote() for t in self._targets]
         res = ray.get(futs)
         histogram_updates = {}
         counter_updates = {}
