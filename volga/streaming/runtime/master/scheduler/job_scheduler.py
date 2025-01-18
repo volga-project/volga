@@ -4,8 +4,8 @@ from ray.actor import ActorHandle
 
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
 from volga.streaming.runtime.master.job_lifecycle.job_status import JobStatus
-from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
-from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
+from volga.streaming.runtime.master.node_assign_strategy import NodeAssignStrategy
+from volga.common.ray.resource_manager import ResourceManager
 from volga.stats.stats_manager import StatsManager
 from volga.streaming.runtime.master.worker_lifecycle_controller import WorkerLifecycleController
 

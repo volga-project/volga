@@ -9,7 +9,7 @@ from typing import Optional, Tuple, Any
 import ray
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from volga.ray_utils import get_head_node_id
+from volga.common.ray.resource_manager import ResourceManager
 from volga.streaming.common.stats import create_streaming_stats_manager, aggregate_streaming_historical_stats
 from volga.streaming.runtime.network.channel import RemoteChannel
 from volga.streaming.runtime.network.io_loop import IOLoop
@@ -393,7 +393,7 @@ class TestRemoteTransfer(unittest.TestCase):
 
         stats_actor_options = {'num_cpus': 0}
         stats_actor_options['scheduling_strategy'] = NodeAffinitySchedulingStrategy(
-            node_id=get_head_node_id(),
+            node_id=ResourceManager.fetch_head_node().node_id,
             soft=False
         )
         stats_actor = StatsActor.options(**stats_actor_options).remote([readers[reader_id] for reader_id in readers])

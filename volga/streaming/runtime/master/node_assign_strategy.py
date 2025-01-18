@@ -1,11 +1,10 @@
 import enum
 import itertools
-import time
 from abc import ABC, abstractmethod
 from typing import List, Dict, Optional
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionVertex
-from volga.streaming.runtime.master.resource_manager.resource_manager import Node, Resources
+from volga.common.ray.resource_manager import Node, Resources
 
 
 class NodeNodeAssignStrategyName(enum.Enum):
@@ -80,7 +79,9 @@ class ParallelismFirst(NodeAssignStrategy):
                 if node is None:
                     raise RuntimeError(f'Not enough resources, total capacity: {total_capacity}, required capacity: {required_capacity}')
                 assert exec_vertex.execution_vertex_id not in res
-                node.allocate_execution_vertex(exec_vertex)
+
+                node.acquire_resources(exec_vertex.resources)
+
                 res[exec_vertex.execution_vertex_id] = node
 
         return res
@@ -124,7 +125,9 @@ class OperatorFirst(NodeAssignStrategy):
                     raise RuntimeError(
                         f'Not enough resources, total capacity: {total_capacity}, required capacity: {required_capacity}')
                 assert exec_vertex.execution_vertex_id not in res
-                node.allocate_execution_vertex(exec_vertex)
+
+                node.acquire_resources(exec_vertex.resources)
+
                 res[exec_vertex.execution_vertex_id] = node
 
         return res

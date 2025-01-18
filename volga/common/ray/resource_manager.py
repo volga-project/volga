@@ -1,5 +1,4 @@
 import logging
-import time
 from typing import Optional, List, Dict
 
 from pydantic import BaseModel
@@ -74,12 +73,11 @@ class Node(BaseModel):
     address: str
     is_head: bool
     resources: Resources
+    is_streaming: bool
+    is_on_demand: bool
 
-    def allocate_execution_vertex(self, vertex: 'ExecutionVertex'):
-        vertex_resources = vertex.resources
-        if vertex_resources is None:
-            raise RuntimeError('Vertex resources is None')
-        self.resources.acquire_resources(vertex_resources)
+    def acquire_resources(self, resources: Resources):
+        self.resources.acquire_resources(resources)
 
 
 class ResourceManager:
@@ -89,9 +87,38 @@ class ResourceManager:
 
     def init(self):
         # TODO periodically check and update new/deleted nodes
-        self.nodes = self._fetch_nodes()
+        self.nodes = ResourceManager.fetch_nodes()
 
-    def _fetch_nodes(self) -> List[Node]:
+    # includes head node
+    def get_streaming_nodes(self) -> List[Node]:
+        assert self.nodes is not None
+        return ResourceManager.filter_streaming_nodes(self.nodes)
+
+    # includes head node
+    def get_on_demand_nodes(self) -> List[Node]:
+        assert self.nodes is not None
+        return ResourceManager.filter_on_demand_nodes(self.nodes)
+
+    def get_head_node(self) -> Node:
+        assert self.nodes is not None
+        return ResourceManager.filter_head_node(self.nodes)
+
+    @staticmethod
+    def filter_head_node(nodes: List[Node]) -> Node:
+        res = list(filter(lambda node: node.is_head, nodes))
+        assert len(res) == 1
+        return res[0]
+
+    @staticmethod
+    def filter_streaming_nodes(nodes: List[Node]) -> List[Node]:
+        return list(filter(lambda node: node.is_streaming, nodes))
+
+    @staticmethod
+    def filter_on_demand_nodes(nodes: List[Node]) -> List[Node]:
+        return list(filter(lambda node: node.is_on_demand, nodes))
+
+    @staticmethod
+    def fetch_nodes() -> List[Node]:
         res = []
         all_nodes = ray.nodes()
         for n in all_nodes:
@@ -102,20 +129,42 @@ class ResourceManager:
             if mem is not None:
                 mem = float(mem)
             gpu = _resources.get('GPU', None)
+            if is_head:
+                is_streaming = True
+                is_on_demand = True
+            else:
+                is_streaming = _resources.get('streaming_node', None)
+                is_on_demand = _resources.get('on_demand_node', None)
+                if is_streaming is None and is_on_demand is None:
+                    # if no custom resource specified we assume all node are for streaming
+                    is_streaming = True
+                    is_on_demand = False
+                elif is_streaming is None:
+                    is_streaming = False
+                elif is_on_demand is None:
+                    is_on_demand = False
+                else:
+                    raise RuntimeError('Node is either for on-demand or streaming workloads')
+
             resources = Resources(num_cpus=cpu, num_gpus=gpu, memory=mem)
             address = n['NodeManagerAddress']
             node_id = n['NodeID']
             node_name = n['NodeName']
             alive = n['Alive']
             if alive:
-                res.append(Node(node_id=node_id, node_name=node_name, address=address, is_head=is_head, resources=resources))
+                res.append(Node(
+                    node_id=node_id,
+                    node_name=node_name,
+                    address=address,
+                    is_head=is_head,
+                    resources=resources,
+                    is_streaming=is_streaming,
+                    is_on_demand=is_on_demand
+                ))
             else:
                 logger.info(f'Fetched non-alive node: {n}')
         return res
 
-    def assign_resources(self, execution_graph: 'ExecutionGraph', strategy: 'NodeAssignStrategy') -> Dict[str, Node]:
-        if self.nodes is None:
-            raise RuntimeError('ResourceManager not inited')
-
-        # TODO skip head node for distributed mode
-        return strategy.assign_resources(self.nodes, execution_graph)
+    @staticmethod
+    def fetch_head_node() -> Node:
+        return ResourceManager.filter_head_node(ResourceManager.fetch_nodes())

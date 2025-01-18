@@ -5,7 +5,7 @@ from typing import Optional, Dict
 from ray.actor import ActorHandle
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
-from volga.ray_utils import get_head_node_id
+from volga.common.ray.resource_manager import ResourceManager
 from volga.streaming.api.job_graph.job_graph import JobGraph
 from volga.streaming.runtime.master.job_master import JobMaster
 
@@ -32,7 +32,7 @@ class JobClient:
         if master_on_head:
             options_kwargs['num_cpus'] = 0
             options_kwargs['scheduling_strategy'] = NodeAffinitySchedulingStrategy(
-                node_id=get_head_node_id(),
+                node_id=ResourceManager.fetch_head_node().node_id,
                 soft=False
             )
 

@@ -4,7 +4,7 @@ import unittest
 import ray
 
 
-from volga.on_demand.actors.coordinator import OnDemandCoordinator
+from volga.on_demand.actors.coordinator import OnDemandCoordinator, create_on_demand_coordinator
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.data.data_service import DataService
 from volga.on_demand.on_demand import OnDemandArgs, OnDemandRequest, OnDemandSpec, FeatureValue, OnDemandResponse
@@ -56,14 +56,14 @@ class TestOnDemandActors(unittest.TestCase):
             )])
 
         loop = asyncio.get_event_loop()
-        loop.run_until_complete(DataService.init())
+        loop.run_until_complete(DataService.init(config))
         loop.run_until_complete(DataService._instance.api.insert(feature_name, keys, values))
 
         client = OnDemandClient(config)
         requests = [request for _ in range(num_requests)]
 
         with ray.init():
-            coordinator = OnDemandCoordinator.remote(config)
+            coordinator = create_on_demand_coordinator(config)
             _servers_per_node = ray.get(coordinator.start.remote())
             if not serve_or_udf:
                 # register specs for udf case

@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from tests.test_wordcount import TestWordCount
 from volga.streaming.runtime.network.test_local_transfer import TestLocalTransfer
 from volga.streaming.runtime.network.test_remote_transfer import TestRemoteTransfer
-from volga.streaming.runtime.network.testing_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
+from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 
 RETRIES_PER_RUN = 2
 

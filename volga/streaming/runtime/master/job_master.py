@@ -7,15 +7,14 @@ import ray
 from volga.streaming.api.job_graph.job_graph import JobGraph
 from volga.streaming.api.operators.chained import ChainedSourceOperator
 from volga.streaming.api.operators.operators import ISourceOperator, SourceOperator
-from volga.streaming.common.stats import LATENCY_STATS_CONFIG, THROUGHPUT_STATS_CONFIG, create_streaming_stats_manager, \
+from volga.streaming.common.stats import create_streaming_stats_manager, \
     aggregate_streaming_historical_stats
 from volga.streaming.runtime.config.streaming_config import StreamingConfig
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
 from volga.streaming.runtime.master.context.job_master_runtime_context import JobMasterRuntimeContext
-from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
-from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
+from volga.streaming.runtime.master.node_assign_strategy import NodeAssignStrategy
+from volga.common.ray.resource_manager import ResourceManager
 from volga.streaming.runtime.master.scheduler.job_scheduler import JobScheduler
-from volga.stats.stats_manager import StatsManager
 from volga.streaming.runtime.network.network_config import DEFAULT_NETWORK_CONFIG
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplitManager, SourceSplit
 

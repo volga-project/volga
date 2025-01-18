@@ -12,8 +12,8 @@ from volga.streaming.api.operators.operators import SinkOperator
 from volga.streaming.runtime.config.streaming_config import StreamingWorkerConfig
 
 from volga.streaming.runtime.core.execution_graph.execution_graph import ExecutionGraph, ExecutionVertex
-from volga.streaming.runtime.master.resource_manager.node_assign_strategy import NodeAssignStrategy
-from volga.streaming.runtime.master.resource_manager.resource_manager import ResourceManager
+from volga.streaming.runtime.master.node_assign_strategy import NodeAssignStrategy
+from volga.common.ray.resource_manager import ResourceManager
 from volga.stats.stats_manager import StatsManager
 from volga.streaming.runtime.master.transfer_controller import TransferController
 from volga.streaming.runtime.network.channel import LocalChannel, gen_ipc_addr, RemoteChannel
@@ -46,7 +46,10 @@ class WorkerLifecycleController:
         workers = {}
         vertex_ids = []
         logger.info(f'Assigning workers to nodes...')
-        node_assignment = self.resource_manager.assign_resources(execution_graph, self.node_assign_strategy)
+
+        # TODO filter streaming-only nodes
+        streaming_nodes = self.resource_manager.get_streaming_nodes()
+        node_assignment = self.node_assign_strategy.assign_resources(streaming_nodes, execution_graph)
 
         vertices_per_node = {}
         for vertex_id in node_assignment:

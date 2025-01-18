@@ -10,7 +10,7 @@ from typing import Optional, Any, Tuple
 import ray
 import zmq
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-from volga.streaming.runtime.network.testing_utils import RAY_ADDR
+from volga.common.ray.ray_utils import RAY_ADDR
 
 from volga.streaming.runtime.network_deprecated.buffer.buffering_config import BufferingConfig
 from volga.streaming.runtime.network_deprecated.buffer.buffering_policy import BufferingPolicy, PeriodicPartialFlushPolicy, \

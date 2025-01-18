@@ -1,6 +1,9 @@
 import asyncio
 from typing import Dict, Any, List, Tuple
 
+import ray
+from volga.on_demand.data.data_service import DataService
+from volga.on_demand.on_demand_config import OnDemandConfig
 from volga.storage.scylla.api import AcsyllaHotFeatureStorageApi
 
 TEST_FEATURE_NAME = 'test_feature'
@@ -10,11 +13,16 @@ def sample_key_value(i: int) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     return {'key': f'key_{i}'}, {'value': f'value_{i}'}
 
 
-def create_sample_feature_data(num_keys: int = 1000):
+@ray.remote
+def setup_sample_feature_data_ray(config: OnDemandConfig, num_keys: int = 1000):
+    asyncio.run(setup_sample_feature_data(config, num_keys))
+
+async def setup_sample_feature_data(config: OnDemandConfig, num_keys: int = 1000):
+    await DataService._cleanup_db(config.data_service_config)
     api = AcsyllaHotFeatureStorageApi()
     keys_values = [sample_key_value(i) for i in range(num_keys)]
 
-    asyncio.get_event_loop().run_until_complete(_insert_data(api, keys_values))
+    await _insert_data(api, keys_values)
 
 
 async def _insert_data(api: AcsyllaHotFeatureStorageApi, keys_values: List[Tuple[Dict[str, Any], Dict[str, Any]]]):

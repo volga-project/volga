@@ -8,7 +8,7 @@ from volga.streaming.api.operators.operators import StreamOperator
 from volga.streaming.api.partition.partition import RoundRobinPartition, Partition, ForwardPartition
 
 from volga.streaming.common.config.resource_config import ResourceConfig
-from volga.streaming.runtime.master.resource_manager.resource_manager import \
+from volga.common.ray.resource_manager import \
     Resources, RESOURCE_KEY_CPU, RESOURCE_KEY_GPU, RESOURCE_KEY_MEM
 from volga.streaming.runtime.network.channel import Channel
 
