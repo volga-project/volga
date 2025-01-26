@@ -133,8 +133,8 @@ class ResourceManager:
                 is_streaming = True
                 is_on_demand = True
             else:
-                is_streaming = _resources.get('streaming_node', None)
-                is_on_demand = _resources.get('on_demand_node', None)
+                is_streaming = True if 'streaming_node' in _resources else None
+                is_on_demand = True if 'on_demand_node' in _resources else None
                 if is_streaming is None and is_on_demand is None:
                     # if no custom resource specified we assume all node are for streaming
                     is_streaming = True

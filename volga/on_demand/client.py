@@ -2,6 +2,7 @@ import asyncio
 import json
 from typing import Optional, List
 
+import aiohttp
 from aiohttp import ClientSession
 
 from volga.on_demand.actors.server import API_ROUTE
@@ -14,6 +15,13 @@ class OnDemandClient:
     def __init__(self, config: OnDemandConfig):
         self.config = config
         self.url_base = f'http://{config.client_url}:{config.server_port}/{API_ROUTE}/'
+
+    async def request_no_keepalive(self, request: OnDemandRequest) -> OnDemandResponse:
+        url = self.url_base + request.json()
+        async with aiohttp.request('GET', url) as response:
+            raw = await response.text()
+            await asyncio.sleep(0.1)
+            return OnDemandResponse(**json.loads(raw))
 
     async def request(self, request: OnDemandRequest, session: Optional[ClientSession] = None) -> OnDemandResponse:
         if session is None:

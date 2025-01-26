@@ -191,11 +191,11 @@ class HistoricalCounterStats(CounterStatsBase):
 
         assert len(self.counts_per_s) <= self.aggregation_window_s
 
-        # calculate aggregated rate over window
-        agg = sum(list(self.counts_per_s.values()))/self.aggregation_window_s
+        # calculate avg rate over window
+        avg = sum(list(self.counts_per_s.values()))/self.aggregation_window_s
 
-        self.historical_counts.append((secs[-1], agg))
-        print(f'[{secs[-1]}] {self.name}: {agg} count/s') # TODO proper logging
+        self.historical_counts.append((secs[-1], avg))
+        print(f'[{secs[-1]}] {self.name}: {avg} count/s') # TODO proper logging
 
 
 class HistoricalStats(BaseModel):
@@ -213,7 +213,8 @@ class ICollectStats(ABC):
 class StatsManager:
 
     def __init__(self, histograms: List[HistogramConfig], counters: List[CounterConfig], collect_period_s: int = 1):
-        self._targets = []
+        # self._targets = []
+        self._targets = {}
         self._stats_collector_thread = Thread(target=self._collect_loop)
         self.running = False
         self.historical_stats = HistoricalStats(
@@ -243,15 +244,21 @@ class StatsManager:
         for config in counters:
             assert config.aggregation_window_s >= self.collect_period_s
 
-    def register_target(self, target: ICollectStats):
-        self._targets.append(target)
+    def register_target(self, target_id: str, target: ICollectStats):
+        assert target_id not in self._targets
+        self._targets[target_id] = target
 
     def _collect_stats_updates(self):
-        futs = [t.collect_stats.remote() for t in self._targets]
+        futs = [t.collect_stats.remote() for t in list(self._targets.values())]
         res = ray.get(futs)
         histogram_updates = {}
         counter_updates = {}
-        for updates in res:
+
+        last_count_per_target = {} # used to pring debug msg
+
+        for i in range(len(res)):
+            updates = res[i]
+            target_id = list(self._targets.keys())[i]
             for update in updates:
                 name = update.name
                 if isinstance(update, HistogramStatsUpdate):
@@ -264,8 +271,16 @@ class StatsManager:
                         counter_updates[name].append(update)
                     else:
                         counter_updates[name] = [update]
+
+                    if len(update.counts_per_s) == 0:
+                        last_count_per_target[target_id] = 0
+                    else:
+                        last_count_per_target[target_id] = list(update.counts_per_s.values())[-1]
                 else:
                     raise RuntimeError(f'Unknown stats update type {update.__class__.__name__}')
+
+        # TODO remove after debug
+        print(f'[StatsManager] Partial count updates {last_count_per_target}')
 
         for name in histogram_updates:
             self.historical_stats.histograms[name].aggregate_updates(histogram_updates[name])

@@ -134,7 +134,7 @@ class TestLocalTransfer(unittest.TestCase):
 
         stats_manager = create_streaming_stats_manager()
         for reader_id in readers:
-            stats_manager.register_target(readers[reader_id])
+            stats_manager.register_target(str(reader_id), readers[reader_id])
 
         time.sleep(1)
         stats_manager.start()

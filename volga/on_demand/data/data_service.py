@@ -1,6 +1,6 @@
 from typing import Dict, Any
 
-from volga.storage.scylla.api import AcsyllaHotFeatureStorageApi
+from volga.storage.scylla.api import AcsyllaHotFeatureStorageApi, ScyllaPyHotFeatureStorageApi
 
 
 # TODO abstract data connector
@@ -12,8 +12,8 @@ class DataService:
         assert 'scylla' in data_service_config
         contact_points = data_service_config['scylla']['contact_points']
 
-        # self.api = ScyllaPyHotFeatureStorageApi()
-        self.api = AcsyllaHotFeatureStorageApi(contact_points=contact_points)
+        self.api = ScyllaPyHotFeatureStorageApi(contact_points=contact_points)
+        # self.api = AcsyllaHotFeatureStorageApi(contact_points=contact_points)
 
     @staticmethod
     async def init(data_service_config: Dict):

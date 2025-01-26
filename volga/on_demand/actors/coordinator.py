@@ -33,6 +33,7 @@ class OnDemandCoordinator:
 
         is_multi_node = len(all_nodes) > 1
         server_id = 0
+        init_futs = []
         for n in all_nodes:
             if is_multi_node and n.is_head:
                 # skip head when running in multi-node env
@@ -40,8 +41,6 @@ class OnDemandCoordinator:
 
             node_id = n.node_id
 
-            # start servers
-            init_futs = []
             for i in range(self.config.num_servers_per_node):
 
                 # TODO pin to node
@@ -57,19 +56,19 @@ class OnDemandCoordinator:
                 else:
                     self.servers_per_node[node_id] = [server]
                 init_futs.append(server.init.remote())
-                self.stats_manager.register_target(server)
+                self.stats_manager.register_target(str(server_id), server)
                 server_id += 1
-            ray.get(init_futs)
+        ray.get(init_futs)
 
-            logger.info(f'[OnDemand] Created {self.config.num_servers_per_node} servers for node {node_id}')
 
-            # start serving
-            for node_id in self.servers_per_node:
-                for server in self.servers_per_node[node_id]:
-                    server.run.remote() # no wait, run is blocking
+        # start serving
+        for node_id in self.servers_per_node:
+            for server in self.servers_per_node[node_id]:
+                server.run.remote() # no wait, run is blocking
 
-            time.sleep(1) # TODO check the endpoints on server actors are responsive and remove this sleep
-            logger.info(f'[OnDemand] Started {len(self.servers_per_node[node_id])} servers for node {node_id}')
+        logger.info(f'[OnDemand] Launched {len(init_futs)} servers, {self.config.num_servers_per_node} per node')
+
+        time.sleep(1)  # TODO check the endpoints on server actors are responsive and remove this sleep
 
         self.stats_manager.start()
         logger.info(f'[OnDemand] All actors started')
@@ -95,7 +94,8 @@ def create_on_demand_coordinator(config: OnDemandConfig) -> ActorHandle:
         'scheduling_strategy': NodeAffinitySchedulingStrategy(
             node_id=head_node.node_id,
             soft=False
-        )
+        ),
+        'num_cpus': 0 # to schedule on head
     }
     coordinator = OnDemandCoordinator.options(**options).remote(config)
     return coordinator

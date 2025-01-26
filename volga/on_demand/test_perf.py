@@ -22,8 +22,9 @@ class TestOnDemandPerf(unittest.TestCase):
         num_keys = 10000
         config = OnDemandConfig(
             # client_url='127.0.0.1',
-            client_url='on-demand-service.ray-system.svc.cluster.local',
-            num_servers_per_node=1,
+            # client_url='on-demand-service.ray-system.svc.cluster.local',
+            client_url='127.1.27.2',
+            num_servers_per_node=2,
             server_port=1122,
             data_service_config={
                 'scylla': {
@@ -48,6 +49,7 @@ class TestOnDemandPerf(unittest.TestCase):
             tasks = set()
             max_tasks = 1000
             session = ClientSession()
+            # session = None
             last_done_ts = [time.time()]
             loop = asyncio.get_event_loop()
             while True:
@@ -61,9 +63,14 @@ class TestOnDemandPerf(unittest.TestCase):
                 request = OnDemandRequest(args=[OnDemandArgs(feature_name=TEST_FEATURE_NAME, serve_or_udf=True, keys=keys)])
                 i = (i + 1) % num_keys
                 task = loop.create_task(client.request(request, session))
+                # task = loop.create_task(client.request_no_keepalive(request))
                 tasks.add(task)
 
                 def _done(_task, _i, _last_done_ts):
+                    res = _task.result()
+                    _server_id = res.server_id
+                    # if _i%10 == 0:
+                    #     print(_server_id)
                     tasks.discard(_task)
                     n = 5000
                     if _i%n == 0:

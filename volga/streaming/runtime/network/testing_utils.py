@@ -150,21 +150,16 @@ class TestReader:
 @ray.remote(max_concurrency=999)
 class StatsActor:
 
-    def __init__(self, readers: List):
+    def __init__(self, readers: Dict):
         self.stats_manager = create_streaming_stats_manager()
-        for reader in readers:
-            self.stats_manager.register_target(reader)
+        for reader_id in readers:
+            self.stats_manager.register_target(str(reader_id), readers[reader_id])
 
     def start(self):
         self.stats_manager.start()
 
     def stop(self):
         self.stats_manager.stop()
-
-    # def get_final_aggregated_stats(self) -> Tuple[
-    #     float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
-    # ]:
-    #     return self.stats_manager.get_final_aggregated_stats()
 
     def get_historical_stats(self) -> HistoricalStats:
         return self.stats_manager.get_historical_stats()

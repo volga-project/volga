@@ -1,4 +1,5 @@
 import json
+import time
 from typing import Dict, Optional
 
 from acsylla import create_cluster, create_statement, Session
@@ -76,7 +77,8 @@ class ScyllaPyHotFeatureStorageApi(HotFeatureStorageApiBase):
         await self.scylla.shutdown()
 
     async def _drop_tables(self):
-        raise NotImplementedError()
+        q = f'DROP TABLE {HOT_FEATURE_TABLE_NAME}'
+        await self.scylla.execute(q)
 
 
 class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
