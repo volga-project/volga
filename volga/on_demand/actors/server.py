@@ -48,7 +48,8 @@ class OnDemandServer(ICollectStats):
         self.db_latency_stats = HistogramStats.create(ON_DEMAND_DB_LATENCY_CONFIG)
 
     async def init(self):
-        await DataService.init(self.config.data_service_config)
+        # await DataService.init(self.config.data_service_config)
+        await asyncio.sleep(0.1)
 
     def register_on_demand_specs(self, specs: List[OnDemandSpec]):
         for spec in specs:
@@ -81,48 +82,63 @@ class OnDemandServer(ICollectStats):
 
     # handle request (can contain multiple features) - either serve directly or execute udf per requested feature
     async def _do_work(self, request: OnDemandRequest, retries: int = 3) -> OnDemandResponse:
-        feature_values = {}
 
-        num_attempts = 0
-        while True:
-            futs = []
-            for arg in request.args:
-                if arg.serve_or_udf:
-                    futs.append(self._fetch(arg.feature_name, arg.keys))
-                else:
-                    futs.append(self._fetch_and_udf(arg.feature_name, arg.dep_features_keys, arg.udf_args))
+        start_ts = time.perf_counter()
+        await asyncio.sleep(0.0401)
 
-            start_ts = time.perf_counter()
-            feature_values_list = await asyncio.gather(*futs)
-            latency_ms = int((time.perf_counter() - start_ts) * 1000)
-
-            has_empty = False
-            for fv in feature_values_list:
-                if len(fv.keys) == 0:
-                    # retry
-                    has_empty = True
-                    break # inner
-            if has_empty:
-                if num_attempts >= retries:
-                    raise RuntimeError('Max retries fetching non-empty results')
-                else:
-                    num_attempts += 1
-                    await asyncio.sleep(0.5)
-            else:
-                # report metrics on success
-                self.qps_stats.inc()
-                self.latency_stats.observe(latency_ms, now_ts_ms())
-                break
-
-        for i in range(len(request.args)):
-            feature_name = request.args[i].feature_name
-            feature_value = feature_values_list[i]
-            feature_values[feature_name] = feature_value
+        latency_ms = int((time.perf_counter() - start_ts) * 1000)
+        self.latency_stats.observe(latency_ms, now_ts_ms())
+        self.qps_stats.inc()
 
         return OnDemandResponse(
-            feature_values=feature_values,
+            feature_values={'test_feature': FeatureValue(
+                keys={'k1': 'k1'},
+                values={'v1': 'v1'},
+            )},
             server_id=self.server_id
         )
+        # feature_values = {}
+        #
+        # num_attempts = 0
+        # while True:
+        #     futs = []
+        #     for arg in request.args:
+        #         if arg.serve_or_udf:
+        #             futs.append(self._fetch(arg.feature_name, arg.keys))
+        #         else:
+        #             futs.append(self._fetch_and_udf(arg.feature_name, arg.dep_features_keys, arg.udf_args))
+        #
+        #     start_ts = time.perf_counter()
+        #     feature_values_list = await asyncio.gather(*futs)
+        #     latency_ms = int((time.perf_counter() - start_ts) * 1000)
+        #
+        #     has_empty = False
+        #     for fv in feature_values_list:
+        #         if len(fv.keys) == 0:
+        #             # retry
+        #             has_empty = True
+        #             break # inner
+        #     if has_empty:
+        #         if num_attempts >= retries:
+        #             raise RuntimeError('Max retries fetching non-empty results')
+        #         else:
+        #             num_attempts += 1
+        #             await asyncio.sleep(0.5)
+        #     else:
+        #         # report metrics on success
+        #         self.qps_stats.inc()
+        #         self.latency_stats.observe(latency_ms, now_ts_ms())
+        #         break
+        #
+        # for i in range(len(request.args)):
+        #     feature_name = request.args[i].feature_name
+        #     feature_value = feature_values_list[i]
+        #     feature_values[feature_name] = feature_value
+        #
+        # return OnDemandResponse(
+        #     feature_values=feature_values,
+        #     server_id=self.server_id
+        # )
 
     # fetches value in storage and returns
     async def _fetch(self, feature_name: str, keys: Dict[str, Any]) -> FeatureValue:

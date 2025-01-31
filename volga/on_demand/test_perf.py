@@ -1,9 +1,13 @@
 import asyncio
+import datetime
 import functools
+import random
 import time
 import unittest
 from asyncio import FIRST_COMPLETED
+from pprint import pprint
 
+import boto3
 import ray
 from aiohttp import ClientSession
 
@@ -23,7 +27,7 @@ class TestOnDemandPerf(unittest.TestCase):
         config = OnDemandConfig(
             # client_url='127.0.0.1',
             # client_url='on-demand-service.ray-system.svc.cluster.local',
-            client_url='127.1.27.2',
+            client_url='127.1.27.4',
             num_servers_per_node=2,
             server_port=1122,
             data_service_config={
@@ -38,12 +42,14 @@ class TestOnDemandPerf(unittest.TestCase):
         # loop.run_until_complete(DataService._cleanup_db(config.data_service_config))
         # setup_sample_feature_data(num_keys)
         with ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV):
-            ray.get(setup_sample_feature_data_ray.remote(config, num_keys))
+            ray.get(setup_sample_feature_data_ray.remote(config, num_keys)) # TODO uncomment
 
             coordinator = create_on_demand_coordinator(config)
             ray.get(coordinator.start.remote())
 
-            client = OnDemandClient(config)
+            time.sleep(10000)
+
+            client = OnDemandClient(config=None, url_base='http://k8s-raysyste-volgaond-3637bbe071-237137006.ap-northeast-1.elb.amazonaws.com')
 
             i = 0
             tasks = set()
@@ -57,6 +63,7 @@ class TestOnDemandPerf(unittest.TestCase):
                     # TODO indicate
                     # print('max tasks reached')
                     loop.run_until_complete(asyncio.wait(tasks, return_when=FIRST_COMPLETED))
+                    # time.sleep(1)
                     assert len(tasks) < max_tasks
 
                 keys, _ = sample_key_value(i)
@@ -69,8 +76,6 @@ class TestOnDemandPerf(unittest.TestCase):
                 def _done(_task, _i, _last_done_ts):
                     res = _task.result()
                     _server_id = res.server_id
-                    # if _i%10 == 0:
-                    #     print(_server_id)
                     tasks.discard(_task)
                     n = 5000
                     if _i%n == 0:
@@ -80,6 +85,9 @@ class TestOnDemandPerf(unittest.TestCase):
                         _last_done_ts[0] = time.time()
 
                 task.add_done_callback(functools.partial(_done, _i=i, _last_done_ts=last_done_ts))
+
+
+
 
 
 if __name__ == '__main__':

@@ -32,8 +32,8 @@ class OnDemandCoordinator:
         all_nodes = ResourceManager.filter_on_demand_nodes(ResourceManager.fetch_nodes())
 
         is_multi_node = len(all_nodes) > 1
-        server_id = 0
         init_futs = []
+        node_index = 1
         for n in all_nodes:
             if is_multi_node and n.is_head:
                 # skip head when running in multi-node env
@@ -42,14 +42,14 @@ class OnDemandCoordinator:
             node_id = n.node_id
 
             for i in range(self.config.num_servers_per_node):
-
-                # TODO pin to node
                 options = {
                     'scheduling_strategy': NodeAffinitySchedulingStrategy(
                         node_id=node_id,
                         soft=False
                     )
                 }
+                server_id = f'{node_index}_{i + 1}' # 1-based
+
                 server = OnDemandServer.options(**options).remote(node_id, server_id, self.config)
                 if node_id in self.servers_per_node:
                     self.servers_per_node[node_id].append(server)
@@ -57,7 +57,9 @@ class OnDemandCoordinator:
                     self.servers_per_node[node_id] = [server]
                 init_futs.append(server.init.remote())
                 self.stats_manager.register_target(str(server_id), server)
-                server_id += 1
+
+            node_index += 1
+
         ray.get(init_futs)
 
 

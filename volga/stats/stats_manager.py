@@ -1,5 +1,7 @@
+import statistics
 from abc import ABC, abstractmethod
 
+import boto3
 from sortedcontainers import SortedDict
 import copy
 import threading
@@ -159,7 +161,7 @@ class HistoricalHistogramStats(HistogramStatsBase):
 
 class HistoricalCounterStats(CounterStatsBase):
 
-    historical_counts: List[Tuple[float, float]]
+    historical_counts: List[Tuple[float, float, float]]
     aggregation_window_s: int
 
     def aggregate_updates(self, counter_updates: List[CounterStatsUpdate]):
@@ -194,7 +196,16 @@ class HistoricalCounterStats(CounterStatsBase):
         # calculate avg rate over window
         avg = sum(list(self.counts_per_s.values()))/self.aggregation_window_s
 
-        self.historical_counts.append((secs[-1], avg))
+        # calculate stdev over different updates - assuming each update comes from different worker this
+        # will show us metric discrepancy (needed to check even qps distribution as an example)
+        # we use last reported counter in each update
+        last_count_per_worker = []
+        for up in counter_updates:
+            if len(up.counts_per_s) != 0:
+                last_count_per_worker.append(list(up.counts_per_s.values())[-1])
+        stdev = statistics.stdev(last_count_per_worker)
+
+        self.historical_counts.append((secs[-1], avg, stdev))
         print(f'[{secs[-1]}] {self.name}: {avg} count/s') # TODO proper logging
 
 
@@ -304,3 +315,79 @@ class StatsManager:
 
     def get_historical_stats(self) -> HistoricalStats:
         return self.historical_stats
+
+
+# TODO move this some other place?
+def fetch_eks_container_insights_cpu_metrics():
+    client = boto3.client('cloudwatch')
+    # list metrics
+    response = client.list_metrics(
+        Namespace='ContainerInsights',
+        MetricName='pod_cpu_utilization',
+        Dimensions=[
+            {
+                'Name': 'Namespace',
+                'Value': 'ray-system'
+            },
+            {
+                'Name': 'ClusterName',
+                'Value': 'volga-test-cluster'
+            },
+        ],
+        RecentlyActive='PT3H',
+    )
+
+    filtered_pod_names = set()
+    for m in response['Metrics']:
+        # get 'PodName' dimension:
+        for dim in m['Dimensions']:
+            if dim['Name'] == 'PodName':
+                pod_name = dim['Value']
+                if 'ray-cluster-kuberay-on-demand-nodes-worker-' in pod_name:
+                    filtered_pod_names.add(pod_name)
+
+    filtered_pod_names = list(filtered_pod_names)
+
+    response = client.get_metric_data(
+        MetricDataQueries=[
+            {
+                'Id': f'request{int(time.time())}{random.randint(0, 1024)}',
+                'MetricStat': {
+                    'Metric': {
+                        'Namespace': 'ContainerInsights',
+                        'MetricName': 'pod_cpu_utilization',
+                        'Dimensions': [
+                            {
+                                'Name': 'Namespace',
+                                'Value': 'ray-system'
+                            },
+                            {
+                                'Name': 'ClusterName',
+                                'Value': 'volga-test-cluster'
+                            },
+                            {
+                                'Name':'PodName',
+                                'Value': filtered_pod_names[i]
+                            }
+                        ]
+                    },
+                    'Period': 60,
+                    'Stat': 'Average',
+                }
+            } for i in range(len(filtered_pod_names))
+        ],
+        StartTime=datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2),
+        EndTime=datetime.datetime.now(datetime.timezone.utc),
+    )
+    res = {}
+
+    metric_results = response['MetricDataResults']
+    assert len(metric_results) == len(filtered_pod_names)
+    for i in range(len(filtered_pod_names)):
+        pod_name = filtered_pod_names[i]
+        metric_result = metric_results[i]
+        assert metric_result['Label'] == pod_name
+        last_value = metric_result['Values'][-1]
+        res[pod_name] = last_value
+
+    return res

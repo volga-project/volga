@@ -160,6 +160,6 @@ class JobMaster:
         return self.num_sent_per_source_worker
 
     def get_final_perf_stats(self) -> Tuple[
-        float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]
+        float, Dict[str, float], List[Tuple[float, float, float]], List[Tuple[float, Dict[str, int]]]
     ]:
         return aggregate_streaming_historical_stats(self.stats_manager.get_historical_stats())

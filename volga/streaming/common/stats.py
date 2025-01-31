@@ -24,7 +24,7 @@ def create_streaming_stats_manager() -> StatsManager:
 def aggregate_streaming_historical_stats(
     historical_stats: HistoricalStats,
     warmup_thresh_s: int = 10 # disregard first seconds of hist data - those are warm-up outliers
-) -> Tuple[float, Dict[str, float], List[Tuple[float, float]], List[Tuple[float, Dict[str, int]]]]:
+) -> Tuple[float, Dict[str, float], List[Tuple[float, float, float]], List[Tuple[float, Dict[str, int]]]]:
     historical_latency = historical_stats.histograms[LATENCY_STATS_CONFIG.name]
     historical_latency_hists = list(historical_latency.hists_per_s.items())
 
