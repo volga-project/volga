@@ -12,7 +12,7 @@ import ray
 import seaborn as sns
 import matplotlib.pyplot as plt
 
-from tests.test_wordcount import TestWordCount
+from tests.test_streaming_wordcount import TestWordCount
 from volga.streaming.runtime.network.test_local_transfer import TestLocalTransfer
 from volga.streaming.runtime.network.test_remote_transfer import TestRemoteTransfer
 from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV

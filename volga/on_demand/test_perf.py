@@ -9,6 +9,7 @@ from pprint import pprint
 
 import boto3
 import ray
+import requests
 from aiohttp import ClientSession
 
 from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
@@ -42,7 +43,7 @@ class TestOnDemandPerf(unittest.TestCase):
         # loop.run_until_complete(DataService._cleanup_db(config.data_service_config))
         # setup_sample_feature_data(num_keys)
         with ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV):
-            ray.get(setup_sample_feature_data_ray.remote(config, num_keys)) # TODO uncomment
+            # ray.get(setup_sample_feature_data_ray.remote(config, num_keys)) # TODO uncomment
 
             coordinator = create_on_demand_coordinator(config)
             ray.get(coordinator.start.remote())
@@ -86,9 +87,11 @@ class TestOnDemandPerf(unittest.TestCase):
 
                 task.add_done_callback(functools.partial(_done, _i=i, _last_done_ts=last_done_ts))
 
-
-
-
+# http://localhost:8089/?tab=charts
+def start_locust_test():
+    url = 'http://localhost:8089/swarm'
+    res = requests.post(url)
+    return res
 
 if __name__ == '__main__':
     t = TestOnDemandPerf()
