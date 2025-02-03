@@ -203,10 +203,12 @@ class HistoricalCounterStats(CounterStatsBase):
         for up in counter_updates:
             if len(up.counts_per_s) != 0:
                 last_count_per_worker.append(list(up.counts_per_s.values())[-1])
-        stdev = statistics.stdev(last_count_per_worker)
+        stdev = 0
+        if len(last_count_per_worker) > 1:
+            stdev = statistics.stdev(last_count_per_worker)
 
         self.historical_counts.append((secs[-1], avg, stdev))
-        print(f'[{secs[-1]}] {self.name}: {avg} count/s') # TODO proper logging
+        print(f'[{secs[-1]}][{self.name}] Avg: {avg} count/s, Stdev: {stdev}') # TODO proper logging
 
 
 class HistoricalStats(BaseModel):
