@@ -2,22 +2,21 @@ import time
 
 import ray
 
-from volga_tests.on_demand_perf.container_insights_watcher import ContainerInsightsWatcher
-from volga_tests.on_demand_perf.locust_watcher import LocustWatcher
 from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.on_demand_config import OnDemandConfig
+from volga_tests.on_demand_perf.load_test_handler import LoadTestHandler
 
 STORE_DIR = 'volga_on_demand_perf_benchmarks'
-CONTAINER_INSIGHTS_STORE_PATH = 'container_insights.json'
-LOCUST_STORE_PATH = 'locust.json'
+# CONTAINER_INSIGHTS_STORE_PATH = 'container_insights.json'
+# LOCUST_STORE_PATH = 'locust.json'
 
-container_insights_watcher = ContainerInsightsWatcher()
-locust_watcher = LocustWatcher()
+# container_insights_watcher = ContainerInsightsWatcher()
+# locust_watcher = LocustWatcher()
 
 run_id = int(time.time())
-container_insights_store_path = f'{STORE_DIR}/run-{run_id}/{CONTAINER_INSIGHTS_STORE_PATH}'
-locust_store_path = f'{STORE_DIR}/run-{run_id}/{LOCUST_STORE_PATH}'
+# container_insights_store_path = f'{STORE_DIR}/run-{run_id}/{CONTAINER_INSIGHTS_STORE_PATH}'
+# locust_store_path = f'{STORE_DIR}/run-{run_id}/{LOCUST_STORE_PATH}'
 
 RUN_TIME_S = 125
 STEP_TIME_S = 30
@@ -47,17 +46,17 @@ on_demand_config = OnDemandConfig(
 coordinator = create_on_demand_coordinator(on_demand_config)
 ray.get(coordinator.start.remote())
 
-locust_watcher.start_load_test(
-    store_path=locust_store_path,
+stats_store_path = f'{STORE_DIR}/run-{run_id}.json'
+load_test_handler = LoadTestHandler(stats_store_path, coordinator)
+
+load_test_handler.start_load_test(
     host=HOST,
     step_user_count=STEP_USER_COUNT,
     step_time_s=STEP_TIME_S,
     run_time_s=RUN_TIME_S
 )
 print(f'[run-{run_id}] Started Locust')
-container_insights_watcher.start(container_insights_store_path)
 
 time.sleep(RUN_TIME_S)
-locust_watcher.stop()
-container_insights_watcher.stop()
+load_test_handler.stop()
 print(f'[run-{run_id}] Finished On-Demand benchmark')

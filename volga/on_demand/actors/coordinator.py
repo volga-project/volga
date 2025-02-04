@@ -88,6 +88,28 @@ class OnDemandCoordinator:
         # TODO delete actors
         self.stats_manager.stop()
 
+    def get_latest_stats(self) -> Dict:
+        latest_stats =  self.stats_manager.get_latest_stats()
+
+        # parse
+        res = {}
+        if ON_DEMAND_QPS_STATS_CONFIG.name in latest_stats['counters']:
+            qps = latest_stats['counters'][ON_DEMAND_QPS_STATS_CONFIG.name]
+            res['qps'] = qps[1]
+            res['qps_stdev'] = qps[2]
+
+        if ON_DEMAND_DB_LATENCY_CONFIG.name in latest_stats['histograms']:
+            db_latency = latest_stats['histograms'][ON_DEMAND_DB_LATENCY_CONFIG.name][1]
+            for k, v in db_latency.items():
+                res[f'db_{k}'] = v
+
+        if ON_DEMAND_SERVER_LATENCY_CONFIG.name in latest_stats['histograms']:
+            server_latency = latest_stats['histograms'][ON_DEMAND_SERVER_LATENCY_CONFIG.name][1]
+            for k, v in server_latency.items():
+                res[f'server_{k}'] = v
+
+        return res
+
 
 def create_on_demand_coordinator(config: OnDemandConfig) -> ActorHandle:
     # TODO use ResourceManager instance instead of static methods

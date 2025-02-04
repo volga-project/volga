@@ -156,7 +156,7 @@ class HistoricalHistogramStats(HistogramStatsBase):
         d = {f'p{self.percentiles[i]}': aggregates[i] for i in range(len(self.percentiles))}
         d['avg'] = avg
         self.historical_windowed_histogram_stats.append((secs[-1], d))
-        print(f'[{secs[-1]}] {self.name}: {d}') # TODO proper logging
+        # print(f'[{secs[-1]}] {self.name}: {d}') # TODO proper logging
 
 
 class HistoricalCounterStats(CounterStatsBase):
@@ -208,7 +208,7 @@ class HistoricalCounterStats(CounterStatsBase):
             stdev = statistics.stdev(last_count_per_worker)
 
         self.historical_counts.append((secs[-1], avg, stdev))
-        print(f'[{secs[-1]}][{self.name}] Avg: {avg} count/s, Stdev: {stdev}') # TODO proper logging
+        # print(f'[{secs[-1]}][{self.name}] Avg: {avg} count/s, Stdev: {stdev}') # TODO proper logging
 
 
 class HistoricalStats(BaseModel):
@@ -226,7 +226,6 @@ class ICollectStats(ABC):
 class StatsManager:
 
     def __init__(self, histograms: List[HistogramConfig], counters: List[CounterConfig], collect_period_s: int = 1):
-        # self._targets = []
         self._targets = {}
         self._stats_collector_thread = Thread(target=self._collect_loop)
         self.running = False
@@ -293,7 +292,7 @@ class StatsManager:
                     raise RuntimeError(f'Unknown stats update type {update.__class__.__name__}')
 
         # TODO remove after debug
-        print(f'[StatsManager] Partial count updates {last_count_per_target}')
+        # print(f'[StatsManager] Partial count updates {last_count_per_target}')
 
         for name in histogram_updates:
             self.historical_stats.histograms[name].aggregate_updates(histogram_updates[name])
@@ -317,3 +316,19 @@ class StatsManager:
 
     def get_historical_stats(self) -> HistoricalStats:
         return self.historical_stats
+
+    def get_latest_stats(self) -> Dict:
+        counters = {}
+        for name in self.historical_stats.counters:
+            if len(self.historical_stats.counters[name].historical_counts) > 0:
+                counters[name] = self.historical_stats.counters[name].historical_counts[-1]
+
+        histograms = {}
+        for name in self.historical_stats.histograms:
+            if len(self.historical_stats.histograms[name].historical_windowed_histogram_stats) > 0:
+                histograms[name] = self.historical_stats.histograms[name].historical_windowed_histogram_stats[-1]
+
+        return {
+            'counters': counters,
+            'histograms': histograms
+        }
