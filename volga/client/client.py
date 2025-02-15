@@ -4,9 +4,9 @@ from typing import Dict, Optional, Tuple, Any, List
 import pandas as pd
 
 from volga.common.time_utils import datetime_to_ts
-from volga.api.dataset.dataset import Dataset
-from volga.api.dataset.operators import Aggregate, OperatorNodeBase
-from volga.api.dataset.schema import Schema
+from volga.api.entity.entity import Entity
+from volga.api.entity.operators import Aggregate, OperatorNodeBase
+from volga.api.entity.schema import Schema
 from volga.storage.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 from volga.storage.hot import HotStorage
@@ -37,8 +37,8 @@ class Client:
 
     def materialize_offline(
         self,
-        target: Dataset,
-        source_tags: Optional[Dict[Dataset, str]] = None,
+        target: Entity,
+        source_tags: Optional[Dict[Entity, str]] = None,
         parallelism: int = 1,
         scaling_config: Optional[ScalingConfig] = None,
         _async: bool = False
@@ -61,8 +61,8 @@ class Client:
 
     def materialize_online(
         self,
-        target: Dataset,
-        source_tags: Optional[Dict[Dataset, str]] = None,
+        target: Entity,
+        source_tags: Optional[Dict[Entity, str]] = None,
         parallelism: int = 1,
         scaling_config: Optional[ScalingConfig] = None,
         _async: bool = False
@@ -108,14 +108,14 @@ class Client:
 
     def get_on_demand(
         self,
-        target: Dataset,
+        target: Entity,
         online: bool, # False for offline storage source
         start: Optional[datetime], end: Optional[datetime], # datetime range in case of offline request
         inputs: List[Dict]
     ) -> Any:
         raise NotImplementedError()
 
-    def _build_stream(self, target: Dataset, source_tags: Optional[Dict[Dataset, str]]) -> Tuple[DataStream, StreamingContext]:
+    def _build_stream(self, target: Entity, source_tags: Optional[Dict[Entity, str]]) -> Tuple[DataStream, StreamingContext]:
         ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
         pipeline = target.get_pipeline()
 
@@ -134,7 +134,7 @@ class Client:
         operator_node: OperatorNodeBase,
         ctx: StreamingContext,
         target_schema: Schema,
-        source_tags: Optional[Dict[Dataset, str]] = None
+        source_tags: Optional[Dict[Entity, str]] = None
     ):
 
         for p in operator_node.parents:
@@ -143,7 +143,7 @@ class Client:
             )
 
         # init sources
-        if isinstance(operator_node, Dataset):
+        if isinstance(operator_node, Entity):
             if not operator_node.is_source():
                 raise ValueError('Currently only source inputs are allowed')
             source_tag = None

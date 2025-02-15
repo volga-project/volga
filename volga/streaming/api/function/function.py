@@ -10,6 +10,7 @@ from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.common.utils import collection_chunk_at_index
 from volga.streaming.runtime.sources.source_splits_manager import SourceSplit
 
+
 class Function(ABC):
 
     def open(self, runtime_context: RuntimeContext):

@@ -1,9 +1,8 @@
 import json
-from typing import List, Callable, Tuple, Dict, Optional, Any
+from abc import ABC
+from typing import List, Callable, Tuple, Dict, Optional, Any, Type
 
 from pydantic import BaseModel
-
-from volga.api.dataset.dataset import Dataset
 
 
 class OnDemandArgs(BaseModel):
@@ -53,8 +52,54 @@ class OnDemandResponse(BaseModel):
     server_id: int
 
 
-# decorator
-def on_demand(
-    deps: List[Dataset]
-) -> Callable:
-    pass
+# TODO rename to DataConnector?
+# class OnDemandComputeModule(ABC):
+
+#     async def init(self):
+#         pass
+
+#     async def close(self):
+#         pass
+
+#     def parse_request(self):
+#         pass
+
+#     def db_query_map(self) -> Dict[str, Callable]:
+#         return {
+#             'latest': self._fetch_latest,
+#             'range': self._fetch_range,
+#             'ann': self._ann
+#         }
+
+#     async def _fetch_latest(self, *args, **kwargs) -> Entity:
+#         return Entity()
+
+#     async def _fetch_range(self, *args, **kwargs) -> List[Entity]:
+#         return [Entity()]
+
+#     async def _ann(self, *args, **kwargs) -> List[Entity]:
+#         return [Entity()]
+
+# # decorator
+# def on_demand(
+#     entity: Type[Entity],
+#     deps: Dict[str, Tuple[Entity, str, List[str]]],
+# ) -> OnDemandSpec:
+#     return OnDemandSpec()
+
+
+# class SampleEntity1(Entity):
+#     pass
+
+# class SampleEntity2(Entity):
+#     pass
+
+# class SampleEntity3(Entity):
+#     pass
+
+# @on_demand(
+#     entity=SampleEntity3,
+#     deps={},
+# )
+# def two_input_on_demand_feature(first: Entity, second: Entity) -> Entity:
+#     return Entity()

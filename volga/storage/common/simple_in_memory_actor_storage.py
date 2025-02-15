@@ -8,7 +8,7 @@ from ray.actor import ActorHandle
 import time
 
 from volga.common.time_utils import datetime_str_to_ts
-from volga.api.dataset.schema import Schema
+from volga.api.entity.schema import Schema
 from volga.storage.cold import ColdStorage
 from volga.storage.common.key_index import compose_main_key, KeyIndex
 from volga.storage.hot import HotStorage
@@ -148,7 +148,7 @@ class BulkSinkToCacheActorFunction(SinkFunction):
 
     DUMPER_PERIOD_S = 1
 
-    # TODO we need to get rid of passing output_schema, it should be a part of a message
+    # TODO we need to get rid of passing output_schema, it should be a part of a message - NOPE - extra mem overhead
     def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: Schema):
         self.cache_actor = cache_actor
         self.dataset_name = dataset_name
@@ -160,7 +160,7 @@ class BulkSinkToCacheActorFunction(SinkFunction):
     def sink(self, value):
         # print(value)
         # raise
-        # TODO all of this should be a part of Record object (value) and not sourced from outside
+        # TODO all of this should be a part of Record object (value) and not sourced from outside - NOPE - extra mem overhead
         key_fields = list(self.output_schema.keys.keys())
         keys_dict = {k: value[k] for k in key_fields}
         timestamp_field = self.output_schema.timestamp

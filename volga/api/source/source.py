@@ -80,13 +80,15 @@ def source(conn: Connector, tag: str = 'default'):
     if not isinstance(conn, Connector):
         raise TypeError('Expected Connector type')
 
-    def decorator(dataset_cls: T):
-        connectors = getattr(dataset_cls, CONNECTORS_ATTR, {})
+    def decorator(entity_cls: T):
+        entity = entity_cls._entity
+        connectors = getattr(entity, CONNECTORS_ATTR, {})
         if tag in connectors:
             raise ValueError(f'Duplicate {tag} for source {conn}')
         connectors[tag] = conn
-        setattr(dataset_cls, CONNECTORS_ATTR, connectors)
-        return dataset_cls
+        setattr(entity, CONNECTORS_ATTR, connectors)
+        entity_cls._entity = entity
+        return entity_cls
 
     return decorator
 

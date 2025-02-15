@@ -8,5 +8,4 @@ RESERVED_FIELD_NAMES = [
     "fqn",
 ]
 
-PIPELINE_ATTR = '__pipeline_attr__'
 CONNECTORS_ATTR = '__connectors_attr__'

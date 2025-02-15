@@ -6,17 +6,11 @@ from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.on_demand_config import OnDemandConfig
 from volga_tests.on_demand_perf.load_test_handler import LoadTestHandler
+from volga.on_demand.testing_utils import setup_sample_feature_data_ray
 
 STORE_DIR = 'volga_on_demand_perf_benchmarks'
-# CONTAINER_INSIGHTS_STORE_PATH = 'container_insights.json'
-# LOCUST_STORE_PATH = 'locust.json'
-
-# container_insights_watcher = ContainerInsightsWatcher()
-# locust_watcher = LocustWatcher()
 
 run_id = int(time.time())
-# container_insights_store_path = f'{STORE_DIR}/run-{run_id}/{CONTAINER_INSIGHTS_STORE_PATH}'
-# locust_store_path = f'{STORE_DIR}/run-{run_id}/{LOCUST_STORE_PATH}'
 
 RUN_TIME_S = 125
 STEP_TIME_S = 30
@@ -29,7 +23,6 @@ HOST = 'http://k8s-raysyste-volgaond-3637bbe071-237137006.ap-northeast-1.elb.ama
 
 print(f'[run-{run_id}] Started On-Demand benchmark')
 ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
-# ray.get(setup_sample_feature_data_ray.remote(config, num_keys)) # TODO uncomment
 on_demand_config = OnDemandConfig(
     # client_url='127.0.0.1',
     # client_url='on-demand-service.ray-system.svc.cluster.local',
@@ -43,6 +36,7 @@ on_demand_config = OnDemandConfig(
         }
     }
 )
+ray.get(setup_sample_feature_data_ray.remote(on_demand_config, 10000))
 coordinator = create_on_demand_coordinator(on_demand_config)
 ray.get(coordinator.start.remote())
 

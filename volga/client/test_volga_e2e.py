@@ -5,9 +5,9 @@ import datetime
 import ray
 
 from volga.client.client import Client
-from volga.api.dataset.aggregate import Avg, Count, Sum
-from volga.api.dataset.dataset import dataset, field, Dataset
-from volga.api.dataset.pipeline import pipeline
+from volga.api.entity.aggregate import Avg, Count, Sum
+from volga.api.entity.entity import dataset, field, Entity
+from volga.api.entity.pipeline import pipeline
 from volga.api.source.source import MysqlSource, source, KafkaSource
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 
@@ -64,7 +64,7 @@ class OnSaleUserSpentInfo:
     sum_spent_1d: float
 
     @pipeline(inputs=[User, Order])
-    def gen(cls, users: Dataset, orders: Dataset):
+    def gen(cls, users: Entity, orders: Entity):
         on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
         per_user = on_sale_purchases.join(users, right_on=['user_id'], left_on=['buyer_id'])
 

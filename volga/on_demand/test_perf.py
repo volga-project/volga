@@ -24,7 +24,7 @@ from volga.on_demand.testing_utils import TEST_FEATURE_NAME, sample_key_value, \
 class TestOnDemandPerf(unittest.TestCase):
 
     def test_qps(self):
-        num_keys = 10000
+        num_keys = 5000
         config = OnDemandConfig(
             # client_url='127.0.0.1',
             # client_url='on-demand-service.ray-system.svc.cluster.local',
@@ -43,7 +43,7 @@ class TestOnDemandPerf(unittest.TestCase):
         # loop.run_until_complete(DataService._cleanup_db(config.data_service_config))
         # setup_sample_feature_data(num_keys)
         with ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV):
-            # ray.get(setup_sample_feature_data_ray.remote(config, num_keys)) # TODO uncomment
+            ray.get(setup_sample_feature_data_ray.remote(config, num_keys))
 
             coordinator = create_on_demand_coordinator(config)
             ray.get(coordinator.start.remote())
@@ -87,7 +87,7 @@ class TestOnDemandPerf(unittest.TestCase):
 
                 task.add_done_callback(functools.partial(_done, _i=i, _last_done_ts=last_done_ts))
 
-# http://localhost:8089/?tab=charts
+
 def start_locust_test():
     url = 'http://localhost:8089/swarm'
     res = requests.post(url)
