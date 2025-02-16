@@ -4,9 +4,9 @@ from typing import Dict, Optional, Tuple, Any, List
 import pandas as pd
 
 from volga.common.time_utils import datetime_to_ts
-from volga.api.entity.entity import Entity
-from volga.api.entity.operators import Aggregate, OperatorNodeBase
-from volga.api.entity.schema import Schema
+from volga.api.entity import Entity
+from volga.api.operators import Aggregate, OperatorNodeBase
+from volga.api.schema import Schema
 from volga.storage.cold import ColdStorage
 from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
 from volga.storage.hot import HotStorage

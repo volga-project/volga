@@ -1,8 +1,8 @@
 from datetime import datetime
 import unittest
 
-from volga.api.entity.entity import entity, field
-from volga.api.entity.operators import Join
+from volga.api.entity import entity, field
+from volga.api.operators import Join
 
 
 class TestOperator(unittest.TestCase):
@@ -25,8 +25,8 @@ class TestOperator(unittest.TestCase):
             purchased_at: datetime = field(timestamp=True)
             product_price: float
 
-        ls = User.schema()
-        rs = Order.schema()
+        ls = User._entity.schema()
+        rs = Order._entity.schema()
         joined_schema = Join._joined_schema(ls=ls, rs=rs, on=None, left_on=['user_id'])
         # print(joined_schema)
         assert joined_schema.keys == {'user_id': str}
@@ -42,5 +42,4 @@ class TestOperator(unittest.TestCase):
 
 
 if __name__ == '__main__':
-    t = TestOperator()
-    t.test_join_schema()
+    unittest.main()

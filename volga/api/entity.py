@@ -1,57 +1,16 @@
-import inspect
+
 from dataclasses import dataclass
 from typing import Type, Optional, List, cast, TypeVar, Dict
 
-from decimal import Decimal
-
-from volga.common.time_utils import datetime_str_to_ts
-from volga.api.consts import RESERVED_FIELD_NAMES, CONNECTORS_ATTR
-from volga.api.entity.operators import OperatorNode
-from volga.api.entity.schema import Schema
+from volga.api.consts import RESERVED_FIELD_NAMES
+from volga.api.operators import OperatorNode
+from volga.api.schema import Schema
 
 import datetime
 
-from volga.api.source.source import Connector
 from volga.api.utils import is_optional
-from volga.streaming.api.context.streaming_context import StreamingContext
-from volga.streaming.api.message.message import Record
-from volga.streaming.api.operators.timestamp_assigner import EventTimeAssigner
 
 T = TypeVar('T')
-
-
-# decorator to construct Dataset from user defined class
-# def dataset(
-#     cls: Optional[Type[T]] = None,
-# ) -> Union[Callable, 'Dataset']:
-
-#     def _create_dataset(
-#         dataset_cls: Type[T],
-#     ) -> Dataset:
-#         cls_annotations = dataset_cls.__dict__.get("__annotations__", {})
-#         fields = [
-#             get_field(
-#                 cls=dataset_cls,
-#                 annotation_name=name,
-#                 dtype=cls_annotations[name],
-#             )
-#             for name in cls_annotations
-#         ]
-
-#         return Dataset(
-#             dataset_cls,
-#             fields,
-#         )
-
-#     def wrap(c: Type[T]) -> Dataset:
-#         return _create_dataset(c)
-
-#     if cls is None:
-#         # called as @dataset(arguments)
-#         return wrap
-#     cls = cast(Type[T], cls)
-#     # @dataset decorator was used without arguments
-#     return wrap(cls)
 
 def entity(*args, **kwargs):
     def wrap(cls):
@@ -185,9 +144,10 @@ class Entity(OperatorNode):
     _name: str
     _fields: List[Field]
     _key_fields: List[str]
-    # _pipeline: Optional['Pipeline']
     _timestamp_field: str
-
+    _pipelines: Dict[str, 'PipelineFeature']
+    _on_demands: Dict[str, 'OnDemandFeature']
+    
     def __init__(
         self,
         cls: T,
@@ -202,7 +162,6 @@ class Entity(OperatorNode):
         self._add_fields_to_class()
         self._set_timestamp_field()
         self._set_key_fields()
-        # self._pipeline = self.get_pipeline()
 
     def __repr__(self):
         return self._name
@@ -256,19 +215,6 @@ class Entity(OperatorNode):
                 key_fields.append(field.name)
         self._key_fields = key_fields
 
-    # def get_pipeline(self) -> Optional['Pipeline']:
-    #     for name, method in inspect.getmembers(self._original_cls):
-    #         if not callable(method):
-    #             continue
-    #         if not hasattr(method, PIPELINE_ATTR):
-    #             continue
-
-    #         pipeline = getattr(method, PIPELINE_ATTR)
-    #         if pipeline is not None:
-    #             return pipeline
-
-    #     return None
-
     def _validate_field_names(self, fields: List[Field]):
         names = set()
         exceptions = []
@@ -283,42 +229,42 @@ class Entity(OperatorNode):
         if len(exceptions) != 0:
             raise Exception(exceptions)
 
-    def _get_source_connectors(self) -> Optional[Dict[str, Connector]]:
-        return getattr(self, CONNECTORS_ATTR, None)
+    # def _get_source_connectors(self) -> Optional[Dict[str, Connector]]:
+    #     return getattr(self, CONNECTORS_ATTR, None)
 
-    def is_source(self) -> bool:
-        return hasattr(self, CONNECTORS_ATTR)
+    # def is_source(self) -> bool:
+    #     return hasattr(self, CONNECTORS_ATTR)
 
-    def init_stream(self, source_tag: Optional[str], ctx: StreamingContext):
-        if not self.is_source():
-            raise ValueError(f'Dataset {self._name}: Can not get source stream from non-source dataset')
-        if self.stream is not None:
-            raise ValueError(f'Dataset {self._name}: Stream source already inited')
+    # def init_stream(self, source_tag: Optional[str], ctx: StreamingContext):
+    #     if not self.is_source():
+    #         raise ValueError(f'Dataset {self._name}: Can not get source stream from non-source dataset')
+    #     if self.stream is not None:
+    #         raise ValueError(f'Dataset {self._name}: Stream source already inited')
 
-        source_connectors = self._get_source_connectors()
-        assert source_connectors is not None
-        if source_tag is None:
-            if len(source_connectors) > 1:
-                raise ValueError(f'Dataset {self._name}: Need to specify tag for source with > 1 connectors')
-            connector = list(source_connectors.values())[0]
-        else:
-            if source_tag not in source_connectors:
-                raise ValueError(f'Dataset {self._name}: Can not find source tag {source_tag}')
-            connector = source_connectors[source_tag]
+    #     source_connectors = self._get_source_connectors()
+    #     assert source_connectors is not None
+    #     if source_tag is None:
+    #         if len(source_connectors) > 1:
+    #             raise ValueError(f'Dataset {self._name}: Need to specify tag for source with > 1 connectors')
+    #         connector = list(source_connectors.values())[0]
+    #     else:
+    #         if source_tag not in source_connectors:
+    #             raise ValueError(f'Dataset {self._name}: Can not find source tag {source_tag}')
+    #         connector = source_connectors[source_tag]
 
-        stream_source = connector.to_stream_source(ctx)
+    #     stream_source = connector.to_stream_source(ctx)
 
-        # set timestamp assigner
-        if self._timestamp_field is None:
-            raise RuntimeError('Can not init source with no timestamp field')
+    #     # set timestamp assigner
+    #     if self._timestamp_field is None:
+    #         raise RuntimeError('Can not init source with no timestamp field')
 
-        def _extract_timestamp(record: Record) -> Decimal:
-            dt_str = record.value[self._timestamp_field]
-            return datetime_str_to_ts(dt_str)
+    #     def _extract_timestamp(record: Record) -> Decimal:
+    #         dt_str = record.value[self._timestamp_field]
+    #         return datetime_str_to_ts(dt_str)
 
-        stream_source.timestamp_assigner(EventTimeAssigner(_extract_timestamp))
+    #     stream_source.timestamp_assigner(EventTimeAssigner(_extract_timestamp))
 
-        self.stream = stream_source
+    #     self.stream = stream_source
 
 
 def field(
@@ -337,3 +283,9 @@ def field(
         ),
     )
 
+def validate_decorated_entity(type_annotation: Type, param_name: str, feature_name: str) -> None:
+    """Validate that a type is decorated with @entity"""
+    if not hasattr(type_annotation, '_entity'):
+        raise TypeError(
+            f'{param_name} type of {feature_name} must be decorated with @entity. '
+        )

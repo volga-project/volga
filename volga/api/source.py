@@ -1,8 +1,11 @@
-from typing import TypeVar, List, Any
+from typing import TypeVar, List, Any, Callable, Type
+import inspect
+from functools import wraps
 
 from pydantic import BaseModel
 
-from volga.api.consts import CONNECTORS_ATTR
+from volga.api.entity import validate_decorated_entity
+from volga.api.pipeline import create_and_register_pipeline_feature
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.stream_source import StreamSource
 
@@ -75,22 +78,65 @@ class Source(BaseModel):
         raise NotImplementedError()
 
 
-# decorator to add source connection to a dataset
-def source(conn: Connector, tag: str = 'default'):
-    if not isinstance(conn, Connector):
-        raise TypeError('Expected Connector type')
-
-    def decorator(entity_cls: T):
-        entity = entity_cls._entity
-        connectors = getattr(entity, CONNECTORS_ATTR, {})
-        if tag in connectors:
-            raise ValueError(f'Duplicate {tag} for source {conn}')
-        connectors[tag] = conn
-        setattr(entity, CONNECTORS_ATTR, connectors)
-        entity_cls._entity = entity
-        return entity_cls
-
-    return decorator
+def source(output: Type) -> Callable:
+    # Validate output type has @entity decorator
+    validate_decorated_entity(output, 'Output', 'source decorator')  
+    
+    def wrapper(source_func: Callable) -> Callable:
+        if not callable(source_func):
+            raise TypeError('source functions must be callable')
+        
+        feature_name = source_func.__name__
+        
+        # Get function signature and parameters
+        sig = inspect.signature(source_func)
+        params = list(sig.parameters.values())
+        
+        # Source functions should have no parameters
+        if len(params) > 0:
+            raise TypeError(
+                f'Source function {feature_name} should have no parameters, '
+                f'got {len(params)} parameters'
+            )
+        
+        # Validate return type is a Connector
+        return_type = sig.return_annotation
+        if return_type == inspect.Parameter.empty:
+            raise TypeError(
+                f'Source function {feature_name} must have a return type annotation'
+            )
+        
+        if not issubclass(return_type, Connector):
+            raise TypeError(
+                f'Source function {feature_name} must return a Connector instance, '
+                f'got {return_type} instead'
+            )
+        
+        create_and_register_pipeline_feature(
+            func=source_func,
+            feature_name=feature_name,
+            dependencies=[],
+            output_type=output,
+            is_source=True
+        )
+        
+        @wraps(source_func)
+        def wrapped_func(*args, **kwargs):
+            # Call the original function
+            result = source_func(*args, **kwargs)
+            
+            # Validate return value is a Connector instance
+            if not isinstance(result, Connector):
+                raise TypeError(
+                    f'Return value of {feature_name} must be an instance of Connector, '
+                    f'got {type(result).__name__} instead'
+                )
+            
+            return result
+        
+        return wrapped_func
+    
+    return wrapper
 
 
 class KafkaSource(Source):

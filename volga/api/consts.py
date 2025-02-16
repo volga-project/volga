@@ -5,7 +5,4 @@ RESERVED_FIELD_NAMES = [
     "key_fields",
     "on_demand",
     "timestamp_field",
-    "fqn",
 ]
-
-CONNECTORS_ATTR = '__connectors_attr__'

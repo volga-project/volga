@@ -3,8 +3,8 @@ import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.common.time_utils import is_time_str
-from volga.api.entity.aggregate import AggregateType
-from volga.api.entity.schema import Schema
+from volga.api.aggregate import AggregateType
+from volga.api.schema import Schema
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operators.window_operator import SlidingWindowConfig, AggregationsPerWindow
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
