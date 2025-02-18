@@ -1,10 +1,9 @@
-from typing import Callable, Type, List
+from typing import Callable, Type, List, Any, Dict, Optional, get_type_hints
 from volga.api.feature import Feature
 from volga.api.feature import FeatureRepository, validate_dependencies
 from volga.api.entity import validate_decorated_entity
 import inspect
 from functools import wraps
-
 
 class OnDemandFeature(Feature):
     def __init__(
@@ -15,6 +14,39 @@ class OnDemandFeature(Feature):
     ):
         super().__init__(func, dependencies, output_type)
     
+        # Validate dependencies
+        validate_dependencies(self.name, dependencies)
+        
+        # Infer UDF argument names from function signature
+        sig = inspect.signature(func)
+        type_hints = get_type_hints(func)
+        
+        self.udf_args_names = []
+        for param_name, param in sig.parameters.items():
+            param_type = type_hints.get(param_name, Any)
+            # If parameter type is not an entity class, it's a UDF arg
+            if not hasattr(param_type, '_entity'):
+                self.udf_args_names.append(param_name)
+
+    def execute(
+        self,
+        dep_values: List[Any],
+        udf_args: Optional[Dict[str, Any]] = None
+    ) -> Any:
+        # Add UDF arguments if provided
+        if udf_args:
+            if not self.udf_args_names:
+                raise ValueError(f"Feature {self.name} does not accept UDF arguments")
+            
+            for arg_name in self.udf_args_names:
+                if arg_name not in udf_args:
+                    raise ValueError(f"Missing UDF argument {arg_name} for {self.name}")
+        else:
+            udf_args  = {}
+            
+        # Execute UDF
+        return self.func(*dep_values, **udf_args)
+
 def on_demand(dependencies: List[str]) -> Callable:
     def wrapper(func: Callable) -> Callable:
         if not callable(func):
@@ -26,12 +58,6 @@ def on_demand(dependencies: List[str]) -> Callable:
         sig = inspect.signature(func)
         params = list(sig.parameters.values())
         
-        # Check number of parameters matches number of dependencies
-        if len(params) != len(dependencies):
-            raise TypeError(
-                f'On-demand function {feature_name} has {len(params)} parameters '
-                f'but {len(dependencies)} dependencies were specified'
-            )
         
         # Validate input types
         for param, dep_name in zip(params, dependencies):

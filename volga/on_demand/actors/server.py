@@ -51,9 +51,9 @@ class OnDemandServer(ICollectStats):
         await DataService.init(self.config.data_service_config)
         # await asyncio.sleep(0.1)
 
-    def register_on_demand_specs(self, specs: List[OnDemandSpec]):
-        for spec in specs:
-            self._on_demand_specs[spec.feature_name] = spec
+    # def register_on_demand_specs(self, specs: List[OnDemandSpec]):
+    #     for spec in specs:
+    #         self._on_demand_specs[spec.feature_name] = spec
 
     async def run(self):
         sock = socket.socket()
@@ -78,119 +78,153 @@ class OnDemandServer(ICollectStats):
 
     async def _serve(self, request_json: str) -> OnDemandResponse:
         on_demand_request = OnDemandRequest(**from_json(request_json))
-        return await self._do_work(on_demand_request)
+        return await self.execute(on_demand_request)
+    
+    async def execute(self, request: OnDemandRequest) -> OnDemandResponse:
+        # Validate request
+        self._validate_request(request)
 
-    # handle request (can contain multiple features) - either serve directly or execute udf per requested feature
-    async def _do_work(self, request: OnDemandRequest, retries: int = 3) -> OnDemandResponse:
-
-        # start_ts = time.perf_counter()
-        # await asyncio.sleep(0.0401)
-        #
-        # latency_ms = int((time.perf_counter() - start_ts) * 1000)
-        # self.latency_stats.observe(latency_ms, now_ts_ms())
-        # self.qps_stats.inc()
-        #
-        # return OnDemandResponse(
-        #     feature_values={'test_feature': FeatureValue(
-        #         keys={'k1': 'k1'},
-        #         values={'v1': 'v1'},
-        #     )},
-        #     server_id=self.server_id
-        # )
-        feature_values = {}
-
-        num_attempts = 0
-        while True:
-            futs = []
-            for arg in request.args:
-                if arg.serve_or_udf:
-                    futs.append(self._fetch(arg.feature_name, arg.keys))
-                else:
-                    futs.append(self._fetch_and_udf(arg.feature_name, arg.dep_features_keys, arg.udf_args))
-
-            start_ts = time.perf_counter()
-            feature_values_list = await asyncio.gather(*futs)
-            latency_ms = int((time.perf_counter() - start_ts) * 1000)
-
-            has_empty = False
-            for fv in feature_values_list:
-                if len(fv.keys) == 0:
-                    # retry
-                    has_empty = True
-                    break # inner
-            if has_empty:
-                if num_attempts >= retries:
-                    raise RuntimeError('Max retries fetching non-empty results')
-                else:
-                    num_attempts += 1
-                    await asyncio.sleep(0.5)
-            else:
-                # report metrics on success
-                self.qps_stats.inc()
-                self.latency_stats.observe(latency_ms, now_ts_ms())
-                break
-
-        for i in range(len(request.args)):
-            feature_name = request.args[i].feature_name
-            feature_value = feature_values_list[i]
-            feature_values[feature_name] = feature_value
-
-        return OnDemandResponse(
-            feature_values=feature_values,
-            server_id=self.server_id
+        # Execute using executor
+        results = await self.executor.execute(
+            target_features=request.get_target_features(),
+            feature_keys=request.get_feature_keys(),
+            udf_args=request.get_udf_args()
         )
 
-    # fetches value in storage and returns
-    async def _fetch(self, feature_name: str, keys: Dict[str, Any]) -> FeatureValue:
-        start_ts = time.perf_counter()
-        feature_value_raw = await DataService.fetch_latest(feature_name=feature_name, keys=keys)
+        return OnDemandResponse(
+            results=results,
+            server_id=int(self.server_id)
+        )
+    
+    def _validate_request(self, request: OnDemandRequest) -> None:
+        """Validate that all required dependencies are included in the request"""
+        features = FeatureRepository.get_all_features()
+        requested_features = set(request.get_target_features())
+        
+        for arg in request.args:
+            feature = features.get(arg.feature_name)
+            if feature is None:
+                raise ValueError(f"Feature {arg.feature_name} not found")
+            
+            # Check that all dependencies are included in the request
+            for dep in feature.dependencies:
+                if dep.name not in requested_features:
+                    raise ValueError(
+                        f"Dependency {dep.name} for feature {arg.feature_name} "
+                        "not included in request"
+                    )
 
-        latency_ms = int((time.perf_counter() - start_ts) * 1000)
-        self.db_latency_stats.observe(latency_ms, now_ts_ms())
-        return FeatureValue.from_raw(feature_value_raw)
+    # # handle request (can contain multiple features) - either serve directly or execute udf per requested feature
+    # async def _do_work(self, request: OnDemandRequest, retries: int = 3) -> OnDemandResponse:
 
-    # fetches dep feature values, performs udf on them + udf_args and returns
-    async def _fetch_and_udf(self, feature_name: str, dep_features_keys: List[Tuple[str, Dict[str, Any]]], udf_args: Optional[Dict]) -> FeatureValue:
-        spec = self._on_demand_specs[feature_name]
-        futs = []
-        for (dep_feature_name, keys) in dep_features_keys:
-            futs.append(self._fetch(feature_name=dep_feature_name, keys=keys))
-        feature_values = await asyncio.gather(*futs)
+    #     # start_ts = time.perf_counter()
+    #     # await asyncio.sleep(0.0401)
+    #     #
+    #     # latency_ms = int((time.perf_counter() - start_ts) * 1000)
+    #     # self.latency_stats.observe(latency_ms, now_ts_ms())
+    #     # self.qps_stats.inc()
+    #     #
+    #     # return OnDemandResponse(
+    #     #     feature_values={'test_feature': FeatureValue(
+    #     #         keys={'k1': 'k1'},
+    #     #         values={'v1': 'v1'},
+    #     #     )},
+    #     #     server_id=self.server_id
+    #     # )
+    #     feature_values = {}
 
-        # check if we have empty results
-        # TODO indicate?
-        for fv in feature_values:
-            if len(fv.keys) == 0:
-                return FeatureValue(keys={}, values={})
+    #     num_attempts = 0
+    #     while True:
+    #         futs = []
+    #         for arg in request.args:
+    #             if arg.serve_or_udf:
+    #                 futs.append(self._fetch(arg.feature_name, arg.keys))
+    #             else:
+    #                 futs.append(self._fetch_and_udf(arg.feature_name, arg.dep_features_keys, arg.udf_args))
 
-        udf = spec.udf
-        udf_kwargs = {}
+    #         start_ts = time.perf_counter()
+    #         feature_values_list = await asyncio.gather(*futs)
+    #         latency_ms = int((time.perf_counter() - start_ts) * 1000)
 
-        # map feature args to fetched feature values
-        for feature_arg_name in spec.udf_dep_features_args_names:
-            dep_feature_name = spec.udf_dep_features_args_names[feature_arg_name]
-            # find index to look up result from list of futures
-            index = -1
-            for i in range(len(dep_features_keys)):
-                if dep_features_keys[i][0] == dep_feature_name:
-                    index = i
-                    break
-            assert index >= 0
-            dep_feature_value = feature_values[index]
-            udf_kwargs[feature_arg_name] = dep_feature_value
+    #         has_empty = False
+    #         for fv in feature_values_list:
+    #             if len(fv.keys) == 0:
+    #                 # retry
+    #                 has_empty = True
+    #                 break # inner
+    #         if has_empty:
+    #             if num_attempts >= retries:
+    #                 raise RuntimeError('Max retries fetching non-empty results')
+    #             else:
+    #                 num_attempts += 1
+    #                 await asyncio.sleep(0.5)
+    #         else:
+    #             # report metrics on success
+    #             self.qps_stats.inc()
+    #             self.latency_stats.observe(latency_ms, now_ts_ms())
+    #             break
 
-        # add udf args
-        assert (spec.udf_args_names is None) == (udf_args is None)
-        if udf_args is not None:
-            assert spec.udf_args_names is not None
-            for extra_arg_name in spec.udf_args_names:
-                udf_kwargs[extra_arg_name] = udf_args[extra_arg_name]
+    #     for i in range(len(request.args)):
+    #         feature_name = request.args[i].feature_name
+    #         feature_value = feature_values_list[i]
+    #         feature_values[feature_name] = feature_value
 
-        return self._execute_udf(udf, **udf_kwargs)
+    #     return OnDemandResponse(
+    #         feature_values=feature_values,
+    #         server_id=self.server_id
+    #     )
 
-    # TODO add option for threadpool, processpool and ray actor pool
-    def _execute_udf(self, udf: Callable, **udf_kwargs) -> FeatureValue:
-        return udf(**udf_kwargs)
+    # # fetches value in storage and returns
+    # async def _fetch(self, feature_name: str, keys: Dict[str, Any]) -> FeatureValue:
+    #     start_ts = time.perf_counter()
+    #     feature_value_raw = await DataService.fetch_latest(feature_name=feature_name, keys=keys)
+
+    #     latency_ms = int((time.perf_counter() - start_ts) * 1000)
+    #     self.db_latency_stats.observe(latency_ms, now_ts_ms())
+    #     return FeatureValue.from_raw(feature_value_raw)
+
+    # # fetches dep feature values, performs udf on them + udf_args and returns
+    # async def _fetch_and_udf(self, feature_name: str, dep_features_keys: List[Tuple[str, Dict[str, Any]]], udf_args: Optional[Dict]) -> FeatureValue:
+    #     spec = self._on_demand_specs[feature_name]
+    #     futs = []
+    #     for (dep_feature_name, keys) in dep_features_keys:
+    #         futs.append(self._fetch(feature_name=dep_feature_name, keys=keys))
+    #     feature_values = await asyncio.gather(*futs)
+
+    #     # check if we have empty results
+    #     # TODO indicate?
+    #     for fv in feature_values:
+    #         if len(fv.keys) == 0:
+    #             return FeatureValue(keys={}, values={})
+
+    #     udf = spec.udf
+    #     udf_kwargs = {}
+
+    #     # map feature args to fetched feature values
+    #     for feature_arg_name in spec.udf_dep_features_args_names:
+    #         dep_feature_name = spec.udf_dep_features_args_names[feature_arg_name]
+    #         # find index to look up result from list of futures
+    #         index = -1
+    #         for i in range(len(dep_features_keys)):
+    #             if dep_features_keys[i][0] == dep_feature_name:
+    #                 index = i
+    #                 break
+    #         assert index >= 0
+    #         dep_feature_value = feature_values[index]
+    #         udf_kwargs[feature_arg_name] = dep_feature_value
+
+    #     # add udf args
+    #     assert (spec.udf_args_names is None) == (udf_args is None)
+    #     if udf_args is not None:
+    #         assert spec.udf_args_names is not None
+    #         for extra_arg_name in spec.udf_args_names:
+    #             udf_kwargs[extra_arg_name] = udf_args[extra_arg_name]
+
+    #     return self._execute_udf(udf, **udf_kwargs)
+
+    # # TODO add option for threadpool, processpool and ray actor pool
+    # def _execute_udf(self, udf: Callable, **udf_kwargs) -> FeatureValue:
+    #     return udf(**udf_kwargs)
 
     def collect_stats(self) -> List[StatsUpdate]:
         return [self.qps_stats.collect(), self.latency_stats.collect(), self.db_latency_stats.collect()]
