@@ -16,6 +16,9 @@ logger = logging.getLogger(__name__)
 
 
 class OnDemandExecutor:
+    # Special delimiter that's unlikely to be in user-defined names
+    PIPELINE_NODE_DELIMITER = "::pipeline_for::"
+
     def __init__(self, data_connector: OnDemandDataConnector):
         self._data_connector = data_connector
         self._features = FeatureRepository.get_all_features()
@@ -31,6 +34,23 @@ class OnDemandExecutor:
         self._dependency_graph: Dict[str, Set[str]] = {}
         
         self._init_features()
+    
+    @classmethod
+    def get_pipeline_node_name(cls, pipeline_name: str, dependent_name: str) -> str:
+        """Generate unique node name for pipeline feature based on dependent feature"""
+        return f"{pipeline_name}{cls.PIPELINE_NODE_DELIMITER}{dependent_name}"
+
+    @classmethod
+    def parse_pipeline_node_name(cls, node_name: str) -> tuple[str, str]:
+        """Extract pipeline and dependent feature names from pipeline node name"""
+        if cls.PIPELINE_NODE_DELIMITER not in node_name:
+            raise ValueError(f"Not a pipeline node name: {node_name}")
+        pipeline_name, dependent_name = node_name.split(cls.PIPELINE_NODE_DELIMITER)
+        return pipeline_name, dependent_name
+
+    def _is_pipeline_node(self, name: str) -> bool:
+        """Check if a name represents a pipeline node"""
+        return self.PIPELINE_NODE_DELIMITER in name
 
     def _init_features(self):
         """Initialize feature categorization and dependencies"""
@@ -48,7 +68,7 @@ class OnDemandExecutor:
                     dep_name = dep_arg.get_name()
                     if dep_name in self._pipeline_features:
                         # Create unique pipeline node for this dependency
-                        pipeline_node = f"{dep_name}_for_{name}"
+                        pipeline_node = self.get_pipeline_node_name(dep_name, name)
                         self._dependency_graph[pipeline_node] = set()
                         self._dependency_graph[name].add(pipeline_node)
                         # Store query type
@@ -156,7 +176,7 @@ class OnDemandExecutor:
             dep_name = dep_arg.get_name()
             if dep_name in self._pipeline_features:
                 # Get value from unique pipeline node
-                pipeline_node = f"{dep_name}_for_{feature_name}"
+                pipeline_node = self.get_pipeline_node_name(dep_name, feature_name)
                 dep_value = computed_values[pipeline_node]
             else:
                 dep_value = computed_values[dep_name]
@@ -186,15 +206,15 @@ class OnDemandExecutor:
             # Execute features in current level concurrently
             tasks = []
             for feature_name in level:
-                if '_for_' in feature_name:
+                if self._is_pipeline_node(feature_name):
                     # This is a pipeline node
-                    pipeline_name, dependent_name = feature_name.split('_for_')
+                    pipeline_name, dependent_name = self.parse_pipeline_node_name(feature_name)
                     task = self._fetch_pipeline_feature(
                         pipeline_name,
                         request.feature_keys.get(dependent_name, {}),
                         self._features[pipeline_name].output_type,
                         self._pipeline_to_on_demand_query[pipeline_name][dependent_name],
-                        (request.query_args or {}).get(dependent_name, {})  
+                        (request.query_args or {}).get(dependent_name, {})
                     )
                 else:
                     # Regular feature execution

@@ -224,11 +224,11 @@ class TestOnDemandExecutor(unittest.TestCase):
         
         # Check dependency graph
         expected_graph = {
-            'simple_feature': {'pipeline_feature_for_simple_feature'},
-            'list_feature': {'pipeline_feature_for_list_feature'},
+            'simple_feature': {OnDemandExecutor.get_pipeline_node_name('pipeline_feature', 'simple_feature')},
+            'list_feature': {OnDemandExecutor.get_pipeline_node_name('pipeline_feature', 'list_feature')},
             'chained_feature': {'simple_feature'},
-            'pipeline_feature_for_simple_feature': set(),
-            'pipeline_feature_for_list_feature': set(),
+            OnDemandExecutor.get_pipeline_node_name('pipeline_feature', 'simple_feature'): set(),
+            OnDemandExecutor.get_pipeline_node_name('pipeline_feature', 'list_feature'): set(),
             'pipeline_feature': set(),
         }
         self.assertEqual(self.executor._dependency_graph, expected_graph)
@@ -293,7 +293,7 @@ class TestOnDemandExecutor(unittest.TestCase):
         self.assertEqual(len(execution_order), 3)  # Should have 3 levels
         self.assertEqual(
             set(execution_order[0]), 
-            {'base_feature1_for_level1_feature1', 'base_feature2_for_level1_feature2'}
+            {OnDemandExecutor.get_pipeline_node_name('base_feature1', 'level1_feature1'), OnDemandExecutor.get_pipeline_node_name('base_feature2', 'level1_feature2')}
         )
         self.assertEqual(
             set(execution_order[1]), 
@@ -306,7 +306,7 @@ class TestOnDemandExecutor(unittest.TestCase):
         self.assertEqual(len(execution_order), 3)  # Should have 3 levels
         self.assertEqual(
             set(execution_order[0]), 
-            {'base_feature1_for_level1_feature1', 'base_feature2_for_level1_feature2'}
+            {OnDemandExecutor.get_pipeline_node_name('base_feature1', 'level1_feature1'), OnDemandExecutor.get_pipeline_node_name('base_feature2', 'level1_feature2')}
         )
         self.assertEqual(
             set(execution_order[1]), 
@@ -319,7 +319,7 @@ class TestOnDemandExecutor(unittest.TestCase):
         self.assertEqual(len(execution_order), 4)  # Should have 4 levels
         self.assertEqual(
             set(execution_order[0]), 
-            {'base_feature1_for_level1_feature1', 'base_feature2_for_level1_feature2'}
+            {OnDemandExecutor.get_pipeline_node_name('base_feature1', 'level1_feature1'), OnDemandExecutor.get_pipeline_node_name('base_feature2', 'level1_feature2')}
         )
         self.assertEqual(
             set(execution_order[1]), 
@@ -333,7 +333,7 @@ class TestOnDemandExecutor(unittest.TestCase):
         self.assertEqual(len(execution_order), 2)  # Should have 2 levels
         self.assertEqual(
             set(execution_order[0]), 
-            {'base_feature1_for_level1_feature1', 'base_feature2_for_level1_feature2'}
+            {OnDemandExecutor.get_pipeline_node_name('base_feature1', 'level1_feature1'), OnDemandExecutor.get_pipeline_node_name('base_feature2', 'level1_feature2')}
         )
         self.assertEqual(
             set(execution_order[1]), 
