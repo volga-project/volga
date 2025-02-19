@@ -29,6 +29,15 @@ class TestSource(unittest.TestCase):
         assert 'online_source' in source_pipelines
         assert 'offline_source' in source_pipelines
 
+        # Verify source features have no dependencies
+        online_feature = FeatureRepository.get_feature('online_source')
+        assert len(online_feature.dep_args) == 0
+        assert online_feature.is_source == True
+
+        offline_feature = FeatureRepository.get_feature('offline_source')
+        assert len(offline_feature.dep_args) == 0
+        assert offline_feature.is_source == True
+
         ctx = StreamingContext()
         kafka_pipeline = source_pipelines['online_source']
         kafka_connector = kafka_pipeline.func()

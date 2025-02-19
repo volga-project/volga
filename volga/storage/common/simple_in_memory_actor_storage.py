@@ -8,7 +8,7 @@ from ray.actor import ActorHandle
 import time
 
 from volga.common.time_utils import datetime_str_to_ts
-from volga.api.entity.schema import Schema
+from volga.api.schema import Schema
 from volga.storage.cold import ColdStorage
 from volga.storage.common.key_index import compose_main_key, KeyIndex
 from volga.storage.hot import HotStorage
@@ -23,8 +23,6 @@ class SimpleInMemoryActorStorage(ColdStorage, HotStorage):
     def __init__(self):
         self.cache_actor = SimpleInMemoryCacheActor.options(name=self.CACHE_ACTOR_NAME, get_if_exists=True).remote()
 
-    # TODO dataset_name and schema should be part of all records metadata
-    #  When it is so, these outside params won't be needed
     def gen_sink_function(self, dataset_name: str, output_schema: Schema, hot: bool) -> SinkFunction:
         if hot:
             return SingleEventSinkToCacheActorFunction(
@@ -148,7 +146,6 @@ class BulkSinkToCacheActorFunction(SinkFunction):
 
     DUMPER_PERIOD_S = 1
 
-    # TODO we need to get rid of passing output_schema, it should be a part of a message - NOPE - extra mem overhead
     def __init__(self, cache_actor: ActorHandle, dataset_name: str, output_schema: Schema):
         self.cache_actor = cache_actor
         self.dataset_name = dataset_name
@@ -158,9 +155,6 @@ class BulkSinkToCacheActorFunction(SinkFunction):
         self.running = False
 
     def sink(self, value):
-        # print(value)
-        # raise
-        # TODO all of this should be a part of Record object (value) and not sourced from outside - NOPE - extra mem overhead
         key_fields = list(self.output_schema.keys.keys())
         keys_dict = {k: value[k] for k in key_fields}
         timestamp_field = self.output_schema.timestamp

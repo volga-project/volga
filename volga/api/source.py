@@ -8,6 +8,7 @@ from volga.api.entity import validate_decorated_entity
 from volga.api.pipeline import create_and_register_pipeline_feature
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.stream_source import StreamSource
+from volga.api.feature import DepArg
 
 T = TypeVar('T')
 
@@ -112,10 +113,11 @@ def source(output: Type) -> Callable:
                 f'got {return_type} instead'
             )
         
+        # Create and register pipeline feature with empty dependencies
         create_and_register_pipeline_feature(
             func=source_func,
             feature_name=feature_name,
-            dependencies=[],
+            dep_args=[],  # Sources have no dependencies
             output_type=output,
             is_source=True
         )

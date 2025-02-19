@@ -120,7 +120,7 @@ class Client:
         pipeline = target.get_pipeline()
 
         # build operator graph
-        # TODO we should recursively reconstruct whole tree in case inputs are not terminal
+        # TODO we should recursively reconstruct whole graph in case inputs are not terminal
         terminal_operator_node = pipeline.func(target.__class__, *pipeline.inputs)
 
         # build stream graph

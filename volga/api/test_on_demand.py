@@ -3,7 +3,7 @@ import unittest
 from volga.api.entity import entity, field, Entity
 from volga.api.pipeline import pipeline
 from volga.api.on_demand import on_demand
-from volga.api.feature import FeatureRepository
+from volga.api.feature import FeatureRepository, DepArg
 from volga.api.source import KafkaSource, MysqlSource, source, Connector
 
 class TestOnDemand(unittest.TestCase):
@@ -67,32 +67,32 @@ class TestOnDemand(unittest.TestCase):
         assert user_source_feature is not None
         assert user_source_feature.name == 'user_source'
         assert user_source_feature.output_type == User
-        assert len(user_source_feature.dependencies) == 0
+        assert len(user_source_feature.dep_args) == 0
 
         # Check order source
         order_source_feature = FeatureRepository.get_feature('order_source')
         assert order_source_feature is not None
         assert order_source_feature.name == 'order_source'
         assert order_source_feature.output_type == Order
-        assert len(order_source_feature.dependencies) == 0
+        assert len(order_source_feature.dep_args) == 0
 
         # Check pipeline
         pipeline_feature = FeatureRepository.get_feature('user_order_pipeline')
         assert pipeline_feature is not None
         assert pipeline_feature.name == 'user_order_pipeline'
         assert pipeline_feature.output_type == UserOrderInfo
-        assert len(pipeline_feature.dependencies) == 2
-        assert 'user_source' in pipeline_feature._dependency_names
-        assert 'order_source' in pipeline_feature._dependency_names
+        assert len(pipeline_feature.dep_args) == 2
+        assert any(dep.get_name() == 'user_source' for dep in pipeline_feature.dep_args)
+        assert any(dep.get_name() == 'order_source' for dep in pipeline_feature.dep_args)
 
         # Check on_demand feature
         on_demand_feature = FeatureRepository.get_feature('user_order_stats')
         assert on_demand_feature is not None
         assert on_demand_feature.name == 'user_order_stats'
         assert on_demand_feature.output_type == UserOrderStats
-        assert len(on_demand_feature.dependencies) == 2
-        assert 'user_order_pipeline' in on_demand_feature._dependency_names
-        assert 'user_source' in on_demand_feature._dependency_names
+        assert len(on_demand_feature.dep_args) == 2
+        assert any(dep.get_name() == 'user_order_pipeline' for dep in on_demand_feature.dep_args)
+        assert any(dep.get_name() == 'user_source' for dep in on_demand_feature.dep_args)
 
         assert UserOrderStats._entity._on_demands['user_order_stats'] == on_demand_feature
 

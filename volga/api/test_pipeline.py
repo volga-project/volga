@@ -2,7 +2,7 @@ import datetime
 import unittest
 from volga.api.entity import entity, field, Entity
 from volga.api.pipeline import pipeline, PipelineFeature
-from volga.api.feature import FeatureRepository
+from volga.api.feature import FeatureRepository, DepArg
 from volga.api.source import KafkaSource, MysqlSource, source, Connector
 
 class TestPipeline(unittest.TestCase):
@@ -36,7 +36,7 @@ class TestPipeline(unittest.TestCase):
         
         @source(Order)
         def mysql_source() -> Connector:
-            return MysqlSource.mock_with_items([Order(user_id='123', product_id='123', product_name='Product', user_name='John', timestamp=datetime.datetime.now())])
+            return MysqlSource.mock_with_items([Order(user_id='123', product_id='123', product_name='Product', timestamp=datetime.datetime.now())])
 
         @pipeline(dependencies=['kafka_source', 'mysql_source'], output=UserOrderInfo)
         def sample_pipeline(users: Entity, orders: Entity):
@@ -60,7 +60,7 @@ class TestPipeline(unittest.TestCase):
         assert kafka_feature is not None
         assert kafka_feature.name == 'kafka_source'
         assert kafka_feature.output_type == User
-        assert len(kafka_feature.dependencies) == 0
+        assert len(kafka_feature.dep_args) == 0
         assert kafka_feature.is_source == True
 
         # Check mysql source 
@@ -68,7 +68,7 @@ class TestPipeline(unittest.TestCase):
         assert mysql_feature is not None
         assert mysql_feature.name == 'mysql_source'
         assert mysql_feature.output_type == Order
-        assert len(mysql_feature.dependencies) == 0
+        assert len(mysql_feature.dep_args) == 0
         assert mysql_feature.is_source == True
 
         # Check pipeline
@@ -76,9 +76,9 @@ class TestPipeline(unittest.TestCase):
         assert pipeline_feature is not None
         assert pipeline_feature.name == 'sample_pipeline'
         assert pipeline_feature.output_type == UserOrderInfo
-        assert len(pipeline_feature.dependencies) == 2
-        assert 'kafka_source' in pipeline_feature._dependency_names
-        assert 'mysql_source' in pipeline_feature._dependency_names
+        assert len(pipeline_feature.dep_args) == 2
+        assert any(dep.get_name() == 'kafka_source' for dep in pipeline_feature.dep_args)
+        assert any(dep.get_name() == 'mysql_source' for dep in pipeline_feature.dep_args)
         assert pipeline_feature.is_source == False
 
 if __name__ == '__main__':

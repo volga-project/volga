@@ -1,32 +1,74 @@
 from abc import ABC
-from typing import Callable, List, Type, Optional, Any, Dict
+from typing import Callable, List, Type, Optional, Any, Dict, Union, Tuple
+from dataclasses import dataclass
+
+@dataclass
+class DepArg:
+    """Represents a feature dependency with optional query specification"""
+    feature_name: str
+    query_name: str = 'latest'
+
+    def get_name(self) -> str:
+        """Get the name of the dependent feature"""
+        return self.feature_name
+
+def validate_dependencies(feature_name: str, dep_args: List[DepArg]) -> None:
+    """Validate dependencies and check for circular dependencies"""
+    visited = set()
+    
+    def check_circular(feat_name: str, path: List[str]) -> None:
+        if feat_name in path:
+            cycle = path[path.index(feat_name):] + [feat_name]
+            raise ValueError(
+                f'Circular dependency detected in feature {feature_name}: {" -> ".join(cycle)}'
+            )
+        
+        if feat_name in visited:
+            return
+            
+        visited.add(feat_name)
+        path.append(feat_name)
+        
+        feat = FeatureRepository.get_feature(feat_name)
+        if feat is None:
+            raise ValueError(
+                f'Dependency {feat_name} not found for feature {feature_name}. '
+                'Make sure all dependencies are decorated with @source, @pipeline, or @on_demand'
+            )
+            
+        # Get dependency names
+        for dep_arg in feat.dep_args:
+            check_circular(dep_arg.get_name(), path)
+            
+        path.pop()
+    
+    # Validate each dependency
+    for dep_arg in dep_args:
+        check_circular(dep_arg.get_name(), [])
 
 class Feature(ABC):
     def __init__(
         self,
         func: Callable,
-        dependencies: List[str],
+        dep_args: List[DepArg],
         output_type: Type
     ):
         self.func = func
         self.name = func.__name__
         self.output_type = output_type
-        self._dependencies: Optional[List['Feature']] = None
-        self._dependency_names = dependencies
+        self._dep_args = dep_args
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         return self.func(*args, **kwargs)
 
     @property
-    def dependencies(self) -> List['Feature']:
-        if self._dependencies is None:
-            self._dependencies = []
-            for dep_name in self._dependency_names:
-                dep = FeatureRepository.get_feature(dep_name)
-                if dep is None:
-                    raise ValueError(f'Dependency {dep_name} not found for feature {self.name}')
-                self._dependencies.append(dep)
-        return self._dependencies
+    def dep_args(self) -> List[DepArg]:
+        """Get list of dependency arguments"""
+        return self._dep_args
+
+    def get_dependency_names(self) -> List[str]:
+        """Get list of dependency names"""
+        return [dep_arg.get_name() for dep_arg in self.dep_args]
 
 class FeatureRepository:
     _features: Dict[str, Feature] = {}
@@ -48,35 +90,3 @@ class FeatureRepository:
     @classmethod
     def clear(cls) -> None:
         cls._features.clear()
-
-def validate_dependencies(feature_name: str, dependencies: List[str]) -> None:
-    """Validate dependencies and check for circular dependencies"""
-    visited = set()
-    
-    def check_circular(feat_name: str, path: List[str]) -> None:
-        if feat_name in path:
-            cycle = path[path.index(feat_name):] + [feat_name]
-            raise ValueError(
-                f'Circular dependency detected in feature {feature_name}: {" -> ".join(cycle)}'
-            )
-        
-        if feat_name in visited:
-            return
-            
-        visited.add(feat_name)
-        path.append(feat_name)
-        
-        feat = FeatureRepository.get_feature(feat_name)
-        if feat is None:
-            raise ValueError(
-                f'Dependency {feat_name} not found for feature {feature_name}. '
-                'Make sure all dependencies are decorated with either @pipeline or @on_demand'
-            )
-            
-        for dep_name in feat._dependency_names:
-            check_circular(dep_name, path)
-            
-        path.pop()
-    
-    for dep in dependencies:
-        check_circular(dep, [])
