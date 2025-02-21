@@ -9,8 +9,8 @@ import yaml
 from volga.on_demand.actors.coordinator import OnDemandCoordinator
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.data.data_service import DataService
-from volga.on_demand.on_demand import OnDemandRequest, OnDemandArgs
-from volga.on_demand.on_demand_config import DEFAULT_ON_DEMAND_CONFIG
+from volga.on_demand.models import OnDemandRequest, OnDemandArgs
+from volga.on_demand.config import DEFAULT_ON_DEMAND_CONFIG
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.function.aggregate_function import AggregationType
 from volga.streaming.api.message.message import Record

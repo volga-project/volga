@@ -4,7 +4,7 @@ import ray
 
 from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
-from volga.on_demand.on_demand_config import OnDemandConfig
+from volga.on_demand.config import OnDemandConfig
 from volga_tests.on_demand_perf.load_test_handler import LoadTestHandler
 from volga.on_demand.testing_utils import setup_sample_feature_data_ray
 

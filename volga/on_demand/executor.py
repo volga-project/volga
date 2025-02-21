@@ -4,13 +4,13 @@ import asyncio
 import logging
 import time
 
-from volga.api.feature import FeatureRepository
+from volga.api.feature import Feature
 from volga.api.pipeline import PipelineFeature
 from volga.api.on_demand import OnDemandFeature
 from volga.stats.stats_manager import HistogramStats
 from volga.streaming.common.utils import now_ts_ms
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
-from volga.on_demand.on_demand import OnDemandRequest
+from volga.on_demand.models import OnDemandRequest
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +19,10 @@ class OnDemandExecutor:
     # Special delimiter that's unlikely to be in user-defined names
     PIPELINE_NODE_DELIMITER = "::pipeline_for::"
 
-    def __init__(self, data_connector: OnDemandDataConnector):
+    def __init__(self, data_connector: OnDemandDataConnector, db_stats: Optional[HistogramStats] = None):
         self._data_connector = data_connector
-        self._features = FeatureRepository.get_all_features()
+        self._features = None
         
-        # Categorize features
         self._pipeline_features: Dict[str, PipelineFeature] = {}
         self._ondemand_features: Dict[str, OnDemandFeature] = {}
         
@@ -32,8 +31,8 @@ class OnDemandExecutor:
         
         # Build dependency graph for execution order
         self._dependency_graph: Dict[str, Set[str]] = {}
-        
-        self._init_features()
+
+        self._db_stats = db_stats
     
     @classmethod
     def get_pipeline_node_name(cls, pipeline_name: str, dependent_name: str) -> str:
@@ -51,8 +50,13 @@ class OnDemandExecutor:
     def _is_pipeline_node(self, name: str) -> bool:
         """Check if a name represents a pipeline node"""
         return self.PIPELINE_NODE_DELIMITER in name
+    
+    def register_features(self, features: Dict[str, Feature]):  
+        self._features = features
+        self._init_features()
 
     def _init_features(self):
+        assert self._features is not None
         """Initialize feature categorization and dependencies"""
         for name, feature in self._features.items():
             if isinstance(feature, PipelineFeature):
@@ -132,12 +136,16 @@ class OnDemandExecutor:
             # Get query function and validate arguments
             query_func = self._data_connector.query_dict()[query_name]
             
-            # Execute query
+            start_ts = time.perf_counter()
             result = await query_func(
                 feature_name=feature_name,
                 keys=keys,
                 **(query_args or {})
             )
+
+            if self._db_stats:
+                latency_ms = int((time.perf_counter() - start_ts) * 1000)
+                self._db_stats.observe(latency_ms, now_ts_ms())       
             
             # Validate result type
             if isinstance(result, list):
@@ -189,7 +197,7 @@ class OnDemandExecutor:
         )
 
     async def execute(self, request: OnDemandRequest) -> Dict[str, Any]:
-        """Execute on-demand features"""
+        assert self._features is not None
         request.validate_request(
             features=self._features,
             query_params=self._data_connector.query_params()

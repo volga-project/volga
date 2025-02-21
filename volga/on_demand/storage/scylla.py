@@ -17,7 +17,7 @@ class OnDemandScyllaConnector(OnDemandDataConnector):
     def query_dict(self) -> Dict[str, Callable]:
         return {
             'latest': self.fetch_latest,
-            # 'range': self.fetch_range,
+            # 'range': self.fetch_range, # TODO: implement this
         }
         
     async def fetch_latest(
@@ -33,22 +33,6 @@ class OnDemandScyllaConnector(OnDemandDataConnector):
             
         return self._parse_entity(feature_name, raw_data)
         
-    # async def fetch_range(
-    #     self,
-    #     feature_name: str,
-    #     keys: Dict[str, Any],
-    #     start_time: datetime,
-    #     end_time: datetime
-    # ) -> List[Any]:
-    #     """Fetch feature values within a time range"""
-    #     raw_data = await self.api.fetch_range(
-    #         feature_name, 
-    #         keys,
-    #         start_time,
-    #         end_time
-    #     )
-        
-    #     return [self._parse_entity(feature_name, item) for item in raw_data]
         
     def _parse_entity(self, feature_name: str, raw_data: Dict[str, Any]) -> Any:
         """Parse raw data into an entity instance"""

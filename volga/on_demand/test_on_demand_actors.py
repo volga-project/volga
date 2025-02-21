@@ -7,8 +7,8 @@ import ray
 from volga.on_demand.actors.coordinator import OnDemandCoordinator, create_on_demand_coordinator
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.data.data_service import DataService
-from volga.on_demand.on_demand import OnDemandArgs, OnDemandRequest, OnDemandSpec, FeatureValue, OnDemandResponse
-from volga.on_demand.on_demand_config import DEFAULT_ON_DEMAND_CONFIG
+from volga.on_demand.models import OnDemandArgs, OnDemandRequest, OnDemandSpec, FeatureValue, OnDemandResponse
+from volga.on_demand.config import DEFAULT_ON_DEMAND_CONFIG
 
 
 class TestOnDemandActors(unittest.TestCase):

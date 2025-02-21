@@ -8,11 +8,10 @@ from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from volga.common.ray.resource_manager import ResourceManager
 from volga.on_demand.actors.server import OnDemandServer
-from volga.on_demand.on_demand import OnDemandSpec
-from volga.on_demand.on_demand_config import OnDemandConfig
+from volga.on_demand.config import OnDemandConfig
 from volga.on_demand.stats import ON_DEMAND_SERVER_LATENCY_CONFIG, ON_DEMAND_DB_LATENCY_CONFIG, ON_DEMAND_QPS_STATS_CONFIG
-from volga.stats.stats_manager import StatsManager
-
+from volga.stats.stats_manager import StatsManager  
+from volga.api.feature import Feature
 logger = logging.getLogger('ray')
 
 
@@ -76,17 +75,16 @@ class OnDemandCoordinator:
         logger.info(f'[OnDemand] All actors started')
         return self.servers_per_node
 
-    def register_on_demand_specs(self, specs: List[OnDemandSpec]):
-        assert len(self.servers_per_node) > 0
-        futs = []
-        for node_id in self.servers_per_node:
-            for server in self.servers_per_node[node_id]:
-                futs.append(server.register_on_demand_specs.remote(specs))
-        ray.get(futs)
-
     def stop(self):
         # TODO delete actors
         self.stats_manager.stop()
+
+    def register_features(self, features: Dict[str, Feature]):
+        futs = []
+        for node_id in self.servers_per_node:
+            for server in self.servers_per_node[node_id]:
+                futs.append(server.register_features.remote(features))
+        ray.get(futs)
 
     def get_latest_stats(self) -> Dict:
         latest_stats =  self.stats_manager.get_latest_stats()

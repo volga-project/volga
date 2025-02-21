@@ -2,25 +2,27 @@ import asyncio
 import logging
 import socket
 import time
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Type
+import importlib
 
 import uvicorn
 from pydantic_core import from_json
 from fastapi import FastAPI, APIRouter
 
-from volga.on_demand.data.data_service import DataService
-from volga.on_demand.on_demand import OnDemandRequest, OnDemandResponse
-from volga.on_demand.on_demand_config import OnDemandConfig
+from volga.on_demand.models import OnDemandRequest, OnDemandResponse
+from volga.on_demand.config import OnDemandConfig
 from volga.on_demand.stats import (
     ON_DEMAND_QPS_STATS_CONFIG,
     ON_DEMAND_SERVER_LATENCY_CONFIG,
     ON_DEMAND_DB_LATENCY_CONFIG
 )
-from volga.on_demand.storage.scylla import OnDemandScyllaConnector
 from volga.stats.stats_manager import CounterStats, HistogramStats, StatsUpdate, ICollectStats
 from volga.streaming.common.utils import now_ts_ms
-from volga.api.feature import FeatureRepository
+from volga.api.feature import FeatureRepository, Feature
 from volga.on_demand.executor import OnDemandExecutor
+
+import ray
+
 
 logger = logging.getLogger('ray')
 
@@ -46,13 +48,18 @@ class OnDemandServer(ICollectStats):
         self.latency_stats = HistogramStats.create(ON_DEMAND_SERVER_LATENCY_CONFIG)
         self.db_latency_stats = HistogramStats.create(ON_DEMAND_DB_LATENCY_CONFIG)
 
+        self.data_connector = self.config.data_connector.connector_class(**self.config.data_connector.connector_args)
+        
         self.executor = OnDemandExecutor(
-            data_connector=OnDemandScyllaConnector(),
+            data_connector=self.data_connector,
             db_stats=self.db_latency_stats
         )
 
+    def register_features(self, features: Dict[str, Feature]):
+        self.executor.register_features(features)
+
     async def init(self):
-        await DataService.init(self.config.data_service_config)
+        await self.data_connector.init()
 
     async def run(self):
         sock = socket.socket()
@@ -77,8 +84,7 @@ class OnDemandServer(ICollectStats):
 
     async def _serve(self, request_json: str) -> OnDemandResponse:
         request = OnDemandRequest(**from_json(request_json))
-        self._validate_request(request)
-
+        
         self.qps_stats.inc()
         start_ts = time.perf_counter()
         
@@ -91,24 +97,6 @@ class OnDemandServer(ICollectStats):
             results=results,
             server_id=int(self.server_id)
         )
-    
-    def _validate_request(self, request: OnDemandRequest) -> None:
-        """Validate that all required dependencies are included in the request"""
-        features = FeatureRepository.get_all_features()
-        requested_features = set(request.get_target_features())
-        
-        for arg in request.args:
-            feature = features.get(arg.feature_name)
-            if feature is None:
-                raise ValueError(f"Feature {arg.feature_name} not found")
-            
-            # Check that all dependencies are included in the request
-            for dep_arg in feature.dep_args:
-                if dep_arg.get_name() not in requested_features:
-                    raise ValueError(
-                        f"Dependency {dep_arg.get_name()} for feature {arg.feature_name} "
-                        "not included in request"
-                    )
 
     def collect_stats(self) -> List[StatsUpdate]:
         return [
@@ -116,3 +104,6 @@ class OnDemandServer(ICollectStats):
             self.latency_stats.collect(),
             self.db_latency_stats.collect()
         ]
+    
+    async def close(self):
+        await self.data_connector.close()

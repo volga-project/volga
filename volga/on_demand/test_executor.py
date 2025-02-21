@@ -11,15 +11,8 @@ from volga.api.pipeline import PipelineFeature
 from volga.api.on_demand import on_demand, OnDemandFeature
 from volga.on_demand.executor import OnDemandExecutor
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
-from volga.on_demand.on_demand import OnDemandRequest
-
-# Test entities
-@entity
-class TestEntity:
-    id: str = field(key=True)
-    value: float
-    timestamp: datetime = field(timestamp=True)
-
+from volga.on_demand.models import OnDemandRequest
+from volga.on_demand.testing_utils import TEST_ENTITY, TestEntity, MockDataConnector
 
 @entity
 class DependentEntity:
@@ -28,50 +21,10 @@ class DependentEntity:
     timestamp: datetime = field(timestamp=True)
 
 
-test_entity = TestEntity(
-    id='test-id',
-    value=1.0,
-    timestamp=datetime.now()
-)
-
-
-# Mock data connector for testing
-class MockDataConnector(OnDemandDataConnector):
-    def __init__(self):
-        self.test_entity = test_entity
-        
-    def query_dict(self) -> Dict[str, Callable]:
-        return {
-            'latest': self.fetch_latest,
-            'range': self.fetch_range
-        }
-        
-    async def init(self):
-        pass
-        
-    async def close(self):
-        pass
-        
-    async def fetch_latest(
-        self,
-        feature_name: str,
-        keys: Dict[str, Any]
-    ) -> Any:
-        return self.test_entity
-        
-    async def fetch_range(
-        self,
-        feature_name: str,
-        keys: Dict[str, Any],
-        start_time: datetime,
-        end_time: datetime
-    ) -> List[Any]:
-        return [self.test_entity]
-
 @source(TestEntity)
 def pipeline_feature() -> Connector:
     return KafkaSource.mock_with_delayed_items(
-        items=[test_entity],
+        items=[TEST_ENTITY],
         delay_s=0
     )
 
@@ -117,20 +70,21 @@ class TestOnDemandExecutor(unittest.TestCase):
 
     def setUp(self):
         self.executor = OnDemandExecutor(MockDataConnector())
+        self.executor.register_features(FeatureRepository.get_all_features())
 
     async def async_test_source_feature_execution(self):
         """Test execution of source features"""
         result = await self.executor._fetch_pipeline_feature(
             'pipeline_feature',
-            {'id': test_entity.id},
+            {'id': TEST_ENTITY.id},
             TestEntity,
             'latest'
         )
         
         # Verify result
         self.assertIsInstance(result, TestEntity)
-        self.assertEqual(result.id, test_entity.id)
-        self.assertEqual(result.value, test_entity.value)
+        self.assertEqual(result.id, TEST_ENTITY.id)
+        self.assertEqual(result.value, TEST_ENTITY.value)
 
     def test_source_feature_execution(self):
         asyncio.run(self.async_test_source_feature_execution())
@@ -285,7 +239,7 @@ class TestOnDemandExecutor(unittest.TestCase):
 
         # Create new executor with test features
         executor = OnDemandExecutor(MockDataConnector())
-
+        executor.register_features(FeatureRepository.get_all_features())
         # Test different execution order scenarios
         
         # Scenario 1: Single feature with dependencies
