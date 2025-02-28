@@ -12,7 +12,13 @@ from volga.api.on_demand import on_demand, OnDemandFeature
 from volga.on_demand.executor import OnDemandExecutor
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
 from volga.on_demand.models import OnDemandRequest
-from volga.on_demand.testing_utils import TEST_ENTITY, TestEntity, MockDataConnector
+from volga.on_demand.testing_utils import MockDataConnector, TestEntity
+
+TEST_ENTITY = TestEntity(
+    id='test-id',
+    value=1.0,
+    timestamp=datetime.now()
+)
 
 @entity
 class DependentEntity:
@@ -70,7 +76,23 @@ class TestOnDemandExecutor(unittest.TestCase):
 
     def setUp(self):
         self.executor = OnDemandExecutor(MockDataConnector())
-        self.executor.register_features(FeatureRepository.get_all_features())
+        all_features = FeatureRepository.get_all_features()
+        
+        # Filter features to only include those relevant to our test
+        relevant_feature_names = [
+            simple_feature.__name__,
+            pipeline_feature.__name__, 
+            list_feature.__name__,
+            chained_feature.__name__
+        ]
+        
+        relevant_features = {
+            name: all_features[name] 
+            for name in all_features 
+            if name in relevant_feature_names
+        }
+
+        self.executor.register_features(relevant_features)
 
     async def async_test_source_feature_execution(self):
         """Test execution of source features"""
@@ -185,6 +207,7 @@ class TestOnDemandExecutor(unittest.TestCase):
             OnDemandExecutor.get_pipeline_node_name('pipeline_feature', 'list_feature'): set(),
             'pipeline_feature': set(),
         }
+
         self.assertEqual(self.executor._dependency_graph, expected_graph)
 
     def test_get_execution_order(self):
@@ -194,14 +217,14 @@ class TestOnDemandExecutor(unittest.TestCase):
         @source(TestEntity)
         def base_feature1() -> Connector:
             return KafkaSource.mock_with_delayed_items(
-                items=[test_entity],
+                items=[TEST_ENTITY],
                 delay_s=0
             )
 
         @source(TestEntity)
         def base_feature2() -> Connector:
             return KafkaSource.mock_with_delayed_items(
-                items=[test_entity],
+                items=[TEST_ENTITY],
                 delay_s=0
             )
 
@@ -389,4 +412,9 @@ if __name__ == '__main__':
     # t = TestOnDemandExecutor()
     # t.setUp()
     # t.test_validate_request()
+    # t.test_get_execution_order()
+    # t.test_source_feature_execution()
+    # t.test_chained_execution()
+    # t.test_multiple_queries()
+    # t.test_executor_initialization()
     # t.tearDown()

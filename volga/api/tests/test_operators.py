@@ -25,8 +25,8 @@ class TestOperator(unittest.TestCase):
             purchased_at: datetime = field(timestamp=True)
             product_price: float
 
-        ls = User._entity.schema()
-        rs = Order._entity.schema()
+        ls = User._entity_metadata.schema()
+        rs = Order._entity_metadata.schema()
         joined_schema = Join._joined_schema(ls=ls, rs=rs, on=None, left_on=['user_id'])
         # print(joined_schema)
         assert joined_schema.keys == {'user_id': str}

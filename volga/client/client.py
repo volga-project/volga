@@ -35,53 +35,53 @@ class Client:
         self.cold = cold
         self.hot = hot
 
-    def materialize_offline(
-        self,
-        target: Entity,
-        source_tags: Optional[Dict[Entity, str]] = None,
-        parallelism: int = 1,
-        scaling_config: Optional[ScalingConfig] = None,
-        _async: bool = False
-    ):
-        if scaling_config is not None:
-            raise ValueError('ScalingConfig is not supported yet')
-        stream, ctx = self._build_stream(target=target, source_tags=source_tags)
-        if self.cold is None:
-            raise ValueError('Offline materialization requires ColdStorage')
-        if not isinstance(self.cold, SimpleInMemoryActorStorage):
-            raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
-        stream.sink(
-            self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.schema(), hot=False)
-        )
-        # stream.sink(print)
-        if _async:
-            ctx.submit()
-        else:
-            ctx.execute()
+    # def materialize_offline(
+    #     self,
+    #     target: Entity,
+    #     source_tags: Optional[Dict[Entity, str]] = None,
+    #     parallelism: int = 1,
+    #     scaling_config: Optional[ScalingConfig] = None,
+    #     _async: bool = False
+    # ):
+    #     if scaling_config is not None:
+    #         raise ValueError('ScalingConfig is not supported yet')
+    #     stream, ctx = self._build_stream(target=target, source_tags=source_tags)
+    #     if self.cold is None:
+    #         raise ValueError('Offline materialization requires ColdStorage')
+    #     if not isinstance(self.cold, SimpleInMemoryActorStorage):
+    #         raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
+    #     stream.sink(
+    #         self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.schema(), hot=False)
+    #     )
+    #     # stream.sink(print)
+    #     if _async:
+    #         ctx.submit()
+    #     else:
+    #         ctx.execute()
 
-    def materialize_online(
-        self,
-        target: Entity,
-        source_tags: Optional[Dict[Entity, str]] = None,
-        parallelism: int = 1,
-        scaling_config: Optional[ScalingConfig] = None,
-        _async: bool = False
-    ):
-        if scaling_config is not None:
-            raise ValueError('ScalingConfig is not supported yet')
-        stream, ctx = self._build_stream(target=target, source_tags=source_tags)
-        if self.hot is None:
-            raise ValueError('Online materialization requires HotStorage')
-        if not isinstance(self.hot, SimpleInMemoryActorStorage):
-            raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
-        stream.sink(
-            self.hot.gen_sink_function(dataset_name=target.__name__, output_schema=target.schema(), hot=True)
-        )
-        # stream.sink(print)
-        if _async:
-            ctx.submit()
-        else:
-            ctx.execute()
+    # def materialize_online(
+    #     self,
+    #     target: Entity,
+    #     source_tags: Optional[Dict[Entity, str]] = None,
+    #     parallelism: int = 1,
+    #     scaling_config: Optional[ScalingConfig] = None,
+    #     _async: bool = False
+    # ):
+    #     if scaling_config is not None:
+    #         raise ValueError('ScalingConfig is not supported yet')
+    #     stream, ctx = self._build_stream(target=target, source_tags=source_tags)
+    #     if self.hot is None:
+    #         raise ValueError('Online materialization requires HotStorage')
+    #     if not isinstance(self.hot, SimpleInMemoryActorStorage):
+    #         raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
+    #     stream.sink(
+    #         self.hot.gen_sink_function(dataset_name=target.__name__, output_schema=target.schema(), hot=True)
+    #     )
+    #     # stream.sink(print)
+    #     if _async:
+    #         ctx.submit()
+    #     else:
+    #         ctx.execute()
 
     def get_offline_data(
         self,
@@ -115,47 +115,47 @@ class Client:
     ) -> Any:
         raise NotImplementedError()
 
-    def _build_stream(self, target: Entity, source_tags: Optional[Dict[Entity, str]]) -> Tuple[DataStream, StreamingContext]:
-        ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
-        pipeline = target.get_pipeline()
+    # def _build_stream(self, target: Entity, source_tags: Optional[Dict[Entity, str]]) -> Tuple[DataStream, StreamingContext]:
+    #     ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
+    #     pipeline = target.get_pipeline()
 
-        # build operator graph
-        # TODO we should recursively reconstruct whole graph in case inputs are not terminal
-        terminal_operator_node = pipeline.func(target.__class__, *pipeline.inputs)
+    #     # build operator graph
+    #     # TODO we should recursively reconstruct whole graph in case inputs are not terminal
+    #     terminal_operator_node = pipeline.func(target.__class__, *pipeline.inputs)
 
-        # build stream graph
-        self._init_stream_graph(terminal_operator_node, ctx, target.schema(), source_tags)
-        stream: DataStream = terminal_operator_node.stream
+    #     # build stream graph
+    #     self._init_stream_graph(terminal_operator_node, ctx, target.schema(), source_tags)
+    #     stream: DataStream = terminal_operator_node.stream
 
-        return stream, ctx
+    #     return stream, ctx
 
-    def _init_stream_graph(
-        self,
-        operator_node: OperatorNodeBase,
-        ctx: StreamingContext,
-        target_schema: Schema,
-        source_tags: Optional[Dict[Entity, str]] = None
-    ):
+    # def _init_stream_graph(
+    #     self,
+    #     operator_node: OperatorNodeBase,
+    #     ctx: StreamingContext,
+    #     target_schema: Schema,
+    #     source_tags: Optional[Dict[Entity, str]] = None
+    # ):
 
-        for p in operator_node.parents:
-            self._init_stream_graph(
-                p, ctx, target_schema, source_tags
-            )
+    #     for p in operator_node.parents:
+    #         self._init_stream_graph(
+    #             p, ctx, target_schema, source_tags
+    #         )
 
-        # init sources
-        if isinstance(operator_node, Entity):
-            if not operator_node.is_source():
-                raise ValueError('Currently only source inputs are allowed')
-            source_tag = None
-            if source_tags is not None and operator_node in source_tags:
-                source_tag = source_tags[operator_node]
+    #     # init sources
+    #     if isinstance(operator_node, Entity):
+    #         if not operator_node.is_source():
+    #             raise ValueError('Currently only source inputs are allowed')
+    #         source_tag = None
+    #         if source_tags is not None and operator_node in source_tags:
+    #             source_tag = source_tags[operator_node]
 
-            operator_node.init_stream(ctx=ctx, source_tag=source_tag)
-            return
+    #         operator_node.init_stream(ctx=ctx, source_tag=source_tag)
+    #         return
 
-        # TODO special cases i.e. terminal node, join, aggregate, etc.
-        if isinstance(operator_node, Aggregate):
-            operator_node.init_stream(target_schema)
-        else:
-            operator_node.init_stream()
+    #     # TODO special cases i.e. terminal node, join, aggregate, etc.
+    #     if isinstance(operator_node, Aggregate):
+    #         operator_node.init_stream(target_schema)
+    #     else:
+    #         operator_node.init_stream()
 

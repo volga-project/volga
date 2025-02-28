@@ -36,15 +36,12 @@ def create_and_register_pipeline_feature(
         is_source=is_source
     )
     
+    # Register with entity metadata
+    output_type._entity_metadata.register_pipeline_feature(feature_name, feature)
+
     # Register in FeatureRepository
     FeatureRepository.register(feature)
-
-    if not hasattr(output_type._entity, '_pipelines'):
-        output_type._entity._pipelines = {}
-        
-    if feature_name in output_type._entity._pipelines:
-        raise ValueError(f'PipelineFeature {feature_name} already exists')
-    output_type._entity._pipelines[feature_name] = feature
+    
     
     return feature
 

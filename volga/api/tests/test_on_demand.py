@@ -94,7 +94,7 @@ class TestOnDemand(unittest.TestCase):
         assert any(dep.get_name() == 'user_order_pipeline' for dep in on_demand_feature.dep_args)
         assert any(dep.get_name() == 'user_source' for dep in on_demand_feature.dep_args)
 
-        assert UserOrderStats._entity._on_demands['user_order_stats'] == on_demand_feature
+        assert UserOrderStats._entity_metadata.get_on_demand_features()['user_order_stats'] == on_demand_feature
 
 if __name__ == '__main__':
     unittest.main() 

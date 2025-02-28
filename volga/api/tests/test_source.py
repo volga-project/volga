@@ -24,7 +24,7 @@ class TestSource(unittest.TestCase):
         def offline_source() -> Connector:
             return MysqlSource.mock_with_items([User(user_id='123', timestamp=datetime.datetime.now(), name='John')])
 
-        source_pipelines = User._entity._pipelines
+        source_pipelines = User._entity_metadata.get_pipeline_features()
         assert len(source_pipelines) == 2
         assert 'online_source' in source_pipelines
         assert 'offline_source' in source_pipelines

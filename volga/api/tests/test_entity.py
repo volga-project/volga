@@ -1,6 +1,8 @@
 import datetime
 import unittest
-from volga.api.entity import entity, field
+from volga.api.entity import entity, field, EntityMetadata, Entity, create_entity
+from volga.api.schema import Schema
+
 
 class TestEntity(unittest.TestCase):
     def test_entity_schema(self):
@@ -10,9 +12,10 @@ class TestEntity(unittest.TestCase):
             timestamp: datetime.datetime = field(timestamp=True)
             name: str
 
-        fields = User._entity._fields
-        key_fields = User._entity._key_fields
-        timestamp_field = User._entity._timestamp_field
+        metadata = User._entity_metadata
+        fields = metadata.fields
+        key_fields = metadata.key_fields
+        timestamp_field = metadata.timestamp_field
 
         assert len(fields) == 3
         assert key_fields == ['user_id']
@@ -33,6 +36,7 @@ class TestEntity(unittest.TestCase):
         self.assertEqual(user.timestamp, now)
         self.assertEqual(user.name, 'John')
         self.assertEqual(user.age, 30)
+
 
 if __name__ == '__main__':
     unittest.main() 

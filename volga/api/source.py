@@ -8,7 +8,6 @@ from volga.api.entity import validate_decorated_entity
 from volga.api.pipeline import create_and_register_pipeline_feature
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.stream_source import StreamSource
-from volga.api.feature import DepArg
 
 T = TypeVar('T')
 

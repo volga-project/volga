@@ -46,14 +46,14 @@ class TestPipeline(unittest.TestCase):
             return p
 
         # Verify pipelines exist on entities
-        assert 'sample_pipeline' in UserOrderInfo._entity._pipelines
-        assert isinstance(UserOrderInfo._entity._pipelines['sample_pipeline'], PipelineFeature)
+        assert 'sample_pipeline' in UserOrderInfo._entity_metadata.get_pipeline_features()
+        assert isinstance(UserOrderInfo._entity_metadata.get_pipeline_features()['sample_pipeline'], PipelineFeature)
 
-        assert 'kafka_source' in User._entity._pipelines
-        assert isinstance(User._entity._pipelines['kafka_source'], PipelineFeature)
+        assert 'kafka_source' in User._entity_metadata.get_pipeline_features()
+        assert isinstance(User._entity_metadata.get_pipeline_features()['kafka_source'], PipelineFeature)
 
-        assert 'mysql_source' in Order._entity._pipelines
-        assert isinstance(Order._entity._pipelines['mysql_source'], PipelineFeature)
+        assert 'mysql_source' in Order._entity_metadata.get_pipeline_features()
+        assert isinstance(Order._entity_metadata.get_pipeline_features()['mysql_source'], PipelineFeature)
 
         # Check kafka source
         kafka_feature = FeatureRepository.get_feature('kafka_source')

@@ -2,7 +2,7 @@ from typing import Callable, Type, List, Any, Dict, Optional, get_type_hints, Un
 from volga.api.feature import Feature
 from volga.api.pipeline import PipelineFeature
 from volga.api.feature import FeatureRepository, validate_dependencies, DepArg
-from volga.api.entity import validate_decorated_entity
+from volga.api.entity import validate_decorated_entity, is_entity_type
 import inspect
 from functools import wraps
 
@@ -25,16 +25,6 @@ class OnDemandFeature(Feature):
         # Get function signature and type hints
         sig = inspect.signature(func)
         type_hints = get_type_hints(func)
-
-        def is_entity_type(type_hint):
-            if hasattr(type_hint, '_entity'):
-                return True
-            # Check if it's a List of entities
-            origin = getattr(type_hint, '__origin__', None)
-            if origin is list or origin is List:
-                args = getattr(type_hint, '__args__', [])
-                return any(hasattr(arg, '_entity') for arg in args)
-            return False
 
         # Get UDF argument names, excluding entity types
         self.udf_args_names = []
@@ -145,14 +135,9 @@ def on_demand(dependencies: List[Union[str, Tuple[str, str]]]) -> Callable:
             output_type=return_type
         )
 
-        # Register with entity
-        if not hasattr(return_type._entity, '_on_demands'):
-            return_type._entity._on_demands = {}
-            
-        if feature_name in return_type._entity._on_demands:
-            raise ValueError(f'OnDemandFeature {feature_name} already exists')
-        return_type._entity._on_demands[feature_name] = feature
-        
+        # Register with entity metadata
+        return_type._entity_metadata.register_on_demand_feature(feature_name, feature)
+    
         # Register in FeatureRepository
         FeatureRepository.register(feature)
         

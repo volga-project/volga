@@ -13,16 +13,17 @@ from typing import Dict, Any
 import unittest
 from volga.api.feature import FeatureRepository
 
+from volga.on_demand.testing_utils import TEST_FEATURE_NAME
 
-@source(TestEntity)
-def pipeline_feature() -> Connector:
-    return KafkaSource.mock_with_delayed_items(
-        items=[TEST_ENTITY],
-        delay_s=0
-    )
+# @source(TestEntity)
+# def pipeline_feature() -> Connector:
+#     return KafkaSource.mock_with_delayed_items(
+#         items=[TEST_ENTITY],
+#         delay_s=0
+#     )
 
 
-@on_demand(dependencies=['pipeline_feature'])
+@on_demand(dependencies=[TEST_FEATURE_NAME])
 def simple_feature(
     dep: TestEntity,
     multiplier: float = 1.0
