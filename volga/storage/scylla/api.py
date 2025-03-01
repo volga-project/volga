@@ -9,7 +9,7 @@ from volga.storage.scylla.consts import KEYSPACE, REPLICATION_FACTOR, HOT_FEATUR
 from scyllapy import Scylla
 
 
-class HotFeatureStorageApiBase:
+class ScyllaFeatureStorageApiBase:
 
     async def init(self):
         raise NotImplementedError()
@@ -24,7 +24,7 @@ class HotFeatureStorageApiBase:
         raise NotImplementedError()
 
 
-class ScyllaPyHotFeatureStorageApi(HotFeatureStorageApiBase):
+class ScyllaPyHotFeatureStorageApi(ScyllaFeatureStorageApiBase):
 
     def __init__(self, contact_points=None):
         if contact_points is None:
@@ -81,7 +81,7 @@ class ScyllaPyHotFeatureStorageApi(HotFeatureStorageApiBase):
         await self.scylla.execute(q)
 
 
-class AcsyllaHotFeatureStorageApi(HotFeatureStorageApiBase):
+class AcsyllaHotFeatureStorageApi(ScyllaFeatureStorageApiBase):
 
     # TODO set queue_size_io
     def __init__(self, contact_points=None, num_io_threads: int = 1): # TODO configure num io threads

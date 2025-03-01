@@ -8,8 +8,6 @@ from volga.api.schema import Schema
 
 import datetime
 
-# from volga.api.utils import is_optional
-
 T = TypeVar('T')
 
 @dataclass

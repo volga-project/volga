@@ -14,7 +14,7 @@ class OnDemandDataConnector(ABC):
         Example:
         {
             'latest': self.fetch_latest,
-            'daily_avg': self.fetch_daily_average
+            'range': self.fetch_range
         }
         """
         pass

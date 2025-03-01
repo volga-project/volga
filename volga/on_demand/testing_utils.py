@@ -4,7 +4,7 @@ from datetime import datetime
 
 import ray
 from volga.on_demand.config import OnDemandConfig
-from volga.storage.scylla.api import AcsyllaHotFeatureStorageApi, ScyllaPyHotFeatureStorageApi, HotFeatureStorageApiBase
+from volga.storage.scylla.api import AcsyllaHotFeatureStorageApi, ScyllaPyHotFeatureStorageApi, ScyllaFeatureStorageApiBase
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
 from volga.api.entity import entity, field
 from volga.api.source import source, KafkaSource, Connector

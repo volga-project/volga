@@ -4,12 +4,12 @@ import datetime
 
 import ray
 
-from volga.client.client import Client
+from volga.api.client import Client
 from volga.api.entity.aggregate import Avg, Count, Sum
 from volga.api.entity.entity import dataset, field, Entity
 from volga.api.entity.pipeline import pipeline
 from volga.api.source.source import MysqlSource, source, KafkaSource
-from volga.storage.common.simple_in_memory_actor_storage import SimpleInMemoryActorStorage
+from volga.storage.common.in_memory_actor import SimpleInMemoryActorStorage
 
 # mock data
 num_users = 2

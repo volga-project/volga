@@ -7,9 +7,6 @@ from volga.common.time_utils import datetime_to_ts
 from volga.api.entity import Entity
 from volga.api.operators import Aggregate, OperatorNodeBase
 from volga.api.schema import Schema
-from volga.storage.cold import ColdStorage
-from volga.storage.common.in_memory_actor import SimpleInMemoryActorStorage
-from volga.storage.hot import HotStorage
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.data_stream import DataStream
 
@@ -31,9 +28,8 @@ ScalingConfig = Dict # TODO move
 
 class Client:
 
-    def __init__(self, hot: Optional[HotStorage] = None, cold: Optional[ColdStorage] = None):
-        self.cold = cold
-        self.hot = hot
+    def __init__(self):
+        pass
 
     # def materialize_offline(
     #     self,
@@ -83,37 +79,37 @@ class Client:
     #     else:
     #         ctx.execute()
 
-    def get_offline_data(
-        self,
-        dataset_name: str,
-        keys: Optional[List[Dict[str, Any]]],
-        start: Optional[datetime],
-        end: Optional[datetime]
-    ) -> pd.DataFrame:
-        if self.cold is None:
-            raise ValueError('ColdStorage is not set')
-        start_ts = None if start is None else datetime_to_ts(start)
-        end_ts = None if end is None else datetime_to_ts(end)
-        data = self.cold.get_data(dataset_name=dataset_name, keys=keys, start_ts=start_ts, end_ts=end_ts)
-        return pd.DataFrame(data)
+    # def get_offline_data(
+    #     self,
+    #     dataset_name: str,
+    #     keys: Optional[List[Dict[str, Any]]],
+    #     start: Optional[datetime],
+    #     end: Optional[datetime]
+    # ) -> pd.DataFrame:
+    #     if self.cold is None:
+    #         raise ValueError('ColdStorage is not set')
+    #     start_ts = None if start is None else datetime_to_ts(start)
+    #     end_ts = None if end is None else datetime_to_ts(end)
+    #     data = self.cold.get_data(dataset_name=dataset_name, keys=keys, start_ts=start_ts, end_ts=end_ts)
+    #     return pd.DataFrame(data)
 
-    def get_online_latest_data(
-        self,
-        dataset_name: str,
-        keys: Optional[List[Dict[str, Any]]]
-    ) -> Any:
-        if self.hot is None:
-            raise ValueError('HotStorage is not set')
-        return self.hot.get_latest_data(dataset_name=dataset_name, keys=keys)
+    # def get_online_latest_data(
+    #     self,
+    #     dataset_name: str,
+    #     keys: Optional[List[Dict[str, Any]]]
+    # ) -> Any:
+    #     if self.hot is None:
+    #         raise ValueError('HotStorage is not set')
+    #     return self.hot.get_latest_data(dataset_name=dataset_name, keys=keys)
 
-    def get_on_demand(
-        self,
-        target: Entity,
-        online: bool, # False for offline storage source
-        start: Optional[datetime], end: Optional[datetime], # datetime range in case of offline request
-        inputs: List[Dict]
-    ) -> Any:
-        raise NotImplementedError()
+    # def get_on_demand(
+    #     self,
+    #     target: Entity,
+    #     online: bool, # False for offline storage source
+    #     start: Optional[datetime], end: Optional[datetime], # datetime range in case of offline request
+    #     inputs: List[Dict]
+    # ) -> Any:
+    #     raise NotImplementedError()
 
     # def _build_stream(self, target: Entity, source_tags: Optional[Dict[Entity, str]]) -> Tuple[DataStream, StreamingContext]:
     #     ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
