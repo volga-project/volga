@@ -88,5 +88,43 @@ class FeatureRepository:
         return cls._features.copy()
     
     @classmethod
+    def get_dependent_features(cls, feature_names: List[str]) -> Dict[str, Feature]:
+        """
+        Get all features that the given features depend on, including the features themselves.
+        
+        Args:
+            feature_names: List of feature names to get dependencies for
+            
+        Returns:
+            Dictionary mapping feature names to Feature objects
+        """
+        result: Dict[str, Feature] = {}
+        visited: Set[str] = set()
+        all_features = cls.get_all_features()
+        
+        def collect_dependencies(name: str) -> None:
+            """Recursively collect dependencies for a feature."""
+            if name in visited:
+                return
+            
+            visited.add(name)
+            feature = all_features.get(name)
+            if not feature:
+                raise ValueError(f"Feature '{name}' not found in repository")
+            
+            result[name] = feature
+            
+            # Collect dependencies
+            for dep in feature.dep_args:
+                dep_name = dep.get_name()
+                collect_dependencies(dep_name)
+        
+        # Collect dependencies for all requested features
+        for name in feature_names:
+            collect_dependencies(name)
+        
+        return result
+    
+    @classmethod
     def clear(cls) -> None:
         cls._features.clear()
