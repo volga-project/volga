@@ -16,7 +16,7 @@ from volga.streaming.api.stream.stream_source import StreamSource
 def build_stream_graph(
     feature_names: List[str],
     ctx: StreamingContext,
-    sink_function: Optional[FunctionOrCallable] = print
+    sink_functions: Optional[Dict[str, FunctionOrCallable]] = None
 ) -> Dict[str, StreamSink]:
     """
     Build a stream graph by traversing the provided features and their dependencies.
@@ -64,6 +64,10 @@ def build_stream_graph(
     sink_dict: Dict[str, StreamSink] = {}
     for feature_name, entity in initialized_entities.items():
         if feature_name in feature_names:
+            if sink_functions is None:
+                sink_function = print
+            else:
+                sink_function = sink_functions[feature_name]
             sink = entity.stream.sink(sink_function)
             sink_dict[feature_name] = sink
     

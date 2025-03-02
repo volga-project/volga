@@ -1,7 +1,7 @@
 from typing import Union, Type, Dict, Any
 import importlib
 from pydantic import BaseModel, validator
-from volga.on_demand.data_connector import OnDemandDataConnector
+from volga.on_demand.storage.data_connector import OnDemandDataConnector
 
 class DataConnectorConfig(BaseModel):
     connector_class: Union[str, Type[OnDemandDataConnector]]

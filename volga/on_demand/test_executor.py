@@ -1,6 +1,7 @@
+from pprint import pprint
 import unittest
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from typing import List, Dict, Any, Callable
 
@@ -10,13 +11,12 @@ from volga.api.source import source, KafkaSource, Connector
 from volga.api.pipeline import PipelineFeature
 from volga.api.on_demand import on_demand, OnDemandFeature
 from volga.on_demand.executor import OnDemandExecutor
-from volga.on_demand.storage.data_connector import OnDemandDataConnector
 from volga.on_demand.models import OnDemandRequest
 from volga.on_demand.testing_utils import MockDataConnector, TestEntity
 
 TEST_ENTITY = TestEntity(
     id='test-id',
-    value=1.0,
+    value=2.0,
     timestamp=datetime.now()
 )
 
@@ -24,13 +24,14 @@ TEST_ENTITY = TestEntity(
 class DependentEntity:
     id: str = field(key=True)
     computed_value: float
+    num_entities: int
     timestamp: datetime = field(timestamp=True)
 
 
 @source(TestEntity)
 def pipeline_feature() -> Connector:
     return KafkaSource.mock_with_delayed_items(
-        items=[TEST_ENTITY],
+        items=[TEST_ENTITY], # this is not actually called, we just need to return a connector
         delay_s=0
     )
 
@@ -45,6 +46,7 @@ def simple_feature(
     return DependentEntity(
         id=dep.id,
         computed_value=dep.value * multiplier,
+        num_entities=1,
         timestamp=datetime.now()
     )
 
@@ -56,6 +58,7 @@ def list_feature(
     return DependentEntity(
         id=entities[0].id if entities else 'default',
         computed_value=total,
+        num_entities=len(entities),
         timestamp=datetime.now()
     )
             
@@ -69,6 +72,7 @@ def chained_feature(
     return DependentEntity(
         id=dep.id,
         computed_value=dep.computed_value + offset,
+        num_entities=1,
         timestamp=datetime.now()
     )
 
@@ -94,29 +98,45 @@ class TestOnDemandExecutor(unittest.TestCase):
 
         self.executor.register_features(relevant_features)
 
-    async def async_test_source_feature_execution(self):
+    async def async_test_fetch_pipeline_feature(self):
         """Test execution of source features"""
         result = await self.executor._fetch_pipeline_feature(
             'pipeline_feature',
-            {'id': TEST_ENTITY.id},
+            [{'id': 'test-id'}, {'id': 'test-id-1'}],
             TestEntity,
             'latest'
         )
         
-        # Verify result
-        self.assertIsInstance(result, TestEntity)
-        self.assertEqual(result.id, TEST_ENTITY.id)
-        self.assertEqual(result.value, TEST_ENTITY.value)
+        # Verify result is list of lists
+        self.assertIsInstance(result, list)
+        self.assertEqual(len(result), 2)  # Two keys
 
-    def test_source_feature_execution(self):
-        asyncio.run(self.async_test_source_feature_execution())
+        self.assertIsInstance(result[0], list)
+        self.assertEqual(len(result[0]), 1)  # One latest value
+
+        self.assertIsInstance(result[1], list)
+        self.assertEqual(len(result[1]), 1)  # One latest value
+        
+        # Verify entity
+        entity1 = result[0][0] 
+        self.assertIsInstance(entity1, TestEntity)
+        self.assertEqual(entity1.id, 'test-id')
+        self.assertEqual(entity1.value, 2.0)  # Latest value from MockDataConnector
+
+        entity2 = result[1][0]
+        self.assertIsInstance(entity2, TestEntity)
+        self.assertEqual(entity2.id, 'test-id-1')
+        self.assertEqual(entity2.value, 3.0)  # Latest value from MockDataConnector
+
+    def test_fetch_pipeline_feature(self):
+        asyncio.run(self.async_test_fetch_pipeline_feature())
 
     async def async_test_chained_execution(self):
         """Test full execution flow with multiple features"""
         request = OnDemandRequest(
             target_features=['chained_feature'],
             feature_keys={
-                'simple_feature': {'id': 'test-id'},
+                'simple_feature': [{'id': 'test-id'}, {'id': 'test-id-1'}],
             },
             udf_args={
                 'simple_feature': {'multiplier': 2.0},
@@ -128,25 +148,35 @@ class TestOnDemandExecutor(unittest.TestCase):
         
         # Verify results
         self.assertIn('chained_feature', results)
-        result = results['chained_feature']
+        result_list = results['chained_feature']
+        self.assertEqual(len(result_list), 2)
+
+        result = result_list[0][0]
         self.assertIsInstance(result, DependentEntity)
-        self.assertEqual(result.computed_value, 3.0)  # (1.0 * 2.0) + 1.0
+        self.assertEqual(result.num_entities, 1)
+        self.assertEqual(result.computed_value, 5.0)  # (2.0 * 2.0) + 1.0
+
+        result = result_list[1][0]
+        self.assertIsInstance(result, DependentEntity)
+        self.assertEqual(result.num_entities, 1)
+        self.assertEqual(result.computed_value, 7.0)  # (3.0 * 2.0) + 1.0
 
     def test_chained_execution(self):
         asyncio.run(self.async_test_chained_execution())
 
     async def async_test_multiple_queries(self):
         """Test executing features that use same pipeline feature with different queries"""
+        base_time = self.executor._data_connector.base_time
         request = OnDemandRequest(
             target_features=['simple_feature', 'list_feature'],
             feature_keys={
-                'simple_feature': {'id': 'test-id'},
-                'list_feature': {'id': 'test-id'}
+                'simple_feature': [{'id': 'test-id'}, {'id': 'test-id-1'}],
+                'list_feature': [{'id': 'test-id'}, {'id': 'test-id-1'}, {'id': 'test-id-2'}]
             },
             query_args={
                 'list_feature': {
-                    'start_time': datetime.now(),
-                    'end_time': datetime.now()
+                    'start_time': base_time - timedelta(hours=2),
+                    'end_time': base_time
                 }
             },
             udf_args={
@@ -161,14 +191,32 @@ class TestOnDemandExecutor(unittest.TestCase):
         self.assertIn('list_feature', results)
         
         # Check simple_feature result (using latest query)
-        simple_result = results['simple_feature']
-        self.assertIsInstance(simple_result, DependentEntity)
-        self.assertEqual(simple_result.computed_value, 2.0)  # 1.0 * 2.0
+        simple_results = results['simple_feature']
+        self.assertEqual(len(simple_results), 2)
+
+        self.assertIsInstance(simple_results[0][0], DependentEntity)
+        self.assertEqual(simple_results[0][0].num_entities, 1)
+        self.assertEqual(simple_results[0][0].computed_value, 4.0)  # 2.0 * 2.0
+
+        self.assertIsInstance(simple_results[1][0], DependentEntity)
+        self.assertEqual(simple_results[1][0].num_entities, 1)
+        self.assertEqual(simple_results[1][0].computed_value, 6.0)  # 3.0 * 2.0
         
         # Check list_feature result (using range query)
-        list_result = results['list_feature']
-        self.assertIsInstance(list_result, DependentEntity)
-        self.assertEqual(list_result.computed_value, 1.0)  # sum of single test entity value
+        list_results = results['list_feature']
+        self.assertEqual(len(list_results), 3)
+
+        self.assertIsInstance(list_results[0][0], DependentEntity)
+        self.assertEqual(list_results[0][0].num_entities, 3)
+        self.assertEqual(list_results[0][0].computed_value, 4.5)  # sum of single test entity values from MockDataConnector
+
+        self.assertIsInstance(list_results[1][0], DependentEntity)
+        self.assertEqual(list_results[1][0].num_entities, 3)
+        self.assertEqual(list_results[1][0].computed_value, 7.5)  # sum of single test entity values from MockDataConnector
+
+        self.assertIsInstance(list_results[2][0], DependentEntity)
+        self.assertEqual(list_results[2][0].num_entities, 3)
+        self.assertEqual(list_results[2][0].computed_value, 10.5)  # sum of single test entity values from MockDataConnector
 
     def test_multiple_queries(self):
         """Wrapper for async test"""
@@ -323,7 +371,7 @@ class TestOnDemandExecutor(unittest.TestCase):
         valid_request = OnDemandRequest(
             target_features=['list_feature'],
             feature_keys={
-                'list_feature': {'id': 'test-id'}  # list_feature directly uses pipeline
+                'list_feature': [{'id': 'test-id'}]  # Updated to list
             },
             query_args={
                 'list_feature': {
@@ -338,7 +386,7 @@ class TestOnDemandExecutor(unittest.TestCase):
         valid_chained_request = OnDemandRequest(
             target_features=['chained_feature'],
             feature_keys={
-                'simple_feature': {'id': 'test-id'}  # only simple_feature needs keys
+                'simple_feature': [{'id': 'test-id'}]  # Updated to list
             },
             udf_args={
                 'simple_feature': {'multiplier': 2.0},
@@ -352,8 +400,8 @@ class TestOnDemandExecutor(unittest.TestCase):
             invalid_request = OnDemandRequest(
                 target_features=['chained_feature'],
                 feature_keys={
-                    'simple_feature': {'id': 'test-id'},
-                    'chained_feature': {'id': 'test-id'}  # chained_feature shouldn't have keys
+                    'simple_feature': [{'id': 'test-id'}],  # Updated to list
+                    'chained_feature': [{'id': 'test-id'}]  # Updated to list
                 }
             )
             invalid_request.validate_request(FeatureRepository.get_all_features(), self.executor._data_connector.query_params())
@@ -367,34 +415,25 @@ class TestOnDemandExecutor(unittest.TestCase):
                 udf_args={'simple_feature': {'multiplier': 2.0}}
             )
             invalid_request.validate_request(FeatureRepository.get_all_features(), self.executor._data_connector.query_params())
-        self.assertIn("Missing keys for on-demand feature simple_feature that directly depends on pipeline features", str(cm.exception))
-
-        # Test missing query args for range query
-        with self.assertRaises(ValueError) as cm:
-            invalid_request = OnDemandRequest(
-                target_features=['list_feature'],
-                feature_keys={'list_feature': {'id': 'test-id'}}
-            )
-            invalid_request.validate_request(FeatureRepository.get_all_features(), self.executor._data_connector.query_params())
-        self.assertIn("Missing required query args for feature list_feature", str(cm.exception))
+        self.assertIn("Feature keys are required", str(cm.exception))
 
         # Test query args for feature without pipeline dependencies
         with self.assertRaises(ValueError) as cm:
             invalid_request = OnDemandRequest(
                 target_features=['chained_feature'],
                 feature_keys={
-                    'simple_feature': {'id': 'test-id'}
+                    'simple_feature': [{'id': 'test-id'}]  # Updated to list
                 },
                 query_args={'chained_feature': {'some_arg': 'value'}}
             )
             invalid_request.validate_request(FeatureRepository.get_all_features(), self.executor._data_connector.query_params())
-        self.assertIn("Query args provided for feature chained_feature with no pipeline dependencies requiring parameters", str(cm.exception))
+        self.assertIn("Query args provided for feature without pipeline dependencies", str(cm.exception))
 
         # Test missing required query parameters
         with self.assertRaises(ValueError) as cm:
             invalid_request = OnDemandRequest(
                 target_features=['list_feature'],
-                feature_keys={'list_feature': {'id': 'test-id'}},
+                feature_keys={'list_feature': [{'id': 'test-id'}]},  # Updated to list
                 query_args={'list_feature': {'start_time': datetime.now()}}  # missing end_time
             )
             invalid_request.validate_request(FeatureRepository.get_all_features(), self.executor._data_connector.query_params())
@@ -403,17 +442,17 @@ class TestOnDemandExecutor(unittest.TestCase):
         # Test valid request without optional UDF args
         valid_no_udf = OnDemandRequest(
             target_features=['simple_feature'],
-            feature_keys={'simple_feature': {'id': 'test-id'}}
+            feature_keys={'simple_feature': [{'id': 'test-id'}]}  # Updated to list
         )
         valid_no_udf.validate_request(FeatureRepository.get_all_features(), self.executor._data_connector.query_params())
-
+        
 if __name__ == '__main__':
     unittest.main()
     # t = TestOnDemandExecutor()
     # t.setUp()
     # t.test_validate_request()
     # t.test_get_execution_order()
-    # t.test_source_feature_execution()
+    # t.test_fetch_pipeline_feature()
     # t.test_chained_execution()
     # t.test_multiple_queries()
     # t.test_executor_initialization()

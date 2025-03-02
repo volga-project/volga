@@ -5,14 +5,10 @@ import pandas as pd
 
 from volga.common.time_utils import datetime_to_ts
 from volga.api.entity import Entity
-from volga.api.operators import Aggregate, OperatorNodeBase
-from volga.api.schema import Schema
-from volga.storage.cold import ColdStorage
-from volga.storage.common.in_memory_actor import SimpleInMemoryActorStorage
-from volga.storage.hot import HotStorage
 from volga.streaming.api.context.streaming_context import StreamingContext
-from volga.streaming.api.stream.data_stream import DataStream
-
+from volga.api.storage import InMemoryActorPipelineDataConnector, PipelineDataConnector
+from volga.api.pipeline import PipelineFeature
+from volga.api.stream_builder import build_stream_graph
 
 DEFAULT_STREAMING_JOB_CONFIG = {
     'worker_config_template': {},
@@ -31,33 +27,30 @@ ScalingConfig = Dict # TODO move
 
 class Client:
 
-    def __init__(self, hot: Optional[HotStorage] = None, cold: Optional[ColdStorage] = None):
-        self.cold = cold
-        self.hot = hot
+    def __init__(self):
+        pass
 
-    # def materialize_offline(
-    #     self,
-    #     target: Entity,
-    #     source_tags: Optional[Dict[Entity, str]] = None,
-    #     parallelism: int = 1,
-    #     scaling_config: Optional[ScalingConfig] = None,
-    #     _async: bool = False
-    # ):
-    #     if scaling_config is not None:
-    #         raise ValueError('ScalingConfig is not supported yet')
-    #     stream, ctx = self._build_stream(target=target, source_tags=source_tags)
-    #     if self.cold is None:
-    #         raise ValueError('Offline materialization requires ColdStorage')
-    #     if not isinstance(self.cold, SimpleInMemoryActorStorage):
-    #         raise ValueError('Currently only SimpleInMemoryActorStorage is supported')
-    #     stream.sink(
-    #         self.cold.gen_sink_function(dataset_name=target.__name__, output_schema=target.schema(), hot=False)
-    #     )
-    #     # stream.sink(print)
-    #     if _async:
-    #         ctx.submit()
-    #     else:
-    #         ctx.execute()
+    def materialize(
+        self,
+        features: List[PipelineFeature],
+        parallelism: int = 1,
+        pipeline_data_connector: PipelineDataConnector = InMemoryActorPipelineDataConnector(batch=False),
+        scaling_config: Optional[ScalingConfig] = None,
+        _async: bool = False
+    ):
+        if scaling_config is not None:
+            raise ValueError('ScalingConfig is not supported yet')
+        ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
+        sink_functions = {
+            feature.name: pipeline_data_connector.get_sink_function(feature.name, feature.output_type._entity_metadata.schema())
+            for feature in features
+        }
+        build_stream_graph(features, ctx, sink_functions)
+        if _async:
+            ctx.submit()
+        else:
+            ctx.execute()
+
 
     # def materialize_online(
     #     self,

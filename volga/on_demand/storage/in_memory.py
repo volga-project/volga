@@ -1,6 +1,6 @@
 from typing import Dict, Any, Callable, Optional, List
 
-from volga.storage.common.in_memory_actor import InMemoryCacheActor, CACHE_ACTOR_NAME
+from volga.storage.common.in_memory_actor import InMemoryCacheActor, CACHE_ACTOR_NAME, get_or_create_in_memory_cache_actor
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
 from decimal import Decimal
 
@@ -11,7 +11,7 @@ class InMemoryActorOnDemandDataConnector(OnDemandDataConnector):
         
     async def init(self):
         """Initialize the Scylla connection"""
-        self.cache_actor = InMemoryCacheActor.options(name=CACHE_ACTOR_NAME, get_if_exists=True).remote()
+        self.cache_actor = get_or_create_in_memory_cache_actor()
         await self.cache_actor.ready.remote()
         
     def query_dict(self) -> Dict[str, Callable]:

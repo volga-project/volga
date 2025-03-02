@@ -123,11 +123,11 @@ class OnDemandExecutor:
     async def _fetch_pipeline_feature(
         self,
         feature_name: str,
-        keys: Dict[str, Any],
+        keys: List[Dict[str, Any]],
         output_type: Type,
         query_name: str,
         query_args: Optional[Dict[str, Any]] = None
-    ) -> Any:
+    ) -> List[List[Any]]:
         """Fetch a pipeline feature value from storage"""
         try:
             # Use default query if none specified
@@ -137,7 +137,7 @@ class OnDemandExecutor:
             query_func = self._data_connector.query_dict()[query_name]
             
             start_ts = time.perf_counter()
-            result = await query_func(
+            results = await query_func(
                 feature_name=feature_name,
                 keys=keys,
                 **(query_args or {})
@@ -148,21 +148,22 @@ class OnDemandExecutor:
                 self._db_stats.observe(latency_ms, now_ts_ms())       
             
             # Validate result type
-            if isinstance(result, list):
-                for item in result:
+            if not isinstance(results, list):
+                raise TypeError(f"Query result must be a list, got {type(results)}")
+            
+            # Convert to list of lists if it's a flat list (latest query)
+            if results and not isinstance(results[0], list):
+                results = [[item] for item in results]
+            
+            for sublist in results:
+                for item in sublist:
                     if not isinstance(item, output_type):
                         raise TypeError(
                             f"Items in query result must be instances of {output_type.__name__}, "
                             f"got {type(item).__name__}"
                         )
-            else:
-                if not isinstance(result, output_type):
-                    raise TypeError(
-                        f"Query result must be an instance of {output_type.__name__}, "
-                        f"got {type(result).__name__}"
-                    )
             
-            return result
+            return results
             
         except Exception as e:
             raise ValueError(
@@ -173,30 +174,103 @@ class OnDemandExecutor:
         self,
         feature_name: str,
         request: OnDemandRequest,
-        computed_values: Dict[str, Any]
-    ) -> Any:
+        computed_values: Dict[str, List[List[Any]]],
+        key_idx: int
+    ) -> List[Any]:
         """Execute a single feature"""
         feature = self._ondemand_features[feature_name]
+
+        # Get type hints from feature function
+        type_hints = list(feature.func.__annotations__.values())[:-1]  # Exclude return type
         
         # Get dependencies
-        dep_values = []
-        for dep_arg in feature.dep_args:
+        args = []
+
+        for dep_arg, arg_type in zip(feature.dep_args, type_hints):
             dep_name = dep_arg.get_name()
             if dep_name in self._pipeline_features:
                 # Get value from unique pipeline node
                 pipeline_node = self.get_pipeline_node_name(dep_name, feature_name)
-                dep_value = computed_values[pipeline_node]
+                dep_values = computed_values[pipeline_node][key_idx]
             else:
-                dep_value = computed_values[dep_name]
-            dep_values.append(dep_value)
-        
-        # Execute feature
-        return feature.execute(
-            dep_values,
+                dep_values = computed_values[dep_name][key_idx]
+
+            # If type hint is List, pass the list directly
+            if getattr(arg_type, "__origin__", None) is list:
+                args.append(dep_values)
+            # Otherwise, take first element for non-list arguments
+            else:
+                args.append(dep_values[0])
+             
+        result = feature.execute(
+            args,
             request.udf_args.get(feature_name)
         )
+        
+        if not isinstance(result, list):
+            result = [result]
+        return result
 
-    async def execute(self, request: OnDemandRequest) -> Dict[str, Any]:
+
+    # TODO test in validate_request
+    def _get_num_keys(
+        self,
+        feature_name: str,
+        request: OnDemandRequest,
+        visited: Dict[str, int] = None
+    ) -> int:
+        """
+        Recursively determine number of keys for a feature.
+        Returns number of keys or raises ValueError if inconsistent.
+        """
+        if visited is None:
+            visited = {}
+            
+        if feature_name in visited:
+            return visited[feature_name]
+            
+        # If feature has explicit keys, use that
+        if feature_name in request.feature_keys:
+            visited[feature_name] = len(request.feature_keys[feature_name])
+            return visited[feature_name]
+            
+        feature = self._features[feature_name]
+        
+        # For pipeline features without explicit keys, raise error
+        if not isinstance(feature, OnDemandFeature):
+            raise ValueError(f"Pipeline feature {feature_name} requires keys in request")
+            
+        # Get all dependency paths and their key counts
+        dep_keys = {}
+        for dep_arg in feature.dep_args:
+            dep_name = dep_arg.get_name()
+            dep_feature = self._features[dep_name]
+            
+            # For pipeline features, check if they have keys in request
+            if isinstance(dep_feature, PipelineFeature):
+                if dep_name not in request.feature_keys:
+                    raise ValueError(f"Pipeline feature {dep_name} requires keys in request")
+                dep_keys[dep_name] = len(request.feature_keys[dep_name])
+            # For on-demand features, recurse
+            else:
+                num_keys = self._get_num_keys(dep_name, request, visited)
+                dep_keys[dep_name] = num_keys
+
+        # Check all dependencies have same number of keys
+        if not dep_keys:
+            raise ValueError(f"Feature {feature_name} has no dependencies with keys")
+            
+        key_counts = set(dep_keys.values())
+        if len(key_counts) > 1:
+            raise ValueError(
+                f"Inconsistent number of keys in dependencies for feature {feature_name}. "
+                f"Dependencies: {dep_keys}"
+            )
+            
+        visited[feature_name] = key_counts.pop()
+        return visited[feature_name]
+
+    async def execute(self, request: OnDemandRequest) -> Dict[str, List[List[Any]]]:
         assert self._features is not None
         request.validate_request(
             features=self._features,
@@ -204,7 +278,7 @@ class OnDemandExecutor:
         )
 
         # Store computed values in local variable
-        computed_values: Dict[str, Any] = {}
+        computed_values: Dict[str, List[List[Any]]] = {}
 
         # Get execution order
         execution_order = self._get_execution_order(request.target_features)
@@ -219,24 +293,34 @@ class OnDemandExecutor:
                     pipeline_name, dependent_name = self.parse_pipeline_node_name(feature_name)
                     task = self._fetch_pipeline_feature(
                         pipeline_name,
-                        request.feature_keys.get(dependent_name, {}),
+                        request.feature_keys[dependent_name],
                         self._features[pipeline_name].output_type,
                         self._pipeline_to_on_demand_query[pipeline_name][dependent_name],
                         (request.query_args or {}).get(dependent_name, {})
                     )
+                    tasks.append((feature_name, asyncio.create_task(task)))
                 else:
                     # Regular feature execution
-                    task = self._execute_feature(
-                        feature_name,
-                        request,
-                        computed_values
-                    )
-                tasks.append((feature_name, asyncio.create_task(task)))
+                    feature_tasks = []
+                    num_keys = self._get_num_keys(feature_name, request, {})
+                    for key_idx in range(num_keys):
+                        task = self._execute_feature(
+                            feature_name,
+                            request,
+                            computed_values,
+                            key_idx
+                        )
+                        feature_tasks.append(asyncio.create_task(task))
+                    tasks.append((feature_name, feature_tasks))
 
             # Wait for all tasks in this level
-            for feature_name, task in tasks:
+            for feature_name, task_or_tasks in tasks:
                 try:
-                    computed_values[feature_name] = await task
+                    if isinstance(task_or_tasks, list):
+                        results = await asyncio.gather(*task_or_tasks)
+                        computed_values[feature_name] = results
+                    else:
+                        computed_values[feature_name] = await task_or_tasks
                 except Exception as e:
                     raise ValueError(f"Error executing feature {feature_name}: {str(e)}") from e
 

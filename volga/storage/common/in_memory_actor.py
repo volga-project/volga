@@ -4,7 +4,7 @@ from typing import Dict, Any, Optional, List, Tuple
 import ray
 from decimal import Decimal
 from volga.storage.common.key_index import compose_main_key, KeyIndex
-
+from ray.actor import ActorHandle
 
 CACHE_ACTOR_NAME = 'cache_actor'
 
@@ -94,3 +94,6 @@ class InMemoryCacheActor:
             last -= 1
         return res
 
+def get_or_create_in_memory_cache_actor() -> ActorHandle:
+    cache_actor = InMemoryCacheActor.options(name=CACHE_ACTOR_NAME, get_if_exists=True).remote()
+    return cache_actor

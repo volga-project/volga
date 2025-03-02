@@ -1,3 +1,4 @@
+from pprint import pprint
 from volga.on_demand.testing_utils import TEST_ENTITY, TestEntity, MockDataConnector
 from volga.on_demand.config import OnDemandConfig, OnDemandDataConnectorConfig  
 from volga.on_demand.client import OnDemandClient
@@ -14,14 +15,6 @@ import unittest
 from volga.api.feature import FeatureRepository
 
 from volga.on_demand.testing_utils import TEST_FEATURE_NAME
-
-# @source(TestEntity)
-# def pipeline_feature() -> Connector:
-#     return KafkaSource.mock_with_delayed_items(
-#         items=[TEST_ENTITY],
-#         delay_s=0
-#     )
-
 
 @on_demand(dependencies=[TEST_FEATURE_NAME])
 def simple_feature(
@@ -73,7 +66,7 @@ class TestOnDemandServing(unittest.TestCase):
         request = OnDemandRequest(
             target_features=['simple_feature'],
             feature_keys={
-                'simple_feature': {'id': 'test-id'}
+                'simple_feature': [{'id': 'test-id'}, {'id': 'test-id-1'}, {'id': 'test-id-2'}]
             },
             udf_args={
                 'simple_feature': {'multiplier': 2.0}
@@ -104,13 +97,22 @@ class TestOnDemandServing(unittest.TestCase):
                 # Verify single response
                 self.assertIn('simple_feature', response.results)
                 result = response.results['simple_feature']
-                
+
                 # Verify response can be cast to TestEntity
-                entity = self._cast_to_test_entity(result)
-                self.assertIsInstance(entity, TestEntity)
-                self.assertEqual(entity.id, 'test-id')
-                self.assertEqual(entity.value, 2.0)  # 1.0 * 2.0
-                
+                entity1 = self._cast_to_test_entity(result[0][0])
+                self.assertIsInstance(entity1, TestEntity)
+                self.assertEqual(entity1.id, 'test-id')
+                self.assertEqual(entity1.value, 4.0)  # 2.0 * 2.0
+
+                entity2 = self._cast_to_test_entity(result[1][0])
+                self.assertIsInstance(entity2, TestEntity)
+                self.assertEqual(entity2.id, 'test-id-1')
+                self.assertEqual(entity2.value, 6.0)  # 3.0 * 2.0
+
+                entity3 = self._cast_to_test_entity(result[2][0])
+                self.assertIsInstance(entity3, TestEntity)
+                self.assertEqual(entity3.id, 'test-id-2')
+                self.assertEqual(entity3.value, 8.0)  # 4.0 * 2.0
                 self.assertIsInstance(response.server_id, int)
 
                 # Test multiple requests
@@ -121,10 +123,20 @@ class TestOnDemandServing(unittest.TestCase):
                 # Verify results and type casting
                 for response in responses:
                     result = response.results['simple_feature']
-                    entity = self._cast_to_test_entity(result)
-                    self.assertIsInstance(entity, TestEntity)
-                    self.assertEqual(entity.id, 'test-id')
-                    self.assertEqual(entity.value, 2.0)
+                    entity1 = self._cast_to_test_entity(result[0][0])
+                    self.assertIsInstance(entity1, TestEntity)
+                    self.assertEqual(entity1.id, 'test-id')
+                    self.assertEqual(entity1.value, 4.0)
+
+                    entity2 = self._cast_to_test_entity(result[1][0])
+                    self.assertIsInstance(entity2, TestEntity)
+                    self.assertEqual(entity2.id, 'test-id-1')
+                    self.assertEqual(entity2.value, 6.0)
+
+                    entity3 = self._cast_to_test_entity(result[2][0])
+                    self.assertIsInstance(entity3, TestEntity)
+                    self.assertEqual(entity3.id, 'test-id-2')
+                    self.assertEqual(entity3.value, 8.0)
 
                 print(f"Successfully processed {num_requests}")
 

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from volga.streaming.api.function.function import SinkFunction
 from volga.api.schema import Schema
-from volga.storage.common.in_memory_actor import InMemoryCacheActor, CACHE_ACTOR_NAME
+from volga.storage.common.in_memory_actor import get_or_create_in_memory_cache_actor
 import time
 from threading import Thread
 from volga.common.time_utils import datetime_str_to_ts
@@ -40,7 +40,7 @@ class BatchSinkToCacheActorFunction(SinkFunction):
             time.sleep(self.DUMPER_PERIOD_S)
 
     def open(self, runtime_context: RuntimeContext):
-        self.cache_actor = InMemoryCacheActor.options(name=CACHE_ACTOR_NAME, get_if_exists=True).remote()
+        self.cache_actor = get_or_create_in_memory_cache_actor()
         ray.get(self.cache_actor.ready.remote())
         self.running = True
         self.dumper_thread = Thread(target=self._dump_batch_loop)
@@ -61,7 +61,7 @@ class StreamSinkToCacheActorFunction(SinkFunction):
         self.output_schema = output_schema
 
     def open(self, runtime_context: RuntimeContext):
-        self.cache_actor = InMemoryCacheActor.options(name=CACHE_ACTOR_NAME, get_if_exists=True).remote()
+        self.cache_actor = get_or_create_in_memory_cache_actor()
         ray.get(self.cache_actor.ready.remote())
 
     def sink(self, value):
