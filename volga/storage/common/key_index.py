@@ -5,7 +5,10 @@ DEFAULT_KV_SEPARATOR = '='
 DEFAULT_KEYS_SEPARATOR = '-'
 
 
-# this should be done with B-tree, but this will work for now
+# The class stores all possible key combinations from keys_dict with the same value
+# This is needed so we can do queries with partial keys
+
+# This should ideally be done with B-tree, but this will work for now
 class KeyIndex:
 
     def __init__(self):

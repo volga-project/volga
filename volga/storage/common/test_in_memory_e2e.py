@@ -9,6 +9,7 @@ from volga.common.time_utils import datetime_str_to_ts
 import time
 from volga.api.schema import Schema
 from volga.api.storage import BatchSinkToCacheActorFunction
+from volga.storage.common.in_memory_actor import delete_in_memory_cache_actor, get_or_create_in_memory_cache_actor
 
 FEATURE_NAME = 'temperature_feature'
 
@@ -24,6 +25,7 @@ class TestInMemoryActorE2E(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         ray.init(ignore_reinit_error=True)
+        delete_in_memory_cache_actor()
         
     @classmethod
     def tearDownClass(cls):
@@ -47,20 +49,30 @@ class TestInMemoryActorE2E(unittest.IsolatedAsyncioTestCase):
         on_demand_connector = InMemoryActorOnDemandDataConnector()
         await on_demand_connector.init()
         
+        cache_actor = get_or_create_in_memory_cache_actor()
+        ray.get(cache_actor.clear_data.remote())
+
         try:
             # Generate and write test data
             base_time = datetime(2024, 1, 1, 12, 0)
-            test_data = [
-                TemperatureReading(
-                    user_id='user1',
-                    timestamp=base_time + timedelta(minutes=i),
-                    temperature=20.0 + i
-                )
-                for i in range(5)
-            ]
+            base_temp = 20.0
+            num_users = 10
+            num_records_per_user = 5
+            test_data = {
+                f'user{i}': [
+                    TemperatureReading(
+                        user_id=f'user{i}',
+                        timestamp=base_time + timedelta(minutes=j),
+                        temperature=base_temp + j
+                    )
+                    for j in range(num_records_per_user)
+                ]
+                for i in range(num_users)
+            }
             
-            for record in test_data:
-                sink_fn.sink(record.__dict__)
+            for user_id, records in test_data.items():
+                for record in records:
+                    sink_fn.sink(record.__dict__)
             
             # Wait for data to be recorded
             time.sleep(BatchSinkToCacheActorFunction.DUMPER_PERIOD_S + 1)
@@ -68,30 +80,47 @@ class TestInMemoryActorE2E(unittest.IsolatedAsyncioTestCase):
             # Test latest
             latest = await on_demand_connector.fetch_latest(
                 FEATURE_NAME,
-                {'user_id': 'user1'}
+                [
+                    {'user_id': user_id}
+                    for user_id in test_data.keys()
+                ]
             )
-            latest_reading = TemperatureReading(**latest)
-            
-            self.assertEqual(latest_reading.temperature, 24.0)
-            self.assertEqual(latest_reading.user_id, 'user1')
-            self.assertEqual(latest_reading.timestamp, test_data[4].timestamp)
+
+            self.assertEqual(len(latest), num_users)
+            for i in range(len(latest)):
+                latest_reading = TemperatureReading(**latest[i][0])
+                user_id = latest_reading.user_id
+                latest_test_data_per_user = test_data[user_id][-1]
+                self.assertEqual(latest_reading.temperature, latest_test_data_per_user.temperature)
+                self.assertEqual(latest_reading.user_id, latest_test_data_per_user.user_id)
+                self.assertEqual(latest_reading.timestamp, latest_test_data_per_user.timestamp)
             
             # Test range
-            start_ts = datetime_str_to_ts(test_data[1].timestamp.isoformat())
-            end_ts = datetime_str_to_ts(test_data[3].timestamp.isoformat())
+            user_id = list(test_data.keys())[0]
+            start_ts = datetime_str_to_ts(test_data[user_id][0].timestamp.isoformat())
+            end_ts = datetime_str_to_ts(test_data[user_id][-1].timestamp.isoformat())
             
             range_data = await on_demand_connector.fetch_range(
                 FEATURE_NAME,
-                {'user_id': 'user1'},
+                [
+                    {'user_id': user_id}
+                    for user_id in test_data.keys()
+                ],
                 start_ts,
                 end_ts
             )
-            
-            range_readings = [TemperatureReading(**data) for data in range_data]
-            
-            self.assertEqual(len(range_readings), 3)
-            self.assertEqual(range_readings[0].temperature, 21.0)
-            self.assertEqual(range_readings[-1].temperature, 23.0)
+
+            self.assertEqual(len(latest), num_users)
+            for i in range(len(range_data)):
+                range_reading = TemperatureReading(**range_data[i][0])
+                first_user_id = range_reading.user_id
+                self.assertEqual(len(range_data[i]), len(test_data[first_user_id]))
+                for j in range(len(range_data[i])):
+                    data_per_user = TemperatureReading(**range_data[i][j])
+                    test_data_per_user = test_data[first_user_id][j]
+                    self.assertEqual(data_per_user.temperature, test_data_per_user.temperature)
+                    self.assertEqual(data_per_user.user_id, test_data_per_user.user_id)
+                    self.assertEqual(data_per_user.timestamp, test_data_per_user.timestamp)
             
         finally:
             await on_demand_connector.close()

@@ -45,15 +45,37 @@ class InMemoryCacheActor:
     def get_range(
         self,
         feature_name: str,
-        keys_dict: Optional[Dict[str, Any]],
+        keys: List[Dict[str, Any]],
+        start: Optional[Decimal], end: Optional[Decimal],
+        with_timestamps: bool = False
+    ) -> List[List]:
+        res = []
+        for key in keys:
+            res.append(self.get_range_per_key(feature_name=feature_name, key=key, start=start, end=end, with_timestamps=with_timestamps))
+        return res
+    
+    def get_latest(
+        self,
+        feature_name: str,
+        keys: List[Dict[str, Any]],
+    ) -> List[List]:
+        res = []
+        for key in keys:
+            res.append(self.get_latest_per_key(feature_name=feature_name, key=key))
+        return res
+
+    def get_range_per_key(
+        self,
+        feature_name: str,
+        key: Optional[Dict[str, Any]],
         start: Optional[Decimal], end: Optional[Decimal],
         with_timestamps: bool = False
     ) -> List:
         if feature_name not in self.per_feature_per_key:
             raise RuntimeError(f'No feature {feature_name}')
 
-        if keys_dict is not None:
-            possible_keys = self.key_index_per_feature[feature_name].get(keys_dict)
+        if key is not None:
+            possible_keys = self.key_index_per_feature[feature_name].get(key)
         else:
             possible_keys = list(self.per_feature_per_key[feature_name].keys())
 
@@ -76,13 +98,14 @@ class InMemoryCacheActor:
             res.extend(values)
 
         res.sort(key=lambda e: e[0])
+
         if with_timestamps:
             return res
         else:
             return list(map(lambda e: e[1], res)) # remove timestamps
 
-    def get_latest(self, feature_name: str, keys_dict: Dict[str, Any]) -> Optional[List]:
-        vals = self.get_range(feature_name=feature_name, keys_dict=keys_dict, start=None, end=None, with_timestamps=True)
+    def get_latest_per_key(self, feature_name: str, key: Dict[str, Any]) -> Optional[List]:
+        vals = self.get_range_per_key(feature_name=feature_name, key=key, start=None, end=None, with_timestamps=True)
         if len(vals) == 0:
             return None
 
@@ -93,7 +116,15 @@ class InMemoryCacheActor:
             res.append(vals[last][1])
             last -= 1
         return res
+    
+    def clear_data(self):
+        self.per_feature_per_key = {}
+        self.key_index_per_feature = {}
 
 def get_or_create_in_memory_cache_actor() -> ActorHandle:
     cache_actor = InMemoryCacheActor.options(name=CACHE_ACTOR_NAME, get_if_exists=True).remote()
     return cache_actor
+
+def delete_in_memory_cache_actor() -> None:
+    actor = get_or_create_in_memory_cache_actor()
+    ray.kill(actor)

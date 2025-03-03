@@ -23,19 +23,17 @@ class InMemoryActorOnDemandDataConnector(OnDemandDataConnector):
     async def fetch_latest(
         self, 
         feature_name: str, 
-        keys: Dict[str, Any]
-    ) -> Any:
-        # returns list if same timestamps
-        latest_data = await self.cache_actor.get_latest.remote(feature_name, keys)
-        return latest_data[-1]
+        keys: List[Dict[str, Any]]
+    ) -> List[List[Any]]:
+        return await self.cache_actor.get_latest.remote(feature_name, keys)
         
     async def fetch_range(
         self,
         feature_name: str,
-        keys: Dict[str, Any],
+        keys: List[Dict[str, Any]],
         start: Optional[Decimal],
         end: Optional[Decimal]
-    ) -> List[Any]:
+    ) -> List[List[Any]]:
         return await self.cache_actor.get_range.remote(feature_name, keys, start, end)
         
     async def close(self):

@@ -72,10 +72,10 @@ class MockDataConnector(OnDemandDataConnector):
         self,
         feature_name: str,
         keys: List[Dict[str, Any]]
-    ) -> List[Any]:
+    ) -> List[List[Any]]:
         """Return latest entity for each key as a flat list"""
         res = [
-            self.test_entities.get(key['id'], self.test_entities['test-id'])[-1]  # Get latest entity
+            [self.test_entities.get(key['id'], self.test_entities['test-id'])[-1]]  # Get latest entity
             for key in keys
         ]
         return res

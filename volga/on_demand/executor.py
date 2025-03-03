@@ -151,11 +151,9 @@ class OnDemandExecutor:
             if not isinstance(results, list):
                 raise TypeError(f"Query result must be a list, got {type(results)}")
             
-            # Convert to list of lists if it's a flat list (latest query)
-            if results and not isinstance(results[0], list):
-                results = [[item] for item in results]
-            
             for sublist in results:
+                if not isinstance(sublist, list):
+                    raise TypeError(f"Query result must be a list of lists, got list of {type(sublist)}")
                 for item in sublist:
                     if not isinstance(item, output_type):
                         raise TypeError(
