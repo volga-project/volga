@@ -9,6 +9,11 @@ class Schema:
     values: Dict[str, Type]
     timestamp: str
 
+    def __init__(self, keys: Dict[str, Type], values: Dict[str, Type], timestamp: str):
+        self.keys = keys
+        self.values = values
+        self.timestamp = timestamp
+
     def to_dict(self) -> Dict[str, Type]:
         schema = {**self.keys, **self.values, self.timestamp: datetime.datetime}
         return schema
@@ -29,3 +34,10 @@ class Schema:
             return datetime.datetime
         else:
             raise ValueError(f'Field {field} not found')
+
+    def copy(self) -> 'Schema':
+        return Schema(
+            keys=self.keys.copy(),
+            values=self.values.copy(),
+            timestamp=self.timestamp
+        )

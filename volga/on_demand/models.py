@@ -64,11 +64,6 @@ class OnDemandRequest(BaseModel):
             if not all(isinstance(k, dict) for k in keys_list):
                 raise ValueError(f"All keys for feature {feature_name} must be dictionaries")
 
-        # Validate all key lists have the same length
-        # key_lengths = {len(keys) for keys in self.feature_keys.values()}
-        # if len(key_lengths) > 1:
-        #     raise ValueError("All feature key lists must have the same length")
-
         # Validate keys are provided for correct features
         for feature_name, keys_list in self.feature_keys.items():
             if feature_name not in features:
@@ -181,5 +176,5 @@ class OnDemandRequest(BaseModel):
                     raise ValueError(f"UDF args provided for feature {feature_name} that takes no arguments")
 
 class OnDemandResponse(BaseModel):
-    results: Dict[str, Any]
+    results: Dict[str, List[List[Any]]]
     server_id: int

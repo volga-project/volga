@@ -3,7 +3,7 @@ import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.common.time_utils import is_time_str
-from volga.api.aggregate import AggregateType
+from volga.api.aggregate import AggregateType, Avg, Count, Max, Min, Sum
 from volga.api.schema import Schema
 from volga.streaming.api.message.message import Record
 from volga.streaming.api.operators.window_operator import SlidingWindowConfig, AggregationsPerWindow
@@ -82,12 +82,29 @@ class Transform(OperatorNode):
         self.func = func
         self.parents.append(parent)
         self.new_schema_dict = new_schema_dict
+        self.output_schema = self.schema()
 
     def init_stream(self):
         self.stream = self.parents[0].stream.map(map_func=self._stream_map_func)
 
     def _stream_map_func(self, event: Any) -> Any:
-        return self.func(event)
+        # Validate input matches parent schema
+        parent_schema = self.parents[0].schema()
+        input_fields = set(event.keys())
+        expected_fields = set(parent_schema.fields())
+        if input_fields != expected_fields:
+            raise ValueError(f'Input event fields {input_fields} do not match parent schema fields {expected_fields}')
+
+        # Apply transform
+        result = self.func(event)
+
+        # Validate output matches target schema
+        output_fields = set(result.keys())
+        expected_fields = set(self.output_schema.fields())
+        if output_fields != expected_fields:
+            raise ValueError(f'Output event fields {output_fields} do not match target schema fields {expected_fields}')
+
+        return result
 
     def schema(self) -> Schema:
         input_schema = self.parents[0].schema()
@@ -116,15 +133,56 @@ class Assign(OperatorNode):
     def __init__(self, parent: OperatorNodeBase, column: str, output_type: Type, func: Callable):
         super().__init__()
         self.parents.append(parent)
-        self.func = func
         self.column = column
         self.output_type = output_type
+        self.func = func
 
     def init_stream(self):
         self.stream = self.parents[0].stream.map(map_func=self._stream_map_func)
 
+    def schema(self) -> Schema:
+        parent_schema = self.parents[0].schema()
+        ts = parent_schema.timestamp
+
+        # Cannot assign to timestamp field
+        if self.column == ts:
+            raise ValueError(f'Cannot assign to timestamp field {ts}')
+
+        # Cannot assign to key fields
+        if self.column in parent_schema.keys:
+            raise ValueError(f'Cannot assign to key field {self.column}')
+
+        # Create new schema with added/updated column
+        keys = parent_schema.keys.copy()
+        values = parent_schema.values.copy()
+        values[self.column] = self.output_type
+
+        return Schema(
+            keys=keys,
+            values=values,
+            timestamp=ts
+        )
+
     def _stream_map_func(self, event: Any) -> Any:
-        raise NotImplementedError()
+        # Validate input matches parent schema
+        parent_schema = self.parents[0].schema()
+        input_fields = set(event.keys())
+        expected_fields = set(parent_schema.fields())
+        if input_fields != expected_fields:
+            raise ValueError(f'Input event fields {input_fields} do not match parent schema fields {expected_fields}')
+
+        # Create new dict with assigned column
+        result = event.copy()
+        result[self.column] = self.func(event)
+
+        # Validate output matches target schema
+        output_schema = self.schema()
+        output_fields = set(result.keys())
+        expected_fields = set(output_schema.fields())
+        if output_fields != expected_fields:
+            raise ValueError(f'Output event fields {output_fields} do not match target schema fields {expected_fields}')
+
+        return result
 
 
 class Filter(OperatorNode):
@@ -142,7 +200,7 @@ class Filter(OperatorNode):
 
     def schema(self) -> Schema:
         # filtering  does not alter parent's schema
-        return self.parents[0].schema()
+        return self.parents[0].schema().copy()
 
 
 class Aggregate(OperatorNode):
@@ -152,16 +210,39 @@ class Aggregate(OperatorNode):
         super().__init__()
         self.aggregates = aggregates
         self.parents.append(parent)
+        self.keys = parent.keys
 
-    def init_stream(self, output_schema: Schema):
+    def schema(self) -> Schema:
+        input_schema = self.parents[0].schema()
+
+        keys = {f: input_schema.get_type(f) for f in self.keys}
+        values = {}
+        for agg in self.aggregates:
+            if isinstance(agg, Count):
+                values[agg.into] = int
+            elif isinstance(agg, Sum):
+                values[agg.into] = float
+            elif isinstance(agg, Min):
+                values[agg.into] = float
+            elif isinstance(agg, Max):
+                values[agg.into] = float
+            elif isinstance(agg, Avg):
+                values[agg.into] = float
+            else:
+                raise ValueError(f'Unsupported aggregate type: {type(agg)}')
+        
+        return Schema(
+            keys=keys,
+            values=values,
+            timestamp=input_schema.timestamp,
+        )
+
+    def init_stream(self):
+        output_schema = self.schema()
 
         def _output_window_func(aggs_per_window: AggregationsPerWindow, record: Record) -> Record:
             record_value = record.value
             res = {}
-
-            # TODO this is a hacky way to infer timestamp field from the record
-            #  Ideally we need to build resulting schema for each node at compilation time and use it to
-            #  derive field names/validate correctness
 
             # copy keys
             expected_key_fields = list(output_schema.keys.keys())
@@ -170,17 +251,11 @@ class Aggregate(OperatorNode):
                     raise RuntimeError(f'Can not locate key field {k}')
                 res[k] = record_value[k]
 
-            # copy timestamp
             ts_field = output_schema.timestamp
-            ts_value = None
-            for v in record_value.values():
-                if is_time_str(v):
-                    ts_value = v
-                    break
 
-            if ts_value is None:
-                raise RuntimeError(f'Unable to locate timestamp field: {record_value}')
-            res[ts_field] = ts_value
+            if ts_field not in record_value:
+                raise RuntimeError(f'Unable to locate timestamp field {ts_field} in record value {record_value}')
+            res[ts_field] = record_value[ts_field]
 
             # copy aggregate values
             values_fields = list(output_schema.values.keys())
@@ -189,9 +264,7 @@ class Aggregate(OperatorNode):
                     raise RuntimeError(f'Unable to locate {v} in aggregates: {aggs_per_window}')
                 res[v] = aggs_per_window[v]
 
-            res_record = Record(value=res, event_time=record.event_time)
-            res_record.set_stream_name(record.stream_name)
-            return res_record
+            return Record.new_value(value=res, record=record)
 
         parent = self.parents[0].stream
         assert isinstance(parent, KeyDataStream)
@@ -212,10 +285,7 @@ class Aggregate(OperatorNode):
 class GroupBy(OperatorNodeBase):
     def __init__(self, parent: OperatorNodeBase, keys: List[str]):
         super().__init__()
-        # TODO support composite key
-        if len(keys) != 1:
-            raise ValueError('Currently GroupBy expects exactly 1 key field')
-        self.keys = keys
+        self.keys = sorted(keys)  # Sort keys for consistent behavior
         self.parents.append(parent)
 
     def init_stream(self):
@@ -223,11 +293,14 @@ class GroupBy(OperatorNodeBase):
 
     def _stream_key_by_func(self, event: Any) -> Any:
         assert isinstance(event, Dict)
-        key = self.keys[0]
-        if key not in event:
-            raise RuntimeError(f'key {key} not in event {event}')
-
-        return event[key]
+        if len(self.keys) == 1:
+            key = self.keys[0]
+            if key not in event:
+                raise RuntimeError(f'key {key} not in event {event}')
+            return event[key]
+        
+        # For multiple keys, use frozenset for order independence
+        return frozenset((k, event[k]) for k in self.keys)
 
     def aggregate(self, aggregates: List[AggregateType]) -> OperatorNode:
         if len(aggregates) == 0:
@@ -236,7 +309,7 @@ class GroupBy(OperatorNodeBase):
 
     def schema(self) -> Schema:
         # group by does not alter parent's schema
-        return self.parents[0].schema()
+        return self.parents[0].schema().copy()
 
 
 class Join(OperatorNode):
@@ -244,9 +317,12 @@ class Join(OperatorNode):
         self,
         left: OperatorNode,
         right: OperatorNode,
+        how: str = 'left',
         on: Optional[List[str]] = None,
         left_on: Optional[List[str]] = None,
-        right_on: Optional[List[str]] = None
+        right_on: Optional[List[str]] = None,
+        left_prefix: str = 'left',
+        right_prefix: str = 'right',
     ):
         super().__init__()
         self.left = left
@@ -254,20 +330,18 @@ class Join(OperatorNode):
 
         self.parents.append(left)
         self.parents.append(right)
-        self.on = on
+        self.on = sorted(on) if on is not None else None
 
-        # TODO support composite keys
-        if on is not None and len(on) != 1 or \
-                left_on is not None and len(left_on) != 1 or \
-                right_on is not None and len(right_on) != 1:
-            raise ValueError('Currently, Join expects exactly 1 key field')
+        self.how = how
+        self.left_prefix = left_prefix
+        self.right_prefix = right_prefix
 
         if left_on is None and right_on is not None or \
                 left_on is not None and right_on is None:
             raise ValueError('Join expects both left_on and right_on')
 
-        self.left_on = left_on
-        self.right_on = right_on
+        self.left_on = sorted(left_on) if left_on is not None else None
+        self.right_on = sorted(right_on) if right_on is not None else None
 
         # fields with the same name
         self._same_fields = list(set(self.left.schema().fields()) & set(self.right.schema().fields()))
@@ -278,61 +352,72 @@ class Join(OperatorNode):
             .with_func(self._stream_join_func)
 
     @staticmethod
-    def _prefix_duplicate_field(field: str, is_left: bool):
+    def _prefix_duplicate_field(field: str, is_left: bool, left_prefix: str, right_prefix: str):
         if is_left:
-            return f'left_{field}'
+            return f'{left_prefix}_{field}'
         else:
-            return f'right_{field}'
+            return f'{right_prefix}_{field}'
 
     @staticmethod
-    def _joined_schema(ls: Schema, rs: Schema, on: Optional[List[str]], left_on: Optional[List[str]]):
+    def _joined_schema(ls: Schema, rs: Schema, how: str, on: Optional[List[str]], left_on: Optional[List[str]], right_on: Optional[List[str]], left_prefix: str = 'left', right_prefix: str = 'right'):
         same_fields = list(set(ls.fields()) & set(rs.fields()))
-        ts = ls.timestamp  # we use left ts by default
+        
+        # Determine which schema to use as primary for timestamp and keys
+        primary_schema = ls if how == 'left' else rs
+        secondary_schema = rs if how == 'left' else ls
+        ts = primary_schema.timestamp
 
         keys = {}
         values = {}
+        
+        # Handle join keys
         if on is not None:
             for k in on:
-                keys[k] = ls.keys[k]
+                keys[k] = primary_schema.keys[k]
         else:
-            # use left keys by default
-            for k in left_on:
-                keys[k] = ls.keys[k]
+            primary_keys = left_on if how == 'left' else right_on
+            for k in primary_keys:
+                keys[k] = primary_schema.keys[k]
 
-        for f in ls.fields():
+        # Process fields from primary schema
+        for f in primary_schema.fields():
             if f == ts or f in keys:
                 continue
-            renamed_f = None
-            if f in same_fields:
-                renamed_f = Join._prefix_duplicate_field(field=f, is_left=True)
-            new_f = f if renamed_f is None else renamed_f
-            if new_f in values:
-                raise RuntimeError(f'Duplicate entry for filed {new_f}')
-            if f in ls.values:
-                values[new_f] = ls.values[f]
-            elif f in ls.keys:
-                values[new_f] = ls.keys[f]
-            else:
-                raise ValueError(f'Unable to locate field {f} in left side of a join')
+            renamed_f = f
+            if f in same_fields:  # Only prefix if field exists in both schemas
+                renamed_f = Join._prefix_duplicate_field(
+                    field=f,
+                    is_left=(how == 'left'),
+                    left_prefix=left_prefix,
+                    right_prefix=right_prefix
+                )
+            if renamed_f in values:
+                raise RuntimeError(f'Duplicate entry for field {renamed_f}')
+            if f in primary_schema.values:
+                values[renamed_f] = primary_schema.values[f]
+            elif f in primary_schema.keys and f not in keys:
+                values[renamed_f] = primary_schema.keys[f]
 
-        for f in rs.fields():
+        # Process fields from secondary schema
+        for f in secondary_schema.fields():
             if f == ts or f in keys:
                 continue
-            renamed_f = None
-            if f in same_fields:
-                renamed_f = Join._prefix_duplicate_field(field=f, is_left=False)
-            new_f = f if renamed_f is None else renamed_f
-            if new_f in values:
-                raise RuntimeError(f'Duplicate entry for filed {new_f}')
-            if f in rs.values:
-                values[new_f] = rs.values[f]
-            elif f in rs.keys:
-                values[new_f] = rs.keys[f]
-            elif f == rs.timestamp:
-                # right still has a timestamp field, we need to handle it explicitly
-                values[new_f] = datetime
-            else:
-                raise ValueError(f'Unable to locate field {f} in left side of a join')
+            renamed_f = f
+            if f in same_fields:  # Only prefix if field exists in both schemas
+                renamed_f = Join._prefix_duplicate_field(
+                    field=f,
+                    is_left=(how != 'left'),
+                    left_prefix=left_prefix,
+                    right_prefix=right_prefix
+                )
+            if renamed_f in values:
+                raise RuntimeError(f'Duplicate entry for field {renamed_f}')
+            if f in secondary_schema.values:
+                values[renamed_f] = secondary_schema.values[f]
+            elif f in secondary_schema.keys and f not in keys:
+                values[renamed_f] = secondary_schema.keys[f]
+            elif f == secondary_schema.timestamp:
+                values[f] = datetime
 
         return Schema(
             keys=keys,
@@ -341,65 +426,76 @@ class Join(OperatorNode):
         )
 
     def schema(self) -> Schema:
-        return Join._joined_schema(self.left.schema(), self.right.schema(), self.on, self.left_on)
+        return Join._joined_schema(self.left.schema(), self.right.schema(), self.how, self.on, self.left_on, self.right_on, self.left_prefix, self.right_prefix)
 
     def _stream_left_key_func(self, element: Any) -> Any:
         assert isinstance(element, Dict)
-        key = self.left_on[0] if self.on is None else self.on[0]
-        return element[key]
+        keys = self.left_on if self.on is None else self.on
+        if len(keys) == 1:
+            return element[keys[0]]
+        # Keys are already sorted during initialization
+        return frozenset((k, element[k]) for k in keys)
 
     def _stream_right_key_func(self, element: Any) -> Any:
         assert isinstance(element, Dict)
-        key = self.right_on[0] if self.on is None else self.on[0]
-        return element[key]
+        keys = self.right_on if self.on is None else self.on
+        if len(keys) == 1:
+            return element[keys[0]]
+        # Keys are already sorted during initialization
+        return frozenset((k, element[k]) for k in keys)
 
-    # {'buyer_id': '0', 'product_type': 'ON_SALE', 'purchased_at': '2024-05-07 14:08:26.519626', 'product_price': 100.0, 'name': 'username_0'}
-    # {'buyer_id': '0', 'product_id': 'prod_0', 'product_type': 'ON_SALE', 'purchased_at': '2024-05-07 14:14:20.335705', 'product_price': 100.0, 'user_id': '0', 'registered_at': '2024-05-07 14:14:20.335697', 'name': 'username_0'}
     def _stream_join_func(self, left: Any, right: Any) -> Any:
-        for k in self._same_fields:
-            if k in left:
-                new_k_left = Join._prefix_duplicate_field(field=k, is_left=True)
-                assert new_k_left not in left
-                left[new_k_left] = left[k]
-                del left[k]
-            if k in right:
-                new_k_right = Join._prefix_duplicate_field(field=k, is_left=False)
-                assert new_k_right not in right
-                left[new_k_right] = right[k]
-                del right[k]
-
-        return {**left, **right}
-
-    # TODO cast to target_dataset_schema in case of join being terminal node
-    def _stream_join_func_new(self, left: Any, right: Any) -> Any:
         if left is None or right is None:
             raise RuntimeError('Can not join null values')
         assert isinstance(left, Dict)
         assert isinstance(right, Dict)
 
-
         out_event = {}
-
         schema = self.schema()
-        for f in left:
-            if f in self._same_fields:
-                new_f = self._prefix_duplicate_field(field=f, is_left=True)
-                out_event[new_f] = left[f]
-            else:
-                # skip fields not in schema
-                if f not in schema.fields():
-                    continue
-                out_event[f] = left[f]
 
-        for f in right:
-            if f in self._same_fields:
-                new_f = self._prefix_duplicate_field(field=f, is_left=False)
-                out_event[new_f] = right[f]
+        # Copy key fields from primary side
+        for k in schema.keys:
+            if self.how == 'left':
+                out_event[k] = left[k]
             else:
-                # skip fields not in schema
-                if f not in schema.fields():
-                    continue
-                out_event[f] = right[f]
+                out_event[k] = right[k]
+
+        # Copy timestamp from primary side
+        ts_field = schema.timestamp
+        if self.how == 'left':
+            out_event[ts_field] = left[ts_field]
+        else:
+            out_event[ts_field] = right[ts_field]
+
+        # Process fields from left side
+        for f in left:
+            if f == ts_field or f in schema.keys:
+                continue
+            new_f = f
+            if f in self._same_fields:
+                new_f = Join._prefix_duplicate_field(
+                    field=f,
+                    is_left=True,
+                    left_prefix=self.left_prefix,
+                    right_prefix=self.right_prefix
+                )
+            if new_f in schema.values:  # Only copy if field is in target schema
+                out_event[new_f] = left[f]
+
+        # Process fields from right side
+        for f in right:
+            if f == ts_field or f in schema.keys:
+                continue
+            new_f = f
+            if f in self._same_fields:
+                new_f = Join._prefix_duplicate_field(
+                    field=f,
+                    is_left=False,
+                    left_prefix=self.left_prefix,
+                    right_prefix=self.right_prefix
+                )
+            if new_f in schema.values:  # Only copy if field is in target schema
+                out_event[new_f] = right[f]
 
         return out_event
 
@@ -410,11 +506,54 @@ class Rename(OperatorNode):
         self.column_mapping = columns
         self.parents.append(parent)
 
-    def init_stream(self):
-        self.stream = self.parents[0].stream.map(map_func=self._stream_map_func)
+    def schema(self) -> Schema:
+        parent_schema = self.parents[0].schema()
+        keys = {}
+        values = {}
+        ts = parent_schema.timestamp
+
+        # Handle key fields
+        for old_name, type_ in parent_schema.keys.items():
+            new_name = self.column_mapping.get(old_name, old_name)
+            if new_name == ts:
+                raise ValueError(f'Cannot rename field {old_name} to timestamp field name {ts}')
+            keys[new_name] = type_
+
+        # Handle value fields
+        for old_name, type_ in parent_schema.values.items():
+            new_name = self.column_mapping.get(old_name, old_name)
+            if new_name == ts:
+                raise ValueError(f'Cannot rename field {old_name} to timestamp field name {ts}')
+            values[new_name] = type_
+
+        return Schema(
+            keys=keys,
+            values=values,
+            timestamp=ts
+        )
 
     def _stream_map_func(self, event: Any) -> Any:
-        raise NotImplementedError()
+        # Validate input matches parent schema
+        parent_schema = self.parents[0].schema()
+        input_fields = set(event.keys())
+        expected_fields = set(parent_schema.fields())
+        if input_fields != expected_fields:
+            raise ValueError(f'Input event fields {input_fields} do not match parent schema fields {expected_fields}')
+
+        # Apply rename
+        result = {}
+        for old_name, value in event.items():
+            new_name = self.column_mapping.get(old_name, old_name)
+            result[new_name] = value
+
+        # Validate output matches target schema
+        output_schema = self.schema()
+        output_fields = set(result.keys())
+        expected_fields = set(output_schema.fields())
+        if output_fields != expected_fields:
+            raise ValueError(f'Output event fields {output_fields} do not match target schema fields {expected_fields}')
+
+        return result
 
 
 # TODO Drop is used for both drop() and select() API, indicate difference?
@@ -422,23 +561,93 @@ class Drop(OperatorNode):
     def __init__(self, parent: OperatorNodeBase, columns: List[str]):
         super().__init__()
         self.parents.append(parent)
-        self.columns = columns
+        # Only keep columns that exist in parent schema
+        parent_schema = parent.schema()
+        self.columns = [col for col in columns if col in parent_schema.fields()]
 
-    def init_stream(self):
-        self.stream = self.parents[0].stream.filter(filter_func=self._stream_filter_func)
+    def schema(self) -> Schema:
+        parent_schema = self.parents[0].schema()
+        ts = parent_schema.timestamp
 
-    def _stream_filter_func(self, event: Any) -> Any:
-        raise NotImplementedError()
+        # Cannot drop timestamp field
+        if ts in self.columns:
+            raise ValueError(f'Cannot drop timestamp field {ts}')
+
+        # Cannot drop key fields
+        key_fields = set(parent_schema.keys.keys())
+        drop_fields = set(self.columns)
+        if key_fields & drop_fields:
+            invalid_keys = key_fields & drop_fields
+            raise ValueError(f'Cannot drop key fields: {invalid_keys}')
+
+        # Create new schema without dropped fields
+        keys = parent_schema.keys
+        values = {
+            field: type_
+            for field, type_ in parent_schema.values.items()
+            if field not in drop_fields
+        }
+
+        return Schema(
+            keys=keys,
+            values=values,
+            timestamp=ts
+        )
+
+    def _stream_map_func(self, event: Any) -> Any:
+        # Validate input matches parent schema
+        parent_schema = self.parents[0].schema()
+        input_fields = set(event.keys())
+        expected_fields = set(parent_schema.fields())
+        if input_fields != expected_fields:
+            raise ValueError(f'Input event fields {input_fields} do not match parent schema fields {expected_fields}')
+
+        # Create new dict without dropped fields
+        result = {
+            field: value
+            for field, value in event.items()
+            if field not in self.columns
+        }
+
+        # Validate output matches target schema
+        output_schema = self.schema()
+        output_fields = set(result.keys())
+        expected_fields = set(output_schema.fields())
+        if output_fields != expected_fields:
+            raise ValueError(f'Output event fields {output_fields} do not match target schema fields {expected_fields}')
+
+        return result
 
 
 class DropNull(OperatorNode):
     def __init__(self, parent: OperatorNodeBase, columns: Optional[List[str]] = None):
         super().__init__()
-        self.columns = columns
         self.parents.append(parent)
+        # If columns is None, check all fields except keys and timestamp
+        if columns is None:
+            parent_schema = parent.schema()
+            self.columns = list(parent_schema.values.keys())
+        else:
+            # Only keep columns that exist in parent schema values
+            parent_schema = parent.schema()
+            self.columns = [
+                col for col in columns 
+                if col in parent_schema.values
+            ]
 
     def init_stream(self):
         self.stream = self.parents[0].stream.filter(filter_func=self._stream_filter_func)
 
-    def _stream_filter_func(self, event: Any) -> Any:
-        raise NotImplementedError()
+    def schema(self) -> Schema:
+        return self.parents[0].schema().copy()
+
+    def _stream_filter_func(self, event: Any) -> bool:
+        # Validate input matches parent schema
+        parent_schema = self.parents[0].schema()
+        input_fields = set(event.keys())
+        expected_fields = set(parent_schema.fields())
+        if input_fields != expected_fields:
+            raise ValueError(f'Input event fields {input_fields} do not match parent schema fields {expected_fields}')
+
+        # Keep event only if none of the specified columns have None value
+        return not any(event[col] is None for col in self.columns)

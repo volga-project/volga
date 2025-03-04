@@ -2,7 +2,8 @@ from typing import Dict, Any, Union, Type
 import importlib
 from pydantic import BaseModel, validator
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
-from volga.on_demand.storage.scylla import OnDemandScyllaConnector
+# from volga.on_demand.storage.scylla import OnDemandScyllaConnector
+from volga.on_demand.storage.in_memory import InMemoryActorOnDemandDataConnector
 
 
 class OnDemandDataConnectorConfig(BaseModel):
@@ -42,9 +43,9 @@ DEFAULT_ON_DEMAND_CONFIG = OnDemandConfig(
     num_servers_per_node=1,
     server_port=1122,
     data_connector=OnDemandDataConnectorConfig(
-        connector_class=OnDemandScyllaConnector,
-        connector_args={
-            'contact_endpoints': ['127.0.0.1']
-        }
+        connector_class=InMemoryActorOnDemandDataConnector,
+        # connector_args={
+        #     'contact_endpoints': ['127.0.0.1']
+        # }
     )
 )

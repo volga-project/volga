@@ -1,5 +1,5 @@
 from abc import ABC
-from typing import Callable, List, Type, Optional, Any, Dict, Union, Tuple
+from typing import Callable, List, Set, Type, Optional, Any, Dict, Union, Tuple
 from dataclasses import dataclass
 
 @dataclass
