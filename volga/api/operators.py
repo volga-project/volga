@@ -1,13 +1,17 @@
 from datetime import datetime
+from decimal import Decimal
 import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
-from volga.common.time_utils import is_time_str
+from volga.common.time_utils import datetime_str_to_ts, is_time_str
 from volga.api.aggregate import AggregateType, Avg, Count, Max, Min, Sum
 from volga.api.schema import Schema
+from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.message.message import Record
+from volga.streaming.api.operators.timestamp_assigner import EventTimeAssigner
 from volga.streaming.api.operators.window_operator import SlidingWindowConfig, AggregationsPerWindow
 from volga.streaming.api.stream.data_stream import DataStream, KeyDataStream
+from volga.streaming.api.stream.stream_source import StreamSource
 
 
 class OperatorNodeBase:
@@ -15,13 +19,33 @@ class OperatorNodeBase:
         self.stream: Optional[DataStream] = None
         self.parents: List['OperatorNodeBase'] = []
 
-    def init_stream(self, *args):
-        raise NotImplementedError()
+    def init_stream(self):
+        raise NotImplementedError(f'{self.__class__.__name__} must implement init_stream')
 
     # TODO we want to be able to cast schema to Dataset's defined schema if the operator is the last in chain
     def schema(self) -> Schema:
-        raise NotImplementedError()
+        raise NotImplementedError(f'{self.__class__.__name__} must implement schema')
+    
+    def as_entity(self, entity_type: Type) -> 'Entity':
+        """
+        Add entity-specific fields to self and return self as Entity.
+        Validates schema compatibility.
+        """
+        expected_schema = entity_type._entity_metadata.schema()
+        actual_schema = self.schema()
+        
+        if actual_schema != expected_schema:
+            raise ValueError(
+                f"Schema mismatch:\n"
+                f"Expected schema: {expected_schema}\n"
+                f"Got schema: {actual_schema}"
+            )
+        
+        # Add entity-specific fields to self
+        self.metadata = entity_type._entity_metadata
+        self.entity_cls = entity_type
 
+        return self  # type: ignore  # We know this has Entity fields now
 
 # user facing operators to construct pipeline graph
 class OperatorNode(OperatorNodeBase):
@@ -44,6 +68,7 @@ class OperatorNode(OperatorNodeBase):
         on: Optional[List[str]] = None,
         left_on: Optional[List[str]] = None,
         right_on: Optional[List[str]] = None,
+        how: str = 'left'
     ) -> 'OperatorNode':
         if on is None:
             if left_on is None or right_on is None:
@@ -53,7 +78,7 @@ class OperatorNode(OperatorNodeBase):
             if on is None:
                 raise ValueError('Join should provide either on or both left_on and right_on')
 
-        return Join(left=self, right=other, on=on, left_on=left_on, right_on=right_on)
+        return Join(left=self, right=other, on=on, left_on=left_on, right_on=right_on, how=how)
 
     def rename(self, columns: Dict[str, str]) -> 'OperatorNode':
         return Rename(self, columns)
@@ -75,6 +100,27 @@ class OperatorNode(OperatorNodeBase):
             return self
         return Drop(self, drop_cols)
 
+class SourceNode(OperatorNode):
+    def __init__(self, source_connector: 'Connector', ctx: StreamingContext, entity_type: Type):
+        super().__init__()
+        self.source_connector = source_connector
+        self.ctx = ctx
+        self.entity_type = entity_type
+        
+    def init_stream(self):
+        self.stream: StreamSource = self.source_connector.to_stream_source(self.ctx)
+        
+        # Set timestamp assigner
+        timestamp_field = self.schema().timestamp
+        assert timestamp_field is not None
+        def _extract_timestamp(record: Record) -> Decimal:
+            dt_str = record.value[timestamp_field]
+            return datetime_str_to_ts(dt_str)
+        
+        self.stream.timestamp_assigner(EventTimeAssigner(_extract_timestamp))
+
+    def schema(self) -> Schema:
+        return self.entity_type._entity_metadata.schema()
 
 class Transform(OperatorNode):
     def __init__(self, parent: OperatorNodeBase, func: Callable, new_schema_dict: Optional[Dict[str, Type]] = None):
@@ -202,7 +248,7 @@ class Filter(OperatorNode):
         # filtering  does not alter parent's schema
         return self.parents[0].schema().copy()
 
-
+# TODO add test case
 class Aggregate(OperatorNode):
     def __init__(
         self, parent: OperatorNodeBase, aggregates: List[AggregateType]
@@ -308,7 +354,6 @@ class GroupBy(OperatorNodeBase):
         return Aggregate(self, aggregates)
 
     def schema(self) -> Schema:
-        # group by does not alter parent's schema
         return self.parents[0].schema().copy()
 
 
@@ -375,9 +420,18 @@ class Join(OperatorNode):
             for k in on:
                 keys[k] = primary_schema.keys[k]
         else:
+            # When using left_on/right_on, use the primary side's key name in output
             primary_keys = left_on if how == 'left' else right_on
-            for k in primary_keys:
-                keys[k] = primary_schema.keys[k]
+            secondary_keys = right_on if how == 'left' else left_on
+            
+            # Use primary side's key names for output schema
+            for pk, sk in zip(primary_keys, secondary_keys):
+                if how == 'left':
+                    # For left join, use left (primary) side's key name
+                    keys[pk] = ls.keys.get(pk) or ls.values.get(pk) or rs.keys.get(sk) or rs.values.get(sk)
+                else:
+                    # For right join, use right (primary) side's key name
+                    keys[pk] = rs.keys.get(pk) or rs.values.get(pk) or ls.keys.get(sk) or ls.values.get(sk)
 
         # Process fields from primary schema
         for f in primary_schema.fields():
@@ -506,30 +560,32 @@ class Rename(OperatorNode):
         self.column_mapping = columns
         self.parents.append(parent)
 
+    def init_stream(self):
+        self.stream = self.parents[0].stream.map(map_func=self._stream_map_func)
+
     def schema(self) -> Schema:
         parent_schema = self.parents[0].schema()
         keys = {}
         values = {}
         ts = parent_schema.timestamp
+        new_ts = self.column_mapping.get(ts, ts)
+
+        print("new_ts", new_ts)
 
         # Handle key fields
         for old_name, type_ in parent_schema.keys.items():
             new_name = self.column_mapping.get(old_name, old_name)
-            if new_name == ts:
-                raise ValueError(f'Cannot rename field {old_name} to timestamp field name {ts}')
             keys[new_name] = type_
 
         # Handle value fields
         for old_name, type_ in parent_schema.values.items():
             new_name = self.column_mapping.get(old_name, old_name)
-            if new_name == ts:
-                raise ValueError(f'Cannot rename field {old_name} to timestamp field name {ts}')
             values[new_name] = type_
 
         return Schema(
             keys=keys,
             values=values,
-            timestamp=ts
+            timestamp=new_ts
         )
 
     def _stream_map_func(self, event: Any) -> Any:
@@ -564,6 +620,9 @@ class Drop(OperatorNode):
         # Only keep columns that exist in parent schema
         parent_schema = parent.schema()
         self.columns = [col for col in columns if col in parent_schema.fields()]
+
+    def init_stream(self):
+        self.stream = self.parents[0].stream.map(map_func=self._stream_map_func)
 
     def schema(self) -> Schema:
         parent_schema = self.parents[0].schema()

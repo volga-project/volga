@@ -15,6 +15,7 @@ from volga.streaming.api.stream.stream_sink import StreamSink
 from volga.streaming.api.job_graph.job_graph import JobGraph, JobVertex, JobEdge, VertexType
 from volga.streaming.api.job_graph.job_graph_builder import JobGraphBuilder
 from volga.streaming.api.partition.partition import ForwardPartition, KeyPartition
+from volga.api.operators import Filter, Assign, Drop, SourceNode
 
 
 # Define test entities
@@ -67,12 +68,21 @@ def transform_feature(source: Entity) -> Entity:
 def join_feature(source: Entity, transformed: Entity) -> Entity:
     return source.join(transformed, on=['id'])
 
+@pipeline(dependencies=['source_feature'], output=TransformedEntity)
+def filter_map_feature(source: Entity) -> Entity:
+    """Filter values > 0.5 then assign and drop."""
+    return (
+        source
+        .filter(lambda x: x['value'] > 0.5)
+        .assign('transformed_value', float, lambda x: x['value'] * 3)
+        .drop(['value'])
+    )
+
 
 class TestStreamBuilder(unittest.TestCase):
     
     def setUp(self):
         
-        # Create a streaming context
         self.ctx = StreamingContext()
         
     def test_build_multi_feature_stream_graph(self):
@@ -206,11 +216,58 @@ class TestStreamBuilder(unittest.TestCase):
         self.assertIsNotNone(source_to_process)
         self.assertIsNotNone(process_to_sink)
 
+    def test_filter_map_feature(self):
+        """Test feature with filter, assign and drop operators."""
+        # Build stream graph
+        sinks_dict = build_stream_graph(
+            ['filter_map_feature'],
+            self.ctx
+        )
+        
+        # Verify we got sink for the feature
+        self.assertEqual(len(sinks_dict), 1)
+        self.assertIn('filter_map_feature', sinks_dict)
+        
+        # Get the stream for verification
+        sink = sinks_dict['filter_map_feature']
+        stream = sink.input_stream
+        
+        # Verify operator chain by checking stream operations
+        # Note: We need to check the actual stream operations rather than 
+        # trying to assert specific operator class types
+        
+        # Build and verify job graph
+        job_graph_builder = JobGraphBuilder(stream_sinks=list(sinks_dict.values()))
+        job_graph = job_graph_builder.build()
+        
+        # Verify vertices
+        vertices = job_graph.job_vertices
+        source_vertices = [v for v in vertices if v.vertex_type == VertexType.SOURCE]
+        process_vertices = [v for v in vertices if v.vertex_type == VertexType.PROCESS]
+        sink_vertices = [v for v in vertices if v.vertex_type == VertexType.SINK]
+        
+        self.assertEqual(len(source_vertices), 1)  # One source
+        self.assertEqual(len(process_vertices), 3)  # Filter, assign, drop
+        self.assertEqual(len(sink_vertices), 1)  # One sink
+        
+        # Verify edges
+        edges = job_graph.job_edges
+        self.assertEqual(len(edges), 4)  # source->filter->assign->drop->sink
+        
+        # Verify edge connections
+        for edge in edges:
+            # Each edge should connect to the next vertex
+            target_vertex = next((v for v in vertices if v.vertex_id == edge.target_vertex_id), None)
+            source_vertex = next((v for v in vertices if v.vertex_id == edge.source_vertex_id), None)
+            self.assertIsNotNone(target_vertex)
+            self.assertIsNotNone(source_vertex)
+
 if __name__ == '__main__':
-    unittest.main() 
-    # t = TestStreamBuilder()
-    # t.setUp()
+    # unittest.main() 
+    t = TestStreamBuilder()
+    t.setUp()
     # t.test_simple_job_graph()
     # t.test_transform_job_graph()
     # t.test_build_multi_feature_stream_graph()
-    # t.tearDown()
+    t.test_filter_map_feature()
+    t.tearDown()

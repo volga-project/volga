@@ -498,31 +498,36 @@ class TestSchema(unittest.TestCase):
             first_name: str
             last_name: str
 
-        # Test simple rename
         @entity
         class UserRenamed:
-            uid: str = field(key=True)
-            registered_at: datetime = field(timestamp=True)
+            id: str = field(key=True)
+            created_at: datetime = field(timestamp=True)
             fname: str
             lname: str
 
+        # Test renaming all fields including timestamp
         rename = Rename(
             Entity(User),
             columns={
-                'user_id': 'uid',
+                'user_id': 'id',
+                'registered_at': 'created_at',
                 'first_name': 'fname',
                 'last_name': 'lname'
             }
         )
         assert rename.schema() == UserRenamed._entity_metadata.schema(), \
-            "Rename should correctly update field names while preserving types"
+            "Rename should handle timestamp field renaming"
 
-        # Test error - renaming to timestamp field name
-        with pytest.raises(ValueError, match='Cannot rename field .* to timestamp field name .*'):
-            Rename(
-                Entity(User),
-                columns={'first_name': 'registered_at'}
-            ).schema()
+        # Test partial rename with timestamp
+        rename_partial = Rename(
+            Entity(User),
+            columns={
+                'registered_at': 'created_at',
+                'first_name': 'fname'
+            }
+        )
+        assert rename_partial.schema().timestamp == 'created_at', \
+            "Rename should update timestamp field name"
 
     def test_rename_map_function(self):
         @entity

@@ -27,7 +27,7 @@ from volga.on_demand.config import DEFAULT_ON_DEMAND_CONFIG
 num_users = 2
 user_items = [{
     'user_id': str(i),
-    'registered_at': str(datetime.datetime.now()),
+    'registered_at': datetime.datetime.now(),
     'name': f'username_{i}'
 } for i in range(num_users)]
 
@@ -38,7 +38,7 @@ order_items = [{
     'buyer_id': str(i % num_users),
     'product_id': f'prod_{i}',
     'product_type': 'ON_SALE' if i % 2 == 0 else 'NORMAL',
-    'purchased_at': str(purchase_time + datetime.timedelta(seconds=i*DELAY_S)),
+    'purchased_at': purchase_time + datetime.timedelta(seconds=i*DELAY_S),
     'product_price': 100.0
 } for i in range(num_orders)]
 
@@ -81,11 +81,18 @@ def order_source() -> Connector:
 @pipeline(dependencies=['user_source', 'order_source'], output=OnSaleUserSpentInfo)
 def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
     on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
-    per_user = on_sale_purchases.join(users, right_on=['user_id'], left_on=['buyer_id'])
+    per_user = on_sale_purchases.join(
+        users, 
+        left_on=['buyer_id'], 
+        right_on=['user_id'],
+        how='left'
+    )
     return per_user.group_by(keys=['user_id']).aggregate([
         Avg(on='product_price', window='7d', into='avg_spent_7d'),
         Count(window='1h', into='num_purchases_1h'),
-    ])
+    ]).rename(columns={
+        'registered_at': 'timestamp'
+    })
 
 @on_demand(dependencies=['user_spent_pipeline'])
 def user_stats(spent_info: OnSaleUserSpentInfo) -> UserStats:
@@ -147,7 +154,8 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         ray.init(ignore_reinit_error=True)
-        pprint(FeatureRepository.get_all_features())
+        # FeatureRepository.clear()
+        # pprint(FeatureRepository.get_all_features())
 
     @classmethod
     def tearDownClass(cls):
