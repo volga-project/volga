@@ -152,7 +152,7 @@ class ExecutionGraph:
             return "GraphViz is not installed. To enable ExecutionGraph visualization, please install GraphViz and pygraphviz"
         G = pgv.AGraph()
         for v in self.execution_vertices_by_id.values():
-            G.add_node(v.execution_vertex_id, label=f'{v.stream_operator.__class__.__name__}_{v.execution_vertex_id} p={v.parallelism}')
+            G.add_node(v.execution_vertex_id, label=f'{v.stream_operator.get_name()}_{v.execution_vertex_id} p={v.parallelism}')
 
         for e in self.execution_edges:
             G.add_edge(e.source_execution_vertex.execution_vertex_id, e.target_execution_vertex.execution_vertex_id, label=e.partition.__class__.__name__)

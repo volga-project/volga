@@ -76,6 +76,8 @@ class StreamOperator(Operator, ABC):
         # set at jobGraph compilation
         self.id = None
 
+        self.name = self.__class__.__name__
+
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         self.collectors = collectors
         self.runtime_context = runtime_context
@@ -91,6 +93,12 @@ class StreamOperator(Operator, ABC):
         for collector in self.collectors:
             collector.collect(record)
 
+    def set_name(self, name: str):
+        self.name = name
+
+    def get_name(self) -> str:
+        return self.name
+    
 
 class ISourceOperator(StreamOperator, ABC):
 

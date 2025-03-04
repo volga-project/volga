@@ -103,12 +103,11 @@ class TestStreamBuilder(unittest.TestCase):
         job_graph_builder = JobGraphBuilder(stream_sinks=list(sinks_dict.values()))
         job_graph = job_graph_builder.build()
         
-        # Verify the job graph
-        self.assertIsInstance(job_graph, JobGraph)
+        # print(job_graph.gen_digraph())
         
         # Verify vertices
         vertices = job_graph.job_vertices
-        self.assertGreaterEqual(len(vertices), 5)  # At least source, transform, join, and their sinks
+        self.assertEqual(len(vertices), 8)  # source + transform + (2 key_by + join) + 3 sinks
         
         # Find vertices by type
         source_vertices = [v for v in vertices if v.vertex_type == VertexType.SOURCE]
@@ -116,35 +115,43 @@ class TestStreamBuilder(unittest.TestCase):
         join_vertices = [v for v in vertices if v.vertex_type == VertexType.JOIN]
         sink_vertices = [v for v in vertices if v.vertex_type == VertexType.SINK]
         
-        # Verify we have the expected vertex types
-        self.assertGreaterEqual(len(source_vertices), 1)  # At least one source
-        self.assertGreaterEqual(len(process_vertices), 1)  # At least one process (transform)
-        self.assertGreaterEqual(len(join_vertices), 1)  # At least one join
+        # Verify exact number of each vertex type
+        self.assertEqual(len(source_vertices), 1)  # One source
+        self.assertEqual(len(process_vertices), 3)  # Transform + 2 key_by
+        self.assertEqual(len(join_vertices), 1)  # One join
         self.assertEqual(len(sink_vertices), 3)  # Three sinks (one for each feature)
         
         # Verify edges
         edges = job_graph.job_edges
-        self.assertGreaterEqual(len(edges), 5)  # At least 5 edges in our graph
+        self.assertEqual(len(edges), 8)  # source->(transform,key_by,sink) + transform->(key_by,sink) + 2(key_by->join) + join->sink
         
-        # Verify edge connections
-        # Each sink should have an incoming edge
-        for sink_vertex in sink_vertices:
-            incoming_edges = [e for e in edges if e.target_vertex_id == sink_vertex.vertex_id]
-            self.assertGreaterEqual(len(incoming_edges), 1)
+        # Get vertices by name for edge verification
+        source = source_vertices[0]
+        transform = next(v for v in process_vertices if "Transform" in v.stream_operator.get_name())
+        left_key_by = next(v for v in process_vertices if "JoinLeftKeyBy" in v.stream_operator.get_name())
+        right_key_by = next(v for v in process_vertices if "JoinRightKeyBy" in v.stream_operator.get_name())
+        join = join_vertices[0]
         
-        # Source vertices should have no incoming edges
-        for source_vertex in source_vertices:
-            incoming_edges = [e for e in edges if e.target_vertex_id == source_vertex.vertex_id]
-            self.assertEqual(len(incoming_edges), 0)
+        def has_edge(source_id: str, target_id: str) -> bool:
+            return any(e.source_vertex_id == source_id and e.target_vertex_id == target_id for e in edges)
         
-        # Join vertices should have at least two incoming edges
-        for join_vertex in join_vertices:
-            incoming_edges = [e for e in edges if e.target_vertex_id == join_vertex.vertex_id]
-            self.assertGreaterEqual(len(incoming_edges), 2)
-            
-            # At least one of the edges should be marked as the right join edge
-            right_edges = [e for e in incoming_edges if hasattr(e, "is_join_right_edge") and e.is_join_right_edge]
-            self.assertGreaterEqual(len(right_edges), 1)
+        # Verify source connections
+        self.assertTrue(has_edge(source.vertex_id, transform.vertex_id))  # source -> transform
+        self.assertTrue(has_edge(source.vertex_id, left_key_by.vertex_id))  # source -> left key_by
+        
+        # Verify transform connections
+        self.assertTrue(has_edge(transform.vertex_id, right_key_by.vertex_id))  # transform -> right key_by
+        
+        # Verify join connections
+        self.assertTrue(has_edge(left_key_by.vertex_id, join.vertex_id))  # left key_by -> join
+        self.assertTrue(has_edge(right_key_by.vertex_id, join.vertex_id))  # right key_by -> join
+        
+        # Verify partition types
+        for edge in edges:
+            if edge.target_vertex_id == join.vertex_id:
+                self.assertIsInstance(edge.partition, KeyPartition)  # key_by -> join edges use KeyPartition
+            else:
+                self.assertIsInstance(edge.partition, ForwardPartition)  # all other edges use ForwardPartition
     
     def test_simple_job_graph(self):
         """Test a simple source -> sink job graph."""
@@ -263,11 +270,11 @@ class TestStreamBuilder(unittest.TestCase):
             self.assertIsNotNone(source_vertex)
 
 if __name__ == '__main__':
-    # unittest.main() 
-    t = TestStreamBuilder()
-    t.setUp()
+    unittest.main() 
+    # t = TestStreamBuilder()
+    # t.setUp()
     # t.test_simple_job_graph()
     # t.test_transform_job_graph()
     # t.test_build_multi_feature_stream_graph()
-    t.test_filter_map_feature()
-    t.tearDown()
+    # t.test_filter_map_feature()
+    # t.tearDown()

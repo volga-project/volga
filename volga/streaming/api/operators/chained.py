@@ -18,6 +18,12 @@ class ChainedOperator(StreamOperator, ABC):
         self.head_operator = operators[0]
         self.tail_operator = operators[len(operators) - 1]
 
+        # set name
+        name = f'{self.__class__.__name__}('
+        for op in self.operators:
+            name += f'{op.get_name()}->'
+        self.name = name.removesuffix('->') + ')'
+
     def open(self, collectors: List[Collector], runtime_context: RuntimeContext):
         # do not call super class, we open each operator separately
         for i in range(len(self.operators) - 1):
@@ -39,12 +45,12 @@ class ChainedOperator(StreamOperator, ABC):
 
     def operator_type(self) -> OperatorType:
         return self.head_operator.operator_type()
+    
+    def set_name(self, name: str):
+        raise NotImplementedError('ChainedOperator does not support setting name')
 
-    def get_description(self) -> str:
-        d = f'{self.__class__.__name__}('
-        for op in self.operators:
-            d += f'{op.__class__.__name__}->'
-        return d.removesuffix('->') + ')'
+    def get_name(self) -> str:
+        return self.name
 
     def _create_runtime_context(self, runtime_context: RuntimeContext, index: int) -> RuntimeContext:
         # TODO implement based on index

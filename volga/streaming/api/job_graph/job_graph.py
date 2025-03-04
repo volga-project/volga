@@ -121,10 +121,10 @@ class JobGraph:
             return "GraphViz is not installed. To enable JobGraph visualization, please install GraphViz and pygraphviz"
         G = pgv.AGraph()
         for jv in self.job_vertices:
-            if isinstance(jv.stream_operator, ChainedOperator):
-                label = f'{jv.stream_operator.get_description()} p={jv.parallelism}'
-            else:
-                label = f'{jv.stream_operator.__class__.__name__} p={jv.parallelism}'
+            # if isinstance(jv.stream_operator, ChainedOperator):
+            #     label = f'{jv.stream_operator.get_name()} p={jv.parallelism}'
+            # else:
+            label = f'{jv.stream_operator.get_name()} p={jv.parallelism}'
             G.add_node(jv.vertex_id, label=label)
 
         for je in self.job_edges:

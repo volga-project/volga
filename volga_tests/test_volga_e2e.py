@@ -1,4 +1,3 @@
-from pprint import pprint
 import time
 import unittest
 import datetime
@@ -80,7 +79,7 @@ def order_source() -> Connector:
 
 @pipeline(dependencies=['user_source', 'order_source'], output=OnSaleUserSpentInfo)
 def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
-    on_sale_purchases = orders.filter(lambda df: df['product_type'] == 'ON_SALE')
+    on_sale_purchases = orders.filter(lambda x: x['product_type'] == 'ON_SALE')
     per_user = on_sale_purchases.join(
         users, 
         left_on=['buyer_id'], 
@@ -141,7 +140,7 @@ class OnDemandClientThread(threading.Thread):
                     for user_id in self.user_ids:
                         self.results_queues[user_id].put(e)
                         
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(1)
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -154,8 +153,6 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         ray.init(ignore_reinit_error=True)
-        # FeatureRepository.clear()
-        # pprint(FeatureRepository.get_all_features())
 
     @classmethod
     def tearDownClass(cls):
@@ -205,7 +202,7 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
                         continue
                         
                     if isinstance(result, Exception):
-                        print(f"Error for user {user_id}: {result}")
+                        # print(f"Error for user {user_id}: {result}")
                         continue
                         
                     # Convert raw stats to UserStats object

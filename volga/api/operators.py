@@ -3,7 +3,7 @@ from decimal import Decimal
 import functools
 from typing import Callable, Dict, Type, List, Optional, Any
 
-from volga.common.time_utils import datetime_str_to_ts, is_time_str
+from volga.common.time_utils import datetime_str_to_ts, datetime_to_ts, is_time_str
 from volga.api.aggregate import AggregateType, Avg, Count, Max, Min, Sum
 from volga.api.schema import Schema
 from volga.streaming.api.context.streaming_context import StreamingContext
@@ -21,6 +21,11 @@ class OperatorNodeBase:
 
     def init_stream(self):
         raise NotImplementedError(f'{self.__class__.__name__} must implement init_stream')
+    
+    def set_stream_name(self, feature_name: str):
+        stream_name = f'{feature_name}::{self.__class__.__name__}'
+        if self.stream is not None:
+            self.stream.set_stream_operator_name(stream_name) 
 
     # TODO we want to be able to cast schema to Dataset's defined schema if the operator is the last in chain
     def schema(self) -> Schema:
@@ -114,8 +119,10 @@ class SourceNode(OperatorNode):
         timestamp_field = self.schema().timestamp
         assert timestamp_field is not None
         def _extract_timestamp(record: Record) -> Decimal:
-            dt_str = record.value[timestamp_field]
-            return datetime_str_to_ts(dt_str)
+            # dt_str = record.value[timestamp_field]
+            # return datetime_str_to_ts(dt_str)
+            dt = record.value[timestamp_field]
+            return datetime_to_ts(dt)
         
         self.stream.timestamp_assigner(EventTimeAssigner(_extract_timestamp))
 
@@ -242,6 +249,7 @@ class Filter(OperatorNode):
         self.stream = self.parents[0].stream.filter(filter_func=self._stream_filter_func)
 
     def _stream_filter_func(self, event: Any) -> bool:
+        print(f"Filtering event: {event}")
         return self.func(event)
 
     def schema(self) -> Schema:
@@ -391,10 +399,21 @@ class Join(OperatorNode):
         # fields with the same name
         self._same_fields = list(set(self.left.schema().fields()) & set(self.right.schema().fields()))
 
+        self.left_key_by_stream = None
+        self.right_key_by_stream = None
+
     def init_stream(self):
-        self.stream = self.left.stream.key_by(self._stream_left_key_func) \
-            .join(self.right.stream.key_by(self._stream_right_key_func)) \
+        self.left_key_by_stream = self.left.stream.key_by(self._stream_left_key_func)
+        self.right_key_by_stream = self.right.stream.key_by(self._stream_right_key_func)
+
+        self.stream = self.left_key_by_stream \
+            .join(self.right_key_by_stream) \
             .with_func(self._stream_join_func)
+    
+    def set_stream_name(self, feature_name: str):
+        self.left_key_by_stream.set_stream_operator_name(f'{feature_name}::JoinLeftKeyBy')
+        self.right_key_by_stream.set_stream_operator_name(f'{feature_name}::JoinRightKeyBy')
+        self.stream.set_stream_operator_name(f'{feature_name}::Join')
 
     @staticmethod
     def _prefix_duplicate_field(field: str, is_left: bool, left_prefix: str, right_prefix: str):

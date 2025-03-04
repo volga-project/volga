@@ -200,7 +200,7 @@ def initialize_entity_stream(
             entity_type=feature.output_type
         )
         # Initialize stream and return as entity
-        init_operator_chain(source_operator, initialized_nodes)
+        init_operator_chain(source_operator, initialized_nodes, feature.name)
         return source_operator.as_entity(feature.output_type)
         
     else:
@@ -210,19 +210,25 @@ def initialize_entity_stream(
             
         result_node: OperatorNodeBase = feature.func(*dep_entities)
         # Initialize all operator nodes in the chain bottom-up
-        init_operator_chain(result_node, initialized_nodes)
+        init_operator_chain(result_node, initialized_nodes, feature.name)
         # Cast to entity type
         return result_node.as_entity(feature.output_type)
 
 
-def init_operator_chain(node: OperatorNodeBase, initialized_nodes: Set[OperatorNodeBase]) -> None:
+def init_operator_chain(
+    node: OperatorNodeBase, 
+    initialized_nodes: Set[OperatorNodeBase],
+    feature_name: str
+) -> None:
     """
     Recursively initialize all operator nodes in the chain, bottom-up.
     Uses shared initialized_nodes set to ensure each node is initialized only once.
+    Sets stream names for debugging using feature name and operator type.
     
     Args:
         node: The operator node to initialize
         initialized_nodes: Set of already initialized nodes
+        feature_name: Name of the feature this operator chain belongs to
     """
     def init_node(node: OperatorNodeBase) -> None:
         # Skip if already initialized
@@ -235,6 +241,10 @@ def init_operator_chain(node: OperatorNodeBase, initialized_nodes: Set[OperatorN
             
         # Then initialize this node
         node.init_stream()
+        
+        # Set stream name using feature name and operator type
+        node.set_stream_name(feature_name)
+        
         initialized_nodes.add(node)
 
     init_node(node)

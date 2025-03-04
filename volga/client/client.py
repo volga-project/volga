@@ -1,24 +1,21 @@
 from datetime import datetime
 from typing import Dict, Optional, Tuple, Any, List
 
-import pandas as pd
-
-from volga.common.time_utils import datetime_to_ts
-from volga.api.entity import Entity
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.api.storage import InMemoryActorPipelineDataConnector, PipelineDataConnector
 from volga.api.pipeline import PipelineFeature
 from volga.api.stream_builder import build_stream_graph
 
 DEFAULT_STREAMING_JOB_CONFIG = {
-    'worker_config_template': {},
+    'worker_config': {},
     'master_config': {
         'resource_config': {
             'default_worker_resources': {
                 'CPU': '0.01'
             }
         },
-        'scheduler_config': {}
+        'scheduler_config': {},
+        'node_assign_strategy': 'parallelism_first'
     }
 }
 
@@ -36,11 +33,12 @@ class Client:
         parallelism: int = 1,
         pipeline_data_connector: PipelineDataConnector = InMemoryActorPipelineDataConnector(batch=False),
         scaling_config: Optional[ScalingConfig] = None,
+        job_config: Dict = DEFAULT_STREAMING_JOB_CONFIG,
         _async: bool = False
     ):
         if scaling_config is not None:
             raise ValueError('ScalingConfig is not supported yet')
-        ctx = StreamingContext(job_config=DEFAULT_STREAMING_JOB_CONFIG)
+        ctx = StreamingContext(job_config=job_config)
         sink_functions = {
             feature.name: pipeline_data_connector.get_sink_function(feature.name, feature.output_type._entity_metadata.schema())
             for feature in features
