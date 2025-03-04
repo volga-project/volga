@@ -272,37 +272,6 @@ def get_field(
         )
     return field
 
-    # def init_stream(self, source_tag: Optional[str], ctx: StreamingContext):
-    #     if not self.is_source():
-    #         raise ValueError(f'Dataset {self._name}: Can not get source stream from non-source dataset')
-    #     if self.stream is not None:
-    #         raise ValueError(f'Dataset {self._name}: Stream source already inited')
-
-    #     source_connectors = self._get_source_connectors()
-    #     assert source_connectors is not None
-    #     if source_tag is None:
-    #         if len(source_connectors) > 1:
-    #             raise ValueError(f'Dataset {self._name}: Need to specify tag for source with > 1 connectors')
-    #         connector = list(source_connectors.values())[0]
-    #     else:
-    #         if source_tag not in source_connectors:
-    #             raise ValueError(f'Dataset {self._name}: Can not find source tag {source_tag}')
-    #         connector = source_connectors[source_tag]
-
-    #     stream_source = connector.to_stream_source(ctx)
-
-    #     # set timestamp assigner
-    #     if self._timestamp_field is None:
-    #         raise RuntimeError('Can not init source with no timestamp field')
-
-    #     def _extract_timestamp(record: Record) -> Decimal:
-    #         dt_str = record.value[self._timestamp_field]
-    #         return datetime_str_to_ts(dt_str)
-
-    #     stream_source.timestamp_assigner(EventTimeAssigner(_extract_timestamp))
-
-    #     self.stream = stream_source
-
 def field(
     key: bool = False,
     timestamp: bool = False,

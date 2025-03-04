@@ -195,12 +195,10 @@ def initialize_entity_stream(
     Returns:
         The initialized entity
     """
-    # Create a new entity instance for this feature
-    entity_cls = feature.output_type
-    entity = create_entity(entity_cls)
     
-    # Handle source features
     if is_source:
+        # Handle source features
+        entity = create_entity(feature.output_type)
         # Initialize source stream
         source_connector = feature.func()  # Call source function to get connector
         stream_source = source_connector.to_stream_source(ctx)
@@ -218,18 +216,18 @@ def initialize_entity_stream(
         if dep_entities is None:
             dep_entities = []
             
-        result_entity = feature.func(*dep_entities)
-        
+        result_entity: Entity = feature.func(*dep_entities)
+        expected_schema = feature.output_type._entity_metadata.schema()
+        result_schema = result_entity.schema()
+        if result_schema != expected_schema:
+            raise ValueError(
+                f"Schema mismatch in feature {feature.name}:\n"
+                f"Expected schema: {expected_schema}\n"
+                f"Got schema: {result_schema}"
+            )
+
         # Use the result entity instead
         entity = result_entity
-        
-        # Initialize the stream based on entity type
-        if isinstance(entity, Aggregate):
-            # For Aggregate entities, pass the target schema to init_stream
-            target_schema = entity.metadata.schema()
-            entity.init_stream(target_schema)
-        else:
-            # For regular entities, just call init_stream
-            entity.init_stream()
+        entity.init_stream()
     
     return entity

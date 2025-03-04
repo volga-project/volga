@@ -26,8 +26,8 @@ class OperatorNodeBase:
 # user facing operators to construct pipeline graph
 class OperatorNode(OperatorNodeBase):
 
-    def transform(self, func: Callable) -> 'OperatorNode':
-        return Transform(self, func)
+    def transform(self, func: Callable, new_schema_dict: Optional[Dict[str, Type]] = None) -> 'OperatorNode':
+        return Transform(self, func, new_schema_dict)
 
     def filter(self, func: Callable) -> 'OperatorNode':
         return Filter(self, func)

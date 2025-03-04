@@ -35,7 +35,7 @@ class TransformedEntity:
 @entity
 class JoinedEntity:
     id: str = field(key=True)
-    source_value: float
+    value: float
     transformed_value: float
     timestamp: datetime.datetime = field(timestamp=True)
 
@@ -50,17 +50,21 @@ def source_feature() -> Connector:
 
 
 @pipeline(dependencies=['source_feature'], output=TransformedEntity)
-def transform_feature(source: Entity):
+def transform_feature(source: Entity) -> Entity:
     # Transform the data
     return source.transform(lambda x: {
         'id': x['id'],
         'transformed_value': x['value'] * 2,
         'timestamp': x['timestamp']
+    }, new_schema_dict={
+        'id': str,
+        'transformed_value': float,
+        'timestamp': datetime.datetime
     })
 
 
 @pipeline(dependencies=['source_feature', 'transform_feature'], output=JoinedEntity)
-def join_feature(source: Entity, transformed: Entity):
+def join_feature(source: Entity, transformed: Entity) -> Entity:
     return source.join(transformed, on=['id'])
 
 
