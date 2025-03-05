@@ -11,6 +11,7 @@ from volga_rust import RustDataWriter
 
 from volga.streaming.runtime.network.io_loop import IOHandler, RustIOHandler
 from volga.streaming.runtime.network.metrics import MetricsRecorder
+from volga.streaming.runtime.network.serializer import Serializer, DEFAULT_SERIALIZER
 
 
 class DataWriter(IOHandler):
@@ -22,7 +23,8 @@ class DataWriter(IOHandler):
         source_stream_name: str,
         job_name: str,
         channels: List[Channel],
-        config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG
+        config: DataWriterConfig = DEFAULT_DATA_WRITER_CONFIG,
+        serializer: Serializer = DEFAULT_SERIALIZER
     ):
         super().__init__(handler_id, name, job_name, channels)
         self._rust_data_writer = RustDataWriter(handler_id, name, job_name, config.to_rust(), self._rust_channels)
@@ -32,6 +34,7 @@ class DataWriter(IOHandler):
         self._batch_size = config.batch_size
         self._flusher_thread = threading.Thread(target=self._flusher_loop)
         self._flush_period_s = config.flush_period_s
+        self._serializer = serializer
         self.running = False
         self._metrics_recorder = MetricsRecorder(name, job_name)
 
@@ -68,7 +71,7 @@ class DataWriter(IOHandler):
         batch = self._batch_per_channel[channel_id]
         batch.append(message)
         if len(batch) == self._batch_size:
-            b = msgpack.dumps(batch)
+            b = self._serializer.dumps(batch)
             # TODO indicate unsuccessful write (e.g. backpressure)?
             res = self._rust_data_writer.write_bytes(channel_id, b, 100)
             if res is None:
@@ -92,7 +95,7 @@ class DataWriter(IOHandler):
             if len(batch) == 0:
                 lock.release()
                 continue
-            b = msgpack.dumps(batch)
+            b = self._serializer.dumps(batch)
             # TODO indicate unsuccessful write (e.g. backpressure)?
             res = self._rust_data_writer.write_bytes(channel_id, b, 0)
             if res is not None:

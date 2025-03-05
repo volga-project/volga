@@ -1,10 +1,9 @@
 from datetime import datetime
 from decimal import Decimal
 import functools
-from pprint import pprint
 from typing import Callable, Dict, Type, List, Optional, Any
 
-from volga.common.time_utils import datetime_str_to_ts, datetime_to_ts, is_time_str
+from volga.common.time_utils import datetime_to_ts
 from volga.api.aggregate import AggregateType, Avg, Count, Max, Min, Sum
 from volga.api.schema import Schema
 from volga.streaming.api.context.streaming_context import StreamingContext
@@ -120,8 +119,6 @@ class SourceNode(OperatorNode):
         timestamp_field = self.schema().timestamp
         assert timestamp_field is not None
         def _extract_timestamp(record: Record) -> Decimal:
-            # dt_str = record.value[timestamp_field]
-            # return datetime_str_to_ts(dt_str)
             dt = record.value[timestamp_field]
             return datetime_to_ts(dt)
         
@@ -250,7 +247,6 @@ class Filter(OperatorNode):
         self.stream = self.parents[0].stream.filter(filter_func=self._stream_filter_func)
 
     def _stream_filter_func(self, event: Any) -> bool:
-        print(f"Filtering event: {event}")
         return self.func(event)
 
     def schema(self) -> Schema:

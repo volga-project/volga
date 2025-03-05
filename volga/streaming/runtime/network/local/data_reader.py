@@ -8,6 +8,7 @@ from volga.streaming.runtime.network.network_config import DataReaderConfig, DEF
 from volga_rust import RustDataReader
 
 from volga.streaming.runtime.network.io_loop import IOHandler, RustIOHandler
+from volga.streaming.runtime.network.serializer import Serializer, DEFAULT_SERIALIZER
 
 
 class DataReader(IOHandler):
@@ -18,11 +19,12 @@ class DataReader(IOHandler):
         name: str,
         job_name: str,
         channels: List[Channel],
-        config: DataReaderConfig = DEFAULT_DATA_READER_CONFIG
+        config: DataReaderConfig = DEFAULT_DATA_READER_CONFIG,
+        serializer: Serializer = DEFAULT_SERIALIZER
     ):
         super().__init__(handler_id, name, job_name, channels)
         self._rust_data_reader = RustDataReader(handler_id, name, job_name, config.to_rust(), self._rust_channels)
-
+        self._serializer = serializer
         self._num_msgs_read = 0
         self._last_report_ts = time.time()
         self._start_ts = None
@@ -34,7 +36,7 @@ class DataReader(IOHandler):
         b = self._rust_data_reader.read_bytes()
         if b is None:
             return None
-        res = msgpack.loads(b)
+        res = self._serializer.loads(b)
         self._num_msgs_read += len(res)
         if time.time() - self._last_report_ts > 1:
             rx = self._num_msgs_read / (time.time() - self._start_ts)
