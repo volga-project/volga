@@ -45,4 +45,5 @@ class Stream(ABC):
     
     def set_stream_operator_name(self, name: str):
         # self.name = f'{self.id}_{name}'
-        self.stream_operator.set_name(name)
+        if self.stream_operator is not None:
+            self.stream_operator.set_name(name)

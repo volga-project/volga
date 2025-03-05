@@ -1,6 +1,7 @@
 from datetime import datetime
 from decimal import Decimal
 import functools
+from pprint import pprint
 from typing import Callable, Dict, Type, List, Optional, Any
 
 from volga.common.time_utils import datetime_str_to_ts, datetime_to_ts, is_time_str
@@ -41,8 +42,8 @@ class OperatorNodeBase:
         
         if actual_schema != expected_schema:
             raise ValueError(
-                f"Schema mismatch:\n"
-                f"Expected schema: {expected_schema}\n"
+                f"Schema mismatch in {self.__class__.__name__}:\n"
+                f"Expected entity type {entity_type.__class__.__name__} with schema: {expected_schema}\n"
                 f"Got schema: {actual_schema}"
             )
         
@@ -268,8 +269,6 @@ class Aggregate(OperatorNode):
 
     def schema(self) -> Schema:
         input_schema = self.parents[0].schema()
-
-        keys = {f: input_schema.get_type(f) for f in self.keys}
         values = {}
         for agg in self.aggregates:
             if isinstance(agg, Count):
@@ -286,7 +285,7 @@ class Aggregate(OperatorNode):
                 raise ValueError(f'Unsupported aggregate type: {type(agg)}')
         
         return Schema(
-            keys=keys,
+            keys=input_schema.keys,
             values=values,
             timestamp=input_schema.timestamp,
         )
@@ -342,6 +341,10 @@ class GroupBy(OperatorNodeBase):
         self.keys = sorted(keys)  # Sort keys for consistent behavior
         self.parents.append(parent)
 
+        for key in self.keys:
+            if key not in parent.schema().keys:
+                raise ValueError(f'Key {key} does not exists in parent {parent.__class__.__name__} schema: {parent.schema()}')
+
     def init_stream(self):
         self.stream = self.parents[0].stream.key_by(key_by_func=self._stream_key_by_func)
 
@@ -356,13 +359,33 @@ class GroupBy(OperatorNodeBase):
         # For multiple keys, use frozenset for order independence
         return frozenset((k, event[k]) for k in self.keys)
 
-    def aggregate(self, aggregates: List[AggregateType]) -> OperatorNode:
+    def aggregate(self, aggregates: List[AggregateType]) -> Aggregate:
         if len(aggregates) == 0:
             raise ValueError('Aggregate expects at least one aggregation operation')
+        
         return Aggregate(self, aggregates)
 
     def schema(self) -> Schema:
-        return self.parents[0].schema().copy()
+        parent_schema = self.parents[0].schema()
+        
+        # Create new schema with only the specified keys
+        new_keys = {}
+        new_values = parent_schema.values.copy()
+        
+        # Move keys that are not in self.keys to values
+        for key, type_ in parent_schema.keys.items():
+            if key in self.keys:
+                new_keys[key] = type_
+            else:
+                # Only add to values if not already there
+                if key not in new_values:
+                    new_values[key] = type_
+        
+        return Schema(
+            keys=new_keys,
+            values=new_values,
+            timestamp=parent_schema.timestamp
+        )
 
 
 class Join(OperatorNode):
@@ -386,6 +409,9 @@ class Join(OperatorNode):
         self.on = sorted(on) if on is not None else None
 
         self.how = how
+        if self.how not in ['left', 'right']:
+            raise ValueError(f'how must be either left or right, got {self.how}')
+        
         self.left_prefix = left_prefix
         self.right_prefix = right_prefix
 
@@ -396,11 +422,15 @@ class Join(OperatorNode):
         self.left_on = sorted(left_on) if left_on is not None else None
         self.right_on = sorted(right_on) if right_on is not None else None
 
-        # fields with the same name
-        self._same_fields = list(set(self.left.schema().fields()) & set(self.right.schema().fields()))
+        if self.left_on is not None and self.right_on is not None:
+            if len(self.left_on) != len(self.right_on):
+                raise ValueError('left_on and right_on must have the same number of keys')
+
 
         self.left_key_by_stream = None
         self.right_key_by_stream = None
+
+        self._same_fields = list(set(self.left.schema().fields()) & set(self.right.schema().fields()))
 
     def init_stream(self):
         self.left_key_by_stream = self.left.stream.key_by(self._stream_left_key_func)
@@ -415,92 +445,83 @@ class Join(OperatorNode):
         self.right_key_by_stream.set_stream_operator_name(f'{feature_name}::JoinRightKeyBy')
         self.stream.set_stream_operator_name(f'{feature_name}::Join')
 
-    @staticmethod
-    def _prefix_duplicate_field(field: str, is_left: bool, left_prefix: str, right_prefix: str):
+    def _prefix_duplicate_field(self, field: str, is_left: bool):
         if is_left:
-            return f'{left_prefix}_{field}'
+            return f'{self.left_prefix}_{field}'
         else:
-            return f'{right_prefix}_{field}'
+            return f'{self.right_prefix}_{field}'
 
-    @staticmethod
-    def _joined_schema(ls: Schema, rs: Schema, how: str, on: Optional[List[str]], left_on: Optional[List[str]], right_on: Optional[List[str]], left_prefix: str = 'left', right_prefix: str = 'right'):
-        same_fields = list(set(ls.fields()) & set(rs.fields()))
-        
-        # Determine which schema to use as primary for timestamp and keys
-        primary_schema = ls if how == 'left' else rs
-        secondary_schema = rs if how == 'left' else ls
-        ts = primary_schema.timestamp
+    def schema(self) -> Schema:
+        if self.how == 'left':
+            ts = self.left.schema().timestamp
+        else:
+            ts = self.right.schema().timestamp
 
         keys = {}
         values = {}
         
         # Handle join keys
-        if on is not None:
-            for k in on:
-                keys[k] = primary_schema.keys[k]
+        if self.on is not None:
+            for k in self.on:
+                if k not in self.left.schema().keys or k not in self.right.schema().keys:
+                    raise ValueError(f'on key {k} not in left or right schema: {self.left.schema()} or {self.right.schema()}')
+                keys[k] = self.left.schema().keys[k]
         else:
-            # When using left_on/right_on, use the primary side's key name in output
-            primary_keys = left_on if how == 'left' else right_on
-            secondary_keys = right_on if how == 'left' else left_on
-            
-            # Use primary side's key names for output schema
-            for pk, sk in zip(primary_keys, secondary_keys):
-                if how == 'left':
-                    # For left join, use left (primary) side's key name
-                    keys[pk] = ls.keys.get(pk) or ls.values.get(pk) or rs.keys.get(sk) or rs.values.get(sk)
-                else:
-                    # For right join, use right (primary) side's key name
-                    keys[pk] = rs.keys.get(pk) or rs.values.get(pk) or ls.keys.get(sk) or ls.values.get(sk)
+            for k in self.left_on:
+                if k not in self.left.schema().keys:
+                    raise ValueError(f'left_on key {k} not in left schema: {self.left.schema()}')
+            for k in self.right_on:
+                if k not in self.right.schema().keys:
+                    raise ValueError(f'right_on key {k} not in right schema: {self.right.schema()}')
+            if self.how == 'left':
+                for k in self.left_on:
+                    keys[k] = self.left.schema().keys[k]
+            else:
+                for k in self.right_on:
+                    keys[k] = self.right.schema().keys[k]
 
-        # Process fields from primary schema
-        for f in primary_schema.fields():
+        for f in self.left.schema().fields():
             if f == ts or f in keys:
                 continue
             renamed_f = f
-            if f in same_fields:  # Only prefix if field exists in both schemas
-                renamed_f = Join._prefix_duplicate_field(
+            if f in self._same_fields:
+                renamed_f = self._prefix_duplicate_field(
                     field=f,
-                    is_left=(how == 'left'),
-                    left_prefix=left_prefix,
-                    right_prefix=right_prefix
+                    is_left=True
                 )
             if renamed_f in values:
                 raise RuntimeError(f'Duplicate entry for field {renamed_f}')
-            if f in primary_schema.values:
-                values[renamed_f] = primary_schema.values[f]
-            elif f in primary_schema.keys and f not in keys:
-                values[renamed_f] = primary_schema.keys[f]
+            if f in self.left.schema().values:
+                values[renamed_f] = self.left.schema().values[f]
+            elif f in self.left.schema().keys and f not in keys:
+                values[renamed_f] = self.left.schema().keys[f]
+            elif f == self.left.schema().timestamp:
+                values[renamed_f] = datetime
 
-        # Process fields from secondary schema
-        for f in secondary_schema.fields():
+        for f in self.right.schema().fields():
             if f == ts or f in keys:
                 continue
             renamed_f = f
-            if f in same_fields:  # Only prefix if field exists in both schemas
-                renamed_f = Join._prefix_duplicate_field(
+            if f in self._same_fields:
+                renamed_f = self._prefix_duplicate_field(
                     field=f,
-                    is_left=(how != 'left'),
-                    left_prefix=left_prefix,
-                    right_prefix=right_prefix
+                    is_left=False
                 )
             if renamed_f in values:
                 raise RuntimeError(f'Duplicate entry for field {renamed_f}')
-            if f in secondary_schema.values:
-                values[renamed_f] = secondary_schema.values[f]
-            elif f in secondary_schema.keys and f not in keys:
-                values[renamed_f] = secondary_schema.keys[f]
-            elif f == secondary_schema.timestamp:
-                values[f] = datetime
+            if f in self.right.schema().values:
+                values[renamed_f] = self.right.schema().values[f]
+            elif f in self.right.schema().keys and f not in keys:
+                values[renamed_f] = self.right.schema().keys[f]
+            elif f == self.right.schema().timestamp:
+                values[renamed_f] = datetime
 
         return Schema(
             keys=keys,
             values=values,
             timestamp=ts
         )
-
-    def schema(self) -> Schema:
-        return Join._joined_schema(self.left.schema(), self.right.schema(), self.how, self.on, self.left_on, self.right_on, self.left_prefix, self.right_prefix)
-
+    
     def _stream_left_key_func(self, element: Any) -> Any:
         assert isinstance(element, Dict)
         keys = self.left_on if self.on is None else self.on
@@ -526,50 +547,41 @@ class Join(OperatorNode):
         out_event = {}
         schema = self.schema()
 
-        # Copy key fields from primary side
         for k in schema.keys:
             if self.how == 'left':
                 out_event[k] = left[k]
             else:
                 out_event[k] = right[k]
 
-        # Copy timestamp from primary side
         ts_field = schema.timestamp
         if self.how == 'left':
             out_event[ts_field] = left[ts_field]
         else:
             out_event[ts_field] = right[ts_field]
 
-        # Process fields from left side
         for f in left:
             if f == ts_field or f in schema.keys:
                 continue
             new_f = f
             if f in self._same_fields:
-                new_f = Join._prefix_duplicate_field(
+                new_f = self._prefix_duplicate_field(
                     field=f,
-                    is_left=True,
-                    left_prefix=self.left_prefix,
-                    right_prefix=self.right_prefix
+                    is_left=True
                 )
-            if new_f in schema.values:  # Only copy if field is in target schema
-                out_event[new_f] = left[f]
+            out_event[new_f] = left[f]
 
-        # Process fields from right side
         for f in right:
             if f == ts_field or f in schema.keys:
                 continue
             new_f = f
             if f in self._same_fields:
-                new_f = Join._prefix_duplicate_field(
+                new_f = self._prefix_duplicate_field(
                     field=f,
-                    is_left=False,
-                    left_prefix=self.left_prefix,
-                    right_prefix=self.right_prefix
+                    is_left=False
                 )
-            if new_f in schema.values:  # Only copy if field is in target schema
-                out_event[new_f] = right[f]
+            out_event[new_f] = right[f]
 
+        # TODO validate inputs and output matches schema
         return out_event
 
 
@@ -584,12 +596,28 @@ class Rename(OperatorNode):
 
     def schema(self) -> Schema:
         parent_schema = self.parents[0].schema()
+        parent_fields = set(parent_schema.fields())
+        
+        # Validate that all columns to rename exist in parent schema
+        for old_name in self.column_mapping.keys():
+            if old_name not in parent_fields:
+                raise ValueError(
+                    f"Cannot rename non-existent column '{old_name}'. "
+                    f"Available columns: {sorted(parent_fields)}"
+                )
+            
+        # TODO can we handle name swap?
+        # Validate that new names do not exist in parent schema
+        for new_name in self.column_mapping.values():
+            if new_name in parent_fields:
+                raise ValueError(
+                    f"Cannot rename '{old_name}': new name '{new_name}' exists in {sorted(parent_fields)}"
+                )
+        
         keys = {}
         values = {}
         ts = parent_schema.timestamp
         new_ts = self.column_mapping.get(ts, ts)
-
-        print("new_ts", new_ts)
 
         # Handle key fields
         for old_name, type_ in parent_schema.keys.items():

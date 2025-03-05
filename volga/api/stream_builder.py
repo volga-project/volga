@@ -49,30 +49,50 @@ def build_stream_graph(
 
     # Initialize streams
     initialized_entities: Dict[str, Entity] = {}
-    initialized_nodes: Set[OperatorNodeBase] = set()
     
-    # Process all features to ensure the entire graph is built
-    for feature_name in feature_lookup.keys():
-        initialize_stream(
+    # Track all initialized nodes across all features
+    all_initialized_nodes: Set[OperatorNodeBase] = set()
+    
+    # Process features in topological order to ensure dependencies are initialized first
+    processed_features = set()
+    
+    def process_feature(feature_name: str):
+        if feature_name in processed_features:
+            return
+            
+        # Process dependencies first
+        for dep_name in dependency_graph[feature_name]:
+            process_feature(dep_name)
+            
+        # Initialize this feature
+        print(f"DEBUG: Initializing feature {feature_name}")
+        entity = initialize_stream(
             feature_name=feature_name,
             initialized=initialized_entities,
             dependency_graph=dependency_graph,
             source_features=source_features,
             ctx=ctx,
             feature_lookup=feature_lookup,
-            initialized_nodes=initialized_nodes
+            all_initialized_nodes=all_initialized_nodes
         )
+        
+        initialized_entities[feature_name] = entity
+        processed_features.add(feature_name)
+    
+    # Process all features
+    for feature_name in feature_names:
+        process_feature(feature_name)
 
     # Create dictionary mapping feature names to StreamSink objects
     sink_dict: Dict[str, StreamSink] = {}
-    for feature_name, entity in initialized_entities.items():
-        if feature_name in feature_names:
-            if sink_functions is None:
-                sink_function = print
-            else:
-                sink_function = sink_functions[feature_name]
-            sink = entity.stream.sink(sink_function)
-            sink_dict[feature_name] = sink
+    for feature_name in feature_names:
+        entity = initialized_entities[feature_name]
+        if sink_functions is None:
+            sink_function = print
+        else:
+            sink_function = sink_functions[feature_name]
+        sink = entity.stream.sink(sink_function)
+        sink_dict[feature_name] = sink
     
     return sink_dict
 
@@ -130,7 +150,7 @@ def initialize_stream(
     source_features: Set[str],
     ctx: StreamingContext,
     feature_lookup: Dict[str, PipelineFeature],
-    initialized_nodes: Set[OperatorNodeBase]
+    all_initialized_nodes: Set[OperatorNodeBase]
 ) -> Entity:
     """
     Recursively initialize streams from source features up.
@@ -145,7 +165,15 @@ def initialize_stream(
         
     # Initialize dependencies first, dfs style
     dep_entities = []
-    for dep_name in dependency_graph[feature_name]:
+    
+    # Get dependencies in the order they're defined in the pipeline
+    ordered_deps = [dep_arg.get_name() for dep_arg in feature.dep_args]
+    
+    # Assert that ordered_deps contains the same values as dependency_graph[feature_name]
+    assert set(ordered_deps) == dependency_graph[feature_name], \
+        f"Ordered dependencies {ordered_deps} don't match dependency graph {dependency_graph[feature_name]} for feature {feature_name}"
+    
+    for dep_name in ordered_deps:
         dep_entity = initialize_stream(
             feature_name=dep_name,
             initialized=initialized,
@@ -153,18 +181,21 @@ def initialize_stream(
             source_features=source_features,
             ctx=ctx,
             feature_lookup=feature_lookup,
-            initialized_nodes=initialized_nodes
+            all_initialized_nodes=all_initialized_nodes
         )
         dep_entities.append(dep_entity)
     
     # Initialize the entity and its stream
     is_source = feature_name in source_features
+    if is_source and len(dep_entities) > 0:
+        raise ValueError(f"Source feature {feature_name} should not have dependencies, but has: {dep_entities}")
+    
     entity = initialize_entity_stream(
         feature=feature,
         ctx=ctx,
         is_source=is_source,
         dep_entities=dep_entities,
-        initialized_nodes=initialized_nodes
+        all_initialized_nodes=all_initialized_nodes,
     )
     
     # Store the entity
@@ -177,7 +208,7 @@ def initialize_entity_stream(
     ctx: StreamingContext,
     is_source: bool,
     dep_entities: List[Entity],
-    initialized_nodes: Set[OperatorNodeBase]
+    all_initialized_nodes: Set[OperatorNodeBase]
 ) -> Entity:
     """
     Create and initialize an entity and its stream based on the feature type.
@@ -187,7 +218,7 @@ def initialize_entity_stream(
         ctx: The streaming context
         is_source: Whether this is a source feature
         dep_entities: List of dependency entities for non-source features
-        initialized_nodes: Set of already initialized nodes
+        all_initialized_nodes: Set of all initialized nodes across all features
         
     Returns:
         The initialized entity
@@ -200,7 +231,11 @@ def initialize_entity_stream(
             entity_type=feature.output_type
         )
         # Initialize stream and return as entity
-        init_operator_chain(source_operator, initialized_nodes, feature.name)
+        init_operator_chain(
+            source_operator, 
+            all_initialized_nodes, 
+            feature.name
+        )
         return source_operator.as_entity(feature.output_type)
         
     else:
@@ -210,29 +245,32 @@ def initialize_entity_stream(
             
         result_node: OperatorNodeBase = feature.func(*dep_entities)
         # Initialize all operator nodes in the chain bottom-up
-        init_operator_chain(result_node, initialized_nodes, feature.name)
+        init_operator_chain(
+            result_node, 
+            all_initialized_nodes, 
+            feature.name
+        )
         # Cast to entity type
         return result_node.as_entity(feature.output_type)
 
 
 def init_operator_chain(
     node: OperatorNodeBase, 
-    initialized_nodes: Set[OperatorNodeBase],
+    all_initialized_nodes: Set[OperatorNodeBase],
     feature_name: str
 ) -> None:
     """
     Recursively initialize all operator nodes in the chain, bottom-up.
-    Uses shared initialized_nodes set to ensure each node is initialized only once.
-    Sets stream names for debugging using feature name and operator type.
+    Ensures each node is initialized exactly once across all features.
     
     Args:
         node: The operator node to initialize
-        initialized_nodes: Set of already initialized nodes
+        all_initialized_nodes: Set of all initialized nodes across all features
         feature_name: Name of the feature this operator chain belongs to
     """
     def init_node(node: OperatorNodeBase) -> None:
         # Skip if already initialized
-        if node in initialized_nodes:
+        if node in all_initialized_nodes:
             return
             
         # First initialize all parent nodes
@@ -242,9 +280,10 @@ def init_operator_chain(
         # Then initialize this node
         node.init_stream()
         
-        # Set stream name using feature name and operator type
+        # Set the stream name
         node.set_stream_name(feature_name)
         
-        initialized_nodes.add(node)
+        # Mark as initialized
+        all_initialized_nodes.add(node)
 
     init_node(node)

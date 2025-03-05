@@ -138,13 +138,13 @@ class TestSchema(unittest.TestCase):
             user_id: str = field(key=True)
             registered_at: datetime = field(timestamp=True)
             name: str
-            type: str
+            type: str = field(key=True)
 
         @entity
         class Order:
             buyer_id: str = field(key=True)
-            order_id: str = field(key=True)
-            type: str
+            order_id: str 
+            type: str = field(key=True)
             purchased_at: datetime = field(timestamp=True)
             product_price: float
 
@@ -840,7 +840,7 @@ class TestSchema(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-    # t = TestSchema()
+    t = TestSchema()
     # t.test_stream_key_functions()
     # t.test_stream_join_function()
     # t.test_group_by_aggregate_schema()

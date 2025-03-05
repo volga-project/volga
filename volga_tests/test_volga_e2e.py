@@ -86,11 +86,12 @@ def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
         right_on=['user_id'],
         how='left'
     )
-    return per_user.group_by(keys=['user_id']).aggregate([
+    return per_user.group_by(keys=['buyer_id']).aggregate([
         Avg(on='product_price', window='7d', into='avg_spent_7d'),
         Count(window='1h', into='num_purchases_1h'),
     ]).rename(columns={
-        'registered_at': 'timestamp'
+        'purchased_at': 'timestamp',
+        'buyer_id': 'user_id'
     })
 
 @on_demand(dependencies=['user_spent_pipeline'])
@@ -189,7 +190,7 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
             }
             
             # Monitor results for 15 seconds
-            end_time = time.time() + 15
+            end_time = time.time() + 3
             while time.time() < end_time:
                 # Sleep briefly to avoid tight loop
                 await asyncio.sleep(0.1)
