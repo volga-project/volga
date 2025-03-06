@@ -1,3 +1,4 @@
+import unittest
 from volga.streaming.api.collector.collector import DummyCollector
 from volga.streaming.api.context.runtime_context import RuntimeContext
 from volga.streaming.api.function.function import SimpleMapFunction
@@ -59,7 +60,8 @@ class TestChaining:
 
 
 if __name__ == '__main__':
-    t = TestChaining()
-    t.test()
+    unittest.main()
+    # t = TestChaining()
+    # t.test()
 
 

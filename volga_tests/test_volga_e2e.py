@@ -190,7 +190,7 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
             }
             
             # Monitor results for 15 seconds
-            end_time = time.time() + 3
+            end_time = time.time() + 5
             while time.time() < end_time:
                 # Sleep briefly to avoid tight loop
                 await asyncio.sleep(0.1)

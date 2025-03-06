@@ -542,7 +542,7 @@ class Join(OperatorNode):
 
         out_event = {}
         schema = self.schema()
-
+        
         for k in schema.keys:
             if self.how == 'left':
                 out_event[k] = left[k]

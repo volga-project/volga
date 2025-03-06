@@ -840,7 +840,7 @@ class TestSchema(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
-    t = TestSchema()
+    # t = TestSchema()
     # t.test_stream_key_functions()
     # t.test_stream_join_function()
     # t.test_group_by_aggregate_schema()

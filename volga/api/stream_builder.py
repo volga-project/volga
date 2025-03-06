@@ -33,7 +33,7 @@ def build_stream_graph(
     feature_lookup = FeatureRepository.get_dependent_features(feature_names)
     
     # Build dependency graph
-    dependency_graph: Dict[str, Set[str]] = {}
+    dependency_graph: Dict[str, List[str]] = {}
     source_features: Set[str] = set()
     visited: Set[str] = set()
     
@@ -65,7 +65,6 @@ def build_stream_graph(
             process_feature(dep_name)
             
         # Initialize this feature
-        print(f"DEBUG: Initializing feature {feature_name}")
         entity = initialize_stream(
             feature_name=feature_name,
             initialized=initialized_entities,
@@ -101,7 +100,7 @@ def build_dependency_graph(
     feature_name: str,
     visited: Set[str],
     path: List[str],
-    dependency_graph: Dict[str, Set[str]],
+    dependency_graph: Dict[str, List[str]],
     source_features: Set[str],
     feature_lookup: Dict[str, PipelineFeature]
 ) -> None:
@@ -124,12 +123,13 @@ def build_dependency_graph(
     
     if feature.is_source:
         source_features.add(feature_name)
-        dependency_graph[feature_name] = set()
+        dependency_graph[feature_name] = []
     else:
-        dependencies = set()
+        dependencies = []
         for dep_arg in feature.dep_args:
             dep_name = dep_arg.get_name()
-            dependencies.add(dep_name)
+            if dep_name not in dependencies:
+                dependencies.append(dep_name)
             build_dependency_graph(
                 dep_name, 
                 visited, 
@@ -146,7 +146,7 @@ def build_dependency_graph(
 def initialize_stream(
     feature_name: str,
     initialized: Dict[str, Entity],
-    dependency_graph: Dict[str, Set[str]],
+    dependency_graph: Dict[str, List[str]],
     source_features: Set[str],
     ctx: StreamingContext,
     feature_lookup: Dict[str, PipelineFeature],
@@ -170,7 +170,7 @@ def initialize_stream(
     ordered_deps = [dep_arg.get_name() for dep_arg in feature.dep_args]
     
     # Assert that ordered_deps contains the same values as dependency_graph[feature_name]
-    assert set(ordered_deps) == dependency_graph[feature_name], \
+    assert set(ordered_deps) == set(dependency_graph[feature_name]), \
         f"Ordered dependencies {ordered_deps} don't match dependency graph {dependency_graph[feature_name]} for feature {feature_name}"
     
     for dep_name in ordered_deps:

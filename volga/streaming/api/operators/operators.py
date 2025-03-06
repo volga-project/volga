@@ -347,7 +347,7 @@ class JoinOperator(StreamOperator, TwoInputOperator):
         self.left_records_dict: Dict[Any, List[Record]] = {}
         self.right_records_dict: Dict[Any, List[Record]] = {}
 
-    def process_element(self, left: KeyRecord, right: KeyRecord):
+    def process_element(self, left: Optional[KeyRecord], right: Optional[KeyRecord]):
         if left is not None:
             key = left.key
         else:

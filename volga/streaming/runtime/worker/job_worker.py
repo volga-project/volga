@@ -128,10 +128,12 @@ class JobWorker(ICollectStats):
                 worker_config=self.worker_config
             )
         else:
-            input_op_ids = set()
+            input_op_ids = []
             for input_edge in self.execution_vertex.input_edges:
-                input_op_ids.add(input_edge.source_execution_vertex.job_vertex.vertex_id)
-            input_op_ids = list(input_op_ids)
+                input_op_id = input_edge.source_execution_vertex.job_vertex.vertex_id
+                if input_op_id in input_op_ids:
+                    raise ValueError(f'Duplicate id for two-input vertex: {input_op_id}')
+                input_op_ids.append(input_op_id)
             if len(input_op_ids) != 2:
                 raise RuntimeError(f'Two input vertex should have exactly 2 edges, {len(input_op_ids)} given')
             left_stream_name = str(input_op_ids[0])
