@@ -1,6 +1,6 @@
 from pprint import pprint
 from volga.on_demand.testing_utils import TEST_ENTITY, TestEntity, MockDataConnector
-from volga.on_demand.config import OnDemandConfig, OnDemandDataConnectorConfig  
+from volga.on_demand.config import DEFAULT_ON_DEMAND_CLIENT_URL, DEFAULT_ON_DEMAND_SERVER_PORT, OnDemandConfig, OnDemandDataConnectorConfig  
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.models import OnDemandRequest, OnDemandResponse
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
@@ -50,12 +50,10 @@ class TestOnDemandServing(unittest.TestCase):
 
     def test_serving(self):
         # Create config
-        SERVER_PORT = 1122
-        CLIENT_URL = f'http://127.0.0.1:{SERVER_PORT}'
 
         config = OnDemandConfig(
             num_servers_per_node=2,
-            server_port=1122,
+            server_port=DEFAULT_ON_DEMAND_SERVER_PORT,
             data_connector=OnDemandDataConnectorConfig(
                 connector_class=MockDataConnector,
                 connector_args={}
@@ -89,7 +87,7 @@ class TestOnDemandServing(unittest.TestCase):
             time.sleep(1)
 
             # Create client
-            client = OnDemandClient(CLIENT_URL)
+            client = OnDemandClient(DEFAULT_ON_DEMAND_CLIENT_URL)
             try:
                 # Test single request
                 response: OnDemandResponse = self.loop.run_until_complete(client.request(request))

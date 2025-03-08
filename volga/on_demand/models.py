@@ -100,16 +100,17 @@ class OnDemandRequest(BaseModel):
         # Validate all required keys are present
         for feature_name in required_features:
             feature = features[feature_name]
-            if isinstance(feature, PipelineFeature):
-                has_ondemand_dependent = any(
-                    isinstance(features[f], OnDemandFeature) and 
-                    any(dep.get_name() == feature_name for dep in features[f].dep_args)
-                    for f in required_features if isinstance(features[f], OnDemandFeature)
-                )
-                if not has_ondemand_dependent and feature_name not in self.feature_keys:
-                    raise ValueError(f"Missing keys for pipeline feature {feature_name}")
+            # if isinstance(feature, PipelineFeature):
+            # TODO validate at least on dependent on-demand has keys
+            #     has_ondemand_dependent = any(
+            #         isinstance(features[f], OnDemandFeature) and 
+            #         any(dep.get_name() == feature_name for dep in features[f].dep_args)
+            #         for f in required_features if isinstance(features[f], OnDemandFeature)
+            #     )
+            #     if not has_ondemand_dependent and feature_name not in self.feature_keys:
+            #         raise ValueError(f"Missing keys for pipeline feature {feature_name}")
             
-            elif isinstance(feature, OnDemandFeature):
+            if isinstance(feature, OnDemandFeature):
                 has_pipeline_dep = any(
                     dep.get_name() in features and 
                     isinstance(features[dep.get_name()], PipelineFeature)
@@ -176,5 +177,5 @@ class OnDemandRequest(BaseModel):
                     raise ValueError(f"UDF args provided for feature {feature_name} that takes no arguments")
 
 class OnDemandResponse(BaseModel):
-    results: Dict[str, List[List[Any]]]
+    results: Dict[str, List[Optional[List[Any]]]]
     server_id: int

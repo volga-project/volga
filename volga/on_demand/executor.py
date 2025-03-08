@@ -127,7 +127,7 @@ class OnDemandExecutor:
         output_type: Type,
         query_name: str,
         query_args: Optional[Dict[str, Any]] = None
-    ) -> List[List[Any]]:
+    ) -> List[Optional[List[Any]]]:
         """Fetch a pipeline feature value from storage"""
         try:
             # Use default query if none specified
@@ -151,17 +151,23 @@ class OnDemandExecutor:
             if not isinstance(results, list):
                 raise TypeError(f"Query result must be a list, got {type(results)}")
             
+            # cast to output_type
+            casted_results = []
             for sublist in results:
+                if sublist is None:
+                    casted_results.append(None)
+                    continue
+
                 if not isinstance(sublist, list):
                     raise TypeError(f"Query result must be a list of lists, got list of {type(sublist)}")
+                casted_sublist = []
                 for item in sublist:
-                    if not isinstance(item, output_type):
-                        raise TypeError(
-                            f"Items in query result must be instances of {output_type.__name__}, "
-                            f"got {type(item).__name__}"
-                        )
+                    casted_item = output_type(**item)
+                    # if not isinstance(item, output_type):
+                    casted_sublist.append(casted_item)
+                casted_results.append(casted_sublist)
             
-            return results
+            return casted_results
             
         except Exception as e:
             raise ValueError(
@@ -172,9 +178,9 @@ class OnDemandExecutor:
         self,
         feature_name: str,
         request: OnDemandRequest,
-        computed_values: Dict[str, List[List[Any]]],
+        computed_values: Dict[str, List[Optional[List[Any]]]],
         key_idx: int
-    ) -> List[Any]:
+    ) -> Optional[List[Any]]:
         """Execute a single feature"""
         feature = self._ondemand_features[feature_name]
 
@@ -193,16 +199,26 @@ class OnDemandExecutor:
             else:
                 dep_values = computed_values[dep_name][key_idx]
 
+            if dep_values is None:
+                args.append(None)
+                continue
+
             # If type hint is List, pass the list directly
             if getattr(arg_type, "__origin__", None) is list:
                 args.append(dep_values)
             # Otherwise, take first element for non-list arguments
             else:
-                args.append(dep_values[0])
+                if len(dep_values) == 0:
+                    args.append(None)
+                else:
+                    args.append(dep_values[0])
+
+        if None in args:
+            return None
              
         result = feature.execute(
             args,
-            request.udf_args.get(feature_name)
+            request.udf_args.get(feature_name) if request.udf_args else None
         )
         
         if not isinstance(result, list):
@@ -268,7 +284,7 @@ class OnDemandExecutor:
         visited[feature_name] = key_counts.pop()
         return visited[feature_name]
 
-    async def execute(self, request: OnDemandRequest) -> Dict[str, List[List[Any]]]:
+    async def execute(self, request: OnDemandRequest) -> Dict[str, List[Optional[List[Any]]]]:
         assert self._features is not None
         request.validate_request(
             features=self._features,
@@ -276,7 +292,7 @@ class OnDemandExecutor:
         )
 
         # Store computed values in local variable
-        computed_values: Dict[str, List[List[Any]]] = {}
+        computed_values: Dict[str, List[Optional[List[Any]]]] = {}
 
         # Get execution order
         execution_order = self._get_execution_order(request.target_features)

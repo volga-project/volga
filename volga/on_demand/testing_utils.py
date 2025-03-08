@@ -40,19 +40,19 @@ class MockDataConnector(OnDemandDataConnector):
         self.base_time = MockDataConnector.BASE_TIME
         self.test_entities = {
             'test-id': [
-                TestEntity(id='test-id', value=1.0, timestamp=self.base_time - timedelta(minutes=2)),
-                TestEntity(id='test-id', value=1.5, timestamp=self.base_time - timedelta(minutes=1)),
-                TestEntity(id='test-id', value=2.0, timestamp=self.base_time),
+                TestEntity(id='test-id', value=1.0, timestamp=self.base_time - timedelta(minutes=2)).__dict__ ,
+                TestEntity(id='test-id', value=1.5, timestamp=self.base_time - timedelta(minutes=1)).__dict__,
+                TestEntity(id='test-id', value=2.0, timestamp=self.base_time).__dict__,
             ],
             'test-id-1': [
-                TestEntity(id='test-id-1', value=2.0, timestamp=self.base_time - timedelta(minutes=2)),
-                TestEntity(id='test-id-1', value=2.5, timestamp=self.base_time - timedelta(minutes=1)),
-                TestEntity(id='test-id-1', value=3.0, timestamp=self.base_time),
+                TestEntity(id='test-id-1', value=2.0, timestamp=self.base_time - timedelta(minutes=2)).__dict__,
+                TestEntity(id='test-id-1', value=2.5, timestamp=self.base_time - timedelta(minutes=1)).__dict__,
+                TestEntity(id='test-id-1', value=3.0, timestamp=self.base_time).__dict__,
             ],
             'test-id-2': [
-                TestEntity(id='test-id-2', value=3.0, timestamp=self.base_time - timedelta(minutes=2)),
-                TestEntity(id='test-id-2', value=3.5, timestamp=self.base_time - timedelta(minutes=1)),
-                TestEntity(id='test-id-2', value=4.0, timestamp=self.base_time),
+                TestEntity(id='test-id-2', value=3.0, timestamp=self.base_time - timedelta(minutes=2)).__dict__,
+                TestEntity(id='test-id-2', value=3.5, timestamp=self.base_time - timedelta(minutes=1)).__dict__,
+                TestEntity(id='test-id-2', value=4.0, timestamp=self.base_time).__dict__,
             ],
         }
         
@@ -94,7 +94,7 @@ class MockDataConnector(OnDemandDataConnector):
             # Filter entities within the time range
             key_results = [
                 entity for entity in key_entities
-                if start_time <= entity.timestamp <= end_time
+                if start_time <= entity['timestamp'] <= end_time
             ]
             results.append(key_results)
         return results

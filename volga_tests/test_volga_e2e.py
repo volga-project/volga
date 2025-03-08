@@ -1,3 +1,4 @@
+from pprint import pprint
 import time
 import unittest
 import datetime
@@ -20,26 +21,8 @@ from volga.on_demand.storage.in_memory import InMemoryActorOnDemandDataConnector
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.models import OnDemandRequest
-from volga.on_demand.config import DEFAULT_ON_DEMAND_CONFIG
-
-# Mock data
-num_users = 2
-user_items = [{
-    'user_id': str(i),
-    'registered_at': datetime.datetime.now(),
-    'name': f'username_{i}'
-} for i in range(num_users)]
-
-num_orders = 10
-purchase_time = datetime.datetime.now()
-DELAY_S = 60*29
-order_items = [{
-    'buyer_id': str(i % num_users),
-    'product_id': f'prod_{i}',
-    'product_type': 'ON_SALE' if i % 2 == 0 else 'NORMAL',
-    'purchased_at': purchase_time + datetime.timedelta(seconds=i*DELAY_S),
-    'product_price': 100.0
-} for i in range(num_orders)]
+from volga.on_demand.config import DEFAULT_ON_DEMAND_CLIENT_URL, DEFAULT_ON_DEMAND_CONFIG
+from volga.storage.common.in_memory_actor import delete_in_memory_cache_actor, get_or_create_in_memory_cache_actor
 
 @entity
 class User:
@@ -69,13 +52,45 @@ class UserStats:
     total_spent: float
     purchase_count: int
 
+# Mock data
+num_users = 100
+users = [
+    User(
+        user_id=str(i), 
+        registered_at=datetime.datetime.now(), 
+        name=f'username_{i}'
+    ) for i in range(num_users)
+]
+
+num_orders = 1000
+purchase_time_base = datetime.datetime.now()
+purchase_delay_s = 1 # this corresponds to purchased_at timestamp showed on order item
+
+# TODO this assumes we have no batching enabled for data writer (batch_size=1, see network_config.py)
+purchase_event_delays_s = 0.01 # this is how often we actually push event. In real case they would match, for testing they are different
+
+client_loop_sleep_s = purchase_event_delays_s/2
+
+assert num_users <= num_orders, 'num_users must be less than or equal to num_orders'
+orders = [
+    Order(
+        buyer_id=str(i % num_users), 
+        product_id=f'prod_{i}', 
+        product_type='ON_SALE' if i <= num_orders * 0.8 else 'NORMAL', 
+        purchased_at=purchase_time_base + datetime.timedelta(seconds=i*purchase_delay_s), 
+        product_price=100.0
+    ) for i in range(num_orders)
+]
+
+run_time_s = num_orders * purchase_event_delays_s
+
 @source(User)
 def user_source() -> Connector:
-    return MysqlSource.mock_with_items(user_items)
+    return MysqlSource.mock_with_items([user.__dict__ for user in users])
 
 @source(Order)
 def order_source() -> Connector:
-    return KafkaSource.mock_with_delayed_items(order_items, delay_s=1)
+    return KafkaSource.mock_with_delayed_items([order.__dict__ for order in orders], delay_s=purchase_event_delays_s)
 
 @pipeline(dependencies=['user_source', 'order_source'], output=OnSaleUserSpentInfo)
 def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
@@ -109,7 +124,7 @@ class OnDemandClientThread(threading.Thread):
         self.user_ids = user_ids
         self.results_queues = results_queues
         self.stop_event = threading.Event()
-        self.client = OnDemandClient(DEFAULT_ON_DEMAND_CONFIG)
+        self.client = OnDemandClient(DEFAULT_ON_DEMAND_CLIENT_URL)
         self.last_timestamps: Dict[str, str] = {}  # Track last timestamp per user
         
     def run(self):
@@ -119,7 +134,7 @@ class OnDemandClientThread(threading.Thread):
                     request = OnDemandRequest(
                         target_features=['user_stats'],
                         feature_keys={
-                            'user_spent_pipeline': [
+                            'user_stats': [
                                 {'user_id': user_id} 
                                 for user_id in self.user_ids
                             ]
@@ -127,21 +142,30 @@ class OnDemandClientThread(threading.Thread):
                     )
                     
                     response = await self.client.request(request)
-                    stats_list = response.feature_values['user_stats']
+
+                    stats_list = response.results['user_stats']
                     
                     # stats_list order corresponds to user_ids order
-                    for user_id, user_stats in zip(self.user_ids, stats_list):
+                    for user_id, user_stats_raw in zip(self.user_ids, stats_list):
+                        if user_stats_raw is None:
+                            continue
+
+                        # cast to UserStats
+                        user_stats = UserStats(**user_stats_raw[0])
+
                         # Check if timestamp has changed before putting in queue
-                        current_timestamp = user_stats[0]['timestamp']
+                        current_timestamp = user_stats.timestamp
                         if current_timestamp != self.last_timestamps.get(user_id):
                             self.last_timestamps[user_id] = current_timestamp
                             self.results_queues[user_id].put(user_stats)
+                            pprint(f'New feature: {user_stats.__dict__}')
                             
                 except Exception as e:
+                    print(f'Error: {e}')
                     for user_id in self.user_ids:
                         self.results_queues[user_id].put(e)
                         
-                await asyncio.sleep(1)
+                await asyncio.sleep(client_loop_sleep_s)
 
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -154,6 +178,7 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
     @classmethod
     def setUpClass(cls):
         ray.init(ignore_reinit_error=True)
+        delete_in_memory_cache_actor()
 
     @classmethod
     def tearDownClass(cls):
@@ -167,7 +192,11 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
 
         # Start OnDemand coordinator
         coordinator = create_on_demand_coordinator(DEFAULT_ON_DEMAND_CONFIG)
-        ray.get(coordinator.start.remote())
+        await coordinator.start.remote()
+
+        features = FeatureRepository.get_all_features()
+
+        await coordinator.register_features.remote(features)
 
         # Create results queues and start client thread
         user_ids = [str(i) for i in range(num_users)]
@@ -189,30 +218,22 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
                 user_id: [] for user_id in user_ids
             }
             
-            # Monitor results for 15 seconds
-            end_time = time.time() + 5
+            # Monitor results
+            end_time = time.time() + run_time_s + 1
             while time.time() < end_time:
                 # Sleep briefly to avoid tight loop
-                await asyncio.sleep(0.1)
+                await asyncio.sleep(client_loop_sleep_s)
                 
                 # Check all queues without blocking
                 for user_id in user_ids:
                     try:
-                        result = results_queues[user_id].get_nowait()
+                        stats = results_queues[user_id].get_nowait()
                     except queue.Empty:
                         continue
                         
-                    if isinstance(result, Exception):
-                        # print(f"Error for user {user_id}: {result}")
+                    if isinstance(stats, Exception):
+                        print(f"Error for user {user_id}: {stats}")
                         continue
-                        
-                    # Convert raw stats to UserStats object
-                    stats = UserStats(
-                        user_id=result[0]['keys']['user_id'],
-                        timestamp=datetime.datetime.fromisoformat(result[0]['timestamp']),
-                        total_spent=result[0]['values']['total_spent'],
-                        purchase_count=result[0]['values']['purchase_count']
-                    )
                     
                     # Validate user_id matches
                     self.assertEqual(stats.user_id, user_id)
@@ -242,12 +263,23 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
                 history = user_stats_history[user_id]
                 self.assertTrue(len(history) > 0, f"No stats received for user {user_id}")
                 final_stats = history[-1]
-                expected_count = sum(1 for order in order_items 
-                                   if order['buyer_id'] == user_id 
-                                   and order['product_type'] == 'ON_SALE')
+                expected_count = sum(1 for order in orders 
+                                   if order.buyer_id == user_id 
+                                   and order.product_type == 'ON_SALE')
+                expected_total_spent = sum(order.product_price for order in orders 
+                                   if order.buyer_id == user_id 
+                                   and order.product_type == 'ON_SALE')
+                
+                # print(f'Expected count: {expected_count}, final_stats.purchase_count: {final_stats.purchase_count}')
+                # print(f'Expected total spent: {expected_total_spent}, final_stats.total_spent: {final_stats.total_spent}')
+
                 self.assertTrue(
-                    final_stats.purchase_count <= expected_count,
-                    f"Purchase count {final_stats.purchase_count} exceeds expected {expected_count} for user {user_id}"
+                    final_stats.purchase_count == expected_count,
+                    f"Purchase count {final_stats.purchase_count} does not match expected {expected_count} for user {user_id}"
+                )
+                self.assertTrue(
+                    final_stats.total_spent == expected_total_spent,
+                    f"Total spent {final_stats.total_spent} does not match expected {expected_total_spent} for user {user_id}"
                 )
 
         finally:

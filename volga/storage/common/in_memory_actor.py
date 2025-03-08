@@ -1,4 +1,5 @@
 import bisect
+from pprint import pprint
 from typing import Dict, Any, Optional, List, Tuple
 
 import ray
@@ -48,7 +49,7 @@ class InMemoryCacheActor:
         keys: List[Dict[str, Any]],
         start: Optional[Decimal], end: Optional[Decimal],
         with_timestamps: bool = False
-    ) -> List[List]:
+    ) -> List[Optional[List[Any]]]:
         res = []
         for key in keys:
             res.append(self.get_range_per_key(feature_name=feature_name, key=key, start=start, end=end, with_timestamps=with_timestamps))
@@ -58,7 +59,7 @@ class InMemoryCacheActor:
         self,
         feature_name: str,
         keys: List[Dict[str, Any]],
-    ) -> List[List]:
+    ) -> List[Optional[List[Any]]]:
         res = []
         for key in keys:
             res.append(self.get_latest_per_key(feature_name=feature_name, key=key))
@@ -70,9 +71,11 @@ class InMemoryCacheActor:
         key: Optional[Dict[str, Any]],
         start: Optional[Decimal], end: Optional[Decimal],
         with_timestamps: bool = False
-    ) -> List:
+    ) -> Optional[List[Any]]:
         if feature_name not in self.per_feature_per_key:
-            raise RuntimeError(f'No feature {feature_name}')
+            # raise RuntimeError(f'No feature {feature_name} in {self.per_feature_per_key.keys()}')
+            # return []
+            return None
 
         if key is not None:
             possible_keys = self.key_index_per_feature[feature_name].get(key)
@@ -104,10 +107,13 @@ class InMemoryCacheActor:
         else:
             return list(map(lambda e: e[1], res)) # remove timestamps
 
-    def get_latest_per_key(self, feature_name: str, key: Dict[str, Any]) -> Optional[List]:
+    def get_latest_per_key(self, feature_name: str, key: Dict[str, Any]) -> Optional[List[Any]]:
         vals = self.get_range_per_key(feature_name=feature_name, key=key, start=None, end=None, with_timestamps=True)
-        if len(vals) == 0:
+        if vals is None:
             return None
+
+        if len(vals) == 0:
+            return []
 
         last = len(vals) - 1
         last_ts = vals[last][0]

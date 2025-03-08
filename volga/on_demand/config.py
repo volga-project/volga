@@ -39,9 +39,12 @@ class OnDemandConfig(BaseModel):
         arbitrary_types_allowed = True
 
 
+DEFAULT_ON_DEMAND_SERVER_PORT = 1122
+DEFAULT_ON_DEMAND_CLIENT_URL = f'http://127.0.0.1:{DEFAULT_ON_DEMAND_SERVER_PORT}'
+
 DEFAULT_ON_DEMAND_CONFIG = OnDemandConfig(
     num_servers_per_node=1,
-    server_port=1122,
+    server_port=DEFAULT_ON_DEMAND_SERVER_PORT,
     data_connector=OnDemandDataConnectorConfig(
         connector_class=InMemoryActorOnDemandDataConnector,
         # connector_args={

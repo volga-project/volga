@@ -139,6 +139,8 @@ class Transform(OperatorNode):
         self.stream = self.parents[0].stream.map(map_func=self._stream_map_func)
 
     def _stream_map_func(self, event: Any) -> Any:
+        # TODO cast event from Dict to Entity for udf
+
         # Validate input matches parent schema
         parent_schema = self.parents[0].schema()
         input_fields = set(event.keys())
@@ -215,6 +217,8 @@ class Assign(OperatorNode):
         )
 
     def _stream_map_func(self, event: Any) -> Any:
+        # TODO cast event from Dict to Entity for udf
+
         # Validate input matches parent schema
         parent_schema = self.parents[0].schema()
         input_fields = set(event.keys())
@@ -247,6 +251,7 @@ class Filter(OperatorNode):
         self.stream = self.parents[0].stream.filter(filter_func=self._stream_filter_func)
 
     def _stream_filter_func(self, event: Any) -> bool:
+        # TODO cast event from Dict to Entity
         return self.func(event)
 
     def schema(self) -> Schema:
@@ -542,7 +547,7 @@ class Join(OperatorNode):
 
         out_event = {}
         schema = self.schema()
-        
+
         for k in schema.keys:
             if self.how == 'left':
                 out_event[k] = left[k]

@@ -1,4 +1,5 @@
 import asyncio
+from pprint import pprint
 from typing import List
 
 from aiohttp import ClientSession
@@ -27,7 +28,12 @@ class OnDemandClient:
         session = await self._ensure_session()
         url = self.url + request.json()
         async with session.get(url) as response:
-            json_response = await response.json()
+            try:
+                json_response = await response.json()
+            except Exception as e:
+                raw = await response.read()
+                raise Exception(f'Unable to parse json response: {raw}')
+            
             return OnDemandResponse.parse_obj(json_response)
 
     async def request_many(self, requests: List[OnDemandRequest]) -> List[OnDemandResponse]:
