@@ -124,6 +124,24 @@ def pipeline(dependencies: List[str], output: Type) -> Callable:
                 f'but {len(dep_args)} dependencies were specified'
             )
         
+        # Check parameter order: entity parameters first, then other parameters
+        for i, param in enumerate(params):
+            if i < len(dep_args):
+                # This should be an entity parameter
+                if param.annotation != Entity:
+                    raise TypeError(
+                        f'Parameter {param.name} at position {i} in {feature_name} should be an Entity '
+                        f'(it corresponds to dependency {dep_args[i].feature_name})'
+                    )
+            else:
+                # This should be a non-entity parameter
+                if param.annotation == Entity:
+                    raise TypeError(
+                        f'Non-dependency parameter {param.name} at position {i} in {feature_name} '
+                        f'cannot be of type Entity. Entity parameters must come first and '
+                        f'correspond to dependencies.'
+                    )
+        
         # Validate dependencies and their types
         validate_pipeline_dependencies(feature_name, dep_args, params[:len(dep_args)])
         
