@@ -34,7 +34,8 @@ class Client:
         pipeline_data_connector: PipelineDataConnector = InMemoryActorPipelineDataConnector(batch=False),
         scaling_config: Optional[ScalingConfig] = None,
         job_config: Dict = DEFAULT_STREAMING_JOB_CONFIG,
-        _async: bool = False
+        _async: bool = False,
+        params: Optional[Dict[str, Dict[str, Any]]] = None
     ):
         if scaling_config is not None:
             raise ValueError('ScalingConfig is not supported yet')
@@ -43,7 +44,12 @@ class Client:
             feature.name: pipeline_data_connector.get_sink_function(feature.name, feature.output_type._entity_metadata.schema())
             for feature in features
         }
-        build_stream_graph([feature.name for feature in features], ctx, sink_functions)
+        build_stream_graph(
+            [feature.name for feature in features], 
+            ctx, 
+            sink_functions,
+            params=params
+        )
         if _async:
             ctx.submit()
         else:

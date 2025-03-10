@@ -1,6 +1,8 @@
 import inspect
-from typing import List, Callable, Type, Any
+from typing import List, Callable, Type, Any, Dict, Tuple
 from functools import wraps
+from abc import ABC
+from dataclasses import dataclass
 
 from volga.api.entity import Entity, validate_decorated_entity
 from volga.api.feature import Feature, FeatureRepository, validate_dependencies, DepArg
@@ -15,6 +17,36 @@ class PipelineFeature(Feature):
     ):
         super().__init__(func, dep_args, output_type)
         self.is_source = is_source
+        
+        # Infer parameter information from function signature
+        self.param_names, self.param_defaults = self._infer_parameters(func, len(dep_args))
+    
+    def _infer_parameters(self, func: Callable, num_deps: int) -> Tuple[List[str], Dict[str, Any]]:
+        """
+        Infer parameter names and default values from function signature.
+        
+        Args:
+            func: The function to analyze
+            num_deps: Number of parameters that are dependencies
+            
+        Returns:
+            Tuple of (parameter names list, parameter defaults dictionary)
+        """
+        param_names = []
+        param_defaults = {}
+        
+        # Get function signature
+        sig = inspect.signature(func)
+        params = list(sig.parameters.values())
+        
+        # Extract parameters beyond dependencies
+        for i in range(num_deps, len(params)):
+            param = params[i]
+            param_names.append(param.name)
+            if param.default is not inspect.Parameter.empty:
+                param_defaults[param.name] = param.default
+        
+        return param_names, param_defaults
 
 
 def create_and_register_pipeline_feature(
@@ -41,7 +73,6 @@ def create_and_register_pipeline_feature(
 
     # Register in FeatureRepository
     FeatureRepository.register(feature)
-    
     
     return feature
 
@@ -86,15 +117,15 @@ def pipeline(dependencies: List[str], output: Type) -> Callable:
         # Convert dependencies to DepArg
         dep_args = [DepArg(feature_name=dep) for dep in dependencies]
         
-        # Check parameters match dependencies
-        if len(params) != len(dep_args):
+        # Check parameters match dependencies plus any additional parameters
+        if len(params) < len(dep_args):
             raise TypeError(
                 f'Pipeline function {feature_name} has {len(params)} parameters '
                 f'but {len(dep_args)} dependencies were specified'
             )
         
         # Validate dependencies and their types
-        validate_pipeline_dependencies(feature_name, dep_args, params)
+        validate_pipeline_dependencies(feature_name, dep_args, params[:len(dep_args)])
         
         # Create pipeline feature
         create_and_register_pipeline_feature(
@@ -108,7 +139,7 @@ def pipeline(dependencies: List[str], output: Type) -> Callable:
         @wraps(pipeline_func)
         def wrapped_func(*args, **kwargs):
             # Validate input arguments are Entities
-            for arg, param in zip(args, params):
+            for arg, param in zip(args[:len(dep_args)], params[:len(dep_args)]):
                 if not isinstance(arg, Entity):
                     raise TypeError(
                         f'Argument for parameter {param.name} must be an instance of '

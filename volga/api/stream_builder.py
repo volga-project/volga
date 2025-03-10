@@ -16,7 +16,8 @@ from volga.streaming.api.stream.stream_source import StreamSource
 def build_stream_graph(
     feature_names: List[str],
     ctx: StreamingContext,
-    sink_functions: Optional[Dict[str, FunctionOrCallable]] = None
+    sink_functions: Optional[Dict[str, FunctionOrCallable]] = None,
+    params: Optional[Dict[str, Dict[str, Any]]] = None
 ) -> Dict[str, StreamSink]:
     """
     Build a stream graph by traversing the provided features and their dependencies.
@@ -25,10 +26,15 @@ def build_stream_graph(
         feature_names: List of feature names to include in the stream graph
         ctx: StreamingContext to use for creating streams
         sink_functions: Optional dictionary mapping feature names to sink functions
+        params: Optional nested dictionary mapping feature names to parameter dictionaries
         
     Returns:
         Dictionary mapping feature names to their corresponding StreamSink objects
     """
+    # Initialize params if None
+    if params is None:
+        params = {}
+        
     # Get all dependent features at once
     feature_lookup = FeatureRepository.get_dependent_features(feature_names)
     
@@ -72,7 +78,8 @@ def build_stream_graph(
             source_features=source_features,
             ctx=ctx,
             feature_lookup=feature_lookup,
-            all_initialized_nodes=all_initialized_nodes
+            all_initialized_nodes=all_initialized_nodes,
+            params=params
         )
         
         initialized_entities[feature_name] = entity
@@ -135,7 +142,7 @@ def build_dependency_graph(
                 visited, 
                 path, 
                 dependency_graph, 
-                source_features,
+                source_features, 
                 feature_lookup
             )
         dependency_graph[feature_name] = dependencies
@@ -150,7 +157,8 @@ def initialize_stream(
     source_features: Set[str],
     ctx: StreamingContext,
     feature_lookup: Dict[str, PipelineFeature],
-    all_initialized_nodes: Set[OperatorNodeBase]
+    all_initialized_nodes: Set[OperatorNodeBase],
+    params: Dict[str, Dict[str, Any]]
 ) -> Entity:
     """
     Recursively initialize streams from source features up.
@@ -181,7 +189,8 @@ def initialize_stream(
             source_features=source_features,
             ctx=ctx,
             feature_lookup=feature_lookup,
-            all_initialized_nodes=all_initialized_nodes
+            all_initialized_nodes=all_initialized_nodes,
+            params=params
         )
         dep_entities.append(dep_entity)
     
@@ -190,12 +199,32 @@ def initialize_stream(
     if is_source and len(dep_entities) > 0:
         raise ValueError(f"Source feature {feature_name} should not have dependencies, but has: {dep_entities}")
     
+    # Get feature parameters if any
+    feature_params = {}
+    if hasattr(feature, 'param_names') and feature.param_names:
+        # Get feature-specific parameters
+        feature_specific_params = params.get(feature_name, {})
+        
+        # Get global parameters (used as fallback)
+        global_params = params.get('global', {})
+        
+        for param_name in feature.param_names:
+            if param_name in feature_specific_params:
+                feature_params[param_name] = feature_specific_params[param_name]
+            elif param_name in global_params:
+                feature_params[param_name] = global_params[param_name]
+            elif hasattr(feature, 'param_defaults') and param_name in feature.param_defaults:
+                feature_params[param_name] = feature.param_defaults[param_name]
+            else:
+                raise ValueError(f"Parameter '{param_name}' required for feature '{feature_name}' but not provided")
+    
     entity = initialize_entity_stream(
         feature=feature,
         ctx=ctx,
         is_source=is_source,
         dep_entities=dep_entities,
         all_initialized_nodes=all_initialized_nodes,
+        params=feature_params
     )
     
     # Store the entity
@@ -208,7 +237,8 @@ def initialize_entity_stream(
     ctx: StreamingContext,
     is_source: bool,
     dep_entities: List[Entity],
-    all_initialized_nodes: Set[OperatorNodeBase]
+    all_initialized_nodes: Set[OperatorNodeBase],
+    params: Dict[str, Any]
 ) -> Entity:
     """
     Create and initialize an entity and its stream based on the feature type.
@@ -219,14 +249,16 @@ def initialize_entity_stream(
         is_source: Whether this is a source feature
         dep_entities: List of dependency entities for non-source features
         all_initialized_nodes: Set of all initialized nodes across all features
+        params: Dictionary of parameter values for this feature
         
     Returns:
         The initialized entity
     """
     if is_source:
         # Create source operator node
+        source_connector = feature.func(**params) if params else feature.func()
         source_operator = SourceNode(
-            source_connector=feature.func(),
+            source_connector=source_connector,
             ctx=ctx,
             entity_type=feature.output_type
         )
@@ -239,11 +271,16 @@ def initialize_entity_stream(
         return source_operator.as_entity(feature.output_type)
         
     else:
-        # For non-source features, execute pipeline function with dependency entities
+        # For non-source features, execute pipeline function with dependency entities and params
         if dep_entities is None:
             dep_entities = []
             
-        result_node: OperatorNodeBase = feature.func(*dep_entities)
+        # Call the function with dependencies and parameters
+        if params:
+            result_node: OperatorNodeBase = feature.func(*dep_entities, **params)
+        else:
+            result_node: OperatorNodeBase = feature.func(*dep_entities)
+            
         # Initialize all operator nodes in the chain bottom-up
         init_operator_chain(
             result_node, 

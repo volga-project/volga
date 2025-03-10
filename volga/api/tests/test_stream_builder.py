@@ -41,11 +41,32 @@ class JoinedEntity:
     timestamp: datetime.datetime = field(timestamp=True)
 
 
+@entity
+class ParameterizedEntity:
+    id: str = field(key=True)
+    value: float
+    threshold: float
+    timestamp: datetime.datetime = field(timestamp=True)
+
+
 # Define test features
 @source(SourceEntity)
 def source_feature() -> Connector:
     return KafkaSource.mock_with_delayed_items(
         items=[SourceEntity(id='test-id', value=1.0, timestamp=datetime.datetime.now())],
+        delay_s=0
+    )
+
+
+@source(SourceEntity)
+def parameterized_source(base_value: float = 1.0) -> Connector:
+    """Source with configurable base value."""
+    return KafkaSource.mock_with_delayed_items(
+        items=[
+            SourceEntity(id='1', value=base_value, timestamp=datetime.datetime.now()),
+            SourceEntity(id='2', value=base_value * 2, timestamp=datetime.datetime.now()),
+            SourceEntity(id='3', value=base_value * 3, timestamp=datetime.datetime.now()),
+        ],
         delay_s=0
     )
 
@@ -68,6 +89,7 @@ def transform_feature(source: Entity) -> Entity:
 def join_feature(source: Entity, transformed: Entity) -> Entity:
     return source.join(transformed, on=['id'])
 
+
 @pipeline(dependencies=['source_feature'], output=TransformedEntity)
 def filter_map_feature(source: Entity) -> Entity:
     """Filter values > 0.5 then assign and drop."""
@@ -79,10 +101,26 @@ def filter_map_feature(source: Entity) -> Entity:
     )
 
 
+# Feature that changes topology based on parameters
+@pipeline(dependencies=['parameterized_source'], output=ParameterizedEntity)
+def parametrized_topology_feature(source: Entity, use_filter: bool = True, threshold: float = 2.0) -> Entity:
+    """
+    Feature that changes its topology based on parameters:
+    - use_filter=True: Filter records then assign threshold
+    - use_filter=False: Just assign threshold without filtering
+    """
+    if use_filter:
+        # Filter -> Assign topology
+        filtered = source.filter(lambda x: x['value'] > threshold)
+        return filtered.assign('threshold', float, lambda x: threshold)
+    else:
+        # Assign only topology
+        return source.assign('threshold', float, lambda x: threshold)
+
+
 class TestStreamBuilder(unittest.TestCase):
     
     def setUp(self):
-        
         self.ctx = StreamingContext()
         
     def test_build_multi_feature_stream_graph(self):
@@ -269,6 +307,67 @@ class TestStreamBuilder(unittest.TestCase):
             self.assertIsNotNone(target_vertex)
             self.assertIsNotNone(source_vertex)
 
+    def test_parameterized_feature(self):
+        """Test that job topology changes based on parameters."""
+        # Test 1: With filter (default)
+        sinks_dict = build_stream_graph(
+            ['parametrized_topology_feature'],
+            self.ctx
+        )
+        
+        # Build job graph for filter topology
+        job_graph_builder = JobGraphBuilder(stream_sinks=list(sinks_dict.values()))
+        filter_job_graph = job_graph_builder.build()
+        
+        # Verify vertices for filter topology
+        vertices = filter_job_graph.job_vertices
+        source_vertices = [v for v in vertices if v.vertex_type == VertexType.SOURCE]
+        process_vertices = [v for v in vertices if v.vertex_type == VertexType.PROCESS]
+        sink_vertices = [v for v in vertices if v.vertex_type == VertexType.SINK]
+        
+        self.assertEqual(len(source_vertices), 1, "Should have 1 source vertex")
+        self.assertEqual(len(process_vertices), 2, "Filter topology should have 2 process vertices (Filter + Assign)")
+        self.assertEqual(len(sink_vertices), 1, "Should have 1 sink vertex")
+        
+        # Test 2: Without filter
+        sinks_dict = build_stream_graph(
+            ['parametrized_topology_feature'],
+            self.ctx,
+            params={'parametrized_topology_feature': {'use_filter': False}}
+        )
+        
+        # Build job graph for no-filter topology
+        job_graph_builder = JobGraphBuilder(stream_sinks=list(sinks_dict.values()))
+        no_filter_job_graph = job_graph_builder.build()
+        
+        # Verify vertices for no-filter topology
+        vertices = no_filter_job_graph.job_vertices
+        source_vertices = [v for v in vertices if v.vertex_type == VertexType.SOURCE]
+        process_vertices = [v for v in vertices if v.vertex_type == VertexType.PROCESS]
+        sink_vertices = [v for v in vertices if v.vertex_type == VertexType.SINK]
+        
+        self.assertEqual(len(source_vertices), 1, "Should have 1 source vertex")
+        self.assertEqual(len(process_vertices), 1, "No-filter topology should have 1 process vertex (Assign only)")
+        self.assertEqual(len(sink_vertices), 1, "Should have 1 sink vertex")
+        
+        # Test 3: Using global parameters to disable filter
+        sinks_dict = build_stream_graph(
+            ['parametrized_topology_feature'],
+            self.ctx,
+            params={'global': {'use_filter': False}}
+        )
+        
+        # Build job graph
+        job_graph_builder = JobGraphBuilder(stream_sinks=list(sinks_dict.values()))
+        global_param_job_graph = job_graph_builder.build()
+        
+        # Should have the no-filter topology
+        vertices = global_param_job_graph.job_vertices
+        process_vertices = [v for v in vertices if v.vertex_type == VertexType.PROCESS]
+        
+        self.assertEqual(len(process_vertices), 1, "No-filter topology should have 1 process vertex")
+
+
 if __name__ == '__main__':
     unittest.main() 
     # t = TestStreamBuilder()
@@ -277,4 +376,5 @@ if __name__ == '__main__':
     # t.test_transform_job_graph()
     # t.test_build_multi_feature_stream_graph()
     # t.test_filter_map_feature()
+    # t.test_parameterized_feature()
     # t.tearDown()

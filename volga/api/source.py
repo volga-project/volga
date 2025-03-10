@@ -92,11 +92,12 @@ def source(output: Type) -> Callable:
         sig = inspect.signature(source_func)
         params = list(sig.parameters.values())
         
-        # Source functions should have no parameters
-        if len(params) > 0:
+        # Source functions should have no required parameters without defaults
+        required_params = [p for p in params if p.default == inspect.Parameter.empty]
+        if required_params:
             raise TypeError(
-                f'Source function {feature_name} should have no parameters, '
-                f'got {len(params)} parameters'
+                f'Source function {feature_name} should not have required parameters, '
+                f'got {len(required_params)} required parameters'
             )
         
         # Validate return type is a Connector

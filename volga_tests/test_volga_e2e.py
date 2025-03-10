@@ -199,7 +199,7 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
         await coordinator.register_features.remote(features)
 
         # Create results queues and start client thread
-        user_ids = [str(i) for i in range(num_users)]
+        user_ids = [user.user_id for user in users]
         results_queues = {user_id: Queue() for user_id in user_ids}
         client_thread = OnDemandClientThread(user_ids, results_queues)
         client_thread.start()
