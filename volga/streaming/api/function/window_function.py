@@ -5,7 +5,7 @@ from volga.streaming.api.function.aggregate_function import AllAggregateFunction
 from volga.streaming.api.function.function import Function
 from volga.streaming.api.message.message import Record
 
-
+# TODO DEPRECATE
 class WindowFunction(Function):
 
     @abstractmethod
