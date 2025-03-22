@@ -3,11 +3,11 @@ import time
 import threading
 from decimal import Decimal
 
-from volga.streaming.api.operators.window.timer_service import TimerService
+from volga.streaming.api.operators.window.timer.processing_time_timer_service import ProcessingTimeTimerService
 
 class TestTimerService(unittest.TestCase):
     def setUp(self):
-        self.timer_service = TimerService()
+        self.timer_service = ProcessingTimeTimerService()
         self.timer_service.start()
         self.results = []
         self.lock = threading.Lock()

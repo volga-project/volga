@@ -26,13 +26,10 @@ class WindowState:
         self.accumulators: Dict[str, Any] = {}
     
     def add_event(self, key: Any, event_id: str, event: Record) -> EventRef:
-        """Add an event to the state and return a reference."""
-        # Add to events by key
         if key not in self.events_per_key:
             self.events_per_key[key] = {}
         self.events_per_key[key][event_id] = event
         
-        # Initialize event to windows mapping
         if key not in self.event_to_windows:
             self.event_to_windows[key] = {}
         self.event_to_windows[key][event_id] = set()
@@ -61,15 +58,13 @@ class WindowState:
     
     def get_events_for_window(self, key: Any, window_id: str) -> List[Tuple[str, Record, bool]]:
         result = []
-        if key in self.window_to_events and window_id in self.window_to_events[key]:
-            for event_id, is_processed in self.window_to_events[key][window_id]:
-                if event_id in self.events_per_key[key]:
-                    record = self.events_per_key[key][event_id]
-                    result.append((event_id, record, is_processed))
+        for event_id, is_processed in self.window_to_events[key][window_id]:
+            if event_id in self.events_per_key[key]:
+                record = self.events_per_key[key][event_id]
+                result.append((event_id, record, is_processed))
         return result
     
     def remove_event(self, key: Any, event_id: str) -> None:
-        """Remove an event and clean up its references."""
         # Remove from events by key
         if key in self.events_per_key and event_id in self.events_per_key[key]:
             del self.events_per_key[key][event_id]
@@ -95,12 +90,6 @@ class WindowState:
     def remove_window(self, key: Any, window_id: str) -> None:
         if window_id in self.windows_per_key[key]:
             del self.windows_per_key[key][window_id]
-        
-        # TODO this should be a separate function
-        # TODO on window close, we should remove only previous window acum, not current
-        # Remove from accumulators
-        if window_id in self.accumulators:
-            del self.accumulators[window_id]
         
         # Get all events referenced by this window and remove window references
         if key in self.window_to_events and window_id in self.window_to_events[key]:
@@ -128,14 +117,20 @@ class WindowState:
         if window.name not in self.windows_per_key[key]:
             self.windows_per_key[key][window.name] = []
         self.windows_per_key[key][window.name].append(window)
+
+    def get_windows(self, key: Any) -> Dict[str, List[Window]]:
+        return self.windows_per_key.get(key, {})
     
     def get_accumulator(self, window_id: str) -> Any:
-        return self.accumulators[window_id]
+        return self.accumulators.get(window_id, None)
     
     def update_accumulator(self, window_id: str, accumulator: Any) -> None:
         self.accumulators[window_id] = accumulator
 
-    def clear_state(self) -> None:
+    def remove_accumulator(self, window_id: str) -> None:
+        del self.accumulators[window_id]
+
+    def clear(self) -> None:
         self.events_per_key.clear()
         self.windows_per_key.clear()
         self.event_to_windows.clear()

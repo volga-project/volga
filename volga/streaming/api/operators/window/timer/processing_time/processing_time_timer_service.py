@@ -7,7 +7,7 @@ from datetime import timezone
 
 logger = logging.getLogger(__name__)
 
-class TimerService:
+class ProcessingTimeTimerService:
     """
     Service for scheduling timer tasks using APScheduler.
     """

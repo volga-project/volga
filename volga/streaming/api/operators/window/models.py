@@ -44,12 +44,6 @@ OutputWindowFunc = Callable[[AggregationsPerWindow, Record], Record]  # forms ou
 
 
 class WindowEventType(Enum):
-    OPEN = 1
-    TRIGGER = 2
-    CLOSE = 3
-
-
-class WindowEvent(NamedTuple):
-    event_type: WindowEventType
-    timestamp: Decimal
-    window: Window
+    OPEN = 0
+    TRIGGER = 1
+    CLOSE = 2

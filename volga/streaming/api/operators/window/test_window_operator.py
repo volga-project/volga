@@ -262,10 +262,6 @@ class TestWindowOperator(unittest.TestCase):
         actual_results = []
         for record in results:
             result = {'time': record.event_time}
-            
-            # Add stream_name if it exists
-            if hasattr(record, 'stream_name') and record.stream_name:
-                result['stream_name'] = record.stream_name
                 
             # Add window values
             for config in configs:
@@ -279,7 +275,7 @@ class TestWindowOperator(unittest.TestCase):
         # Sort both expected and actual results for comparison
         # Sort by time first, then by stream_name if present
         def sort_key(result):
-            return (result['time'], result.get('stream_name', ''))
+            return result['time']
         
         expected_results_sorted = sorted(expected_results, key=sort_key)
         actual_results_sorted = sorted(actual_results, key=sort_key)
@@ -303,19 +299,19 @@ class TestWindowOperator(unittest.TestCase):
         failed_test_cases = []
         # for test_case_name in self.TEST_CASES:
         for test_case_name in ['single_key_multi_window']:
-            try:
+            # try:
                 self.test_fixed_interval(test_case_name)
-                print(f"✅ Test case '{test_case_name}' passed")
-            except Exception as e:
-                print(f"❌ Test case '{test_case_name}' failed: {str(e)}")
-                failed_test_cases.append((test_case_name, str(e)))
+            #     print(f"✅ Test case '{test_case_name}' passed")
+            # except Exception as e:
+            #     print(f"❌ Test case '{test_case_name}' failed: {str(e)}")
+            #     failed_test_cases.append((test_case_name, str(e)))
                 # raise  # Re-raise the exception to fail the test
 
-        if len(failed_test_cases) > 0:
-            error_message = ""
-            for test_case, error in failed_test_cases:
-                error_message += f"  {test_case}: {error}\n"
-            raise Exception(f"{[f[0] for f in failed_test_cases]} test cases failed: {error_message}")
+        # if len(failed_test_cases) > 0:
+        #     error_message = ""
+        #     for test_case, error in failed_test_cases:
+        #         error_message += f"  {test_case}: {error}\n"
+        #     raise Exception(f"{[f[0] for f in failed_test_cases]} test cases failed: {error_message}")
 
 
 if __name__ == '__main__':
