@@ -43,9 +43,9 @@ class StreamingContext:
         func = CollectionSourceFunction(values)
         return self.source(func)
 
-    def from_periodic_collection(self, values, delay_s) -> StreamSource:
+    def from_periodic_collection(self, values, period_s) -> StreamSource:
         assert values, "values shouldn't be None or empty"
-        func = PeriodicCollectionSourceFunction(values, delay_s)
+        func = PeriodicCollectionSourceFunction(values, period_s)
         return self.source(func)
 
     def read_text_file(self, filename: str) -> StreamSource:

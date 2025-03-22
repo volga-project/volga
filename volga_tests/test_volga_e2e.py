@@ -13,7 +13,7 @@ from volga.api.aggregate import Avg, Count
 from volga.api.entity import Entity, entity, field
 from volga.api.feature import FeatureRepository
 from volga.api.pipeline import pipeline
-from volga.api.source import Connector, source, KafkaSource, MysqlSource
+from volga.api.source import Connector, MockOnlineConnector, source, MockOfflineConnector
 from volga.api.on_demand import on_demand
 from volga.client.client import Client
 from volga.api.storage import InMemoryActorPipelineDataConnector
@@ -86,11 +86,11 @@ run_time_s = num_orders * purchase_event_delays_s
 
 @source(User)
 def user_source() -> Connector:
-    return MysqlSource.mock_with_items([user.__dict__ for user in users])
+    return MockOfflineConnector.with_items([user.__dict__ for user in users])
 
 @source(Order)
 def order_source() -> Connector:
-    return KafkaSource.mock_with_delayed_items([order.__dict__ for order in orders], delay_s=purchase_event_delays_s)
+    return MockOnlineConnector.with_periodic_items([order.__dict__ for order in orders], period_s=purchase_event_delays_s)
 
 @pipeline(dependencies=['user_source', 'order_source'], output=OnSaleUserSpentInfo)
 def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
@@ -283,7 +283,6 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
                 )
 
         finally:
-            # Cleanup
             client_thread.stop()
             client_thread.join()
             await on_demand_connector.close()

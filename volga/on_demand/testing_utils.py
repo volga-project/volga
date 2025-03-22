@@ -7,7 +7,7 @@ from volga.on_demand.config import OnDemandConfig
 from volga.storage.scylla.api import ScyllaPyHotFeatureStorageApi, ScyllaFeatureStorageApiBase
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
 from volga.api.entity import entity, field
-from volga.api.source import source, KafkaSource, Connector
+from volga.api.source import MockOnlineConnector, source, Connector
 
 @entity
 class TestEntity:
@@ -25,9 +25,9 @@ TEST_FEATURE_NAME = 'test_feature'
 
 @source(TestEntity)
 def test_feature() -> Connector:
-    return KafkaSource.mock_with_delayed_items(
+    return MockOnlineConnector.with_periodic_items(
         items=[TEST_ENTITY], # this is ignored when we use setup_sample_scylla_feature_data
-        delay_s=0
+        period_s=0
     )
 
 # Mock data connector for testing

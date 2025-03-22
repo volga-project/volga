@@ -58,16 +58,24 @@ class MockOfflineConnector(Connector):
 
     def to_stream_source(self, ctx: StreamingContext) -> StreamSource:
         return ctx.from_collection(self.items)
+    
+    @staticmethod
+    def with_items(items: List[Any]) -> 'MockOfflineConnector':
+        return MockOfflineConnector(items)
 
 
 class MockOnlineConnector(Connector):
 
-    def __init__(self, items: List[Any], delay_s: int):
+    def __init__(self, items: List[Any], period_s: int):
         self.items = items
-        self.delay_s = delay_s
+        self.period_s = period_s
 
     def to_stream_source(self, ctx: StreamingContext) -> StreamSource:
-        return ctx.from_periodic_collection(self.items, delay_s=self.delay_s)
+        return ctx.from_periodic_collection(self.items, period_s=self.period_s)
+    
+    @staticmethod
+    def with_periodic_items(items: List[Any], period_s: int) -> 'MockOnlineConnector':
+        return MockOnlineConnector(items, period_s=period_s)
 
 
 # produces connections
@@ -164,10 +172,6 @@ class KafkaSource(Source):
             topic=topic
         )
 
-    @staticmethod
-    def mock_with_delayed_items(items: List[Any], delay_s: int) -> MockOnlineConnector:
-        return MockOnlineConnector(items, delay_s)
-
 
 class MysqlSource(Source):
     host: str
@@ -197,7 +201,4 @@ class MysqlSource(Source):
             source=self,
             table=table_name
         )
-
-    @staticmethod
-    def mock_with_items(items: List[Any]) -> MockOfflineConnector:
-        return MockOfflineConnector(items)
+    

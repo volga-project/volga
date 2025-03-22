@@ -4,7 +4,7 @@ from volga.api.entity import entity, field, Entity
 from volga.api.pipeline import pipeline
 from volga.api.on_demand import on_demand
 from volga.api.feature import FeatureRepository, DepArg
-from volga.api.source import KafkaSource, MysqlSource, source, Connector
+from volga.api.source import MockOnlineConnector, MockOfflineConnector, source, Connector
 
 class TestOnDemand(unittest.TestCase):
     def test_on_demand(self):
@@ -33,11 +33,11 @@ class TestOnDemand(unittest.TestCase):
 
         @source(User)
         def user_source() -> Connector:
-            return KafkaSource.mock_with_delayed_items([User(user_id='123', timestamp=datetime.datetime.now(), name='John')], 0)
+            return MockOnlineConnector.with_periodic_items([User(user_id='123', timestamp=datetime.datetime.now(), name='John')], 0)
         
         @source(Order)
         def order_source() -> Connector:
-            return MysqlSource.mock_with_items([Order(user_id='123', product_id='123', product_name='Product', timestamp=datetime.datetime.now())])
+            return MockOfflineConnector.with_items([Order(user_id='123', product_id='123', product_name='Product', timestamp=datetime.datetime.now())])
 
         @pipeline(dependencies=['user_source', 'order_source'], output=UserOrderInfo)
         def user_order_pipeline(users: Entity, orders: Entity):

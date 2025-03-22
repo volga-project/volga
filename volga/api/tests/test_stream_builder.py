@@ -6,7 +6,7 @@ from typing import Dict, List, Any, Callable, Optional
 from volga.api.stream_builder import build_stream_graph
 from volga.api.entity import entity, field, Entity
 from volga.api.feature import FeatureRepository
-from volga.api.source import source, KafkaSource, Connector
+from volga.api.source import MockOnlineConnector, source, Connector
 from volga.api.pipeline import pipeline
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.data_stream import DataStream
@@ -52,22 +52,22 @@ class ParameterizedEntity:
 # Define test features
 @source(SourceEntity)
 def source_feature() -> Connector:
-    return KafkaSource.mock_with_delayed_items(
+    return MockOnlineConnector.with_periodic_items(
         items=[SourceEntity(id='test-id', value=1.0, timestamp=datetime.datetime.now())],
-        delay_s=0
+        period_s=0
     )
 
 
 @source(SourceEntity)
 def parameterized_source(base_value: float = 1.0) -> Connector:
     """Source with configurable base value."""
-    return KafkaSource.mock_with_delayed_items(
+    return MockOnlineConnector.with_periodic_items(
         items=[
             SourceEntity(id='1', value=base_value, timestamp=datetime.datetime.now()),
             SourceEntity(id='2', value=base_value * 2, timestamp=datetime.datetime.now()),
             SourceEntity(id='3', value=base_value * 3, timestamp=datetime.datetime.now()),
         ],
-        delay_s=0
+        period_s=0
     )
 
 

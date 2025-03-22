@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Callable
 
 from volga.api.entity import entity, field
 from volga.api.feature import Feature, FeatureRepository
-from volga.api.source import source, KafkaSource, Connector
+from volga.api.source import source, MockOnlineConnector, Connector
 from volga.api.pipeline import PipelineFeature
 from volga.api.on_demand import on_demand, OnDemandFeature
 from volga.on_demand.executor import OnDemandExecutor
@@ -30,9 +30,9 @@ class DependentEntity:
 
 @source(TestEntity)
 def pipeline_feature() -> Connector:
-    return KafkaSource.mock_with_delayed_items(
+    return MockOnlineConnector.with_periodic_items(
         items=[TEST_ENTITY], # this is not actually called, we just need to return a connector
-        delay_s=0
+        period_s=0
     )
 
 
@@ -264,16 +264,16 @@ class TestOnDemandExecutor(unittest.TestCase):
         # Define features with different dependency patterns
         @source(TestEntity)
         def base_feature1() -> Connector:
-            return KafkaSource.mock_with_delayed_items(
+            return MockOnlineConnector.with_periodic_items(
                 items=[TEST_ENTITY],
-                delay_s=0
+                period_s=0
             )
 
         @source(TestEntity)
         def base_feature2() -> Connector:
-            return KafkaSource.mock_with_delayed_items(
+            return MockOnlineConnector.with_periodic_items(
                 items=[TEST_ENTITY],
-                delay_s=0
+                period_s=0
             )
 
         @on_demand(dependencies=['base_feature1'])

@@ -1,7 +1,7 @@
 import datetime
 import unittest
 from volga.api.entity import entity, field
-from volga.api.source import KafkaSource, MysqlSource, source, Connector
+from volga.api.source import MockOfflineConnector, MockOnlineConnector, source, Connector
 from volga.api.feature import FeatureRepository
 from volga.streaming.api.context.streaming_context import StreamingContext
 from volga.streaming.api.stream.stream_source import StreamSource
@@ -18,11 +18,11 @@ class TestSource(unittest.TestCase):
 
         @source(User)
         def online_source() -> Connector:
-            return KafkaSource.mock_with_delayed_items([User(user_id='123', timestamp=datetime.datetime.now(), name='John')], 0)
+            return MockOnlineConnector.with_periodic_items([User(user_id='123', timestamp=datetime.datetime.now(), name='John')], 0)
         
         @source(User)
         def offline_source() -> Connector:
-            return MysqlSource.mock_with_items([User(user_id='123', timestamp=datetime.datetime.now(), name='John')])
+            return MockOfflineConnector.with_items([User(user_id='123', timestamp=datetime.datetime.now(), name='John')])
 
         source_pipelines = User._entity_metadata.get_pipeline_features()
         assert len(source_pipelines) == 2
@@ -39,12 +39,12 @@ class TestSource(unittest.TestCase):
         assert offline_feature.is_source == True
 
         ctx = StreamingContext()
-        kafka_pipeline = source_pipelines['online_source']
-        kafka_connector = kafka_pipeline.func()
-        assert isinstance(kafka_connector, Connector)
+        online_pipeline = source_pipelines['online_source']
+        online_connector = online_pipeline.func()
+        assert isinstance(online_connector, Connector)
 
-        kc = kafka_connector.to_stream_source(ctx)
-        assert isinstance(kc, StreamSource)
+        oc = online_connector.to_stream_source(ctx)
+        assert isinstance(oc, StreamSource)
 
         mysql_pipeline = source_pipelines['offline_source']
         mysql_connector = mysql_pipeline.func()
