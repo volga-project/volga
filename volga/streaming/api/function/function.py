@@ -126,6 +126,8 @@ class CollectionSourceFunction(SourceFunction):
         self.all_values = all_values
         self.values = None
         self.num_values = None
+        self.num_sent = 0
+
 
     def init(self, parallel, index):
         self.values = collection_chunk_at_index(self.all_values, parallel, index)
@@ -134,10 +136,14 @@ class CollectionSourceFunction(SourceFunction):
     def fetch(self, ctx: SourceContext):
         for v in self.values:
             ctx.collect(v)
+        self.num_sent += len(self.values)
         self.values = []
 
     def num_records(self) -> int:
         return self.num_values
+    
+    def get_num_sent(self) -> Any:
+        return self.num_sent
 
 
 class LocalFileSourceFunction(SourceFunction):

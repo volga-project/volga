@@ -2,6 +2,7 @@ from pprint import pprint
 import time
 import unittest
 import datetime
+import pandas as pd
 import ray
 import asyncio
 import queue
@@ -21,7 +22,7 @@ from volga.on_demand.storage.in_memory import InMemoryActorOnDemandDataConnector
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.models import OnDemandRequest
-from volga.on_demand.config import DEFAULT_ON_DEMAND_CLIENT_URL, DEFAULT_ON_DEMAND_CONFIG
+from volga.on_demand.config import DEFAULT_ON_DEMAND_CLIENT_URL, DEFAULT_ON_DEMAND_CONFIG, DEFAULT_ON_DEMAND_SERVER_PORT, OnDemandConfig, OnDemandDataConnectorConfig
 from volga.storage.common.in_memory_actor import delete_in_memory_cache_actor, get_or_create_in_memory_cache_actor
 
 @entity
@@ -89,8 +90,11 @@ def user_source() -> Connector:
     return MockOfflineConnector.with_items([user.__dict__ for user in users])
 
 @source(Order)
-def order_source() -> Connector:
-    return MockOnlineConnector.with_periodic_items([order.__dict__ for order in orders], period_s=purchase_event_delays_s)
+def order_source(online: bool = True) -> Connector:
+    if online:
+        return MockOnlineConnector.with_periodic_items([order.__dict__ for order in orders], period_s=purchase_event_delays_s)
+    else:
+        return MockOfflineConnector.with_items([order.__dict__ for order in orders])
 
 @pipeline(dependencies=['user_source', 'order_source'], output=OnSaleUserSpentInfo)
 def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
@@ -109,7 +113,7 @@ def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
         'buyer_id': 'user_id'
     })
 
-@on_demand(dependencies=['user_spent_pipeline'])
+@on_demand(dependencies=[('user_spent_pipeline', 'latest')])
 def user_stats(spent_info: OnSaleUserSpentInfo) -> UserStats:
     return UserStats(
         user_id=spent_info.user_id,
@@ -184,14 +188,16 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
     def tearDownClass(cls):
         ray.shutdown()
 
-    async def test_e2e(self):
-        # Initialize connectors
-        pipeline_connector = InMemoryActorPipelineDataConnector(batch=False)
-        on_demand_connector = InMemoryActorOnDemandDataConnector()
-        await on_demand_connector.init()
-
+    async def test_e2e_online(self):
         # Start OnDemand coordinator
-        coordinator = create_on_demand_coordinator(DEFAULT_ON_DEMAND_CONFIG)
+        coordinator = create_on_demand_coordinator(OnDemandConfig(
+            num_servers_per_node=1,
+            server_port=DEFAULT_ON_DEMAND_SERVER_PORT,
+            data_connector=OnDemandDataConnectorConfig(
+                connector_class=InMemoryActorOnDemandDataConnector,
+                connector_args={}
+            )
+        ))
         await coordinator.start.remote()
 
         features = FeatureRepository.get_all_features()
@@ -205,13 +211,16 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
         client_thread.start()
 
         try:
-            # Initialize client and start materialization
+            # Initialize client and start online materialization
             client = Client()
+            print('Starting online materialization')
             client.materialize(
                 features=[FeatureRepository.get_feature('user_spent_pipeline')],
-                pipeline_data_connector=pipeline_connector,
-                _async=True
+                pipeline_data_connector=InMemoryActorPipelineDataConnector(batch=False),
+                _async=True,
+                params={'global': {'online': True}}
             )
+            
 
             # Track stats over time
             user_stats_history: Dict[str, List[UserStats]] = {
@@ -281,11 +290,30 @@ class TestVolgaE2E(unittest.IsolatedAsyncioTestCase):
                     final_stats.total_spent == expected_total_spent,
                     f"Total spent {final_stats.total_spent} does not match expected {expected_total_spent} for user {user_id}"
                 )
-
         finally:
             client_thread.stop()
             client_thread.join()
-            await on_demand_connector.close()
+
+    
+    async def test_e2e_offline(self):
+        print('Starting offline materialization')
+        cache_actor = get_or_create_in_memory_cache_actor()
+        client = Client()
+        client.materialize(
+            features=[FeatureRepository.get_feature('user_spent_pipeline')],
+            pipeline_data_connector=InMemoryActorPipelineDataConnector(batch=False),
+            _async=False,
+            params={'global': {'online': False}}
+        )   
+    
+        keys = [{'user_id': user.user_id} for user in users]
+        offline_res_raw = ray.get(cache_actor.get_range.remote(feature_name='user_spent_pipeline', keys=keys, start=None, end=None, with_timestamps=False))
+        offline_res_flattened = [item for items in offline_res_raw for item in items]
+        offline_res_flattened.sort(key=lambda x: x['timestamp'])
+        offline_df = pd.DataFrame(offline_res_flattened)
+        pprint(offline_df)
+        assert len(offline_df) > 0 # TODO proper assert contents
+        await asyncio.sleep(1) # for print to work
 
 if __name__ == '__main__':
     unittest.main()
