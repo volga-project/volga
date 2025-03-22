@@ -18,8 +18,7 @@ consistent online+offline feature calculation semantics, configurable storage, r
 ![alt text](https://github.com/volga-project/volga/blob/master/.github/volga_arch.png?raw=true)
 
 - *Hybrid push+pull architecture*: **custom Streaming Engine (the *Push part*)** and **On-Demand Compute Layer (the *Pull part*)** to execute environment-agnostic computation DAGs.  
-- General purpose *[Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)* built with **[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)** for orchestration, 
-**[ZeroMQ](https://zeromq.org/)** for messaging, **[Rust](https://www.rust-lang.org/)** and **[PyO3](https://github.com/PyO3/pyo3)** for performance and *Python-native runtime*. Python-native Flink altenative with flexible DataSet API to build custom streaming pipelines.
+- General purpose **[Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)** built with *[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)* for orchestration, *[ZeroMQ](https://zeromq.org/)* for messaging, *[Rust](https://www.rust-lang.org/)* and *[PyO3](https://github.com/PyO3/pyo3)* for performance and *Python-native runtime*. Python-native Flink altenative with flexible DataSet API to build custom streaming pipelines.
 - **[On-Demand Compute Layer](https://volgaai.substack.com/p/volga-open-source-feature-engine-2)** to perform request time/inference time calculations in sync with streaming engine (real-time feature serving, request-time heavy embedding dot products, meta-models query/feature enrichment or simply calculating users age in milliseconds).
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as custom ML infrastructure.
