@@ -5,7 +5,7 @@
 
 # What and why
 
-**[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)** is a **real-time data processing engine for real-time AI/ML**. It aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to execute environment-agnostic event-time/request-time computations (common in real-time AI/ML workloads - feature engineering, RAG, etc.).
+**[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)** is a **data processing engine for real-time AI/ML**. It aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to execute environment-agnostic event-time/request-time computations (common in real-time AI/ML workloads - feature engineering, RAG, etc.).
 
 Volga is designed to be a backbone for your custom real-time AI/ML feature platforms or general data pipelines without relying on heterogenous data processors like Flink/Spark/custom data processing layers (e.g. Chronon) or third party data/feature platforms (e.g. Tecton.ai, Fennel.ai, Chalk.ai).
 
