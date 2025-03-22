@@ -32,9 +32,11 @@ operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate``
 
 # Performance
 
-Volga's Streaming Engine scales to millions of events per second with millisecond-scale latency. See more *[here](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-3)*
+Volga's Streaming Engine scales to millions of events per second with millisecond-scale latency. See more *[here](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-3)*.
 
-![alt text](https://github.com/volga-project/volga/blob/master/.github/cluster_combined.png)
+<p align="center">
+  <img src="https://github.com/volga-project/volga/blob/master/.github/cluster_combined.png" height="600" >
+</p>
 
 
 # Quick start
