@@ -3,6 +3,21 @@
   <img src="https://github.com/volga-project/volga/blob/master/.github/logo_white_bckgr_100.png?raw=true" width="100" height="100">
 </p>
 
+
+
+
+
+
+<div align="center">
+  
+  <a href="">![GitHub License](https://img.shields.io/github/license/volga-project/volga)</a>
+  <a href="">![Static Badge](https://img.shields.io/badge/Volga-visit_blog-blue?link=https%3A%2F%2Fvolgaai.substack.com%2F)</a>
+  <a href="">![GitHub Created At](https://img.shields.io/github/created-at/volga-project/volga)</a>
+  <a href="">![GitHub last commit](https://img.shields.io/github/last-commit/volga-project/volga)</a>
+  
+</div>
+
+
 # What and why
 
 **[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)** is a **general purpose real-time data processing engine tailored for modern AI/ML applications**. It aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to execute environment-agnostic event-time/request-time computations (common in real-time AI/ML workloads - fraud detection, recommender systems, search personalization, dynamic pricing, credit risk, ETA calculation, personalized real-time context-aware RAG, etc.).
