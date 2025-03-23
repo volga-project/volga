@@ -35,7 +35,7 @@ Volga is designed to be a backbone for your custom real-time AI/ML feature platf
 
 Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
 
-Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, uses a ***hybrid push(streaming) + pull(on-demand) architecture*** to run arbitrary request-time/event-time computation DAGs, features convenient Pandas-like **Entity API** to define data entities and online/offline pipelines and on-demand features as well as general purpose **DataStream API** for lower level computations, 
+Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, uses a ***hybrid push(streaming) + pull(on-demand) architecture*** to run arbitrary request-time/event-time computation DAGs, features convenient Pandas-like **Entity API** to define data entities and online/offline feature pipelines and on-demand features as well as general purpose **DataStream API** for more general data processing cases, 
 consistent online+offline feature calculation semantics, configurable storage, real-time data serving and request-time compute. It can run on a laptop or a distributed cluster.
 
 ![alt text](https://github.com/volga-project/volga/blob/master/.github/volga_arch.png?raw=true)
