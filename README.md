@@ -25,7 +25,7 @@ Volga is a general purpose real-time data processing engine which aims to be a f
   * [DataStream API](#datastream-api-example)
 * [🏠 Installation](#-installation)
 * [🙇 Running Locally](#-running-locally)
-* [🏋️‍♀️ Development](#-development)
+* [🧁 Development](#-development)
 
 # 🤯 What and why
 
@@ -53,7 +53,7 @@ consistent online+offline feature calculation semantics, configurable storage, r
   <img src="https://github.com/volga-project/volga/blob/master/.github/cluster_combined_crop_500.png?raw=true" height="250">
 </p>
 
-# 🏃‍♂️ Quick Start
+# 🚅 Quick Start
 
 Volga provides two sets of APIs to build and run data pipelines: high-level **Entity API** to build environment-agnostic computation DAGs (commonly used in real-time AI/ML feature pipelines) and low-level Flink-like **DataStream API** for general streaming/batch pipelines.
 
@@ -354,7 +354,7 @@ python test_streaming_e2e.py
 The development is done with Python 3.10.8 and Ray 2.22.0, in case of any import/installation related errors, please try rolling
 your dev env back to these versions.
 
-# 🗺️ Development
+# 🧁 Development
 
 Volga is in a active development state and requires some key features to be prod-ready (checkpointing and state backend, 
 watermarks, etc.), you can see the backlog here
