@@ -14,7 +14,7 @@
   
 </div>
 
-Volga is a general purpose real-time data processing engine which aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to support modern real-time AI/ML systems.
+Volga is a general purpose real-time data processing engine aiming to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to support modern real-time AI/ML systems.
 
 # 📖 Table of contents
 * [📖 Table of contents](#-table-of-contents)
@@ -46,7 +46,7 @@ consistent online+offline feature calculation semantics, configurable storage, r
 - **[Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)** built with *Ray Actors*, *ZeroMQ*, *Rust* and *PyO3*. Python-native Flink altenative with flexible ***DataStream API*** to build custom streaming pipelines that **[scale to millitons of messages per second with latency in milliseconds](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-3)**.
 - **[On-Demand Compute Layer](https://volgaai.substack.com/p/volga-open-source-feature-engine-2)** to perform arbitrary DAGs of request time/inference time calculations in sync with streaming engine (real-time feature serving, request-time heavy embedding dot products, meta-models query/feature enrichment or simply calculating users age in milliseconds).
 - ***Entity API*** to build standtartized data models with compile-time schema validation, Pandas-like operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc. to build modular AI/ML features with consistent online/offline semantics.
-- Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem, runs on Kubernetes and local machines, no heavy JVM dependencies.
+- Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem, runs on Kubernetes and local machines, provides a homogeneus platform with no heavy dependencies on multiple JVM-based systems.
 - Highly customizable data connectors to read/write data from/to any third party system.
 
 <p align="center">
@@ -356,7 +356,7 @@ your dev env back to these versions.
 
 # 🧁 Development
 
-Volga is in a active development state and requires some key features to be prod-ready (checkpointing and state backend, 
+Volga is in active development and requires few key features to be prod-ready (checkpointing and state backend, 
 watermarks, etc.), you can see the backlog here
 
 **[BACKLOG](https://github.com/orgs/volga-project/projects/2/views/1)**
