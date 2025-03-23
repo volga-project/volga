@@ -3,11 +3,6 @@
   <img src="https://github.com/volga-project/volga/blob/master/.github/logo_white_bckgr_50_pct.png?raw=true" width="150" height="150">
 </p>
 
-
-
-
-
-
 <div align="center">
   
   <a href="">![GitHub License](https://img.shields.io/github/license/volga-project/volga)</a>
@@ -19,13 +14,20 @@
   
 </div>
 
-- [What and why](#what-and-why)
-- [Features](#features)
-- [Quick start](#quick-start)
-  * [Entity API](#entity-api-example)
-  * [DataStream API](#datastream-api-example)
+Volga is a general purpose real-time data processing engine which aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to support modern real-time AI/ML systems.
 
-# What and why
+# 📖 Table of contents
+- [📖 Table of contents](#table-of-contents)
+- [🤯 What and why](#what-and-why)
+- [🌳 Features](#features)
+- [🏃‍♂️ Quick start](#quick-start)
+  - [Entity API](#entity-api-example)
+  - [DataStream API](#datastream-api-example)
+- [🏠 Installation](#installation)
+- [🙇 Running Locally](#running-locally)
+- [🗺️ Development](#development)
+
+# 🤯 What and why
 
 **[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)** is a **general purpose real-time data processing engine tailored for modern AI/ML applications**. It aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to execute environment-agnostic event-time/request-time computations (common in real-time AI/ML workloads - fraud detection, recommender systems, search personalization, dynamic pricing, credit risk, ETA calculation, personalized real-time context-aware RAG, etc.).
 
@@ -36,7 +38,7 @@ Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https
 Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, uses a ***hybrid push(streaming) + pull(on-demand) architecture*** to run arbitrary request-time/event-time computation DAGs, features convenient Pandas-like **Entity API** to define data entities and online/offline pipelines and on-demand features as well as general purpose **DataStream API** for lower level computations, 
 consistent online+offline feature calculation semantics, configurable storage, real-time data serving and request-time compute. It can run on a laptop or a distributed cluster.
 
-# Features
+# 🌳 Features
 ![alt text](https://github.com/volga-project/volga/blob/master/.github/volga_arch.png?raw=true)
 
 - *Hybrid push+pull architecture*: **custom Streaming Engine (the *Push part*)** and **On-Demand Compute Layer (the *Pull part*)** to execute environment-agnostic computation DAGs.  
@@ -51,7 +53,7 @@ consistent online+offline feature calculation semantics, configurable storage, r
 - Declarative Pandas-like API to define consistent online+offline feature pipelines, including 
 operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc.
 
-# Quick start
+# 🏃‍♂️ Quick start
 
 Volga provides two sets of APIs to build and run data pipelines: high-level **Entity API** to build environment-agnostic computation DAGs (commonly used in real-time AI/ML feature pipelines) and low-level Flink-like **DataStream API** for general streaming/batch pipelines.
 
@@ -299,7 +301,7 @@ s.sink(SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0],
 ctx.execute()
 ```
 
-# Installation
+# 🏠 Installation
 
 The project is currently in dev stage and has no published packages/binaries.
 To run locally/dev locally, clone the repository and in your dev env run:
@@ -332,7 +334,7 @@ export PYTHONPATH=/path/to/local/volga/folder:$PYTHONPATH # you need to set it i
 ```
 
 
-# Running locally
+# 🙇 Running locally
 
 Since Volga uses Ray's distributed runtime you'll need a running Ray Cluster to run pipelines. The easiest way is to launch
 a local one-node cluster:
@@ -352,7 +354,7 @@ python test_streaming_e2e.py
 The development is done with Python 3.10.8 and Ray 2.22.0, in case of any import/installation related errors, please try rolling
 your dev env back to these versions.
 
-# Development
+# 🗺️ Development
 
 Volga is in a active development state and requires some key features to be prod-ready (checkpointing and state backend, 
 watermarks, etc.), you can see the backlog here
