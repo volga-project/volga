@@ -17,15 +17,15 @@
 Volga is a general purpose real-time data processing engine which aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to support modern real-time AI/ML systems.
 
 # 📖 Table of contents
-- [📖 Table of contents](#table-of-contents)
-- [🤯 What and why](#what-and-why)
-- [🌳 Features](#features)
-- [🏃‍♂️ Quick start](#quick-start)
-  - [Entity API](#entity-api-example)
-  - [DataStream API](#datastream-api-example)
-- [🏠 Installation](#installation)
-- [🙇 Running Locally](#running-locally)
-- [🗺️ Development](#development)
+* [📖 Table of contents](#-table-of-contents)
+* [🤯 What and why](#-what-and-why)
+* [🌳 Features](#-features)
+* [🚅 Quick Start](#-quick-start)
+  * [Entity API](#entity-api-example)
+  * [DataStream API](#datastream-api-example)
+* [🏠 Installation](#-installation)
+* [🙇 Running Locally](#-running-locally)
+* [🏋️‍♀️ Development](#-development)
 
 # 🤯 What and why
 
@@ -38,22 +38,22 @@ Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https
 Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, uses a ***hybrid push(streaming) + pull(on-demand) architecture*** to run arbitrary request-time/event-time computation DAGs, features convenient Pandas-like **Entity API** to define data entities and online/offline pipelines and on-demand features as well as general purpose **DataStream API** for lower level computations, 
 consistent online+offline feature calculation semantics, configurable storage, real-time data serving and request-time compute. It can run on a laptop or a distributed cluster.
 
-# 🌳 Features
 ![alt text](https://github.com/volga-project/volga/blob/master/.github/volga_arch.png?raw=true)
 
-- *Hybrid push+pull architecture*: **custom Streaming Engine (the *Push part*)** and **On-Demand Compute Layer (the *Pull part*)** to execute environment-agnostic computation DAGs.  
-- General purpose **[Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)** built with *[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)*, *[ZeroMQ](https://zeromq.org/)*, *[Rust](https://www.rust-lang.org/)* and *[PyO3](https://github.com/PyO3/pyo3)*. Python-native Flink altenative with flexible DataSet API to build custom streaming pipelines that **[scale to millitons of messages per second with latency in milliseconds](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-3)**.
-- **[On-Demand Compute Layer](https://volgaai.substack.com/p/volga-open-source-feature-engine-2)** to perform arbitrary DAGs of request time/inference time calculations in sync with streaming engine (real-time feature serving, request-time heavy embedding dot products, meta-models query/feature enrichment or simply calculating users age in milliseconds).
-- Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
-(cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as custom ML infrastructure.
-- Kubernetes ready - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python.
-- Python-native runtime, no heavy JVM setups - easily import all of the Python ecosystem to your pipeline, minimal setup and maintenance efforts.
-- Standalone - runs on a laptop or a distributed cluster.
-- Standartized Entity data models with compile-time schema validation and customizable data connectors.
-- Declarative Pandas-like API to define consistent online+offline feature pipelines, including 
-operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc.
+# 🌳 Features
 
-# 🏃‍♂️ Quick start
+- *Hybrid push+pull architecture*: **custom Streaming Engine (the *Push part*)** and **On-Demand Compute Layer (the *Pull part*)** to execute environment-agnostic computation DAGs.  
+- **[Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)** built with *Ray Actors*, *ZeroMQ*, *Rust* and *PyO3*. Python-native Flink altenative with flexible ***DataStream API*** to build custom streaming pipelines that **[scale to millitons of messages per second with latency in milliseconds](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-3)**.
+- **[On-Demand Compute Layer](https://volgaai.substack.com/p/volga-open-source-feature-engine-2)** to perform arbitrary DAGs of request time/inference time calculations in sync with streaming engine (real-time feature serving, request-time heavy embedding dot products, meta-models query/feature enrichment or simply calculating users age in milliseconds).
+- ***Entity API*** to build standtartized data models with compile-time schema validation, Pandas-like operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc. to build modular AI/ML features with consistent online/offline semantics.
+- Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem, runs on Kubernetes and local machines, no heavy JVM dependencies.
+- Highly customizable data connectors to read/write data from/to any third party system.
+
+<p align="center">
+  <img src="https://github.com/volga-project/volga/blob/master/.github/cluster_combined_crop_500.png?raw=true" height="250">
+</p>
+
+# 🏃‍♂️ Quick Start
 
 Volga provides two sets of APIs to build and run data pipelines: high-level **Entity API** to build environment-agnostic computation DAGs (commonly used in real-time AI/ML feature pipelines) and low-level Flink-like **DataStream API** for general streaming/batch pipelines.
 
@@ -153,7 +153,7 @@ def user_stats(spent_info: OnSaleUserSpentInfo) -> UserStats:
 ```
 
 
-- Run streaming (online) materialization. This is needed for inefrence time feature reads.
+- Run streaming (online) materialization. This is needed for inference time feature reads.
   
 ```python
 from volga.client.client import Client
