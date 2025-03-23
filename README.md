@@ -14,6 +14,8 @@
   <a href="">![Static Badge](https://img.shields.io/badge/Volga-visit_blog-blue?link=https%3A%2F%2Fvolgaai.substack.com%2F)</a>
   <a href="">![GitHub Created At](https://img.shields.io/github/created-at/volga-project/volga)</a>
   <a href="">![GitHub last commit](https://img.shields.io/github/last-commit/volga-project/volga)</a>
+  <a href="">![GitHub top language](https://img.shields.io/github/languages/top/volga-project/volga)</a>
+
   
 </div>
 
