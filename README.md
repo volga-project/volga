@@ -10,7 +10,7 @@
   <a href="">![GitHub Created At](https://img.shields.io/github/created-at/volga-project/volga)</a>
   <a href="">![GitHub last commit](https://img.shields.io/github/last-commit/volga-project/volga)</a>
   <a href="">![GitHub top language](https://img.shields.io/github/languages/top/volga-project/volga)</a>
-
+  <a href="">![GitHub Issues or Pull Requests](https://img.shields.io/github/issues-raw/volga-project/volga)</a>
   
 </div>
 
