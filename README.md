@@ -19,6 +19,11 @@
   
 </div>
 
+- [What and why](#what-and-why)
+- [Features](#features)
+- [Quick start](#quick-start)
+  * [Entity API](#entity-api-example)
+  * [DataStream API](#datastream-api-example)
 
 # What and why
 
