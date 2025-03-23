@@ -5,7 +5,7 @@
 
 # What and why
 
-**[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)** is a **general purpose real-time data processing engine tailored for modern AI/ML applications**. It aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to execute environment-agnostic event-time/request-time computations (common in real-time AI/ML workloads - fraud detection, recommedner systems, search personalization, dynamic pricing, credit risk, ETA calculation, personalized real-time context-aware RAG, etc.).
+**[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)** is a **general purpose real-time data processing engine tailored for modern AI/ML applications**. It aims to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to execute environment-agnostic event-time/request-time computations (common in real-time AI/ML workloads - fraud detection, recommender systems, search personalization, dynamic pricing, credit risk, ETA calculation, personalized real-time context-aware RAG, etc.).
 
 Volga is designed to be a backbone for your custom real-time AI/ML feature platforms or general data pipelines without relying on heterogenous data processors like Flink/Spark/custom data processing layers (e.g. Chronon) or third party data/feature platforms (e.g. Tecton.ai, Fennel.ai, Chalk.ai).
 
@@ -18,8 +18,8 @@ consistent online+offline feature calculation semantics, configurable storage, r
 ![alt text](https://github.com/volga-project/volga/blob/master/.github/volga_arch.png?raw=true)
 
 - *Hybrid push+pull architecture*: **custom Streaming Engine (the *Push part*)** and **On-Demand Compute Layer (the *Pull part*)** to execute environment-agnostic computation DAGs.  
-- General purpose **[Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)** built with *[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)* for orchestration, *[ZeroMQ](https://zeromq.org/)* for messaging, *[Rust](https://www.rust-lang.org/)* and *[PyO3](https://github.com/PyO3/pyo3)* for performance and *Python-native runtime*. Python-native Flink altenative with flexible DataSet API to build custom streaming pipelines.
-- **[On-Demand Compute Layer](https://volgaai.substack.com/p/volga-open-source-feature-engine-2)** to perform request time/inference time calculations in sync with streaming engine (real-time feature serving, request-time heavy embedding dot products, meta-models query/feature enrichment or simply calculating users age in milliseconds).
+- General purpose **[Streaming Engine](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-1)** built with *[Ray Actors](https://docs.ray.io/en/latest/ray-core/actors.html)*, *[ZeroMQ](https://zeromq.org/)*, *[Rust](https://www.rust-lang.org/)* and *[PyO3](https://github.com/PyO3/pyo3)*. Python-native Flink altenative with flexible DataSet API to build custom streaming pipelines that **[scale to millitons of messages per second with latency in milliseconds](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-3)**.
+- **[On-Demand Compute Layer](https://volgaai.substack.com/p/volga-open-source-feature-engine-2)** to perform arbitrary DAGs of request time/inference time calculations in sync with streaming engine (real-time feature serving, request-time heavy embedding dot products, meta-models query/feature enrichment or simply calculating users age in milliseconds).
 - Built on top of **[Ray](https://github.com/ray-project/ray)** - Easily integrates with Ray ecosystem 
 (cluster/job/cloud management, model training/serving, zero-copy data transfers, etc.) as well as custom ML infrastructure.
 - Kubernetes ready - use **[KubeRay](https://github.com/ray-project/kuberay)** to run multitenant scalable jobs or create your own deployment/scheduling logic in pure Python.
@@ -28,15 +28,6 @@ consistent online+offline feature calculation semantics, configurable storage, r
 - Standartized Entity data models with compile-time schema validation and customizable data connectors.
 - Declarative Pandas-like API to define consistent online+offline feature pipelines, including 
 operators like ```transform```, ```filter```, ```join```, ```groupby/aggregate```, ```drop```, etc.
-
-# Performance
-
-Volga's Streaming Engine scales to millions of events per second with millisecond-scale latency. See more *[here](https://volgaai.substack.com/p/volga-streaming-engine-and-networking-3)*.
-
-<p align="center">
-  <img src="https://github.com/volga-project/volga/blob/master/.github/cluster_combined.png" height="600" >
-</p>
-
 
 # Quick start
 
