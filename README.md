@@ -55,17 +55,19 @@ consistent online+offline feature calculation semantics, configurable storage, r
 
 # 🚅 Quick Start
 
-Volga provides two sets of APIs to build and run data pipelines: high-level **Entity API** to build environment-agnostic computation DAGs (commonly used in real-time AI/ML feature pipelines) and low-level Flink-like **DataStream API** for general streaming/batch pipelines.
+Volga provides two sets of APIs to build and run data pipelines: high-level **Entity API** to build environment-agnostic computation DAGs (commonly used in real-time AI/ML feature pipelines) and low-level Flink-like **DataStream API** for general streaming/batch pipelines. 
+In a nutshell, Entity API is built on top of DataStream API (for streaming/batch features calculated on streaming engine) and also includes interface for On-Demand Compute Layer (for features calculated at request time) and consistent data models/abstractions to stitch both systems together.
 
 ## Entity API example
 
-Example workflows to generate real-time features for online inference and offline for training.
+Entity API distinguishes between two types of features: ```@pipeline``` (online/streaming + offline/batch which are executed on streaming engine) and ```@on_demand``` (request time execution on On-Demand Compute Layer), both types operate on ```@entity``` annotated data models.
 
-- Define entities with ```@entity``` decorator
+- Use ```@entity``` to decorate data models. Note ```key``` and ```timestamp```: keys are used to group/join/lookup features, timestamps are used for point-in-time correctness, range queries and lookups by on-demand features. Entities should also have logically matching schemas - this is enforced at compile-time which is extremely useful for data consistency. 
 
 ```python
 from volga.api.entity import Entity, entity, field
 
+# User, Order and OnSaleUserSpentInfo are used by @pipeline features
 @entity
 class User:
     user_id: str = field(key=True)
@@ -87,6 +89,7 @@ class OnSaleUserSpentInfo:
     avg_spent_7d: float
     num_purchases_1h: int
 
+# UserStats is an entity returned to user as a resutl of corresponding @on_demand feature
 @entity
 class UserStats:
     user_id: str = field(key=True)
@@ -95,7 +98,7 @@ class UserStats:
     purchase_count: int
 ```
 
-- Define streaming/batch pipelines (same API) using ```@source``` and ```@pipeline``` decorators
+- Define pipeline features (streaming/batch) using ```@source``` and ```@pipeline``` decorators. We explicilty specify dependant features in ```dependencies``` which our engine automatically maps to function arguments at job graph compile time. Note that pipelines can only depend on other pipelines
 
 ```python
 from volga.api.pipeline import pipeline
@@ -115,7 +118,7 @@ def order_source(online: bool = True) -> Connector: # this will generate appropr
     else:
         return MockOfflineConnector.with_items([order.__dict__ for order in orders])
 
-@pipeline(dependencies=['user_source', 'order_source'], output=OnSaleUserSpentInfo) # pipelines can only depend on other pipelines
+@pipeline(dependencies=['user_source', 'order_source'], output=OnSaleUserSpentInfo)
 def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
     on_sale_purchases = orders.filter(lambda x: x['product_type'] == 'ON_SALE')
     per_user = on_sale_purchases.join(
@@ -133,7 +136,51 @@ def user_spent_pipeline(users: Entity, orders: Entity) -> Entity:
     })
 ```
 
-- Define on-demand transforms using ```@on_demand```decorator
+- Run batch (offline) materialization. This is needed if you want offline features for model training.
+
+```python
+from volga.client.client import Client
+from volga.api.feature import FeatureRepository
+
+client = Client()
+pipeline_connector = InMemoryActorPipelineDataConnector(batch=False) # store data in-memory, can be any other user-defined connector, e.g. Redis/Cassandra/S3
+
+# Note that offline materialization only works for pipeline features at the moment, so offline data points you get will match event time, not request time
+client.materialize(
+    features=[FeatureRepository.get_feature('user_spent_pipeline')],
+    pipeline_data_connector=InMemoryActorPipelineDataConnector(batch=False),
+    _async=False,
+    params={'global': {'online': False}}
+)
+
+# Get results from storage. This will be specific to what db you use
+
+keys = [{'user_id': user.user_id} for user in users]
+
+# we user in-memory actor
+offline_res_raw = ray.get(cache_actor.get_range.remote(feature_name='user_spent_pipeline', keys=keys, start=None, end=None, with_timestamps=False))
+offline_res_flattened = [item for items in offline_res_raw for item in items]
+offline_res_flattened.sort(key=lambda x: x['timestamp'])
+offline_df = pd.DataFrame(offline_res_flattened)
+pprint(offline_df)
+
+...
+
+    user_id                  timestamp  avg_spent_7d  num_purchases_1h
+0         0 2025-03-22 13:54:43.335568         100.0                 1
+1         1 2025-03-22 13:54:44.335568         100.0                 1
+2         2 2025-03-22 13:54:45.335568         100.0                 1
+3         3 2025-03-22 13:54:46.335568         100.0                 1
+4         4 2025-03-22 13:54:47.335568         100.0                 1
+..      ...                        ...           ...               ...
+796      96 2025-03-22 14:07:59.335568         100.0                 8
+797      97 2025-03-22 14:08:00.335568         100.0                 8
+798      98 2025-03-22 14:08:01.335568         100.0                 8
+799      99 2025-03-22 14:08:02.335568         100.0                 8
+800       0 2025-03-22 14:08:03.335568         100.0                 9
+```
+
+- For online inference, define on-demand features using ```@on_demand``` - this willl be executed at request time. Unlike ```@pipeline```, ```@on_demand``` can depend on both pipelines and on-demands. If we just want to serve pipeline results, we can skip this.
 
 ```python
 from volga.api.on_demand import on_demand
@@ -141,7 +188,7 @@ from volga.api.on_demand import on_demand
 @on_demand(dependencies=[(
   'user_spent_pipeline', # name of dependency, matches positional argument in function
   'latest' # name of the query defined in OnDemandDataConnector - how we access dependant data (e.g. latest, last_n, average, etc.).
-)]) # can depend on multiple pipelines and other on-demand transforms to build custom DAG.
+)])
 def user_stats(spent_info: OnSaleUserSpentInfo) -> UserStats:
     # logic to execute at request time
     return UserStats(
@@ -152,15 +199,9 @@ def user_stats(spent_info: OnSaleUserSpentInfo) -> UserStats:
     )
 ```
 
-
-- Run streaming (online) materialization. This is needed for inference time feature reads.
+- To be able to request results in real-time, run streaming (online) materialization.
   
 ```python
-from volga.client.client import Client
-from volga.api.feature import FeatureRepository
-
-client = Client()
-pipeline_connector = InMemoryActorPipelineDataConnector(batch=False) # store data in-memory, can be any other user-defined connector, e.g. Redis/Cassandra/S3
 
 client.materialize(
     features=[FeatureRepository.get_feature('user_spent_pipeline')],
@@ -228,48 +269,9 @@ while True:
 
 ```
 
-- Run batch (offline) materialization. This is needed if you want offline features for model training.
-
-```python
-
-# Note that offline materialization only works for pipeline features at the moment, so offline data points you get will match event time, not request time
-client.materialize(
-    features=[FeatureRepository.get_feature('user_spent_pipeline')],
-    pipeline_data_connector=InMemoryActorPipelineDataConnector(batch=False),
-    _async=False,
-    params={'global': {'online': False}}
-)
-
-# Get results from storage. This will be specific to what db you use
-
-keys = [{'user_id': user.user_id} for user in users]
-
-# we user in-memory actor
-offline_res_raw = ray.get(cache_actor.get_range.remote(feature_name='user_spent_pipeline', keys=keys, start=None, end=None, with_timestamps=False))
-offline_res_flattened = [item for items in offline_res_raw for item in items]
-offline_res_flattened.sort(key=lambda x: x['timestamp'])
-offline_df = pd.DataFrame(offline_res_flattened)
-pprint(offline_df)
-
-...
-
-    user_id                  timestamp  avg_spent_7d  num_purchases_1h
-0         0 2025-03-22 13:54:43.335568         100.0                 1
-1         1 2025-03-22 13:54:44.335568         100.0                 1
-2         2 2025-03-22 13:54:45.335568         100.0                 1
-3         3 2025-03-22 13:54:46.335568         100.0                 1
-4         4 2025-03-22 13:54:47.335568         100.0                 1
-..      ...                        ...           ...               ...
-796      96 2025-03-22 14:07:59.335568         100.0                 8
-797      97 2025-03-22 14:08:00.335568         100.0                 8
-798      98 2025-03-22 14:08:01.335568         100.0                 8
-799      99 2025-03-22 14:08:02.335568         100.0                 8
-800       0 2025-03-22 14:08:03.335568         100.0                 9
-```
-
 ## DataStream API example
 
-General purpose Flink-like API to define consistent streaming/batch pipelines.
+If we want to have more control over streaming engine and build any other custom pipeline, Volga exposes general purpose Flink-like DataStream API to define consistent streaming/batch pipelines.
 
 ```python
 from volga.streaming.api.context.streaming_context import StreamingContext
