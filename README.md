@@ -19,11 +19,12 @@ Volga is a general purpose real-time data processing engine aiming to be a fully
 # 📖 Table of contents
 * [📖 Table of contents](#-table-of-contents)
 * [🤯 What and why](#-what-and-why)
+* [🏠 Architecture](#-architecture)
 * [🌳 Features](#-features)
 * [🚅 Quick Start](#-quick-start)
   * [Entity API](#entity-api-example)
   * [DataStream API](#datastream-api-example)
-* [🏠 Installation](#-installation)
+* [🚢 Installation](#-installation)
 * [🙇 Running Locally](#-running-locally)
 * [🧁 Development](#-development)
 
@@ -34,6 +35,8 @@ Volga is a general purpose real-time data processing engine aiming to be a fully
 Volga is designed to be a backbone for your custom real-time AI/ML feature platforms or general data pipelines without relying on heterogenous data processors like Flink/Spark/custom data processing layers (e.g. Chronon) or third party data/feature platforms (e.g. Tecton.ai, Fennel.ai, Chalk.ai).
 
 Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
+
+# 🏠 Architecture
 
 Volga provides a ***Python-native runtime*** in conjunction with ***Rust*** for performance, runs on ***[Ray](https://github.com/ray-project/ray)***, uses a ***hybrid push(streaming) + pull(on-demand) architecture*** to run arbitrary request-time/event-time computation DAGs, features convenient Pandas-like **Entity API** to define data entities and online/offline feature pipelines and on-demand features as well as general purpose **DataStream API** for more general data processing cases, 
 consistent online+offline feature calculation semantics, configurable storage, real-time data serving and request-time compute. It can run on a laptop or a distributed cluster.
@@ -303,7 +306,7 @@ s.sink(SinkToCacheDictFunction(sink_cache, key_value_extractor=(lambda e: (e[0],
 ctx.execute()
 ```
 
-# 🏠 Installation
+# 🚢 Installation
 
 The project is currently in dev stage and has no published packages/binaries.
 To run locally/dev locally, clone the repository and in your dev env run:
