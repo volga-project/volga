@@ -209,7 +209,7 @@ client.materialize(
     job_config=DEFAULT_STREAMING_JOB_CONFIG,
     scaling_config={},
     _async=True,
-    params={'global': {'online': False}}
+    params={'global': {'online': True}}
 )
 ```
 
