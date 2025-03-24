@@ -180,7 +180,7 @@ pprint(offline_df)
 800       0 2025-03-22 14:08:03.335568         100.0                 9
 ```
 
-- For online inference, define on-demand features using ```@on_demand``` - this willl be executed at request time. Unlike ```@pipeline```, ```@on_demand``` can depend on both pipelines and on-demands. If we just want to serve pipeline results, we can skip this.
+- For online inference, define on-demand features using ```@on_demand``` - this will be executed at request time. Unlike ```@pipeline```, ```@on_demand``` can depend on both pipelines and on-demands. If we just want to serve pipeline results, we can skip this.
 
 ```python
 from volga.api.on_demand import on_demand
