@@ -53,7 +53,7 @@ consistent online+offline feature calculation semantics, configurable storage, r
 - Highly customizable data connectors to read/write data from/to any third party system.
 
 <p align="center">
-  <img src="https://github.com/volga-project/volga/blob/master/.github/cluster_combined_crop_500.png?raw=true" height="250">
+  <img src="https://github.com/volga-project/volga/blob/master/.github/cluster_combined_crop_500.png?raw=true">
 </p>
 
 # 🚅 Quick Start
