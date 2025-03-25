@@ -26,7 +26,7 @@ Volga is a general purpose real-time data processing engine aiming to be a fully
   * [DataStream API](#datastream-api-example)
 * [🚢 Installation](#-installation)
 * [🙇 Running Locally](#-running-locally)
-* [🧁 Development](#-development)
+* [🧁 Roadmap](#-roadmap)
 
 # 🤯 What and why
 
@@ -34,7 +34,7 @@ Volga is a general purpose real-time data processing engine aiming to be a fully
 
 Volga is designed to be a backbone for your custom real-time AI/ML feature platforms or general data pipelines without relying on heterogenous data processors like Flink/Spark/custom data processing layers (e.g. Chronon) or third party data/feature platforms (e.g. Tecton.ai, Fennel.ai, Chalk.ai).
 
-Subscribe to our *[blog](https://volgaai.substack.com)*, join our *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*.
+Check the *[blog](https://volgaai.substack.com)*, join *[Slack](https://join.slack.com/t/volga-project/shared_invite/zt-2vqyiyajo-zqgHZKXahQPuqqS~eD~A5w)*, see *[v1.0 Relaese Roadmap](https://github.com/volga-project/volga/issues/69)*.
 
 # 🏠 Architecture
 
@@ -308,7 +308,7 @@ ctx.execute()
 
 # 🚢 Installation
 
-The project is currently in dev stage and has no published packages/binaries.
+The project is currently in [dev stage](https://github.com/volga-project/volga/issues/69) and has no published packages/binaries yet.
 To run locally/dev locally, clone the repository and in your dev env run:
 ```
 pip install .
@@ -359,11 +359,11 @@ python test_streaming_e2e.py
 The development is done with Python 3.10.8 and Ray 2.22.0, in case of any import/installation related errors, please try rolling
 your dev env back to these versions.
 
-# 🧁 Development
+# 🧁 Roadmap
 
-Volga is in active development and requires few key features to be prod-ready (checkpointing and state backend, 
-watermarks, etc.), you can see the backlog here
+Volga is in active development and requires a number of features to get to prod-ready release (mostly around fault-tolerance: streaming engine checkpointing and state backend, 
+watermarks, on-demand worker health, etc.), you can see the release roadmap here:
 
-**[BACKLOG](https://github.com/orgs/volga-project/projects/2/views/1)**
+**[Volga v1.0 Relase Roadmap](https://github.com/volga-project/volga/issues/69)**
 
 Any feedback is extremely valuable, issues and PRs are always welcome.
