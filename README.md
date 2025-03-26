@@ -14,7 +14,7 @@
   
 </div>
 
-Volga is a general purpose real-time data processing engine aiming to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to support modern real-time AI/ML systems.
+Volga is a general purpose real-time data processing engine aiming to be a fully functional Python-native Flink/Spark Streaming alternative with extended functionality to support modern real-time AI/ML systems without dependency on 3rd party feature platforms.
 
 # 📖 Table of contents
 * [📖 Table of contents](#-table-of-contents)
