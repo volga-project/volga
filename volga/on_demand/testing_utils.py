@@ -31,13 +31,13 @@ def test_feature() -> Connector:
     )
 
 # Mock data connector for testing
-class MockDataConnector(OnDemandDataConnector):
+class MockOnDemandDataConnector(OnDemandDataConnector):
 
     BASE_TIME = datetime(2024, 1, 1, 12, 0)
 
     def __init__(self):
         # Create test data: for each key, store multiple entities with different timestamps
-        self.base_time = MockDataConnector.BASE_TIME
+        self.base_time = MockOnDemandDataConnector.BASE_TIME
         self.test_entities = {
             'test-id': [
                 TestEntity(id='test-id', value=1.0, timestamp=self.base_time - timedelta(minutes=2)).__dict__ ,

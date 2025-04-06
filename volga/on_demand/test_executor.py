@@ -12,7 +12,7 @@ from volga.api.pipeline import PipelineFeature
 from volga.api.on_demand import on_demand, OnDemandFeature
 from volga.on_demand.executor import OnDemandExecutor
 from volga.on_demand.models import OnDemandRequest
-from volga.on_demand.testing_utils import MockDataConnector, TestEntity
+from volga.on_demand.testing_utils import MockOnDemandDataConnector, TestEntity
 
 TEST_ENTITY = TestEntity(
     id='test-id',
@@ -79,7 +79,7 @@ def chained_feature(
 class TestOnDemandExecutor(unittest.TestCase):
 
     def setUp(self):
-        self.executor = OnDemandExecutor(MockDataConnector())
+        self.executor = OnDemandExecutor(MockOnDemandDataConnector())
         all_features = FeatureRepository.get_all_features()
         
         # Filter features to only include those relevant to our test
@@ -309,7 +309,7 @@ class TestOnDemandExecutor(unittest.TestCase):
             )
 
         # Create new executor with test features
-        executor = OnDemandExecutor(MockDataConnector())
+        executor = OnDemandExecutor(MockOnDemandDataConnector())
         executor.register_features(FeatureRepository.get_all_features())
         # Test different execution order scenarios
         

@@ -1,5 +1,5 @@
 from pprint import pprint
-from volga.on_demand.testing_utils import TEST_ENTITY, TestEntity, MockDataConnector
+from volga.on_demand.testing_utils import TEST_ENTITY, TestEntity, MockOnDemandDataConnector
 from volga.on_demand.config import DEFAULT_ON_DEMAND_CLIENT_URL, DEFAULT_ON_DEMAND_SERVER_PORT, OnDemandConfig, OnDemandDataConnectorConfig  
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.models import OnDemandRequest, OnDemandResponse
@@ -55,7 +55,7 @@ class TestOnDemandServing(unittest.TestCase):
             num_servers_per_node=2,
             server_port=DEFAULT_ON_DEMAND_SERVER_PORT,
             data_connector=OnDemandDataConnectorConfig(
-                connector_class=MockDataConnector,
+                connector_class=MockOnDemandDataConnector,
                 connector_args={}
             )
         )
