@@ -31,7 +31,7 @@ def build_stream_graph(
         params = {}
         
     # Get all dependent features at once
-    feature_lookup = FeatureRepository.get_dependent_features(feature_names)
+    feature_lookup = FeatureRepository.get_features_with_deps(feature_names)
     
     # Build dependency graph
     dependency_graph: Dict[str, List[str]] = {}

@@ -88,7 +88,7 @@ class FeatureRepository:
         return cls._features.copy()
     
     @classmethod
-    def get_dependent_features(cls, feature_names: List[str]) -> Dict[str, Feature]:
+    def get_features_with_deps(cls, feature_names: List[str]) -> Dict[str, Feature]:
         """
         Get all features that the given features depend on, including the features themselves.
         
