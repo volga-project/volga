@@ -4,12 +4,14 @@ from typing import Dict, Any, Optional, List, Tuple
 
 import ray
 from decimal import Decimal
+from volga.common.ray.resource_manager import ResourceManager
 from volga.storage.common.key_index import compose_main_key, KeyIndex
 from ray.actor import ActorHandle
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 CACHE_ACTOR_NAME = 'cache_actor'
 
-@ray.remote(num_cpus=0.001)
+@ray.remote(num_cpus=0)
 class InMemoryCacheActor:
     def __init__(self):
         self.per_feature_per_key: Dict[str, Dict[str, List[Tuple[Decimal, Any]]]] = {}
@@ -128,7 +130,16 @@ class InMemoryCacheActor:
         self.key_index_per_feature = {}
 
 def get_or_create_in_memory_cache_actor() -> ActorHandle:
-    cache_actor = InMemoryCacheActor.options(name=CACHE_ACTOR_NAME, get_if_exists=True).remote()
+    options_kwargs = {
+        'name': CACHE_ACTOR_NAME,
+        'get_if_exists': True,
+        'num_cpus': 0,
+        'scheduling_strategy': NodeAffinitySchedulingStrategy(
+            node_id=ResourceManager.fetch_head_node().node_id,
+            soft=False
+        )
+    }
+    cache_actor = InMemoryCacheActor.options(**options_kwargs).remote()
     return cache_actor
 
 def delete_in_memory_cache_actor() -> None:

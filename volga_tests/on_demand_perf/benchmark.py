@@ -1,13 +1,20 @@
+import enum
 import time
 
 import ray
 
+from volga.api.feature import FeatureRepository
 from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.config import OnDemandConfig, OnDemandDataConnectorConfig
+from volga.on_demand.storage.in_memory import InMemoryActorOnDemandDataConnector
 from volga_tests.on_demand_perf.load_test_handler import LoadTestHandler
-from volga.on_demand.testing_utils import setup_sample_scylla_feature_data_ray
-from volga.on_demand.storage.data_connector import ScyllaDataConnector
+from volga.on_demand.testing_utils import MockOnDemandDataConnector, setup_sample_in_memory_actor_feature_data_ray, setup_sample_scylla_feature_data_ray
+from volga.on_demand.storage.scylla import OnDemandScyllaConnector
+
+class MemoryBackend(enum.Enum):
+    IN_MEMORY = 'in_memory'
+    SCYLLA = 'scylla'
 
 STORE_DIR = 'volga_on_demand_perf_benchmarks'
 
@@ -20,24 +27,43 @@ MAX_RPS = 1000
 MAX_USERS = int(MAX_RPS/RPS_PER_USER)
 NUM_STEPS = int(RUN_TIME_S/STEP_TIME_S)
 STEP_USER_COUNT = int(MAX_USERS/NUM_STEPS)
+MEMORY_BACKEND = MemoryBackend.IN_MEMORY
 
-HOST = 'http://k8s-raysyste-volgaond-3637bbe071-237137006.ap-northeast-1.elb.amazonaws.com/'
+HOST = 'k8s-raysyste-volgaond-3637bbe071-1840438529.ap-northeast-1.elb.amazonaws.com'
 SCYLLA_CONTACT_POINTS = ['scylla-client.scylla.svc.cluster.local']
 
 print(f'[run-{run_id}] Started On-Demand benchmark')
+
+# setup data
+if MEMORY_BACKEND == MemoryBackend.IN_MEMORY:
+    ray.get(setup_sample_in_memory_actor_feature_data_ray.remote(10000))
+    data_connector_config = data_connector=OnDemandDataConnectorConfig(
+        connector_class=InMemoryActorOnDemandDataConnector,
+        connector_args={}
+    )
+elif MEMORY_BACKEND == MemoryBackend.SCYLLA:
+    ray.get(setup_sample_scylla_feature_data_ray.remote(SCYLLA_CONTACT_POINTS, 10000))
+    data_connector_config = data_connector=OnDemandDataConnectorConfig(
+        connector_class=OnDemandScyllaConnector,
+        connector_args={'contact_points': SCYLLA_CONTACT_POINTS}
+    )
+else:
+    raise ValueError(f'Invalid memory backend: {MEMORY_BACKEND}')
+
+
 ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
 on_demand_config = OnDemandConfig(
     num_servers_per_node=2,
     server_port=1122,
-    data_connector=OnDemandDataConnectorConfig(
-        connector_class=ScyllaDataConnector,
-        connector_args={'contact_points': SCYLLA_CONTACT_POINTS}
-    ),
+    data_connector=data_connector_config
 )
-ray.get(setup_sample_scylla_feature_data_ray.remote(SCYLLA_CONTACT_POINTS, 10000))
+
 coordinator = create_on_demand_coordinator(on_demand_config)
 ray.get(coordinator.start.remote())
+features = FeatureRepository.get_all_features()
+ray.get(coordinator.register_features.remote(features))
 
+time.sleep(1000)
 stats_store_path = f'{STORE_DIR}/run-{run_id}.json'
 load_test_handler = LoadTestHandler(stats_store_path, coordinator)
 

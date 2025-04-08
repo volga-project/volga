@@ -8,7 +8,7 @@ from volga.on_demand.actors.server import API_ROUTE
 from volga.on_demand.models import OnDemandRequest, OnDemandResponse
 
 
-# Example request: http://base/on_demand_compute/{"args": [{"feature_name": "test_feature", "serve_or_udf": true, "keys": {"key": "key_0"}, "dep_features_keys": null, "udf_args": null}]}
+# Example request: http://base/on_demand_compute/{"target_features": ["simple_feature"], "feature_keys": {"simple_feature": [{"id": "test-id"}, {"id": "test-id-1"}, {"id": "test-id-2"}]}, "query_args": null, "udf_args": {"simple_feature": {"multiplier": 2.0}}}
 class OnDemandClient:
     def __init__(self, url_base: str):
         self.url = f'{url_base}/{API_ROUTE}/'

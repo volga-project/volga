@@ -4,7 +4,6 @@ from volga.on_demand.config import DEFAULT_ON_DEMAND_CLIENT_URL, DEFAULT_ON_DEMA
 from volga.on_demand.client import OnDemandClient
 from volga.on_demand.models import OnDemandRequest, OnDemandResponse
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
-from volga.api.source import source, KafkaSource, Connector
 from volga.api.on_demand import on_demand
 from datetime import datetime
 import asyncio

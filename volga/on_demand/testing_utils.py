@@ -3,11 +3,15 @@ from typing import Dict, Any, List, Callable, Tuple
 from datetime import datetime, timedelta
 
 import ray
+from volga.api.schema import Schema
+from volga.common.time_utils import datetime_str_to_ts
 from volga.on_demand.config import OnDemandConfig
 from volga.storage.scylla.api import ScyllaPyHotFeatureStorageApi, ScyllaFeatureStorageApiBase
 from volga.on_demand.storage.data_connector import OnDemandDataConnector
 from volga.api.entity import entity, field
 from volga.api.source import MockOnlineConnector, source, Connector
+from volga.storage.common.in_memory_actor import get_or_create_in_memory_cache_actor
+
 
 @entity
 class TestEntity:
@@ -107,11 +111,28 @@ def gen_test_entity(i: int) -> TestEntity:
         timestamp=datetime.now()
     )
 
-
-# TODO ideally this should be populated via pipeline job, fix later
 @ray.remote
-def setup_sample_scylla_feature_data_ray(config: OnDemandConfig, num_keys: int = 1000):
-    asyncio.run(setup_sample_scylla_feature_data(config, num_keys))
+def setup_sample_in_memory_actor_feature_data_ray(num_keys: int = 1000):
+    print(f'Started generating sample feature records...')
+    in_memory_actor = get_or_create_in_memory_cache_actor()
+    records = []
+    for i in range(num_keys):
+        test_entity = gen_test_entity(i)
+        test_entity_dict = test_entity.__dict__
+        schema: Schema = test_entity._entity_metadata.schema()
+        key_fields = list(schema.keys.keys())
+        keys_dict = {k: test_entity_dict[k] for k in key_fields}
+        timestamp_field = schema.timestamp
+        ts = datetime_str_to_ts(test_entity_dict[timestamp_field].isoformat())
+        records.append((keys_dict, ts, test_entity_dict))
+    ray.get(in_memory_actor.put_records.remote(TEST_FEATURE_NAME, records))
+    print(f'Finished writing sample feature records - {num_keys} total')
+
+# TODO ideally this should be populated via test pipeline job, fix later
+@ray.remote
+def setup_sample_scylla_feature_data_ray(scylla_contact_points: List[str], num_keys: int = 1000):
+    asyncio.run(setup_sample_scylla_feature_data(scylla_contact_points, num_keys))
+
 
 
 async def setup_sample_scylla_feature_data(scylla_contact_points: List[str], num_keys: int = 1000):

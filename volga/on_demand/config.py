@@ -47,6 +47,7 @@ DEFAULT_ON_DEMAND_CONFIG = OnDemandConfig(
     server_port=DEFAULT_ON_DEMAND_SERVER_PORT,
     data_connector=OnDemandDataConnectorConfig(
         connector_class=InMemoryActorOnDemandDataConnector,
+        connector_args={}
         # connector_args={
         #     'contact_endpoints': ['127.0.0.1']
         # }
