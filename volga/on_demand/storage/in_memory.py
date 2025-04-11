@@ -24,7 +24,8 @@ class InMemoryActorOnDemandDataConnector(OnDemandDataConnector):
         feature_name: str, 
         keys: List[Dict[str, Any]]
     ) -> List[List[Any]]:
-        return await self.cache_actor.get_latest.remote(feature_name, keys)
+        res = await self.cache_actor.get_latest.remote(feature_name, keys)
+        return res
         
     async def fetch_range(
         self,

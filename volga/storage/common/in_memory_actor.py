@@ -19,6 +19,9 @@ class InMemoryCacheActor:
 
     def ready(self) -> bool:
         return True
+    
+    def get_all(self) -> Dict[str, Dict[str, List[Tuple[Decimal, Any]]]]:
+        return self.per_feature_per_key
 
     def put_records(self, feature_name: str, records: List[Tuple[Dict[str, Any], Decimal, Any]]):
         if feature_name in self.per_feature_per_key:

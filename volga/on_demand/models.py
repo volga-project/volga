@@ -28,7 +28,7 @@ class OnDemandRequest(BaseModel):
         # Validate target features exist
         for feature_name in self.target_features:
             if feature_name not in features:
-                raise ValueError(f"Feature {feature_name} not found")
+                raise ValueError(f"Feature {feature_name} not found: {features}, {self.target_features}")
 
         # Build complete set of required features (including dependencies)
         required_features = set()

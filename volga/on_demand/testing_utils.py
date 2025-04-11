@@ -112,10 +112,11 @@ def gen_test_entity(i: int) -> TestEntity:
     )
 
 @ray.remote
-def setup_sample_in_memory_actor_feature_data_ray(num_keys: int = 1000):
+def setup_sample_in_memory_actor_feature_data_ray(num_keys):
     print(f'Started generating sample feature records...')
     in_memory_actor = get_or_create_in_memory_cache_actor()
     records = []
+    batch_size = 100000 # TODO: implement batching
     for i in range(num_keys):
         test_entity = gen_test_entity(i)
         test_entity_dict = test_entity.__dict__
@@ -132,7 +133,6 @@ def setup_sample_in_memory_actor_feature_data_ray(num_keys: int = 1000):
 @ray.remote
 def setup_sample_scylla_feature_data_ray(scylla_contact_points: List[str], num_keys: int = 1000):
     asyncio.run(setup_sample_scylla_feature_data(scylla_contact_points, num_keys))
-
 
 
 async def setup_sample_scylla_feature_data(scylla_contact_points: List[str], num_keys: int = 1000):

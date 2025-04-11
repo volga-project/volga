@@ -1,15 +1,17 @@
+import datetime
 import enum
 import time
 
 import ray
 
 from volga.api.feature import FeatureRepository
+from volga.api.on_demand import on_demand
 from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.config import OnDemandConfig, OnDemandDataConnectorConfig
 from volga.on_demand.storage.in_memory import InMemoryActorOnDemandDataConnector
 from volga_tests.on_demand_perf.load_test_handler import LoadTestHandler
-from volga.on_demand.testing_utils import MockOnDemandDataConnector, setup_sample_in_memory_actor_feature_data_ray, setup_sample_scylla_feature_data_ray
+from volga.on_demand.testing_utils import TEST_FEATURE_NAME, TestEntity, setup_sample_in_memory_actor_feature_data_ray, setup_sample_scylla_feature_data_ray
 from volga.on_demand.storage.scylla import OnDemandScyllaConnector
 
 class MemoryBackend(enum.Enum):
@@ -32,8 +34,21 @@ MEMORY_BACKEND = MemoryBackend.IN_MEMORY
 HOST = 'k8s-raysyste-volgaond-3637bbe071-1840438529.ap-northeast-1.elb.amazonaws.com'
 SCYLLA_CONTACT_POINTS = ['scylla-client.scylla.svc.cluster.local']
 
+@on_demand(dependencies=[TEST_FEATURE_NAME])
+def simple_feature(
+    dep: TestEntity,
+    multiplier: float = 1.0
+) -> TestEntity:
+    """Simple on-demand feature that multiplies the value"""
+    return TestEntity(
+        id=dep.id,
+        value=dep.value * multiplier,
+        timestamp=datetime.datetime.now()
+    )
+
 print(f'[run-{run_id}] Started On-Demand benchmark')
 
+ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
 # setup data
 if MEMORY_BACKEND == MemoryBackend.IN_MEMORY:
     ray.get(setup_sample_in_memory_actor_feature_data_ray.remote(10000))
@@ -50,8 +65,6 @@ elif MEMORY_BACKEND == MemoryBackend.SCYLLA:
 else:
     raise ValueError(f'Invalid memory backend: {MEMORY_BACKEND}')
 
-
-ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
 on_demand_config = OnDemandConfig(
     num_servers_per_node=2,
     server_port=1122,
@@ -63,9 +76,21 @@ ray.get(coordinator.start.remote())
 features = FeatureRepository.get_all_features()
 ray.get(coordinator.register_features.remote(features))
 
-time.sleep(1000)
 stats_store_path = f'{STORE_DIR}/run-{run_id}.json'
-load_test_handler = LoadTestHandler(stats_store_path, coordinator)
+
+run_metadata = {
+    'run_id': run_id,
+    'start_time': datetime.datetime.now(),
+    'run_time_s': RUN_TIME_S,
+    'step_time_s': STEP_TIME_S,
+    'step_user_count': STEP_USER_COUNT,
+    'max_rps': MAX_RPS,
+    'max_users': MAX_USERS,
+    'memory_backend': MEMORY_BACKEND.value,
+    'num_steps': NUM_STEPS,
+    'rps_per_user': RPS_PER_USER
+}
+load_test_handler = LoadTestHandler(stats_store_path, coordinator, run_metadata)
 
 load_test_handler.start_load_test(
     host=HOST,
