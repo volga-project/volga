@@ -49,6 +49,7 @@ def simple_feature(
 print(f'[run-{run_id}] Started On-Demand benchmark')
 
 ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
+# ray.init()
 # setup data
 if MEMORY_BACKEND == MemoryBackend.IN_MEMORY:
     ray.get(setup_sample_in_memory_actor_feature_data_ray.remote(10000))
@@ -75,6 +76,8 @@ coordinator = create_on_demand_coordinator(on_demand_config)
 ray.get(coordinator.start.remote())
 features = FeatureRepository.get_all_features()
 ray.get(coordinator.register_features.remote(features))
+
+# time.sleep(10000)
 
 stats_store_path = f'{STORE_DIR}/run-{run_id}.json'
 
