@@ -116,8 +116,11 @@ def setup_sample_in_memory_actor_feature_data_ray(num_keys):
     print(f'Started generating sample feature records...')
     in_memory_actor = get_or_create_in_memory_cache_actor()
     records = []
-    batch_size = 100000 # TODO: implement batching
-    for i in range(num_keys):
+    batch_size = 100000
+    i = 0
+    batch_id = 1
+    num_batches = num_keys // batch_size
+    while i < num_keys:
         test_entity = gen_test_entity(i)
         test_entity_dict = test_entity.__dict__
         schema: Schema = test_entity._entity_metadata.schema()
@@ -126,7 +129,15 @@ def setup_sample_in_memory_actor_feature_data_ray(num_keys):
         timestamp_field = schema.timestamp
         ts = datetime_str_to_ts(test_entity_dict[timestamp_field].isoformat())
         records.append((keys_dict, ts, test_entity_dict))
-    ray.get(in_memory_actor.put_records.remote(TEST_FEATURE_NAME, records))
+        i += 1
+        if i%batch_size == 0:
+            ray.get(in_memory_actor.put_records.remote(TEST_FEATURE_NAME, records))
+            print(f'Finished writing batch {batch_id} of {num_batches}')
+            records = []
+            batch_id += 1
+
+    if len(records) != 0:
+        ray.get(in_memory_actor.put_records.remote(TEST_FEATURE_NAME, records))
     print(f'Finished writing sample feature records - {num_keys} total')
 
 # TODO ideally this should be populated via test pipeline job, fix later

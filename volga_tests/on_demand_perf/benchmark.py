@@ -32,7 +32,7 @@ STEP_USER_COUNT = int(MAX_USERS/NUM_STEPS)
 MEMORY_BACKEND = MemoryBackend.IN_MEMORY
 
 HOST = 'k8s-raysyste-volgaond-3637bbe071-1840438529.ap-northeast-1.elb.amazonaws.com'
-SCYLLA_CONTACT_POINTS = ['scylla-client.scylla.svc.cluster.local']
+SCYLLA_CONTACT_POINTS = ['scylla-client.scylla-operator.svc.cluster.local']
 
 @on_demand(dependencies=[TEST_FEATURE_NAME])
 def simple_feature(
@@ -52,7 +52,7 @@ ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
 # ray.init()
 # setup data
 if MEMORY_BACKEND == MemoryBackend.IN_MEMORY:
-    ray.get(setup_sample_in_memory_actor_feature_data_ray.remote(10000))
+    ray.get(setup_sample_in_memory_actor_feature_data_ray.remote(1000000))
     data_connector_config = data_connector=OnDemandDataConnectorConfig(
         connector_class=InMemoryActorOnDemandDataConnector,
         connector_args={}

@@ -137,6 +137,7 @@ def get_or_create_in_memory_cache_actor() -> ActorHandle:
         'name': CACHE_ACTOR_NAME,
         'get_if_exists': True,
         'num_cpus': 0,
+        'lifetime': 'detached',
         'scheduling_strategy': NodeAffinitySchedulingStrategy(
             node_id=ResourceManager.fetch_head_node().node_id,
             soft=False
