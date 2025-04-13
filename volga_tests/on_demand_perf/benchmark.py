@@ -20,7 +20,6 @@ class MemoryBackend(enum.Enum):
 
 STORE_DIR = 'volga_on_demand_perf_benchmarks'
 
-run_id = int(time.time())
 
 RUN_TIME_S = 125
 STEP_TIME_S = 30
@@ -45,6 +44,9 @@ def simple_feature(
         value=dep.value * multiplier,
         timestamp=datetime.datetime.now()
     )
+
+
+run_id = f'{int(time.time())}-{MAX_RPS}-{MEMORY_BACKEND.value}'
 
 print(f'[run-{run_id}] Started On-Demand benchmark')
 
