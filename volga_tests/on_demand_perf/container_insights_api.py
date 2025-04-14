@@ -1,7 +1,7 @@
 import statistics
 import time
 import random
-from typing import Dict
+from typing import Dict, List, Optional
 
 import boto3
 import datetime
@@ -9,8 +9,9 @@ import datetime
 
 class ContainerInsightsApi:
 
-    def __init__(self):
+    def __init__(self, node_names: Optional[List[str]] = None):
         self.boto_client = boto3.client('cloudwatch')
+        self.node_names = node_names
 
     def fetch_cpu_metrics(self) -> Dict[str, float]:
         # list metrics
@@ -40,6 +41,10 @@ class ContainerInsightsApi:
                         filtered_pod_names.add(pod_name)
 
         filtered_pod_names = list(filtered_pod_names)
+        if self.node_names is not None:
+            for n in self.node_names:
+                assert n in filtered_pod_names
+            filtered_pod_names = self.node_names
 
         response = self.boto_client.get_metric_data(
             MetricDataQueries=[
@@ -80,8 +85,11 @@ class ContainerInsightsApi:
             pod_name = filtered_pod_names[i]
             metric_result = metric_results[i]
             assert metric_result['Label'] == pod_name
-            last_value = metric_result['Values'][-1]
-            res[pod_name] = last_value
+            values = metric_result['Values']
+            if len(values) == 0:
+                res[pod_name] = 0
+            else:
+                res[pod_name] = values[-1]
 
         cpu_loads = list(res.values())
         avg_cpu = statistics.fmean(cpu_loads)

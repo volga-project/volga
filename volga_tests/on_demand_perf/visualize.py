@@ -46,14 +46,20 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
     with open(data_file, 'r') as f:
         data = json.load(f)
     
-    # Extract data from the format in the sample file
-    # Each item in the list has a 'stats' dict and a 'timestamp'
+    # Extract data based on the new structure with run_metadata and historical_stats
+    if not isinstance(data, dict) or 'run_metadata' not in data or 'historical_stats' not in data:
+        raise ValueError("Invalid data format: Expected a dictionary with 'run_metadata' and 'historical_stats' keys")
+    
+    metadata = data['run_metadata']
+    historical_stats = data['historical_stats']
+    
+    # Extract data from historical_stats
     timestamps = []
     locust_data = []
     container_insights_data = []
     volga_on_demand_data = []
     
-    for item in data:
+    for item in historical_stats:
         if 'stats' in item and 'timestamp' in item:
             timestamp = item['timestamp']
             timestamps.append(timestamp)

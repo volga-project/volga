@@ -16,7 +16,8 @@ class LoadTestHandler:
     def __init__(self, stats_store_path: str, on_demand_coordinator: ActorHandle, run_metadata: Dict):
         self._stats_watcher_thread = Thread(target=self._run_watcher_loop)
         self.running = True
-        self.container_insights_api = ContainerInsightsApi()
+        on_demand_node_names = [n['NodeManagerHostname'] for n in ray.nodes() if 'on_demand_node' in n['Resources']]
+        self.container_insights_api = ContainerInsightsApi(on_demand_node_names)
         self.locust_api = LocustApi()
         self.stats_store_path = stats_store_path
         self.on_demand_coordinator = on_demand_coordinator

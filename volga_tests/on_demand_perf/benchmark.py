@@ -1,5 +1,6 @@
 import datetime
 import enum
+from pprint import pprint
 import time
 
 import ray
@@ -10,6 +11,7 @@ from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.config import OnDemandConfig, OnDemandDataConnectorConfig
 from volga.on_demand.storage.in_memory import InMemoryActorOnDemandDataConnector
+from volga.storage.common.in_memory_actor import get_or_create_in_memory_cache_actor
 from volga_tests.on_demand_perf.load_test_handler import LoadTestHandler
 from volga.on_demand.testing_utils import TEST_FEATURE_NAME, TestEntity, setup_sample_in_memory_actor_feature_data_ray, setup_sample_scylla_feature_data_ray
 from volga.on_demand.storage.scylla import OnDemandScyllaConnector
@@ -24,13 +26,15 @@ STORE_DIR = 'volga_on_demand_perf_benchmarks'
 RUN_TIME_S = 125
 STEP_TIME_S = 30
 RPS_PER_USER = 10
-MAX_RPS = 1000
+MAX_RPS = 2000
 MAX_USERS = int(MAX_RPS/RPS_PER_USER)
 NUM_STEPS = int(RUN_TIME_S/STEP_TIME_S)
 STEP_USER_COUNT = int(MAX_USERS/NUM_STEPS)
 MEMORY_BACKEND = MemoryBackend.IN_MEMORY
+NUM_KEYS = 100000
 
-HOST = 'k8s-raysyste-volgaond-3637bbe071-1840438529.ap-northeast-1.elb.amazonaws.com'
+# DO NOT FORGET http:// prefix and / at the end
+HOST = 'http://k8s-raysyste-volgaond-3637bbe071-1840438529.ap-northeast-1.elb.amazonaws.com/'
 SCYLLA_CONTACT_POINTS = ['scylla-client.scylla-operator.svc.cluster.local']
 
 @on_demand(dependencies=[TEST_FEATURE_NAME])
@@ -46,21 +50,22 @@ def simple_feature(
     )
 
 
-run_id = f'{int(time.time())}-{MAX_RPS}-{MEMORY_BACKEND.value}'
+run_id = f'{int(time.time())}-{MAX_RPS}-{MEMORY_BACKEND.value}-{NUM_KEYS}'
 
 print(f'[run-{run_id}] Started On-Demand benchmark')
 
-ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV)
-# ray.init()
+ray.init(address=RAY_ADDR, runtime_env=REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV, namespace='default')
+# ray.init(namespace='default')
+
 # setup data
 if MEMORY_BACKEND == MemoryBackend.IN_MEMORY:
-    ray.get(setup_sample_in_memory_actor_feature_data_ray.remote(1000000))
+    ray.get(setup_sample_in_memory_actor_feature_data_ray.remote(NUM_KEYS))
     data_connector_config = data_connector=OnDemandDataConnectorConfig(
         connector_class=InMemoryActorOnDemandDataConnector,
         connector_args={}
     )
 elif MEMORY_BACKEND == MemoryBackend.SCYLLA:
-    ray.get(setup_sample_scylla_feature_data_ray.remote(SCYLLA_CONTACT_POINTS, 10000))
+    ray.get(setup_sample_scylla_feature_data_ray.remote(SCYLLA_CONTACT_POINTS, NUM_KEYS))
     data_connector_config = data_connector=OnDemandDataConnectorConfig(
         connector_class=OnDemandScyllaConnector,
         connector_args={'contact_points': SCYLLA_CONTACT_POINTS}
@@ -85,7 +90,7 @@ stats_store_path = f'{STORE_DIR}/run-{run_id}.json'
 
 run_metadata = {
     'run_id': run_id,
-    'start_time': datetime.datetime.now(),
+    'start_time': str(datetime.datetime.now()),
     'run_time_s': RUN_TIME_S,
     'step_time_s': STEP_TIME_S,
     'step_user_count': STEP_USER_COUNT,
@@ -93,7 +98,8 @@ run_metadata = {
     'max_users': MAX_USERS,
     'memory_backend': MEMORY_BACKEND.value,
     'num_steps': NUM_STEPS,
-    'rps_per_user': RPS_PER_USER
+    'rps_per_user': RPS_PER_USER,
+    'num_keys': NUM_KEYS
 }
 load_test_handler = LoadTestHandler(stats_store_path, coordinator, run_metadata)
 
