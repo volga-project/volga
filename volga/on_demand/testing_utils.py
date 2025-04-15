@@ -115,6 +115,7 @@ def gen_test_entity(i: int) -> TestEntity:
 def setup_sample_in_memory_actor_feature_data_ray(num_keys):
     print(f'Started generating sample feature records...')
     in_memory_actor = get_or_create_in_memory_cache_actor()
+    ray.get(in_memory_actor.clear_data.remote())
     records = []
     batch_size = 100000
     i = 0
@@ -148,8 +149,9 @@ def setup_sample_scylla_feature_data_ray(scylla_contact_points: List[str], num_k
 
 async def setup_sample_scylla_feature_data(scylla_contact_points: List[str], num_keys: int = 1000):
     api = ScyllaPyHotFeatureStorageApi(scylla_contact_points)
+    # await api._drop_tables() # cleanup
     await api.init()
-    await api._drop_tables() # cleanup
+    await api._delete_data()
 
     i = 0
     max_tasks = 10000

@@ -1,5 +1,6 @@
 import json
 import os
+from pprint import pprint
 import time
 import ray
 from threading import Thread
@@ -36,13 +37,20 @@ class LoadTestHandler:
     def _run_watcher_loop(self):
         while self.running:
             ts = time.time()
-            container_insights_cpu_metrics = self.container_insights_api.fetch_cpu_metrics()
+            container_insights_cpu_metrics_all = self.container_insights_api.fetch_cpu_metrics()
+            container_insights_cpu_metrics = {
+                'avg': container_insights_cpu_metrics_all['avg'],
+                'stdev': container_insights_cpu_metrics_all['stdev'],
+                'num_pods': len(container_insights_cpu_metrics_all) - 2
+            }
+
             locust_metrics = self.locust_api.get_stats()
             volga_on_demand_metrics = ray.get(self.on_demand_coordinator.get_latest_stats.remote())
 
-            print(f'[ContainerInsights][{ts}] {container_insights_cpu_metrics}')
-            print(f'[Locust Stats][{ts}] {locust_metrics}')
-            print(f'[Volga OnDemand Stats][{ts}] {volga_on_demand_metrics}')
+            pprint(f'[ContainerInsights][{ts}] {container_insights_cpu_metrics}')
+            pprint(f'[Locust Stats][{ts}] {locust_metrics}')
+            pprint(f'[Volga OnDemand Stats][{ts}] {volga_on_demand_metrics}')
+            print('-' * 100)
 
             stats_update = {
                 'container_insights': container_insights_cpu_metrics,

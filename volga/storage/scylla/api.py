@@ -66,6 +66,7 @@ class ScyllaPyHotFeatureStorageApi(ScyllaFeatureStorageApiBase):
         params = {'feature_name': feature_name, 'keys_json': keys_json}
         res = await self.scylla.execute(q, params)
         res = res.all()
+        print(f'res: {res}')
         assert len(res) <= 1
 
         if len(res) == 0:
@@ -76,8 +77,12 @@ class ScyllaPyHotFeatureStorageApi(ScyllaFeatureStorageApiBase):
     async def close(self):
         await self.scylla.shutdown()
 
-    async def _drop_tables(self):
-        q = f'DROP TABLE {HOT_FEATURE_TABLE_NAME}'
+    # async def _drop_tables(self):
+    #     q = f'DROP TABLE {HOT_FEATURE_TABLE_NAME}'
+    #     await self.scylla.execute(q)
+
+    async def _delete_data(self):
+        q = f'TRUNCATE TABLE {HOT_FEATURE_TABLE_NAME}'
         await self.scylla.execute(q)
 
 

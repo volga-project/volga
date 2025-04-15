@@ -86,3 +86,5 @@ class LocustApi:
             'stdev_worker_cpu': stdev_worker_cpu,
             'total_fail_per_sec': total_fail_per_sec
         }
+    
+# scaling locust workers on Kube

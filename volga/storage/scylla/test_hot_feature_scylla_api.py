@@ -12,7 +12,9 @@ values2 = {'val1': '1', 'val2': '2'}
 
 
 async def run():
-    api = AcsyllaHotFeatureStorageApi()
+    # contact_points=['127.1.29.1']
+    contact_points=None
+    api = AcsyllaHotFeatureStorageApi(contact_points=contact_points)
     # api = ScyllaHotFeatureStorageApi()
     await api.init()
     await asyncio.gather(*[

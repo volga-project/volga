@@ -49,7 +49,7 @@ class ContainerInsightsApi:
         response = self.boto_client.get_metric_data(
             MetricDataQueries=[
                 {
-                    'Id': f'request{int(time.time())}{random.randint(0, 1024)}',
+                    'Id': f'request{int(time.time())}{random.randint(0, 1024*1024)}',
                     'MetricStat': {
                         'Metric': {
                             'Namespace': 'ContainerInsights',
