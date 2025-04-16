@@ -1,6 +1,6 @@
 import json
-import time
-from typing import Dict, Optional
+import asyncio
+from typing import Dict, List, Optional, Any
 
 from acsylla import create_cluster, create_statement, Session
 
@@ -17,7 +17,7 @@ class ScyllaFeatureStorageApiBase:
     async def insert(self, feature_name: str, keys: Dict, values: Dict):
         raise NotImplementedError()
 
-    async def fetch_latest(self, feature_name: str, keys: Dict) -> Dict:
+    async def get_latest(self, feature_name: str, keys: List[Dict]) -> List[Optional[Dict]]:
         raise NotImplementedError()
 
     async def close(self):
@@ -60,26 +60,21 @@ class ScyllaPyHotFeatureStorageApi(ScyllaFeatureStorageApiBase):
         params = {'feature_name': feature_name, 'keys_json': keys_json, 'values_json': values_json}
         return await self.scylla.execute(q, params)
 
-    async def fetch_latest(self, feature_name: str, keys: Dict) -> Dict:
-        q = f'SELECT * FROM {HOT_FEATURE_TABLE_NAME} WHERE feature_name=:feature_name AND keys_json=:keys_json'
-        keys_json = json.dumps(keys)
-        params = {'feature_name': feature_name, 'keys_json': keys_json}
-        res = await self.scylla.execute(q, params)
-        res = res.all()
-        print(f'res: {res}')
-        assert len(res) <= 1
-
-        if len(res) == 0:
-            return {}
-        else:
-            return res[0]
+    async def get_latest(self, feature_name: str, keys: List[Dict]) -> List[Optional[Dict]]:
+        async def fetch_single(key_dict):
+            q = f'SELECT * FROM {HOT_FEATURE_TABLE_NAME} WHERE feature_name=:feature_name AND keys_json=:keys_json'
+            keys_json = json.dumps(key_dict)
+            params = {'feature_name': feature_name, 'keys_json': keys_json}
+            res = await self.scylla.execute(q, params)
+            res = res.all()
+            assert len(res) <= 1, f"Multiple records found for feature {feature_name} with keys {key_dict}"
+            return res[0] if len(res) > 0 else None
+        
+        results = await asyncio.gather(*[fetch_single(key_dict) for key_dict in keys])
+        return results
 
     async def close(self):
         await self.scylla.shutdown()
-
-    # async def _drop_tables(self):
-    #     q = f'DROP TABLE {HOT_FEATURE_TABLE_NAME}'
-    #     await self.scylla.execute(q)
 
     async def _delete_data(self):
         q = f'TRUNCATE TABLE {HOT_FEATURE_TABLE_NAME}'
@@ -125,28 +120,27 @@ class AcsyllaHotFeatureStorageApi(ScyllaFeatureStorageApiBase):
             q = f'INSERT INTO {HOT_FEATURE_TABLE_NAME} (feature_name, keys_json, values_json) VALUES (?, ?, ?) USING TIMESTAMP {ts_micro}'
         statement = create_statement(q, parameters=3)
         statement.bind_list([feature_name, keys_json, values_json])
+        return await self.session.execute(statement)
 
-        res = await self.session.execute(statement)
-        return res
-
-    async def fetch_latest(self, feature_name: str, keys: Dict) -> Dict:
-        keys_json = json.dumps(keys)
-        q = f'SELECT * FROM {HOT_FEATURE_TABLE_NAME} WHERE feature_name=? AND keys_json=?'
-        statement = create_statement(q, parameters=2)
-        statement.bind_list([feature_name, keys_json])
-        res = await self.session.execute(statement)
-        assert res.count() <= 1
-
-        if res.count() == 0:
-            return {}
-        else:
-            return res.first().as_dict()
+    async def get_latest(self, feature_name: str, keys: List[Dict]) -> List[Optional[Dict]]:
+        async def fetch_single(key_dict):
+            keys_json = json.dumps(key_dict)
+            q = f'SELECT * FROM {HOT_FEATURE_TABLE_NAME} WHERE feature_name=? AND keys_json=?'
+            statement = create_statement(q, parameters=2)
+            statement.bind_list([feature_name, keys_json])
+            res = await self.session.execute(statement)
+            count = res.count()
+            assert count <= 1, f"Multiple records found for feature {feature_name} with keys {key_dict}"
+            return res.first().as_dict() if count > 0 else None
+        
+        results = await asyncio.gather(*[fetch_single(key_dict) for key_dict in keys])
+        return results
 
     async def close(self):
         if self.session is not None:
             await self.session.close()
 
-    async def _drop_tables(self):
-        q = f'DROP TABLE {HOT_FEATURE_TABLE_NAME}'
+    async def _delete_data(self):
+        q = f'TRUNCATE TABLE {HOT_FEATURE_TABLE_NAME}'
         statement = create_statement(q)
         await self.session.execute(statement)

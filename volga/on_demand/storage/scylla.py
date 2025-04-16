@@ -9,9 +9,9 @@ from volga.on_demand.storage.data_connector import OnDemandDataConnector
 class OnDemandScyllaConnector(OnDemandDataConnector):
     def __init__(self, contact_points: Optional[list[str]] = None):
         self.api = ScyllaPyHotFeatureStorageApi(contact_points=contact_points)
+
         
     async def init(self):
-        """Initialize the Scylla connection"""
         await self.api.init()
         
     def query_dict(self) -> Dict[str, Callable]:
@@ -23,41 +23,37 @@ class OnDemandScyllaConnector(OnDemandDataConnector):
     async def fetch_latest(
         self, 
         feature_name: str, 
-        keys: Dict[str, Any]
-    ) -> Any:
-        """Fetch latest value for a feature"""
-        raw_data = await self.api.fetch_latest(feature_name, keys)
+        keys: List[Dict[str, Any]]
+    ) -> List[Optional[Dict]]:
+        raw_data_list = await self.api.get_latest(feature_name, keys)
         
-        if not raw_data:
-            raise ValueError(f"No data found for feature {feature_name} with keys {keys}")
-            
-        return self._parse_entity(feature_name, raw_data)
+        # cast to list of lists for compatibility with OnDemandDataConnector
+        res = [[self._parse_raw_data(feature_name, d)] for d in raw_data_list]
+        return res
         
-        
-    def _parse_entity(self, feature_name: str, raw_data: Dict[str, Any]) -> Any:
-        """Parse raw data into an entity instance"""
-        feature = FeatureRepository.get_feature(feature_name)
+    def _parse_raw_data(self, feature_name: str, raw_data: Optional[Dict[str, Any]]) -> Optional[Dict]:
+        if raw_data is None:
+            return None
+
+        feature = FeatureRepository.get_feature(feature_name) # TODO init once
         output_type = feature.output_type
         
         # Parse JSON data
         keys_dict = json.loads(raw_data['keys_json'])
         values_dict = json.loads(raw_data['values_json'])
         
-        # Get timestamp field name from entity class fields
-        timestamp_field = next(
-            (field_name for field_name, field in output_type._entity._fields.items() 
-             if field.timestamp),
-            'timestamp'  # Default to 'timestamp' if not found
-        )
-        
+        timestamp_field = output_type._entity_metadata.schema().timestamp
+
         # Combine keys and values
         output_dict = {**keys_dict, **values_dict}
         if timestamp_field in raw_data:
             output_dict[timestamp_field] = raw_data[timestamp_field]
+        else:
+            # use fetch time by default
+            output_dict[timestamp_field] = datetime.now()
             
         # Create entity instance
-        return output_type(**output_dict)
+        return output_dict
         
     async def close(self):
-        """Close the Scylla connection"""
         await self.api.close()

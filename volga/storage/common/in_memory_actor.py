@@ -78,8 +78,6 @@ class InMemoryCacheActor:
         with_timestamps: bool = False
     ) -> Optional[List[Any]]:
         if feature_name not in self.per_feature_per_key:
-            # raise RuntimeError(f'No feature {feature_name} in {self.per_feature_per_key.keys()}')
-            # return []
             return None
 
         if key is not None:

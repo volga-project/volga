@@ -128,51 +128,47 @@ class OnDemandExecutor:
         query_name: str,
         query_args: Optional[Dict[str, Any]] = None
     ) -> List[Optional[List[Any]]]:
-        """Fetch a pipeline feature value from storage"""
-        try:
-            # Use default query if none specified
-            query_name = query_name or 'latest'
-            
-            # Get query function and validate arguments
-            query_func = self._data_connector.query_dict()[query_name]
-            
-            start_ts = time.perf_counter()
-            results = await query_func(
-                feature_name=feature_name,
-                keys=keys,
-                **(query_args or {})
-            )
+        # Use default query if none specified
+        query_name = query_name or 'latest'
+        
+        # Get query function and validate arguments
+        query_func = self._data_connector.query_dict()[query_name]
+        
+        start_ts = time.perf_counter()
 
-            if self._db_stats:
-                latency_ms = int((time.perf_counter() - start_ts) * 1000)
-                self._db_stats.observe(latency_ms, now_ts_ms())       
-            
-            # Validate result type
-            if not isinstance(results, list):
-                raise TypeError(f"Query result must be a list, got {type(results)}")
-            
-            # cast to output_type
-            casted_results = []
-            for sublist in results:
-                if sublist is None:
-                    casted_results.append(None)
-                    continue
+        results = await query_func(
+            feature_name=feature_name,
+            keys=keys,
+            **(query_args or {})
+        )
 
-                if not isinstance(sublist, list):
-                    raise TypeError(f"Query result must be a list of lists, got list of {type(sublist)}")
-                casted_sublist = []
-                for item in sublist:
+        if self._db_stats:
+            latency_ms = int((time.perf_counter() - start_ts) * 1000)
+            self._db_stats.observe(latency_ms, now_ts_ms())       
+        
+        # Validate result type
+        if not isinstance(results, list):
+            raise TypeError(f"Query result must be a list, got {type(results)}")
+        
+        # cast to output_type
+        casted_results = []
+        for sublist in results:
+            if sublist is None:
+                casted_results.append(None)
+                continue
+
+            if not isinstance(sublist, list):
+                raise TypeError(f"Query result must be a list of lists, got list of {type(sublist)}")
+            casted_sublist = []
+            for item in sublist:
+                if item is None:
+                    casted_item = None
+                else:
                     casted_item = output_type(**item)
-                    # if not isinstance(item, output_type):
-                    casted_sublist.append(casted_item)
-                casted_results.append(casted_sublist)
-            
-            return casted_results
-            
-        except Exception as e:
-            raise ValueError(
-                f"Error fetching pipeline feature {feature_name}: {str(e)}"
-            ) from e
+                casted_sublist.append(casted_item)
+            casted_results.append(casted_sublist)
+        
+        return casted_results
 
     async def _execute_feature(
         self,
@@ -329,14 +325,11 @@ class OnDemandExecutor:
 
             # Wait for all tasks in this level
             for feature_name, task_or_tasks in tasks:
-                try:
-                    if isinstance(task_or_tasks, list):
-                        results = await asyncio.gather(*task_or_tasks)
-                        computed_values[feature_name] = results
-                    else:
-                        computed_values[feature_name] = await task_or_tasks
-                except Exception as e:
-                    raise ValueError(f"Error executing feature {feature_name}: {str(e)}") from e
+                if isinstance(task_or_tasks, list):
+                    results = await asyncio.gather(*task_or_tasks)
+                    computed_values[feature_name] = results
+                else:
+                    computed_values[feature_name] = await task_or_tasks
 
         # Return only requested features
         return {
