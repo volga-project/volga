@@ -26,7 +26,7 @@ STORE_DIR = 'volga_on_demand_perf_benchmarks'
 RUN_TIME_S = 125
 STEP_TIME_S = 30
 RPS_PER_USER = 10
-MAX_RPS = 10000
+MAX_RPS = 2000
 MAX_USERS = int(MAX_RPS/RPS_PER_USER)
 NUM_STEPS = int(RUN_TIME_S/STEP_TIME_S)
 STEP_USER_COUNT = int(MAX_USERS/NUM_STEPS)
@@ -84,7 +84,7 @@ ray.get(coordinator.start.remote())
 features = FeatureRepository.get_all_features()
 ray.get(coordinator.register_features.remote(features))
 
-time.sleep(10000)
+# time.sleep(10000)
 
 stats_store_path = f'{STORE_DIR}/run-{run_id}.json'
 

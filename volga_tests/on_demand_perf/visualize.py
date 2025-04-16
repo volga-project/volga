@@ -112,22 +112,26 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
             if not df.empty and 'timestamp' in df.columns:
                 df['elapsed_time'] = (df['timestamp'] - t0).dt.total_seconds()
     
-    # Create the visualization - 2x2 grid layout
-    fig, axes = plt.subplots(2, 2, figsize=(width*2, height_per_plot*2), sharex=True, 
+    # Create the visualization - 3x2 grid layout
+    fig, axes = plt.subplots(3, 2, figsize=(width*2, height_per_plot*3), sharex=True, 
                             gridspec_kw={'hspace': 0.3, 'wspace': 0.3})
     
-    # Rearranged layout:
-    # [0,0]: Volga On-Demand Performance
-    # [1,0]: Locust Performance Metrics
-    # [0,1]: Volga On-Demand CPU Usage (renamed from Container CPU)
-    # [1,1]: Locust Worker CPU Usage
+    # New layout:
+    # Left column (Volga metrics):
+    # [0,0]: Volga On-Demand QPS
+    # [1,0]: Volga On-Demand Latency
+    # [2,0]: Volga On-Demand CPU Usage
     
-    # 1. Volga on-demand: combined QPS and latency [0,0]
+    # Right column (Locust metrics):
+    # [0,1]: Locust RPS
+    # [1,1]: Locust Latency
+    # [2,1]: Locust Worker CPU Usage
+    
+    # 1. Volga on-demand QPS [0,0]
     if not volga_on_demand_df.empty:
         ax = axes[0, 0]
-        ax.set_title('Volga On-Demand Performance')
+        ax.set_title('Volga On-Demand QPS')
         
-        # Primary y-axis for QPS
         if 'qps' in volga_on_demand_df.columns:
             ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['qps'], 'c-', label='QPS')
             
@@ -141,55 +145,35 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
         
         ax.set_ylabel('Queries per Second')
         ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left')
+    
+    # 2. Volga on-demand Latency [1,0]
+    if not volga_on_demand_df.empty:
+        ax = axes[1, 0]
+        ax.set_title('Volga On-Demand Latency')
         
-        # Secondary y-axis for latency
-        ax2 = ax.twinx()
-        
-        if 'server_p99' in volga_on_demand_df.columns:
-            ax2.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_p99'], 'm-', label='P99 Latency')
+        # Server latency metrics (removed P99)
+        if 'server_p95' in volga_on_demand_df.columns:
+            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_p95'], 'm-', label='Server P95')
         
         if 'server_avg' in volga_on_demand_df.columns:
-            ax2.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_avg'], 'y-', label='Avg Latency')
+            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_avg'], 'm--', label='Server Avg')
         
-        ax2.set_ylabel('Latency (ms)')
+        # Database latency metrics (removed P99)
+        if 'db_p95' in volga_on_demand_df.columns:
+            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['db_p95'], 'g-', label='DB P95')
         
-        # Combine legends
-        lines1, labels1 = ax.get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-    
-    # 2. Locust stats: total_rps, cur_p95 and total_fail_per_sec [1,0]
-    if not locust_df.empty:
-        ax = axes[1, 0]
-        ax.set_title('Locust Performance Metrics')
+        if 'db_avg' in volga_on_demand_df.columns:
+            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['db_avg'], 'g--', label='DB Avg')
         
-        # Primary y-axis for RPS
-        if 'total_rps' in locust_df.columns:
-            ax.plot(locust_df['elapsed_time'], locust_df['total_rps'], 'b-', label='Total RPS')
-        
-        if 'total_fail_per_sec' in locust_df.columns:
-            ax.plot(locust_df['elapsed_time'], locust_df['total_fail_per_sec'], 'r-', label='Failures/sec')
-        
-        ax.set_ylabel('Requests per Second')
+        ax.set_ylabel('Latency (ms)')
         ax.grid(True, alpha=0.3)
-        
-        # Secondary y-axis for latency
-        if 'cur_p95' in locust_df.columns:
-            ax2 = ax.twinx()
-            ax2.plot(locust_df['elapsed_time'], locust_df['cur_p95'], 'g-', label='P95 Latency (ms)')
-            ax2.set_ylabel('Latency (ms)')
-            
-            # Combine legends
-            lines1, labels1 = ax.get_legend_handles_labels()
-            lines2, labels2 = ax2.get_legend_handles_labels()
-            ax.legend(lines1 + lines2, labels1 + labels2, loc='upper left')
-        else:
-            ax.legend(loc='upper left')
+        ax.legend(loc='upper left')
     
-    # 3. Container insights: avg and stdev CPU utilization [0,1] - renamed
+    # 3. Volga on-demand CPU usage [2,0]
     if not container_insights_df.empty:
-        ax = axes[0, 1]
-        ax.set_title('Volga On-Demand CPU Usage')  # Renamed from Container CPU Utilization
+        ax = axes[2, 0]
+        ax.set_title('Volga On-Demand CPU Usage')
         
         if 'avg' in container_insights_df.columns:
             ax.plot(container_insights_df['elapsed_time'], container_insights_df['avg'], 'b-', label='Avg CPU')
@@ -206,9 +190,39 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper left')
     
-    # 4. Locust worker stats: avg_worker_cpu, stdev_worker_cpu [1,1]
+    # 4. Locust RPS [0,1]
+    if not locust_df.empty:
+        ax = axes[0, 1]
+        ax.set_title('Locust RPS')
+        
+        if 'total_rps' in locust_df.columns:
+            ax.plot(locust_df['elapsed_time'], locust_df['total_rps'], 'b-', label='Total RPS')
+        
+        if 'total_fail_per_sec' in locust_df.columns:
+            ax.plot(locust_df['elapsed_time'], locust_df['total_fail_per_sec'], 'r-', label='Failures/sec')
+        
+        ax.set_ylabel('Requests per Second')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left')
+    
+    # 5. Locust Latency [1,1]
     if not locust_df.empty:
         ax = axes[1, 1]
+        ax.set_title('Locust Latency')
+        
+        if 'cur_p95' in locust_df.columns:
+            ax.plot(locust_df['elapsed_time'], locust_df['cur_p95'], 'g-', label='P95 Latency')
+        
+        if 'cur_p50' in locust_df.columns:
+            ax.plot(locust_df['elapsed_time'], locust_df['cur_p50'], 'g--', label='P50 Latency')
+        
+        ax.set_ylabel('Latency (ms)')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left')
+    
+    # 6. Locust worker CPU usage [2,1]
+    if not locust_df.empty:
+        ax = axes[2, 1]
         ax.set_title('Locust Worker CPU Usage')
         
         if 'avg_worker_cpu' in locust_df.columns:
@@ -234,15 +248,15 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
     plt.xlabel('Time (seconds from start)')
     plt.tight_layout()
     
-    # Extract run information from filename if possible
-    try:
-        parts = run_id.split('-')
-        if len(parts) >= 3:
-            timestamp, max_rps, memory_backend = parts
-            metadata_text = f"Memory Backend: {memory_backend} | Max RPS: {max_rps} | Timestamp: {timestamp}"
-            fig.text(0.5, 0.01, metadata_text, ha='center', fontsize=10)
-    except:
-        pass
+    # Add metadata as text if available
+    if metadata:
+        memory_backend = metadata.get('memory_backend', 'unknown')
+        max_rps = metadata.get('max_rps', 'unknown')
+        run_time = metadata.get('run_time_s', 'unknown')
+        num_keys = metadata.get('num_keys', 'unknown')
+        
+        metadata_text = f"Memory Backend: {memory_backend} | Max RPS: {max_rps} | Run Time: {run_time}s | Keys: {num_keys}"
+        fig.text(0.5, 0.01, metadata_text, ha='center', fontsize=10)
     
     # Save to file if requested
     if output_file:
