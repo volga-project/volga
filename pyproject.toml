@@ -20,7 +20,7 @@ sortedcontainers = "2.4.0"
 acsylla = "0.2.1"
 scyllapy= "1.3.3"
 apscheduler = "3.11.0"
-redis = "2.0.1"
+redis = "5.2.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

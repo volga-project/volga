@@ -29,15 +29,15 @@ RUN_TIME_S = 125
 STEP_TIME_S = 30
 RPS_PER_USER = 10
 
-MAX_RPS = 10000
+NUM_WORKERS = 100
+
+MAX_RPS = 1000 * NUM_WORKERS
 
 MAX_USERS = int(MAX_RPS/RPS_PER_USER)
 NUM_STEPS = int(RUN_TIME_S/STEP_TIME_S)
 STEP_USER_COUNT = int(MAX_USERS/NUM_STEPS)
 MEMORY_BACKEND = MemoryBackend.REDIS
 NUM_KEYS = MAX_RPS
-
-NUM_WORKERS = int(MAX_RPS/1000)
 
 # DO NOT FORGET http:// prefix and / at the end
 HOST = 'http://k8s-raysyste-volgaond-3637bbe071-1840438529.ap-northeast-1.elb.amazonaws.com/'
