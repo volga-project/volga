@@ -25,11 +25,11 @@ class MemoryBackend(enum.Enum):
 STORE_DIR = 'volga_on_demand_perf_benchmarks'
 
 
-RUN_TIME_S = 125
-STEP_TIME_S = 30
+RUN_TIME_S = 185
+STEP_TIME_S = 10
 RPS_PER_USER = 10
 
-NUM_WORKERS = 100
+NUM_WORKERS = 4
 
 MAX_RPS = 1000 * NUM_WORKERS
 

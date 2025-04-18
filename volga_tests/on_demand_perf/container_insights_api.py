@@ -41,10 +41,16 @@ class ContainerInsightsApi:
                         filtered_pod_names.add(pod_name)
 
         filtered_pod_names = list(filtered_pod_names)
+        # not_found_pod_names = set(self.node_names) - set(filtered_pod_names)
+        not_found_pod_names = []
         if self.node_names is not None:
             for n in self.node_names:
-                assert n in filtered_pod_names
+                if n not in filtered_pod_names:
+                    not_found_pod_names.append(n)
             filtered_pod_names = self.node_names
+
+        if len(not_found_pod_names) > 0:
+            print(f'Warning: {len(not_found_pod_names)} pod names not found: {not_found_pod_names}')
 
         response = self.boto_client.get_metric_data(
             MetricDataQueries=[

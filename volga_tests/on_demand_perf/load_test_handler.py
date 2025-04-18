@@ -5,12 +5,14 @@ import time
 import ray
 from threading import Thread
 from typing import Dict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from ray.actor import ActorHandle
 
 from volga_tests.on_demand_perf.container_insights_api import ContainerInsightsApi
 from volga_tests.on_demand_perf.locust_api import LocustApi
 
+SLEEP_TIME_S = 1
 
 class LoadTestHandler:
 
@@ -37,15 +39,24 @@ class LoadTestHandler:
     def _run_watcher_loop(self):
         while self.running:
             ts = time.time()
-            container_insights_cpu_metrics_all = self.container_insights_api.fetch_cpu_metrics()
+            
+            # Use ThreadPoolExecutor to run API calls concurrently
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                # Submit all tasks to the executor
+                container_insights_future = executor.submit(self.container_insights_api.fetch_cpu_metrics)
+                locust_metrics_future = executor.submit(self.locust_api.get_stats)
+                volga_metrics_future = executor.submit(lambda: ray.get(self.on_demand_coordinator.get_latest_stats.remote()))
+                
+                # Gather results as they complete
+                container_insights_cpu_metrics_all = container_insights_future.result()
+                locust_metrics = locust_metrics_future.result()
+                volga_on_demand_metrics = volga_metrics_future.result()
+            
             container_insights_cpu_metrics = {
                 'avg': container_insights_cpu_metrics_all['avg'],
                 'stdev': container_insights_cpu_metrics_all['stdev'],
                 'num_pods': len(container_insights_cpu_metrics_all) - 2
             }
-
-            locust_metrics = self.locust_api.get_stats()
-            volga_on_demand_metrics = ray.get(self.on_demand_coordinator.get_latest_stats.remote())
 
             pprint(f'[ContainerInsights][{ts}] {container_insights_cpu_metrics}')
             pprint(f'[Locust Stats][{ts}] {locust_metrics}')
@@ -60,7 +71,7 @@ class LoadTestHandler:
 
             self._append_stats_update(self.stats_store_path, stats_update, ts, self.run_metadata)
 
-            time.sleep(5)
+            time.sleep(SLEEP_TIME_S)
 
     @staticmethod
     def _append_stats_update(path: str, stats_update: Dict, ts: float, run_metadata: Dict):
