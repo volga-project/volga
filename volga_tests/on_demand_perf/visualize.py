@@ -176,7 +176,7 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
         ax.set_title('Volga On-Demand CPU Usage')
         
         if 'avg' in container_insights_df.columns:
-            ax.plot(container_insights_df['elapsed_time'], container_insights_df['avg'], 'b-', label='Avg CPU')
+            ax.plot(container_insights_df['elapsed_time'], container_insights_df['avg'], 'b-', label='Avg Num CPUs')
         
         if 'stdev' in container_insights_df.columns:
             ax.fill_between(
@@ -186,7 +186,7 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
                 alpha=0.2, color='b'
             )
         
-        ax.set_ylabel('CPU Utilization (%)')
+        ax.set_ylabel('Number of CPUs')
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper left')
     

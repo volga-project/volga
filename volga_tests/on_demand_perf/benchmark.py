@@ -11,14 +11,16 @@ from volga.common.ray.ray_utils import RAY_ADDR, REMOTE_RAY_CLUSTER_TEST_RUNTIME
 from volga.on_demand.actors.coordinator import create_on_demand_coordinator
 from volga.on_demand.config import OnDemandConfig, OnDemandDataConnectorConfig
 from volga.on_demand.storage.in_memory import InMemoryActorOnDemandDataConnector
+from volga.on_demand.storage.redis import OnDemandRedisConnector
 from volga.storage.common.in_memory_actor import get_or_create_in_memory_cache_actor
 from volga_tests.on_demand_perf.load_test_handler import LoadTestHandler
-from volga.on_demand.testing_utils import TEST_FEATURE_NAME, TestEntity, setup_sample_in_memory_actor_feature_data_ray, setup_sample_scylla_feature_data_ray
+from volga.on_demand.testing_utils import TEST_FEATURE_NAME, TestEntity, setup_sample_in_memory_actor_feature_data_ray, setup_sample_redis_feature_data_ray, setup_sample_scylla_feature_data_ray
 from volga.on_demand.storage.scylla import OnDemandScyllaConnector
 
 class MemoryBackend(enum.Enum):
     IN_MEMORY = 'in_memory'
     SCYLLA = 'scylla'
+    REDIS = 'redis'
 
 STORE_DIR = 'volga_on_demand_perf_benchmarks'
 
@@ -26,16 +28,24 @@ STORE_DIR = 'volga_on_demand_perf_benchmarks'
 RUN_TIME_S = 125
 STEP_TIME_S = 30
 RPS_PER_USER = 10
-MAX_RPS = 2000
+
+MAX_RPS = 10000
+
 MAX_USERS = int(MAX_RPS/RPS_PER_USER)
 NUM_STEPS = int(RUN_TIME_S/STEP_TIME_S)
 STEP_USER_COUNT = int(MAX_USERS/NUM_STEPS)
-MEMORY_BACKEND = MemoryBackend.SCYLLA
-NUM_KEYS = 10000
+MEMORY_BACKEND = MemoryBackend.REDIS
+NUM_KEYS = MAX_RPS
+
+NUM_WORKERS = int(MAX_RPS/1000)
 
 # DO NOT FORGET http:// prefix and / at the end
 HOST = 'http://k8s-raysyste-volgaond-3637bbe071-1840438529.ap-northeast-1.elb.amazonaws.com/'
+
 SCYLLA_CONTACT_POINTS = ['scylla-client.scylla-operator.svc.cluster.local']
+
+REDIS_HOST = 'redis-master.redis.svc.cluster.local'
+REDIS_PASSWORD = 'password'
 
 @on_demand(dependencies=[TEST_FEATURE_NAME])
 def simple_feature(
@@ -50,7 +60,7 @@ def simple_feature(
     )
 
 
-run_id = f'{int(time.time())}-{MAX_RPS}-{MEMORY_BACKEND.value}-{NUM_KEYS}'
+run_id = f'{int(time.time())}-{MAX_RPS}-{MEMORY_BACKEND.value}-{NUM_WORKERS}'
 
 print(f'[run-{run_id}] Started On-Demand benchmark')
 
@@ -69,6 +79,12 @@ elif MEMORY_BACKEND == MemoryBackend.SCYLLA:
     data_connector_config = data_connector=OnDemandDataConnectorConfig(
         connector_class=OnDemandScyllaConnector,
         connector_args={'contact_points': SCYLLA_CONTACT_POINTS}
+    )
+elif MEMORY_BACKEND == MemoryBackend.REDIS:
+    ray.get(setup_sample_redis_feature_data_ray.remote(REDIS_HOST, 6379, 0, REDIS_PASSWORD, NUM_KEYS))
+    data_connector_config = data_connector=OnDemandDataConnectorConfig(
+        connector_class=OnDemandRedisConnector,
+        connector_args={'host': REDIS_HOST, 'port': 6379, 'password': REDIS_PASSWORD}
     )
 else:
     raise ValueError(f'Invalid memory backend: {MEMORY_BACKEND}')
@@ -99,7 +115,8 @@ run_metadata = {
     'memory_backend': MEMORY_BACKEND.value,
     'num_steps': NUM_STEPS,
     'rps_per_user': RPS_PER_USER,
-    'num_keys': NUM_KEYS
+    'num_keys': NUM_KEYS,
+    'num_workers': NUM_WORKERS
 }
 load_test_handler = LoadTestHandler(stats_store_path, coordinator, run_metadata)
 

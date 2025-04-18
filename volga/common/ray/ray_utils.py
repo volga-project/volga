@@ -13,7 +13,8 @@ REMOTE_RAY_CLUSTER_TEST_RUNTIME_ENV = {
         'aenum==3.1.15',
         'sortedcontainers==2.4.0',
         'acsylla==0.2.1',
-        'scyllapy==1.3.3'
+        'scyllapy==1.3.3',
+        'redis==5.2.1'
     ],
     'py_modules': [
         volga,

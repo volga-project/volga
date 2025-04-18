@@ -1,5 +1,5 @@
 import asyncio
-from typing import Dict, Any, List, Callable, Tuple
+from typing import Dict, Any, List, Callable, Tuple, Optional
 from datetime import datetime, timedelta
 
 import ray
@@ -11,6 +11,7 @@ from volga.on_demand.storage.data_connector import OnDemandDataConnector
 from volga.api.entity import entity, field
 from volga.api.source import MockOnlineConnector, source, Connector
 from volga.storage.common.in_memory_actor import get_or_create_in_memory_cache_actor
+from volga.storage.redis.api import RedisHotFeatureStorageApi
 
 
 @entity
@@ -175,3 +176,41 @@ async def setup_sample_scylla_feature_data(scylla_contact_points: List[str], num
 
     await asyncio.gather(*futs)
     print(f'Finished writing sample feature records - {i} total')
+
+@ray.remote
+def setup_sample_redis_feature_data_ray(redis_host: str = 'localhost', redis_port: int = 6379, 
+                                        redis_db: int = 0, redis_password: Optional[str] = None, 
+                                        num_keys: int = 1000):
+    asyncio.run(setup_sample_redis_feature_data(redis_host, redis_port, redis_db, redis_password, num_keys))
+
+
+async def setup_sample_redis_feature_data(redis_host: str = 'localhost', redis_port: int = 6379, 
+                                         redis_db: int = 0, redis_password: Optional[str] = None, 
+                                         num_keys: int = 1000):
+    api = RedisHotFeatureStorageApi(host=redis_host, port=redis_port, db=redis_db, password=redis_password)
+    await api.init()
+    await api._delete_data()  # cleanup existing data
+
+    i = 0
+    max_tasks = 10000
+    futs = set()
+
+    while i < num_keys:
+        test_entity = gen_test_entity(i)
+        keys = {'id': test_entity.id}
+        values = {'value': test_entity.value}
+
+        if len(futs) == max_tasks:
+            done, pending = await asyncio.wait(futs, return_when=asyncio.FIRST_COMPLETED)
+            for f in done:
+                assert f in futs
+                futs.remove(f)
+        f = asyncio.get_event_loop().create_task(api.insert(TEST_FEATURE_NAME, keys, values))
+        futs.add(f)
+        i += 1
+        if i%1000 == 0:
+            print(f'Written {i} sample feature records to Redis...')
+
+    await asyncio.gather(*futs)
+    print(f'Finished writing sample feature records to Redis - {i} total')
+    await api.close()

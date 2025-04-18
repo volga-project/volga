@@ -144,8 +144,8 @@ class OnDemandExecutor:
 
         if self._db_stats:
             latency_ms = int((time.perf_counter() - start_ts) * 1000)
-            self._db_stats.observe(latency_ms, now_ts_ms())       
-        
+            self._db_stats.observe(latency_ms, now_ts_ms())    
+
         # Validate result type
         if not isinstance(results, list):
             raise TypeError(f"Query result must be a list, got {type(results)}")
