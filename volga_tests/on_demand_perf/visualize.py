@@ -8,7 +8,8 @@ from datetime import datetime
 import numpy as np
 
 def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchmarks', output_file=None, 
-                            height_per_plot=3, width=10, display=True):
+                            height_per_plot=3, width=10, display=True, start_time=None, end_time=None,
+                            hide_cpu=False):
     """
     Visualize benchmark data from the specified run or the latest run if not specified.
     
@@ -19,6 +20,9 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
         height_per_plot: Height in inches for each subplot
         width: Width in inches for the figure
         display: Whether to display the plot (set to False when running in headless mode)
+        start_time: Optional start time in seconds (0-based) to filter data
+        end_time: Optional end time in seconds (0-based) to filter data
+        hide_cpu: Whether to hide CPU-related graphs
     
     Returns:
         The figure object for further customization if needed
@@ -112,28 +116,43 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
             if not df.empty and 'timestamp' in df.columns:
                 df['elapsed_time'] = (df['timestamp'] - t0).dt.total_seconds()
     
-    # Create the visualization - 3x2 grid layout
-    fig, axes = plt.subplots(3, 2, figsize=(width*2, height_per_plot*3), sharex=True, 
+    # Filter data by start and end time if specified
+    if start_time is not None or end_time is not None:
+        for df in [locust_df, container_insights_df, volga_on_demand_df]:
+            if not df.empty and 'elapsed_time' in df.columns:
+                if start_time is not None:
+                    df.query('elapsed_time >= @start_time', inplace=True)
+                if end_time is not None:
+                    df.query('elapsed_time <= @end_time', inplace=True)
+        
+        print(f"Filtered data: start={start_time}s, end={end_time}s")
+        print(f"Remaining data points: Locust={len(locust_df)}, Container={len(container_insights_df)}, Volga={len(volga_on_demand_df)}")
+    
+    # Determine number of rows based on hide_cpu flag
+    num_rows = 2 if hide_cpu else 3
+    
+    # Create the visualization - dynamic grid layout
+    fig, axes = plt.subplots(num_rows, 2, figsize=(width*2, height_per_plot*num_rows), sharex=True, 
                             gridspec_kw={'hspace': 0.3, 'wspace': 0.3})
     
-    # New layout:
-    # Left column (Volga metrics):
-    # [0,0]: Volga On-Demand QPS
-    # [1,0]: Volga On-Demand Latency
-    # [2,0]: Volga On-Demand CPU Usage
+    # Add a title with num_workers and memory_backend if available
+    if metadata:
+        num_workers = metadata.get('num_workers', 'unknown')
+        memory_backend = metadata.get('memory_backend', 'unknown')
+        fig.suptitle(f'Volga On-Demand Load Test (workers={num_workers}, db={memory_backend})', fontsize=14, y=0.98)
+    else:
+        fig.suptitle('Volga On-Demand Load Test', fontsize=14, y=0.98)
     
-    # Right column (Locust metrics):
-    # [0,1]: Locust RPS
-    # [1,1]: Locust Latency
-    # [2,1]: Locust Worker CPU Usage
+    # Adjust subplot positions to make room for the title
+    plt.subplots_adjust(top=0.85)  # Reduced from 0.92 to 0.85 to add more space
     
-    # 1. Volga on-demand QPS [0,0]
+    # 1. Volga on-demand RPS [0,0]
     if not volga_on_demand_df.empty:
         ax = axes[0, 0]
-        ax.set_title('Volga On-Demand QPS')
+        ax.set_title('Volga On-Demand RPS')
         
         if 'qps' in volga_on_demand_df.columns:
-            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['qps'], 'c-', label='QPS')
+            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['qps'], 'c-', label='RPS')
             
             if 'qps_stdev' in volga_on_demand_df.columns:
                 ax.fill_between(
@@ -143,7 +162,7 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
                     alpha=0.2, color='c'
                 )
         
-        ax.set_ylabel('Queries per Second')
+        ax.set_ylabel('Requests per Second')
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper left')
     
@@ -152,14 +171,14 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
         ax = axes[1, 0]
         ax.set_title('Volga On-Demand Latency')
         
-        # Server latency metrics (removed P99)
+        # Server latency metrics renamed to End-to-End
         if 'server_p95' in volga_on_demand_df.columns:
-            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_p95'], 'm-', label='Server P95')
+            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_p95'], 'm-', label='End-to-End P95')
         
         if 'server_avg' in volga_on_demand_df.columns:
-            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_avg'], 'm--', label='Server Avg')
+            ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['server_avg'], 'm--', label='End-to-End Avg')
         
-        # Database latency metrics (removed P99)
+        # Database latency metrics
         if 'db_p95' in volga_on_demand_df.columns:
             ax.plot(volga_on_demand_df['elapsed_time'], volga_on_demand_df['db_p95'], 'g-', label='DB P95')
         
@@ -170,8 +189,8 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper left')
     
-    # 3. Volga on-demand CPU usage [2,0]
-    if not container_insights_df.empty:
+    # 3. Volga on-demand CPU usage [2,0] - only if not hidden
+    if not hide_cpu and not container_insights_df.empty:
         ax = axes[2, 0]
         ax.set_title('Volga On-Demand CPU Usage')
         
@@ -220,8 +239,8 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
         ax.grid(True, alpha=0.3)
         ax.legend(loc='upper left')
     
-    # 6. Locust worker CPU usage [2,1]
-    if not locust_df.empty:
+    # 6. Locust worker CPU usage [2,1] - only if not hidden
+    if not hide_cpu and not locust_df.empty:
         ax = axes[2, 1]
         ax.set_title('Locust Worker CPU Usage')
         
@@ -246,17 +265,6 @@ def visualize_benchmark_data(run_id=None, data_dir='volga_on_demand_perf_benchma
             ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, pos: f'{int(x)}s'))
     
     plt.xlabel('Time (seconds from start)')
-    plt.tight_layout()
-    
-    # Add metadata as text if available
-    if metadata:
-        memory_backend = metadata.get('memory_backend', 'unknown')
-        max_rps = metadata.get('max_rps', 'unknown')
-        run_time = metadata.get('run_time_s', 'unknown')
-        num_keys = metadata.get('num_keys', 'unknown')
-        
-        metadata_text = f"Memory Backend: {memory_backend} | Max RPS: {max_rps} | Run Time: {run_time}s | Keys: {num_keys}"
-        fig.text(0.5, 0.01, metadata_text, ha='center', fontsize=10)
     
     # Save to file if requested
     if output_file:
@@ -280,14 +288,43 @@ if __name__ == "__main__":
     parser.add_argument('--height', type=float, default=3, help='Height per subplot in inches')
     parser.add_argument('--width', type=float, default=10, help='Figure width in inches')
     parser.add_argument('--no-display', action='store_true', help='Do not display the plot (useful for batch processing)')
+    parser.add_argument('-i', '--index', type=int, default=0, 
+                        help='Index of file to open (0=most recent, 1=second most recent, etc.)')
+    parser.add_argument('--start', type=float, help='Start time in seconds (0-based) to filter data')
+    parser.add_argument('--end', type=float, help='End time in seconds (0-based) to filter data')
+    parser.add_argument('--hide-cpu', action='store_true', help='Hide CPU-related graphs')
     
     args = parser.parse_args()
     
+    # If both run-id and index are provided, run-id takes precedence
+    if args.run_id:
+        run_id = args.run_id
+    else:
+        # Find all run files
+        files = glob.glob(os.path.join(args.data_dir, 'run-*.json'))
+        if not files:
+            raise FileNotFoundError(f"No benchmark data files found in {args.data_dir}")
+        
+        # Sort by modification time (newest first)
+        files.sort(key=os.path.getmtime, reverse=True)
+        
+        # Check if index is valid
+        if args.index < 0 or args.index >= len(files):
+            raise ValueError(f"Index {args.index} is out of range. There are {len(files)} files.")
+        
+        # Get the file at the specified index
+        selected_file = files[args.index]
+        run_id = os.path.basename(selected_file).replace('run-', '').replace('.json', '')
+        print(f"Selected file at index {args.index}: {run_id}")
+    
     visualize_benchmark_data(
-        run_id=args.run_id,
+        run_id=run_id,
         data_dir=args.data_dir,
         output_file=args.output,
         height_per_plot=args.height,
         width=args.width,
-        display=not args.no_display
+        display=not args.no_display,
+        start_time=args.start,
+        end_time=args.end,
+        hide_cpu=args.hide_cpu
     ) 
