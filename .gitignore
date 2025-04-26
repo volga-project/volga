@@ -76,3 +76,4 @@ rust/target
 *volga_network_perf_benchmarks*
 golem
 *volga_on_demand_perf_benchmarks*
+volga_stream/target
