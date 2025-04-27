@@ -1,10 +1,11 @@
 use serde::{Serialize, Deserialize};
 use std::fmt::Debug;
+use ordered_float::OrderedFloat;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Value {
     Int(i64),
-    Float(f64),
+    Float(OrderedFloat<f64>),
     String(String),
     Boolean(bool),
     Null,
@@ -99,7 +100,6 @@ impl KeyedRecord {
         Record { base: self.base }
     }
 }
-
 #[derive(Clone, Debug)]
 pub enum StreamRecord {
     Record(Record),

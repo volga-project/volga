@@ -1,6 +1,5 @@
 pub mod collector;
 pub mod function;
-pub mod record;
 pub mod operator;
 pub mod partition;
 pub mod processor;

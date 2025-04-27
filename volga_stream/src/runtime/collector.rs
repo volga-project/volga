@@ -1,11 +1,11 @@
 use async_trait::async_trait;
-use crate::core::record::StreamRecord;
+use crate::common::record::StreamRecord;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::network::data_writer::DataWriter;
-use crate::core::partition::Partition;
-use tokio::task::{JoinSet};
+use crate::runtime::partition::Partition;
+use tokio::task::JoinSet;
 
 #[async_trait]
 pub trait Collector: Send + Sync {

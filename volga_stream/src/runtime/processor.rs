@@ -1,11 +1,12 @@
-use crate::core::{collector::Collector, operator::Operator, record::StreamRecord, runtime_context::RuntimeContext};
+use crate::runtime::{collector::Collector, operator::Operator, runtime_context::RuntimeContext};
+use crate::common::record::StreamRecord;
 use anyhow::{Error, Result};
 use std::any::Any;
 use async_trait::async_trait;
 
 #[async_trait]
 pub trait Processor: Send + Sync {
-    async fn open(&mut self, collectors: Vec<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()>;
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()>;
     async fn process_batch(&mut self, records: Vec<StreamRecord>, stream_id: Option<usize>) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
@@ -13,7 +14,7 @@ pub trait Processor: Send + Sync {
 
     // Default implementation for non-source processors
     async fn fetch(&mut self) -> Result<()> {
-        Err(Error::new("Not a source processor"))
+        Err(anyhow::anyhow!("Not a source processor"))
     }
 }
 
@@ -33,9 +34,9 @@ impl StreamProcessor {
 
 #[async_trait]
 impl Processor for StreamProcessor {
-    async fn open(&mut self, collectors: Vec<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
         self.runtime_context = Some(runtime_context.clone());
-        self.operator.open(collectors, runtime_context).await
+        self.operator.open(collector, runtime_context).await
     }
 
     async fn process_batch(&mut self, records: Vec<StreamRecord>, stream_id: Option<usize>) -> Result<()> {
@@ -71,13 +72,13 @@ impl SourceProcessor {
 
 #[async_trait]
 impl Processor for SourceProcessor {
-    async fn open(&mut self, collectors: Vec<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
         self.runtime_context = Some(runtime_context.clone());
-        self.operator.open(collectors, runtime_context).await
+        self.operator.open(collector, runtime_context).await
     }
 
     async fn process_batch(&mut self, _records: Vec<StreamRecord>, _stream_id: Option<usize>) -> Result<()> {
-        Err(Error::new("SourceProcessor does not process input records"))
+        Err(anyhow::anyhow!("SourceProcessor does not process input records"))
     }
 
     async fn close(&mut self) -> Result<()> {

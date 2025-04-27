@@ -1,12 +1,14 @@
 use async_trait::async_trait;
-use crate::core::collector::Collector;
-use crate::core::runtime_context::RuntimeContext;
-use crate::core::record::StreamRecord;
-use anyhow::{Error, Result};
+use crate::runtime::collector::Collector;
+use crate::runtime::runtime_context::RuntimeContext;
+use crate::common::record::StreamRecord;
+use crate::common::record::Value;
+use anyhow::Result;
 use std::any::Any;
 use std::collections::HashMap;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{function::{Function, JoinFunction, MapFunction, SourceFunction}, record::Value, source::{SourceContextImpl, TimestampAssigner}};
+use super::{function::{Function, JoinFunction, MapFunction, SourceFunction, SinkFunction}, source::{SourceContextImpl, TimestampAssigner}};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -16,7 +18,7 @@ pub enum OperatorType {
 
 #[async_trait]
 pub trait Operator: Send + Sync {
-    async fn open(&mut self, collectors: Vec<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()>;
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
     async fn process_batch(&mut self, records: Vec<StreamRecord>, stream_id: Option<usize>) -> Result<()>;
@@ -25,14 +27,14 @@ pub trait Operator: Send + Sync {
 
     // Default implementation for non-source operators
     async fn fetch(&mut self) -> Result<()> {
-        Err(Error::new("Not a source operator"))
+        Err(anyhow::anyhow!("Not a source operator"))
     }
 }
 
 // Base operator
 pub struct BaseOperator<F: Function> {
     pub func: F,
-    pub collectors: Vec<Box<dyn Collector>>,
+    pub collector: Option<Box<dyn Collector>>,
     pub runtime_context: Option<RuntimeContext>,
 }
 
@@ -40,26 +42,18 @@ impl<F: Function> BaseOperator<F> {
     pub fn new(func: F) -> Self {
         Self {
             func,
-            collectors: Vec::new(),
+            collector: None,
             runtime_context: None,
         }
-    }
-
-    async fn collect_batch(&mut self, records: Vec<StreamRecord>) -> Result<()> {
-        for collector in &mut self.collectors {
-            let records_clone = records.clone();
-            collector.collect_batch(records_clone).await?;
-        }
-        Ok(())
     }
 }
 
 // MapOperator
-pub struct MapOperator<F: MapFunction> {
+pub struct MapOperator<F: MapFunction + Clone + 'static> {
     base: BaseOperator<F>,
 }
 
-impl<F: MapFunction> MapOperator<F> {
+impl<F: MapFunction + Clone + 'static> MapOperator<F> {
     pub fn new(func: F) -> Self {
         Self {
             base: BaseOperator::new(func),
@@ -68,9 +62,9 @@ impl<F: MapFunction> MapOperator<F> {
 }
 
 #[async_trait]
-impl<F: MapFunction> Operator for MapOperator<F> {
-    async fn open(&mut self, collectors: Vec<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
-        self.base.collectors = collectors;
+impl<F: MapFunction + Clone + 'static> Operator for MapOperator<F> {
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = Some(collector);
         self.base.runtime_context = Some(runtime_context.clone());
         self.base.func.open(runtime_context).await
     }
@@ -85,14 +79,19 @@ impl<F: MapFunction> Operator for MapOperator<F> {
 
     async fn process_batch(&mut self, records: Vec<StreamRecord>, stream_id: Option<usize>) -> Result<()> {
         if stream_id != Some(0) {
-            return Err(Error::new("MapOperator only accepts input from stream 0"));
+            return Err(anyhow::anyhow!("MapOperator only accepts input from stream 0"));
         }
 
         let map_futures: Vec<_> = records.iter()
-            .map(|record| self.base.func.map(record.value()))
-            .collect();
+            .map(|record| {
+                let value = record.value().clone();
+                let mut func = self.base.func.clone();
+                async move { func.map(&value).await }
+            })
+            .collect::<Vec<_>>();
         
-        let mapped_values = tokio::join!(map_futures.into_iter())
+        let mapped_values = futures::future::join_all(map_futures)
+            .await
             .into_iter()
             .collect::<Result<Vec<Value>>>()?;
         
@@ -101,11 +100,14 @@ impl<F: MapFunction> Operator for MapOperator<F> {
             .map(|(record, value)| record.with_new_value(value))
             .collect();
         
-        self.base.collect_batch(new_records).await
+        if let Some(collector) = &mut self.base.collector {
+            collector.collect_batch(new_records).await?;
+        }
+        Ok(())
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::ONE_INPUT
+        OperatorType::PROCESSOR
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -114,13 +116,13 @@ impl<F: MapFunction> Operator for MapOperator<F> {
 }
 
 // JoinOperator
-pub struct JoinOperator<F: JoinFunction> {
+pub struct JoinOperator<F: JoinFunction + Clone + 'static> {
     base: BaseOperator<F>,
     left_records: HashMap<Value, Vec<StreamRecord>>,
     right_records: HashMap<Value, Vec<StreamRecord>>,
 }
 
-impl<F: JoinFunction> JoinOperator<F> {
+impl<F: JoinFunction + Clone + 'static> JoinOperator<F> {
     pub fn new(func: F) -> Self {
         Self {
             base: BaseOperator::new(func),
@@ -131,9 +133,9 @@ impl<F: JoinFunction> JoinOperator<F> {
 }
 
 #[async_trait]
-impl<F: JoinFunction> Operator for JoinOperator<F> {
-    async fn open(&mut self, collectors: Vec<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
-        self.base.collectors = collectors;
+impl<F: JoinFunction + Clone + 'static> Operator for JoinOperator<F> {
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = Some(collector);
         self.base.runtime_context = Some(runtime_context.clone());
         self.base.func.open(runtime_context).await
     }
@@ -147,12 +149,14 @@ impl<F: JoinFunction> Operator for JoinOperator<F> {
     }
 
     async fn process_batch(&mut self, records: Vec<StreamRecord>, stream_id: Option<usize>) -> Result<()> {
-        let stream_id = stream_id.ok_or_else(|| Error::new("JoinOperator requires a stream ID"))?;
+        let stream_id = stream_id.ok_or_else(|| anyhow::anyhow!("JoinOperator requires a stream ID"))?;
         
         let mut keyed_records: HashMap<Value, Vec<StreamRecord>> = HashMap::new();
         for record in records {
-            let key = record.key().ok_or_else(|| Error::new("JoinOperator expects a keyed record"))?;
-            keyed_records.entry(key.clone()).or_default().push(record);
+            let key = record.key().ok_or_else(|| anyhow::anyhow!("JoinOperator expects a keyed record"))?;
+            let mut records = Vec::new();
+            records.push(record.clone());
+            keyed_records.insert(key.clone(), records);
         }
 
         match stream_id {
@@ -166,15 +170,16 @@ impl<F: JoinFunction> Operator for JoinOperator<F> {
                         
                         for left_record in &left_batch {
                             for right_record in right_records {
-                                join_futures.push(self.base.func.join(
-                                    left_record.value(),
-                                    right_record.value()
-                                ));
+                                let mut func = self.base.func.clone();
+                                join_futures.push(async move {
+                                    func.join(left_record.value(), right_record.value()).await
+                                });
                                 record_pairs.push((left_record, right_record));
                             }
                         }
                         
-                        let joined_values = tokio::join!(join_futures.into_iter())
+                        let joined_values = futures::future::join_all(join_futures)
+                            .await
                             .into_iter()
                             .collect::<Result<Vec<Value>>>()?;
                         
@@ -183,20 +188,22 @@ impl<F: JoinFunction> Operator for JoinOperator<F> {
                             .map(|((left_record, _), value)| (*left_record).with_new_value(value))
                             .collect();
                         
-                        self.base.collect_batch(new_records).await?;
+                        if let Some(collector) = &mut self.base.collector {
+                            collector.collect_batch(new_records).await?;
+                        }
                     }
                 }
             }
             1 => { // Right stream - similar pattern
                 // ... similar implementation for right stream ...
             }
-            _ => return Err(Error::new("Invalid stream ID for JoinOperator")),
+            _ => return Err(anyhow::anyhow!("Invalid stream ID for JoinOperator")),
         }
         Ok(())
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::TWO_INPUT
+        OperatorType::PROCESSOR
     }
 
     fn as_any(&self) -> &dyn Any {
@@ -204,12 +211,62 @@ impl<F: JoinFunction> Operator for JoinOperator<F> {
     }
 }
 
-pub struct SourceOperator<F: SourceFunction> {
+// SinkOperator
+pub struct SinkOperator<F: SinkFunction + 'static> {
+    base: BaseOperator<F>,
+}
+
+impl<F: SinkFunction + 'static> SinkOperator<F> {
+    pub fn new(func: F) -> Self {
+        Self {
+            base: BaseOperator::new(func),
+        }
+    }
+}
+
+#[async_trait]
+impl<F: SinkFunction + 'static> Operator for SinkOperator<F> {
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = Some(collector);
+        self.base.runtime_context = Some(runtime_context.clone());
+        self.base.func.open(runtime_context).await
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.base.func.close().await
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn process_batch(&mut self, records: Vec<StreamRecord>, stream_id: Option<usize>) -> Result<()> {
+        if stream_id != Some(0) {
+            return Err(anyhow::anyhow!("SinkOperator only accepts input from stream 0"));
+        }
+
+        // TODO parallelize this
+        for record in records {
+            self.base.func.sink(record.value()).await?;
+        }
+        Ok(())
+    }
+
+    fn operator_type(&self) -> OperatorType {
+        OperatorType::PROCESSOR
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+pub struct SourceOperator<F: SourceFunction + 'static> {
     base: BaseOperator<F>,
     source_context: Option<SourceContextImpl>,
 }
 
-impl<F: SourceFunction> SourceOperator<F> {
+impl<F: SourceFunction + 'static> SourceOperator<F> {
     pub fn new(func: F) -> Self {
         Self {
             base: BaseOperator::new(func),
@@ -225,14 +282,14 @@ impl<F: SourceFunction> SourceOperator<F> {
 }
 
 #[async_trait]
-impl<F: SourceFunction> Operator for SourceOperator<F> {
-    async fn open(&mut self, collectors: Vec<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
-        self.base.collectors = collectors.clone();
+impl<F: SourceFunction + 'static> Operator for SourceOperator<F> {
+    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = Some(collector);
         self.base.runtime_context = Some(runtime_context.clone());
         self.base.func.open(runtime_context.clone()).await?;
 
         self.source_context = Some(SourceContextImpl::new(
-            collectors,
+            vec![self.base.collector.take().unwrap()],
             runtime_context,
             None,
             None,
@@ -250,14 +307,14 @@ impl<F: SourceFunction> Operator for SourceOperator<F> {
     }
 
     async fn process_batch(&mut self, _records: Vec<StreamRecord>, _stream_id: Option<usize>) -> Result<()> {
-        Err(Error::new("SourceOperator does not process input records"))
+        Err(anyhow::anyhow!("SourceOperator does not process input records"))
     }
 
     async fn fetch(&mut self) -> Result<()> {
         if let Some(ctx) = &mut self.source_context {
             self.base.func.fetch(ctx).await
         } else {
-            Err(Error::new("SourceContext not initialized"))
+            Err(anyhow::anyhow!("SourceContext not initialized"))
         }
     }
 

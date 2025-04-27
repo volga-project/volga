@@ -1,12 +1,12 @@
-use crate::core::record::StreamRecord;
+use crate::common::record::StreamRecord;
 use anyhow::{Error, Result};
 use std::sync::Mutex;
 use lru::LruCache;
 use std::hash::{Hash, Hasher};
-use std::collections::hash_map::DefaultHasher;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use crate::core::record::Value;
+use crate::common::record::Value;
+use std::num::NonZeroUsize;
 
 pub trait Partition: Send + Sync {
     fn partition(&self, record: &StreamRecord, num_partition: usize) -> Result<Vec<usize>>;
@@ -45,7 +45,7 @@ impl KeyPartition {
     pub fn new() -> Self {
         Self {
             partitions: Mutex::new(vec![0]),
-            hash_cache: Mutex::new(LruCache::new(1024)),
+            hash_cache: Mutex::new(LruCache::new(NonZeroUsize::new(1024).unwrap())),
         }
     }
 
@@ -66,7 +66,7 @@ impl KeyPartition {
 
 impl Partition for KeyPartition {
     fn partition(&self, record: &StreamRecord, num_partition: usize) -> Result<Vec<usize>> {
-        let key = record.key().ok_or_else(|| Error::new("KeyPartition expects a keyed record"))?;
+        let key = record.key().ok_or_else(|| anyhow::anyhow!("KeyPartition expects a keyed record"))?;
         let hash = self.hash(key);
         let mut partitions = self.partitions.lock().unwrap();
         partitions[0] = hash % num_partition;

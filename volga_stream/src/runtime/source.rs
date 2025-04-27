@@ -1,7 +1,9 @@
-use crate::core::{collector::Collector, record::StreamRecord, runtime_context::RuntimeContext};
+use crate::runtime::{collector::Collector, runtime_context::RuntimeContext};
+use crate::common::record::StreamRecord;
+use crate::common::record::Value;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
-use serde_json::Value;
+use futures::future::join_all;
 
 #[async_trait]
 pub trait SourceContext: Send + Sync {
@@ -44,8 +46,10 @@ impl SourceContext for SourceContextImpl {
         }
 
         let records = if let Some(assigner) = &self.timestamp_assigner {
-            records.into_iter()
-                .map(|record| assigner.assign_timestamp(record))
+            join_all(records.into_iter()
+                .map(|record| assigner.assign_timestamp(record)))
+                .await
+                .into_iter()
                 .collect::<Result<Vec<_>>>()?
         } else {
             records
@@ -56,7 +60,6 @@ impl SourceContext for SourceContextImpl {
         }
 
         self.num_fetched_records += records.len() as i64;
-        self.throughput_stats.increment(records.len() as i64);
 
         if let Some(num_records) = self.num_records {
             if self.num_fetched_records >= num_records {
