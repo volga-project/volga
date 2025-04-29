@@ -18,7 +18,7 @@ pub enum OperatorType {
 
 #[async_trait]
 pub trait Operator: Send + Sync {
-    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()>;
+    async fn open(&mut self, collector: Option<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
     async fn process_batch(&mut self, records: Vec<StreamRecord>, stream_id: Option<usize>) -> Result<()>;
@@ -63,8 +63,8 @@ impl<F: MapFunction + Clone + 'static> MapOperator<F> {
 
 #[async_trait]
 impl<F: MapFunction + Clone + 'static> Operator for MapOperator<F> {
-    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
-        self.base.collector = Some(collector);
+    async fn open(&mut self, collector: Option<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = collector;
         self.base.runtime_context = Some(runtime_context.clone());
         self.base.func.open(runtime_context).await
     }
@@ -134,8 +134,8 @@ impl<F: JoinFunction + Clone + 'static> JoinOperator<F> {
 
 #[async_trait]
 impl<F: JoinFunction + Clone + 'static> Operator for JoinOperator<F> {
-    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
-        self.base.collector = Some(collector);
+    async fn open(&mut self, collector: Option<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = collector;
         self.base.runtime_context = Some(runtime_context.clone());
         self.base.func.open(runtime_context).await
     }
@@ -226,8 +226,8 @@ impl<F: SinkFunction + 'static> SinkOperator<F> {
 
 #[async_trait]
 impl<F: SinkFunction + 'static> Operator for SinkOperator<F> {
-    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
-        self.base.collector = Some(collector);
+    async fn open(&mut self, collector: Option<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = collector;
         self.base.runtime_context = Some(runtime_context.clone());
         self.base.func.open(runtime_context).await
     }
@@ -283,8 +283,8 @@ impl<F: SourceFunction + 'static> SourceOperator<F> {
 
 #[async_trait]
 impl<F: SourceFunction + 'static> Operator for SourceOperator<F> {
-    async fn open(&mut self, collector: Box<dyn Collector>, runtime_context: RuntimeContext) -> Result<()> {
-        self.base.collector = Some(collector);
+    async fn open(&mut self, collector: Option<Box<dyn Collector>>, runtime_context: RuntimeContext) -> Result<()> {
+        self.base.collector = collector;
         self.base.runtime_context = Some(runtime_context.clone());
         self.base.func.open(runtime_context.clone()).await?;
 

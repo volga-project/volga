@@ -3,7 +3,7 @@ use crate::common::record::StreamRecord;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::network::data_writer::DataWriter;
+use crate::transport::transport::DataWriter;
 use crate::runtime::partition::Partition;
 use tokio::task::JoinSet;
 
