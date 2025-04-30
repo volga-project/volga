@@ -8,6 +8,7 @@ use crate::transport::transport::{TransportConfig, Transport};
 use crate::transport::transport_factory::create_transport;
 use crate::runtime::operator::Operator;
 use crate::common::data_batch::DataBatch;
+use tokio_rayon::rayon::ThreadPool;
 
 #[async_trait]
 pub trait Task: Send + Sync {
@@ -31,7 +32,7 @@ impl StreamTask {
     const DEFAULT_FETCH_INTERVAL_MS: u64 = 1;
     
     pub fn new(
-        vertex: ExecutionVertex,
+        vertex_id: String,
         operator: Box<dyn Operator>,
         transport_config: TransportConfig,
         runtime_context: RuntimeContext,

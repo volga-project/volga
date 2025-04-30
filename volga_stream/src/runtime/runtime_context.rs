@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use serde_json::Value;
+use std::sync::Arc;
+use tokio_rayon::rayon::ThreadPool;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeContext {
@@ -9,6 +11,7 @@ pub struct RuntimeContext {
     operator_id: i64,
     operator_name: String,
     job_config: HashMap<String, Value>,
+    compute_pool: Option<Arc<ThreadPool>>,
 }
 
 impl RuntimeContext {
@@ -19,6 +22,7 @@ impl RuntimeContext {
         operator_id: i64,
         operator_name: String,
         job_config: Option<HashMap<String, Value>>,
+        compute_pool: Option<Arc<ThreadPool>>,
     ) -> Self {
         Self {
             task_id,
@@ -27,6 +31,7 @@ impl RuntimeContext {
             operator_id,
             operator_name,
             job_config: job_config.unwrap_or_default(),
+            compute_pool,
         }
     }
 
@@ -36,4 +41,5 @@ impl RuntimeContext {
     pub fn operator_id(&self) -> i64 { self.operator_id }
     pub fn operator_name(&self) -> &str { &self.operator_name }
     pub fn job_config(&self) -> &HashMap<String, Value> { &self.job_config }
+    pub fn compute_pool(&self) -> Option<&Arc<ThreadPool>> { self.compute_pool.as_ref() }
 }

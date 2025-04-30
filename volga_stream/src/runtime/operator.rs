@@ -35,7 +35,6 @@ pub trait Operator: Send + Sync {
 pub struct BaseOperator<F: Function> {
     pub func: F,
     pub runtime_context: Option<RuntimeContext>,
-    pub compute_pool: Arc<ThreadPool>,
 }
 
 impl<F: Function> BaseOperator<F> {
@@ -43,7 +42,6 @@ impl<F: Function> BaseOperator<F> {
         Self {
             func,
             runtime_context: None,
-            compute_pool: Arc::new(ThreadPoolBuilder::new().build().unwrap()),
         }
     }
 }
@@ -137,11 +135,14 @@ impl<F: JoinFunction + Clone + 'static> Operator for JoinOperator<F> {
                     let batch_clone = batch.clone();
                     let right_batch = right_batch.clone();
                     
-                    let join_future = tokio::task::spawn_blocking(move || {
-                        func.join(&batch_clone, &right_batch).map(|_| ()).unwrap_or(())
-                    });
-                    
-                    join_future.await;
+                    if let Some(runtime_context) = &self.base.runtime_context {
+                        if let Some(compute_pool) = runtime_context.compute_pool() {
+                            // TODO: Use we should await this
+                            compute_pool.spawn_fifo(move || {
+                                func.join(&batch_clone, &right_batch).map(|_| ()).unwrap_or(())
+                            });
+                        }
+                    }
                     Ok(batch)
                 } else {
                     Ok(batch)
@@ -155,11 +156,14 @@ impl<F: JoinFunction + Clone + 'static> Operator for JoinOperator<F> {
                     let batch_clone = batch.clone();
                     let left_batch = left_batch.clone();
                     
-                    let join_future = tokio::task::spawn_blocking(move || {
-                        func.join(&left_batch, &batch_clone).map(|_| ()).unwrap_or(())
-                    });
-                    
-                    join_future.await;
+                    if let Some(runtime_context) = &self.base.runtime_context {
+                        if let Some(compute_pool) = runtime_context.compute_pool() {
+                            // TODO: Use we should await this
+                            compute_pool.spawn_fifo(move || {
+                                func.join(&left_batch, &batch_clone).map(|_| ()).unwrap_or(())
+                            });
+                        }
+                    }
                     Ok(batch)
                 } else {
                     Ok(batch)

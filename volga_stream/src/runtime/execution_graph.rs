@@ -65,7 +65,7 @@ impl Clone for OperatorOrConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ExecutionVertex {
     pub vertex_id: String,
     pub operator: OperatorOrConfig,
@@ -92,6 +92,13 @@ impl ExecutionVertex {
 
     pub fn add_output_edge(&mut self, edge_id: String) {
         self.output_edges.push(edge_id);
+    }
+
+    pub fn take_operator(&mut self) -> Option<Box<dyn Operator>> {
+        match std::mem::replace(&mut self.operator, OperatorOrConfig::Config(HashMap::new())) {
+            OperatorOrConfig::Operator(op) => Some(op),
+            _ => None,
+        }
     }
 }
 
