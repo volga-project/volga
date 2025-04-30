@@ -2,7 +2,6 @@ pub mod collector;
 pub mod function;
 pub mod operator;
 pub mod partition;
-pub mod processor;
 pub mod runtime_context;
 pub mod source;
 pub mod task;

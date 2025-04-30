@@ -1,15 +1,14 @@
-use crate::common::record::StreamRecord;
 use anyhow::{Error, Result};
 use std::sync::Mutex;
 use lru::LruCache;
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
-use crate::common::record::Value;
 use std::num::NonZeroUsize;
+use crate::common::data_batch::DataBatch;
 
 pub trait Partition: Send + Sync {
-    fn partition(&self, record: &StreamRecord, num_partition: usize) -> Result<Vec<usize>>;
+    fn partition(&self, batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>>;
 }
 
 // BroadcastPartition
@@ -26,7 +25,7 @@ impl BroadcastPartition {
 }
 
 impl Partition for BroadcastPartition {
-    fn partition(&self, _record: &StreamRecord, num_partition: usize) -> Result<Vec<usize>> {
+    fn partition(&self, _batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>> {
         let mut partitions = self.partitions.lock().unwrap();
         if partitions.len() != num_partition {
             *partitions = (0..num_partition).collect();
@@ -38,7 +37,7 @@ impl Partition for BroadcastPartition {
 // KeyPartition
 pub struct KeyPartition {
     partitions: Mutex<Vec<usize>>,
-    hash_cache: Mutex<LruCache<Value, usize>>,
+    hash_cache: Mutex<LruCache<String, usize>>,
 }
 
 impl KeyPartition {
@@ -49,7 +48,7 @@ impl KeyPartition {
         }
     }
 
-    fn hash(&self, key: &Value) -> usize {
+    fn hash(&self, key: &str) -> usize {
         let mut cache = self.hash_cache.lock().unwrap();
         if let Some(&hash) = cache.get(key) {
             return hash;
@@ -59,15 +58,15 @@ impl KeyPartition {
         key.hash(&mut hasher);
         let hash = hasher.finish() as usize;
         
-        cache.put(key.clone(), hash);
+        cache.put(key.to_string(), hash);
         hash
     }
 }
 
 impl Partition for KeyPartition {
-    fn partition(&self, record: &StreamRecord, num_partition: usize) -> Result<Vec<usize>> {
-        let key = record.key().ok_or_else(|| anyhow::anyhow!("KeyPartition expects a keyed record"))?;
-        let hash = self.hash(key);
+    fn partition(&self, batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>> {
+        let key = batch.key()?;
+        let hash = self.hash(&key);
         let mut partitions = self.partitions.lock().unwrap();
         partitions[0] = hash % num_partition;
         Ok(partitions.clone())
@@ -90,7 +89,7 @@ impl RoundRobinPartition {
 }
 
 impl Partition for RoundRobinPartition {
-    fn partition(&self, _record: &StreamRecord, num_partition: usize) -> Result<Vec<usize>> {
+    fn partition(&self, _batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed) % num_partition;
         let mut partitions = self.partitions.lock().unwrap();
         partitions[0] = seq;
@@ -112,7 +111,7 @@ impl ForwardPartition {
 }
 
 impl Partition for ForwardPartition {
-    fn partition(&self, _record: &StreamRecord, _num_partition: usize) -> Result<Vec<usize>> {
+    fn partition(&self, _batch: &DataBatch, _num_partition: usize) -> Result<Vec<usize>> {
         Ok(self.partitions.clone())
     }
 }

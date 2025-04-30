@@ -1,13 +1,14 @@
 use crate::runtime::{collector::Collector, runtime_context::RuntimeContext};
-use crate::common::record::StreamRecord;
-use crate::common::record::Value;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
-use futures::future::join_all;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use crate::common::data_batch::DataBatch;
+// use arrow::record_batch::RecordBatch;
 
 #[async_trait]
 pub trait SourceContext: Send + Sync {
-    async fn collect_batch(&mut self, records: Vec<StreamRecord>) -> Result<()>;
+    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()>;
     fn get_runtime_context(&self) -> &RuntimeContext;
 }
 
@@ -15,6 +16,7 @@ pub struct SourceContextImpl {
     pub collectors: Vec<Box<dyn Collector>>,
     pub runtime_context: RuntimeContext,
     pub timestamp_assigner: Option<Box<dyn TimestampAssigner>>,
+    pub watermark_generator: Option<Box<dyn WatermarkGenerator>>,
     pub num_records: Option<i64>,
     pub num_fetched_records: i64,
     pub finished: bool,
@@ -25,12 +27,14 @@ impl SourceContextImpl {
         collectors: Vec<Box<dyn Collector>>,
         runtime_context: RuntimeContext,
         timestamp_assigner: Option<Box<dyn TimestampAssigner>>,
+        watermark_generator: Option<Box<dyn WatermarkGenerator>>,
         num_records: Option<i64>,
     ) -> Self {
         Self {
             collectors,
             runtime_context,
             timestamp_assigner,
+            watermark_generator,
             num_records,
             num_fetched_records: 0,
             finished: false,
@@ -40,30 +44,35 @@ impl SourceContextImpl {
 
 #[async_trait]
 impl SourceContext for SourceContextImpl {
-    async fn collect_batch(&mut self, records: Vec<StreamRecord>) -> Result<()> {
+    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()> {
         if self.finished {
             return Ok(());
         }
 
-        let records = if let Some(assigner) = &self.timestamp_assigner {
-            join_all(records.into_iter()
-                .map(|record| assigner.assign_timestamp(record)))
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?
-        } else {
-            records
-        };
-
-        for collector in &mut self.collectors {
-            collector.collect_batch(records.clone()).await?;
+        let mut batch = batch;
+        
+        // Apply timestamp assigner if present
+        if let Some(assigner) = &self.timestamp_assigner {
+            assigner.assign_timestamp(&mut batch);
         }
 
-        self.num_fetched_records += records.len() as i64;
+        // Collect batch through all collectors
+        for collector in &mut self.collectors {
+            collector.collect_batch(batch.clone()).await?;
+        }
+
+        self.num_fetched_records += batch.record_batch().len() as i64;
 
         if let Some(num_records) = self.num_records {
             if self.num_fetched_records >= num_records {
                 self.finished = true;
+            }
+        }
+
+        // Update watermark if generator is present
+        if let Some(generator) = &self.watermark_generator {
+            if let Some(watermark) = generator.generate_watermark(&batch) {
+                // TODO: Update watermark in runtime context
             }
         }
 
@@ -75,43 +84,39 @@ impl SourceContext for SourceContextImpl {
     }
 }
 
-#[async_trait]
 pub trait TimestampAssigner: Send + Sync {
-    async fn assign_timestamp(&self, record: StreamRecord) -> Result<StreamRecord>;
+    fn assign_timestamp(&self, batch: &mut DataBatch);
+}
+
+pub trait WatermarkGenerator: Send + Sync {
+    fn generate_watermark(&self, batch: &DataBatch) -> Option<u64>;
 }
 
 pub struct EventTimeAssigner<F> 
 where 
-    F: Fn(&StreamRecord) -> Result<i64> + Send + Sync 
+    F: Fn(&DataBatch) -> Result<i64> + Send + Sync 
 {
     func: F,
 }
 
 impl<F> EventTimeAssigner<F>
 where 
-    F: Fn(&StreamRecord) -> Result<i64> + Send + Sync 
+    F: Fn(&DataBatch) -> Result<i64> + Send + Sync 
 {
     pub fn new(func: F) -> Self {
         Self { func }
     }
 }
 
-#[async_trait]
 impl<F> TimestampAssigner for EventTimeAssigner<F>
 where 
-    F: Fn(&StreamRecord) -> Result<i64> + Send + Sync 
+    F: Fn(&DataBatch) -> Result<i64> + Send + Sync 
 {
-    async fn assign_timestamp(&self, mut record: StreamRecord) -> Result<StreamRecord> {
-        let ts = (self.func)(&record)?;
-        match record {
-            StreamRecord::Record(ref mut r) => {
-                r.base.event_time = Some(ts);
-            }
-            StreamRecord::KeyedRecord(ref mut kr) => {
-                kr.base.event_time = Some(ts);
-            }
+    fn assign_timestamp(&self, batch: &mut DataBatch) {
+        if let Ok(ts) = (self.func)(batch) {
+            // TODO: Update timestamp in the batch
+            // This will require modifying the RecordBatch to add/update timestamp column
         }
-        Ok(record)
     }
 }
 
@@ -124,29 +129,18 @@ impl DefaultEventTimeAssigner {
         Self { timestamp_field }
     }
 
-    fn extract_timestamp(&self, value: &Value) -> Result<i64> {
-        match value {
-            Value::String(s) => {
-                s.parse::<i64>()
-                    .map_err(|_| Error::msg("Failed to parse timestamp from string"))
-            }
-            _ => Err(Error::msg("Value is not a string"))
-        }
+    fn extract_timestamp(&self, batch: &DataBatch) -> Result<i64> {
+        // TODO: Extract timestamp from the specified column in the RecordBatch
+        // This will require accessing the column by name and converting to i64
+        Err(Error::msg("Not implemented"))
     }
 }
 
-#[async_trait]
 impl TimestampAssigner for DefaultEventTimeAssigner {
-    async fn assign_timestamp(&self, mut record: StreamRecord) -> Result<StreamRecord> {
-        let ts = self.extract_timestamp(record.value())?;
-        match record {
-            StreamRecord::Record(ref mut r) => {
-                r.base.event_time = Some(ts);
-            }
-            StreamRecord::KeyedRecord(ref mut kr) => {
-                kr.base.event_time = Some(ts);
-            }
+    fn assign_timestamp(&self, batch: &mut DataBatch) {
+        if let Ok(ts) = self.extract_timestamp(batch) {
+            // TODO: Update timestamp in the batch
+            // This will require modifying the RecordBatch to add/update timestamp column
         }
-        Ok(record)
     }
 }

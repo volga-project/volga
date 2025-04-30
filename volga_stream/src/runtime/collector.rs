@@ -1,15 +1,15 @@
 use async_trait::async_trait;
-use crate::common::record::StreamRecord;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use crate::transport::transport::DataWriter;
 use crate::runtime::partition::Partition;
 use tokio::task::JoinSet;
+use crate::common::data_batch::DataBatch;
 
 #[async_trait]
 pub trait Collector: Send + Sync {
-    async fn collect_batch(&mut self, records: Vec<StreamRecord>) -> Result<()>;
+    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()>;
 }
 
 // Collection collector
@@ -25,11 +25,11 @@ impl CollectionCollector {
 
 #[async_trait]
 impl Collector for CollectionCollector {
-    async fn collect_batch(&mut self, records: Vec<StreamRecord>) -> Result<()> {
+    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()> {
         let mut all_futures = Vec::new();
         for collector in &mut self.collectors {
-            let records_clone = records.clone();
-            all_futures.push(collector.collect_batch(records_clone));
+            let batch_clone = batch.clone();
+            all_futures.push(collector.collect_batch(batch_clone));
         }
 
         futures::future::try_join_all(all_futures).await?;
@@ -60,24 +60,25 @@ impl OutputCollector {
 
 #[async_trait]
 impl Collector for OutputCollector {
-    async fn collect_batch(&mut self, records: Vec<StreamRecord>) -> Result<()> {
-        if records.is_empty() {
+    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()> {
+        if batch.record_batch().len() == 0 {
             return Ok(());
         }
 
         let num_partitions = self.output_channel_ids.len();
-        let mut partitioned_records: Vec<Vec<StreamRecord>> = vec![Vec::new(); num_partitions];
+        let mut partitioned_batches: Vec<DataBatch> = vec![DataBatch::new(None, batch.record_batch().clone()); num_partitions];
         
-        for record in records {
-            let partitions = self.partition.partition(&record, num_partitions)?;
+        // Partition the batch based on the key
+        if let Ok(key) = batch.key() {
+            let partitions = self.partition.partition(&batch, num_partitions)?;
             for partition_idx in partitions {
-                partitioned_records[partition_idx].push(record.clone());
+                partitioned_batches[partition_idx] = batch.clone();
             }
         }
 
         let mut join_set = JoinSet::new();
-        for (partition_idx, partition_records) in partitioned_records.into_iter().enumerate() {
-            if partition_records.is_empty() {
+        for (partition_idx, partition_batch) in partitioned_batches.into_iter().enumerate() {
+            if partition_batch.record_batch().len() == 0 {
                 continue;
             }
             
@@ -86,7 +87,7 @@ impl Collector for OutputCollector {
             
             join_set.spawn(async move {
                 let mut writer = data_writer.lock().await;
-                writer.write_batch(&channel_id, partition_records).await
+                writer.write_batch(&channel_id, partition_batch).await
             });
         }
 

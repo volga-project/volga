@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 path = "src/lib.rs"
 
 [dependencies]
-pyo3 = {version = "0.18.3", features = ["extension-module"]}
+pyo3 = {version = "0.20.3", features = ["extension-module"]}
 zmq = "0.10.0"
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.68"
@@ -30,6 +30,8 @@ itertools = "0.13.0"
 async-trait = "0.1"
 anyhow = "1.0"
 tokio = { version = "1.0", features = ["full"] }
+tokio-rayon = "2.1.0"
 lru = "0.12"
 futures = "0.3"
 ordered-float = { version = "3.7", features = ["serde"] }
+# arrow = "42.0.0"

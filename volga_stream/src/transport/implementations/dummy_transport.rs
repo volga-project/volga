@@ -1,7 +1,7 @@
 use async_trait::async_trait;
-use crate::common::record::StreamRecord;
 use anyhow::Result;
 use crate::transport::transport::{DataReader, DataWriter};
+use crate::common::data_batch::DataBatch;
 
 pub struct DummyDataReader;
 
@@ -13,7 +13,7 @@ impl DummyDataReader {
 
 #[async_trait]
 impl DataReader for DummyDataReader {
-    async fn read_batch(&mut self, _max_batch_size: usize) -> Result<Option<Vec<StreamRecord>>> {
+    async fn read_batch(&mut self, _max_batch_size: usize) -> Result<Option<DataBatch>> {
         Ok(None)
     }
 }
@@ -28,7 +28,7 @@ impl DummyDataWriter {
 
 #[async_trait]
 impl DataWriter for DummyDataWriter {
-    async fn write_batch(&mut self, _channel_id: &str, _records: Vec<StreamRecord>) -> Result<()> {
+    async fn write_batch(&mut self, _channel_id: &str, _batch: DataBatch) -> Result<()> {
         Ok(())
     }
 } 

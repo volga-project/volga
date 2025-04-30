@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use crate::common::record::StreamRecord;
+use crate::common::data_batch::DataBatch;
 use anyhow::Result;
 use std::sync::Arc;
 use crate::transport::channel::Channel;
@@ -42,12 +42,12 @@ impl Default for DataWriterConfig {
 
 #[async_trait]
 pub trait DataReader: Send + Sync {
-    async fn read_batch(&mut self, max_batch_size: usize) -> Result<Option<Vec<StreamRecord>>>;
+    async fn read_batch(&mut self, max_batch_size: usize) -> Result<Option<DataBatch>>;
 }
 
 #[async_trait]
 pub trait DataWriter: Send + Sync {
-    async fn write_batch(&mut self, channel_id: &str, records: Vec<StreamRecord>) -> Result<()>;
+    async fn write_batch(&mut self, channel_id: &str, batch: DataBatch) -> Result<()>;
 }
 
 pub struct Transport {

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use crate::common::record::StreamRecord;
+use crate::common::data_batch::DataBatch;
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as TokioMutex;
@@ -14,7 +14,7 @@ pub struct NetworkDataReader {
     name: String,
     job_name: String,
     channels: Arc<Vec<Channel>>,
-    output_queue: Arc<TokioMutex<Vec<StreamRecord>>>,
+    output_queue: Arc<TokioMutex<Vec<DataBatch>>>,
     output_queue_capacity: usize,
     response_batch_period_ms: Option<usize>,
     running: Arc<AtomicBool>,
@@ -58,14 +58,13 @@ impl NetworkDataReader {
 
 #[async_trait]
 impl DataReader for NetworkDataReader {
-    async fn read_batch(&mut self, max_batch_size: usize) -> Result<Option<Vec<StreamRecord>>> {
+    async fn read_batch(&mut self, max_batch_size: usize) -> Result<Option<DataBatch>> {
         let mut queue = self.output_queue.lock().await;
         if queue.is_empty() {
             return Ok(None);
         }
 
-        let batch_size = std::cmp::min(max_batch_size, queue.len());
-        let batch = queue.drain(..batch_size).collect();
+        let batch = queue.remove(0);
         Ok(Some(batch))
     }
 }
@@ -78,7 +77,7 @@ pub struct NetworkDataWriter {
     in_flight_timeout_s: usize,
     max_capacity_bytes_per_channel: usize,
     running: Arc<AtomicBool>,
-    channel_queues: Arc<TokioMutex<HashMap<String, Vec<StreamRecord>>>>,
+    channel_queues: Arc<TokioMutex<HashMap<String, Vec<DataBatch>>>>,
 }
 
 impl NetworkDataWriter {
@@ -119,10 +118,10 @@ impl NetworkDataWriter {
 
 #[async_trait]
 impl DataWriter for NetworkDataWriter {
-    async fn write_batch(&mut self, channel_id: &str, records: Vec<StreamRecord>) -> Result<()> {
+    async fn write_batch(&mut self, channel_id: &str, batch: DataBatch) -> Result<()> {
         let mut queues = self.channel_queues.lock().await;
         let queue = queues.entry(channel_id.to_string()).or_insert_with(Vec::new);
-        queue.extend(records);
+        queue.push(batch);
         Ok(())
     }
 } 
