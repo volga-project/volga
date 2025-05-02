@@ -1,14 +1,14 @@
-use crate::runtime::{runtime_context::RuntimeContext, collector::{OutputCollector, Collector}, execution_graph::ExecutionVertex};
+use crate::runtime::{runtime_context::RuntimeContext, collector::{OutputCollector, Collector}, execution_graph::{ExecutionVertex, OperatorConfig}};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use crate::transport::transport::{TransportConfig, Transport};
-use crate::transport::transport_factory::create_transport;
-use crate::runtime::operator::Operator;
+use tokio::sync::{Mutex, mpsc};
+use crate::transport::transport_client::{TransportClient, DataWriter};
+use crate::runtime::operator::{Operator, MapOperator, JoinOperator, SinkOperator, SourceOperator};
 use crate::common::data_batch::DataBatch;
 use tokio_rayon::rayon::ThreadPool;
+use std::collections::HashMap;
 
 #[async_trait]
 pub trait Task: Send + Sync {
@@ -19,33 +19,65 @@ pub trait Task: Send + Sync {
 
 pub struct StreamTask {
     operator: Box<dyn Operator>,
-    transport: Transport,
+    transport_client: TransportClient,
     runtime_context: Option<RuntimeContext>,
     collector: Option<Box<dyn Collector>>,
     running: bool,
-    fetch_interval_ms: u64,
 }
 
 impl StreamTask {
-    const BATCH_SIZE: usize = 1000;
-    const READ_RETRY_PERIOD_MS: u64 = 1;
     const DEFAULT_FETCH_INTERVAL_MS: u64 = 1;
     
-    pub fn new(
+    pub async fn new(
         vertex_id: String,
-        operator: Box<dyn Operator>,
-        transport_config: TransportConfig,
+        operator_config: OperatorConfig,
         runtime_context: RuntimeContext,
-        fetch_interval_ms: Option<u64>,
     ) -> Result<Self> {
+        // Create operator based on config
+        let operator: Box<dyn Operator> = match operator_config {
+            OperatorConfig::MapConfig(_) => {
+                Box::new(MapOperator::new())
+            }
+            OperatorConfig::JoinConfig(_) => {
+                Box::new(JoinOperator::new())
+            }
+            OperatorConfig::SinkConfig(_) => {
+                Box::new(SinkOperator::new())
+            }
+            OperatorConfig::SourceConfig(_) => {
+                Box::new(SourceOperator::new(Vec::new()))
+            }
+        };
+
         Ok(Self {
             operator,
-            transport: create_transport(transport_config),
+            transport_client: TransportClient::new(),
             runtime_context: Some(runtime_context),
             collector: None,
             running: true,
-            fetch_interval_ms: fetch_interval_ms.unwrap_or(Self::DEFAULT_FETCH_INTERVAL_MS),
         })
+    }
+
+    pub fn transport_client(&self) -> TransportClient {
+        self.transport_client.clone()
+    }
+
+    pub fn register_channels(
+        &mut self,
+        input_channels: HashMap<String, Arc<Mutex<mpsc::Receiver<DataBatch>>>>,
+        output_channels: HashMap<String, Arc<Mutex<mpsc::Sender<DataBatch>>>>,
+    ) -> Result<()> {
+        // Register input channels with the data reader
+        for (channel_id, receiver) in input_channels {
+            self.transport_client.register_in_channel(channel_id, receiver)?;
+        }
+
+        // Register output channels with the data writer
+        for (channel_id, sender) in output_channels {
+            self.transport_client.register_out_channel(channel_id, sender)?;
+        }
+
+        Ok(())
     }
 }
 
@@ -53,7 +85,7 @@ impl StreamTask {
 impl Task for StreamTask {
     async fn open(&mut self) -> Result<()> {
         // Create OutputCollector with the data_writer if it exists
-        let collector = if let Some(writer) = self.transport.writer.take() {
+        let collector = if let Some(writer) = self.transport_client.writer() {
             Some(Box::new(OutputCollector::new(
                 Arc::new(Mutex::new(writer)),
                 vec![], // TODO: Get channel IDs from runtime context
@@ -65,7 +97,7 @@ impl Task for StreamTask {
 
         // Open the operator with runtime context
         if let Some(runtime_context) = self.runtime_context.take() {
-            self.operator.open(runtime_context).await?;
+            self.operator.open(&runtime_context).await?;
         }
         
         self.collector = collector;
@@ -81,17 +113,15 @@ impl Task for StreamTask {
                             collector.collect_batch(batch).await?;
                         }
                     }
-                    tokio::time::sleep(Duration::from_millis(self.fetch_interval_ms)).await;
                 }
                 crate::runtime::operator::OperatorType::PROCESSOR => {
-                    let reader = self.transport.reader.as_mut().expect("Transport reader must be initialized");
-                    if let Some(batch) = reader.read_batch(Self::BATCH_SIZE).await? {
-                        let processed_batch = self.operator.process_batch(batch, None).await?;
-                        if let Some(collector) = &mut self.collector {
-                            collector.collect_batch(processed_batch).await?;
+                    if let Some(reader) = self.transport_client.reader() {
+                        if let Some(batch) = reader.read_batch().await? {
+                            let processed_batch = self.operator.process_batch(batch, None).await?;
+                            if let Some(collector) = &mut self.collector {
+                                collector.collect_batch(processed_batch).await?;
+                            }
                         }
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(Self::READ_RETRY_PERIOD_MS)).await;
                     }
                 }
             }

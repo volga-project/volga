@@ -429,6 +429,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lazy_static"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
+
+[[package]]
 name = "libc"
 version = "0.2.172"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -968,6 +974,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "66a539a9ad6d5d281510d5bd368c973d636c02dbf8a67300bfb6b950696ad7df"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "toml"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1046,10 +1065,12 @@ dependencies = [
  "crossbeam-skiplist",
  "futures",
  "itertools",
+ "lazy_static",
  "lru",
  "ordered-float",
  "pyo3",
  "rand 0.5.6",
+ "rayon",
  "rmp",
  "rmp-serde",
  "rmpv",
@@ -1058,6 +1079,7 @@ dependencies = [
  "serde_yaml",
  "tokio",
  "tokio-rayon",
+ "tokio-util",
  "varint",
  "zmq",
 ]

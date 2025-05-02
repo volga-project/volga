@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::transport::transport::DataWriter;
+use crate::transport::transport_client::DataWriter;
 use crate::runtime::partition::Partition;
 use tokio::task::JoinSet;
 use crate::common::data_batch::DataBatch;
@@ -39,14 +39,14 @@ impl Collector for CollectionCollector {
 
 // Output collector
 pub struct OutputCollector {
-    data_writer: Arc<Mutex<Box<dyn DataWriter>>>,
+    data_writer: Arc<Mutex<DataWriter>>,
     output_channel_ids: Vec<String>,
     partition: Box<dyn Partition>,
 }
 
 impl OutputCollector {
     pub fn new(
-        data_writer: Arc<Mutex<Box<dyn DataWriter>>>,
+        data_writer: Arc<Mutex<DataWriter>>,
         output_channel_ids: Vec<String>,
         partition: Box<dyn Partition>,
     ) -> Self {
@@ -61,7 +61,7 @@ impl OutputCollector {
 #[async_trait]
 impl Collector for OutputCollector {
     async fn collect_batch(&mut self, batch: DataBatch) -> Result<()> {
-        if batch.record_batch().len() == 0 {
+        if batch.record_batch().is_empty() {
             return Ok(());
         }
 
@@ -78,7 +78,7 @@ impl Collector for OutputCollector {
 
         let mut join_set = JoinSet::new();
         for (partition_idx, partition_batch) in partitioned_batches.into_iter().enumerate() {
-            if partition_batch.record_batch().len() == 0 {
+            if partition_batch.record_batch().is_empty() {
                 continue;
             }
             

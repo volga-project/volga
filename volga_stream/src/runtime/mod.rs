@@ -1,5 +1,4 @@
 pub mod collector;
-pub mod function;
 pub mod operator;
 pub mod partition;
 pub mod runtime_context;

@@ -65,10 +65,39 @@ impl Clone for OperatorOrConfig {
     }
 }
 
-#[derive(Debug)]
+pub enum OperatorConfig {
+    MapConfig(HashMap<String, String>),
+    JoinConfig(HashMap<String, String>),
+    SinkConfig(HashMap<String, String>),
+    SourceConfig(HashMap<String, String>),
+}
+
+impl fmt::Debug for OperatorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OperatorConfig::MapConfig(config) => f.debug_tuple("MapConfig").field(config).finish(),
+            OperatorConfig::JoinConfig(config) => f.debug_tuple("JoinConfig").field(config).finish(),
+            OperatorConfig::SinkConfig(config) => f.debug_tuple("SinkConfig").field(config).finish(),
+            OperatorConfig::SourceConfig(config) => f.debug_tuple("SourceConfig").field(config).finish(),
+        }
+    }
+}
+
+impl Clone for OperatorConfig {
+    fn clone(&self) -> Self {
+        match self {
+            OperatorConfig::MapConfig(config) => OperatorConfig::MapConfig(config.clone()),
+            OperatorConfig::JoinConfig(config) => OperatorConfig::JoinConfig(config.clone()),
+            OperatorConfig::SinkConfig(config) => OperatorConfig::SinkConfig(config.clone()),
+            OperatorConfig::SourceConfig(config) => OperatorConfig::SourceConfig(config.clone()),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct ExecutionVertex {
     pub vertex_id: String,
-    pub operator: OperatorOrConfig,
+    pub operator_config: OperatorConfig,
     pub input_edges: Vec<String>,
     pub output_edges: Vec<String>,
 }
@@ -76,11 +105,11 @@ pub struct ExecutionVertex {
 impl ExecutionVertex {
     pub fn new(
         vertex_id: String,
-        operator: OperatorOrConfig,
+        operator_config: OperatorConfig,
     ) -> Self {
         Self {
             vertex_id,
-            operator,
+            operator_config,
             input_edges: Vec::new(),
             output_edges: Vec::new(),
         }
@@ -92,13 +121,6 @@ impl ExecutionVertex {
 
     pub fn add_output_edge(&mut self, edge_id: String) {
         self.output_edges.push(edge_id);
-    }
-
-    pub fn take_operator(&mut self) -> Option<Box<dyn Operator>> {
-        match std::mem::replace(&mut self.operator, OperatorOrConfig::Config(HashMap::new())) {
-            OperatorOrConfig::Operator(op) => Some(op),
-            _ => None,
-        }
     }
 }
 
