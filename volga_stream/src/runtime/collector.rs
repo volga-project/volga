@@ -6,9 +6,10 @@ use crate::transport::transport_client::DataWriter;
 use crate::runtime::partition::Partition;
 use tokio::task::JoinSet;
 use crate::common::data_batch::DataBatch;
+use std::any::Any;
 
 #[async_trait]
-pub trait Collector: Send + Sync {
+pub trait Collector: Send + Sync + Any {
     async fn collect_batch(&mut self, batch: DataBatch) -> Result<()>;
 }
 
@@ -47,14 +48,17 @@ pub struct OutputCollector {
 impl OutputCollector {
     pub fn new(
         data_writer: Arc<Mutex<DataWriter>>,
-        output_channel_ids: Vec<String>,
         partition: Box<dyn Partition>,
     ) -> Self {
         Self {
             data_writer,
-            output_channel_ids,
+            output_channel_ids: Vec::new(),
             partition,
         }
+    }
+
+    pub fn register_output_channel_id(&mut self, channel_id: String) {
+        self.output_channel_ids.push(channel_id);
     }
 }
 

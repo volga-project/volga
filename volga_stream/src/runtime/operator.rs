@@ -17,14 +17,6 @@ pub enum OperatorType {
     PROCESSOR,
 }
 
-#[derive(Debug, Clone)]
-pub enum OperatorConfig {
-    MapConfig(HashMap<String, String>),
-    JoinConfig(HashMap<String, String>),
-    SinkConfig(HashMap<String, String>),
-    SourceConfig(HashMap<String, String>),
-}
-
 #[async_trait]
 pub trait Operator: Send + Sync {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
@@ -181,10 +173,18 @@ pub struct SinkOperator {
 }
 
 impl SinkOperator {
-    pub fn new() -> Self {
+    pub fn new(config: HashMap<String, String>) -> Self {
+        // TODO hacky way to pass pointer as string, we need to propely configure operators
+        let batches = if let Some(output_ptr) = config.get("output") {
+            let ptr = output_ptr.parse::<usize>().unwrap_or(0);
+            unsafe { Arc::from_raw(ptr as *const Mutex<Vec<DataBatch>>) }
+        } else {
+            Arc::new(Mutex::new(Vec::new()))
+        };
+
         Self {
             base: BaseOperator::new(),
-            batches: Arc::new(Mutex::new(Vec::new())),
+            batches,
         }
     }
 
@@ -229,7 +229,13 @@ pub struct SourceOperator {
 }
 
 impl SourceOperator {
-    pub fn new(batches: Vec<DataBatch>) -> Self {
+    pub fn new(config: HashMap<String, String>) -> Self {
+        let batches = if let Some(test_data) = config.get("test_data") {
+            serde_json::from_str(test_data).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         Self {
             base: BaseOperator::new(),
             batches: Arc::new(Mutex::new(batches)),

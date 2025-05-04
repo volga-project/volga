@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use anyhow::Result;
-use crate::runtime::partition::Partition;
+use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use std::fmt;
 use crate::runtime::operator::Operator;
@@ -9,7 +9,8 @@ pub struct ExecutionEdge {
     pub source_vertex_id: String,
     pub target_vertex_id: String,
     pub edge_id: String,
-    pub partition: Box<dyn Partition>,
+    pub job_edge_id: String,
+    pub partition_type: PartitionType,
     pub channel: Channel,
 }
 
@@ -19,24 +20,26 @@ impl fmt::Debug for ExecutionEdge {
             .field("source_vertex_id", &self.source_vertex_id)
             .field("target_vertex_id", &self.target_vertex_id)
             .field("edge_id", &self.edge_id)
-            .field("partition", &"<dyn Partition>")
+            .field("job_edge_id", &self.job_edge_id)
+            .field("partition_type", &self.partition_type)
             .field("channel", &self.channel)
             .finish()
     }
 }
-
+ 
 impl ExecutionEdge {
     pub fn new(
         source_vertex_id: String,
         target_vertex_id: String,
-        partition: Box<dyn Partition>,
+        partition_type: PartitionType,
         channel: Channel,
     ) -> Self {
         Self {
             source_vertex_id: source_vertex_id.clone(),
             target_vertex_id: target_vertex_id.clone(),
             edge_id: format!("{}-{}", source_vertex_id, target_vertex_id),
-            partition,
+            job_edge_id: format!("{}-{}", source_vertex_id, target_vertex_id),
+            partition_type,
             channel,
         }
     }

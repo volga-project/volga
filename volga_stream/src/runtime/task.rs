@@ -1,4 +1,4 @@
-use crate::runtime::{runtime_context::RuntimeContext, collector::{OutputCollector, Collector}, execution_graph::{ExecutionVertex, OperatorConfig}};
+use crate::runtime::{runtime_context::RuntimeContext, collector::{OutputCollector, Collector}, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::Partition};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::time::Duration;
@@ -9,6 +9,8 @@ use crate::runtime::operator::{Operator, MapOperator, JoinOperator, SinkOperator
 use crate::common::data_batch::DataBatch;
 use tokio_rayon::rayon::ThreadPool;
 use std::collections::HashMap;
+use std::any::Any;
+use futures::future::join_all;
 
 #[async_trait]
 pub trait Task: Send + Sync {
@@ -18,42 +20,35 @@ pub trait Task: Send + Sync {
 }
 
 pub struct StreamTask {
+    vertex_id: String,
     operator: Box<dyn Operator>,
+    runtime_context: RuntimeContext,
     transport_client: TransportClient,
-    runtime_context: Option<RuntimeContext>,
-    collector: Option<Box<dyn Collector>>,
+    collectors: HashMap<String, Box<dyn Collector>>,
     running: bool,
 }
 
 impl StreamTask {
-    const DEFAULT_FETCH_INTERVAL_MS: u64 = 1;
     
     pub async fn new(
         vertex_id: String,
         operator_config: OperatorConfig,
         runtime_context: RuntimeContext,
     ) -> Result<Self> {
-        // Create operator based on config
         let operator: Box<dyn Operator> = match operator_config {
-            OperatorConfig::MapConfig(_) => {
-                Box::new(MapOperator::new())
-            }
-            OperatorConfig::JoinConfig(_) => {
-                Box::new(JoinOperator::new())
-            }
-            OperatorConfig::SinkConfig(_) => {
-                Box::new(SinkOperator::new())
-            }
-            OperatorConfig::SourceConfig(_) => {
-                Box::new(SourceOperator::new(Vec::new()))
-            }
+            OperatorConfig::MapConfig(_) => Box::new(MapOperator::new()),
+            OperatorConfig::JoinConfig(_) => Box::new(JoinOperator::new()),
+            OperatorConfig::SinkConfig(config) => Box::new(SinkOperator::new(config)),
+            OperatorConfig::SourceConfig(config) => Box::new(SourceOperator::new(config)),
         };
-
+        let transport_client = TransportClient::new();
+        
         Ok(Self {
+            vertex_id,
             operator,
-            transport_client: TransportClient::new(),
-            runtime_context: Some(runtime_context),
-            collector: None,
+            runtime_context,
+            transport_client,
+            collectors: HashMap::new(),
             running: true,
         })
     }
@@ -62,21 +57,34 @@ impl StreamTask {
         self.transport_client.clone()
     }
 
-    pub fn register_channels(
+    pub fn register_output_channel(
         &mut self,
-        input_channels: HashMap<String, Arc<Mutex<mpsc::Receiver<DataBatch>>>>,
-        output_channels: HashMap<String, Arc<Mutex<mpsc::Sender<DataBatch>>>>,
+        channel_id: String,
+        partition: Box<dyn Partition>,
+        target_operator_id: String,
     ) -> Result<()> {
-        // Register input channels with the data reader
-        for (channel_id, receiver) in input_channels {
-            self.transport_client.register_in_channel(channel_id, receiver)?;
+        let collector = self.collectors.entry(target_operator_id).or_insert_with(|| {
+            let data_writer = Arc::new(Mutex::new(DataWriter::new()));
+            Box::new(OutputCollector::new(
+                data_writer,
+                partition,
+            )) as Box<dyn Collector>
+        });
+
+        if let Some(output_collector) = (collector.as_mut() as &mut dyn Any).downcast_mut::<OutputCollector>() {
+            output_collector.register_output_channel_id(channel_id);
         }
 
-        // Register output channels with the data writer
-        for (channel_id, sender) in output_channels {
-            self.transport_client.register_out_channel(channel_id, sender)?;
-        }
+        Ok(())
+    }
 
+    async fn collect_batch_parallel(&mut self, batch: DataBatch) -> Result<()> {
+        let mut futures = Vec::new();
+        for collector in self.collectors.values_mut() {
+            let batch_clone = batch.clone();
+            futures.push(collector.collect_batch(batch_clone));
+        }
+        join_all(futures).await.into_iter().collect::<Result<Vec<()>>>()?;
         Ok(())
     }
 }
@@ -84,23 +92,8 @@ impl StreamTask {
 #[async_trait]
 impl Task for StreamTask {
     async fn open(&mut self) -> Result<()> {
-        // Create OutputCollector with the data_writer if it exists
-        let collector = if let Some(writer) = self.transport_client.writer() {
-            Some(Box::new(OutputCollector::new(
-                Arc::new(Mutex::new(writer)),
-                vec![], // TODO: Get channel IDs from runtime context
-                Box::new(crate::runtime::partition::RoundRobinPartition::new()),
-            )) as Box<dyn Collector>)
-        } else {
-            None
-        };
-
         // Open the operator with runtime context
-        if let Some(runtime_context) = self.runtime_context.take() {
-            self.operator.open(&runtime_context).await?;
-        }
-        
-        self.collector = collector;
+        self.operator.open(&self.runtime_context).await?;
         Ok(())
     }
 
@@ -109,18 +102,14 @@ impl Task for StreamTask {
             match self.operator.operator_type() {
                 crate::runtime::operator::OperatorType::SOURCE => {
                     if let Some(batch) = self.operator.fetch().await? {
-                        if let Some(collector) = &mut self.collector {
-                            collector.collect_batch(batch).await?;
-                        }
+                        self.collect_batch_parallel(batch).await?;
                     }
                 }
-                crate::runtime::operator::OperatorType::PROCESSOR => {
+                _ => {
                     if let Some(reader) = self.transport_client.reader() {
                         if let Some(batch) = reader.read_batch().await? {
                             let processed_batch = self.operator.process_batch(batch, None).await?;
-                            if let Some(collector) = &mut self.collector {
-                                collector.collect_batch(processed_batch).await?;
-                            }
+                            self.collect_batch_parallel(processed_batch).await?;
                         }
                     }
                 }
@@ -131,6 +120,7 @@ impl Task for StreamTask {
 
     async fn close(&mut self) -> Result<()> {
         self.running = false;
-        self.operator.close().await
+        self.operator.close().await?;
+        Ok(())
     }
 }

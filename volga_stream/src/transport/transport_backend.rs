@@ -6,12 +6,11 @@ use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client::TransportClient;
 
-#[async_trait::async_trait]
 pub trait TransportBackend: Send + Sync {
-    async fn start(&mut self) -> Result<()>;
-    async fn close(&mut self) -> Result<()>;
-    async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_input: bool) -> Result<()>;
-    async fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()>;
+    fn start(&mut self) -> Result<()>;
+    fn close(&mut self) -> Result<()>;
+    fn register_channel(&mut self, vertex_id: String, channel: Channel, is_input: bool) -> Result<()>;
+    fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()>;
 }
 
 pub struct InMemoryTransportBackend {
@@ -28,17 +27,16 @@ impl InMemoryTransportBackend {
     }
 }
 
-#[async_trait::async_trait]
 impl TransportBackend for InMemoryTransportBackend {
-    async fn start(&mut self) -> Result<()> {
+    fn start(&mut self) -> Result<()> {
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<()> {
+    fn close(&mut self) -> Result<()> {
         Ok(())
     }
 
-    async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_in: bool) -> Result<()> {
+    fn register_channel(&mut self, vertex_id: String, channel: Channel, is_in: bool) -> Result<()> {
         // Only handle local channels
         let channel_id = match &channel {
             Channel::Local { channel_id } => channel_id.clone(),
@@ -67,7 +65,7 @@ impl TransportBackend for InMemoryTransportBackend {
         Ok(())
     }
 
-    async fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()> {
+    fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()> {
         self.clients.insert(vertex_id, client);
         Ok(())
     }

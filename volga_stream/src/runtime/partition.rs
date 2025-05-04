@@ -7,6 +7,23 @@ use std::sync::atomic::Ordering;
 use std::num::NonZeroUsize;
 use crate::common::data_batch::DataBatch;
 
+#[derive(Debug, Clone)]
+pub enum PartitionType {
+    Broadcast,
+    Key,
+    RoundRobin,
+    Forward,
+}
+
+pub fn create_partition(partition_type: PartitionType) -> Box<dyn Partition> {
+    match partition_type {
+        PartitionType::Broadcast => Box::new(BroadcastPartition::new()),
+        PartitionType::Key => Box::new(KeyPartition::new()),
+        PartitionType::RoundRobin => Box::new(RoundRobinPartition::new()),
+        PartitionType::Forward => Box::new(ForwardPartition::new()),
+    }
+}
+
 pub trait Partition: Send + Sync {
     fn partition(&self, batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>>;
 }
