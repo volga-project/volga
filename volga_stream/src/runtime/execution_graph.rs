@@ -4,6 +4,9 @@ use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use std::fmt;
 use crate::runtime::operator::Operator;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use crate::common::data_batch::DataBatch;
 
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
@@ -45,34 +48,21 @@ impl ExecutionEdge {
     }
 }
 
-pub enum OperatorOrConfig {
-    Operator(Box<dyn Operator>),
-    Config(HashMap<String, String>),
+#[derive(Debug, Clone)]
+pub enum SourceConfig {
+    VectorSourceConfig(Arc<Mutex<Vec<DataBatch>>>),
 }
 
-impl fmt::Debug for OperatorOrConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OperatorOrConfig::Operator(_) => f.debug_tuple("Operator").field(&"<dyn Operator>").finish(),
-            OperatorOrConfig::Config(config) => f.debug_tuple("Config").field(config).finish(),
-        }
-    }
-}
-
-impl Clone for OperatorOrConfig {
-    fn clone(&self) -> Self {
-        match self {
-            OperatorOrConfig::Operator(_) => panic!("Cannot clone Operator, use Config instead"),
-            OperatorOrConfig::Config(config) => OperatorOrConfig::Config(config.clone()),
-        }
-    }
+#[derive(Debug, Clone)]
+pub enum SinkConfig {
+    VectorSinkConfig(Arc<Mutex<Vec<DataBatch>>>),
 }
 
 pub enum OperatorConfig {
     MapConfig(HashMap<String, String>),
     JoinConfig(HashMap<String, String>),
-    SinkConfig(HashMap<String, String>),
-    SourceConfig(HashMap<String, String>),
+    SinkConfig(SinkConfig),
+    SourceConfig(SourceConfig),
 }
 
 impl fmt::Debug for OperatorConfig {

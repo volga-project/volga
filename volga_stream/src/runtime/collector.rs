@@ -7,13 +7,15 @@ use crate::runtime::partition::Partition;
 use tokio::task::JoinSet;
 use crate::common::data_batch::DataBatch;
 use std::any::Any;
+use std::fmt;
 
 #[async_trait]
-pub trait Collector: Send + Sync + Any {
+pub trait Collector: Send + Sync + Any + fmt::Debug {
     async fn collect_batch(&mut self, batch: DataBatch) -> Result<()>;
 }
 
 // Collection collector
+#[derive(Debug)]
 pub struct CollectionCollector {
     collectors: Vec<Box<dyn Collector>>,
 }
@@ -39,6 +41,7 @@ impl Collector for CollectionCollector {
 }
 
 // Output collector
+#[derive(Debug)]
 pub struct OutputCollector {
     data_writer: Arc<Mutex<DataWriter>>,
     output_channel_ids: Vec<String>,
@@ -57,7 +60,10 @@ impl OutputCollector {
         }
     }
 
-    pub fn register_output_channel_id(&mut self, channel_id: String) {
+    pub fn add_output_channel_id(&mut self, channel_id: String) {
+        if self.output_channel_ids.contains(&channel_id) {
+            panic!("Output channel id already exists");
+        }
         self.output_channel_ids.push(channel_id);
     }
 }

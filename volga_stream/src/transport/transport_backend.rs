@@ -5,12 +5,14 @@ use tokio::sync::{mpsc, Mutex};
 use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client::TransportClient;
+use async_trait::async_trait;
 
+#[async_trait]
 pub trait TransportBackend: Send + Sync {
-    fn start(&mut self) -> Result<()>;
-    fn close(&mut self) -> Result<()>;
-    fn register_channel(&mut self, vertex_id: String, channel: Channel, is_input: bool) -> Result<()>;
-    fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()>;
+    async fn start(&mut self) -> Result<()>;
+    async fn close(&mut self) -> Result<()>;
+    async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_input: bool) -> Result<()>;
+    async fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()>;
 }
 
 pub struct InMemoryTransportBackend {
@@ -27,16 +29,17 @@ impl InMemoryTransportBackend {
     }
 }
 
+#[async_trait]
 impl TransportBackend for InMemoryTransportBackend {
-    fn start(&mut self) -> Result<()> {
+    async fn start(&mut self) -> Result<()> {
         Ok(())
     }
 
-    fn close(&mut self) -> Result<()> {
+    async fn close(&mut self) -> Result<()> {
         Ok(())
     }
 
-    fn register_channel(&mut self, vertex_id: String, channel: Channel, is_in: bool) -> Result<()> {
+    async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_in: bool) -> Result<()> {
         // Only handle local channels
         let channel_id = match &channel {
             Channel::Local { channel_id } => channel_id.clone(),
@@ -56,16 +59,16 @@ impl TransportBackend for InMemoryTransportBackend {
         if let Some(client) = self.clients.get_mut(&vertex_id) {
             let (tx, rx) = self.mpsc_channels.get(&channel_id).unwrap().clone();
             if is_in {
-                client.register_in_channel(channel_id, rx)?;
+                client.register_in_channel(channel_id, rx).await?;
             } else {
-                client.register_out_channel(channel_id, tx)?;
+                client.register_out_channel(channel_id, tx).await?;
             }
         }
 
         Ok(())
     }
 
-    fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()> {
+    async fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()> {
         self.clients.insert(vertex_id, client);
         Ok(())
     }

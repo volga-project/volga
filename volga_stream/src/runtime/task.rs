@@ -1,16 +1,15 @@
 use crate::runtime::{runtime_context::RuntimeContext, collector::{OutputCollector, Collector}, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::Partition};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::time::Duration;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use crate::transport::transport_client::{TransportClient, DataWriter};
-use crate::runtime::operator::{Operator, MapOperator, JoinOperator, SinkOperator, SourceOperator};
+use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator};
 use crate::common::data_batch::DataBatch;
-use tokio_rayon::rayon::ThreadPool;
 use std::collections::HashMap;
 use std::any::Any;
 use futures::future::join_all;
+use std::fmt;
 
 #[async_trait]
 pub trait Task: Send + Sync {
@@ -21,7 +20,7 @@ pub trait Task: Send + Sync {
 
 pub struct StreamTask {
     vertex_id: String,
-    operator: Box<dyn Operator>,
+    operator: Operator,
     runtime_context: RuntimeContext,
     transport_client: TransportClient,
     collectors: HashMap<String, Box<dyn Collector>>,
@@ -30,18 +29,18 @@ pub struct StreamTask {
 
 impl StreamTask {
     
-    pub async fn new(
+    pub fn new(
         vertex_id: String,
         operator_config: OperatorConfig,
         runtime_context: RuntimeContext,
     ) -> Result<Self> {
-        let operator: Box<dyn Operator> = match operator_config {
-            OperatorConfig::MapConfig(_) => Box::new(MapOperator::new()),
-            OperatorConfig::JoinConfig(_) => Box::new(JoinOperator::new()),
-            OperatorConfig::SinkConfig(config) => Box::new(SinkOperator::new(config)),
-            OperatorConfig::SourceConfig(config) => Box::new(SourceOperator::new(config)),
+        let operator = match operator_config {
+            OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new()),
+            OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new()),
+            OperatorConfig::SinkConfig(config) => Operator::Sink(SinkOperator::new(config)),
+            OperatorConfig::SourceConfig(config) => Operator::Source(SourceOperator::new(config)),
         };
-        let transport_client = TransportClient::new();
+        let transport_client = TransportClient::new(vertex_id.clone());
         
         Ok(Self {
             vertex_id,
@@ -53,18 +52,24 @@ impl StreamTask {
         })
     }
 
+    pub fn vertex_id(&self) -> &str {
+        &self.vertex_id
+    }
+
     pub fn transport_client(&self) -> TransportClient {
         self.transport_client.clone()
     }
 
-    pub fn register_output_channel(
+    pub fn create_or_update_collector(
         &mut self,
         channel_id: String,
         partition: Box<dyn Partition>,
         target_operator_id: String,
     ) -> Result<()> {
+        let writer = self.transport_client.writer().ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
+        let data_writer = Arc::new(Mutex::new(writer));
+
         let collector = self.collectors.entry(target_operator_id).or_insert_with(|| {
-            let data_writer = Arc::new(Mutex::new(DataWriter::new()));
             Box::new(OutputCollector::new(
                 data_writer,
                 partition,
@@ -72,7 +77,7 @@ impl StreamTask {
         });
 
         if let Some(output_collector) = (collector.as_mut() as &mut dyn Any).downcast_mut::<OutputCollector>() {
-            output_collector.register_output_channel_id(channel_id);
+            output_collector.add_output_channel_id(channel_id);
         }
 
         Ok(())
@@ -86,6 +91,18 @@ impl StreamTask {
         }
         join_all(futures).await.into_iter().collect::<Result<Vec<()>>>()?;
         Ok(())
+    }
+}
+
+impl fmt::Debug for StreamTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamTask")
+            .field("vertex_id", &self.vertex_id)
+            .field("operator_type", &self.operator.operator_type())
+            .field("num_collectors", &self.collectors.len())
+            .field("collector_targets", &self.collectors.keys().collect::<Vec<_>>())
+            .field("running", &self.running)
+            .finish()
     }
 }
 

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use tokio::sync::Mutex;
 use std::fmt;
+use crate::runtime::execution_graph::{SourceConfig, SinkConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -18,7 +19,7 @@ pub enum OperatorType {
 }
 
 #[async_trait]
-pub trait Operator: Send + Sync {
+pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
@@ -31,6 +32,72 @@ pub trait Operator: Send + Sync {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum Operator {
+    Map(MapOperator),
+    Join(JoinOperator),
+    Sink(SinkOperator),
+    Source(SourceOperator),
+}
+
+#[async_trait]
+impl OperatorTrait for Operator {
+    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        match self {
+            Operator::Map(op) => op.open(context).await,
+            Operator::Join(op) => op.open(context).await,
+            Operator::Sink(op) => op.open(context).await,
+            Operator::Source(op) => op.open(context).await,
+        }
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        match self {
+            Operator::Map(op) => op.close().await,
+            Operator::Join(op) => op.close().await,
+            Operator::Sink(op) => op.close().await,
+            Operator::Source(op) => op.close().await,
+        }
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        match self {
+            Operator::Map(op) => op.finish().await,
+            Operator::Join(op) => op.finish().await,
+            Operator::Sink(op) => op.finish().await,
+            Operator::Source(op) => op.finish().await,
+        }
+    }
+
+    async fn process_batch(&mut self, batch: DataBatch, stream_id: Option<usize>) -> Result<DataBatch> {
+        match self {
+            Operator::Map(op) => op.process_batch(batch, stream_id).await,
+            Operator::Join(op) => op.process_batch(batch, stream_id).await,
+            Operator::Sink(op) => op.process_batch(batch, stream_id).await,
+            Operator::Source(op) => op.process_batch(batch, stream_id).await,
+        }
+    }
+
+    fn operator_type(&self) -> OperatorType {
+        match self {
+            Operator::Map(op) => op.operator_type(),
+            Operator::Join(op) => op.operator_type(),
+            Operator::Sink(op) => op.operator_type(),
+            Operator::Source(op) => op.operator_type(),
+        }
+    }
+
+    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+        match self {
+            Operator::Map(op) => op.fetch().await,
+            Operator::Join(op) => op.fetch().await,
+            Operator::Sink(op) => op.fetch().await,
+            Operator::Source(op) => op.fetch().await,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct BaseOperator {
     runtime_context: Option<RuntimeContext>,
 }
@@ -48,7 +115,7 @@ impl BaseOperator {
 }
 
 #[async_trait]
-impl Operator for BaseOperator {
+impl OperatorTrait for BaseOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
         Ok(())
@@ -67,6 +134,7 @@ impl Operator for BaseOperator {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct MapOperator {
     base: BaseOperator,
 }
@@ -80,7 +148,7 @@ impl MapOperator {
 }
 
 #[async_trait]
-impl Operator for MapOperator {
+impl OperatorTrait for MapOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await
     }
@@ -101,6 +169,8 @@ impl Operator for MapOperator {
         for record in batch.record_batch() {
             result.push(record.clone());
         }
+
+        println!("Map operator processed batch: {:?}", batch);
         Ok(DataBatch::new(None, result))
     }
 
@@ -109,6 +179,7 @@ impl Operator for MapOperator {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct JoinOperator {
     base: BaseOperator,
     left_buffer: Vec<DataBatch>,
@@ -126,7 +197,7 @@ impl JoinOperator {
 }
 
 #[async_trait]
-impl Operator for JoinOperator {
+impl OperatorTrait for JoinOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await
     }
@@ -167,19 +238,16 @@ impl Operator for JoinOperator {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SinkOperator {
     base: BaseOperator,
     batches: Arc<Mutex<Vec<DataBatch>>>,
 }
 
 impl SinkOperator {
-    pub fn new(config: HashMap<String, String>) -> Self {
-        // TODO hacky way to pass pointer as string, we need to propely configure operators
-        let batches = if let Some(output_ptr) = config.get("output") {
-            let ptr = output_ptr.parse::<usize>().unwrap_or(0);
-            unsafe { Arc::from_raw(ptr as *const Mutex<Vec<DataBatch>>) }
-        } else {
-            Arc::new(Mutex::new(Vec::new()))
+    pub fn new(config: SinkConfig) -> Self {
+        let batches = match config {
+            SinkConfig::VectorSinkConfig(batches) => batches,
         };
 
         Self {
@@ -188,13 +256,13 @@ impl SinkOperator {
         }
     }
 
-    pub fn get_batches(&self) -> Arc<Mutex<Vec<DataBatch>>> {
-        self.batches.clone()
-    }
+    // pub fn get_batches(&self) -> Arc<Mutex<Vec<DataBatch>>> {
+    //     self.batches.clone()
+    // }
 }
 
 #[async_trait]
-impl Operator for SinkOperator {
+impl OperatorTrait for SinkOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await
     }
@@ -213,6 +281,8 @@ impl Operator for SinkOperator {
         }
         let mut batches = self.batches.lock().await;
         batches.push(batch.clone());
+
+        println!("Sink operator processed batch: {:?}", batch);
         Ok(batch)
     }
 
@@ -221,6 +291,7 @@ impl Operator for SinkOperator {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct SourceOperator {
     base: BaseOperator,
     batches: Arc<Mutex<Vec<DataBatch>>>,
@@ -229,16 +300,14 @@ pub struct SourceOperator {
 }
 
 impl SourceOperator {
-    pub fn new(config: HashMap<String, String>) -> Self {
-        let batches = if let Some(test_data) = config.get("test_data") {
-            serde_json::from_str(test_data).unwrap_or_default()
-        } else {
-            Vec::new()
+    pub fn new(config: SourceConfig) -> Self {
+        let batches = match config {
+            SourceConfig::VectorSourceConfig(batches) => batches,
         };
 
         Self {
             base: BaseOperator::new(),
-            batches: Arc::new(Mutex::new(batches)),
+            batches,
             current_index: 0,
             num_sent: 0,
         }
@@ -250,7 +319,7 @@ impl SourceOperator {
 }
 
 #[async_trait]
-impl Operator for SourceOperator {
+impl OperatorTrait for SourceOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await
     }
@@ -274,6 +343,7 @@ impl Operator for SourceOperator {
             let batch = batches[self.current_index].clone();
             self.num_sent += 1;
             self.current_index += 1;
+            println!("Source operator fetched batch: {:?}", batch);
             Ok(Some(batch))
         } else {
             Ok(None)

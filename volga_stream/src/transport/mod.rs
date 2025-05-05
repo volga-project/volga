@@ -1,6 +1,7 @@
 pub mod channel;
 pub mod transport_client;
 pub mod transport_backend;
+pub mod tests;
 
 pub use transport_client::{TransportClient, DataReader, DataWriter};
 pub use transport_backend::{TransportBackend, InMemoryTransportBackend};

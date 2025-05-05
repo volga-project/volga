@@ -6,6 +6,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::num::NonZeroUsize;
 use crate::common::data_batch::DataBatch;
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub enum PartitionType {
@@ -24,11 +25,12 @@ pub fn create_partition(partition_type: PartitionType) -> Box<dyn Partition> {
     }
 }
 
-pub trait Partition: Send + Sync {
+pub trait Partition: Send + Sync + fmt::Debug {
     fn partition(&self, batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>>;
 }
 
 // BroadcastPartition
+#[derive(Debug)]
 pub struct BroadcastPartition {
     partitions: Mutex<Vec<usize>>,
 }
@@ -52,6 +54,7 @@ impl Partition for BroadcastPartition {
 }
 
 // KeyPartition
+#[derive(Debug)]
 pub struct KeyPartition {
     partitions: Mutex<Vec<usize>>,
     hash_cache: Mutex<LruCache<String, usize>>,
@@ -91,6 +94,7 @@ impl Partition for KeyPartition {
 }
 
 // RoundRobinPartition
+#[derive(Debug)]
 pub struct RoundRobinPartition {
     partitions: Mutex<Vec<usize>>,
     seq: AtomicUsize,
@@ -115,6 +119,7 @@ impl Partition for RoundRobinPartition {
 }
 
 // ForwardPartition
+#[derive(Debug)]
 pub struct ForwardPartition {
     partitions: Vec<usize>,
 }
