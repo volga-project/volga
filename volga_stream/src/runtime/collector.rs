@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -6,49 +5,16 @@ use crate::transport::transport_client::DataWriter;
 use crate::runtime::partition::Partition;
 use tokio::task::JoinSet;
 use crate::common::data_batch::DataBatch;
-use std::any::Any;
-use std::fmt;
+use std::collections::HashMap;
 
-#[async_trait]
-pub trait Collector: Send + Sync + Any + fmt::Debug {
-    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()>;
-}
-
-// Collection collector
 #[derive(Debug)]
-pub struct CollectionCollector {
-    collectors: Vec<Box<dyn Collector>>,
-}
-
-impl CollectionCollector {
-    pub fn new(collectors: Vec<Box<dyn Collector>>) -> Self {
-        Self { collectors }
-    }
-}
-
-#[async_trait]
-impl Collector for CollectionCollector {
-    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()> {
-        let mut all_futures = Vec::new();
-        for collector in &mut self.collectors {
-            let batch_clone = batch.clone();
-            all_futures.push(collector.collect_batch(batch_clone));
-        }
-
-        futures::future::try_join_all(all_futures).await?;
-        Ok(())
-    }
-}
-
-// Output collector
-#[derive(Debug)]
-pub struct OutputCollector {
+pub struct Collector {
     data_writer: Arc<Mutex<DataWriter>>,
     output_channel_ids: Vec<String>,
     partition: Box<dyn Partition>,
 }
 
-impl OutputCollector {
+impl Collector {
     pub fn new(
         data_writer: Arc<Mutex<DataWriter>>,
         partition: Box<dyn Partition>,
@@ -66,45 +32,57 @@ impl OutputCollector {
         }
         self.output_channel_ids.push(channel_id);
     }
-}
 
-#[async_trait]
-impl Collector for OutputCollector {
-    async fn collect_batch(&mut self, batch: DataBatch) -> Result<()> {
-        if batch.record_batch().is_empty() {
-            return Ok(());
-        }
+    pub fn output_channel_ids(&self) -> Vec<String> {
+        self.output_channel_ids.clone()
+    }
 
+    pub async fn collect_batch(&mut self, batch: DataBatch, channel_ids_to_send: Option<Vec<String>>) -> Result<Vec<String>> {
         let num_partitions = self.output_channel_ids.len();
         let mut partitioned_batches: Vec<DataBatch> = vec![DataBatch::new(None, batch.record_batch().clone()); num_partitions];
         
-        // Partition the batch based on the key
-        if let Ok(key) = batch.key() {
-            let partitions = self.partition.partition(&batch, num_partitions)?;
-            for partition_idx in partitions {
-                partitioned_batches[partition_idx] = batch.clone();
-            }
+        let partitions = self.partition.partition(&batch, num_partitions)?;
+        for partition_idx in partitions {
+            partitioned_batches[partition_idx] = batch.clone();
         }
 
+        // Create channel to partition mapping
+        let channel_to_partition: HashMap<_, _> = self.output_channel_ids.iter()
+            .enumerate()
+            .map(|(idx, channel_id)| (channel_id.clone(), idx))
+            .collect();
+
         let mut join_set = JoinSet::new();
-        for (partition_idx, partition_batch) in partitioned_batches.into_iter().enumerate() {
-            if partition_batch.record_batch().is_empty() {
-                continue;
+        let mut successful_channels = Vec::new();
+
+        // Use provided channel IDs or default to all output channels
+        let channels_to_send = channel_ids_to_send.unwrap_or_else(|| self.output_channel_ids.clone());
+
+        // Only send to specified channels
+        for channel_id in channels_to_send {
+            if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
+                let partition_batch = partitioned_batches[partition_idx].clone();
+                if partition_batch.record_batch().is_empty() {
+                    continue;
+                }
+                
+                let data_writer = self.data_writer.clone();
+                join_set.spawn(async move {
+                    let mut writer = data_writer.lock().await;
+                    match writer.write_batch(&channel_id, partition_batch).await {
+                        Ok(_) => Some(channel_id),
+                        Err(_) => None,
+                    }
+                });
             }
-            
-            let channel_id = self.output_channel_ids[partition_idx].clone();
-            let data_writer = self.data_writer.clone();
-            
-            join_set.spawn(async move {
-                let mut writer = data_writer.lock().await;
-                writer.write_batch(&channel_id, partition_batch).await
-            });
         }
 
         while let Some(result) = join_set.join_next().await {
-            result??;
+            if let Ok(Some(channel_id)) = result {
+                successful_channels.push(channel_id);
+            }
         }
 
-        Ok(())
+        Ok(successful_channels)
     }
 }

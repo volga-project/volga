@@ -1,13 +1,12 @@
-use crate::runtime::{runtime_context::RuntimeContext, collector::{OutputCollector, Collector}, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::Partition};
+use crate::runtime::{runtime_context::RuntimeContext, collector::Collector, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::Partition};
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
-use crate::transport::transport_client::{TransportClient, DataWriter};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use tokio::sync::{Mutex};
+use crate::transport::transport_client::{TransportClient};
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator};
 use crate::common::data_batch::DataBatch;
 use std::collections::HashMap;
-use std::any::Any;
 use futures::future::join_all;
 use std::fmt;
 
@@ -23,8 +22,8 @@ pub struct StreamTask {
     operator: Operator,
     runtime_context: RuntimeContext,
     transport_client: TransportClient,
-    collectors: HashMap<String, Box<dyn Collector>>,
-    running: bool,
+    collectors: HashMap<String, Collector>,
+    running: AtomicBool,
 }
 
 impl StreamTask {
@@ -48,7 +47,7 @@ impl StreamTask {
             runtime_context,
             transport_client,
             collectors: HashMap::new(),
-            running: true,
+            running: AtomicBool::new(true),
         })
     }
 
@@ -70,27 +69,38 @@ impl StreamTask {
         let data_writer = Arc::new(Mutex::new(writer));
 
         let collector = self.collectors.entry(target_operator_id).or_insert_with(|| {
-            Box::new(OutputCollector::new(
+            Collector::new(
                 data_writer,
                 partition,
-            )) as Box<dyn Collector>
+            )
         });
 
-        if let Some(output_collector) = (collector.as_mut() as &mut dyn Any).downcast_mut::<OutputCollector>() {
-            output_collector.add_output_channel_id(channel_id);
-        }
-
+        collector.add_output_channel_id(channel_id);
         Ok(())
     }
 
-    async fn collect_batch_parallel(&mut self, batch: DataBatch) -> Result<()> {
+    async fn collect_batch_parallel(
+        &mut self, 
+        batch: DataBatch,
+        channels_to_send: Option<HashMap<String, Vec<String>>>
+    ) -> Result<HashMap<String, Vec<String>>> {
         let mut futures = Vec::new();
-        for collector in self.collectors.values_mut() {
+        for (collector_id, collector) in self.collectors.iter_mut() {
             let batch_clone = batch.clone();
-            futures.push(collector.collect_batch(batch_clone));
+            let channels = channels_to_send.as_ref()
+                .and_then(|map| map.get(collector_id).cloned());
+            futures.push(async move {
+                let result = collector.collect_batch(batch_clone, channels).await?;
+                Ok::<_, anyhow::Error>((collector_id.clone(), result))
+            });
         }
-        join_all(futures).await.into_iter().collect::<Result<Vec<()>>>()?;
-        Ok(())
+        let results = join_all(futures).await;
+        let mut successful_channels = HashMap::new();
+        for result in results {
+            let (collector_id, channels) = result?;
+            successful_channels.insert(collector_id, channels);
+        }
+        Ok(successful_channels)
     }
 }
 
@@ -101,7 +111,7 @@ impl fmt::Debug for StreamTask {
             .field("operator_type", &self.operator.operator_type())
             .field("num_collectors", &self.collectors.len())
             .field("collector_targets", &self.collectors.keys().collect::<Vec<_>>())
-            .field("running", &self.running)
+            .field("running", &self.running.load(Ordering::Relaxed))
             .finish()
     }
 }
@@ -115,18 +125,40 @@ impl Task for StreamTask {
     }
 
     async fn run(&mut self) -> Result<()> {
-        while self.running {
-            match self.operator.operator_type() {
-                crate::runtime::operator::OperatorType::SOURCE => {
-                    if let Some(batch) = self.operator.fetch().await? {
-                        self.collect_batch_parallel(batch).await?;
+        while self.running.load(Ordering::Relaxed) {
+            let batch = match self.operator.operator_type() {
+                crate::runtime::operator::OperatorType::SOURCE => self.operator.fetch().await?,
+                _ => {
+                    let mut reader = self.transport_client.reader().expect("Reader should be initialized for non-SOURCE operator");
+                    if let Some(batch) = reader.read_batch().await? {
+                        Some(self.operator.process_batch(batch, None).await?)
+                    } else {
+                        None
                     }
                 }
-                _ => {
-                    if let Some(reader) = self.transport_client.reader() {
-                        if let Some(batch) = reader.read_batch().await? {
-                            let processed_batch = self.operator.process_batch(batch, None).await?;
-                            self.collect_batch_parallel(processed_batch).await?;
+            };
+
+            if let Some(batch) = batch {
+                let mut channels_to_retry = HashMap::new();
+                // Initialize with all channels for each collector
+                for (collector_id, collector) in &self.collectors {
+                    channels_to_retry.insert(collector_id.clone(), collector.output_channel_ids());
+                }
+
+                while self.running.load(Ordering::Relaxed) && !channels_to_retry.is_empty() {
+                    let successful_channels = self.collect_batch_parallel(batch.clone(), Some(channels_to_retry.clone())).await?;
+                    
+                    // Update channels_to_retry with only the unsuccessful ones
+                    channels_to_retry.clear();
+                    for (collector_id, successful) in successful_channels {
+                        if let Some(collector) = self.collectors.get(&collector_id) {
+                            let unsuccessful: Vec<String> = collector.output_channel_ids()
+                                .into_iter()
+                                .filter(|channel| !successful.contains(channel))
+                                .collect();
+                            if !unsuccessful.is_empty() {
+                                channels_to_retry.insert(collector_id, unsuccessful);
+                            }
                         }
                     }
                 }
@@ -136,7 +168,7 @@ impl Task for StreamTask {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.running = false;
+        self.running.store(false, Ordering::Relaxed);
         self.operator.close().await?;
         Ok(())
     }

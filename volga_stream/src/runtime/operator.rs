@@ -98,11 +98,11 @@ impl OperatorTrait for Operator {
 }
 
 #[derive(Debug, Clone)]
-pub struct BaseOperator {
+pub struct OperatorBase {
     runtime_context: Option<RuntimeContext>,
 }
 
-impl BaseOperator {
+impl OperatorBase {
     pub fn new() -> Self {
         Self {
             runtime_context: None,
@@ -115,7 +115,7 @@ impl BaseOperator {
 }
 
 #[async_trait]
-impl OperatorTrait for BaseOperator {
+impl OperatorTrait for OperatorBase {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
         Ok(())
@@ -136,13 +136,13 @@ impl OperatorTrait for BaseOperator {
 
 #[derive(Debug, Clone)]
 pub struct MapOperator {
-    base: BaseOperator,
+    base: OperatorBase,
 }
 
 impl MapOperator {
     pub fn new() -> Self {
         Self {
-            base: BaseOperator::new(),
+            base: OperatorBase::new(),
         }
     }
 }
@@ -181,7 +181,7 @@ impl OperatorTrait for MapOperator {
 
 #[derive(Debug, Clone)]
 pub struct JoinOperator {
-    base: BaseOperator,
+    base: OperatorBase,
     left_buffer: Vec<DataBatch>,
     right_buffer: Vec<DataBatch>,
 }
@@ -189,7 +189,7 @@ pub struct JoinOperator {
 impl JoinOperator {
     pub fn new() -> Self {
         Self {
-            base: BaseOperator::new(),
+            base: OperatorBase::new(),
             left_buffer: Vec::new(),
             right_buffer: Vec::new(),
         }
@@ -240,7 +240,7 @@ impl OperatorTrait for JoinOperator {
 
 #[derive(Debug, Clone)]
 pub struct SinkOperator {
-    base: BaseOperator,
+    base: OperatorBase,
     batches: Arc<Mutex<Vec<DataBatch>>>,
 }
 
@@ -251,14 +251,10 @@ impl SinkOperator {
         };
 
         Self {
-            base: BaseOperator::new(),
+            base: OperatorBase::new(),
             batches,
         }
     }
-
-    // pub fn get_batches(&self) -> Arc<Mutex<Vec<DataBatch>>> {
-    //     self.batches.clone()
-    // }
 }
 
 #[async_trait]
@@ -293,10 +289,9 @@ impl OperatorTrait for SinkOperator {
 
 #[derive(Debug, Clone)]
 pub struct SourceOperator {
-    base: BaseOperator,
+    base: OperatorBase,
     batches: Arc<Mutex<Vec<DataBatch>>>,
     current_index: usize,
-    num_sent: usize,
 }
 
 impl SourceOperator {
@@ -306,15 +301,10 @@ impl SourceOperator {
         };
 
         Self {
-            base: BaseOperator::new(),
+            base: OperatorBase::new(),
             batches,
             current_index: 0,
-            num_sent: 0,
         }
-    }
-
-    pub fn get_num_sent(&self) -> usize {
-        self.num_sent
     }
 }
 
@@ -341,7 +331,6 @@ impl OperatorTrait for SourceOperator {
         
         if self.current_index < batches.len() {
             let batch = batches[self.current_index].clone();
-            self.num_sent += 1;
             self.current_index += 1;
             println!("Source operator fetched batch: {:?}", batch);
             Ok(Some(batch))

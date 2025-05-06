@@ -13,7 +13,7 @@ pub trait SourceContext: Send + Sync {
 }
 
 pub struct SourceContextImpl {
-    pub collectors: Vec<Box<dyn Collector>>,
+    pub collectors: Vec<Box<Collector>>,
     pub runtime_context: RuntimeContext,
     pub timestamp_assigner: Option<Box<dyn TimestampAssigner>>,
     pub watermark_generator: Option<Box<dyn WatermarkGenerator>>,
@@ -24,7 +24,7 @@ pub struct SourceContextImpl {
 
 impl SourceContextImpl {
     pub fn new(
-        collectors: Vec<Box<dyn Collector>>,
+        collectors: Vec<Box<Collector>>,
         runtime_context: RuntimeContext,
         timestamp_assigner: Option<Box<dyn TimestampAssigner>>,
         watermark_generator: Option<Box<dyn WatermarkGenerator>>,
@@ -58,7 +58,7 @@ impl SourceContext for SourceContextImpl {
 
         // Collect batch through all collectors
         for collector in &mut self.collectors {
-            collector.collect_batch(batch.clone()).await?;
+            collector.collect_batch(batch.clone(), None).await?;
         }
 
         self.num_fetched_records += batch.record_batch().len() as i64;

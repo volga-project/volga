@@ -106,7 +106,7 @@ fn test_transport_exchange() -> Result<()> {
     let received_batches = runtime.block_on(async {
         let mut all_reader_batches = Vec::new();
         for reader in readers.iter_mut() {
-            let reader = reader.reader().expect("Reader should be initialized");
+            let mut reader = reader.reader().expect("Reader should be initialized");
             let mut reader_batches = Vec::new();
             // Each reader should receive batches_per_writer from each writer
             for _ in 0..(num_writers * batches_per_writer) {
@@ -158,4 +158,4 @@ fn test_transport_exchange() -> Result<()> {
     })?;
 
     Ok(())
-} 
+}

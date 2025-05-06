@@ -59,9 +59,9 @@ impl TransportBackend for InMemoryTransportBackend {
         if let Some(client) = self.clients.get_mut(&vertex_id) {
             let (tx, rx) = self.mpsc_channels.get(&channel_id).unwrap().clone();
             if is_in {
-                client.register_in_channel(channel_id, rx).await?;
+                client.register_receiver(channel_id, rx).await?;
             } else {
-                client.register_out_channel(channel_id, tx).await?;
+                client.register_sender(channel_id, tx).await?;
             }
         }
 
