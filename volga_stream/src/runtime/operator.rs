@@ -241,7 +241,7 @@ impl OperatorTrait for JoinOperator {
 #[derive(Debug, Clone)]
 pub struct SinkOperator {
     base: OperatorBase,
-    batches: Arc<Mutex<Vec<DataBatch>>>,
+    batches: Vec<DataBatch>,
 }
 
 impl SinkOperator {
@@ -275,8 +275,7 @@ impl OperatorTrait for SinkOperator {
         if stream_id != Some(0) {
             return Err(anyhow::anyhow!("Sink operator only accepts input from stream 0"));
         }
-        let mut batches = self.batches.lock().await;
-        batches.push(batch.clone());
+        self.batches.push(batch.clone());
 
         println!("Sink operator processed batch: {:?}", batch);
         Ok(batch)
@@ -290,7 +289,7 @@ impl OperatorTrait for SinkOperator {
 #[derive(Debug, Clone)]
 pub struct SourceOperator {
     base: OperatorBase,
-    batches: Arc<Mutex<Vec<DataBatch>>>,
+    batches: Vec<DataBatch>,
     current_index: usize,
 }
 
@@ -327,10 +326,8 @@ impl OperatorTrait for SourceOperator {
     }
 
     async fn fetch(&mut self) -> Result<Option<DataBatch>> {
-        let batches = self.batches.lock().await;
-        
-        if self.current_index < batches.len() {
-            let batch = batches[self.current_index].clone();
+        if self.current_index < self.batches.len() {
+            let batch = self.batches[self.current_index].clone();
             self.current_index += 1;
             println!("Source operator fetched batch: {:?}", batch);
             Ok(Some(batch))

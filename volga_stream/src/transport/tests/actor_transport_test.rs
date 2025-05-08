@@ -1,29 +1,37 @@
-use crate::runtime::actors::{StreamTaskActor, TransportBackendActor, StreamTaskMessage, TransportBackendMessage};
-use crate::runtime::task::StreamTask;
-use crate::runtime::execution_graph::{OperatorConfig, ExecutionVertex, SourceConfig, SinkConfig};
-use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::actors::TransportBackendActor;
+use crate::transport::test_utils::{DataReaderActor, DataWriterActor, DataReaderMessage, DataWriterMessage};
 use crate::transport::channel::Channel;
-use crate::transport::transport_client::TransportClient;
 use crate::common::data_batch::DataBatch;
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use tokio::runtime::Runtime;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use tokio_rayon::rayon::ThreadPoolBuilder;
-use std::collections::HashMap;
-use serde_json::Value;
+use tokio::sync::mpsc;
 
 #[test]
 fn test_actor_transport_exchange() -> Result<()> {
     // Configuration
-    let num_writers = 10;
-    let num_readers = 10;
+    let num_writers = 50;
+    let num_readers = 50;
     let batches_per_writer = 10;
 
     // Create a runtime for transport operations
     let runtime = Runtime::new()?;
     runtime.block_on(async {
+        // Create test data for each writer
+        let test_batches: Vec<Vec<DataBatch>> = (0..num_writers)
+            .map(|writer_idx| {
+                (0..batches_per_writer)
+                    .map(|batch_idx| {
+                        DataBatch::new(
+                            None,
+                            vec![format!("writer{}_batch{}", writer_idx, batch_idx)],
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+
         // Create transport backend actor
         let transport_backend = TransportBackendActor::new();
         let transport_backend_ref = spawn(transport_backend);
@@ -31,30 +39,7 @@ fn test_actor_transport_exchange() -> Result<()> {
         // Create writer actors
         let mut writer_actors = Vec::new();
         for i in 0..num_writers {
-            let task_id = i as i64;
-            let task_index = i as i32;
-            let parallelism = num_writers as i32;
-            let operator_id = i as i64;
-            let operator_name = format!("writer_{}", i);
-            let job_config = None;
-            let compute_pool = Some(Arc::new(ThreadPoolBuilder::new().num_threads(1).build()?));
-
-            let context = RuntimeContext::new(
-                task_id,
-                task_index,
-                parallelism,
-                operator_id,
-                operator_name,
-                job_config,
-                compute_pool,
-            );
-
-            let task = StreamTask::new(
-                format!("writer_{}", i),
-                OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(Arc::new(Mutex::new(Vec::new())))),
-                context,
-            )?;
-            let actor = StreamTaskActor::new(task);
+            let actor = DataWriterActor::new(format!("writer{}", i));
             let actor_ref = spawn(actor);
             writer_actors.push(actor_ref);
         }
@@ -62,92 +47,90 @@ fn test_actor_transport_exchange() -> Result<()> {
         // Create reader actors
         let mut reader_actors = Vec::new();
         for i in 0..num_readers {
-            let task_id = (i + num_writers) as i64;
-            let task_index = i as i32;
-            let parallelism = num_readers as i32;
-            let operator_id = (i + num_writers) as i64;
-            let operator_name = format!("reader_{}", i);
-            let job_config = None;
-            let compute_pool = Some(Arc::new(ThreadPoolBuilder::new().num_threads(1).build()?));
-
-            let context = RuntimeContext::new(
-                task_id,
-                task_index,
-                parallelism,
-                operator_id,
-                operator_name,
-                job_config,
-                compute_pool,
-            );
-
-            let task = StreamTask::new(
-                format!("reader_{}", i),
-                OperatorConfig::SinkConfig(SinkConfig::VectorSinkConfig(Arc::new(Mutex::new(Vec::new())))),
-                context,
-            )?;
-            let actor = StreamTaskActor::new(task);
+            let actor = DataReaderActor::new(format!("reader{}", i));
             let actor_ref = spawn(actor);
             reader_actors.push(actor_ref);
         }
 
-        // Register clients and channels
-        for writer in &writer_actors {
-            let client = TransportClient::new(format!("writer_{}", writer_actors.iter().position(|w| w.id() == writer.id()).unwrap()));
-            transport_backend_ref.tell(TransportBackendMessage::RegisterClient { 
-                vertex_id: format!("writer_{}", writer_actors.iter().position(|w| w.id() == writer.id()).unwrap()),
-                client
-            }).await?;
-            writer.tell(StreamTaskMessage::Open).await?;
-        }
+        // Create and register channels between each writer and reader
+        for writer_idx in 0..num_writers {
+            for reader_idx in 0..num_readers {
+                let channel_id = format!("writer{}_to_reader{}", writer_idx, reader_idx);
+                let (sender, receiver) = mpsc::channel(100);
 
-        for reader in &reader_actors {
-            let client = TransportClient::new(format!("reader_{}", reader_actors.iter().position(|r| r.id() == reader.id()).unwrap()));
-            transport_backend_ref.tell(TransportBackendMessage::RegisterClient {
-                vertex_id: format!("reader_{}", reader_actors.iter().position(|r| r.id() == reader.id()).unwrap()),
-                client
-            }).await?;
-            reader.tell(StreamTaskMessage::Open).await?;
-        }
+                // Register sender with writer
+                writer_actors[writer_idx].tell(DataWriterMessage::RegisterSender {
+                    channel_id: channel_id.clone(),
+                    sender,
+                }).await;
 
-        // Create channels between writers and readers
-        for (i, writer) in writer_actors.iter().enumerate() {
-            for (j, reader) in reader_actors.iter().enumerate() {
-                let channel = Channel::Local {
-                    channel_id: format!("channel_{}_{}", i, j)
-                };
-                transport_backend_ref.tell(TransportBackendMessage::RegisterChannel {
-                    vertex_id: format!("writer_{}", i),
-                    channel: channel.clone(),
-                    is_input: false
-                }).await?;
-                transport_backend_ref.tell(TransportBackendMessage::RegisterChannel {
-                    vertex_id: format!("reader_{}", j),
-                    channel: channel.clone(),
-                    is_input: true
-                }).await?;
+                // Register receiver with reader
+                reader_actors[reader_idx].tell(DataReaderMessage::RegisterReceiver {
+                    channel_id: channel_id.clone(),
+                    receiver,
+                }).await;
             }
         }
 
-        // Start transport backend
-        transport_backend_ref.tell(TransportBackendMessage::Start).await?;
-
-        // Run tasks
-        for writer in &writer_actors {
-            writer.tell(StreamTaskMessage::Run).await?;
-        }
-        for reader in &reader_actors {
-            reader.tell(StreamTaskMessage::Run).await?;
-        }
-
-        // Close tasks
-        for writer in &writer_actors {
-            writer.tell(StreamTaskMessage::Close).await?;
-        }
-        for reader in &reader_actors {
-            reader.tell(StreamTaskMessage::Close).await?;
+        // Write test data from each writer to each reader
+        for (writer_idx, writer) in writer_actors.iter().enumerate() {
+            for reader_idx in 0..num_readers {
+                for batch in &test_batches[writer_idx] {
+                    writer.tell(DataWriterMessage::WriteBatch {
+                        channel_id: format!("writer{}_to_reader{}", writer_idx, reader_idx),
+                        batch: batch.clone(),
+                    }).await;
+                }
+            }
         }
 
-        transport_backend_ref.tell(TransportBackendMessage::Close).await?;
+        // Read and verify data from each reader
+        let mut all_reader_batches = Vec::new();
+        for reader in reader_actors.iter() {
+            let mut reader_batches = Vec::new();
+            // Each reader should receive batches_per_writer from each writer
+            for _ in 0..(num_writers * batches_per_writer) {
+                let result = reader.ask(DataReaderMessage::ReadBatch).await?;
+                if let Some(batch) = result {
+                    reader_batches.push(batch);
+                } else {
+                    break;
+                }
+            }
+            all_reader_batches.push(reader_batches);
+        }
+
+        // Verify received data
+        assert_eq!(all_reader_batches.len(), num_readers);
+        for reader_batches in all_reader_batches {
+            assert_eq!(reader_batches.len(), num_writers * batches_per_writer);
+            
+            // Group batches by writer
+            let mut writer_batches: Vec<Vec<String>> = vec![Vec::new(); num_writers];
+            for batch in reader_batches {
+                let content = batch.record_batch()[0].clone();
+                // Extract writer index from the batch content (format: "writer{idx}_batch{idx}")
+                let writer_idx = content.split('_').next().unwrap()
+                    .trim_start_matches("writer")
+                    .parse::<usize>()
+                    .unwrap();
+                writer_batches[writer_idx].push(content);
+            }
+
+            // Verify each writer's batches
+            for writer_idx in 0..num_writers {
+                assert_eq!(writer_batches[writer_idx].len(), batches_per_writer);
+                
+                // Verify batches are in order for this writer
+                for batch_idx in 0..batches_per_writer {
+                    let expected = format!("writer{}_batch{}", writer_idx, batch_idx);
+                    let actual = writer_batches[writer_idx][batch_idx].clone();
+                    assert_eq!(actual, expected, 
+                        "Batches from writer {} are not in order. Expected {} but got {}", 
+                        writer_idx, expected, actual);
+                }
+            }
+        }
 
         Ok(())
     })

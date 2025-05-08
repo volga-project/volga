@@ -5,7 +5,7 @@ use crate::runtime::task::StreamTask;
 use crate::transport::transport_backend::{TransportBackend, InMemoryTransportBackend};
 use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
-use crate::transport::transport_client::TransportClient;
+use crate::transport::transport_client::{TransportClient, DataReader, DataWriter};
 use std::collections::HashMap;
 use crate::runtime::partition::PartitionType;
 

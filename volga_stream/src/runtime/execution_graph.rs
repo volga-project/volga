@@ -50,12 +50,12 @@ impl ExecutionEdge {
 
 #[derive(Debug, Clone)]
 pub enum SourceConfig {
-    VectorSourceConfig(Arc<Mutex<Vec<DataBatch>>>),
+    VectorSourceConfig(Vec<DataBatch>),
 }
 
 #[derive(Debug, Clone)]
 pub enum SinkConfig {
-    VectorSinkConfig(Arc<Mutex<Vec<DataBatch>>>),
+    VectorSinkConfig(Vec<DataBatch>),
 }
 
 pub enum OperatorConfig {
