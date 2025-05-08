@@ -1,21 +1,11 @@
-use crate::runtime::{runtime_context::RuntimeContext, collector::Collector, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::Partition};
+use crate::runtime::{runtime_context::RuntimeContext, collector::Collector, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::{Partition, PartitionType}};
 use anyhow::Result;
-use async_trait::async_trait;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use tokio::sync::{Mutex};
-use crate::transport::transport_client::{TransportClient};
+use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator};
 use crate::common::data_batch::DataBatch;
 use std::collections::HashMap;
 use futures::future::join_all;
 use std::fmt;
-
-#[async_trait]
-pub trait Task: Send + Sync {
-    async fn open(&mut self) -> Result<()>;
-    async fn run(&mut self) -> Result<()>;
-    async fn close(&mut self) -> Result<()>;
-}
 
 pub struct StreamTask {
     vertex_id: String,
@@ -23,11 +13,10 @@ pub struct StreamTask {
     runtime_context: RuntimeContext,
     transport_client: TransportClient,
     collectors: HashMap<String, Collector>,
-    running: AtomicBool,
+    running: bool,
 }
 
 impl StreamTask {
-    
     pub fn new(
         vertex_id: String,
         operator_config: OperatorConfig,
@@ -47,30 +36,30 @@ impl StreamTask {
             runtime_context,
             transport_client,
             collectors: HashMap::new(),
-            running: AtomicBool::new(true),
+            running: true,
         })
     }
 
-    pub fn vertex_id(&self) -> &str {
-        &self.vertex_id
-    }
+    // pub fn vertex_id(&self) -> &str {
+    //     &self.vertex_id
+    // }
 
-    pub fn transport_client(&self) -> TransportClient {
-        self.transport_client.clone()
-    }
+    // pub fn transport_client(&self) -> TransportClient {
+    //     self.transport_client.clone()
+    // }
 
     pub fn create_or_update_collector(
         &mut self,
         channel_id: String,
-        partition: Box<dyn Partition>,
+        partition_type: PartitionType,
         target_operator_id: String,
     ) -> Result<()> {
-        let writer = self.transport_client.writer().ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
-        let data_writer = Arc::new(Mutex::new(writer));
+        let writer = self.transport_client.writer.as_ref().ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
+        let partition = partition_type.create();
 
         let collector = self.collectors.entry(target_operator_id).or_insert_with(|| {
             Collector::new(
-                data_writer,
+                writer.clone(),
                 partition,
             )
         });
@@ -102,36 +91,16 @@ impl StreamTask {
         }
         Ok(successful_channels)
     }
-}
 
-impl fmt::Debug for StreamTask {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StreamTask")
-            .field("vertex_id", &self.vertex_id)
-            .field("operator_type", &self.operator.operator_type())
-            .field("num_collectors", &self.collectors.len())
-            .field("collector_targets", &self.collectors.keys().collect::<Vec<_>>())
-            .field("running", &self.running.load(Ordering::Relaxed))
-            .finish()
-    }
-}
-
-#[async_trait]
-impl Task for StreamTask {
-    async fn open(&mut self) -> Result<()> {
-        // Open the operator with runtime context
-        self.operator.open(&self.runtime_context).await?;
-        Ok(())
-    }
-
-    async fn run(&mut self) -> Result<()> {
-        while self.running.load(Ordering::Relaxed) {
+    pub async fn run(&mut self) -> Result<()> {
+        while self.running {
             let batch = match self.operator.operator_type() {
                 crate::runtime::operator::OperatorType::SOURCE => self.operator.fetch().await?,
                 _ => {
-                    let mut reader = self.transport_client.reader().expect("Reader should be initialized for non-SOURCE operator");
+                    let reader = self.transport_client.reader.as_mut().expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(batch) = reader.read_batch().await? {
-                        Some(self.operator.process_batch(batch, None).await?)
+                        println!("StreamTask {:?} received batch", self.vertex_id);
+                        Some(self.operator.process_batch(batch, Some(0)).await?)
                     } else {
                         None
                     }
@@ -140,15 +109,12 @@ impl Task for StreamTask {
 
             if let Some(batch) = batch {
                 let mut channels_to_retry = HashMap::new();
-                // Initialize with all channels for each collector
                 for (collector_id, collector) in &self.collectors {
                     channels_to_retry.insert(collector_id.clone(), collector.output_channel_ids());
                 }
 
-                while self.running.load(Ordering::Relaxed) && !channels_to_retry.is_empty() {
+                while self.running && !channels_to_retry.is_empty() {
                     let successful_channels = self.collect_batch_parallel(batch.clone(), Some(channels_to_retry.clone())).await?;
-                    
-                    // Update channels_to_retry with only the unsuccessful ones
                     channels_to_retry.clear();
                     for (collector_id, successful) in successful_channels {
                         if let Some(collector) = self.collectors.get(&collector_id) {
@@ -167,9 +133,29 @@ impl Task for StreamTask {
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<()> {
-        self.running.store(false, Ordering::Relaxed);
-        self.operator.close().await?;
+    pub async fn open(&mut self) -> Result<()> {
+        // Open the operator with runtime context
+        self.operator.open(&self.runtime_context).await?;
         Ok(())
+    }
+
+    pub async fn close(&mut self) -> Result<()> {
+        println!("StreamTask {:?} closing", self.vertex_id);
+        self.running = false;
+        self.operator.close().await?;
+        println!("StreamTask {:?} closed", self.vertex_id);
+        Ok(())
+    }
+}
+
+impl fmt::Debug for StreamTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamTask")
+            .field("vertex_id", &self.vertex_id)
+            .field("operator_type", &self.operator.operator_type())
+            .field("num_collectors", &self.collectors.len())
+            .field("collector_targets", &self.collectors.keys().collect::<Vec<_>>())
+            .field("running", &self.running)
+            .finish()
     }
 }

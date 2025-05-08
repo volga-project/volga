@@ -1,7 +1,6 @@
 use anyhow::Result;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client::TransportClient;
@@ -17,14 +16,16 @@ pub trait TransportBackend: Send + Sync {
 
 pub struct InMemoryTransportBackend {
     clients: HashMap<String, TransportClient>,
-    mpsc_channels: HashMap<String, (Arc<Mutex<mpsc::Sender<DataBatch>>>, Arc<Mutex<mpsc::Receiver<DataBatch>>>)>,
+    senders: HashMap<String, mpsc::Sender<DataBatch>>,
+    receivers: HashMap<String, mpsc::Receiver<DataBatch>>,
 }
 
 impl InMemoryTransportBackend {
     pub fn new() -> Self {
         Self {
             clients: HashMap::new(),
-            mpsc_channels: HashMap::new(),
+            senders: HashMap::new(),
+            receivers: HashMap::new(),
         }
     }
 }
@@ -47,21 +48,23 @@ impl TransportBackend for InMemoryTransportBackend {
         };
 
         // Create a new channel if it doesn't exist
-        if !self.mpsc_channels.contains_key(&channel_id) {
+        // TODO we should use a more efficient way to handle this
+        if !self.senders.contains_key(&channel_id) {
             let (tx, rx) = mpsc::channel(100); // Buffer size of 100
-            self.mpsc_channels.insert(
-                channel_id.clone(),
-                (Arc::new(Mutex::new(tx)), Arc::new(Mutex::new(rx))),
-            );
+            self.senders.insert(channel_id.clone(), tx);
+            self.receivers.insert(channel_id.clone(), rx);
         }
 
         // Register the channel with the appropriate client
         if let Some(client) = self.clients.get_mut(&vertex_id) {
-            let (tx, rx) = self.mpsc_channels.get(&channel_id).unwrap().clone();
             if is_in {
-                client.register_receiver(channel_id, rx).await?;
+                if let Some(rx) = self.receivers.remove(&channel_id) {
+                    client.register_receiver(channel_id, rx).await?;
+                }
             } else {
-                client.register_sender(channel_id, tx).await?;
+                if let Some(tx) = self.senders.remove(&channel_id) {
+                    client.register_sender(channel_id, tx).await?;
+                }
             }
         }
 

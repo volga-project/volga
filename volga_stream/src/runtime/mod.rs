@@ -7,3 +7,4 @@ pub mod task;
 pub mod worker;
 pub mod execution_graph;
 pub mod tests;
+pub mod actors;

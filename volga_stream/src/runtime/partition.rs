@@ -1,12 +1,12 @@
 use anyhow::{Error, Result};
-use std::sync::Mutex;
-use lru::LruCache;
-use std::hash::{Hash, Hasher};
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering;
-use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::common::data_batch::DataBatch;
 use std::fmt;
+use std::hash::{Hash, Hasher};
+
+pub trait Partition: Send + Sync + fmt::Debug {
+    fn partition(&mut self, batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>>;
+}
 
 #[derive(Debug, Clone)]
 pub enum PartitionType {
@@ -16,124 +16,84 @@ pub enum PartitionType {
     Forward,
 }
 
-pub fn create_partition(partition_type: PartitionType) -> Box<dyn Partition> {
-    match partition_type {
-        PartitionType::Broadcast => Box::new(BroadcastPartition::new()),
-        PartitionType::Key => Box::new(KeyPartition::new()),
-        PartitionType::RoundRobin => Box::new(RoundRobinPartition::new()),
-        PartitionType::Forward => Box::new(ForwardPartition::new()),
+impl PartitionType {
+    pub fn create(&self) -> Box<dyn Partition> {
+        match self {
+            PartitionType::Broadcast => Box::new(BroadcastPartition::new()),
+            PartitionType::Key => Box::new(KeyPartition::new()),
+            PartitionType::RoundRobin => Box::new(RoundRobinPartition::new()),
+            PartitionType::Forward => Box::new(ForwardPartition::new()),
+        }
     }
 }
 
-pub trait Partition: Send + Sync + fmt::Debug {
-    fn partition(&self, batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>>;
-}
-
-// BroadcastPartition
-#[derive(Debug)]
-pub struct BroadcastPartition {
-    partitions: Mutex<Vec<usize>>,
-}
+#[derive(Debug, Clone)]
+pub struct BroadcastPartition;
 
 impl BroadcastPartition {
     pub fn new() -> Self {
-        Self {
-            partitions: Mutex::new(Vec::new()),
-        }
+        Self
     }
 }
 
 impl Partition for BroadcastPartition {
-    fn partition(&self, _batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>> {
-        let mut partitions = self.partitions.lock().unwrap();
-        if partitions.len() != num_partition {
-            *partitions = (0..num_partition).collect();
-        }
-        Ok(partitions.clone())
+    fn partition(&mut self, _batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
+        Ok((0..num_partitions).collect())
     }
 }
 
-// KeyPartition
-#[derive(Debug)]
-pub struct KeyPartition {
-    partitions: Mutex<Vec<usize>>,
-    hash_cache: Mutex<LruCache<String, usize>>,
-}
+#[derive(Debug, Clone)]
+pub struct KeyPartition;
 
 impl KeyPartition {
     pub fn new() -> Self {
-        Self {
-            partitions: Mutex::new(vec![0]),
-            hash_cache: Mutex::new(LruCache::new(NonZeroUsize::new(1024).unwrap())),
-        }
-    }
-
-    fn hash(&self, key: &str) -> usize {
-        let mut cache = self.hash_cache.lock().unwrap();
-        if let Some(&hash) = cache.get(key) {
-            return hash;
-        }
-
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        let hash = hasher.finish() as usize;
-        
-        cache.put(key.to_string(), hash);
-        hash
+        Self
     }
 }
 
 impl Partition for KeyPartition {
-    fn partition(&self, batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>> {
+    fn partition(&mut self, batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
         let key = batch.key()?;
-        let hash = self.hash(&key);
-        let mut partitions = self.partitions.lock().unwrap();
-        partitions[0] = hash % num_partition;
-        Ok(partitions.clone())
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        key.hash(&mut hasher);
+        let hash = hasher.finish() as usize;
+        Ok(vec![hash % num_partitions])
     }
 }
 
-// RoundRobinPartition
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RoundRobinPartition {
-    partitions: Mutex<Vec<usize>>,
-    seq: AtomicUsize,
+    counter: usize,
 }
 
 impl RoundRobinPartition {
     pub fn new() -> Self {
-        Self {
-            partitions: Mutex::new(vec![0]),
-            seq: AtomicUsize::new(0),
-        }
+        Self { counter: 0 }
     }
 }
 
 impl Partition for RoundRobinPartition {
-    fn partition(&self, _batch: &DataBatch, num_partition: usize) -> Result<Vec<usize>> {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed) % num_partition;
-        let mut partitions = self.partitions.lock().unwrap();
-        partitions[0] = seq;
-        Ok(partitions.clone())
+    fn partition(&mut self, _batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
+        let seq = self.counter % num_partitions;
+        self.counter += 1;
+        Ok(vec![seq])
     }
 }
 
-// ForwardPartition
-#[derive(Debug)]
-pub struct ForwardPartition {
-    partitions: Vec<usize>,
-}
+#[derive(Debug, Clone)]
+pub struct ForwardPartition;
 
 impl ForwardPartition {
     pub fn new() -> Self {
-        Self {
-            partitions: vec![0],
-        }
+        Self
     }
 }
 
 impl Partition for ForwardPartition {
-    fn partition(&self, _batch: &DataBatch, _num_partition: usize) -> Result<Vec<usize>> {
-        Ok(self.partitions.clone())
+    fn partition(&mut self, _batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
+        if num_partitions != 1 {
+            anyhow::bail!("Forward partition requires exactly one partition");
+        }
+        Ok(vec![0])
     }
 }

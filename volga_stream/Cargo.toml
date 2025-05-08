@@ -38,3 +38,4 @@ ordered-float = { version = "3.7", features = ["serde"] }
 tokio-util = "0.7"
 rayon = "1.7"
 lazy_static = "1.4"
+kameo = "0.16.0"

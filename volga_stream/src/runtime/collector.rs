@@ -1,22 +1,19 @@
 use anyhow::Result;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use crate::transport::transport_client::DataWriter;
-use crate::runtime::partition::Partition;
-use tokio::task::JoinSet;
 use crate::common::data_batch::DataBatch;
 use std::collections::HashMap;
+use crate::transport::transport_client::DataWriter;
+use crate::runtime::partition::Partition;
+use futures::future::join_all;
 
-#[derive(Debug)]
 pub struct Collector {
-    data_writer: Arc<Mutex<DataWriter>>,
+    data_writer: DataWriter,
     output_channel_ids: Vec<String>,
     partition: Box<dyn Partition>,
 }
 
 impl Collector {
     pub fn new(
-        data_writer: Arc<Mutex<DataWriter>>,
+        data_writer: DataWriter,
         partition: Box<dyn Partition>,
     ) -> Self {
         Self {
@@ -52,13 +49,11 @@ impl Collector {
             .map(|(idx, channel_id)| (channel_id.clone(), idx))
             .collect();
 
-        let mut join_set = JoinSet::new();
-        let mut successful_channels = Vec::new();
-
         // Use provided channel IDs or default to all output channels
         let channels_to_send = channel_ids_to_send.unwrap_or_else(|| self.output_channel_ids.clone());
 
-        // Only send to specified channels
+        // Create futures for parallel writes
+        let mut write_futures = Vec::new();
         for channel_id in channels_to_send {
             if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
                 let partition_batch = partitioned_batches[partition_idx].clone();
@@ -66,22 +61,24 @@ impl Collector {
                     continue;
                 }
                 
-                let data_writer = self.data_writer.clone();
-                join_set.spawn(async move {
-                    let mut writer = data_writer.lock().await;
-                    match writer.write_batch(&channel_id, partition_batch).await {
-                        Ok(_) => Some(channel_id),
-                        Err(_) => None,
+                let mut writer = self.data_writer.clone();
+                let channel_id_clone = channel_id.clone();
+                write_futures.push(async move {
+                    match writer.write_batch(&channel_id_clone, partition_batch).await {
+                        Ok(_) => Ok(channel_id_clone),
+                        Err(_) => Err(anyhow::anyhow!("Failed to write batch"))
                     }
                 });
             }
         }
 
-        while let Some(result) = join_set.join_next().await {
-            if let Ok(Some(channel_id)) = result {
-                successful_channels.push(channel_id);
-            }
-        }
+        // Execute all writes in parallel
+        let results = join_all(write_futures).await;
+        
+        // Collect successful channel IDs
+        let successful_channels: Vec<String> = results.into_iter()
+            .filter_map(|result| result.ok())
+            .collect();
 
         Ok(successful_channels)
     }
