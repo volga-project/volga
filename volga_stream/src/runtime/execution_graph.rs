@@ -3,9 +3,6 @@ use anyhow::Result;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use std::fmt;
-use crate::runtime::operator::Operator;
-use std::sync::Arc;
-use tokio::sync::Mutex;
 use crate::common::data_batch::DataBatch;
 
 pub struct ExecutionEdge {

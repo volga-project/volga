@@ -146,6 +146,10 @@ impl StreamTask {
         println!("StreamTask {:?} closed", self.vertex_id);
         Ok(())
     }
+
+    pub fn transport_client_mut(&mut self) -> &mut TransportClient {
+        &mut self.transport_client
+    }
 }
 
 impl fmt::Debug for StreamTask {

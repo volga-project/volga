@@ -174,6 +174,10 @@ impl TransportClient {
         }
     }
 
+    pub fn vertex_id(&self) -> &str {
+        &self.vertex_id
+    }
+
     pub async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
         if let Some(reader) = &mut self.reader {
             reader.register_receiver(channel_id, receiver);

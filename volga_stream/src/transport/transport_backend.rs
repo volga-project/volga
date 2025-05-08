@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
-use crate::transport::transport_client::TransportClient;
+use crate::transport::transport_actor::{TransportActorType};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -11,11 +11,11 @@ pub trait TransportBackend: Send + Sync {
     async fn start(&mut self) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_input: bool) -> Result<()>;
-    async fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()>;
+    async fn register_actor(&mut self, vertex_id: String, actor: TransportActorType) -> Result<()>;
 }
 
 pub struct InMemoryTransportBackend {
-    clients: HashMap<String, TransportClient>,
+    actors: HashMap<String, TransportActorType>,
     senders: HashMap<String, mpsc::Sender<DataBatch>>,
     receivers: HashMap<String, mpsc::Receiver<DataBatch>>,
 }
@@ -23,7 +23,7 @@ pub struct InMemoryTransportBackend {
 impl InMemoryTransportBackend {
     pub fn new() -> Self {
         Self {
-            clients: HashMap::new(),
+            actors: HashMap::new(),
             senders: HashMap::new(),
             receivers: HashMap::new(),
         }
@@ -48,22 +48,21 @@ impl TransportBackend for InMemoryTransportBackend {
         };
 
         // Create a new channel if it doesn't exist
-        // TODO we should use a more efficient way to handle this
         if !self.senders.contains_key(&channel_id) {
             let (tx, rx) = mpsc::channel(100); // Buffer size of 100
             self.senders.insert(channel_id.clone(), tx);
             self.receivers.insert(channel_id.clone(), rx);
         }
 
-        // Register the channel with the appropriate client
-        if let Some(client) = self.clients.get_mut(&vertex_id) {
+        // Register the channel with the appropriate actor using message passing
+        if let Some(actor) = self.actors.get(&vertex_id) {
             if is_in {
                 if let Some(rx) = self.receivers.remove(&channel_id) {
-                    client.register_receiver(channel_id, rx).await?;
+                    actor.register_receiver(channel_id, rx).await?;
                 }
             } else {
                 if let Some(tx) = self.senders.remove(&channel_id) {
-                    client.register_sender(channel_id, tx).await?;
+                    actor.register_sender(channel_id, tx).await?;
                 }
             }
         }
@@ -71,8 +70,8 @@ impl TransportBackend for InMemoryTransportBackend {
         Ok(())
     }
 
-    async fn register_client(&mut self, vertex_id: String, client: TransportClient) -> Result<()> {
-        self.clients.insert(vertex_id, client);
+    async fn register_actor(&mut self, vertex_id: String, actor: TransportActorType) -> Result<()> {
+        self.actors.insert(vertex_id, actor);
         Ok(())
     }
 } 

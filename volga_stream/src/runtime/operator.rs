@@ -1,14 +1,8 @@
 use async_trait::async_trait;
-use crate::runtime::collector::Collector;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::data_batch::DataBatch;
 use anyhow::Result;
-use std::any::Any;
-use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::Arc;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
-use tokio::sync::Mutex;
 use std::fmt;
 use crate::runtime::execution_graph::{SourceConfig, SinkConfig};
 
@@ -107,10 +101,6 @@ impl OperatorBase {
         Self {
             runtime_context: None,
         }
-    }
-
-    pub fn get_runtime_context(&self) -> Option<&RuntimeContext> {
-        self.runtime_context.as_ref()
     }
 }
 

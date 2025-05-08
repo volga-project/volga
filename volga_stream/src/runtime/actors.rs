@@ -3,11 +3,11 @@ use kameo::Actor;
 use kameo::message::{Context, Message};
 use crate::runtime::task::StreamTask;
 use crate::transport::transport_backend::{TransportBackend, InMemoryTransportBackend};
-use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
-use crate::transport::transport_client::{TransportClient, DataReader, DataWriter};
-use std::collections::HashMap;
 use crate::runtime::partition::PartitionType;
+use crate::transport::transport_actor::{TransportActor, TransportActorMessage, TransportActorType};
+use tokio::sync::mpsc;
+use crate::common::data_batch::DataBatch;
 
 // StreamTaskActor messages
 #[derive(Debug)]
@@ -55,6 +55,52 @@ impl Message<StreamTaskMessage> for StreamTaskActor {
     }
 }
 
+impl Message<TransportActorMessage> for StreamTaskActor {
+    type Reply = Result<()>;
+
+    async fn handle(&mut self, msg: TransportActorMessage, _ctx: &mut Context<StreamTaskActor, Result<()>>) -> Self::Reply {
+        match msg {
+            TransportActorMessage::RegisterReceiver { channel_id, receiver } => {
+                if let Some(reader) = &mut self.task.transport_client_mut().reader {
+                    reader.register_receiver(channel_id, receiver);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Reader not initialized"))
+                }
+            }
+            TransportActorMessage::RegisterSender { channel_id, sender } => {
+                if let Some(writer) = &mut self.task.transport_client_mut().writer {
+                    writer.register_sender(channel_id, sender);
+                    Ok(())
+                } else {
+                    Err(anyhow::anyhow!("Writer not initialized"))
+                }
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl TransportActor for StreamTaskActor {
+    async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
+        if let Some(reader) = &mut self.task.transport_client_mut().reader {
+            reader.register_receiver(channel_id, receiver);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Reader not initialized"))
+        }
+    }
+
+    async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()> {
+        if let Some(writer) = &mut self.task.transport_client_mut().writer {
+            writer.register_sender(channel_id, sender);
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("Writer not initialized"))
+        }
+    }
+}
+
 // TransportBackendActor messages
 #[derive(Debug)]
 pub enum TransportBackendMessage {
@@ -65,9 +111,9 @@ pub enum TransportBackendMessage {
         channel: Channel,
         is_input: bool,
     },
-    RegisterClient {
+    RegisterActor {
         vertex_id: String,
-        client: TransportClient,
+        actor: TransportActorType,
     },
 }
 
@@ -98,8 +144,8 @@ impl Message<TransportBackendMessage> for TransportBackendActor {
             TransportBackendMessage::RegisterChannel { vertex_id, channel, is_input } => {
                 self.backend.register_channel(vertex_id, channel, is_input).await?;
             }
-            TransportBackendMessage::RegisterClient { vertex_id, client } => {
-                self.backend.register_client(vertex_id, client).await?;
+            TransportBackendMessage::RegisterActor { vertex_id, actor } => {
+                self.backend.register_actor(vertex_id, actor).await?;
             }
         }
         Ok(())
