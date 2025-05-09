@@ -8,3 +8,5 @@ pub mod worker;
 pub mod execution_graph;
 pub mod tests;
 pub mod stream_task_actor;
+pub mod storage;
+pub mod sink_function;

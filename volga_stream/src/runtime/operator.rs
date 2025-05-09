@@ -5,6 +5,9 @@ use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use std::fmt;
 use crate::runtime::execution_graph::{SourceConfig, SinkConfig};
+use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage};
+use kameo::prelude::ActorRef;
+use crate::runtime::sink_function::{SinkFunction, create_sink_function, SinkFunctionTrait};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -26,12 +29,23 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum Operator {
     Map(MapOperator),
     Join(JoinOperator),
     Sink(SinkOperator),
     Source(SourceOperator),
+}
+
+impl Clone for Operator {
+    fn clone(&self) -> Self {
+        match self {
+            Operator::Map(op) => Operator::Map(op.clone()),
+            Operator::Join(op) => Operator::Join(op.clone()),
+            Operator::Source(op) => Operator::Source(op.clone()),
+            Operator::Sink(_) => panic!("Cannot clone SinkOperator"),
+        }
+    }
 }
 
 #[async_trait]
@@ -228,21 +242,17 @@ impl OperatorTrait for JoinOperator {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SinkOperator {
     base: OperatorBase,
-    batches: Vec<DataBatch>,
+    sink_function: SinkFunction,
 }
 
 impl SinkOperator {
     pub fn new(config: SinkConfig) -> Self {
-        let batches = match config {
-            SinkConfig::VectorSinkConfig(batches) => batches,
-        };
-
         Self {
             base: OperatorBase::new(),
-            batches,
+            sink_function: create_sink_function(config),
         }
     }
 }
@@ -261,13 +271,8 @@ impl OperatorTrait for SinkOperator {
         self.base.finish().await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch, stream_id: Option<usize>) -> Result<DataBatch> {
-        if stream_id != Some(0) {
-            return Err(anyhow::anyhow!("Sink operator only accepts input from stream 0"));
-        }
-        self.batches.push(batch.clone());
-
-        println!("Sink operator processed batch: {:?}", batch);
+    async fn process_batch(&mut self, batch: DataBatch, _stream_id: Option<usize>) -> Result<DataBatch> {
+        self.sink_function.sink(batch.clone()).await?;
         Ok(batch)
     }
 

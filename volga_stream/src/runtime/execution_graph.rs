@@ -4,6 +4,8 @@ use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use std::fmt;
 use crate::common::data_batch::DataBatch;
+use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
+use kameo::prelude::ActorRef;
 
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
@@ -50,9 +52,10 @@ pub enum SourceConfig {
     VectorSourceConfig(Vec<DataBatch>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum SinkConfig {
     VectorSinkConfig(Vec<DataBatch>),
+    InMemoryStorageActorSinkConfig(ActorRef<InMemoryStorageActor>),
 }
 
 pub enum OperatorConfig {

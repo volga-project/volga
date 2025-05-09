@@ -62,7 +62,7 @@ impl Message<TransportClientActorMessage> for StreamTaskActor {
     async fn handle(&mut self, msg: TransportClientActorMessage, _ctx: &mut Context<StreamTaskActor, Result<()>>) -> Self::Reply {
         match msg {
             TransportClientActorMessage::RegisterReceiver { channel_id, receiver } => {
-                if let Some(reader) = &mut self.task.transport_client_mut().reader {
+                if let Some(reader) = &mut self.task.transport_client.reader {
                     reader.register_receiver(channel_id, receiver);
                     Ok(())
                 } else {
@@ -70,7 +70,7 @@ impl Message<TransportClientActorMessage> for StreamTaskActor {
                 }
             }
             TransportClientActorMessage::RegisterSender { channel_id, sender } => {
-                if let Some(writer) = &mut self.task.transport_client_mut().writer {
+                if let Some(writer) = &mut self.task.transport_client.writer {
                     writer.register_sender(channel_id, sender);
                     Ok(())
                 } else {
@@ -84,7 +84,7 @@ impl Message<TransportClientActorMessage> for StreamTaskActor {
 #[async_trait]
 impl TransportClientActor for StreamTaskActor {
     async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
-        if let Some(reader) = &mut self.task.transport_client_mut().reader {
+        if let Some(reader) = &mut self.task.transport_client.reader {
             reader.register_receiver(channel_id, receiver);
             Ok(())
         } else {
@@ -93,7 +93,7 @@ impl TransportClientActor for StreamTaskActor {
     }
 
     async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()> {
-        if let Some(writer) = &mut self.task.transport_client_mut().writer {
+        if let Some(writer) = &mut self.task.transport_client.writer {
             writer.register_sender(channel_id, sender);
             Ok(())
         } else {

@@ -1,180 +1,204 @@
-// use crate::runtime::{execution_graph::ExecutionGraph, task::StreamTask, runtime_context::RuntimeContext, partition::{create_partition, PartitionType}};
-// use anyhow::Result;
-// use std::{sync::Arc, collections::HashMap};
-// use tokio::runtime::{Builder, Runtime};
-// use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
-// use crate::transport::{TransportBackend, InMemoryTransportBackend};
-// use tokio::sync::Mutex;
+use crate::runtime::{
+    execution_graph::ExecutionGraph,
+    stream_task::StreamTask,
+    runtime_context::RuntimeContext,
+    stream_task_actor::StreamTaskActor,
+};
+use crate::transport::{
+    transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage},
+    transport_client_actor::TransportClientActorType,
+    channel::Channel,
+};
+use anyhow::Result;
+use std::collections::HashMap;
+use kameo::{Actor, spawn, prelude::ActorRef};
+use tokio::runtime::{Builder, Runtime};
+use futures;
 
-// pub struct Worker {
-//     graph: ExecutionGraph,
-//     vertex_ids: Vec<String>,
-//     task_runtimes: HashMap<String, Runtime>,
-//     compute_pools: HashMap<String, Arc<ThreadPool>>,
-//     tasks: HashMap<String, Arc<Mutex<StreamTask>>>,
-//     num_io_threads: usize,
-//     num_compute_threads: usize,
-//     transport_backend: Arc<Mutex<InMemoryTransportBackend>>,
-//     transport_runtime: Runtime,
-// }
+pub struct Worker {
+    graph: ExecutionGraph,
+    vertex_ids: Vec<String>,
+    task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
+    backend_actor: Option<ActorRef<TransportBackendActor>>,
+    task_runtimes: HashMap<String, Runtime>,
+    backend_runtime: Option<Runtime>,
+    num_io_threads: usize,
+}
 
-// impl Worker {
-//     pub fn new(
-//         graph: ExecutionGraph, 
-//         vertex_ids: Vec<String>, 
-//         num_io_threads: usize, 
-//         num_compute_threads: usize,
-//     ) -> Self {
-//         Self {
-//             graph,
-//             vertex_ids,
-//             task_runtimes: HashMap::new(),
-//             compute_pools: HashMap::new(),
-//             tasks: HashMap::new(),
-//             num_io_threads,
-//             num_compute_threads,
-//             transport_backend: Arc::new(Mutex::new(InMemoryTransportBackend::new())),
-//             transport_runtime: Builder::new_multi_thread()
-//                 .worker_threads(1)
-//                 .enable_all()
-//                 .thread_name("transport-runtime")
-//                 .build()
-//                 .unwrap(),
-//         }
-//     }
+impl Worker {
+    pub fn new(
+        graph: ExecutionGraph, 
+        vertex_ids: Vec<String>,
+        num_io_threads: usize,
+    ) -> Self {
+        Self {
+            graph,
+            vertex_ids,
+            task_actors: HashMap::new(),
+            backend_actor: None,
+            task_runtimes: HashMap::new(),
+            backend_runtime: None,
+            num_io_threads,
+        }
+    }
 
-//     pub fn start(&mut self) -> Result<()> {
-//         println!("Starting worker");
-//         // Create runtimes, tasks and register input/output channels
-//         for vertex_id in &self.vertex_ids {
-//             let vertex = self.graph.get_vertex(vertex_id).expect("Vertex should exist");
+    pub fn start(&mut self) -> Result<()> {
+        println!("Starting worker");
+
+        // Create runtime for transport backend
+        let backend_runtime = Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("transport-backend-runtime")
+            .build()?;
+
+        // Create backend actor in its runtime
+        let backend_actor = backend_runtime.block_on(async {
+            spawn(TransportBackendActor::new())
+        });
+
+        self.backend_runtime = Some(backend_runtime);
+        self.backend_actor = Some(backend_actor.clone());
+
+        // Create and register task actors
+        for vertex_id in &self.vertex_ids {
+            let vertex = self.graph.get_vertex(vertex_id).expect("Vertex should exist");
             
-//             // Create a new Tokio runtime for each vertex
-//             let runtime = Builder::new_multi_thread()
-//                 .worker_threads(self.num_io_threads)
-//                 .enable_all()
-//                 .thread_name(format!("tokio-runtime-vertex-{}", vertex_id))
-//                 .build()?;
+            // Create runtime for this task
+            let runtime = Builder::new_multi_thread()
+                .worker_threads(self.num_io_threads)
+                .enable_all()
+                .thread_name(format!("task-runtime-{}", vertex_id))
+                .build()?;
 
-//             // Create a compute pool for each vertex
-//             let compute_pool = Arc::new(
-//                 ThreadPoolBuilder::new()
-//                     .num_threads(self.num_compute_threads)
-//                     .build()?
-//             );
+            // Create runtime context for the vertex
+            let runtime_context = RuntimeContext::new(
+                vertex_id.clone(), // vertex_id
+                0, // task_index
+                0, // parallelism
+                None, // job_config
+            );
 
-//             // Store runtime and compute pool
-//             self.task_runtimes.insert(vertex_id.clone(), runtime);
-//             self.compute_pools.insert(vertex_id.clone(), compute_pool.clone());
+            // Create the task and its actor in the task's runtime
+            let task = StreamTask::new(
+                vertex_id.clone(),
+                vertex.operator_config.clone(),
+                runtime_context,
+            )?;
+            let task_actor = StreamTaskActor::new(task);
+            let task_ref = runtime.block_on(async {
+                spawn(task_actor)
+            });
+            self.task_actors.insert(vertex_id.clone(), task_ref.clone());
 
-//             // Create runtime context for the vertex
-//             let runtime_context = RuntimeContext::new(
-//                 0, // task_id
-//                 0, // task_index
-//                 0, // parallelism
-//                 0, // operator_id
-//                 vertex_id.clone(), // operator_name
-//                 None, // job_config
-//                 Some(compute_pool), // compute_pool
-//             );
+            // Get edges for this vertex
+            let (input_edges, output_edges) = self.graph.get_edges_for_vertex(vertex_id).unwrap();
 
+            // Register everything in a single block_on call
+            runtime.block_on(async {
+                // Register task actor with backend
+                self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::RegisterActor {
+                    vertex_id: vertex_id.clone(),
+                    actor: TransportClientActorType::StreamTask(task_ref.clone()),
+                }).await?;
+
+                // Register input channels
+                for edge in input_edges {
+                    self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::RegisterChannel {
+                        vertex_id: vertex_id.clone(),
+                        channel: edge.channel.clone(),
+                        is_input: true,
+                    }).await?;
+                }
+
+                // Register output channels
+                for edge in output_edges {
+                    self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::RegisterChannel {
+                        vertex_id: vertex_id.clone(),
+                        channel: edge.channel.clone(),
+                        is_input: false,
+                    }).await?;
+
+                    // Create collector for output channel
+                    task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::CreateCollector {
+                        channel_id: edge.channel.get_channel_id().clone(),
+                        partition_type: edge.partition_type.clone(),
+                        target_operator_id: edge.job_edge_id.clone(),
+                    }).await?;
+                }
+
+                Ok::<(), anyhow::Error>(())
+            })?;
+
+            // Store the runtime after all async operations are done
+            self.task_runtimes.insert(vertex_id.clone(), runtime);
+        }
+
+        // Start the backend
+        self.backend_runtime.as_ref().unwrap().block_on(async {
+            self.backend_actor.as_ref().unwrap().tell(TransportBackendActorMessage::Start).await
+        })?;
+
+        // Start all tasks
+        for (vertex_id, runtime) in &self.task_runtimes {
+            let vertex_id = vertex_id.clone();
+            let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
             
-//             // Create the task
-//             let task = Arc::new(Mutex::new(StreamTask::new(
-//                 vertex_id.clone(),
-//                 vertex.operator_config.clone(),
-//                 runtime_context,
-//             )?));
-//             self.tasks.insert(vertex_id.clone(), task.clone());
-//             let task = task.clone();
-            
-//             let (input_edges, output_edges) = self.graph.get_edges_for_vertex(vertex_id).unwrap();
-//             let transport_backend = self.transport_backend.clone();
-//             self.transport_runtime.block_on(async move {
-//                 let mut task = task.lock().await;
-//                 let mut backend = transport_backend.lock().await;
-//                 backend.register_client(vertex_id.clone(), task.transport_client()).await?;
-//                 for edge in input_edges {
-//                     backend.register_channel(
-//                         vertex_id.clone(),
-//                         edge.channel.clone(),
-//                         true,
-//                     ).await?;
-//                 }
-//                 for edge in output_edges.clone() {
-//                     backend.register_channel(
-//                         vertex_id.clone(),
-//                         edge.channel.clone(),
-//                         false,
-//                     ).await?;
-//                 }
-//                 for edge in output_edges.clone() {
-//                     task.create_or_update_collector(
-//                         edge.channel.get_channel_id().clone(),
-//                         create_partition(edge.partition_type.clone()),
-//                         edge.job_edge_id.clone(),
-//                     )?;
-//                 }
-//                 Ok::<(), anyhow::Error>(())
-//             })?;
-//         }
-        
-//         // Start the transport backend
-//         let transport_backend = self.transport_backend.clone();
-//         self.transport_runtime.block_on(async move {
-//             let mut backend = transport_backend.lock().await;
-//             backend.start().await
-//         })?;
+            // Open task synchronously
+            runtime.block_on(async {
+                task_ref.tell(crate::runtime::stream_task_actor::StreamTaskMessage::Open).await
+            })?;
 
-//         // Start the tasks
-//         for vertex_id in &self.vertex_ids {
-//             // Spawn the task on the vertex's runtime
-//             let runtime = self.task_runtimes.get(vertex_id).unwrap();
-//             let task = self.tasks.get(vertex_id).unwrap().clone();
-//             runtime.spawn(async move {
-//                 let mut task = task.lock().await;
-//                 task.open().await?;
-//                 task.run().await?;
-//                 Ok::<(), anyhow::Error>(())
-//             });
-//         }
+            // Run task asynchronously without blocking
+            let task_ref = task_ref.clone();
+            runtime.spawn(async move {
+                if let Err(e) = task_ref.tell(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await {
+                    eprintln!("Error running task {}: {}", vertex_id, e);
+                }
+            });
+        }
 
-//         println!("Started worker");
-//         Ok(())
-//     }
+        println!("Started worker");
+        Ok(())
+    }
 
-//     pub fn close(&mut self) -> Result<()> {
-//         println!("Closing worker");
-//         // Close all tasks in their respective runtimes
-//         for vertex_id in &self.vertex_ids {
-//             if let Some(task) = self.tasks.get(vertex_id) {
-//                 let task = task.clone();
-//                 if let Some(runtime) = self.task_runtimes.get(vertex_id) {
-//                     runtime.block_on(async move {
-//                         let mut task = task.lock().await;
-//                         task.close().await
-//                     })?;
-//                 }
-//             }
-//         }
+    pub fn close(&mut self) -> Result<()> {
+        println!("Closing worker");
 
-//         // Close the transport backend in its runtime
-//         let transport_backend = self.transport_backend.clone();
-//         self.transport_runtime.block_on(async move {
-//             let mut backend = transport_backend.lock().await;
-//             backend.close().await
-//         })?;
+        // Close all tasks in parallel
+        for (vertex_id, runtime) in &self.task_runtimes {
+            runtime.block_on(async {
+                let mut close_futures = Vec::new();
+                for (_, task_ref) in &self.task_actors {
+                    close_futures.push(task_ref.tell(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await);
+                }
+                for result in close_futures {
+                    result?;
+                }
+                Ok::<(), anyhow::Error>(())
+            })?;
+        }
 
-//         // Shutdown all runtimes
-//         for vertex_id in &self.vertex_ids {
-//             if let Some(runtime) = self.task_runtimes.remove(vertex_id) {
-//                 runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-//             }
-//         }
+        // Close the backend
+        if let Some(backend_actor) = &self.backend_actor {
+            self.backend_runtime.as_ref().unwrap().block_on(async {
+                backend_actor.tell(TransportBackendActorMessage::Close).await
+            })?;
+        }
 
-//         // TODO: Shutdown the transport runtime
-//         // self.transport_runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+        // Shutdown all runtimes
+        for (vertex_id, runtime) in self.task_runtimes.drain() {
+            println!("Shutting down runtime for task {}", vertex_id);
+            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+        }
 
-//         Ok(())
-//     }
-// }
+        // Shutdown backend runtime
+        if let Some(runtime) = self.backend_runtime.take() {
+            println!("Shutting down transport backend runtime");
+            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+        }
+
+        println!("Closed worker");
+        Ok(())
+    }
+}

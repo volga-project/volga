@@ -11,7 +11,7 @@ pub struct StreamTask {
     vertex_id: String,
     operator: Operator,
     runtime_context: RuntimeContext,
-    transport_client: TransportClient,
+    pub transport_client: TransportClient,
     collectors: HashMap<String, Collector>,
     running: bool,
 }
@@ -39,15 +39,7 @@ impl StreamTask {
             running: true,
         })
     }
-
-    // pub fn vertex_id(&self) -> &str {
-    //     &self.vertex_id
-    // }
-
-    // pub fn transport_client(&self) -> TransportClient {
-    //     self.transport_client.clone()
-    // }
-
+    
     pub fn create_or_update_collector(
         &mut self,
         channel_id: String,
@@ -145,10 +137,6 @@ impl StreamTask {
         self.operator.close().await?;
         println!("StreamTask {:?} closed", self.vertex_id);
         Ok(())
-    }
-
-    pub fn transport_client_mut(&mut self) -> &mut TransportClient {
-        &mut self.transport_client
     }
 }
 
