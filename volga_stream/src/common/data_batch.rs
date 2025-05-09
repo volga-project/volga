@@ -6,14 +6,14 @@ type RecordBatch = Vec<String>; // TODO use arrow::record_batch::RecordBatch
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BaseDataBatch {
-    pub stream_name: Option<String>,
+    pub upstream_vertex_id: Option<String>,
     pub record_batch: RecordBatch,
 }
 
 impl BaseDataBatch {
-    pub fn new(stream_name: Option<String>, record_batch: RecordBatch) -> Self {
+    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch) -> Self {
         Self {
-            stream_name,
+            upstream_vertex_id,
             record_batch,
         }
     }
@@ -45,21 +45,21 @@ pub enum DataBatch {
 }
 
 impl DataBatch {
-    pub fn new(stream_name: Option<String>, record_batch: RecordBatch) -> Self {
-        DataBatch::Batch(BaseDataBatch::new(stream_name, record_batch))
+    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch) -> Self {
+        DataBatch::Batch(BaseDataBatch::new(upstream_vertex_id, record_batch))
     }
 
-    pub fn new_keyed(stream_name: Option<String>, record_batch: RecordBatch, key_column: String) -> Self {
+    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key_column: String) -> Self {
         DataBatch::KeyedBatch(KeyedDataBatch::new(
-            BaseDataBatch::new(stream_name, record_batch),
+            BaseDataBatch::new(upstream_vertex_id, record_batch),
             key_column,
         ))
     }
 
-    pub fn stream_name(&self) -> Option<&str> {
+    pub fn upstream_vertex_id(&self) -> Option<&str> {
         match self {
-            DataBatch::Batch(batch) => batch.stream_name.as_deref(),
-            DataBatch::KeyedBatch(batch) => batch.base.stream_name.as_deref(),
+            DataBatch::Batch(batch) => batch.upstream_vertex_id.as_deref(),
+            DataBatch::KeyedBatch(batch) => batch.base.upstream_vertex_id.as_deref(),
         }
     }
 

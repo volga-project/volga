@@ -20,7 +20,7 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
-    async fn process_batch(&mut self, batch: DataBatch, stream_id: Option<usize>) -> Result<DataBatch> {
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
         Err(anyhow::anyhow!("process_batch not implemented for this operator"))
     }
     fn operator_type(&self) -> OperatorType;
@@ -77,12 +77,12 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn process_batch(&mut self, batch: DataBatch, stream_id: Option<usize>) -> Result<DataBatch> {
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
         match self {
-            Operator::Map(op) => op.process_batch(batch, stream_id).await,
-            Operator::Join(op) => op.process_batch(batch, stream_id).await,
-            Operator::Sink(op) => op.process_batch(batch, stream_id).await,
-            Operator::Source(op) => op.process_batch(batch, stream_id).await,
+            Operator::Map(op) => op.process_batch(batch).await,
+            Operator::Join(op) => op.process_batch(batch).await,
+            Operator::Sink(op) => op.process_batch(batch).await,
+            Operator::Source(op) => op.process_batch(batch).await,
         }
     }
 
@@ -165,10 +165,7 @@ impl OperatorTrait for MapOperator {
         self.base.finish().await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch, stream_id: Option<usize>) -> Result<DataBatch> {
-        if stream_id != Some(0) {
-            return Err(anyhow::anyhow!("Map operator only accepts input from stream 0"));
-        }
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
         let mut result = Vec::new();
         for record in batch.record_batch() {
             result.push(record.clone());
@@ -214,27 +211,16 @@ impl OperatorTrait for JoinOperator {
         self.base.finish().await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch, stream_id: Option<usize>) -> Result<DataBatch> {
-        match stream_id {
-            Some(0) => self.left_buffer.push(batch),
-            Some(1) => self.right_buffer.push(batch),
-            _ => return Err(anyhow::anyhow!("Join operator only accepts input from streams 0 and 1")),
-        }
-
-        if !self.left_buffer.is_empty() && !self.right_buffer.is_empty() {
-            let left = self.left_buffer.remove(0);
-            let right = self.right_buffer.remove(0);
-            let mut result = Vec::new();
-            for record in left.record_batch() {
-                result.push(record.clone());
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
+        // TODO proper lookup for upstream_vertex_id position (left or right)
+        if let Some(upstream_id) = batch.upstream_vertex_id() {
+            if upstream_id.contains("left") {
+                self.left_buffer.push(batch.clone());
+            } else {
+                self.right_buffer.push(batch.clone());
             }
-            for record in right.record_batch() {
-                result.push(record.clone());
-            }
-            Ok(DataBatch::new(None, result))
-        } else {
-            Ok(DataBatch::new(None, Vec::new()))
         }
+        Ok(batch)
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -271,7 +257,7 @@ impl OperatorTrait for SinkOperator {
         self.base.finish().await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch, _stream_id: Option<usize>) -> Result<DataBatch> {
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
         self.sink_function.sink(batch.clone()).await?;
         Ok(batch)
     }

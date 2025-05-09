@@ -92,7 +92,7 @@ impl StreamTask {
                     let reader = self.transport_client.reader.as_mut().expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(batch) = reader.read_batch().await? {
                         println!("StreamTask {:?} received batch", self.vertex_id);
-                        Some(self.operator.process_batch(batch, Some(0)).await?)
+                        Some(self.operator.process_batch(batch).await?)
                     } else {
                         None
                     }
@@ -100,6 +100,7 @@ impl StreamTask {
             };
 
             if let Some(batch) = batch {
+                // TODO set vertex_id in the batch
                 let mut channels_to_retry = HashMap::new();
                 for (collector_id, collector) in &self.collectors {
                     channels_to_retry.insert(collector_id.clone(), collector.output_channel_ids());
@@ -132,11 +133,16 @@ impl StreamTask {
     }
 
     pub async fn close(&mut self) -> Result<()> {
+        // TODO store in-fligh tasks
         println!("StreamTask {:?} closing", self.vertex_id);
         self.running = false;
         self.operator.close().await?;
         println!("StreamTask {:?} closed", self.vertex_id);
         Ok(())
+    }
+
+    pub async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<DataBatch>> {
+        Ok(Some(self.operator.process_batch(batch).await?))
     }
 }
 
