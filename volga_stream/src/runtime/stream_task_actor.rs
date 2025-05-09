@@ -1,13 +1,14 @@
 use anyhow::Result;
 use kameo::Actor;
 use kameo::message::{Context, Message};
-use crate::runtime::task::StreamTask;
+use crate::runtime::stream_task::StreamTask;
 use crate::transport::transport_backend::{TransportBackend, InMemoryTransportBackend};
 use crate::transport::channel::Channel;
 use crate::runtime::partition::PartitionType;
-use crate::transport::transport_actor::{TransportActor, TransportActorMessage, TransportActorType};
+use crate::transport::transport_client_actor::{TransportClientActor, TransportClientActorMessage, TransportClientActorType};
 use tokio::sync::mpsc;
 use crate::common::data_batch::DataBatch;
+use async_trait::async_trait;
 
 // StreamTaskActor messages
 #[derive(Debug)]
@@ -55,12 +56,12 @@ impl Message<StreamTaskMessage> for StreamTaskActor {
     }
 }
 
-impl Message<TransportActorMessage> for StreamTaskActor {
+impl Message<TransportClientActorMessage> for StreamTaskActor {
     type Reply = Result<()>;
 
-    async fn handle(&mut self, msg: TransportActorMessage, _ctx: &mut Context<StreamTaskActor, Result<()>>) -> Self::Reply {
+    async fn handle(&mut self, msg: TransportClientActorMessage, _ctx: &mut Context<StreamTaskActor, Result<()>>) -> Self::Reply {
         match msg {
-            TransportActorMessage::RegisterReceiver { channel_id, receiver } => {
+            TransportClientActorMessage::RegisterReceiver { channel_id, receiver } => {
                 if let Some(reader) = &mut self.task.transport_client_mut().reader {
                     reader.register_receiver(channel_id, receiver);
                     Ok(())
@@ -68,7 +69,7 @@ impl Message<TransportActorMessage> for StreamTaskActor {
                     Err(anyhow::anyhow!("Reader not initialized"))
                 }
             }
-            TransportActorMessage::RegisterSender { channel_id, sender } => {
+            TransportClientActorMessage::RegisterSender { channel_id, sender } => {
                 if let Some(writer) = &mut self.task.transport_client_mut().writer {
                     writer.register_sender(channel_id, sender);
                     Ok(())
@@ -80,8 +81,8 @@ impl Message<TransportActorMessage> for StreamTaskActor {
     }
 }
 
-#[async_trait::async_trait]
-impl TransportActor for StreamTaskActor {
+#[async_trait]
+impl TransportClientActor for StreamTaskActor {
     async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
         if let Some(reader) = &mut self.task.transport_client_mut().reader {
             reader.register_receiver(channel_id, receiver);
@@ -100,54 +101,3 @@ impl TransportActor for StreamTaskActor {
         }
     }
 }
-
-// TransportBackendActor messages
-#[derive(Debug)]
-pub enum TransportBackendMessage {
-    Start,
-    Close,
-    RegisterChannel {
-        vertex_id: String,
-        channel: Channel,
-        is_input: bool,
-    },
-    RegisterActor {
-        vertex_id: String,
-        actor: TransportActorType,
-    },
-}
-
-#[derive(Actor)]
-pub struct TransportBackendActor {
-    backend: InMemoryTransportBackend,
-}
-
-impl TransportBackendActor {
-    pub fn new() -> Self {
-        Self {
-            backend: InMemoryTransportBackend::new(),
-        }
-    }
-}
-
-impl Message<TransportBackendMessage> for TransportBackendActor {
-    type Reply = Result<()>;
-
-    async fn handle(&mut self, msg: TransportBackendMessage, _ctx: &mut Context<TransportBackendActor, Result<()>>) -> Self::Reply {
-        match msg {
-            TransportBackendMessage::Start => {
-                self.backend.start().await?;
-            }
-            TransportBackendMessage::Close => {
-                self.backend.close().await?;
-            }
-            TransportBackendMessage::RegisterChannel { vertex_id, channel, is_input } => {
-                self.backend.register_channel(vertex_id, channel, is_input).await?;
-            }
-            TransportBackendMessage::RegisterActor { vertex_id, actor } => {
-                self.backend.register_actor(vertex_id, actor).await?;
-            }
-        }
-        Ok(())
-    }
-} 

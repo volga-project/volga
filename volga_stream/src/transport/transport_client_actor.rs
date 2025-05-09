@@ -4,32 +4,32 @@ use crate::common::data_batch::DataBatch;
 use async_trait::async_trait;
 use kameo::Actor;
 use kameo::prelude::ActorRef;
-use crate::runtime::actors::StreamTaskActor;
+use crate::runtime::stream_task_actor::StreamTaskActor;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 
 #[derive(Debug)]
-pub enum TransportActorType {
+pub enum TransportClientActorType {
     StreamTask(ActorRef<StreamTaskActor>),
     TestReader(ActorRef<TestDataReaderActor>),
     TestWriter(ActorRef<TestDataWriterActor>),
 }
 
-impl TransportActorType {
+impl TransportClientActorType {
     pub async fn register_receiver(&self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
         match self {
-            TransportActorType::StreamTask(actor) => {
-                actor.tell(crate::transport::transport_actor::TransportActorMessage::RegisterReceiver {
+            TransportClientActorType::StreamTask(actor) => {
+                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterReceiver {
                     channel_id,
                     receiver,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register receiver: {}", e))
             }
-            TransportActorType::TestReader(actor) => {
-                actor.tell(crate::transport::transport_actor::TransportActorMessage::RegisterReceiver {
+            TransportClientActorType::TestReader(actor) => {
+                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterReceiver {
                     channel_id,
                     receiver,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register receiver: {}", e))
             }
-            TransportActorType::TestWriter(_) => {
+            TransportClientActorType::TestWriter(_) => {
                 Err(anyhow::anyhow!("Writer actor does not support receiver registration"))
             }
         }
@@ -37,19 +37,19 @@ impl TransportActorType {
 
     pub async fn register_sender(&self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()> {
         match self {
-            TransportActorType::StreamTask(actor) => {
-                actor.tell(crate::transport::transport_actor::TransportActorMessage::RegisterSender {
+            TransportClientActorType::StreamTask(actor) => {
+                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterSender {
                     channel_id,
                     sender,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register sender: {}", e))
             }
-            TransportActorType::TestWriter(actor) => {
-                actor.tell(crate::transport::transport_actor::TransportActorMessage::RegisterSender {
+            TransportClientActorType::TestWriter(actor) => {
+                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterSender {
                     channel_id,
                     sender,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register sender: {}", e))
             }
-            TransportActorType::TestReader(_) => {
+            TransportClientActorType::TestReader(_) => {
                 Err(anyhow::anyhow!("Reader actor does not support sender registration"))
             }
         }
@@ -57,14 +57,13 @@ impl TransportActorType {
 }
 
 #[async_trait]
-pub trait TransportActor: Actor + Send + Sync {
+pub trait TransportClientActor: Actor + Send + Sync {
     async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()>;
     async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()>;
 }
 
 // Messages for transport actor registration
-#[derive(Debug)]
-pub enum TransportActorMessage {
+pub enum TransportClientActorMessage {
     RegisterReceiver {
         channel_id: String,
         receiver: mpsc::Receiver<DataBatch>,

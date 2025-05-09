@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
-use crate::transport::transport_actor::TransportActorType;
+use crate::transport::transport_client_actor::TransportClientActorType;
 use async_trait::async_trait;
 
 #[async_trait]
@@ -11,11 +11,11 @@ pub trait TransportBackend: Send + Sync {
     async fn start(&mut self) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_input: bool) -> Result<()>;
-    async fn register_actor(&mut self, vertex_id: String, actor: TransportActorType) -> Result<()>;
+    async fn register_actor(&mut self, vertex_id: String, actor: TransportClientActorType) -> Result<()>;
 }
 
 pub struct InMemoryTransportBackend {
-    actors: HashMap<String, TransportActorType>,
+    actors: HashMap<String, TransportClientActorType>,
     senders: HashMap<String, mpsc::Sender<DataBatch>>,
     receivers: HashMap<String, mpsc::Receiver<DataBatch>>,
 }
@@ -72,7 +72,7 @@ impl TransportBackend for InMemoryTransportBackend {
         Ok(())
     }
 
-    async fn register_actor(&mut self, vertex_id: String, actor: TransportActorType) -> Result<()> {
+    async fn register_actor(&mut self, vertex_id: String, actor: TransportClientActorType) -> Result<()> {
         self.actors.insert(vertex_id, actor);
         Ok(())
     }

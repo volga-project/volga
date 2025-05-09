@@ -3,13 +3,13 @@ use kameo::Actor;
 use kameo::message::{Context, Message};
 use crate::common::data_batch::DataBatch;
 use crate::transport::transport_client::{DataReader, DataWriter};
-use crate::transport::transport_actor::{TransportActor, TransportActorMessage};
+use crate::transport::transport_client_actor::{TransportClientActor, TransportClientActorMessage};
 use tokio::sync::mpsc;
 use async_trait::async_trait;
 
 // TestDataReaderActor messages
 #[derive(Debug)]
-pub enum DataReaderMessage {
+pub enum TestDataReaderMessage {
     RegisterReceiver {
         channel_id: String,
         receiver: mpsc::Receiver<DataBatch>,
@@ -30,32 +30,32 @@ impl TestDataReaderActor {
     }
 }
 
-impl Message<DataReaderMessage> for TestDataReaderActor {
+impl Message<TestDataReaderMessage> for TestDataReaderActor {
     type Reply = Result<Option<DataBatch>>;
 
-    async fn handle(&mut self, msg: DataReaderMessage, _ctx: &mut Context<TestDataReaderActor, Result<Option<DataBatch>>>) -> Self::Reply {
+    async fn handle(&mut self, msg: TestDataReaderMessage, _ctx: &mut Context<TestDataReaderActor, Result<Option<DataBatch>>>) -> Self::Reply {
         match msg {
-            DataReaderMessage::RegisterReceiver { channel_id, receiver } => {
+            TestDataReaderMessage::RegisterReceiver { channel_id, receiver } => {
                 self.reader.register_receiver(channel_id, receiver);
                 Ok(None)
             }
-            DataReaderMessage::ReadBatch => {
+            TestDataReaderMessage::ReadBatch => {
                 self.reader.read_batch().await
             }
         }
     }
 }
 
-impl Message<TransportActorMessage> for TestDataReaderActor {
+impl Message<TransportClientActorMessage> for TestDataReaderActor {
     type Reply = Result<()>;
 
-    async fn handle(&mut self, msg: TransportActorMessage, _ctx: &mut Context<TestDataReaderActor, Result<()>>) -> Self::Reply {
+    async fn handle(&mut self, msg: TransportClientActorMessage, _ctx: &mut Context<TestDataReaderActor, Result<()>>) -> Self::Reply {
         match msg {
-            TransportActorMessage::RegisterReceiver { channel_id, receiver } => {
+            TransportClientActorMessage::RegisterReceiver { channel_id, receiver } => {
                 self.reader.register_receiver(channel_id, receiver);
                 Ok(())
             }
-            TransportActorMessage::RegisterSender { .. } => {
+            TransportClientActorMessage::RegisterSender { .. } => {
                 Err(anyhow::anyhow!("TestDataReaderActor does not support sender registration"))
             }
         }
@@ -63,7 +63,7 @@ impl Message<TransportActorMessage> for TestDataReaderActor {
 }
 
 #[async_trait]
-impl TransportActor for TestDataReaderActor {
+impl TransportClientActor for TestDataReaderActor {
     async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
         self.reader.register_receiver(channel_id, receiver);
         Ok(())
@@ -76,7 +76,7 @@ impl TransportActor for TestDataReaderActor {
 
 // TestDataWriterActor messages
 #[derive(Debug)]
-pub enum DataWriterMessage {
+pub enum TestDataWriterMessage {
     RegisterSender {
         channel_id: String,
         sender: mpsc::Sender<DataBatch>,
@@ -100,32 +100,32 @@ impl TestDataWriterActor {
     }
 }
 
-impl Message<DataWriterMessage> for TestDataWriterActor {
+impl Message<TestDataWriterMessage> for TestDataWriterActor {
     type Reply = Result<()>;
 
-    async fn handle(&mut self, msg: DataWriterMessage, _ctx: &mut Context<TestDataWriterActor, Result<()>>) -> Self::Reply {
+    async fn handle(&mut self, msg: TestDataWriterMessage, _ctx: &mut Context<TestDataWriterActor, Result<()>>) -> Self::Reply {
         match msg {
-            DataWriterMessage::RegisterSender { channel_id, sender } => {
+            TestDataWriterMessage::RegisterSender { channel_id, sender } => {
                 self.writer.register_sender(channel_id, sender);
                 Ok(())
             }
-            DataWriterMessage::WriteBatch { channel_id, batch } => {
+            TestDataWriterMessage::WriteBatch { channel_id, batch } => {
                 self.writer.write_batch(&channel_id, batch).await
             }
         }
     }
 }
 
-impl Message<TransportActorMessage> for TestDataWriterActor {
+impl Message<TransportClientActorMessage> for TestDataWriterActor {
     type Reply = Result<()>;
 
-    async fn handle(&mut self, msg: TransportActorMessage, _ctx: &mut Context<TestDataWriterActor, Result<()>>) -> Self::Reply {
+    async fn handle(&mut self, msg: TransportClientActorMessage, _ctx: &mut Context<TestDataWriterActor, Result<()>>) -> Self::Reply {
         match msg {
-            TransportActorMessage::RegisterSender { channel_id, sender } => {
+            TransportClientActorMessage::RegisterSender { channel_id, sender } => {
                 self.writer.register_sender(channel_id, sender);
                 Ok(())
             }
-            TransportActorMessage::RegisterReceiver { .. } => {
+            TransportClientActorMessage::RegisterReceiver { .. } => {
                 Err(anyhow::anyhow!("TestDataWriterActor does not support receiver registration"))
             }
         }
@@ -133,7 +133,7 @@ impl Message<TransportActorMessage> for TestDataWriterActor {
 }
 
 #[async_trait]
-impl TransportActor for TestDataWriterActor {
+impl TransportClientActor for TestDataWriterActor {
     async fn register_receiver(&mut self, _channel_id: String, _receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
         Err(anyhow::anyhow!("TestDataWriterActor does not support receiver registration"))
     }
