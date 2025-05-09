@@ -18,7 +18,7 @@ impl DataReader {
         Self {
             vertex_id,
             receivers: HashMap::new(),
-            default_timeout: Duration::from_millis(100),
+            default_timeout: Duration::from_millis(10000),
             default_retries: 0,
         }
     }
@@ -42,7 +42,7 @@ impl DataReader {
 
         while attempts <= retries {
             if self.receivers.is_empty() {
-                return Err(anyhow!("Attempted to read batch from DataReader with no channels registered"));
+                return Err(anyhow!("Attempted to read batch from DataReader {} with no channels registered", self.vertex_id));
             }
 
             // Create a future that completes when any channel has data

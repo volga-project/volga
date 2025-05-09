@@ -7,13 +7,20 @@ use anyhow::Result;
 use kameo::{Actor, spawn};
 use kameo::prelude::ActorRef;
 use tokio::sync::mpsc;
+use tracing::info;
+use tokio::sync::Barrier;
 
 #[tokio::test]
 async fn test_actor_transport() -> Result<()> {
+    // Initialize console subscriber for tracing
+    // console_subscriber::init();
+
     // Configuration
-    let num_writers = 3;
-    let num_readers = 2;
-    let batches_per_writer = 2;
+    let num_writers = 10;
+    let num_readers = 10;
+    let batches_per_writer = 10;
+
+    info!("Starting actor transport test");
 
     // Create transport backend actor
     let backend_actor = TransportBackendActor::new();
@@ -31,6 +38,7 @@ async fn test_actor_transport() -> Result<()> {
             vertex_id: format!("writer{}", i),
             actor: TransportActorType::TestWriter(writer_ref),
         }).await?;
+        info!("Registered writer {}", i);
     }
 
     // Create reader actors
@@ -45,9 +53,11 @@ async fn test_actor_transport() -> Result<()> {
             vertex_id: format!("reader{}", i),
             actor: TransportActorType::TestReader(reader_ref),
         }).await?;
+        info!("Registered reader {}", i);
     }
 
     // Create and register channels between each writer and reader
+    let mut channel_registrations = Vec::new();
     for writer_idx in 0..num_writers {
         for reader_idx in 0..num_readers {
             let channel = Channel::Local {
@@ -55,23 +65,31 @@ async fn test_actor_transport() -> Result<()> {
             };
 
             // Register channel for writer (output)
-            backend_ref.tell(TransportBackendMessage::RegisterChannel {
+            channel_registrations.push(backend_ref.ask(TransportBackendMessage::RegisterChannel {
                 vertex_id: format!("writer{}", writer_idx),
                 channel: channel.clone(),
                 is_input: false,
-            }).await?;
+            }).await);
 
             // Register channel for reader (input)
-            backend_ref.tell(TransportBackendMessage::RegisterChannel {
+            channel_registrations.push(backend_ref.ask(TransportBackendMessage::RegisterChannel {
                 vertex_id: format!("reader{}", reader_idx),
                 channel: channel.clone(),
                 is_input: true,
-            }).await?;
+            }).await);
+            info!("Queued channel registration between writer {} and reader {}", writer_idx, reader_idx);
         }
     }
 
+    // Wait for all channel registrations to complete
+    for result in channel_registrations {
+        result?;
+    }
+    info!("All channel registrations completed");
+
     // Start the backend
     backend_ref.tell(TransportBackendMessage::Start).await?;
+    info!("Started transport backend");
 
     // Create test data and send from each writer
     for writer_idx in 0..num_writers {
@@ -88,6 +106,7 @@ async fn test_actor_transport() -> Result<()> {
                     channel_id,
                     batch: batch.clone(),
                 }).await?;
+                info!("Writer {} sent batch {} to reader {}", writer_idx, batch_idx, reader_idx);
             }
         }
     }
@@ -101,7 +120,7 @@ async fn test_actor_transport() -> Result<()> {
                 .await?;
             
             if let Some(batch) = batch_result {
-                println!("Reader {} received batch: {:?}", reader_idx, batch);
+                info!("Reader {} received batch: {:?}", reader_idx, batch);
             } else {
                 return Err(anyhow::anyhow!("Reader {} did not receive expected batch", reader_idx));
             }
@@ -110,6 +129,7 @@ async fn test_actor_transport() -> Result<()> {
 
     // Close the backend
     backend_ref.tell(TransportBackendMessage::Close).await?;
+    info!("Closed transport backend");
 
     Ok(())
 } 

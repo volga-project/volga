@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use crate::common::data_batch::DataBatch;
 use crate::transport::channel::Channel;
-use crate::transport::transport_actor::{TransportActorType};
+use crate::transport::transport_actor::TransportActorType;
 use async_trait::async_trait;
 
 #[async_trait]
@@ -57,12 +57,14 @@ impl TransportBackend for InMemoryTransportBackend {
         // Register the channel with the appropriate actor using message passing
         if let Some(actor) = self.actors.get(&vertex_id) {
             if is_in {
+                // For readers, we need to move the receiver since it can't be cloned
                 if let Some(rx) = self.receivers.remove(&channel_id) {
                     actor.register_receiver(channel_id, rx).await?;
                 }
             } else {
-                if let Some(tx) = self.senders.remove(&channel_id) {
-                    actor.register_sender(channel_id, tx).await?;
+                // For writers, we can clone the sender since it's designed for multiple producers
+                if let Some(tx) = self.senders.get(&channel_id) {
+                    actor.register_sender(channel_id, tx.clone()).await?;
                 }
             }
         }
