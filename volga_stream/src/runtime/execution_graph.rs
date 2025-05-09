@@ -6,6 +6,7 @@ use std::fmt;
 use crate::common::data_batch::DataBatch;
 use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
 use kameo::prelude::ActorRef;
+use crate::runtime::map_function::MapFunction;
 
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
@@ -59,7 +60,7 @@ pub enum SinkConfig {
 }
 
 pub enum OperatorConfig {
-    MapConfig(HashMap<String, String>),
+    MapConfig(MapFunction),
     JoinConfig(HashMap<String, String>),
     SinkConfig(SinkConfig),
     SourceConfig(SourceConfig),

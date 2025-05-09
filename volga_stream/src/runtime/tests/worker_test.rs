@@ -1,5 +1,9 @@
 use crate::runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig}, operator::SourceOperator, partition::{ForwardPartition, PartitionType}, worker::Worker
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig}, 
+    operator::SourceOperator, 
+    partition::{ForwardPartition, PartitionType}, 
+    worker::Worker,
+    map_function::{MapFunction, MapFunctionTrait},
 };
 use crate::common::data_batch::DataBatch;
 use anyhow::Result;
@@ -12,6 +16,17 @@ use std::time::Duration;
 use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage};
 use kameo::{Actor, spawn};
 use crate::transport::channel::Channel;
+use async_trait::async_trait;
+
+#[derive(Debug, Clone)]
+struct IdentityMapFunction;
+
+#[async_trait]
+impl MapFunctionTrait for IdentityMapFunction {
+    async fn map(&self, batch: DataBatch) -> Result<DataBatch> {
+        Ok(batch)
+    }
+}
 
 #[test]
 fn test_worker() -> Result<()> {
@@ -41,10 +56,10 @@ fn test_worker() -> Result<()> {
     );
     graph.add_vertex(source_vertex);
 
-    // Create map vertex
+    // Create map vertex with identity function
     let map_vertex = ExecutionVertex::new(
         "map".to_string(),
-        OperatorConfig::MapConfig(std::collections::HashMap::new()),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
     );
     graph.add_vertex(map_vertex);
 

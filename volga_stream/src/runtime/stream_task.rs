@@ -23,7 +23,7 @@ impl StreamTask {
         runtime_context: RuntimeContext,
     ) -> Result<Self> {
         let operator = match operator_config {
-            OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new()),
+            OperatorConfig::MapConfig(map_function) => Operator::Map(MapOperator::new(map_function)),
             OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new()),
             OperatorConfig::SinkConfig(config) => Operator::Sink(SinkOperator::new(config)),
             OperatorConfig::SourceConfig(config) => Operator::Source(SourceOperator::new(config)),

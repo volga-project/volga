@@ -1723,6 +1723,7 @@ dependencies = [
  "console-subscriber",
  "crossbeam",
  "crossbeam-skiplist",
+ "dyn-clone",
  "futures",
  "itertools 0.13.0",
  "kameo",

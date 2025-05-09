@@ -8,6 +8,7 @@ use crate::runtime::execution_graph::{SourceConfig, SinkConfig};
 use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage};
 use kameo::prelude::ActorRef;
 use crate::runtime::sink_function::{SinkFunction, create_sink_function, SinkFunctionTrait};
+use crate::runtime::map_function::MapFunction;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -20,9 +21,7 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
-        Err(anyhow::anyhow!("process_batch not implemented for this operator"))
-    }
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch>;
     fn operator_type(&self) -> OperatorType;
     async fn fetch(&mut self) -> Result<Option<DataBatch>> {
         Err(anyhow::anyhow!("fetch not implemented for this operator"))
@@ -35,17 +34,6 @@ pub enum Operator {
     Join(JoinOperator),
     Sink(SinkOperator),
     Source(SourceOperator),
-}
-
-impl Clone for Operator {
-    fn clone(&self) -> Self {
-        match self {
-            Operator::Map(op) => Operator::Map(op.clone()),
-            Operator::Join(op) => Operator::Join(op.clone()),
-            Operator::Source(op) => Operator::Source(op.clone()),
-            Operator::Sink(_) => panic!("Cannot clone SinkOperator"),
-        }
-    }
 }
 
 #[async_trait]
@@ -105,7 +93,7 @@ impl OperatorTrait for Operator {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OperatorBase {
     runtime_context: Option<RuntimeContext>,
 }
@@ -133,54 +121,54 @@ impl OperatorTrait for OperatorBase {
         Ok(())
     }
 
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
+        Ok(batch)
+    }
+
     fn operator_type(&self) -> OperatorType {
         OperatorType::PROCESSOR
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MapOperator {
-    base: OperatorBase,
+    map_function: MapFunction,
 }
 
 impl MapOperator {
-    pub fn new() -> Self {
-        Self {
-            base: OperatorBase::new(),
-        }
+    pub fn new(map_function: MapFunction) -> Self {
+        Self { map_function }
     }
 }
 
 #[async_trait]
 impl OperatorTrait for MapOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        self.base.open(context).await
-    }
-
-    async fn close(&mut self) -> Result<()> {
-        self.base.close().await
-    }
-
-    async fn finish(&mut self) -> Result<()> {
-        self.base.finish().await
+        Ok(())
     }
 
     async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
-        let mut result = Vec::new();
-        for record in batch.record_batch() {
-            result.push(record.clone());
-        }
-
-        println!("Map operator processed batch: {:?}", batch);
-        Ok(DataBatch::new(None, result))
+        self.map_function.map(batch).await
     }
 
     fn operator_type(&self) -> OperatorType {
         OperatorType::PROCESSOR
     }
+
+    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+        Err(anyhow::anyhow!("fetch not implemented for this operator"))
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct JoinOperator {
     base: OperatorBase,
     left_buffer: Vec<DataBatch>,
@@ -267,7 +255,7 @@ impl OperatorTrait for SinkOperator {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
     batches: Vec<DataBatch>,
@@ -300,6 +288,10 @@ impl OperatorTrait for SourceOperator {
 
     async fn finish(&mut self) -> Result<()> {
         self.base.finish().await
+    }
+
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
+        Err(anyhow::anyhow!("Source operator does not process batches"))
     }
 
     fn operator_type(&self) -> OperatorType {

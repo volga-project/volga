@@ -7,12 +7,24 @@ use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::transport_client_actor::TransportClientActorType;
+use crate::runtime::map_function::{MapFunction, MapFunctionTrait};
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use tokio::runtime::Runtime;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Duration;
+use async_trait::async_trait;
+
+#[derive(Debug, Clone)]
+struct IdentityMapFunction;
+
+#[async_trait]
+impl MapFunctionTrait for IdentityMapFunction {
+    async fn map(&self, batch: DataBatch) -> Result<DataBatch> {
+        Ok(batch)
+    }
+}
 
 #[test]
 fn test_stream_task_actor() -> Result<()> {
@@ -28,7 +40,7 @@ fn test_stream_task_actor() -> Result<()> {
         // Create task with MapOperator
         let task = StreamTask::new(
             "task1".to_string(),
-            OperatorConfig::MapConfig(std::collections::HashMap::new()),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
             RuntimeContext::new(
                 "task1".to_string(), // vertex_id
                 0, // task_index
