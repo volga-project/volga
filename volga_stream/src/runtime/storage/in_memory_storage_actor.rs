@@ -22,6 +22,14 @@ pub enum InMemoryStorageMessage {
     GetMap,
 }
 
+#[derive(Debug)]
+pub enum InMemoryStorageReply {
+    None,
+    SingleBatch(DataBatch),
+    Vector(Vec<DataBatch>),
+    Map(HashMap<String, DataBatch>),
+}
+
 #[derive(Actor)]
 pub struct InMemoryStorageActor {
     vector_storage: Vec<DataBatch>,
@@ -38,41 +46,33 @@ impl InMemoryStorageActor {
 }
 
 impl Message<InMemoryStorageMessage> for InMemoryStorageActor {
-    type Reply = Result<Option<DataBatch>>;
+    type Reply = Result<InMemoryStorageReply>;
 
-    async fn handle(&mut self, msg: InMemoryStorageMessage, _ctx: &mut Context<InMemoryStorageActor, Result<Option<DataBatch>>>) -> Self::Reply {
+    async fn handle(&mut self, msg: InMemoryStorageMessage, _ctx: &mut Context<InMemoryStorageActor, Result<InMemoryStorageReply>>) -> Self::Reply {
         match msg {
             InMemoryStorageMessage::Append { batch } => {
                 self.vector_storage.push(batch);
-                Ok(None)
+                Ok(InMemoryStorageReply::None)
             }
             InMemoryStorageMessage::Insert { key, batch } => {
                 self.map_storage.insert(key, batch);
-                Ok(None)
+                Ok(InMemoryStorageReply::None)
             }
             InMemoryStorageMessage::GetByIndex { index } => {
-                Ok(self.vector_storage.get(index).cloned())
+                Ok(self.vector_storage.get(index)
+                    .map(|batch| InMemoryStorageReply::SingleBatch(batch.clone()))
+                    .unwrap_or(InMemoryStorageReply::None))
             }
             InMemoryStorageMessage::GetByKey { key } => {
-                Ok(self.map_storage.get(&key).cloned())
+                Ok(self.map_storage.get(&key)
+                    .map(|batch| InMemoryStorageReply::SingleBatch(batch.clone()))
+                    .unwrap_or(InMemoryStorageReply::None))
             }
             InMemoryStorageMessage::GetVector => {
-                // Return a copy of the vector storage
-                Ok(Some(DataBatch::new(
-                    None,
-                    self.vector_storage.iter()
-                        .flat_map(|batch| batch.record_batch().clone())
-                        .collect()
-                )))
+                Ok(InMemoryStorageReply::Vector(self.vector_storage.clone()))
             }
             InMemoryStorageMessage::GetMap => {
-                // Return a copy of the map storage as a single batch
-                Ok(Some(DataBatch::new(
-                    None,
-                    self.map_storage.values()
-                        .flat_map(|batch| batch.record_batch().clone())
-                        .collect()
-                )))
+                Ok(InMemoryStorageReply::Map(self.map_storage.clone()))
             }
         }
     }

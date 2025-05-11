@@ -4,8 +4,10 @@ use crate::runtime::{
     partition::{ForwardPartition, PartitionType}, 
     worker::Worker,
     map_function::{MapFunction, MapFunctionTrait},
+    storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
 };
 use crate::common::data_batch::DataBatch;
+use crate::common::test_utils::create_test_string_batch;
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,10 +15,10 @@ use tokio::sync::Mutex;
 use tokio::runtime::Runtime;
 use std::thread;
 use std::time::Duration;
-use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage};
 use kameo::{Actor, spawn};
 use crate::transport::channel::Channel;
 use async_trait::async_trait;
+use arrow::array::StringArray;
 
 #[derive(Debug, Clone)]
 struct IdentityMapFunction;
@@ -35,9 +37,9 @@ fn test_worker() -> Result<()> {
 
     // Create test data
     let test_batches = vec![
-        DataBatch::new(None, vec!["test1".to_string()]),
-        DataBatch::new(None, vec!["test2".to_string()]),
-        DataBatch::new(None, vec!["test3".to_string()]),
+        DataBatch::new(None, create_test_string_batch(vec!["test1".to_string()])?),
+        DataBatch::new(None, create_test_string_batch(vec!["test2".to_string()])?),
+        DataBatch::new(None, create_test_string_batch(vec!["test3".to_string()])?),
     ];
 
     // Create storage actor
@@ -106,11 +108,17 @@ fn test_worker() -> Result<()> {
     let result = runtime.block_on(async {
         storage_ref.ask(InMemoryStorageMessage::GetVector).await
     })?;
-    let result_batch = result.expect("Expected data in storage");
-    let result_records = result_batch.record_batch();
-    assert_eq!(result_records.len(), test_batches.len());
-    for (expected, actual) in test_batches.iter().zip(result_records.iter()) {
-        assert_eq!(actual, &expected.record_batch()[0]);
+    
+    match result {
+        InMemoryStorageReply::Vector(result_batches) => {
+            assert_eq!(result_batches.len(), test_batches.len());
+            for (expected, actual) in test_batches.iter().zip(result_batches.iter()) {
+                let expected_value = expected.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+                let actual_value = actual.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+                assert_eq!(actual_value, expected_value);
+            }
+        }
+        _ => panic!("Expected Vector reply from storage actor"),
     }
 
     // Close worker

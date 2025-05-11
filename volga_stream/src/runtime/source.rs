@@ -61,7 +61,7 @@ impl SourceContext for SourceContextImpl {
             collector.collect_batch(batch.clone(), None).await?;
         }
 
-        self.num_fetched_records += batch.record_batch().len() as i64;
+        self.num_fetched_records += batch.record_batch().num_rows() as i64;
 
         if let Some(num_records) = self.num_records {
             if self.num_fetched_records >= num_records {

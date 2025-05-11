@@ -34,14 +34,13 @@ tokio-rayon = "2.1.0"
 lru = "0.12"
 futures = "0.3"
 ordered-float = { version = "3.7", features = ["serde"] }
-# arrow = "42.0.0"
+arrow = "55.0.0"
 tokio-util = "0.7"
 rayon = "1.7"
 lazy_static = "1.4"
 kameo = "0.16.0"
 console-subscriber = "0.1.5"
 tracing = "0.1.41"
-dyn-clone = "1.0.19"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

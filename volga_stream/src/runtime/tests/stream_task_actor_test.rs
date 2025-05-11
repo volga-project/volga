@@ -3,6 +3,7 @@ use crate::runtime::stream_task::StreamTask;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::execution_graph::OperatorConfig;
 use crate::common::data_batch::DataBatch;
+use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
@@ -32,9 +33,9 @@ fn test_stream_task_actor() -> Result<()> {
     runtime.block_on(async {
         // Create test data
         let test_batches = vec![
-            DataBatch::new(None, vec!["test1".to_string()]),
-            DataBatch::new(None, vec!["test2".to_string()]),
-            DataBatch::new(None, vec!["test3".to_string()]),
+            DataBatch::new(None, create_test_string_batch(vec!["test1".to_string()])?),
+            DataBatch::new(None, create_test_string_batch(vec!["test2".to_string()])?),
+            DataBatch::new(None, create_test_string_batch(vec!["test3".to_string()])?),
         ];
 
         // Create task with MapOperator

@@ -1,10 +1,7 @@
-// use arrow::record_batch::RecordBatch;
+use arrow::record_batch::RecordBatch;
 use anyhow::Result;
-use serde::{Serialize, Deserialize};
 
-type RecordBatch = Vec<String>; // TODO use arrow::record_batch::RecordBatch
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct BaseDataBatch {
     pub upstream_vertex_id: Option<String>,
     pub record_batch: RecordBatch,
@@ -19,7 +16,7 @@ impl BaseDataBatch {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct KeyedDataBatch {
     pub base: BaseDataBatch,
     pub key: String,
@@ -38,7 +35,7 @@ impl KeyedDataBatch {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub enum DataBatch {
     Batch(BaseDataBatch),
     KeyedBatch(KeyedDataBatch),

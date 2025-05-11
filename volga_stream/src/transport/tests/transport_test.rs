@@ -1,11 +1,15 @@
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::channel::Channel;
 use crate::common::data_batch::DataBatch;
+use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::transport_client_actor::TransportClientActorType;
+use arrow::array::StringArray;
 use anyhow::Result;
 use kameo::{Actor, spawn};
+use std::collections::HashMap;
 
+// TODO test ordered delivery
 #[tokio::test]
 async fn test_actor_transport() -> Result<()> {
     // Initialize console subscriber for tracing
@@ -85,7 +89,7 @@ async fn test_actor_transport() -> Result<()> {
         for batch_idx in 0..batches_per_writer {
             let batch = DataBatch::new(
                 Some(format!("writer{}_stream", writer_idx)),
-                vec![format!("writer{}_batch{}", writer_idx, batch_idx)],
+                create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, batch_idx)])?
             );
 
             // Send batch to each reader
@@ -101,14 +105,46 @@ async fn test_actor_transport() -> Result<()> {
 
     // Verify data received by each reader
     for reader_idx in 0..num_readers {
-        // Each reader should receive batches_per_writer from each writer
+        let mut received_batches = Vec::new();
+        
+        // Read all expected batches
         for _ in 0..(num_writers * batches_per_writer) {
-            let batch_result = reader_refs[reader_idx]
-                .ask(crate::transport::test_utils::TestDataReaderMessage::ReadBatch)
-                .await?;
+            let result = reader_refs[reader_idx].ask(crate::transport::test_utils::TestDataReaderMessage::ReadBatch).await?;
+            if let Some(batch) = result {
+                received_batches.push(batch);
+            }
+        }
+
+        // Verify we got all expected batches
+        assert_eq!(received_batches.len(), num_writers * batches_per_writer, 
+            "Reader {} did not receive all expected batches", reader_idx);
+
+        // Create a map to track received batches by writer and batch number
+        let mut received_map: HashMap<(usize, usize), String> = HashMap::new();
+        for batch in received_batches {
+            let value = batch.record_batch()
+                .column(0)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0);
             
-            if batch_result.is_none() {
-                return Err(anyhow::anyhow!("Reader {} did not receive expected batch", reader_idx));
+            // Parse writer_idx and batch_num from the value
+            let parts: Vec<&str> = value.split("_batch").collect();
+            let writer_part = parts[0].strip_prefix("writer").unwrap();
+            let writer_idx = writer_part.parse::<usize>().unwrap();
+            let batch_num = parts[1].parse::<usize>().unwrap();
+            
+            received_map.insert((writer_idx, batch_num), value.to_string());
+        }
+
+        // Verify all expected batches were received
+        for writer_idx in 0..num_writers {
+            for batch_num in 0..batches_per_writer {
+                let expected_value = format!("writer{}_batch{}", writer_idx, batch_num);
+                let actual_value = received_map.get(&(writer_idx, batch_num))
+                    .expect(&format!("Missing batch writer{}_batch{} for reader {}", writer_idx, batch_num, reader_idx));
+                assert_eq!(actual_value, &expected_value);
             }
         }
     }

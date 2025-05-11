@@ -57,7 +57,7 @@ impl Collector {
         for channel_id in channels_to_send {
             if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
                 let partition_batch = partitioned_batches[partition_idx].clone();
-                if partition_batch.record_batch().is_empty() {
+                if partition_batch.record_batch().num_rows() == 0 {
                     continue;
                 }
                 
