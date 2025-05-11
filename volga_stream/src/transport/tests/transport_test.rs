@@ -1,161 +1,120 @@
-// use crate::transport::{
-//     transport_backend::TransportBackend,
-//     transport_client::{TransportClient, DataWriter, DataReader},
-//     channel::Channel,
-// };
-// use crate::common::data_batch::DataBatch;
-// use anyhow::Result;
-// use std::sync::Arc;
-// use tokio::sync::Mutex;
-// use tokio::runtime::Runtime;
+use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
+use crate::transport::channel::Channel;
+use crate::common::data_batch::DataBatch;
+use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
+use crate::transport::transport_client_actor::TransportClientActorType;
+use anyhow::Result;
+use kameo::{Actor, spawn};
 
-// #[test]
-// fn test_transport_exchange() -> Result<()> {
-//     // Configuration
-//     let num_writers = 10;
-//     let num_readers = 10;
-//     let batches_per_writer = 10;
+#[tokio::test]
+async fn test_actor_transport() -> Result<()> {
+    // Initialize console subscriber for tracing
+    // console_subscriber::init();
 
-//     // Create a runtime for transport operations
-//     let runtime = Runtime::new()?;
+    // Configuration
+    let num_writers = 10;
+    let num_readers = 10;
+    let batches_per_writer = 10;
 
-//     // Create test data for each writer
-//     let test_batches: Vec<Vec<DataBatch>> = (0..num_writers)
-//         .map(|writer_idx| {
-//             (0..batches_per_writer)
-//                 .map(|batch_idx| {
-//                     DataBatch::new(
-//                         None,
-//                         vec![format!("writer{}_batch{}", writer_idx, batch_idx)],
-//                     )
-//                 })
-//                 .collect()
-//         })
-//         .collect();
+    // Create transport backend actor
+    let backend_actor = TransportBackendActor::new();
+    let backend_ref = spawn(backend_actor);
 
-//     // Create transport backend
-//     let transport_backend = Arc::new(Mutex::new(crate::transport::InMemoryTransportBackend::new()));
+    // Create writer actors
+    let mut writer_refs = Vec::new();
+    for i in 0..num_writers {
+        let writer_actor = TestDataWriterActor::new(format!("writer{}", i));
+        let writer_ref = spawn(writer_actor);
+        writer_refs.push(writer_ref.clone());
 
-//     // Create writers and readers
-//     let mut writers: Vec<TransportClient> = (0..num_writers)
-//         .map(|i| TransportClient::new(format!("writer{}", i)))
-//         .collect();
-    
-//     let mut readers: Vec<TransportClient> = (0..num_readers)
-//         .map(|i| TransportClient::new(format!("reader{}", i)))
-//         .collect();
+        // Register writer with backend
+        backend_ref.tell(TransportBackendActorMessage::RegisterActor {
+            vertex_id: format!("writer{}", i),
+            actor: TransportClientActorType::TestWriter(writer_ref),
+        }).await?;
+    }
 
-//     // Register clients and create channels
-//     runtime.block_on(async {
-//         let mut backend = transport_backend.lock().await;
-        
-//         // Register all clients
-//         for writer in &writers {
-//             backend.register_client(writer.vertex_id().to_string(), writer.clone()).await?;
-//         }
-//         for reader in &readers {
-//             backend.register_client(reader.vertex_id().to_string(), reader.clone()).await?;
-//         }
-        
-//         // Create and register channels between each writer and reader
-//         for writer_idx in 0..num_writers {
-//             for reader_idx in 0..num_readers {
-//                 let channel = Channel::Local {
-//                     channel_id: format!("writer{}_to_reader{}", writer_idx, reader_idx),
-//                 };
-                
-//                 // Register channel for writer (output)
-//                 backend.register_channel(
-//                     format!("writer{}", writer_idx),
-//                     channel.clone(),
-//                     false,
-//                 ).await?;
-                
-//                 // Register channel for reader (input)
-//                 backend.register_channel(
-//                     format!("reader{}", reader_idx),
-//                     channel.clone(),
-//                     true,
-//                 ).await?;
-//             }
-//         }
-        
-//         // Start the backend
-//         backend.start().await?;
-        
-//         Ok::<(), anyhow::Error>(())
-//     })?;
+    // Create reader actors
+    let mut reader_refs = Vec::new();
+    for i in 0..num_readers {
+        let reader_actor = TestDataReaderActor::new(format!("reader{}", i));
+        let reader_ref = spawn(reader_actor);
+        reader_refs.push(reader_ref.clone());
 
-//     // Write test data from each writer to each reader
-//     runtime.block_on(async {
-//         for (writer_idx, writer) in writers.iter_mut().enumerate() {
-//             let mut writer = writer.writer().expect("Writer should be initialized");
-//             for reader_idx in 0..num_readers {
-//                 for batch in &test_batches[writer_idx] {
-//                     writer.write_batch(
-//                         &format!("writer{}_to_reader{}", writer_idx, reader_idx),
-//                         batch.clone(),
-//                     ).await?;
-//                 }
-//             }
-//         }
-//         Ok::<(), anyhow::Error>(())
-//     })?;
+        // Register reader with backend
+        backend_ref.tell(TransportBackendActorMessage::RegisterActor {
+            vertex_id: format!("reader{}", i),
+            actor: TransportClientActorType::TestReader(reader_ref),
+        }).await?;
+    }
 
-//     // Read and verify data from each reader
-//     let received_batches = runtime.block_on(async {
-//         let mut all_reader_batches = Vec::new();
-//         for reader in readers.iter_mut() {
-//             let mut reader = reader.reader().expect("Reader should be initialized");
-//             let mut reader_batches = Vec::new();
-//             // Each reader should receive batches_per_writer from each writer
-//             for _ in 0..(num_writers * batches_per_writer) {
-//                 if let Some(batch) = reader.read_batch().await? {
-//                     reader_batches.push(batch);
-//                 }
-//             }
-//             all_reader_batches.push(reader_batches);
-//         }
-//         Ok::<Vec<Vec<DataBatch>>, anyhow::Error>(all_reader_batches)
-//     })?;
+    // Create and register channels between each writer and reader
+    let mut channel_registrations = Vec::new();
+    for writer_idx in 0..num_writers {
+        for reader_idx in 0..num_readers {
+            let channel = Channel::Local {
+                channel_id: format!("writer{}_to_reader{}", writer_idx, reader_idx),
+            };
 
-//     // Verify received data
-//     assert_eq!(received_batches.len(), num_readers);
-//     for reader_batches in received_batches {
-//         assert_eq!(reader_batches.len(), num_writers * batches_per_writer);
-        
-//         // Group batches by writer
-//         let mut writer_batches: Vec<Vec<String>> = vec![Vec::new(); num_writers];
-//         for batch in reader_batches {
-//             let content = batch.record_batch()[0].clone();
-//             // Extract writer index from the batch content (format: "writer{idx}_batch{idx}")
-//             let writer_idx = content.split('_').next().unwrap()
-//                 .trim_start_matches("writer")
-//                 .parse::<usize>()
-//                 .unwrap();
-//             writer_batches[writer_idx].push(content);
-//         }
+            // Register channel for writer (output)
+            channel_registrations.push(backend_ref.ask(TransportBackendActorMessage::RegisterChannel {
+                vertex_id: format!("writer{}", writer_idx),
+                channel: channel.clone(),
+                is_input: false,
+            }).await);
 
-//         // Verify each writer's batches
-//         for writer_idx in 0..num_writers {
-//             assert_eq!(writer_batches[writer_idx].len(), batches_per_writer);
+            // Register channel for reader (input)
+            channel_registrations.push(backend_ref.ask(TransportBackendActorMessage::RegisterChannel {
+                vertex_id: format!("reader{}", reader_idx),
+                channel: channel.clone(),
+                is_input: true,
+            }).await);
+        }
+    }
+
+    // Wait for all channel registrations to complete
+    for result in channel_registrations {
+        result?;
+    }
+
+    // Start the backend
+    backend_ref.tell(TransportBackendActorMessage::Start).await?;
+
+    // Create test data and send from each writer
+    for writer_idx in 0..num_writers {
+        for batch_idx in 0..batches_per_writer {
+            let batch = DataBatch::new(
+                Some(format!("writer{}_stream", writer_idx)),
+                vec![format!("writer{}_batch{}", writer_idx, batch_idx)],
+            );
+
+            // Send batch to each reader
+            for reader_idx in 0..num_readers {
+                let channel_id = format!("writer{}_to_reader{}", writer_idx, reader_idx);
+                writer_refs[writer_idx].tell(crate::transport::test_utils::TestDataWriterMessage::WriteBatch {
+                    channel_id,
+                    batch: batch.clone(),
+                }).await?;
+            }
+        }
+    }
+
+    // Verify data received by each reader
+    for reader_idx in 0..num_readers {
+        // Each reader should receive batches_per_writer from each writer
+        for _ in 0..(num_writers * batches_per_writer) {
+            let batch_result = reader_refs[reader_idx]
+                .ask(crate::transport::test_utils::TestDataReaderMessage::ReadBatch)
+                .await?;
             
-//             // Verify batches are in order for this writer
-//             for batch_idx in 0..batches_per_writer {
-//                 let expected = format!("writer{}_batch{}", writer_idx, batch_idx);
-//                 let actual = writer_batches[writer_idx][batch_idx].clone();
-//                 assert_eq!(actual, expected, 
-//                     "Batches from writer {} are not in order. Expected {} but got {}", 
-//                     writer_idx, expected, actual);
-//             }
-//         }
-//     }
+            if batch_result.is_none() {
+                return Err(anyhow::anyhow!("Reader {} did not receive expected batch", reader_idx));
+            }
+        }
+    }
 
-//     // Close the transport backend
-//     runtime.block_on(async {
-//         let mut backend = transport_backend.lock().await;
-//         backend.close().await
-//     })?;
+    // Close the backend
+    backend_ref.tell(TransportBackendActorMessage::Close).await?;
 
-//     Ok(())
-// }
+    Ok(())
+} 

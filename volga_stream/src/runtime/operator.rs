@@ -21,7 +21,9 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch>;
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
+        Err(anyhow::anyhow!("process_batch not implemented for this operator"))
+    }
     fn operator_type(&self) -> OperatorType;
     async fn fetch(&mut self) -> Result<Option<DataBatch>> {
         Err(anyhow::anyhow!("fetch not implemented for this operator"))
@@ -132,19 +134,23 @@ impl OperatorTrait for OperatorBase {
 
 #[derive(Debug)]
 pub struct MapOperator {
+    base: OperatorBase,
     map_function: MapFunction,
 }
 
 impl MapOperator {
     pub fn new(map_function: MapFunction) -> Self {
-        Self { map_function }
+        Self { 
+            base: OperatorBase::new(),
+            map_function,
+        }
     }
 }
 
 #[async_trait]
 impl OperatorTrait for MapOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        Ok(())
+        self.base.open(context).await
     }
 
     async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
@@ -160,11 +166,11 @@ impl OperatorTrait for MapOperator {
     }
 
     async fn close(&mut self) -> Result<()> {
-        Ok(())
+        self.base.close().await
     }
 
     async fn finish(&mut self) -> Result<()> {
-        Ok(())
+        self.base.finish().await
     }
 }
 
@@ -288,10 +294,6 @@ impl OperatorTrait for SourceOperator {
 
     async fn finish(&mut self) -> Result<()> {
         self.base.finish().await
-    }
-
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<DataBatch> {
-        Err(anyhow::anyhow!("Source operator does not process batches"))
     }
 
     fn operator_type(&self) -> OperatorType {

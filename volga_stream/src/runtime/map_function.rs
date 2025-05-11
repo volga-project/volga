@@ -3,10 +3,9 @@ use async_trait::async_trait;
 use crate::common::data_batch::DataBatch;
 use anyhow::Result;
 use std::fmt;
-use dyn_clone::DynClone;
 
 #[async_trait]
-pub trait MapFunctionTrait: Send + Sync + fmt::Debug + DynClone {
+pub trait MapFunctionTrait: Send + Sync + fmt::Debug {
     async fn map(&self, batch: DataBatch) -> Result<DataBatch>;
 }
 
