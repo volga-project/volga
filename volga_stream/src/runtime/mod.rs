@@ -11,3 +11,4 @@ pub mod stream_task_actor;
 pub mod storage;
 pub mod sink_function;
 pub mod map_function;
+pub mod key_by_function;

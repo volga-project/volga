@@ -1,7 +1,7 @@
-use crate::runtime::{runtime_context::RuntimeContext, collector::Collector, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::{Partition, PartitionType}};
+use crate::runtime::{runtime_context::RuntimeContext, collector::Collector, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::{PartitionTrait, PartitionType}};
 use anyhow::Result;
 use crate::transport::transport_client::TransportClient;
-use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator};
+use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator};
 use crate::common::data_batch::DataBatch;
 use std::collections::HashMap;
 use futures::future::join_all;
@@ -27,6 +27,7 @@ impl StreamTask {
             OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new()),
             OperatorConfig::SinkConfig(config) => Operator::Sink(SinkOperator::new(config)),
             OperatorConfig::SourceConfig(config) => Operator::Source(SourceOperator::new(config)),
+            OperatorConfig::KeyByConfig(key_by_function) => Operator::KeyBy(KeyByOperator::new(key_by_function)),
         };
         let transport_client = TransportClient::new(vertex_id.clone());
         
@@ -46,7 +47,9 @@ impl StreamTask {
         partition_type: PartitionType,
         target_operator_id: String,
     ) -> Result<()> {
-        let writer = self.transport_client.writer.as_ref().ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
+        let writer = self.transport_client.writer.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
+        
         let partition = partition_type.create();
 
         let collector = self.collectors.entry(target_operator_id).or_insert_with(|| {
@@ -60,8 +63,9 @@ impl StreamTask {
         Ok(())
     }
 
+    // send a batch to all collectors in parallel
     async fn collect_batch_parallel(
-        &mut self, 
+        &mut self,
         batch: DataBatch,
         channels_to_send: Option<HashMap<String, Vec<String>>>
     ) -> Result<HashMap<String, Vec<String>>> {
@@ -86,20 +90,34 @@ impl StreamTask {
 
     pub async fn run(&mut self) -> Result<()> {
         while self.running {
-            let batch = match self.operator.operator_type() {
-                crate::runtime::operator::OperatorType::SOURCE => self.operator.fetch().await?,
+            let batches = match self.operator.operator_type() {
+                crate::runtime::operator::OperatorType::SOURCE => {
+                    match self.operator.fetch().await? {
+                        Some(batch) => Some(vec![batch]),
+                        None => None,
+                    }
+                }
                 _ => {
                     let reader = self.transport_client.reader.as_mut().expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(batch) = reader.read_batch().await? {
                         println!("StreamTask {:?} received batch", self.vertex_id);
-                        Some(self.operator.process_batch(batch).await?)
+                        match self.operator.process_batch(batch).await? {
+                            Some(batches) => Some(batches),
+                            None => None,
+                        }
                     } else {
                         None
                     }
                 }
             };
 
-            if let Some(batch) = batch {
+            if batches.is_none() {
+                continue;
+            }
+            let batches = batches.unwrap();
+            
+            // TODO figure out if we need to do this in parallel
+            for batch in batches {
                 // TODO set vertex_id in the batch
                 let mut channels_to_retry = HashMap::new();
                 for (collector_id, collector) in &self.collectors {
@@ -123,6 +141,7 @@ impl StreamTask {
                 }
             }
         }
+        
         Ok(())
     }
 
@@ -139,10 +158,6 @@ impl StreamTask {
         self.operator.close().await?;
         println!("StreamTask {:?} closed", self.vertex_id);
         Ok(())
-    }
-
-    pub async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<DataBatch>> {
-        Ok(Some(self.operator.process_batch(batch).await?))
     }
 }
 

@@ -3,18 +3,20 @@ use crate::common::data_batch::DataBatch;
 use std::collections::HashMap;
 use crate::transport::transport_client::DataWriter;
 use crate::runtime::partition::Partition;
+use crate::runtime::partition::PartitionTrait;
 use futures::future::join_all;
 
+#[derive(Clone)]
 pub struct Collector {
     data_writer: DataWriter,
     output_channel_ids: Vec<String>,
-    partition: Box<dyn Partition>,
+    partition: Partition,
 }
 
 impl Collector {
     pub fn new(
         data_writer: DataWriter,
-        partition: Box<dyn Partition>,
+        partition: Partition,
     ) -> Self {
         Self {
             data_writer,

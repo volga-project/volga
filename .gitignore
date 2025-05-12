@@ -76,3 +76,5 @@ rust/target
 *volga_network_perf_benchmarks*
 golem
 volga_stream/target
+volga_stream/Cargo.lock
+

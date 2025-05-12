@@ -7,6 +7,7 @@ use crate::common::data_batch::DataBatch;
 use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
 use kameo::prelude::ActorRef;
 use crate::runtime::map_function::MapFunction;
+use crate::runtime::key_by_function::KeyByFunction;
 
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
@@ -64,6 +65,7 @@ pub enum OperatorConfig {
     JoinConfig(HashMap<String, String>),
     SinkConfig(SinkConfig),
     SourceConfig(SourceConfig),
+    KeyByConfig(KeyByFunction),
 }
 
 impl fmt::Debug for OperatorConfig {
@@ -73,6 +75,7 @@ impl fmt::Debug for OperatorConfig {
             OperatorConfig::JoinConfig(config) => f.debug_tuple("JoinConfig").field(config).finish(),
             OperatorConfig::SinkConfig(config) => f.debug_tuple("SinkConfig").field(config).finish(),
             OperatorConfig::SourceConfig(config) => f.debug_tuple("SourceConfig").field(config).finish(),
+            OperatorConfig::KeyByConfig(config) => f.debug_tuple("KeyByConfig").field(config).finish(),
         }
     }
 }
@@ -84,6 +87,7 @@ impl Clone for OperatorConfig {
             OperatorConfig::JoinConfig(config) => OperatorConfig::JoinConfig(config.clone()),
             OperatorConfig::SinkConfig(config) => OperatorConfig::SinkConfig(config.clone()),
             OperatorConfig::SourceConfig(config) => OperatorConfig::SourceConfig(config.clone()),
+            OperatorConfig::KeyByConfig(config) => OperatorConfig::KeyByConfig(config.clone()),
         }
     }
 }

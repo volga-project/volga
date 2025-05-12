@@ -46,10 +46,10 @@ impl DataBatch {
         DataBatch::Batch(BaseDataBatch::new(upstream_vertex_id, record_batch))
     }
 
-    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key_column: String) -> Self {
+    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: String) -> Self {
         DataBatch::KeyedBatch(KeyedDataBatch::new(
             BaseDataBatch::new(upstream_vertex_id, record_batch),
-            key_column,
+            key,
         ))
     }
 

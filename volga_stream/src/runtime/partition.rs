@@ -1,10 +1,9 @@
 use anyhow::{Error, Result};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use crate::common::data_batch::DataBatch;
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-pub trait Partition: Send + Sync + fmt::Debug {
+pub trait PartitionTrait: Send + Sync + fmt::Debug {
     fn partition(&mut self, batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>>;
 }
 
@@ -16,13 +15,32 @@ pub enum PartitionType {
     Forward,
 }
 
-impl PartitionType {
-    pub fn create(&self) -> Box<dyn Partition> {
+#[derive(Debug, Clone)]
+pub enum Partition {
+    Broadcast(BroadcastPartition),
+    Key(KeyPartition),
+    RoundRobin(RoundRobinPartition),
+    Forward(ForwardPartition),
+}
+
+impl PartitionTrait for Partition {
+    fn partition(&mut self, batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
         match self {
-            PartitionType::Broadcast => Box::new(BroadcastPartition::new()),
-            PartitionType::Key => Box::new(KeyPartition::new()),
-            PartitionType::RoundRobin => Box::new(RoundRobinPartition::new()),
-            PartitionType::Forward => Box::new(ForwardPartition::new()),
+            Partition::Broadcast(p) => p.partition(batch, num_partitions),
+            Partition::Key(p) => p.partition(batch, num_partitions),
+            Partition::RoundRobin(p) => p.partition(batch, num_partitions),
+            Partition::Forward(p) => p.partition(batch, num_partitions),
+        }
+    }
+}
+
+impl PartitionType {
+    pub fn create(&self) -> Partition {
+        match self {
+            PartitionType::Broadcast => Partition::Broadcast(BroadcastPartition::new()),
+            PartitionType::Key => Partition::Key(KeyPartition::new()),
+            PartitionType::RoundRobin => Partition::RoundRobin(RoundRobinPartition::new()),
+            PartitionType::Forward => Partition::Forward(ForwardPartition::new()),
         }
     }
 }
@@ -36,7 +54,7 @@ impl BroadcastPartition {
     }
 }
 
-impl Partition for BroadcastPartition {
+impl PartitionTrait for BroadcastPartition {
     fn partition(&mut self, _batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
         Ok((0..num_partitions).collect())
     }
@@ -51,7 +69,7 @@ impl KeyPartition {
     }
 }
 
-impl Partition for KeyPartition {
+impl PartitionTrait for KeyPartition {
     fn partition(&mut self, batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
         let key = batch.key()?;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -72,11 +90,11 @@ impl RoundRobinPartition {
     }
 }
 
-impl Partition for RoundRobinPartition {
+impl PartitionTrait for RoundRobinPartition {
     fn partition(&mut self, _batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
-        let seq = self.counter % num_partitions;
+        let partition = self.counter % num_partitions;
         self.counter += 1;
-        Ok(vec![seq])
+        Ok(vec![partition])
     }
 }
 
@@ -89,10 +107,10 @@ impl ForwardPartition {
     }
 }
 
-impl Partition for ForwardPartition {
+impl PartitionTrait for ForwardPartition {
     fn partition(&mut self, _batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
         if num_partitions != 1 {
-            anyhow::bail!("Forward partition requires exactly one partition");
+            return Err(Error::msg("Forward partition requires exactly one partition"));
         }
         Ok(vec![0])
     }
