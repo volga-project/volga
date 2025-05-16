@@ -1,7 +1,6 @@
 use anyhow::{Error, Result};
 use crate::common::data_batch::DataBatch;
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
 pub trait PartitionTrait: Send + Sync + fmt::Debug {
     fn partition(&mut self, batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>>;
@@ -18,7 +17,7 @@ pub enum PartitionType {
 #[derive(Debug, Clone)]
 pub enum Partition {
     Broadcast(BroadcastPartition),
-    Key(KeyPartition),
+    Key(HashPartition),
     RoundRobin(RoundRobinPartition),
     Forward(ForwardPartition),
 }
@@ -38,7 +37,7 @@ impl PartitionType {
     pub fn create(&self) -> Partition {
         match self {
             PartitionType::Broadcast => Partition::Broadcast(BroadcastPartition::new()),
-            PartitionType::Key => Partition::Key(KeyPartition::new()),
+            PartitionType::Key => Partition::Key(HashPartition::new()),
             PartitionType::RoundRobin => Partition::RoundRobin(RoundRobinPartition::new()),
             PartitionType::Forward => Partition::Forward(ForwardPartition::new()),
         }
@@ -61,21 +60,19 @@ impl PartitionTrait for BroadcastPartition {
 }
 
 #[derive(Debug, Clone)]
-pub struct KeyPartition;
+pub struct HashPartition;
 
-impl KeyPartition {
+impl HashPartition {
     pub fn new() -> Self {
         Self
     }
 }
 
-impl PartitionTrait for KeyPartition {
+impl PartitionTrait for HashPartition {
     fn partition(&mut self, batch: &DataBatch, num_partitions: usize) -> Result<Vec<usize>> {
         let key = batch.key()?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        key.hash(&mut hasher);
-        let hash = hasher.finish() as usize;
-        Ok(vec![hash % num_partitions])
+        let hash = key.hash();
+        Ok(vec![(hash % num_partitions as u64) as usize])
     }
 }
 

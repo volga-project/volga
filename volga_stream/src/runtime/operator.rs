@@ -10,6 +10,7 @@ use kameo::prelude::ActorRef;
 use crate::runtime::sink_function::{SinkFunction, create_sink_function, SinkFunctionTrait};
 use crate::runtime::map_function::MapFunction;
 use crate::runtime::key_by_function::KeyByFunction;
+use crate::runtime::key_by_function::KeyByFunctionTrait;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {

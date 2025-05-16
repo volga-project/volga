@@ -41,6 +41,7 @@ lazy_static = "1.4"
 kameo = "0.16.0"
 console-subscriber = "0.1.5"
 tracing = "0.1.41"
+arrow-row = "55.1.0"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
