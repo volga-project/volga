@@ -8,6 +8,7 @@ use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
 use kameo::prelude::ActorRef;
 use crate::runtime::map_function::MapFunction;
 use crate::runtime::key_by_function::KeyByFunction;
+use crate::runtime::reduce_function::{ReduceFunction, AggregationResultExtractor};
 
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
@@ -66,6 +67,7 @@ pub enum OperatorConfig {
     SinkConfig(SinkConfig),
     SourceConfig(SourceConfig),
     KeyByConfig(KeyByFunction),
+    ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
 }
 
 impl fmt::Debug for OperatorConfig {
@@ -76,6 +78,14 @@ impl fmt::Debug for OperatorConfig {
             OperatorConfig::SinkConfig(config) => f.debug_tuple("SinkConfig").field(config).finish(),
             OperatorConfig::SourceConfig(config) => f.debug_tuple("SourceConfig").field(config).finish(),
             OperatorConfig::KeyByConfig(config) => f.debug_tuple("KeyByConfig").field(config).finish(),
+            OperatorConfig::ReduceConfig(reduce_fn, extractor) => {
+                let mut debug = f.debug_tuple("ReduceConfig");
+                debug.field(reduce_fn);
+                if let Some(ext) = extractor {
+                    debug.field(ext);
+                }
+                debug.finish()
+            },
         }
     }
 }
@@ -88,6 +98,9 @@ impl Clone for OperatorConfig {
             OperatorConfig::SinkConfig(config) => OperatorConfig::SinkConfig(config.clone()),
             OperatorConfig::SourceConfig(config) => OperatorConfig::SourceConfig(config.clone()),
             OperatorConfig::KeyByConfig(config) => OperatorConfig::KeyByConfig(config.clone()),
+            OperatorConfig::ReduceConfig(reduce_fn, extractor) => {
+                OperatorConfig::ReduceConfig(reduce_fn.clone(), extractor.clone())
+            },
         }
     }
 }

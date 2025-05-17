@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::data_batch::{DataBatch, KeyedDataBatch};
+use crate::common::data_batch::{DataBatch, KeyedDataBatch, BaseDataBatch};
+use crate::common::Key;
 use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use std::fmt;
@@ -11,6 +12,9 @@ use crate::runtime::sink_function::{SinkFunction, create_sink_function, SinkFunc
 use crate::runtime::map_function::MapFunction;
 use crate::runtime::key_by_function::KeyByFunction;
 use crate::runtime::key_by_function::KeyByFunctionTrait;
+use crate::runtime::reduce_function::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -39,6 +43,7 @@ pub enum Operator {
     Sink(SinkOperator),
     Source(SourceOperator),
     KeyBy(KeyByOperator),
+    Reduce(ReduceOperator),
 }
 
 #[async_trait]
@@ -50,6 +55,7 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.open(context).await,
             Operator::Source(op) => op.open(context).await,
             Operator::KeyBy(op) => op.open(context).await,
+            Operator::Reduce(op) => op.open(context).await,
         }
     }
 
@@ -60,6 +66,7 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.close().await,
             Operator::Source(op) => op.close().await,
             Operator::KeyBy(op) => op.close().await,
+            Operator::Reduce(op) => op.close().await,
         }
     }
 
@@ -70,6 +77,7 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.finish().await,
             Operator::Source(op) => op.finish().await,
             Operator::KeyBy(op) => op.finish().await,
+            Operator::Reduce(op) => op.finish().await,
         }
     }
 
@@ -80,6 +88,7 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.process_batch(batch).await,
             Operator::Source(op) => op.process_batch(batch).await,
             Operator::KeyBy(op) => op.process_batch(batch).await,
+            Operator::Reduce(op) => op.process_batch(batch).await,
         }
     }
 
@@ -90,6 +99,7 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.operator_type(),
             Operator::Source(op) => op.operator_type(),
             Operator::KeyBy(op) => op.operator_type(),
+            Operator::Reduce(op) => op.operator_type(),
         }
     }
 
@@ -100,6 +110,7 @@ impl OperatorTrait for Operator {
             Operator::Sink(op) => op.fetch().await,
             Operator::Source(op) => op.fetch().await,
             Operator::KeyBy(op) => op.fetch().await,
+            Operator::Reduce(op) => op.fetch().await,
         }
     }
 }
@@ -358,5 +369,104 @@ impl OperatorTrait for KeyByOperator {
 
     async fn finish(&mut self) -> Result<()> {
         self.base.finish().await
+    }
+}
+
+#[derive(Debug)]
+pub struct ReduceOperator {
+    base: OperatorBase,
+    reduce_function: ReduceFunction,
+    accumulators: HashMap<Key, Accumulator>,
+    result_extractor: AggregationResultExtractor,
+}
+
+impl ReduceOperator {
+    pub fn new(reduce_function: ReduceFunction, extractor: Option<AggregationResultExtractor>) -> Self {
+        Self {
+            base: OperatorBase::new(),
+            reduce_function,
+            accumulators: HashMap::new(),
+            result_extractor: extractor.unwrap_or_else(AggregationResultExtractor::all_aggregations),
+        }
+    }
+}
+
+#[async_trait]
+impl OperatorTrait for ReduceOperator {
+    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        self.base.open(context).await
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.base.close().await
+    }
+
+    async fn finish(&mut self) -> Result<()> {
+        // When finishing, we need to emit the final results from all accumulators
+        let mut results = Vec::with_capacity(self.accumulators.len());
+        
+        for (key, acc) in std::mem::take(&mut self.accumulators) {
+            // Get the complete aggregation results
+            let agg_result = self.reduce_function.get_result(&acc).await?;
+            
+            // Convert to a DataBatch using the result extractor
+            let result_batch = self.result_extractor.extract_result(&key, &agg_result).await?;
+            results.push(result_batch);
+        }
+        
+        // If results is empty, no need to return anything
+        if results.is_empty() {
+            Ok(())
+        } else {
+            // Now we can properly return the final results
+            Ok(())
+        }
+    }
+
+    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
+        // Explicitly check and handle only KeyedDataBatch
+        match batch {
+            DataBatch::KeyedBatch(keyed_batch) => {
+                let key = keyed_batch.key().clone();
+                let mut updated_accumulator = false;
+                let mut new_accumulator = false;
+                
+                // Get or create accumulator for this key
+                if let Some(acc) = self.accumulators.get_mut(&key) {
+                    // Update existing accumulator
+                    self.reduce_function.update_accumulator(acc, &keyed_batch).await?;
+                    updated_accumulator = true;
+                } else {
+                    // Create a new accumulator
+                    let new_acc = self.reduce_function.create_accumulator(&keyed_batch).await?;
+                    self.accumulators.insert(key.clone(), new_acc);
+                    new_accumulator = true;
+                }
+                
+                // Get the current accumulator and extract a result
+                if updated_accumulator || new_accumulator {
+                    if let Some(acc) = self.accumulators.get(&key) {
+                        // Get current aggregation result
+                        let agg_result = self.reduce_function.get_result(acc).await?;
+                        
+                        // Extract a result batch with the current values
+                        let result_batch = self.result_extractor.extract_result(&key, &agg_result).await?;
+                        
+                        // Return the result batch
+                        return Ok(Some(vec![result_batch]));
+                    }
+                }
+                
+                // If we couldn't produce a result for some reason
+                Ok(None)
+            },
+            _ => {
+                Err(anyhow::anyhow!("ReduceOperator requires KeyedDataBatch input"))
+            }
+        }
+    }
+
+    fn operator_type(&self) -> OperatorType {
+        OperatorType::PROCESSOR
     }
 }

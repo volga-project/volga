@@ -12,3 +12,4 @@ pub mod storage;
 pub mod sink_function;
 pub mod map_function;
 pub mod key_by_function;
+pub mod reduce_function;

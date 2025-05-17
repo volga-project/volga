@@ -1,7 +1,7 @@
 use crate::runtime::{runtime_context::RuntimeContext, collector::Collector, execution_graph::{ExecutionVertex, OperatorConfig}, execution_graph::ExecutionGraph, partition::{PartitionTrait, PartitionType}};
 use anyhow::Result;
 use crate::transport::transport_client::TransportClient;
-use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator};
+use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::data_batch::DataBatch;
 use std::collections::HashMap;
 use futures::future::join_all;
@@ -28,6 +28,7 @@ impl StreamTask {
             OperatorConfig::SinkConfig(config) => Operator::Sink(SinkOperator::new(config)),
             OperatorConfig::SourceConfig(config) => Operator::Source(SourceOperator::new(config)),
             OperatorConfig::KeyByConfig(key_by_function) => Operator::KeyBy(KeyByOperator::new(key_by_function)),
+            OperatorConfig::ReduceConfig(reduce_function, extractor) => Operator::Reduce(ReduceOperator::new(reduce_function, extractor)),
         };
         let transport_client = TransportClient::new(vertex_id.clone());
         
