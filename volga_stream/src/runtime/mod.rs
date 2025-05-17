@@ -13,3 +13,5 @@ pub mod sink_function;
 pub mod map_function;
 pub mod key_by_function;
 pub mod reduce_function;
+pub mod function_trait;
+pub mod source_function;

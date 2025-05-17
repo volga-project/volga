@@ -12,6 +12,9 @@ use arrow::record_batch::RecordBatch;
 use arrow_row::{RowConverter, SortField};
 use std::collections::HashMap;
 use std::collections::HashSet;
+use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::function_trait::FunctionTrait;
+use std::any::Any;
 
 #[async_trait]
 pub trait KeyByFunctionTrait: Send + Sync + fmt::Debug {
@@ -188,6 +191,32 @@ impl KeyByFunction {
     
     pub fn new_arrow_key_by(key_columns: Vec<String>) -> Self {
         Self::Arrow(ArrowKeyByFunction::new(key_columns))
+    }
+}
+
+#[async_trait]
+impl FunctionTrait for KeyByFunction {
+    async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    async fn close(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    async fn finish(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 

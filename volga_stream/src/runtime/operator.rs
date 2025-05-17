@@ -6,15 +6,16 @@ use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use std::fmt;
 use crate::runtime::execution_graph::{SourceConfig, SinkConfig};
-use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage};
-use kameo::prelude::ActorRef;
 use crate::runtime::sink_function::{SinkFunction, create_sink_function, SinkFunctionTrait};
+use crate::runtime::source_function::{SourceFunction, create_source_function, SourceFunctionTrait};
 use crate::runtime::map_function::MapFunction;
 use crate::runtime::key_by_function::KeyByFunction;
 use crate::runtime::key_by_function::KeyByFunctionTrait;
 use crate::runtime::reduce_function::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait};
+use crate::runtime::function_trait::FunctionTrait;
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::any::Any;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -118,13 +119,34 @@ impl OperatorTrait for Operator {
 #[derive(Debug)]
 pub struct OperatorBase {
     runtime_context: Option<RuntimeContext>,
+    function: Option<Box<dyn FunctionTrait>>,
 }
 
 impl OperatorBase {
     pub fn new() -> Self {
         Self {
             runtime_context: None,
+            function: None,
         }
+    }
+    
+    pub fn new_with_function<F: FunctionTrait + 'static>(function: F) -> Self {
+        Self {
+            runtime_context: None,
+            function: Some(Box::new(function)),
+        }
+    }
+    
+    /// Get a reference to the function as a specific type
+    pub fn get_function<T: 'static>(&self) -> Option<&T> {
+        self.function.as_ref()
+            .and_then(|f| f.as_any().downcast_ref::<T>())
+    }
+    
+    /// Get a mutable reference to the function as a specific type
+    pub fn get_function_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        self.function.as_mut()
+            .and_then(|f| f.as_any_mut().downcast_mut::<T>())
     }
 }
 
@@ -132,14 +154,30 @@ impl OperatorBase {
 impl OperatorTrait for OperatorBase {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
+        
+        // If we have a function, open it
+        if let Some(function) = &mut self.function {
+            function.open(context).await?;
+        }
+        
         Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
+        // If we have a function, close it
+        if let Some(function) = &mut self.function {
+            function.close().await?;
+        }
+        
         Ok(())
     }
 
     async fn finish(&mut self) -> Result<()> {
+        // If we have a function, finish it
+        if let Some(function) = &mut self.function {
+            function.finish().await?;
+        }
+        
         Ok(())
     }
 
@@ -151,14 +189,12 @@ impl OperatorTrait for OperatorBase {
 #[derive(Debug)]
 pub struct MapOperator {
     base: OperatorBase,
-    map_function: MapFunction,
 }
 
 impl MapOperator {
     pub fn new(map_function: MapFunction) -> Self {
         Self { 
-            base: OperatorBase::new(),
-            map_function,
+            base: OperatorBase::new_with_function(map_function),
         }
     }
 }
@@ -170,16 +206,16 @@ impl OperatorTrait for MapOperator {
     }
 
     async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
-        let processed = self.map_function.map(batch).await?;
-        Ok(Some(vec![processed]))
+        if let Some(function) = self.base.get_function_mut::<MapFunction>() {
+            let processed = function.map(batch).await?;
+            Ok(Some(vec![processed]))
+        } else {
+            Err(anyhow::anyhow!("MapFunction not available"))
+        }
     }
 
     fn operator_type(&self) -> OperatorType {
         OperatorType::PROCESSOR
-    }
-
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
-        Err(anyhow::anyhow!("fetch not implemented for this operator"))
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -242,14 +278,13 @@ impl OperatorTrait for JoinOperator {
 #[derive(Debug)]
 pub struct SinkOperator {
     base: OperatorBase,
-    sink_function: SinkFunction,
 }
 
 impl SinkOperator {
     pub fn new(config: SinkConfig) -> Self {
+        let sink_function = create_sink_function(config);
         Self {
-            base: OperatorBase::new(),
-            sink_function: create_sink_function(config),
+            base: OperatorBase::new_with_function(sink_function),
         }
     }
 }
@@ -269,8 +304,12 @@ impl OperatorTrait for SinkOperator {
     }
 
     async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
-        self.sink_function.sink(batch.clone()).await?;
-        Ok(Some(vec![batch]))
+        if let Some(function) = self.base.get_function_mut::<SinkFunction>() {
+            function.sink(batch.clone()).await?;
+            Ok(Some(vec![batch]))
+        } else {
+            Err(anyhow::anyhow!("SinkFunction not available"))
+        }
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -281,20 +320,13 @@ impl OperatorTrait for SinkOperator {
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
-    batches: Vec<DataBatch>,
-    current_index: usize,
 }
 
 impl SourceOperator {
     pub fn new(config: SourceConfig) -> Self {
-        let batches = match config {
-            SourceConfig::VectorSourceConfig(batches) => batches,
-        };
-
+        let source_function = create_source_function(config);
         Self {
-            base: OperatorBase::new(),
-            batches,
-            current_index: 0,
+            base: OperatorBase::new_with_function(source_function),
         }
     }
 }
@@ -318,13 +350,10 @@ impl OperatorTrait for SourceOperator {
     }
 
     async fn fetch(&mut self) -> Result<Option<DataBatch>> {
-        if self.current_index < self.batches.len() {
-            let batch = self.batches[self.current_index].clone();
-            self.current_index += 1;
-            println!("Source operator fetched batch: {:?}", batch);
-            Ok(Some(batch))
+        if let Some(function) = self.base.get_function_mut::<SourceFunction>() {
+            function.fetch().await
         } else {
-            Ok(None)
+            Err(anyhow::anyhow!("SourceFunction not available"))
         }
     }
 }
@@ -332,14 +361,12 @@ impl OperatorTrait for SourceOperator {
 #[derive(Debug)]
 pub struct KeyByOperator {
     base: OperatorBase,
-    key_by_function: KeyByFunction,
 }
 
 impl KeyByOperator {
     pub fn new(key_by_function: KeyByFunction) -> Self {
         Self { 
-            base: OperatorBase::new(),
-            key_by_function,
+            base: OperatorBase::new_with_function(key_by_function),
         }
     }
 }
@@ -351,12 +378,16 @@ impl OperatorTrait for KeyByOperator {
     }
 
     async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
-        let keyed_batches = self.key_by_function.key_by(batch).await?;
-        // Convert KeyedDataBatch to DataBatch::KeyedBatch
-        let batches = keyed_batches.into_iter()
-            .map(DataBatch::KeyedBatch)
-            .collect();
-        Ok(Some(batches))
+        if let Some(function) = self.base.get_function_mut::<KeyByFunction>() {
+            let keyed_batches = function.key_by(batch).await?;
+            // Convert KeyedDataBatch to DataBatch::KeyedBatch
+            let batches = keyed_batches.into_iter()
+                .map(DataBatch::KeyedBatch)
+                .collect();
+            Ok(Some(batches))
+        } else {
+            Err(anyhow::anyhow!("KeyByFunction not available"))
+        }
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -375,7 +406,6 @@ impl OperatorTrait for KeyByOperator {
 #[derive(Debug)]
 pub struct ReduceOperator {
     base: OperatorBase,
-    reduce_function: ReduceFunction,
     accumulators: HashMap<Key, Accumulator>,
     result_extractor: AggregationResultExtractor,
 }
@@ -383,8 +413,7 @@ pub struct ReduceOperator {
 impl ReduceOperator {
     pub fn new(reduce_function: ReduceFunction, extractor: Option<AggregationResultExtractor>) -> Self {
         Self {
-            base: OperatorBase::new(),
-            reduce_function,
+            base: OperatorBase::new_with_function(reduce_function),
             accumulators: HashMap::new(),
             result_extractor: extractor.unwrap_or_else(AggregationResultExtractor::all_aggregations),
         }
@@ -402,25 +431,7 @@ impl OperatorTrait for ReduceOperator {
     }
 
     async fn finish(&mut self) -> Result<()> {
-        // When finishing, we need to emit the final results from all accumulators
-        let mut results = Vec::with_capacity(self.accumulators.len());
-        
-        for (key, acc) in std::mem::take(&mut self.accumulators) {
-            // Get the complete aggregation results
-            let agg_result = self.reduce_function.get_result(&acc).await?;
-            
-            // Convert to a DataBatch using the result extractor
-            let result_batch = self.result_extractor.extract_result(&key, &agg_result).await?;
-            results.push(result_batch);
-        }
-        
-        // If results is empty, no need to return anything
-        if results.is_empty() {
-            Ok(())
-        } else {
-            // Now we can properly return the final results
-            Ok(())
-        }
+        self.base.finish().await
     }
 
     async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
@@ -428,37 +439,40 @@ impl OperatorTrait for ReduceOperator {
         match batch {
             DataBatch::KeyedBatch(keyed_batch) => {
                 let key = keyed_batch.key().clone();
-                let mut updated_accumulator = false;
-                let mut new_accumulator = false;
                 
-                // Get or create accumulator for this key
-                if let Some(acc) = self.accumulators.get_mut(&key) {
+                // Check if we need to create a new accumulator or update an existing one
+                let acc_exists = self.accumulators.contains_key(&key);
+                
+                if acc_exists {
                     // Update existing accumulator
-                    self.reduce_function.update_accumulator(acc, &keyed_batch).await?;
-                    updated_accumulator = true;
+                    {
+                        let acc = self.accumulators.get_mut(&key)
+                            .ok_or_else(|| anyhow::anyhow!("Accumulator not found"))?;
+                        
+                        let function = self.base.get_function_mut::<ReduceFunction>()
+                            .ok_or_else(|| anyhow::anyhow!("ReduceFunction not available"))?;
+                        
+                        function.update_accumulator(acc, &keyed_batch).await?;
+                    }
                 } else {
                     // Create a new accumulator
-                    let new_acc = self.reduce_function.create_accumulator(&keyed_batch).await?;
+                    let function = self.base.get_function_mut::<ReduceFunction>()
+                        .ok_or_else(|| anyhow::anyhow!("ReduceFunction not available"))?;
+                    
+                    let new_acc = function.create_accumulator(&keyed_batch).await?;
                     self.accumulators.insert(key.clone(), new_acc);
-                    new_accumulator = true;
                 }
                 
-                // Get the current accumulator and extract a result
-                if updated_accumulator || new_accumulator {
-                    if let Some(acc) = self.accumulators.get(&key) {
-                        // Get current aggregation result
-                        let agg_result = self.reduce_function.get_result(acc).await?;
-                        
-                        // Extract a result batch with the current values
-                        let result_batch = self.result_extractor.extract_result(&key, &agg_result).await?;
-                        
-                        // Return the result batch
-                        return Ok(Some(vec![result_batch]));
-                    }
-                }
+                // Now that we've updated the accumulator, get the result
+                let acc = self.accumulators.get(&key)
+                    .ok_or_else(|| anyhow::anyhow!("Accumulator not found"))?;
                 
-                // If we couldn't produce a result for some reason
-                Ok(None)
+                let function = self.base.get_function::<ReduceFunction>()
+                    .ok_or_else(|| anyhow::anyhow!("ReduceFunction not available"))?;
+                
+                let agg_result = function.get_result(acc).await?;
+                let result_batch = self.result_extractor.extract_result(&key, &agg_result).await?;
+                return Ok(Some(vec![result_batch]));
             },
             _ => {
                 Err(anyhow::anyhow!("ReduceOperator requires KeyedDataBatch input"))

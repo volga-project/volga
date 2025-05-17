@@ -9,6 +9,9 @@ use arrow::compute;
 use arrow::compute::kernels::aggregate::{sum, min, max};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
+use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::function_trait::FunctionTrait;
+use std::any::Any;
 
 #[derive(Debug, Clone)]
 pub struct Accumulator {
@@ -354,6 +357,32 @@ impl ReduceFunction {
     
     pub fn new_arrow_reduce(column_name: String) -> Self {
         Self::Arrow(ArrowReduceFunction::new(column_name))
+    }
+}
+
+#[async_trait]
+impl FunctionTrait for ReduceFunction {
+    async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    async fn close(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    async fn finish(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
     }
 }
 

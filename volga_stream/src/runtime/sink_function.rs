@@ -4,6 +4,10 @@ use std::fmt;
 use crate::common::data_batch::DataBatch;
 use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage};
 use kameo::prelude::ActorRef;
+use crate::runtime::execution_graph::SinkConfig;
+use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::function_trait::FunctionTrait;
+use std::any::Any;
 
 #[async_trait]
 pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
@@ -26,7 +30,33 @@ impl SinkFunctionTrait for SinkFunction {
     }
 }
 
-#[derive(Debug)]
+#[async_trait]
+impl FunctionTrait for SinkFunction {
+    async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    async fn close(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    async fn finish(&mut self) -> Result<()> {
+        // Default implementation does nothing
+        Ok(())
+    }
+    
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    
+    fn as_any_mut(&mut self) -> &mut dyn Any {
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct VectorSinkFunction {
     output: Vec<DataBatch>,
 }
