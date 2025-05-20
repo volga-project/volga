@@ -1,4 +1,16 @@
-use crate::{runtime::{collector::Collector, execution_graph::{ExecutionGraph, ExecutionVertex, OperatorConfig}, partition::{PartitionTrait, PartitionType}, runtime_context::RuntimeContext}, transport::{DataReader, DataWriter}};
+use crate::{runtime::{
+    collector::Collector, 
+    execution_graph::{ExecutionGraph, ExecutionVertex, OperatorConfig}, 
+    partition::{PartitionTrait, PartitionType}, 
+    runtime_context::RuntimeContext,
+    functions::{
+        map::MapFunction,
+        key_by::KeyByFunction,
+        reduce::{ReduceFunction, AggregationResultExtractor},
+        sink::SinkFunction,
+        source::SourceFunction,
+    }
+}, transport::{DataReader, DataWriter}};
 use anyhow::Result;
 use tokio::{sync::mpsc::{Receiver, Sender, channel}, task::JoinHandle, time::Instant};
 use crate::transport::transport_client::TransportClient;

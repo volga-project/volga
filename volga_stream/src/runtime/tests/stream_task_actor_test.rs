@@ -8,7 +8,11 @@ use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::transport_client_actor::TransportClientActorType;
-use crate::runtime::map_function::{MapFunction, MapFunctionTrait};
+// use crate::runtime::map_function::{MapFunction, MapFunctionTrait};
+use crate::runtime::functions::{
+    map::MapFunction,
+    map::MapFunctionTrait,
+};
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use tokio::runtime::Runtime;

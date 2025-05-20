@@ -6,7 +6,7 @@ use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InM
 use kameo::prelude::ActorRef;
 use crate::runtime::execution_graph::SinkConfig;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::function_trait::FunctionTrait;
+use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 
 #[async_trait]

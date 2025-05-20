@@ -13,7 +13,7 @@ use arrow_row::{RowConverter, SortField};
 use std::collections::HashMap;
 use std::collections::HashSet;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::function_trait::FunctionTrait;
+use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 
 #[async_trait]
@@ -372,4 +372,4 @@ mod tests {
         assert_eq!(values_3_1.len(), 1);
         assert_eq!(*values_3_1, vec![60.0]);
     }
-}
+} 

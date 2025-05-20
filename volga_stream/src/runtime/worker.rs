@@ -72,8 +72,8 @@ impl Worker {
             // Create runtime context for the vertex
             let runtime_context = RuntimeContext::new(
                 vertex_id.clone(), // vertex_id
-                0, // task_index
-                0, // parallelism
+                vertex.task_index, // task_index
+                vertex.parallelism, // parallelism
                 None, // job_config
             );
 

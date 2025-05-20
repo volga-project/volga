@@ -1,17 +1,12 @@
-pub mod collector;
-pub mod operator;
-pub mod partition;
 pub mod runtime_context;
-pub mod source;
-pub mod stream_task;
-pub mod worker;
 pub mod execution_graph;
-pub mod tests;
+pub mod operator;
+pub mod stream_task;
 pub mod stream_task_actor;
+pub mod worker;
+pub mod functions;
+
+pub mod partition;
+pub mod collector;
+pub mod tests;
 pub mod storage;
-pub mod sink_function;
-pub mod map_function;
-pub mod key_by_function;
-pub mod reduce_function;
-pub mod function_trait;
-pub mod source_function;

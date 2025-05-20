@@ -6,9 +6,13 @@ use std::fmt;
 use crate::common::data_batch::DataBatch;
 use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
 use kameo::prelude::ActorRef;
-use crate::runtime::map_function::MapFunction;
-use crate::runtime::key_by_function::KeyByFunction;
-use crate::runtime::reduce_function::{ReduceFunction, AggregationResultExtractor};
+use crate::runtime::functions::{
+    map::MapFunction,
+    key_by::KeyByFunction,
+    reduce::{ReduceFunction, AggregationResultExtractor},
+    sink::SinkFunction,
+    source::SourceFunction,
+};
 
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
@@ -53,6 +57,13 @@ impl ExecutionEdge {
 #[derive(Debug, Clone)]
 pub enum SourceConfig {
     VectorSourceConfig(Vec<DataBatch>),
+    WordCountSourceConfig {
+        word_length: usize,
+        num_words: usize,        // Total pool of words to generate
+        num_to_send: Option<usize>, // Optional: how many words to actually send
+        run_for_s: Option<u64>,
+        batch_size: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -111,18 +122,24 @@ pub struct ExecutionVertex {
     pub operator_config: OperatorConfig,
     pub input_edges: Vec<String>,
     pub output_edges: Vec<String>,
+    pub parallelism: i32,
+    pub task_index: i32,
 }
 
 impl ExecutionVertex {
     pub fn new(
         vertex_id: String,
         operator_config: OperatorConfig,
+        parallelism: i32,
+        task_index: i32,
     ) -> Self {
         Self {
             vertex_id,
             operator_config,
             input_edges: Vec::new(),
             output_edges: Vec::new(),
+            parallelism,
+            task_index,
         }
     }
 

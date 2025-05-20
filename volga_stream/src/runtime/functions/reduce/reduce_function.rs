@@ -10,7 +10,7 @@ use arrow::compute::kernels::aggregate::{sum, min, max};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::function_trait::FunctionTrait;
+use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 
 #[derive(Debug, Clone)]

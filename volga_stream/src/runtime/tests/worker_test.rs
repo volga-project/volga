@@ -3,7 +3,11 @@ use crate::runtime::{
     operator::SourceOperator, 
     partition::{ForwardPartition, PartitionType}, 
     worker::Worker,
-    map_function::{MapFunction, MapFunctionTrait},
+    // map_function::{MapFunction, MapFunctionTrait},
+    functions::{
+        map::MapFunction,
+        map::MapFunctionTrait,
+    },
     storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
 };
 use crate::common::data_batch::DataBatch;
@@ -58,6 +62,8 @@ fn test_worker() -> Result<()> {
     let source_vertex = ExecutionVertex::new(
         "source".to_string(),
         OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_batches.clone())),
+        1,
+        0,
     );
     graph.add_vertex(source_vertex);
 
@@ -65,6 +71,8 @@ fn test_worker() -> Result<()> {
     let map_vertex = ExecutionVertex::new(
         "map".to_string(),
         OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        1,
+        0,
     );
     graph.add_vertex(map_vertex);
 
@@ -72,6 +80,8 @@ fn test_worker() -> Result<()> {
     let sink_vertex = ExecutionVertex::new(
         "sink".to_string(),
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageActorSinkConfig(storage_ref.clone())),
+        1,
+        0,
     );
     graph.add_vertex(sink_vertex);
 

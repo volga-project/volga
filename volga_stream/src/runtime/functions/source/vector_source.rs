@@ -2,60 +2,12 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
 use crate::common::data_batch::DataBatch;
-use crate::runtime::execution_graph::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::function_trait::FunctionTrait;
+use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use tokio::sync::mpsc::{self, Sender, Receiver};
 use tokio::time::{timeout, Duration};
-
-#[async_trait]
-pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
-    async fn fetch(&mut self) -> Result<Option<DataBatch>>;
-}
-
-#[derive(Debug)]
-pub enum SourceFunction {
-    Vector(VectorSourceFunction),
-}
-
-#[async_trait]
-impl SourceFunctionTrait for SourceFunction {
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
-        match self {
-            SourceFunction::Vector(f) => f.fetch().await,
-        }
-    }
-}
-
-#[async_trait]
-impl FunctionTrait for SourceFunction {
-    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        match self {
-            SourceFunction::Vector(f) => f.open(context).await,
-        }
-    }
-    
-    async fn close(&mut self) -> Result<()> {
-        match self {
-            SourceFunction::Vector(f) => f.close().await,
-        }
-    }
-    
-    async fn finish(&mut self) -> Result<()> {
-        match self {
-            SourceFunction::Vector(f) => f.finish().await,
-        }
-    }
-    
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-    
-    fn as_any_mut(&mut self) -> &mut dyn Any {
-        self
-    }
-}
+use super::source_function::SourceFunctionTrait;
 
 #[derive(Debug)]
 pub struct VectorSourceFunction {
@@ -121,14 +73,6 @@ impl SourceFunctionTrait for VectorSourceFunction {
             }
         } else {
             Ok(None) // Not initialized
-        }
-    }
-}
-
-pub fn create_source_function(config: SourceConfig) -> SourceFunction {
-    match config {
-        SourceConfig::VectorSourceConfig(batches) => {
-            SourceFunction::Vector(VectorSourceFunction::new(batches))
         }
     }
 } 

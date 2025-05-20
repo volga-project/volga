@@ -6,13 +6,16 @@ use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use std::fmt;
 use crate::runtime::execution_graph::{SourceConfig, SinkConfig};
-use crate::runtime::sink_function::{SinkFunction, create_sink_function, SinkFunctionTrait};
-use crate::runtime::source_function::{SourceFunction, create_source_function, SourceFunctionTrait};
-use crate::runtime::map_function::MapFunction;
-use crate::runtime::key_by_function::KeyByFunction;
-use crate::runtime::key_by_function::KeyByFunctionTrait;
-use crate::runtime::reduce_function::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait};
-use crate::runtime::function_trait::FunctionTrait;
+use crate::runtime::functions::{
+    function_trait::FunctionTrait,
+    source::{SourceFunction, SourceFunctionTrait, create_source_function},
+    sink::{SinkFunction, SinkFunctionTrait},
+    sink::sink_function::create_sink_function,
+    map::{MapFunction, MapFunctionTrait},
+    key_by::{KeyByFunction, KeyByFunctionTrait},
+    reduce::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait}
+};
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::any::Any;
