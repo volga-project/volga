@@ -3,8 +3,14 @@ use std::collections::HashMap;
 use tokio::sync::mpsc;
 use crate::common::data_batch::DataBatch;
 use std::fmt;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
+
+// Helper function to get current timestamp
+fn timestamp() -> String {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
+    format!("[{}.{:03}]", now.as_secs(), now.subsec_millis())
+}
 
 pub struct DataReader {
     vertex_id: String,
@@ -18,7 +24,7 @@ impl DataReader {
         Self {
             vertex_id,
             receivers: HashMap::new(),
-            default_timeout: Duration::from_millis(10000),
+            default_timeout: Duration::from_millis(100),
             default_retries: 0,
         }
     }
@@ -68,7 +74,7 @@ impl DataReader {
             };
 
             if result.is_some() {
-                println!("DataReader {:?} read batch: {:?}", self.vertex_id, result.clone());
+                println!("{} DataReader {:?} read batch: {:?}", timestamp(), self.vertex_id, result.clone());
                 return Ok(result);
             }
             attempts += 1;
@@ -131,7 +137,7 @@ impl DataWriter {
             if let Some(sender) = self.senders.get(channel_id) {
                 match time::timeout(timeout_duration, sender.send(batch.clone())).await {
                     Ok(Ok(())) => {
-                        println!("DataWriter {:?} wrote batch: {:?}", self.vertex_id, batch);
+                        println!("{} DataWriter {:?} wrote batch: {:?}", timestamp(), self.vertex_id, batch);
                         return Ok(());
                     }
                     Ok(Err(_)) => {

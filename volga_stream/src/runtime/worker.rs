@@ -7,13 +7,11 @@ use crate::runtime::{
 use crate::transport::{
     transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage},
     transport_client_actor::TransportClientActorType,
-    channel::Channel,
 };
 use anyhow::Result;
 use std::collections::HashMap;
-use kameo::{Actor, spawn, prelude::ActorRef};
+use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Runtime};
-use futures;
 
 pub struct Worker {
     graph: ExecutionGraph,
@@ -136,27 +134,30 @@ impl Worker {
 
         // Start the backend
         self.backend_runtime.as_ref().unwrap().block_on(async {
-            self.backend_actor.as_ref().unwrap().tell(TransportBackendActorMessage::Start).await
+            self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::Start).await
         })?;
 
         // Start all tasks
+        let mut start_futures = Vec::new();
         for (vertex_id, runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
-            
-            // Open task synchronously
-            runtime.block_on(async {
-                task_ref.tell(crate::runtime::stream_task_actor::StreamTaskMessage::Open).await
-            })?;
 
             // Run task asynchronously without blocking
             let task_ref = task_ref.clone();
-            runtime.spawn(async move {
-                if let Err(e) = task_ref.tell(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await {
+            let fut = runtime.spawn(async move {
+                if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await {
                     eprintln!("Error running task {}: {}", vertex_id, e);
                 }
             });
+            start_futures.push(fut);
         }
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for f in start_futures {
+                let _ = f.await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
 
         println!("Started worker");
         Ok(())
@@ -166,23 +167,27 @@ impl Worker {
         println!("Closing worker");
 
         // Close all tasks in parallel
+        let mut close_futures = Vec::new();
         for (vertex_id, runtime) in &self.task_runtimes {
-            runtime.block_on(async {
-                let mut close_futures = Vec::new();
-                for (_, task_ref) in &self.task_actors {
-                    close_futures.push(task_ref.tell(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await);
-                }
-                for result in close_futures {
-                    result?;
-                }
+            let task_ref = self.task_actors.get(&vertex_id.clone()).unwrap().clone();
+            let fut = runtime.spawn(async move {
+                task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await?;
                 Ok::<(), anyhow::Error>(())
-            })?;
+            });
+            close_futures.push(fut);
         }
+
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for f in close_futures {
+                let _ = f.await?;
+            }
+            Ok::<(), anyhow::Error>(())
+        })?;
 
         // Close the backend
         if let Some(backend_actor) = &self.backend_actor {
             self.backend_runtime.as_ref().unwrap().block_on(async {
-                backend_actor.tell(TransportBackendActorMessage::Close).await
+                backend_actor.ask(TransportBackendActorMessage::Close).await
             })?;
         }
 

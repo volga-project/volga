@@ -121,24 +121,21 @@ fn test_stream_task_actor() -> Result<()> {
         }
 
         // Start the backend
-        backend_ref.tell(TransportBackendActorMessage::Start).await?;
-
-        // Open task
-        task_ref.tell(StreamTaskMessage::Open).await?;
+        backend_ref.ask(TransportBackendActorMessage::Start).await?;
 
         // Create collector for task to output
-        task_ref.tell(StreamTaskMessage::CreateCollector {
+        task_ref.ask(StreamTaskMessage::CreateCollector {
             channel_id: "task_to_output".to_string(),
             partition_type: crate::runtime::partition::PartitionType::Forward,
             target_operator_id: "output".to_string(),
         }).await?;
 
         // Run task
-        task_ref.tell(StreamTaskMessage::Run).await?;
+        task_ref.ask(StreamTaskMessage::Run).await?;
 
         // Write test data using external writer
         for batch in &test_batches {
-            input_ref.tell(crate::transport::test_utils::TestDataWriterMessage::WriteBatch {
+            input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteBatch {
                 channel_id: "input_to_task".to_string(),
                 batch: batch.clone(),
             }).await?;
@@ -160,8 +157,8 @@ fn test_stream_task_actor() -> Result<()> {
         }
 
         // Close task and backend
-        task_ref.tell(StreamTaskMessage::Close).await?;
-        backend_ref.tell(TransportBackendActorMessage::Close).await?;
+        task_ref.ask(StreamTaskMessage::Close).await?;
+        backend_ref.ask(TransportBackendActorMessage::Close).await?;
 
         Ok(())
     })

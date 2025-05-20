@@ -18,13 +18,13 @@ impl TransportClientActorType {
     pub async fn register_receiver(&self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
         match self {
             TransportClientActorType::StreamTask(actor) => {
-                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterReceiver {
+                actor.ask(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterReceiver {
                     channel_id,
                     receiver,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register receiver: {}", e))
             }
             TransportClientActorType::TestReader(actor) => {
-                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterReceiver {
+                actor.ask(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterReceiver {
                     channel_id,
                     receiver,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register receiver: {}", e))
@@ -38,13 +38,13 @@ impl TransportClientActorType {
     pub async fn register_sender(&self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()> {
         match self {
             TransportClientActorType::StreamTask(actor) => {
-                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterSender {
+                actor.ask(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterSender {
                     channel_id,
                     sender,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register sender: {}", e))
             }
             TransportClientActorType::TestWriter(actor) => {
-                actor.tell(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterSender {
+                actor.ask(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterSender {
                     channel_id,
                     sender,
                 }).await.map_err(|e| anyhow::anyhow!("Failed to register sender: {}", e))

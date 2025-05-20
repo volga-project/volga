@@ -42,11 +42,14 @@ fn test_worker() -> Result<()> {
         DataBatch::new(None, create_test_string_batch(vec!["test3".to_string()])?),
     ];
 
+    println!("Creating storage actor...");
     // Create storage actor
     let storage_actor = InMemoryStorageActor::new();
     let storage_ref = runtime.block_on(async {
         spawn(storage_actor)
     });
+
+    println!("Created storage actor");
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
@@ -99,7 +102,10 @@ fn test_worker() -> Result<()> {
         vec!["source".to_string(), "map".to_string(), "sink".to_string()],
         1,
     );
+
+    println!("Worker starting...");
     worker.start()?;
+    println!("Worker started");
 
     // Wait for processing to complete
     thread::sleep(Duration::from_secs(1));

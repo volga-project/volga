@@ -32,7 +32,7 @@ async fn test_actor_transport() -> Result<()> {
         writer_refs.push(writer_ref.clone());
 
         // Register writer with backend
-        backend_ref.tell(TransportBackendActorMessage::RegisterActor {
+        backend_ref.ask(TransportBackendActorMessage::RegisterActor {
             vertex_id: format!("writer{}", i),
             actor: TransportClientActorType::TestWriter(writer_ref),
         }).await?;
@@ -46,7 +46,7 @@ async fn test_actor_transport() -> Result<()> {
         reader_refs.push(reader_ref.clone());
 
         // Register reader with backend
-        backend_ref.tell(TransportBackendActorMessage::RegisterActor {
+        backend_ref.ask(TransportBackendActorMessage::RegisterActor {
             vertex_id: format!("reader{}", i),
             actor: TransportClientActorType::TestReader(reader_ref),
         }).await?;
@@ -82,7 +82,7 @@ async fn test_actor_transport() -> Result<()> {
     }
 
     // Start the backend
-    backend_ref.tell(TransportBackendActorMessage::Start).await?;
+    backend_ref.ask(TransportBackendActorMessage::Start).await?;
 
     // Create test data and send from each writer
     for writer_idx in 0..num_writers {
@@ -95,7 +95,7 @@ async fn test_actor_transport() -> Result<()> {
             // Send batch to each reader
             for reader_idx in 0..num_readers {
                 let channel_id = format!("writer{}_to_reader{}", writer_idx, reader_idx);
-                writer_refs[writer_idx].tell(crate::transport::test_utils::TestDataWriterMessage::WriteBatch {
+                writer_refs[writer_idx].ask(crate::transport::test_utils::TestDataWriterMessage::WriteBatch {
                     channel_id,
                     batch: batch.clone(),
                 }).await?;
@@ -150,7 +150,7 @@ async fn test_actor_transport() -> Result<()> {
     }
 
     // Close the backend
-    backend_ref.tell(TransportBackendActorMessage::Close).await?;
+    backend_ref.ask(TransportBackendActorMessage::Close).await?;
 
     Ok(())
 } 
