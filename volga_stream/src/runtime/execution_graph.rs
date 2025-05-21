@@ -10,8 +10,6 @@ use crate::runtime::functions::{
     map::MapFunction,
     key_by::KeyByFunction,
     reduce::{ReduceFunction, AggregationResultExtractor},
-    sink::SinkFunction,
-    source::SourceFunction,
 };
 
 pub struct ExecutionEdge {
@@ -68,7 +66,6 @@ pub enum SourceConfig {
 
 #[derive(Clone, Debug)]
 pub enum SinkConfig {
-    VectorSinkConfig(Vec<DataBatch>),
     InMemoryStorageActorSinkConfig(ActorRef<InMemoryStorageActor>),
 }
 

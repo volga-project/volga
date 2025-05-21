@@ -2,12 +2,12 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
 use crate::common::data_batch::DataBatch;
-use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage};
-use kameo::prelude::ActorRef;
 use crate::runtime::execution_graph::SinkConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
+
+use super::in_memory_storage_sink::InMemoryStorageActorSinkFunction;
 
 #[async_trait]
 pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
@@ -16,7 +16,6 @@ pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
 
 #[derive(Debug)]
 pub enum SinkFunction {
-    Vector(VectorSinkFunction),
     InMemoryStorageActor(InMemoryStorageActorSinkFunction),
 }
 
@@ -24,7 +23,6 @@ pub enum SinkFunction {
 impl SinkFunctionTrait for SinkFunction {
     async fn sink(&mut self, batch: DataBatch) -> Result<()> {
         match self {
-            SinkFunction::Vector(f) => f.sink(batch).await,
             SinkFunction::InMemoryStorageActor(f) => f.sink(batch).await,
         }
     }
@@ -32,19 +30,22 @@ impl SinkFunctionTrait for SinkFunction {
 
 #[async_trait]
 impl FunctionTrait for SinkFunction {
-    async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
-        // Default implementation does nothing
-        Ok(())
+    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        match self {
+            SinkFunction::InMemoryStorageActor(f) => f.open(context).await,
+        }
     }
     
     async fn close(&mut self) -> Result<()> {
-        // Default implementation does nothing
-        Ok(())
+        match self {
+            SinkFunction::InMemoryStorageActor(f) => f.close().await,
+        }
     }
     
     async fn finish(&mut self) -> Result<()> {
-        // Default implementation does nothing
-        Ok(())
+        match self {
+            SinkFunction::InMemoryStorageActor(f) => f.finish().await,
+        }
     }
     
     fn as_any(&self) -> &dyn Any {
@@ -56,51 +57,10 @@ impl FunctionTrait for SinkFunction {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct VectorSinkFunction {
-    output: Vec<DataBatch>,
-}
-
-impl VectorSinkFunction {
-    pub fn new(output: Vec<DataBatch>) -> Self {
-        Self { output }
-    }
-}
-
-#[async_trait]
-impl SinkFunctionTrait for VectorSinkFunction {
-    async fn sink(&mut self, batch: DataBatch) -> Result<()> {
-        self.output.push(batch);
-        Ok(())
-    }
-}
-
-#[derive(Debug)]
-pub struct InMemoryStorageActorSinkFunction {
-    storage_actor: ActorRef<InMemoryStorageActor>,
-}
-
-impl InMemoryStorageActorSinkFunction {
-    pub fn new(storage_actor: ActorRef<InMemoryStorageActor>) -> Self {
-        Self { storage_actor }
-    }
-}
-
-#[async_trait]
-impl SinkFunctionTrait for InMemoryStorageActorSinkFunction {
-    async fn sink(&mut self, batch: DataBatch) -> Result<()> {
-        self.storage_actor.tell(InMemoryStorageMessage::Append { batch }).await?;
-        Ok(())
-    }
-}
-
-pub fn create_sink_function(config: crate::runtime::execution_graph::SinkConfig) -> SinkFunction {
+pub fn create_sink_function(config: SinkConfig) -> SinkFunction {
     match config {
-        crate::runtime::execution_graph::SinkConfig::VectorSinkConfig(output) => {
-            SinkFunction::Vector(VectorSinkFunction::new(output))
-        }
-        crate::runtime::execution_graph::SinkConfig::InMemoryStorageActorSinkConfig(storage_actor) => {
+        SinkConfig::InMemoryStorageActorSinkConfig(storage_actor) => {
             SinkFunction::InMemoryStorageActor(InMemoryStorageActorSinkFunction::new(storage_actor))
         }
     }
-} 
+}

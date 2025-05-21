@@ -3,7 +3,6 @@ use crate::runtime::{
     operator::SourceOperator, 
     partition::{ForwardPartition, PartitionType}, 
     worker::Worker,
-    // map_function::{MapFunction, MapFunctionTrait},
     functions::{
         map::MapFunction,
         map::MapFunctionTrait,

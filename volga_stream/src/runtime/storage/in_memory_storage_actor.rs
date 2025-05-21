@@ -8,9 +8,15 @@ pub enum InMemoryStorageMessage {
     Append {
         batch: DataBatch,
     },
+    AppendBatches {
+        batches: Vec<DataBatch>,
+    },
     Insert {
         key: String,
         batch: DataBatch,
+    },
+    InsertKeyedBatches {
+        keyed_batches: HashMap<String, DataBatch>,
     },
     GetByIndex {
         index: usize,
@@ -54,8 +60,16 @@ impl Message<InMemoryStorageMessage> for InMemoryStorageActor {
                 self.vector_storage.push(batch);
                 Ok(InMemoryStorageReply::None)
             }
+            InMemoryStorageMessage::AppendBatches { batches } => {
+                self.vector_storage.extend(batches);
+                Ok(InMemoryStorageReply::None)
+            }
             InMemoryStorageMessage::Insert { key, batch } => {
                 self.map_storage.insert(key, batch);
+                Ok(InMemoryStorageReply::None)
+            }
+            InMemoryStorageMessage::InsertKeyedBatches { keyed_batches } => {
+                self.map_storage.extend(keyed_batches);
                 Ok(InMemoryStorageReply::None)
             }
             InMemoryStorageMessage::GetByIndex { index } => {

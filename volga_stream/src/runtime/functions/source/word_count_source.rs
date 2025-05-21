@@ -189,7 +189,7 @@ mod tests {
         // Test configuration
         let word_length = 5;
         let num_words = 100;      // Pool of words
-        let num_to_send = 1009;   // Number of words to send (not a multiple of batch_size)
+        let num_to_send = 1009;   // Number of words to send
         let batch_size = 10;      // Batch size
 
         let mut source = WordCountSourceFunction::new(
@@ -249,6 +249,80 @@ mod tests {
         // Verify partial batch if it exists
         if expected_partial_batch_size > 0 {
             assert_eq!(batches.last().unwrap().record_batch().num_rows(), expected_partial_batch_size);
+        }
+        
+        // Verify no duplicate words in a single batch
+        for batch in &batches {
+            let word_array = batch.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let mut words_in_batch = std::collections::HashSet::new();
+            for i in 0..word_array.len() {
+                let word = word_array.value(i).to_string();
+                assert!(words_in_batch.insert(word), "Duplicate word found in batch");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_word_count_source_timed() {
+        // Test configuration
+        let word_length = 5;
+        let num_words = 100;      // Pool of words
+        let run_for_s = 2;        // Run for 2 seconds
+        let batch_size = 10;      // Batch size
+
+        let mut source = WordCountSourceFunction::new(
+            word_length,
+            num_words,
+            None, // No limit on number of words to send
+            Some(run_for_s),
+            batch_size,
+        );
+
+        // Open the source
+        source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
+
+        // Collect all batches
+        let mut total_words = 0;
+        let mut batches = Vec::new();
+        let mut all_words = Vec::new();
+        let start_time = Instant::now();
+        
+        while let Some(batch) = source.fetch().await.unwrap() {
+            let record_batch = batch.record_batch();
+            let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let timestamp_array = record_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+            
+            // Verify batch structure
+            assert_eq!(record_batch.num_columns(), 2);
+            assert_eq!(word_array.len(), timestamp_array.len());
+            
+            // Collect words and verify their properties
+            for i in 0..word_array.len() {
+                let word = word_array.value(i).to_string();
+                assert_eq!(word.len(), word_length);
+                assert!(word.chars().all(|c| c.is_alphabetic()));
+                all_words.push(word);
+            }
+            
+            total_words += word_array.len();
+            batches.push(batch);
+            
+            // Small sleep to simulate real-world processing
+            sleep(Duration::from_millis(10)).await;
+        }
+
+        let elapsed = start_time.elapsed();
+        
+        // Verify that we ran for approximately the specified duration
+        assert!(elapsed >= Duration::from_secs(run_for_s), "Should run for at least run_for_s seconds");
+        assert!(elapsed <= Duration::from_secs(run_for_s + 1), "Should not run much longer than run_for_s seconds");
+        
+        // Verify that we got some words
+        assert!(total_words > 0, "Should have sent some words");
+        
+        // Verify batch sizes
+        for batch in batches.iter().take(batches.len() - 1) {
+            assert_eq!(batch.record_batch().num_rows(), batch_size, "Full batches should have batch_size rows");
         }
         
         // Verify no duplicate words in a single batch
