@@ -1,0 +1,187 @@
+use crate::runtime::{
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig, BatchingMode}, 
+    partition::PartitionType,
+    worker::Worker,
+    functions::{
+        key_by::KeyByFunction,
+        reduce::{ReduceFunction, AggregationResultExtractor, AggregationType},
+        source::word_count_source::WordCountSourceFunction,
+    },
+    storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
+};
+use crate::common::data_batch::{DataBatch, KeyedDataBatch};
+use crate::common::Key;
+use anyhow::Result;
+use std::collections::HashMap;
+use tokio::runtime::Runtime;
+use kameo::{Actor, spawn};
+use crate::transport::channel::Channel;
+use async_trait::async_trait;
+use arrow::array::{StringArray, Int64Array, Array};
+use arrow::record_batch::RecordBatch;
+use arrow::datatypes::{Schema, Field, DataType};
+use std::sync::Arc;
+
+#[test]
+fn test_parallel_word_count() -> Result<()> {
+    // Create runtime for async operations
+    let runtime = Runtime::new()?;
+
+    // Create storage actor
+    let storage_actor = InMemoryStorageActor::new();
+    let storage_ref = runtime.block_on(async {
+        spawn(storage_actor)
+    });
+
+    // Create execution graph
+    let mut graph = ExecutionGraph::new();
+    let parallelism = 2; // Number of parallel tasks
+    let num_words = 3; // Number of unique words
+    let num_to_send_per_word = 4; // Number of copies of each word to send
+
+    // Create vertices for each parallel task
+    for i in 0..parallelism {
+        let task_id = i.to_string();
+        
+        // Create source vertex with word count source
+        let source_vertex = ExecutionVertex::new(
+            format!("source_{}", task_id),
+            OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
+                word_length: 5,
+                num_words,      // Pool of words
+                num_to_send_per_word: Some(num_to_send_per_word), // Send num_to_send_per_word copies of each word
+                run_for_s: None,     // No time limit
+                batch_size: 2,      // Batch size
+                batching_mode: BatchingMode::MixedWord, // Use mixed word batching for this test
+            }),
+            parallelism,
+            i,
+        );
+        graph.add_vertex(source_vertex);
+
+        // Create key-by vertex using ArrowKeyByFunction
+        let key_by_vertex = ExecutionVertex::new(
+            format!("key_by_{}", task_id),
+            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()])),
+            parallelism,
+            i,
+        );
+        graph.add_vertex(key_by_vertex);
+
+        // Create reduce vertex using ArrowReduceFunction
+        let reduce_vertex = ExecutionVertex::new(
+            format!("reduce_{}", task_id),
+            OperatorConfig::ReduceConfig(
+                ReduceFunction::new_arrow_reduce("word".to_string()),
+                Some(AggregationResultExtractor::single_aggregation(
+                    AggregationType::Count,
+                    "count".to_string(),
+                )),
+            ),
+            parallelism,
+            i,
+        );
+        graph.add_vertex(reduce_vertex);
+
+        // Create sink vertex
+        let sink_vertex = ExecutionVertex::new(
+            format!("sink_{}", task_id),
+            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageActorSinkConfig(storage_ref.clone())),
+            parallelism,
+            i,
+        );
+        graph.add_vertex(sink_vertex);
+
+        // Add edges
+        let source_to_key_by = ExecutionEdge::new(
+            format!("source_{}", task_id),
+            format!("key_by_{}", task_id),
+            PartitionType::Forward,
+            Channel::Local {
+                channel_id: format!("source_to_key_by_{}", task_id),
+            },
+        );
+        graph.add_edge(source_to_key_by)?;
+
+        let key_by_to_reduce = ExecutionEdge::new(
+            format!("key_by_{}", task_id),
+            format!("reduce_{}", task_id),
+            PartitionType::Key,
+            Channel::Local {
+                channel_id: format!("key_by_to_reduce_{}", task_id),
+            },
+        );
+        graph.add_edge(key_by_to_reduce)?;
+
+        let reduce_to_sink = ExecutionEdge::new(
+            format!("reduce_{}", task_id),
+            format!("sink_{}", task_id),
+            PartitionType::Forward,
+            Channel::Local {
+                channel_id: format!("reduce_to_sink_{}", task_id),
+            },
+        );
+        graph.add_edge(reduce_to_sink)?;
+    }
+
+    // Create and start worker
+    let mut worker = Worker::new(
+        graph,
+        (0..parallelism).flat_map(|i| {
+            vec![
+                format!("source_{}", i),
+                format!("key_by_{}", i),
+                format!("reduce_{}", i),
+                format!("sink_{}", i),
+            ]
+        }).collect(),
+        1,
+    );
+
+    println!("Starting worker...");
+    worker.start()?;
+    println!("Worker started");
+
+    // Wait for processing to complete
+    std::thread::sleep(std::time::Duration::from_secs(2));
+
+    // Verify results by reading from storage actor
+    let result = runtime.block_on(async {
+        storage_ref.ask(InMemoryStorageMessage::GetVector).await
+    })?;
+    
+    match result {
+        InMemoryStorageReply::Vector(result_batches) => {
+            // Count occurrences of each word
+            let mut word_counts = HashMap::new();
+            for batch in result_batches {
+                let record_batch = batch.record_batch();
+                let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                let count_array = record_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+                
+                for i in 0..word_array.len() {
+                    let word = word_array.value(i).to_string();
+                    let count = count_array.value(i);
+                    word_counts.insert(word, count);
+                }
+            }
+            
+            // Verify we have exactly num_words unique words
+            assert_eq!(word_counts.len(), num_words, "Should have exactly num_words unique words");
+            
+            // Verify each word appears exactly num_to_send_per_word times
+            for (word, count) in &word_counts {
+                assert_eq!(*count, num_to_send_per_word as i64, 
+                    "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
+            }
+            
+            println!("Word counts: {:?}", word_counts);
+        }
+        _ => panic!("Expected Vector reply from storage actor"),
+    }
+
+    // Close worker
+    worker.close()?;
+
+    Ok(())
+} 

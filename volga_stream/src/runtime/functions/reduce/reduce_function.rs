@@ -471,5 +471,31 @@ mod tests {
         assert_eq!(result.sum, 168.0);
         assert_eq!(result.count, 8.0);
         assert_eq!(result.average, 168.0 / 8.0);
+
+        let key = initial_batch.key();
+
+        // Test min aggregation
+        let min_extractor = SingleAggregationResultExtractor::new(AggregationType::Min, "min_value".to_string());
+        let min_batch = min_extractor.extract_result(&key, &result).await.unwrap();
+        let min_value = min_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        assert_eq!(min_value, 3.0);
+        
+        // Test max aggregation
+        let max_extractor = SingleAggregationResultExtractor::new(AggregationType::Max, "max_value".to_string());
+        let max_batch = max_extractor.extract_result(&key, &result).await.unwrap();
+        let max_value = max_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        assert_eq!(max_value, 50.0);
+        
+        // Test sum aggregation
+        let sum_extractor = SingleAggregationResultExtractor::new(AggregationType::Sum, "sum_value".to_string());
+        let sum_batch = sum_extractor.extract_result(&key, &result).await.unwrap();
+        let sum_value = sum_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        assert_eq!(sum_value, 168.0);
+        
+        // Test count aggregation
+        let count_extractor = SingleAggregationResultExtractor::new(AggregationType::Count, "count_value".to_string());
+        let count_batch = count_extractor.extract_result(&key, &result).await.unwrap();
+        let count_value = count_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        assert_eq!(count_value, 8.0);
     }
 } 

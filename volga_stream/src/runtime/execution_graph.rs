@@ -52,15 +52,22 @@ impl ExecutionEdge {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchingMode {
+    SameWord,  // Only batch identical words together
+    MixedWord, // Batch any words together
+}
+
 #[derive(Debug, Clone)]
 pub enum SourceConfig {
     VectorSourceConfig(Vec<DataBatch>),
     WordCountSourceConfig {
         word_length: usize,
         num_words: usize,        // Total pool of words to generate
-        num_to_send: Option<usize>, // Optional: how many words to actually send
+        num_to_send_per_word: Option<usize>, // Optional: how many copies of each word to send
         run_for_s: Option<u64>,
         batch_size: usize,
+        batching_mode: BatchingMode, // Controls how words are batched together
     },
 }
 
