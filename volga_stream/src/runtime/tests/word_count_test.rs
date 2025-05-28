@@ -1,13 +1,9 @@
 use crate::runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig, BatchingMode}, 
-    partition::PartitionType,
-    worker::Worker,
-    functions::{
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::{
         key_by::KeyByFunction,
-        reduce::{ReduceFunction, AggregationResultExtractor, AggregationType},
-        source::word_count_source::WordCountSourceFunction,
-    },
-    storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
+        reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
+        source::word_count_source::{BatchingMode, WordCountSourceFunction},
+    }, partition::PartitionType, storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply}, worker::Worker
 };
 use crate::common::data_batch::{DataBatch, KeyedDataBatch};
 use crate::common::Key;
@@ -52,7 +48,7 @@ fn test_parallel_word_count() -> Result<()> {
                 num_to_send_per_word: Some(num_to_send_per_word), // Send num_to_send_per_word copies of each word
                 run_for_s: None,     // No time limit
                 batch_size: 2,      // Batch size
-                batching_mode: BatchingMode::MixedWord, // Use mixed word batching for this test
+                batching_mode: BatchingMode::SameWord,
             }),
             parallelism,
             i,

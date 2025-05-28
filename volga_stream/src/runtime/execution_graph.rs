@@ -12,6 +12,8 @@ use crate::runtime::functions::{
     reduce::{ReduceFunction, AggregationResultExtractor},
 };
 
+use super::functions::source::word_count_source::BatchingMode;
+
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
     pub target_vertex_id: String,
@@ -50,12 +52,6 @@ impl ExecutionEdge {
             channel,
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BatchingMode {
-    SameWord,  // Only batch identical words together
-    MixedWord, // Batch any words together
 }
 
 #[derive(Debug, Clone)]
