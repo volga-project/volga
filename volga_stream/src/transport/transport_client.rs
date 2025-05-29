@@ -74,7 +74,7 @@ impl DataReader {
             };
 
             if result.is_some() {
-                println!("{} DataReader {:?} read batch: {:?}", timestamp(), self.vertex_id, result.clone());
+                // println!("{} DataReader {:?} read batch: {:?}", timestamp(), self.vertex_id, result.clone());
                 return Ok(result);
             }
             attempts += 1;
@@ -137,7 +137,7 @@ impl DataWriter {
             if let Some(sender) = self.senders.get(channel_id) {
                 match time::timeout(timeout_duration, sender.send(batch.clone())).await {
                     Ok(Ok(())) => {
-                        println!("{} DataWriter {:?} wrote batch: {:?}", timestamp(), self.vertex_id, batch);
+                        // println!("{} DataWriter {:?} wrote batch: {:?}", timestamp(), self.vertex_id, batch);
                         return Ok(());
                     }
                     Ok(Err(_)) => {

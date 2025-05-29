@@ -224,7 +224,7 @@ impl StreamTask {
                             .expect("Reader should be initialized for non-SOURCE operator");
                         if let Some(batch) = reader.read_batch().await? {
                             println!("StreamTask {:?} received batch", vertex_id);
-                            match operator.process_batch(batch).await? {
+                            match operator.process_batch(batch).await.unwrap() {
                                 Some(batches) => Some(batches),
                                 None => None,
                             }

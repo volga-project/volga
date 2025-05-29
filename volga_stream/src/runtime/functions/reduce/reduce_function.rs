@@ -243,25 +243,27 @@ impl ArrowReduceFunction {
     }
     
     fn compute_aggregations(&self, array: &ArrayRef) -> Result<(f64, f64, f64, i64)> {
-        let array_f64 = compute::cast(array, &DataType::Float64)?;
+        let count = array.len() as i64;  // Always return the array length for count
         
-        let float_array = array_f64.as_any().downcast_ref::<Float64Array>()
-            .ok_or_else(|| anyhow::anyhow!("Failed to downcast to Float64Array"))?;
-        
-        let count = float_array.len() - float_array.null_count();
-        
-        if count == 0 {
-            return Ok((f64::INFINITY, f64::NEG_INFINITY, 0.0, 0));
+        // Try to convert to float array and compute aggregations
+        match compute::cast(array, &DataType::Float64) {
+            Ok(array_f64) => {
+                if let Some(float_array) = array_f64.as_any().downcast_ref::<Float64Array>() {
+                    // Compute aggregations for valid float array
+                    let min_val = min(float_array).unwrap_or(f64::INFINITY);
+                    let max_val = max(float_array).unwrap_or(f64::NEG_INFINITY);
+                    let sum_val = sum(float_array).unwrap_or(0.0);
+                    Ok((min_val, max_val, sum_val, count))
+                } else {
+                    // If downcast fails, return default values with actual count
+                    Ok((f64::INFINITY, f64::NEG_INFINITY, 0.0, count))
+                }
+            },
+            Err(_) => {
+                // If cast fails (e.g., for string arrays), return default values with actual count
+                Ok((f64::INFINITY, f64::NEG_INFINITY, 0.0, count))
+            }
         }
-        
-        let min_val = min(float_array)
-            .ok_or_else(|| anyhow::anyhow!("Failed to compute min"))?;
-        let max_val = max(float_array)
-            .ok_or_else(|| anyhow::anyhow!("Failed to compute max"))?;
-        let sum_val = sum(float_array)
-            .ok_or_else(|| anyhow::anyhow!("Failed to compute sum"))?;
-        
-        Ok((min_val, max_val, sum_val, count as i64))
     }
 }
 
@@ -389,9 +391,10 @@ impl FunctionTrait for ReduceFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int32Array, Float64Array};
-    use arrow::datatypes::{Field, DataType};
-    use crate::common::data_batch::BaseDataBatch;
+    use arrow::array::{Int32Array, Float64Array, StringArray};
+    use arrow::datatypes::{Schema, Field, DataType};
+    use arrow::record_batch::RecordBatch;
+    use std::sync::Arc;
 
     fn create_test_keyed_batch(values: Vec<f64>, key_value: i32) -> KeyedDataBatch {
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
@@ -497,5 +500,66 @@ mod tests {
         let count_batch = count_extractor.extract_result(&key, &result).await.unwrap();
         let count_value = count_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(count_value, 8.0);
+    }
+
+    #[tokio::test]
+    async fn test_arrow_reduce_function_different_types() {
+        // Test with float values
+        let float_batch = create_test_keyed_batch(vec![10.0, 5.0, 20.0], 1);
+
+        // Test with string values
+        let string_schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let string_array = StringArray::from(vec!["a", "b", "c"]);
+        let string_batch = RecordBatch::try_new(
+            string_schema.clone(),
+            vec![Arc::new(string_array)]
+        ).unwrap();
+        let string_batch = KeyedDataBatch::new(
+            BaseDataBatch::new(None, string_batch),
+            Key::new(RecordBatch::try_new(
+                Arc::new(Schema::new(vec![Field::new("key", DataType::Int32, false)])),
+                vec![Arc::new(Int32Array::from(vec![1]))]
+            ).unwrap()).unwrap()
+        );
+
+        // Test float column
+        let reducer = ArrowReduceFunction::new("value".to_string());
+        
+        // Test float batch
+        let acc = reducer.create_accumulator(&float_batch).await.unwrap();
+        assert_eq!(acc.min, 5.0);
+        assert_eq!(acc.max, 20.0);
+        assert_eq!(acc.sum, 35.0);
+        assert_eq!(acc.count, 3);
+        assert_eq!(acc.average(), 35.0 / 3.0);
+
+        // Test string batch (should return default values with correct count)
+        let acc = reducer.create_accumulator(&string_batch).await.unwrap();
+        assert_eq!(acc.min, f64::INFINITY);
+        assert_eq!(acc.max, f64::NEG_INFINITY);
+        assert_eq!(acc.sum, 0.0);
+        assert_eq!(acc.count, 3);  // Count should still be correct
+        assert_eq!(acc.average(), 0.0);
+
+        // Test accumulation with different types
+        let mut acc = reducer.create_accumulator(&float_batch).await.unwrap();
+        
+        // Accumulate float batch
+        reducer.update_accumulator(&mut acc, &float_batch).await.unwrap();
+        assert_eq!(acc.min, 5.0);
+        assert_eq!(acc.max, 20.0);
+        assert_eq!(acc.sum, 70.0);  // 35.0 * 2
+        assert_eq!(acc.count, 6);   // 3 * 2
+        assert_eq!(acc.average(), 70.0 / 6.0);
+
+        // Accumulate string batch (should not affect float values)
+        reducer.update_accumulator(&mut acc, &string_batch).await.unwrap();
+        assert_eq!(acc.min, 5.0);  // Should not change
+        assert_eq!(acc.max, 20.0); // Should not change
+        assert_eq!(acc.sum, 70.0); // Should not change
+        assert_eq!(acc.count, 9);  // Should add string batch count
+        assert_eq!(acc.average(), 70.0 / 9.0);  // Average should be affected by count
     }
 } 

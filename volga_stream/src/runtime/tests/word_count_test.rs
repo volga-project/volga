@@ -13,11 +13,12 @@ use tokio::runtime::Runtime;
 use kameo::{Actor, spawn};
 use crate::transport::channel::Channel;
 use async_trait::async_trait;
-use arrow::array::{StringArray, Int64Array, Array};
+use arrow::array::{Array, Float64Array, Int64Array, StringArray};
 use arrow::record_batch::RecordBatch;
 use arrow::datatypes::{Schema, Field, DataType};
 use std::sync::Arc;
 
+// TODO: we may have colliding words since each source worker generates it's own
 #[test]
 fn test_parallel_word_count() -> Result<()> {
     // Create runtime for async operations
@@ -31,9 +32,10 @@ fn test_parallel_word_count() -> Result<()> {
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
-    let parallelism = 2; // Number of parallel tasks
-    let num_words = 3; // Number of unique words
-    let num_to_send_per_word = 4; // Number of copies of each word to send
+    let parallelism = 10; // Number of parallel tasks
+    let num_words = 10; // Number of unique words
+    let num_to_send_per_word = 10000; // Number of copies of each word to send
+    let batch_size = 100; // Batch size
 
     // Create vertices for each parallel task
     for i in 0..parallelism {
@@ -44,10 +46,10 @@ fn test_parallel_word_count() -> Result<()> {
             format!("source_{}", task_id),
             OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
                 word_length: 5,
-                num_words,      // Pool of words
-                num_to_send_per_word: Some(num_to_send_per_word), // Send num_to_send_per_word copies of each word
+                num_words,
+                num_to_send_per_word: Some(num_to_send_per_word),
                 run_for_s: None,     // No time limit
-                batch_size: 2,      // Batch size
+                batch_size: batch_size,
                 batching_mode: BatchingMode::SameWord,
             }),
             parallelism,
@@ -139,41 +141,47 @@ fn test_parallel_word_count() -> Result<()> {
     println!("Worker started");
 
     // Wait for processing to complete
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    std::thread::sleep(std::time::Duration::from_secs(5));
 
     // Verify results by reading from storage actor
     let result = runtime.block_on(async {
-        storage_ref.ask(InMemoryStorageMessage::GetVector).await
+        storage_ref.ask(InMemoryStorageMessage::GetMap).await
     })?;
     
     match result {
-        InMemoryStorageReply::Vector(result_batches) => {
+        InMemoryStorageReply::Map(result_map) => {
+            println!("Result map: {:?}", result_map);
+            println!("Result map len: {:?}", result_map.len());
             // Count occurrences of each word
             let mut word_counts = HashMap::new();
-            for batch in result_batches {
-                let record_batch = batch.record_batch();
-                let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                let count_array = record_batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+            for (_, batch) in result_map {
+                // Get the keyed batch and extract the word from its key
+                let keyed_batch = match batch {
+                    DataBatch::KeyedBatch(kb) => kb,
+                    _ => panic!("Expected KeyedBatch"),
+                };
                 
-                for i in 0..word_array.len() {
-                    let word = word_array.value(i).to_string();
-                    let count = count_array.value(i);
-                    word_counts.insert(word, count);
-                }
+                // Extract word from the key's record batch
+                let key_batch = keyed_batch.key().record_batch();
+                let word_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                let word = word_array.value(0).to_string();
+                // Get count from the single column in the batch
+                let count_array = keyed_batch.base.record_batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+                let count = count_array.value(0);
+                
+                word_counts.insert(word, count);
             }
             
-            // Verify we have exactly num_words unique words
-            assert_eq!(word_counts.len(), num_words, "Should have exactly num_words unique words");
+            assert_eq!(word_counts.len(), num_words * parallelism as usize, "Should have exactly num_words * parallelism unique words");
             
-            // Verify each word appears exactly num_to_send_per_word times
             for (word, count) in &word_counts {
-                assert_eq!(*count, num_to_send_per_word as i64, 
+                assert_eq!(*count, num_to_send_per_word as f64, 
                     "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
             }
             
             println!("Word counts: {:?}", word_counts);
         }
-        _ => panic!("Expected Vector reply from storage actor"),
+        _ => panic!("Expected Map reply from storage actor"),
     }
 
     // Close worker
