@@ -58,28 +58,25 @@ pub struct AggregationResult {
     pub average: f64,
 }
 
-#[async_trait]
 pub trait ReduceFunctionTrait: Send + Sync + fmt::Debug {
-    async fn create_accumulator(&self, key_batch: &KeyedDataBatch) -> Result<Accumulator>;
+    fn create_accumulator(&self) -> Result<Accumulator>;
     
-    async fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()>;
+    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()>;
     
-    async fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult>;
+    fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult>;
 }
 
 /// Trait for extracting final results from aggregated data
-#[async_trait]
 pub trait AggregationResultExtractorTrait: Send + Sync + fmt::Debug {
-    async fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch>;
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch>;
 }
 
 /// Default implementation of ResultExtractor that includes all aggregation values
 #[derive(Debug, Clone)]
 pub struct AllAggregationsResultExtractor;
 
-#[async_trait]
 impl AggregationResultExtractorTrait for AllAggregationsResultExtractor {
-    async fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
         // Create a schema with all aggregation fields
         let schema = Arc::new(Schema::new(vec![
             Field::new("min", DataType::Float64, false),
@@ -137,9 +134,8 @@ impl SingleAggregationResultExtractor {
     }
 }
 
-#[async_trait]
 impl AggregationResultExtractorTrait for SingleAggregationResultExtractor {
-    async fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
         let value = match self.aggregation_type {
             AggregationType::Min => result.min,
             AggregationType::Max => result.max,
@@ -174,13 +170,12 @@ pub enum AggregationResultExtractor {
     Custom(Arc<dyn AggregationResultExtractorTrait>),
 }
 
-#[async_trait]
 impl AggregationResultExtractorTrait for AggregationResultExtractor {
-    async fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
         match self {
-            AggregationResultExtractor::All(e) => e.extract_result(key, result).await,
-            AggregationResultExtractor::Single(e) => e.extract_result(key, result).await,
-            AggregationResultExtractor::Custom(e) => e.extract_result(key, result).await,
+            AggregationResultExtractor::All(e) => e.extract_result(key, result),
+            AggregationResultExtractor::Single(e) => e.extract_result(key, result),
+            AggregationResultExtractor::Custom(e) => e.extract_result(key, result),
         }
     }
 }
@@ -216,18 +211,17 @@ impl CustomReduceFunction {
     }
 }
 
-#[async_trait]
 impl ReduceFunctionTrait for CustomReduceFunction {
-    async fn create_accumulator(&self, key_batch: &KeyedDataBatch) -> Result<Accumulator> {
-        self.function.create_accumulator(key_batch).await
+    fn create_accumulator(&self) -> Result<Accumulator> {
+        self.function.create_accumulator()
     }
     
-    async fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
-        self.function.update_accumulator(accumulator, batch).await
+    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
+        self.function.update_accumulator(accumulator, batch)
     }
     
-    async fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult> {
-        self.function.get_result(accumulator).await
+    fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult> {
+        self.function.get_result(accumulator)
     }
 }
 
@@ -267,27 +261,29 @@ impl ArrowReduceFunction {
     }
 }
 
-#[async_trait]
 impl ReduceFunctionTrait for ArrowReduceFunction {
-    async fn create_accumulator(&self, key_batch: &KeyedDataBatch) -> Result<Accumulator> {
-        let batch = &key_batch.base.record_batch;
-        let schema = batch.schema();
+    fn create_accumulator(&self) -> Result<Accumulator> {
+        // let batch = &key_batch.base.record_batch;
+        // let schema = batch.schema();
         
-        // Find the column to aggregate
-        if let Some((idx, _)) = schema.column_with_name(&self.column_name) {
-            let array = batch.column(idx);
+        // // Find the column to aggregate
+        // if let Some((idx, _)) = schema.column_with_name(&self.column_name) {
+        //     let array = batch.column(idx);
             
-            // Compute initial aggregations
-            let (min_val, max_val, sum_val, count) = self.compute_aggregations(array)?;
+        //     // Compute initial aggregations
+        //     let (min_val, max_val, sum_val, count) = self.compute_aggregations(array)?;
             
-            // Create an accumulator with the initial values
-            Ok(Accumulator::new(min_val, max_val, sum_val, count))
-        } else {
-            Err(anyhow::anyhow!("Column '{}' not found in schema", self.column_name))
-        }
+        //     // Create an accumulator with the initial values
+        //     Ok(Accumulator::new(min_val, max_val, sum_val, count))
+        // } else {
+        //     Err(anyhow::anyhow!("Column '{}' not found in schema", self.column_name))
+        // }
+
+        Ok(Accumulator::new(f64::INFINITY, f64::NEG_INFINITY, 0.0, 0))
+            
     }
     
-    async fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
+    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
         let record_batch = &batch.base.record_batch;
         let schema = record_batch.schema();
         
@@ -300,14 +296,14 @@ impl ReduceFunctionTrait for ArrowReduceFunction {
             
             // Update the accumulator with these values
             accumulator.update(min_val, max_val, sum_val, count);
-            
+
             Ok(())
         } else {
             Err(anyhow::anyhow!("Column '{}' not found in batch", self.column_name))
         }
     }
     
-    async fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult> {
+    fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult> {
         Ok(AggregationResult {
             min: accumulator.min,
             max: accumulator.max,
@@ -325,26 +321,25 @@ pub enum ReduceFunction {
     Arrow(ArrowReduceFunction),
 }
 
-#[async_trait]
 impl ReduceFunctionTrait for ReduceFunction {
-    async fn create_accumulator(&self, key_batch: &KeyedDataBatch) -> Result<Accumulator> {
+    fn create_accumulator(&self) -> Result<Accumulator> {
         match self {
-            ReduceFunction::Custom(function) => function.create_accumulator(key_batch).await,
-            ReduceFunction::Arrow(function) => function.create_accumulator(key_batch).await,
+            ReduceFunction::Custom(function) => function.create_accumulator(),
+            ReduceFunction::Arrow(function) => function.create_accumulator(),
         }
     }
     
-    async fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
+    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
         match self {
-            ReduceFunction::Custom(function) => function.update_accumulator(accumulator, batch).await,
-            ReduceFunction::Arrow(function) => function.update_accumulator(accumulator, batch).await,
+            ReduceFunction::Custom(function) => function.update_accumulator(accumulator, batch),
+            ReduceFunction::Arrow(function) => function.update_accumulator(accumulator, batch),
         }
     }
     
-    async fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult> {
+    fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult> {
         match self {
-            ReduceFunction::Custom(function) => function.get_result(accumulator).await,
-            ReduceFunction::Arrow(function) => function.get_result(accumulator).await,
+            ReduceFunction::Custom(function) => function.get_result(accumulator),
+            ReduceFunction::Arrow(function) => function.get_result(accumulator),
         }
     }
 }
@@ -438,7 +433,8 @@ mod tests {
         let reducer = ArrowReduceFunction::new("value".to_string());
         
         // Initialize accumulator with first batch
-        let mut acc = reducer.create_accumulator(&initial_batch).await.unwrap();
+        let mut acc = reducer.create_accumulator().unwrap();
+        reducer.update_accumulator(&mut acc, &initial_batch).unwrap();
         
         // Check initial values
         assert_eq!(acc.min, 5.0);
@@ -448,7 +444,7 @@ mod tests {
         assert_eq!(acc.average(), 35.0 / 3.0);
         
         // Update with second batch
-        reducer.update_accumulator(&mut acc, &second_batch).await.unwrap();
+        reducer.update_accumulator(&mut acc, &second_batch).unwrap();
         
         // Verify after second batch
         assert_eq!(acc.min, 3.0);  // Min from both batches
@@ -458,7 +454,7 @@ mod tests {
         assert_eq!(acc.average(), 78.0 / 6.0);
         
         // Update with third batch
-        reducer.update_accumulator(&mut acc, &third_batch).await.unwrap();
+        reducer.update_accumulator(&mut acc, &third_batch).unwrap();
         
         // Verify after third batch
         assert_eq!(acc.min, 3.0);   // Min across all batches
@@ -468,7 +464,7 @@ mod tests {
         assert_eq!(acc.average(), 168.0 / 8.0);
         
         // Get results and verify all aggregation types
-        let result = reducer.get_result(&acc).await.unwrap();
+        let result = reducer.get_result(&acc).unwrap();
         assert_eq!(result.min, 3.0);
         assert_eq!(result.max, 50.0);
         assert_eq!(result.sum, 168.0);
@@ -479,25 +475,25 @@ mod tests {
 
         // Test min aggregation
         let min_extractor = SingleAggregationResultExtractor::new(AggregationType::Min, "min_value".to_string());
-        let min_batch = min_extractor.extract_result(&key, &result).await.unwrap();
+        let min_batch = min_extractor.extract_result(&key, &result).unwrap();
         let min_value = min_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(min_value, 3.0);
         
         // Test max aggregation
         let max_extractor = SingleAggregationResultExtractor::new(AggregationType::Max, "max_value".to_string());
-        let max_batch = max_extractor.extract_result(&key, &result).await.unwrap();
+        let max_batch = max_extractor.extract_result(&key, &result).unwrap();
         let max_value = max_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(max_value, 50.0);
         
         // Test sum aggregation
         let sum_extractor = SingleAggregationResultExtractor::new(AggregationType::Sum, "sum_value".to_string());
-        let sum_batch = sum_extractor.extract_result(&key, &result).await.unwrap();
+        let sum_batch = sum_extractor.extract_result(&key, &result).unwrap();
         let sum_value = sum_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(sum_value, 168.0);
         
         // Test count aggregation
         let count_extractor = SingleAggregationResultExtractor::new(AggregationType::Count, "count_value".to_string());
-        let count_batch = count_extractor.extract_result(&key, &result).await.unwrap();
+        let count_batch = count_extractor.extract_result(&key, &result).unwrap();
         let count_value = count_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(count_value, 8.0);
     }
@@ -528,7 +524,9 @@ mod tests {
         let reducer = ArrowReduceFunction::new("value".to_string());
         
         // Test float batch
-        let acc = reducer.create_accumulator(&float_batch).await.unwrap();
+        let mut acc = reducer.create_accumulator().unwrap();
+        reducer.update_accumulator(&mut acc, &float_batch).unwrap();
+        
         assert_eq!(acc.min, 5.0);
         assert_eq!(acc.max, 20.0);
         assert_eq!(acc.sum, 35.0);
@@ -536,7 +534,9 @@ mod tests {
         assert_eq!(acc.average(), 35.0 / 3.0);
 
         // Test string batch (should return default values with correct count)
-        let acc = reducer.create_accumulator(&string_batch).await.unwrap();
+        let mut acc = reducer.create_accumulator().unwrap();
+        reducer.update_accumulator(&mut acc, &string_batch).unwrap();
+
         assert_eq!(acc.min, f64::INFINITY);
         assert_eq!(acc.max, f64::NEG_INFINITY);
         assert_eq!(acc.sum, 0.0);
@@ -544,22 +544,22 @@ mod tests {
         assert_eq!(acc.average(), 0.0);
 
         // Test accumulation with different types
-        let mut acc = reducer.create_accumulator(&float_batch).await.unwrap();
+        let mut acc = reducer.create_accumulator().unwrap();
         
         // Accumulate float batch
-        reducer.update_accumulator(&mut acc, &float_batch).await.unwrap();
+        reducer.update_accumulator(&mut acc, &float_batch).unwrap();
         assert_eq!(acc.min, 5.0);
         assert_eq!(acc.max, 20.0);
-        assert_eq!(acc.sum, 70.0);  // 35.0 * 2
-        assert_eq!(acc.count, 6);   // 3 * 2
-        assert_eq!(acc.average(), 70.0 / 6.0);
+        assert_eq!(acc.sum, 35.0);
+        assert_eq!(acc.count, 3);
+        assert_eq!(acc.average(), 35.0 / 3.0);
 
         // Accumulate string batch (should not affect float values)
-        reducer.update_accumulator(&mut acc, &string_batch).await.unwrap();
+        reducer.update_accumulator(&mut acc, &string_batch).unwrap();
         assert_eq!(acc.min, 5.0);  // Should not change
         assert_eq!(acc.max, 20.0); // Should not change
-        assert_eq!(acc.sum, 70.0); // Should not change
-        assert_eq!(acc.count, 9);  // Should add string batch count
-        assert_eq!(acc.average(), 70.0 / 9.0);  // Average should be affected by count
+        assert_eq!(acc.sum, 35.0); // Should not change
+        assert_eq!(acc.count, 6);  // Should add string batch count # TODO is this ok?
+        assert_eq!(acc.average(), 35.0 / 6.0);  // Average should be affected by count
     }
 } 

@@ -26,7 +26,7 @@ struct IdentityMapFunction;
 
 #[async_trait]
 impl MapFunctionTrait for IdentityMapFunction {
-    async fn map(&self, batch: DataBatch) -> Result<DataBatch> {
+    fn map(&self, batch: DataBatch) -> Result<DataBatch> {
         Ok(batch)
     }
 }

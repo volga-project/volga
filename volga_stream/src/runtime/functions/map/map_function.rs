@@ -9,7 +9,7 @@ use std::any::Any;
 
 #[async_trait]
 pub trait MapFunctionTrait: Send + Sync + fmt::Debug {
-    async fn map(&self, batch: DataBatch) -> Result<DataBatch>;
+    fn map(&self, batch: DataBatch) -> Result<DataBatch>;
 }
 
 #[derive(Debug, Clone)]
@@ -30,8 +30,8 @@ impl CustomMapFunction {
 
 #[async_trait]
 impl MapFunctionTrait for CustomMapFunction {
-    async fn map(&self, batch: DataBatch) -> Result<DataBatch> {
-        self.function.map(batch).await
+    fn map(&self, batch: DataBatch) -> Result<DataBatch> {
+        self.function.map(batch)
     }
 }
 
@@ -48,9 +48,9 @@ impl MapFunction {
         Self::Custom(CustomMapFunction::new(function))
     }
 
-    pub async fn map(&self, batch: DataBatch) -> Result<DataBatch> {
+    pub fn map(&self, batch: DataBatch) -> Result<DataBatch> {
         match self {
-            MapFunction::Custom(function) => function.map(batch).await,
+            MapFunction::Custom(function) => function.map(batch),
         }
     }
 }
@@ -93,7 +93,7 @@ mod tests {
 
     #[async_trait]
     impl MapFunctionTrait for TestMapFunction {
-        async fn map(&self, batch: DataBatch) -> Result<DataBatch> {
+        fn map(&self, batch: DataBatch) -> Result<DataBatch> {
             let record_batch = batch.record_batch();
             let schema = record_batch.schema();
             
@@ -132,7 +132,7 @@ mod tests {
         
         // Create and execute map function
         let map_function = MapFunction::new_custom(TestMapFunction);
-        let result = map_function.map(batch).await.unwrap();
+        let result = map_function.map(batch).unwrap();
         
         // Verify result
         let result_array = result.record_batch().column(0).as_any().downcast_ref::<Int32Array>().unwrap();

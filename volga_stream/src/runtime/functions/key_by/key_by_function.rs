@@ -16,9 +16,8 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 
-#[async_trait]
 pub trait KeyByFunctionTrait: Send + Sync + fmt::Debug {
-    async fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>>;
+    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>>;
 }
 
 /// Generic key-by function that can be used for any key-by function
@@ -38,10 +37,9 @@ impl CustomKeyByFunction {
     }
 }
 
-#[async_trait]
 impl KeyByFunctionTrait for CustomKeyByFunction {
-    async fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
-        self.function.key_by(batch).await
+    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
+        self.function.key_by(batch)
     }
 }
 
@@ -79,9 +77,8 @@ impl ArrowKeyByFunction {
     }
 }
 
-#[async_trait]
 impl KeyByFunctionTrait for ArrowKeyByFunction {
-    async fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
+    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
         let record_batch = batch.record_batch();
         let schema = record_batch.schema();
         
@@ -171,12 +168,11 @@ pub enum KeyByFunction {
     Arrow(ArrowKeyByFunction),
 }
 
-#[async_trait]
 impl KeyByFunctionTrait for KeyByFunction {
-    async fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
+    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
         match self {
-            KeyByFunction::Custom(function) => function.key_by(batch).await,
-            KeyByFunction::Arrow(function) => function.key_by(batch).await,
+            KeyByFunction::Custom(function) => function.key_by(batch),
+            KeyByFunction::Arrow(function) => function.key_by(batch),
         }
     }
 }
@@ -248,7 +244,7 @@ mod tests {
         let key_by_function = ArrowKeyByFunction::new(vec!["id".to_string()]);
         
         // Execute key-by
-        let keyed_batches = key_by_function.key_by(batch).await.unwrap();
+        let keyed_batches = key_by_function.key_by(batch).unwrap();
         
         // We should have 3 distinct keys (1, 2, 3)
         assert_eq!(keyed_batches.len(), 3);
@@ -323,7 +319,7 @@ mod tests {
         );
         
         // Execute key-by
-        let keyed_batches = key_by_function.key_by(batch).await.unwrap();
+        let keyed_batches = key_by_function.key_by(batch).unwrap();
         
         // We should have 4 distinct keys: (1,1), (1,2), (2,1), (3,1)
         assert_eq!(keyed_batches.len(), 4);
