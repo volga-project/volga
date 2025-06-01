@@ -4,12 +4,12 @@ use anyhow::Result;
 use super::Key;
 
 #[derive(Debug, Clone)]
-pub struct BaseDataBatch {
+pub struct BaseMessage {
     pub upstream_vertex_id: Option<String>,
     pub record_batch: RecordBatch,
 }
 
-impl BaseDataBatch {
+impl BaseMessage {
     pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch) -> Self {
         Self {
             upstream_vertex_id,
@@ -19,13 +19,13 @@ impl BaseDataBatch {
 }
 
 #[derive(Debug, Clone)]
-pub struct KeyedDataBatch {
-    pub base: BaseDataBatch,
+pub struct KeyedMessage {
+    pub base: BaseMessage,
     pub key: Key,
 }
 
-impl KeyedDataBatch {
-    pub fn new(base: BaseDataBatch, key: Key) -> Self {
+impl KeyedMessage {
+    pub fn new(base: BaseMessage, key: Key) -> Self {
         Self {
             base,
             key,
@@ -38,41 +38,41 @@ impl KeyedDataBatch {
 }
 
 #[derive(Clone, Debug)]
-pub enum DataBatch {
-    Batch(BaseDataBatch),
-    KeyedBatch(KeyedDataBatch),
+pub enum Message {
+    Regular(BaseMessage),
+    Keyed(KeyedMessage),
 }
 
-impl DataBatch {
+impl Message {
     pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch) -> Self {
-        DataBatch::Batch(BaseDataBatch::new(upstream_vertex_id, record_batch))
+        Message::Regular(BaseMessage::new(upstream_vertex_id, record_batch))
     }
 
     pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: Key) -> Self {
-        DataBatch::KeyedBatch(KeyedDataBatch::new(
-            BaseDataBatch::new(upstream_vertex_id, record_batch),
+        Message::Keyed(KeyedMessage::new(
+            BaseMessage::new(upstream_vertex_id, record_batch),
             key,
         ))
     }
 
     pub fn upstream_vertex_id(&self) -> Option<String> {
         match self {
-            DataBatch::Batch(batch) => batch.upstream_vertex_id.clone(),
-            DataBatch::KeyedBatch(batch) => batch.base.upstream_vertex_id.clone(),
+            Message::Regular(message) => message.upstream_vertex_id.clone(),
+            Message::Keyed(message) => message.base.upstream_vertex_id.clone(),
         }
     }
 
     pub fn record_batch(&self) -> &RecordBatch {
         match self {
-            DataBatch::Batch(batch) => &batch.record_batch,
-            DataBatch::KeyedBatch(batch) => &batch.base.record_batch,
+            Message::Regular(message) => &message.record_batch,
+            Message::Keyed(message) => &message.base.record_batch,
         }
     }
 
     pub fn key(&self) -> Result<&Key> {
         match self {
-            DataBatch::Batch(_) => Err(anyhow::anyhow!("Batch does not have a key")),
-            DataBatch::KeyedBatch(batch) => Ok(batch.key()),
+            Message::Regular(_) => Err(anyhow::anyhow!("Regular message does not have a key")),
+            Message::Keyed(message) => Ok(&message.key),
         }
     }
 } 

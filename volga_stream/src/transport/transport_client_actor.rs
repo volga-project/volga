@@ -1,6 +1,6 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use async_trait::async_trait;
 use kameo::Actor;
 use kameo::prelude::ActorRef;
@@ -15,7 +15,7 @@ pub enum TransportClientActorType {
 }
 
 impl TransportClientActorType {
-    pub async fn register_receiver(&self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
+    pub async fn register_receiver(&self, channel_id: String, receiver: mpsc::Receiver<Message>) -> Result<()> {
         match self {
             TransportClientActorType::StreamTask(actor) => {
                 actor.ask(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterReceiver {
@@ -35,7 +35,7 @@ impl TransportClientActorType {
         }
     }
 
-    pub async fn register_sender(&self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()> {
+    pub async fn register_sender(&self, channel_id: String, sender: mpsc::Sender<Message>) -> Result<()> {
         match self {
             TransportClientActorType::StreamTask(actor) => {
                 actor.ask(crate::transport::transport_client_actor::TransportClientActorMessage::RegisterSender {
@@ -58,18 +58,18 @@ impl TransportClientActorType {
 
 #[async_trait]
 pub trait TransportClientActor: Actor + Send + Sync {
-    async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()>;
-    async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()>;
+    async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<Message>) -> Result<()>;
+    async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<Message>) -> Result<()>;
 }
 
 // Messages for transport actor registration
 pub enum TransportClientActorMessage {
     RegisterReceiver {
         channel_id: String,
-        receiver: mpsc::Receiver<DataBatch>,
+        receiver: mpsc::Receiver<Message>,
     },
     RegisterSender {
         channel_id: String,
-        sender: mpsc::Sender<DataBatch>,
+        sender: mpsc::Sender<Message>,
     },
 } 

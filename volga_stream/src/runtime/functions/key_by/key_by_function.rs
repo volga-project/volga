@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use crate::common::data_batch::{DataBatch, KeyedDataBatch, BaseDataBatch};
+use crate::common::message::{Message, KeyedMessage, BaseMessage};
 use crate::common::Key;
 use anyhow::Result;
 use std::fmt;
@@ -17,7 +17,7 @@ use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 
 pub trait KeyByFunctionTrait: Send + Sync + fmt::Debug {
-    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>>;
+    fn key_by(&self, batch: Message) -> Result<Vec<KeyedMessage>>;
 }
 
 /// Generic key-by function that can be used for any key-by function
@@ -38,7 +38,7 @@ impl CustomKeyByFunction {
 }
 
 impl KeyByFunctionTrait for CustomKeyByFunction {
-    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
+    fn key_by(&self, batch: Message) -> Result<Vec<KeyedMessage>> {
         self.function.key_by(batch)
     }
 }
@@ -78,8 +78,8 @@ impl ArrowKeyByFunction {
 }
 
 impl KeyByFunctionTrait for ArrowKeyByFunction {
-    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
-        let record_batch = batch.record_batch();
+    fn key_by(&self, message: Message) -> Result<Vec<KeyedMessage>> {
+        let record_batch = message.record_batch();
         let schema = record_batch.schema();
         
         // If batch is empty, return empty result
@@ -150,8 +150,8 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
             let key = Key::new(key_batch)?;
             
             // Create a KeyedDataBatch with this partition data
-            let keyed_batch = KeyedDataBatch::new(
-                BaseDataBatch::new(batch.upstream_vertex_id(), group_batch),
+            let keyed_batch = KeyedMessage::new(
+                BaseMessage::new(message.upstream_vertex_id(), group_batch),
                 key,
             );
             
@@ -169,10 +169,10 @@ pub enum KeyByFunction {
 }
 
 impl KeyByFunctionTrait for KeyByFunction {
-    fn key_by(&self, batch: DataBatch) -> Result<Vec<KeyedDataBatch>> {
+    fn key_by(&self, message: Message) -> Result<Vec<KeyedMessage>> {
         match self {
-            KeyByFunction::Custom(function) => function.key_by(batch),
-            KeyByFunction::Arrow(function) => function.key_by(batch),
+            KeyByFunction::Custom(function) => function.key_by(message),
+            KeyByFunction::Arrow(function) => function.key_by(message),
         }
     }
 }
@@ -238,22 +238,22 @@ mod tests {
             vec![Arc::new(id_array), Arc::new(value_array)]
         ).unwrap();
         
-        let batch = DataBatch::new(None, record_batch);
+        let message = Message::new(None, record_batch);
         
         // Create a key-by function with 'id' as the key column
         let key_by_function = ArrowKeyByFunction::new(vec!["id".to_string()]);
         
         // Execute key-by
-        let keyed_batches = key_by_function.key_by(batch).unwrap();
+        let keyed_messages = key_by_function.key_by(message).unwrap();
         
         // We should have 3 distinct keys (1, 2, 3)
-        assert_eq!(keyed_batches.len(), 3);
+        assert_eq!(keyed_messages.len(), 3);
         
-        // Verify the contents of each keyed batch
+        // Verify the contents of each keyed message
         let mut id_to_values: HashMap<i32, Vec<String>> = HashMap::new();
         
-        for keyed_batch in &keyed_batches {
-            let batch = &keyed_batch.base.record_batch;
+        for keyed_message in &keyed_messages {
+            let batch = &keyed_message.base.record_batch;
             let id_col = batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
             let value_col = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
             
@@ -311,7 +311,7 @@ mod tests {
             ]
         ).unwrap();
         
-        let batch = DataBatch::new(None, record_batch);
+        let message = Message::new(None, record_batch);
         
         // Create a key-by function with both columns as keys
         let key_by_function = ArrowKeyByFunction::new(
@@ -319,16 +319,16 @@ mod tests {
         );
         
         // Execute key-by
-        let keyed_batches = key_by_function.key_by(batch).unwrap();
+        let keyed_messages = key_by_function.key_by(message).unwrap();
         
         // We should have 4 distinct keys: (1,1), (1,2), (2,1), (3,1)
-        assert_eq!(keyed_batches.len(), 4);
+        assert_eq!(keyed_messages.len(), 4);
         
         // Map to store key -> values
         let mut key_to_values: HashMap<(i32, i32), Vec<f64>> = HashMap::new();
         
-        for keyed_batch in &keyed_batches {
-            let batch = &keyed_batch.base.record_batch;
+        for keyed_message in &keyed_messages {
+            let batch = &keyed_message.base.record_batch;
             let cat_col = batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
             let subcat_col = batch.column(1).as_any().downcast_ref::<Int32Array>().unwrap();
             let value_col = batch.column(2).as_any().downcast_ref::<Float64Array>().unwrap();

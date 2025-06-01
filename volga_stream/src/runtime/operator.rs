@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::data_batch::{DataBatch, KeyedDataBatch, BaseDataBatch};
+use crate::common::message::{Message, KeyedMessage, BaseMessage};
 use crate::common::Key;
 use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
@@ -32,11 +32,11 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     async fn finish(&mut self) -> Result<()>;
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
-        Err(anyhow::anyhow!("process_batch not implemented for this operator"))
+    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
+        Err(anyhow::anyhow!("process_message not implemented for this operator"))
     }
     fn operator_type(&self) -> OperatorType;
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+    async fn fetch(&mut self) -> Result<Option<Message>> {
         Err(anyhow::anyhow!("fetch not implemented for this operator"))
     }
 }
@@ -86,14 +86,14 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
+    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
         match self {
-            Operator::Map(op) => op.process_batch(batch).await,
-            Operator::Join(op) => op.process_batch(batch).await,
-            Operator::Sink(op) => op.process_batch(batch).await,
-            Operator::Source(op) => op.process_batch(batch).await,
-            Operator::KeyBy(op) => op.process_batch(batch).await,
-            Operator::Reduce(op) => op.process_batch(batch).await,
+            Operator::Map(op) => op.process_message(message).await,
+            Operator::Join(op) => op.process_message(message).await,
+            Operator::Sink(op) => op.process_message(message).await,
+            Operator::Source(op) => op.process_message(message).await,
+            Operator::KeyBy(op) => op.process_message(message).await,
+            Operator::Reduce(op) => op.process_message(message).await,
         }
     }
 
@@ -108,7 +108,7 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+    async fn fetch(&mut self) -> Result<Option<Message>> {
         match self {
             Operator::Map(op) => op.fetch().await,
             Operator::Join(op) => op.fetch().await,
@@ -220,13 +220,13 @@ impl OperatorTrait for MapOperator {
         self.base.open(context).await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
+    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
         if let Some(function) = self.base.get_function_mut::<MapFunction>() {
             let function = function.clone();
-            let batch = batch.clone();
+            let message = message.clone();
 
             self.base.thread_pool.spawn_fifo_async(move || {
-                let processed = function.map(batch).unwrap();
+                let processed = function.map(message).unwrap();
                 Ok(Some(vec![processed]))
             }).await
         } else {
@@ -250,8 +250,8 @@ impl OperatorTrait for MapOperator {
 #[derive(Debug)]
 pub struct JoinOperator {
     base: OperatorBase,
-    left_buffer: Vec<DataBatch>,
-    right_buffer: Vec<DataBatch>,
+    left_buffer: Vec<Message>,
+    right_buffer: Vec<Message>,
 }
 
 impl JoinOperator {
@@ -278,16 +278,16 @@ impl OperatorTrait for JoinOperator {
         self.base.finish().await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
+    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
         // TODO proper lookup for upstream_vertex_id position (left or right)
-        if let Some(upstream_id) = batch.upstream_vertex_id() {
+        if let Some(upstream_id) = message.upstream_vertex_id() {
             if upstream_id.contains("left") {
-                self.left_buffer.push(batch.clone());
+                self.left_buffer.push(message.clone());
             } else {
-                self.right_buffer.push(batch.clone());
+                self.right_buffer.push(message.clone());
             }
         }
-        Ok(Some(vec![batch]))
+        Ok(Some(vec![message]))
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -323,10 +323,10 @@ impl OperatorTrait for SinkOperator {
         self.base.finish().await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
+    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
         if let Some(function) = self.base.get_function_mut::<SinkFunction>() {
-            function.sink(batch.clone()).await?;
-            Ok(Some(vec![batch]))
+            function.sink(message.clone()).await?;
+            Ok(Some(vec![message]))
         } else {
             Err(anyhow::anyhow!("SinkFunction not available"))
         }
@@ -369,7 +369,7 @@ impl OperatorTrait for SourceOperator {
         OperatorType::SOURCE
     }
 
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+    async fn fetch(&mut self) -> Result<Option<Message>> {
         if let Some(function) = self.base.get_function_mut::<SourceFunction>() {
             function.fetch().await
         } else {
@@ -397,18 +397,18 @@ impl OperatorTrait for KeyByOperator {
         self.base.open(context).await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
+    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
         if let Some(function) = self.base.get_function_mut::<KeyByFunction>() {
             let function = function.clone();
-            let batch = batch.clone();
+            let message = message.clone();
 
             self.base.thread_pool.spawn_fifo_async(move || {
-                let keyed_batches = function.key_by(batch)?;
-                // Convert KeyedDataBatch to DataBatch::KeyedBatch
-                let batches = keyed_batches.into_iter()
-                    .map(DataBatch::KeyedBatch)
+                let keyed_messages = function.key_by(message)?;
+                // Convert
+                let messages = keyed_messages.into_iter()
+                    .map(Message::Keyed)
                     .collect();
-                Ok(Some(batches))
+                Ok(Some(messages))
             }).await
         } else {
             Err(anyhow::anyhow!("KeyByFunction not available"))
@@ -459,11 +459,11 @@ impl OperatorTrait for ReduceOperator {
         self.base.finish().await
     }
 
-    async fn process_batch(&mut self, batch: DataBatch) -> Result<Option<Vec<DataBatch>>> {
-        // Explicitly check and handle only KeyedDataBatch
-        match batch {
-            DataBatch::KeyedBatch(keyed_batch) => {
-                let key = keyed_batch.key().clone();
+    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
+        // Explicitly check and handle only KeyedMessage
+        match message {
+            Message::Keyed(keyed_message) => {
+                let key = keyed_message.key().clone();
                 
                 // Check if we need to create a new accumulator or update an existing one
                 let acc_exists = self.accumulators.contains_key(&key);
@@ -481,14 +481,14 @@ impl OperatorTrait for ReduceOperator {
                     .ok_or_else(|| anyhow::anyhow!("Accumulator not found"))?;
                 
                 // TODO call on rayon threadpool
-                function.update_accumulator(&mut acc, &keyed_batch)?;
+                function.update_accumulator(&mut acc, &keyed_message)?;
                 
                 let agg_result = function.get_result(acc)?;
-                let result_batch = self.result_extractor.extract_result(&key, &agg_result)?;
-                return Ok(Some(vec![result_batch]));
+                let result_message = self.result_extractor.extract_result(&key, &agg_result)?;
+                return Ok(Some(vec![result_message]));
             },
             _ => {
-                Err(anyhow::anyhow!("ReduceOperator requires KeyedDataBatch input"))
+                Err(anyhow::anyhow!("ReduceOperator requires KeyedMessage input"))
             }
         }
     }

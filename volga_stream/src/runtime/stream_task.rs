@@ -15,8 +15,8 @@ use anyhow::Result;
 use tokio::{sync::mpsc::{Receiver, Sender, channel}, task::JoinHandle, time::Instant};
 use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
-use crate::common::data_batch::DataBatch;
-use std::{collections::HashMap, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use crate::common::message::Message;
+use std::{collections::HashMap, mem, sync::{atomic::{AtomicBool, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use futures::future::join_all;
 use std::fmt;
 // Helper function to get current timestamp
@@ -32,11 +32,11 @@ pub enum StreamTaskConfigurationRequest {
     },
     RegisterReaderReceiver {
         channel_id: String,
-        receiver: Receiver<DataBatch>,
+        receiver: Receiver<Message>,
     },
     RegisterWriterSender {  
         channel_id: String,
-        sender: Sender<DataBatch>,
+        sender: Sender<Message>,
     },
 }
 
@@ -84,7 +84,7 @@ impl StreamTask {
         Ok(())
     }
 
-    pub async fn register_reader_receiver(&mut self, channel_id: String, receiver: Receiver<DataBatch>) -> Result<()> {
+    pub async fn register_reader_receiver(&mut self, channel_id: String, receiver: Receiver<Message>) -> Result<()> {
         self.configuration_sender.send(StreamTaskConfigurationRequest::RegisterReaderReceiver {
             channel_id,
             receiver,
@@ -93,7 +93,7 @@ impl StreamTask {
         Ok(())
     }
 
-    pub async fn register_writer_sender(&mut self, channel_id: String, sender: Sender<DataBatch>) -> Result<()> {
+    pub async fn register_writer_sender(&mut self, channel_id: String, sender: Sender<Message>) -> Result<()> {
         self.configuration_sender.send(StreamTaskConfigurationRequest::RegisterWriterSender {
             channel_id,
             sender,
@@ -144,20 +144,20 @@ impl StreamTask {
         Ok(())
     }
 
-    async fn collect_batch_parallel(
+    async fn collect_message_parallel(
         collectors: &mut HashMap<String, Collector>,
-        batch: DataBatch,
+        message: Message,
         channels_to_send: Option<HashMap<String, Vec<String>>>
     ) -> Result<HashMap<String, Vec<String>>> {
         let mut futures = Vec::new();
         for (collector_id, collector) in collectors.iter_mut() {
-            let batch_clone = batch.clone();
+            let message_clone = message.clone();
             let collector_id = collector_id.clone();
             let channels = channels_to_send.as_ref()
                 .and_then(|map| map.get(&collector_id).cloned());
             
             futures.push(async move {
-                let result = collector.collect_batch(batch_clone, channels).await?;
+                let result = collector.collect_message(message_clone, channels).await?;
                 Ok::<_, anyhow::Error>((collector_id, result))
             });
         }
@@ -171,7 +171,7 @@ impl StreamTask {
                     successful_channels.insert(id, channels);
                 },
                 Err(e) => {
-                    println!("Error collecting batch: {:?}", e);
+                    println!("Error collecting message: {:?}", e);
                 }
             }
         }
@@ -212,20 +212,20 @@ impl StreamTask {
                     &mut collectors
                 ).await?;
                 
-                let batches = match operator.operator_type() {
+                let messages = match operator.operator_type() {
                     crate::runtime::operator::OperatorType::SOURCE => {
                         match operator.fetch().await? {
-                            Some(batch) => Some(vec![batch]),
+                            Some(message) => Some(vec![message]),
                             None => None,
                         }
                     }
                     _ => {
                         let reader = transport_client.reader.as_mut()
                             .expect("Reader should be initialized for non-SOURCE operator");
-                        if let Some(batch) = reader.read_batch().await? {
-                            println!("StreamTask {:?} received batch", vertex_id);
-                            match operator.process_batch(batch).await.unwrap() {
-                                Some(batches) => Some(batches),
+                        if let Some(message) = reader.read_message().await? {
+                            println!("StreamTask {:?} received message", vertex_id);
+                            match operator.process_message(message).await.unwrap() {
+                                Some(messages) => Some(messages),
                                 None => None,
                             }
                         } else {
@@ -234,13 +234,13 @@ impl StreamTask {
                     }
                 };
 
-                if batches.is_none() {
+                if messages.is_none() {
                     continue;
                 }
                 
-                let batches = batches.unwrap();
+                let messages = messages.unwrap();
                 
-                for batch in batches {
+                for message in messages {
                     let mut channels_to_retry = HashMap::new();
                     for (collector_id, collector) in &collectors {
                         channels_to_retry.insert(collector_id.clone(), collector.output_channel_ids());
@@ -252,9 +252,9 @@ impl StreamTask {
                             break;
                         }
                         
-                        let successful_channels = Self::collect_batch_parallel(
+                        let successful_channels = Self::collect_message_parallel(
                             &mut collectors, 
-                            batch.clone(), 
+                            message.clone(), 
                             Some(channels_to_retry.clone())
                         ).await?;
                         

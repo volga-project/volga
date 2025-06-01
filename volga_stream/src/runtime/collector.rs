@@ -1,5 +1,5 @@
 use anyhow::Result;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use std::collections::HashMap;
 use crate::transport::transport_client::DataWriter;
 use crate::runtime::partition::Partition;
@@ -36,13 +36,13 @@ impl Collector {
         self.output_channel_ids.clone()
     }
 
-    pub async fn collect_batch(&mut self, batch: DataBatch, channel_ids_to_send: Option<Vec<String>>) -> Result<Vec<String>> {
+    pub async fn collect_message(&mut self, message: Message, channel_ids_to_send: Option<Vec<String>>) -> Result<Vec<String>> {
         let num_partitions = self.output_channel_ids.len();
-        let mut partitioned_batches: Vec<DataBatch> = vec![DataBatch::new(None, batch.record_batch().clone()); num_partitions];
+        let mut partitioned_messages: Vec<Message> = vec![Message::new(None, message.record_batch().clone()); num_partitions];
         
-        let partitions = self.partition.partition(&batch, num_partitions)?;
+        let partitions = self.partition.partition(&message, num_partitions)?;
         for partition_idx in partitions {
-            partitioned_batches[partition_idx] = batch.clone();
+            partitioned_messages[partition_idx] = message.clone();
         }
 
         // Create channel to partition mapping
@@ -58,17 +58,17 @@ impl Collector {
         let mut write_futures = Vec::new();
         for channel_id in channels_to_send {
             if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
-                let partition_batch = partitioned_batches[partition_idx].clone();
-                if partition_batch.record_batch().num_rows() == 0 {
+                let partition_message = partitioned_messages[partition_idx].clone();
+                if partition_message.record_batch().num_rows() == 0 {
                     continue;
                 }
                 
                 let mut writer = self.data_writer.clone();
                 let channel_id_clone = channel_id.clone();
                 write_futures.push(async move {
-                    match writer.write_batch(&channel_id_clone, partition_batch).await {
+                    match writer.write_message(&channel_id_clone, partition_message).await {
                         Ok(_) => Ok(channel_id_clone),
-                        Err(_) => Err(anyhow::anyhow!("Failed to write batch"))
+                        Err(_) => Err(anyhow::anyhow!("Failed to write message"))
                     }
                 });
             }

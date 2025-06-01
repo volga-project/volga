@@ -3,7 +3,7 @@ use anyhow::Result;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use std::fmt;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
 use kameo::prelude::ActorRef;
 use crate::runtime::functions::{
@@ -56,7 +56,7 @@ impl ExecutionEdge {
 
 #[derive(Debug, Clone)]
 pub enum SourceConfig {
-    VectorSourceConfig(Vec<DataBatch>),
+    VectorSourceConfig(Vec<Message>),
     WordCountSourceConfig {
         word_length: usize,
         num_words: usize,        // Total pool of words to generate

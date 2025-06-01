@@ -1,20 +1,14 @@
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
 
-// Helper function to get current timestamp
-fn timestamp() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
-    format!("[{}.{:03}]", now.as_secs(), now.subsec_millis())
-}
-
 pub struct DataReader {
     vertex_id: String,
-    receivers: HashMap<String, mpsc::Receiver<DataBatch>>,
+    receivers: HashMap<String, mpsc::Receiver<Message>>,
     default_timeout: Duration,
     default_retries: usize,
 }
@@ -29,26 +23,26 @@ impl DataReader {
         }
     }
 
-    pub fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) {
+    pub fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<Message>) {
         self.receivers.insert(channel_id, receiver);
     }
 
-    pub async fn read_batch(&mut self) -> Result<Option<DataBatch>> {
-        self.read_batch_with_params(None, None).await
+    pub async fn read_message(&mut self) -> Result<Option<Message>> {
+        self.read_message_with_params(None, None).await
     }
 
-    pub async fn read_batch_with_params(
+    pub async fn read_message_with_params(
         &mut self,
         timeout_duration: Option<Duration>,
         retries: Option<usize>
-    ) -> Result<Option<DataBatch>> {
+    ) -> Result<Option<Message>> {
         let timeout_duration = timeout_duration.unwrap_or(self.default_timeout);
         let retries = retries.unwrap_or(self.default_retries);
         let mut attempts = 0;
 
         while attempts <= retries {
             if self.receivers.is_empty() {
-                return Err(anyhow!("Attempted to read batch from DataReader {} with no channels registered", self.vertex_id));
+                return Err(anyhow!("Attempted to read message from DataReader {} with no channels registered", self.vertex_id));
             }
 
             // Create a future that completes when any channel has data
@@ -56,7 +50,7 @@ impl DataReader {
             for (channel_id, receiver) in self.receivers.iter_mut() {
                 futures.push(Box::pin(async move {
                     match time::timeout(timeout_duration, receiver.recv()).await {
-                        Ok(Some(batch)) => Some((channel_id.clone(), batch)),
+                        Ok(Some(message)) => Some((channel_id.clone(), message)),
                         Ok(None) => None,
                         Err(_) => None,
                     }
@@ -67,14 +61,14 @@ impl DataReader {
             let result = tokio::select! {
                 result = futures::future::select_all(futures) => {
                     match result.0 {
-                        Some((channel_id, batch)) => Some(batch),
+                        Some((channel_id, message)) => Some(message),
                         None => None,
                     }
                 }
             };
 
             if result.is_some() {
-                // println!("{} DataReader {:?} read batch: {:?}", timestamp(), self.vertex_id, result.clone());
+                // println!("{} DataReader {:?} read message: {:?}", timestamp(), self.vertex_id, result.clone());
                 return Ok(result);
             }
             attempts += 1;
@@ -95,7 +89,7 @@ impl fmt::Debug for DataReader {
 #[derive(Clone)]
 pub struct DataWriter {
     vertex_id: String,
-    senders: HashMap<String, mpsc::Sender<DataBatch>>,
+    senders: HashMap<String, mpsc::Sender<Message>>,
     default_timeout: Duration,
     default_retries: usize,
 }
@@ -110,18 +104,18 @@ impl DataWriter {
         }
     }
 
-    pub fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<DataBatch>) {
+    pub fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<Message>) {
         self.senders.insert(channel_id, sender);
     }
 
-    pub async fn write_batch(&mut self, channel_id: &str, batch: DataBatch) -> Result<()> {
-        self.write_batch_with_params(channel_id, batch, None, None).await
+    pub async fn write_message(&mut self, channel_id: &str, message: Message) -> Result<()> {
+        self.write_message_with_params(channel_id, message, None, None).await
     }
 
-    pub async fn write_batch_with_params(
+    pub async fn write_message_with_params(
         &mut self,
         channel_id: &str,
-        batch: DataBatch,
+        message: Message,
         timeout_duration: Option<Duration>,
         retries: Option<usize>
     ) -> Result<()> {
@@ -131,13 +125,13 @@ impl DataWriter {
 
         while attempts <= retries {
             if self.senders.is_empty() {
-                return Err(anyhow!("Attempted to write batch to DataWriter with no channels registered"));
+                return Err(anyhow!("Attempted to write message to DataWriter with no channels registered"));
             }
             
             if let Some(sender) = self.senders.get(channel_id) {
-                match time::timeout(timeout_duration, sender.send(batch.clone())).await {
+                match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {
-                        // println!("{} DataWriter {:?} wrote batch: {:?}", timestamp(), self.vertex_id, batch);
+                        // println!("{} DataWriter {:?} wrote message: {:?}", timestamp(), self.vertex_id, message);
                         return Ok(());
                     }
                     Ok(Err(_)) => {
@@ -152,7 +146,7 @@ impl DataWriter {
                 return Err(anyhow!("Channel {} not found", channel_id));
             }
         }
-        Err(anyhow!("Failed to write batch after {} retries", retries))
+        Err(anyhow!("Failed to write message after {} retries", retries))
     }
 }
 
@@ -184,7 +178,7 @@ impl TransportClient {
         &self.vertex_id
     }
 
-    pub async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<DataBatch>) -> Result<()> {
+    pub async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<Message>) -> Result<()> {
         if let Some(reader) = &mut self.reader {
             reader.register_receiver(channel_id, receiver);
             Ok(())
@@ -193,7 +187,7 @@ impl TransportClient {
         }
     }
 
-    pub async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<DataBatch>) -> Result<()> {
+    pub async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<Message>) -> Result<()> {
         if let Some(writer) = &mut self.writer {
             writer.register_sender(channel_id, sender);
             Ok(())

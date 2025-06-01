@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client_actor::TransportClientActorType;
 use async_trait::async_trait;
@@ -16,8 +16,8 @@ pub trait TransportBackend: Send + Sync {
 
 pub struct InMemoryTransportBackend {
     actors: HashMap<String, TransportClientActorType>,
-    senders: HashMap<String, mpsc::Sender<DataBatch>>,
-    receivers: HashMap<String, mpsc::Receiver<DataBatch>>,
+    senders: HashMap<String, mpsc::Sender<Message>>,
+    receivers: HashMap<String, mpsc::Receiver<Message>>,
 }
 
 impl InMemoryTransportBackend {

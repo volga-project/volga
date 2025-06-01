@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use crate::common::data_batch::{DataBatch, KeyedDataBatch, BaseDataBatch};
+use crate::common::message::{Message, KeyedMessage, BaseMessage};
 use crate::common::Key;
 use anyhow::Result;
 use std::fmt;
@@ -61,14 +61,14 @@ pub struct AggregationResult {
 pub trait ReduceFunctionTrait: Send + Sync + fmt::Debug {
     fn create_accumulator(&self) -> Result<Accumulator>;
     
-    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()>;
+    fn update_accumulator(&self, accumulator: &mut Accumulator, message: &KeyedMessage) -> Result<()>;
     
     fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult>;
 }
 
 /// Trait for extracting final results from aggregated data
 pub trait AggregationResultExtractorTrait: Send + Sync + fmt::Debug {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch>;
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<Message>;
 }
 
 /// Default implementation of ResultExtractor that includes all aggregation values
@@ -76,7 +76,7 @@ pub trait AggregationResultExtractorTrait: Send + Sync + fmt::Debug {
 pub struct AllAggregationsResultExtractor;
 
 impl AggregationResultExtractorTrait for AllAggregationsResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<Message> {
         // Create a schema with all aggregation fields
         let schema = Arc::new(Schema::new(vec![
             Field::new("min", DataType::Float64, false),
@@ -103,8 +103,8 @@ impl AggregationResultExtractorTrait for AllAggregationsResultExtractor {
             ]
         )?;
         
-        Ok(DataBatch::KeyedBatch(KeyedDataBatch::new(
-            BaseDataBatch::new(None, record_batch),
+        Ok(Message::Keyed(KeyedMessage::new(
+            BaseMessage::new(None, record_batch),
             key.clone(),
         )))
     }
@@ -135,7 +135,7 @@ impl SingleAggregationResultExtractor {
 }
 
 impl AggregationResultExtractorTrait for SingleAggregationResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<Message> {
         let value = match self.aggregation_type {
             AggregationType::Min => result.min,
             AggregationType::Max => result.max,
@@ -155,8 +155,8 @@ impl AggregationResultExtractorTrait for SingleAggregationResultExtractor {
             vec![Arc::new(array)]
         )?;
         
-        Ok(DataBatch::KeyedBatch(KeyedDataBatch::new(
-            BaseDataBatch::new(None, record_batch),
+        Ok(Message::Keyed(KeyedMessage::new(
+            BaseMessage::new(None, record_batch),
             key.clone(),
         )))
     }
@@ -171,7 +171,7 @@ pub enum AggregationResultExtractor {
 }
 
 impl AggregationResultExtractorTrait for AggregationResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<DataBatch> {
+    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Result<Message> {
         match self {
             AggregationResultExtractor::All(e) => e.extract_result(key, result),
             AggregationResultExtractor::Single(e) => e.extract_result(key, result),
@@ -216,8 +216,8 @@ impl ReduceFunctionTrait for CustomReduceFunction {
         self.function.create_accumulator()
     }
     
-    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
-        self.function.update_accumulator(accumulator, batch)
+    fn update_accumulator(&self, accumulator: &mut Accumulator, message: &KeyedMessage) -> Result<()> {
+        self.function.update_accumulator(accumulator, message)
     }
     
     fn get_result(&self, accumulator: &Accumulator) -> Result<AggregationResult> {
@@ -263,28 +263,11 @@ impl ArrowReduceFunction {
 
 impl ReduceFunctionTrait for ArrowReduceFunction {
     fn create_accumulator(&self) -> Result<Accumulator> {
-        // let batch = &key_batch.base.record_batch;
-        // let schema = batch.schema();
-        
-        // // Find the column to aggregate
-        // if let Some((idx, _)) = schema.column_with_name(&self.column_name) {
-        //     let array = batch.column(idx);
-            
-        //     // Compute initial aggregations
-        //     let (min_val, max_val, sum_val, count) = self.compute_aggregations(array)?;
-            
-        //     // Create an accumulator with the initial values
-        //     Ok(Accumulator::new(min_val, max_val, sum_val, count))
-        // } else {
-        //     Err(anyhow::anyhow!("Column '{}' not found in schema", self.column_name))
-        // }
-
-        Ok(Accumulator::new(f64::INFINITY, f64::NEG_INFINITY, 0.0, 0))
-            
+        Ok(Accumulator::new(f64::INFINITY, f64::NEG_INFINITY, 0.0, 0))     
     }
     
-    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
-        let record_batch = &batch.base.record_batch;
+    fn update_accumulator(&self, accumulator: &mut Accumulator, message: &KeyedMessage) -> Result<()> {
+        let record_batch = &message.base.record_batch;
         let schema = record_batch.schema();
         
         // Find the column to aggregate
@@ -329,10 +312,10 @@ impl ReduceFunctionTrait for ReduceFunction {
         }
     }
     
-    fn update_accumulator(&self, accumulator: &mut Accumulator, batch: &KeyedDataBatch) -> Result<()> {
+    fn update_accumulator(&self, accumulator: &mut Accumulator, message: &KeyedMessage) -> Result<()> {
         match self {
-            ReduceFunction::Custom(function) => function.update_accumulator(accumulator, batch),
-            ReduceFunction::Arrow(function) => function.update_accumulator(accumulator, batch),
+            ReduceFunction::Custom(function) => function.update_accumulator(accumulator, message),
+            ReduceFunction::Arrow(function) => function.update_accumulator(accumulator, message),
         }
     }
     
@@ -391,7 +374,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
-    fn create_test_keyed_batch(values: Vec<f64>, key_value: i32) -> KeyedDataBatch {
+    fn create_test_keyed_batch(values: Vec<f64>, key_value: i32) -> KeyedMessage {
         let schema = Arc::new(arrow::datatypes::Schema::new(vec![
             Field::new("value", DataType::Float64, false),
         ]));
@@ -403,7 +386,7 @@ mod tests {
             vec![Arc::new(value_array)]
         ).unwrap();
         
-        let base_batch = BaseDataBatch::new(None, record_batch);
+        let base_message = BaseMessage::new(None, record_batch);
         
         // Create key batch with a single row
         let key_schema = Arc::new(arrow::datatypes::Schema::new(vec![
@@ -419,22 +402,22 @@ mod tests {
         
         let key = Key::new(key_batch).unwrap();
         
-        KeyedDataBatch::new(base_batch, key)
+        KeyedMessage::new(base_message, key)
     }
 
     #[tokio::test]
     async fn test_arrow_reduce_function() {
         // Test data in multiple batches with the same key
-        let initial_batch = create_test_keyed_batch(vec![10.0, 5.0, 20.0], 1);
-        let second_batch = create_test_keyed_batch(vec![15.0, 3.0, 25.0], 1);
-        let third_batch = create_test_keyed_batch(vec![40.0, 50.0], 1);
+        let initial_message = create_test_keyed_batch(vec![10.0, 5.0, 20.0], 1);
+        let second_message = create_test_keyed_batch(vec![15.0, 3.0, 25.0], 1);
+        let third_message = create_test_keyed_batch(vec![40.0, 50.0], 1);
         
         // Create reducer
         let reducer = ArrowReduceFunction::new("value".to_string());
         
-        // Initialize accumulator with first batch
+        // Initialize accumulator with first message
         let mut acc = reducer.create_accumulator().unwrap();
-        reducer.update_accumulator(&mut acc, &initial_batch).unwrap();
+        reducer.update_accumulator(&mut acc, &initial_message).unwrap();
         
         // Check initial values
         assert_eq!(acc.min, 5.0);
@@ -443,22 +426,22 @@ mod tests {
         assert_eq!(acc.count, 3);
         assert_eq!(acc.average(), 35.0 / 3.0);
         
-        // Update with second batch
-        reducer.update_accumulator(&mut acc, &second_batch).unwrap();
+        // Update with second message
+        reducer.update_accumulator(&mut acc, &second_message).unwrap();
         
-        // Verify after second batch
-        assert_eq!(acc.min, 3.0);  // Min from both batches
-        assert_eq!(acc.max, 25.0);  // Max from both batches
+        // Verify after second message
+        assert_eq!(acc.min, 3.0);  // Min from both messages
+        assert_eq!(acc.max, 25.0);  // Max from both messages
         assert_eq!(acc.sum, 78.0);  // 35 + 15 + 3 + 25
         assert_eq!(acc.count, 6);   // 3 + 3
         assert_eq!(acc.average(), 78.0 / 6.0);
         
-        // Update with third batch
-        reducer.update_accumulator(&mut acc, &third_batch).unwrap();
+        // Update with third message
+        reducer.update_accumulator(&mut acc, &third_message).unwrap();
         
-        // Verify after third batch
-        assert_eq!(acc.min, 3.0);   // Min across all batches
-        assert_eq!(acc.max, 50.0);  // Max across all batches
+        // Verify after third message
+        assert_eq!(acc.min, 3.0);   // Min across all messages
+        assert_eq!(acc.max, 50.0);  // Max across all messages
         assert_eq!(acc.sum, 168.0); // 78 + 40 + 50
         assert_eq!(acc.count, 8);   // 6 + 2
         assert_eq!(acc.average(), 168.0 / 8.0);
@@ -471,37 +454,37 @@ mod tests {
         assert_eq!(result.count, 8.0);
         assert_eq!(result.average, 168.0 / 8.0);
 
-        let key = initial_batch.key();
+        let key = initial_message.key();
 
         // Test min aggregation
         let min_extractor = SingleAggregationResultExtractor::new(AggregationType::Min, "min_value".to_string());
-        let min_batch = min_extractor.extract_result(&key, &result).unwrap();
-        let min_value = min_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        let min_message = min_extractor.extract_result(&key, &result).unwrap();
+        let min_value = min_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(min_value, 3.0);
         
         // Test max aggregation
         let max_extractor = SingleAggregationResultExtractor::new(AggregationType::Max, "max_value".to_string());
-        let max_batch = max_extractor.extract_result(&key, &result).unwrap();
-        let max_value = max_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        let max_message = max_extractor.extract_result(&key, &result).unwrap();
+        let max_value = max_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(max_value, 50.0);
         
         // Test sum aggregation
         let sum_extractor = SingleAggregationResultExtractor::new(AggregationType::Sum, "sum_value".to_string());
-        let sum_batch = sum_extractor.extract_result(&key, &result).unwrap();
-        let sum_value = sum_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        let sum_message = sum_extractor.extract_result(&key, &result).unwrap();
+        let sum_value = sum_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(sum_value, 168.0);
         
         // Test count aggregation
         let count_extractor = SingleAggregationResultExtractor::new(AggregationType::Count, "count_value".to_string());
-        let count_batch = count_extractor.extract_result(&key, &result).unwrap();
-        let count_value = count_batch.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
+        let count_message = count_extractor.extract_result(&key, &result).unwrap();
+        let count_value = count_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(count_value, 8.0);
     }
 
     #[tokio::test]
     async fn test_arrow_reduce_function_different_types() {
         // Test with float values
-        let float_batch = create_test_keyed_batch(vec![10.0, 5.0, 20.0], 1);
+        let float_message = create_test_keyed_batch(vec![10.0, 5.0, 20.0], 1);
 
         // Test with string values
         let string_schema = Arc::new(Schema::new(vec![
@@ -512,8 +495,8 @@ mod tests {
             string_schema.clone(),
             vec![Arc::new(string_array)]
         ).unwrap();
-        let string_batch = KeyedDataBatch::new(
-            BaseDataBatch::new(None, string_batch),
+        let string_message = KeyedMessage::new(
+            BaseMessage::new(None, string_batch),
             Key::new(RecordBatch::try_new(
                 Arc::new(Schema::new(vec![Field::new("key", DataType::Int32, false)])),
                 vec![Arc::new(Int32Array::from(vec![1]))]
@@ -523,9 +506,9 @@ mod tests {
         // Test float column
         let reducer = ArrowReduceFunction::new("value".to_string());
         
-        // Test float batch
+        // Test float message
         let mut acc = reducer.create_accumulator().unwrap();
-        reducer.update_accumulator(&mut acc, &float_batch).unwrap();
+        reducer.update_accumulator(&mut acc, &float_message).unwrap();
         
         assert_eq!(acc.min, 5.0);
         assert_eq!(acc.max, 20.0);
@@ -533,9 +516,9 @@ mod tests {
         assert_eq!(acc.count, 3);
         assert_eq!(acc.average(), 35.0 / 3.0);
 
-        // Test string batch (should return default values with correct count)
+        // Test string message (should return default values with correct count)
         let mut acc = reducer.create_accumulator().unwrap();
-        reducer.update_accumulator(&mut acc, &string_batch).unwrap();
+        reducer.update_accumulator(&mut acc, &string_message).unwrap();
 
         assert_eq!(acc.min, f64::INFINITY);
         assert_eq!(acc.max, f64::NEG_INFINITY);
@@ -546,16 +529,16 @@ mod tests {
         // Test accumulation with different types
         let mut acc = reducer.create_accumulator().unwrap();
         
-        // Accumulate float batch
-        reducer.update_accumulator(&mut acc, &float_batch).unwrap();
+        // Accumulate float message
+        reducer.update_accumulator(&mut acc, &float_message).unwrap();
         assert_eq!(acc.min, 5.0);
         assert_eq!(acc.max, 20.0);
         assert_eq!(acc.sum, 35.0);
         assert_eq!(acc.count, 3);
         assert_eq!(acc.average(), 35.0 / 3.0);
 
-        // Accumulate string batch (should not affect float values)
-        reducer.update_accumulator(&mut acc, &string_batch).unwrap();
+        // Accumulate string message (should not affect float values)
+        reducer.update_accumulator(&mut acc, &string_message).unwrap();
         assert_eq!(acc.min, 5.0);  // Should not change
         assert_eq!(acc.max, 20.0); // Should not change
         assert_eq!(acc.sum, 35.0); // Should not change

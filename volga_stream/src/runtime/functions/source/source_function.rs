@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
@@ -10,7 +10,7 @@ use super::word_count_source::WordCountSourceFunction;
 
 #[async_trait]
 pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
-    async fn fetch(&mut self) -> Result<Option<DataBatch>>;
+    async fn fetch(&mut self) -> Result<Option<Message>>;
 }
 
 #[derive(Debug)]
@@ -21,7 +21,7 @@ pub enum SourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for SourceFunction {
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+    async fn fetch(&mut self) -> Result<Option<Message>> {
         match self {
             SourceFunction::Vector(f) => f.fetch().await,
             SourceFunction::WordCount(f) => f.fetch().await,
@@ -63,8 +63,8 @@ impl FunctionTrait for SourceFunction {
 
 pub fn create_source_function(config: crate::runtime::execution_graph::SourceConfig) -> SourceFunction {
     match config {
-        crate::runtime::execution_graph::SourceConfig::VectorSourceConfig(batches) => {
-            SourceFunction::Vector(VectorSourceFunction::new(batches))
+        crate::runtime::execution_graph::SourceConfig::VectorSourceConfig(messages) => {
+            SourceFunction::Vector(VectorSourceFunction::new(messages))
         }
         crate::runtime::execution_graph::SourceConfig::WordCountSourceConfig { 
             word_length, 

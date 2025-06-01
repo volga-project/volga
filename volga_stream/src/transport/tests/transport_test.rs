@@ -1,6 +1,6 @@
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::channel::Channel;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::transport_client_actor::TransportClientActorType;
@@ -18,7 +18,7 @@ async fn test_actor_transport() -> Result<()> {
     // Configuration
     let num_writers = 10;
     let num_readers = 10;
-    let batches_per_writer = 10;
+    let messages_per_writer = 10;
 
     // Create transport backend actor
     let backend_actor = TransportBackendActor::new();
@@ -86,18 +86,18 @@ async fn test_actor_transport() -> Result<()> {
 
     // Create test data and send from each writer
     for writer_idx in 0..num_writers {
-        for batch_idx in 0..batches_per_writer {
-            let batch = DataBatch::new(
+        for message_idx in 0..messages_per_writer {
+            let message = Message::new(
                 Some(format!("writer{}_stream", writer_idx)),
-                create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, batch_idx)])?
+                create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, message_idx)])?
             );
 
-            // Send batch to each reader
+            // Send message to each reader
             for reader_idx in 0..num_readers {
                 let channel_id = format!("writer{}_to_reader{}", writer_idx, reader_idx);
-                writer_refs[writer_idx].ask(crate::transport::test_utils::TestDataWriterMessage::WriteBatch {
+                writer_refs[writer_idx].ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                     channel_id,
-                    batch: batch.clone(),
+                    message: message.clone(),
                 }).await?;
             }
         }
@@ -105,24 +105,24 @@ async fn test_actor_transport() -> Result<()> {
 
     // Verify data received by each reader
     for reader_idx in 0..num_readers {
-        let mut received_batches = Vec::new();
+        let mut received_messages = Vec::new();
         
         // Read all expected batches
-        for _ in 0..(num_writers * batches_per_writer) {
-            let result = reader_refs[reader_idx].ask(crate::transport::test_utils::TestDataReaderMessage::ReadBatch).await?;
-            if let Some(batch) = result {
-                received_batches.push(batch);
+        for _ in 0..(num_writers * messages_per_writer) {
+            let result = reader_refs[reader_idx].ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage).await?;
+            if let Some(message) = result {
+                received_messages.push(message);
             }
         }
 
         // Verify we got all expected batches
-        assert_eq!(received_batches.len(), num_writers * batches_per_writer, 
+        assert_eq!(received_messages.len(), num_writers * messages_per_writer, 
             "Reader {} did not receive all expected batches", reader_idx);
 
         // Create a map to track received batches by writer and batch number
         let mut received_map: HashMap<(usize, usize), String> = HashMap::new();
-        for batch in received_batches {
-            let value = batch.record_batch()
+        for message in received_messages {
+            let value = message.record_batch()
                 .column(0)
                 .as_any()
                 .downcast_ref::<StringArray>()
@@ -133,17 +133,17 @@ async fn test_actor_transport() -> Result<()> {
             let parts: Vec<&str> = value.split("_batch").collect();
             let writer_part = parts[0].strip_prefix("writer").unwrap();
             let writer_idx = writer_part.parse::<usize>().unwrap();
-            let batch_num = parts[1].parse::<usize>().unwrap();
+            let message_idx = parts[1].parse::<usize>().unwrap();
             
-            received_map.insert((writer_idx, batch_num), value.to_string());
+            received_map.insert((writer_idx, message_idx), value.to_string());
         }
 
         // Verify all expected batches were received
         for writer_idx in 0..num_writers {
-            for batch_num in 0..batches_per_writer {
-                let expected_value = format!("writer{}_batch{}", writer_idx, batch_num);
-                let actual_value = received_map.get(&(writer_idx, batch_num))
-                    .expect(&format!("Missing batch writer{}_batch{} for reader {}", writer_idx, batch_num, reader_idx));
+            for message_idx in 0..messages_per_writer {
+                let expected_value = format!("writer{}_batch{}", writer_idx, message_idx);
+                let actual_value = received_map.get(&(writer_idx, message_idx))
+                    .expect(&format!("Missing message writer{}_batch{} for reader {}", writer_idx, message_idx, reader_idx));
                 assert_eq!(actual_value, &expected_value);
             }
         }

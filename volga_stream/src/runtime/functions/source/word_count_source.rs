@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
@@ -66,7 +66,7 @@ impl WordCountSourceFunction {
             .collect()
     }
 
-    fn create_batch(&self, words: &[String]) -> Result<DataBatch> {
+    fn create_batch(&self, words: &[String]) -> Result<Message> {
         let schema = Arc::new(Schema::new(vec![
             Field::new("word", arrow::datatypes::DataType::Utf8, false),
             Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
@@ -87,7 +87,7 @@ impl WordCountSourceFunction {
             vec![Arc::new(word_array), Arc::new(timestamp_array)],
         )?;
 
-        Ok(DataBatch::new(None, batch))
+        Ok(Message::new(None, batch))
     }
 
     fn collect_words_for_batch(&mut self) -> Option<Vec<String>> {
@@ -169,7 +169,7 @@ impl FunctionTrait for WordCountSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for WordCountSourceFunction {
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+    async fn fetch(&mut self) -> Result<Option<Message>> {
         // Check if we should stop based on time
         if let Some(run_for_s) = self.run_for_s {
             if let Some(start_time) = self.start_time {
@@ -190,12 +190,12 @@ impl SourceFunctionTrait for WordCountSourceFunction {
         };
 
         // Create and return batch
-        let batch = self.create_batch(&batch_words)?;
+        let message = self.create_batch(&batch_words)?;
         
         // Yield to other tasks
         tokio::task::yield_now().await;
         
-        Ok(Some(batch))
+        Ok(Some(message))
     }
 }
 
@@ -221,11 +221,11 @@ mod tests {
 
         source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
 
-        let mut batches = Vec::new();
+        let mut messages = Vec::new();
         let mut word_counts = HashMap::new();
         
-        while let Some(batch) = source.fetch().await.unwrap() {
-            let record_batch = batch.record_batch();
+        while let Some(message) = source.fetch().await.unwrap() {
+            let record_batch = message.record_batch();
             let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
             
             // Verify all words in batch are the same
@@ -240,7 +240,7 @@ mod tests {
                 *word_counts.entry(word).or_insert(0) += 1;
             }
             
-            batches.push(batch);
+            messages.push(message);
         }
 
         // Verify each word was sent exactly num_to_send_per_word times

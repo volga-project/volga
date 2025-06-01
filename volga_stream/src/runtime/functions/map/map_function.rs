@@ -1,6 +1,6 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use anyhow::Result;
 use std::fmt;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -9,7 +9,7 @@ use std::any::Any;
 
 #[async_trait]
 pub trait MapFunctionTrait: Send + Sync + fmt::Debug {
-    fn map(&self, batch: DataBatch) -> Result<DataBatch>;
+    fn map(&self, message: Message) -> Result<Message>;
 }
 
 #[derive(Debug, Clone)]
@@ -30,8 +30,8 @@ impl CustomMapFunction {
 
 #[async_trait]
 impl MapFunctionTrait for CustomMapFunction {
-    fn map(&self, batch: DataBatch) -> Result<DataBatch> {
-        self.function.map(batch)
+    fn map(&self, message: Message) -> Result<Message> {
+        self.function.map(message)
     }
 }
 
@@ -48,9 +48,9 @@ impl MapFunction {
         Self::Custom(CustomMapFunction::new(function))
     }
 
-    pub fn map(&self, batch: DataBatch) -> Result<DataBatch> {
+    pub fn map(&self, message: Message) -> Result<Message> {
         match self {
-            MapFunction::Custom(function) => function.map(batch),
+            MapFunction::Custom(function) => function.map(message),
         }
     }
 }
@@ -93,8 +93,8 @@ mod tests {
 
     #[async_trait]
     impl MapFunctionTrait for TestMapFunction {
-        fn map(&self, batch: DataBatch) -> Result<DataBatch> {
-            let record_batch = batch.record_batch();
+        fn map(&self, message: Message) -> Result<Message> {
+            let record_batch = message.record_batch();
             let schema = record_batch.schema();
             
             // Get the input array
@@ -111,7 +111,7 @@ mod tests {
                 vec![Arc::new(output_array)]
             )?;
             
-            Ok(DataBatch::new(batch.upstream_vertex_id(), new_batch))
+            Ok(Message::new(message.upstream_vertex_id(), new_batch))
         }
     }
 
@@ -128,16 +128,14 @@ mod tests {
             vec![Arc::new(input_array)]
         ).unwrap();
         
-        let batch = DataBatch::new(None, record_batch);
+        let message = Message::new(None, record_batch);
         
         // Create and execute map function
         let map_function = MapFunction::new_custom(TestMapFunction);
-        let result = map_function.map(batch).unwrap();
+        let result = map_function.map(message).unwrap();
         
         // Verify result
         let result_array = result.record_batch().column(0).as_any().downcast_ref::<Int32Array>().unwrap();
         assert_eq!(result_array.values(), &[2, 4, 6, 8, 10]);
     }
 }
-
-// pub fn create_map_function(config: ...) -> MapFunction { ... } 

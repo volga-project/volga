@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
-use crate::common::data_batch::{DataBatch, KeyedDataBatch, BaseDataBatch};
+use crate::common::message::{Message, KeyedMessage, BaseMessage};
 use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply};
 use kameo::prelude::ActorRef;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -19,8 +19,8 @@ const MAX_BUFFER_SIZE: usize = 1000;
 #[derive(Debug)]
 pub struct InMemoryStorageActorSinkFunction {
     storage_actor: ActorRef<InMemoryStorageActor>,
-    buffer: Arc<Mutex<Vec<DataBatch>>>,
-    keyed_buffer: Arc<Mutex<HashMap<u64, DataBatch>>>,
+    buffer: Arc<Mutex<Vec<Message>>>,
+    keyed_buffer: Arc<Mutex<HashMap<u64, Message>>>,
     flush_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<AtomicBool>,
 }
@@ -41,7 +41,7 @@ impl InMemoryStorageActorSinkFunction {
         let mut regular_batches = self.buffer.lock().await;
         if !regular_batches.is_empty() {
             let batches = regular_batches.drain(..).collect();
-            self.storage_actor.ask(InMemoryStorageMessage::AppendBatches { batches }).await?;
+            self.storage_actor.ask(InMemoryStorageMessage::AppendMany { messages: batches }).await?;
         }
 
         // Flush keyed batches
@@ -50,7 +50,7 @@ impl InMemoryStorageActorSinkFunction {
             let batches = keyed_batches.drain()
                 .map(|(key, batch)| (key.to_string(), batch))
                 .collect();
-            self.storage_actor.ask(InMemoryStorageMessage::InsertKeyedBatches { keyed_batches: batches }).await?;
+            self.storage_actor.ask(InMemoryStorageMessage::InsertKeyedMany { keyed_messages: batches }).await?;
         }
 
         Ok(())
@@ -59,29 +59,29 @@ impl InMemoryStorageActorSinkFunction {
 
 #[async_trait]
 impl crate::runtime::functions::sink::sink_function::SinkFunctionTrait for InMemoryStorageActorSinkFunction {
-    async fn sink(&mut self, batch: DataBatch) -> Result<()> {
-        match &batch {
-            DataBatch::KeyedBatch(keyed_batch) => {
-                let key = keyed_batch.key().hash();
+    async fn sink(&mut self, message: Message) -> Result<()> {
+        match &message {
+            Message::Keyed(keyed_message) => {
+                let key = keyed_message.key().hash();
                 let mut keyed_buffer = self.keyed_buffer.lock().await;
-                keyed_buffer.insert(key, batch);
+                keyed_buffer.insert(key, message);
                 
                 // If buffer is full, flush it
                 if keyed_buffer.len() >= MAX_BUFFER_SIZE {
-                    let batches = keyed_buffer.drain()
-                        .map(|(key, batch)| (key.to_string(), batch))
+                    let messages = keyed_buffer.drain()
+                        .map(|(key, message)| (key.to_string(), message))
                         .collect();
-                    self.storage_actor.ask(InMemoryStorageMessage::InsertKeyedBatches { keyed_batches: batches }).await?;
+                    self.storage_actor.ask(InMemoryStorageMessage::InsertKeyedMany { keyed_messages: messages }).await?;
                 }
             }
             _ => {
                 let mut buffer = self.buffer.lock().await;
-                buffer.push(batch);
+                buffer.push(message);
                 
                 // If buffer is full, flush it
                 if buffer.len() >= MAX_BUFFER_SIZE {
-                    let batches = buffer.drain(..).collect();
-                    self.storage_actor.ask(InMemoryStorageMessage::AppendBatches { batches }).await?;
+                    let messages = buffer.drain(..).collect();
+                    self.storage_actor.ask(InMemoryStorageMessage::AppendMany { messages: messages }).await?;
                 }
             }
         }
@@ -106,23 +106,23 @@ impl FunctionTrait for InMemoryStorageActorSinkFunction {
             while running.load(Ordering::SeqCst) {
                 interval.tick().await;
                 
-                // Flush regular batches
-                let mut regular_batches = buffer.lock().await;
-                if !regular_batches.is_empty() {
-                    let batches = regular_batches.drain(..).collect();
-                    if let Err(e) = storage_actor.ask(InMemoryStorageMessage::AppendBatches { batches }).await {
-                        eprintln!("Error flushing regular batches: {}", e);
+                // Flush regular messages
+                let mut regular_messages = buffer.lock().await;
+                if !regular_messages.is_empty() {
+                    let messages = regular_messages.drain(..).collect();
+                    if let Err(e) = storage_actor.ask(InMemoryStorageMessage::AppendMany { messages: messages }).await {
+                        eprintln!("Error flushing regular messages: {}", e);
                     }
                 }
 
-                // Flush keyed batches
-                let mut keyed_batches = keyed_buffer.lock().await;
-                if !keyed_batches.is_empty() {
-                    let batches = keyed_batches.drain()
-                        .map(|(key, batch)| (key.to_string(), batch))
+                // Flush keyed messages
+                let mut keyed_messages = keyed_buffer.lock().await;
+                if !keyed_messages.is_empty() {
+                    let messages = keyed_messages.drain()
+                        .map(|(key, message)| (key.to_string(), message))
                         .collect();
-                    if let Err(e) = storage_actor.ask(InMemoryStorageMessage::InsertKeyedBatches { keyed_batches: batches }).await {
-                        eprintln!("Error flushing keyed batches: {}", e);
+                    if let Err(e) = storage_actor.ask(InMemoryStorageMessage::InsertKeyedMany { keyed_messages: messages }).await {
+                        eprintln!("Error flushing keyed messages: {}", e);
                     }
                 }
             }
@@ -143,7 +143,7 @@ impl FunctionTrait for InMemoryStorageActorSinkFunction {
             }
         }
         
-        // Flush any remaining batches
+        // Flush any remaining messages
         self.flush_buffers().await?;
         
         Ok(())
@@ -171,7 +171,7 @@ mod tests {
     use tokio::runtime::Runtime;
     use kameo::spawn;
     use arrow::array::StringArray;
-    use crate::common::data_batch::{KeyedDataBatch, BaseDataBatch};
+    use crate::common::message::{KeyedMessage, BaseMessage};
     use crate::runtime::storage::in_memory_storage_actor::{InMemoryStorageMessage, InMemoryStorageReply};
     use crate::runtime::functions::sink::sink_function::SinkFunctionTrait;
 
@@ -181,24 +181,24 @@ mod tests {
         let runtime = Runtime::new()?;
 
         // Create test data
-        let regular_batches = vec![
-            DataBatch::new(None, create_test_string_batch(vec!["regular1".to_string()])?),
-            DataBatch::new(None, create_test_string_batch(vec!["regular2".to_string()])?),
-            DataBatch::new(None, create_test_string_batch(vec!["regular3".to_string()])?),
+        let regular_messages = vec![
+            Message::new(None, create_test_string_batch(vec!["regular1".to_string()])?),
+            Message::new(None, create_test_string_batch(vec!["regular2".to_string()])?),
+            Message::new(None, create_test_string_batch(vec!["regular3".to_string()])?),
         ];
 
-        // Create keyed batches
+        // Create keyed messages
         let key1_batch = create_test_string_batch(vec!["key1".to_string()])?;
         let key2_batch = create_test_string_batch(vec!["key2".to_string()])?;
         let key1 = Key::new(key1_batch.clone())?;
         let key2 = Key::new(key2_batch.clone())?;
-        let keyed_batches = vec![
-            DataBatch::KeyedBatch(KeyedDataBatch::new(
-                BaseDataBatch::new(None, create_test_string_batch(vec!["value1".to_string()])?),
+        let keyed_messages = vec![
+            Message::Keyed(KeyedMessage::new(
+                BaseMessage::new(None, create_test_string_batch(vec!["value1".to_string()])?),
                 key1.clone(),
             )),
-            DataBatch::KeyedBatch(KeyedDataBatch::new(
-                BaseDataBatch::new(None, create_test_string_batch(vec!["value2".to_string()])?),
+            Message::Keyed(KeyedMessage::new(
+                BaseMessage::new(None, create_test_string_batch(vec!["value2".to_string()])?),
                 key2.clone(),
             )),
         ];
@@ -221,14 +221,14 @@ mod tests {
             );
             sink_function.open(&context).await?;
 
-            // Send regular batches
-            for batch in regular_batches {
-                sink_function.sink(batch).await?;
+            // Send regular messages
+            for message in regular_messages {
+                sink_function.sink(message).await?;
             }
 
-            // Send keyed batches
-            for batch in keyed_batches {
-                sink_function.sink(batch).await?;
+            // Send keyed messages
+            for message in keyed_messages {
+                sink_function.sink(message).await?;
             }
 
             // Wait for data to be flushed
@@ -243,13 +243,13 @@ mod tests {
 
             match (vector_reply, map_reply) {
                 (InMemoryStorageReply::Vector(vector), InMemoryStorageReply::Map(map)) => {
-                    // Check regular batches
+                    // Check regular messages
                     assert_eq!(vector.len(), 3);
                     assert_eq!(vector[0].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "regular1");
                     assert_eq!(vector[1].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "regular2");
                     assert_eq!(vector[2].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "regular3");
 
-                    // Check keyed batches
+                    // Check keyed messages
                     assert_eq!(map.len(), 2);
                     let key1_hash = key1.hash();
                     let key2_hash = key2.hash();

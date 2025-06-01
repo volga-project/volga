@@ -2,7 +2,7 @@ use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::runtime::stream_task::StreamTask;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::execution_graph::OperatorConfig;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::channel::Channel;
@@ -26,8 +26,8 @@ struct IdentityMapFunction;
 
 #[async_trait]
 impl MapFunctionTrait for IdentityMapFunction {
-    fn map(&self, batch: DataBatch) -> Result<DataBatch> {
-        Ok(batch)
+    fn map(&self, message: Message) -> Result<Message> {
+        Ok(message)
     }
 }
 
@@ -36,10 +36,10 @@ fn test_stream_task_actor() -> Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
         // Create test data
-        let test_batches = vec![
-            DataBatch::new(None, create_test_string_batch(vec!["test1".to_string()])?),
-            DataBatch::new(None, create_test_string_batch(vec!["test2".to_string()])?),
-            DataBatch::new(None, create_test_string_batch(vec!["test3".to_string()])?),
+        let test_messages = vec![
+            Message::new(None, create_test_string_batch(vec!["test1".to_string()])?),
+            Message::new(None, create_test_string_batch(vec!["test2".to_string()])?),
+            Message::new(None, create_test_string_batch(vec!["test3".to_string()])?),
         ];
 
         // Create task with MapOperator
@@ -138,25 +138,25 @@ fn test_stream_task_actor() -> Result<()> {
         task_ref.ask(StreamTaskMessage::Run).await?;
 
         // Write test data using external writer
-        for batch in &test_batches {
-            input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteBatch {
+        for message in &test_messages {
+            input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                 channel_id: "input_to_task".to_string(),
-                batch: batch.clone(),
+                message: message.clone(),
             }).await?;
         }
 
         // Read and verify output using external reader
-        let mut received_batches: Vec<DataBatch> = Vec::new();
-        for _ in 0..test_batches.len() {
-            let result = output_ref.ask(crate::transport::test_utils::TestDataReaderMessage::ReadBatch).await?;
-            if let Some(batch) = result {
-                received_batches.push(batch);
+        let mut received_messages: Vec<Message> = Vec::new();
+        for _ in 0..test_messages.len() {
+            let result = output_ref.ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage).await?;
+            if let Some(message) = result {
+                received_messages.push(message);
             }
         }
 
         // Verify received data
-        assert_eq!(received_batches.len(), test_batches.len());
-        for (expected, actual) in test_batches.iter().zip(received_batches.iter()) {
+        assert_eq!(received_messages.len(), test_messages.len());
+        for (expected, actual) in test_messages.iter().zip(received_messages.iter()) {
             assert_eq!(actual.record_batch(), expected.record_batch());
         }
 

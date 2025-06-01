@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::runtime::execution_graph::SinkConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
@@ -11,7 +11,7 @@ use super::in_memory_storage_sink::InMemoryStorageActorSinkFunction;
 
 #[async_trait]
 pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
-    async fn sink(&mut self, batch: DataBatch) -> Result<()>;
+    async fn sink(&mut self, message: Message) -> Result<()>;
 }
 
 #[derive(Debug)]
@@ -21,9 +21,9 @@ pub enum SinkFunction {
 
 #[async_trait]
 impl SinkFunctionTrait for SinkFunction {
-    async fn sink(&mut self, batch: DataBatch) -> Result<()> {
+    async fn sink(&mut self, message: Message) -> Result<()> {
         match self {
-            SinkFunction::InMemoryStorageActor(f) => f.sink(batch).await,
+            SinkFunction::InMemoryStorageActor(f) => f.sink(message).await,
         }
     }
 }

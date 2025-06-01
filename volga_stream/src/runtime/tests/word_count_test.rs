@@ -5,7 +5,7 @@ use crate::runtime::{
         source::word_count_source::{BatchingMode, WordCountSourceFunction},
     }, partition::PartitionType, storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply}, worker::Worker
 };
-use crate::common::data_batch::{DataBatch, KeyedDataBatch};
+use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -157,7 +157,7 @@ fn test_parallel_word_count() -> Result<()> {
             for (_, batch) in result_map {
                 // Get the keyed batch and extract the word from its key
                 let keyed_batch = match batch {
-                    DataBatch::KeyedBatch(kb) => kb,
+                    Message::Keyed(kb) => kb,
                     _ => panic!("Expected KeyedBatch"),
                 };
                 

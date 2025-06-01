@@ -9,7 +9,7 @@ use crate::runtime::{
     },
     storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
 };
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -28,8 +28,8 @@ struct IdentityMapFunction;
 
 #[async_trait]
 impl MapFunctionTrait for IdentityMapFunction {
-    fn map(&self, batch: DataBatch) -> Result<DataBatch> {
-        Ok(batch)
+    fn map(&self, message: Message) -> Result<Message> {
+        Ok(message)
     }
 }
 
@@ -39,10 +39,10 @@ fn test_worker() -> Result<()> {
     let runtime = Runtime::new()?;
 
     // Create test data
-    let test_batches = vec![
-        DataBatch::new(None, create_test_string_batch(vec!["test1".to_string()])?),
-        DataBatch::new(None, create_test_string_batch(vec!["test2".to_string()])?),
-        DataBatch::new(None, create_test_string_batch(vec!["test3".to_string()])?),
+    let test_messages = vec![
+        Message::new(None, create_test_string_batch(vec!["test1".to_string()])?),
+        Message::new(None, create_test_string_batch(vec!["test2".to_string()])?),
+        Message::new(None, create_test_string_batch(vec!["test3".to_string()])?),
     ];
 
     println!("Creating storage actor...");
@@ -60,7 +60,7 @@ fn test_worker() -> Result<()> {
     // Create source vertex
     let source_vertex = ExecutionVertex::new(
         "source".to_string(),
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_batches.clone())),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages.clone())),
         1,
         0,
     );
@@ -125,9 +125,9 @@ fn test_worker() -> Result<()> {
     })?;
     
     match result {
-        InMemoryStorageReply::Vector(result_batches) => {
-            assert_eq!(result_batches.len(), test_batches.len());
-            for (expected, actual) in test_batches.iter().zip(result_batches.iter()) {
+        InMemoryStorageReply::Vector(result_messages) => {
+            assert_eq!(result_messages.len(), test_messages.len());
+            for (expected, actual) in test_messages.iter().zip(result_messages.iter()) {
                 let expected_value = expected.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
                 let actual_value = actual.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
                 assert_eq!(actual_value, expected_value);

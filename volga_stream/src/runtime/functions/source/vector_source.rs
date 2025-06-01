@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
-use crate::common::data_batch::DataBatch;
+use crate::common::message::Message;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
@@ -11,17 +11,17 @@ use super::source_function::SourceFunctionTrait;
 
 #[derive(Debug)]
 pub struct VectorSourceFunction {
-    channel: Option<Receiver<DataBatch>>,
-    sender: Option<Sender<DataBatch>>,
-    initial_batches: Vec<DataBatch>,
+    channel: Option<Receiver<Message>>,
+    sender: Option<Sender<Message>>,
+    initial_messages: Vec<Message>,
 }
 
 impl VectorSourceFunction {
-    pub fn new(batches: Vec<DataBatch>) -> Self {
+    pub fn new(messages: Vec<Message>) -> Self {
         Self {
             channel: None,
             sender: None,
-            initial_batches: batches,
+            initial_messages: messages,
         }
     }
 }
@@ -33,10 +33,10 @@ impl FunctionTrait for VectorSourceFunction {
         self.sender = Some(sender);
         self.channel = Some(receiver);
 
-        // Move all batches to the channel
+        // Move all messages to the channel
         if let Some(sender) = &self.sender {
-            for batch in self.initial_batches.drain(..) {
-                sender.send(batch).await?;
+            for message in self.initial_messages.drain(..) {
+                sender.send(message).await?;
             }
         }
         Ok(())
@@ -64,10 +64,10 @@ impl FunctionTrait for VectorSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for VectorSourceFunction {
-    async fn fetch(&mut self) -> Result<Option<DataBatch>> {
+    async fn fetch(&mut self) -> Result<Option<Message>> {
         if let Some(receiver) = &mut self.channel {
             match timeout(Duration::from_millis(1), receiver.recv()).await {
-                Ok(Some(batch)) => Ok(Some(batch)),
+                Ok(Some(message)) => Ok(Some(message)),
                 Ok(None) => Ok(None), // Channel closed
                 Err(_) => Ok(None),   // Timeout
             }
