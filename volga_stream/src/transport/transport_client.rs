@@ -6,6 +6,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::time;
 
+#[derive(Debug)]
 pub struct DataReader {
     vertex_id: String,
     receivers: HashMap<String, mpsc::Receiver<Message>>,
@@ -77,16 +78,7 @@ impl DataReader {
     }
 }
 
-impl fmt::Debug for DataReader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DataReader")
-            .field("vertex_id", &self.vertex_id)
-            .field("channels", &self.receivers.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct DataWriter {
     vertex_id: String,
     senders: HashMap<String, mpsc::Sender<Message>>,
@@ -150,15 +142,7 @@ impl DataWriter {
     }
 }
 
-impl fmt::Debug for DataWriter {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("DataWriter")
-            .field("vertex_id", &self.vertex_id)
-            .field("channels", &self.senders.keys().collect::<Vec<_>>())
-            .finish()
-    }
-}
-
+#[derive(Debug)]
 pub struct TransportClient {
     vertex_id: String,
     pub reader: Option<DataReader>,
@@ -196,13 +180,3 @@ impl TransportClient {
         }
     }
 }
-
-impl fmt::Debug for TransportClient {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("TransportClient")
-            .field("vertex_id", &self.vertex_id)
-            .field("reader", &self.reader)
-            .field("writer", &self.writer)
-            .finish()
-    }
-} 

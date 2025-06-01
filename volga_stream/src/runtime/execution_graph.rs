@@ -14,6 +14,7 @@ use crate::runtime::functions::{
 
 use super::functions::source::word_count_source::BatchingMode;
 
+#[derive(Debug, Clone)]
 pub struct ExecutionEdge {
     pub source_vertex_id: String,
     pub target_vertex_id: String,
@@ -21,19 +22,6 @@ pub struct ExecutionEdge {
     pub job_edge_id: String,
     pub partition_type: PartitionType,
     pub channel: Channel,
-}
-
-impl fmt::Debug for ExecutionEdge {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ExecutionEdge")
-            .field("source_vertex_id", &self.source_vertex_id)
-            .field("target_vertex_id", &self.target_vertex_id)
-            .field("edge_id", &self.edge_id)
-            .field("job_edge_id", &self.job_edge_id)
-            .field("partition_type", &self.partition_type)
-            .field("channel", &self.channel)
-            .finish()
-    }
 }
  
 impl ExecutionEdge {
@@ -72,6 +60,7 @@ pub enum SinkConfig {
     InMemoryStorageActorSinkConfig(ActorRef<InMemoryStorageActor>),
 }
 
+#[derive(Clone, Debug)]
 pub enum OperatorConfig {
     MapConfig(MapFunction),
     JoinConfig(HashMap<String, String>),
@@ -79,41 +68,6 @@ pub enum OperatorConfig {
     SourceConfig(SourceConfig),
     KeyByConfig(KeyByFunction),
     ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
-}
-
-impl fmt::Debug for OperatorConfig {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OperatorConfig::MapConfig(config) => f.debug_tuple("MapConfig").field(config).finish(),
-            OperatorConfig::JoinConfig(config) => f.debug_tuple("JoinConfig").field(config).finish(),
-            OperatorConfig::SinkConfig(config) => f.debug_tuple("SinkConfig").field(config).finish(),
-            OperatorConfig::SourceConfig(config) => f.debug_tuple("SourceConfig").field(config).finish(),
-            OperatorConfig::KeyByConfig(config) => f.debug_tuple("KeyByConfig").field(config).finish(),
-            OperatorConfig::ReduceConfig(reduce_fn, extractor) => {
-                let mut debug = f.debug_tuple("ReduceConfig");
-                debug.field(reduce_fn);
-                if let Some(ext) = extractor {
-                    debug.field(ext);
-                }
-                debug.finish()
-            },
-        }
-    }
-}
-
-impl Clone for OperatorConfig {
-    fn clone(&self) -> Self {
-        match self {
-            OperatorConfig::MapConfig(config) => OperatorConfig::MapConfig(config.clone()),
-            OperatorConfig::JoinConfig(config) => OperatorConfig::JoinConfig(config.clone()),
-            OperatorConfig::SinkConfig(config) => OperatorConfig::SinkConfig(config.clone()),
-            OperatorConfig::SourceConfig(config) => OperatorConfig::SourceConfig(config.clone()),
-            OperatorConfig::KeyByConfig(config) => OperatorConfig::KeyByConfig(config.clone()),
-            OperatorConfig::ReduceConfig(reduce_fn, extractor) => {
-                OperatorConfig::ReduceConfig(reduce_fn.clone(), extractor.clone())
-            },
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -152,7 +106,7 @@ impl ExecutionVertex {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone)]
 pub struct ExecutionGraph {
     vertices: HashMap<String, ExecutionVertex>,
     edges: HashMap<String, ExecutionEdge>,
@@ -227,5 +181,12 @@ impl ExecutionGraph {
             .collect();
             
         Some((input_edges, output_edges))
+    }
+
+    pub fn get_source_vertices(&self) -> Vec<ExecutionVertex> {
+        self.vertices.values()
+            .filter(|v| matches!(v.operator_config, OperatorConfig::SourceConfig(_)))
+            .cloned()
+            .collect()
     }
 } 

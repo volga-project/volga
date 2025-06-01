@@ -40,7 +40,13 @@ impl Collector {
         let num_partitions = self.output_channel_ids.len();
         let mut partitioned_messages: Vec<Message> = vec![Message::new(None, message.record_batch().clone()); num_partitions];
         
-        let partitions = self.partition.partition(&message, num_partitions)?;
+        // Use BroadcastPartition for watermark messages, otherwise use the configured partition strategy
+        let partitions = if let Message::Watermark(_) = &message {
+            crate::runtime::partition::BroadcastPartition::new().partition(&message, num_partitions)?
+        } else {
+            self.partition.partition(&message, num_partitions)?
+        };
+
         for partition_idx in partitions {
             partitioned_messages[partition_idx] = message.clone();
         }

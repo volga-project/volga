@@ -1,8 +1,8 @@
 use crate::runtime::{
     execution_graph::ExecutionGraph,
-    stream_task::StreamTask,
+    stream_task::{StreamTask, StreamTaskStatus, StreamTaskState},
     runtime_context::RuntimeContext,
-    stream_task_actor::StreamTaskActor,
+    stream_task_actor::{StreamTaskActor, StreamTaskMessage},
 };
 use crate::transport::{
     transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage},
@@ -12,6 +12,8 @@ use anyhow::Result;
 use std::collections::HashMap;
 use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Runtime};
+use tokio::time::{sleep, Duration};
+use futures::future::join_all;
 
 pub struct Worker {
     graph: ExecutionGraph,
@@ -82,6 +84,7 @@ impl Worker {
                 vertex_id.clone(),
                 vertex.operator_config.clone(),
                 runtime_context,
+                self.graph.clone(),
             )?;
             let task_actor = StreamTaskActor::new(task);
             let task_ref = runtime.block_on(async {
@@ -205,5 +208,61 @@ impl Worker {
 
         println!("Closed worker");
         Ok(())
+    }
+
+    async fn wait_for_completion(&self) -> Result<()> {
+        let mut all_closed = false;
+        while !all_closed {
+            // Create futures for all task state checks
+            let state_futures: Vec<_> = self.task_actors.iter()
+                .map(|(vertex_id, task_ref)| {
+                    let task_ref = task_ref.clone();
+                    let vertex_id = vertex_id.clone();
+                    async move {
+                        let state = task_ref.ask(StreamTaskMessage::GetState).await?;
+                        Ok::<_, anyhow::Error>((vertex_id, state))
+                    }
+                })
+                .collect();
+
+            // Wait for all state checks to complete in parallel
+            let states = join_all(state_futures).await;
+            
+            // Check if any task is not closed
+            all_closed = true;
+            for result in states {
+                match result {
+                    Ok((vertex_id, state)) => {
+                        if state.status != StreamTaskStatus::Closed {
+                            all_closed = false;
+                            println!("Task {} is still in state {:?}", vertex_id, state.status);
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error getting task state: {}", e);
+                        all_closed = false;
+                        break;
+                    }
+                }
+            }
+
+            if !all_closed {
+                sleep(Duration::from_millis(100)).await;
+            }
+        }
+        println!("All tasks have completed");
+        Ok(())
+    }
+
+    pub fn execute(&mut self) -> Result<()> {
+        println!("Starting worker execution");
+        self.start()?;
+        let runtime = Runtime::new()?;
+        runtime.block_on(async {
+            self.wait_for_completion().await?;
+            println!("Worker execution completed");
+            Ok(())
+        })
     }
 }

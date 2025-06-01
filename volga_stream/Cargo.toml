@@ -42,6 +42,7 @@ kameo = "0.16.0"
 console-subscriber = "0.1.5"
 tracing = "0.1.41"
 arrow-row = "55.1.0"
+hdrhistogram = "7.5.2"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

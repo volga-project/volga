@@ -45,7 +45,7 @@ fn test_parallel_word_count() -> Result<()> {
         let source_vertex = ExecutionVertex::new(
             format!("source_{}", task_id),
             OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
-                word_length: 5,
+                word_length: 10,
                 num_words,
                 num_to_send_per_word: Some(num_to_send_per_word),
                 run_for_s: None,     // No time limit
@@ -104,7 +104,7 @@ fn test_parallel_word_count() -> Result<()> {
         let key_by_to_reduce = ExecutionEdge::new(
             format!("key_by_{}", task_id),
             format!("reduce_{}", task_id),
-            PartitionType::Key,
+            PartitionType::Hash,
             Channel::Local {
                 channel_id: format!("key_by_to_reduce_{}", task_id),
             },

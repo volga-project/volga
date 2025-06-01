@@ -1,5 +1,5 @@
 use anyhow::Result;
-use kameo::{Actor, message::{Context}};
+use kameo::{Actor, message::Context};
 use crate::common::message::Message;
 use std::collections::HashMap;
 

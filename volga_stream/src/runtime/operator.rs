@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::message::{Message, KeyedMessage, BaseMessage};
+use crate::common::message::{Message, KeyedMessage, BaseMessage, WatermarkMessage};
 use crate::common::Key;
 use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
@@ -20,6 +20,7 @@ use crate::runtime::functions::{
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::any::Any;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -87,13 +88,79 @@ impl OperatorTrait for Operator {
     }
 
     async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
-        match self {
-            Operator::Map(op) => op.process_message(message).await,
-            Operator::Join(op) => op.process_message(message).await,
-            Operator::Sink(op) => op.process_message(message).await,
-            Operator::Source(op) => op.process_message(message).await,
-            Operator::KeyBy(op) => op.process_message(message).await,
-            Operator::Reduce(op) => op.process_message(message).await,
+        match &message {
+            Message::Watermark(watermark) => {
+                // Update watermark for the input channel
+                let channel_id = watermark.source_vertex_id.clone();
+                let watermark_value = watermark.watermark_value;
+                
+                match self {
+                    Operator::Map(op) => op.base.update_watermark(&channel_id, watermark_value)?,
+                    Operator::Join(op) => op.base.update_watermark(&channel_id, watermark_value)?,
+                    Operator::Sink(op) => op.base.update_watermark(&channel_id, watermark_value)?,
+                    Operator::Source(op) => op.base.update_watermark(&channel_id, watermark_value)?,
+                    Operator::KeyBy(op) => op.base.update_watermark(&channel_id, watermark_value)?,
+                    Operator::Reduce(op) => op.base.update_watermark(&channel_id, watermark_value)?,
+                }
+                
+                // Forward the watermark to downstream operators if it's new
+                let current_watermark = match self {
+                    Operator::Map(op) => op.base.get_current_watermark(),
+                    Operator::Join(op) => op.base.get_current_watermark(),
+                    Operator::Sink(op) => op.base.get_current_watermark(),
+                    Operator::Source(op) => op.base.get_current_watermark(),
+                    Operator::KeyBy(op) => op.base.get_current_watermark(),
+                    Operator::Reduce(op) => op.base.get_current_watermark(),
+                };
+
+                let last_forwarded = match self {
+                    Operator::Map(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
+                    Operator::Join(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
+                    Operator::Sink(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
+                    Operator::Source(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
+                    Operator::KeyBy(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
+                    Operator::Reduce(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
+                };
+
+                if current_watermark > last_forwarded {
+                    match self {
+                        Operator::Map(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
+                        Operator::Join(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
+                        Operator::Sink(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
+                        Operator::Source(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
+                        Operator::KeyBy(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
+                        Operator::Reduce(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
+                    }
+
+                    let runtime_context = match self {
+                        Operator::Map(op) => op.base.runtime_context.as_ref().unwrap(),
+                        Operator::Join(op) => op.base.runtime_context.as_ref().unwrap(),
+                        Operator::Sink(op) => op.base.runtime_context.as_ref().unwrap(),
+                        Operator::Source(op) => op.base.runtime_context.as_ref().unwrap(),
+                        Operator::KeyBy(op) => op.base.runtime_context.as_ref().unwrap(),
+                        Operator::Reduce(op) => op.base.runtime_context.as_ref().unwrap(),
+                    };
+
+                    let watermark = WatermarkMessage {
+                        source_vertex_id: runtime_context.vertex_id().to_string(),
+                        watermark_value: current_watermark,
+                    };
+                    Ok(Some(vec![Message::Watermark(watermark)]))
+                } else {
+                    Ok(None)
+                }
+            }
+            _ => {
+                // Process regular messages as before
+                match self {
+                    Operator::Map(op) => op.process_message(message).await,
+                    Operator::Join(op) => op.process_message(message).await,
+                    Operator::Sink(op) => op.process_message(message).await,
+                    Operator::Source(op) => op.process_message(message).await,
+                    Operator::KeyBy(op) => op.process_message(message).await,
+                    Operator::Reduce(op) => op.process_message(message).await,
+                }
+            }
         }
     }
 
@@ -125,9 +192,13 @@ pub struct OperatorBase {
     runtime_context: Option<RuntimeContext>,
     function: Option<Box<dyn FunctionTrait>>,
     thread_pool: ThreadPool,
+    // Track watermarks from each input channel
+    input_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+    // Current watermark is the minimum of all input watermarks
+    current_watermark: AtomicU64,
+    last_forwarded_watermark: AtomicU64,
 }
 
-// TODO configure threadpool size
 impl OperatorBase {
     pub fn new() -> Self {
         let thread_pool = ThreadPoolBuilder::new()
@@ -138,6 +209,9 @@ impl OperatorBase {
             runtime_context: None,
             function: None,
             thread_pool,
+            input_watermarks: Arc::new(Mutex::new(HashMap::new())),
+            current_watermark: AtomicU64::new(0),
+            last_forwarded_watermark: AtomicU64::new(0),
         }
     }
     
@@ -150,6 +224,9 @@ impl OperatorBase {
             runtime_context: None,
             function: Some(Box::new(function)),
             thread_pool,
+            input_watermarks: Arc::new(Mutex::new(HashMap::new())),
+            current_watermark: AtomicU64::new(0),
+            last_forwarded_watermark: AtomicU64::new(0),
         }
     }
     
@@ -163,6 +240,21 @@ impl OperatorBase {
     pub fn get_function_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.function.as_mut()
             .and_then(|f| f.as_any_mut().downcast_mut::<T>())
+    }
+
+    pub fn update_watermark(&self, channel_id: &str, watermark: u64) -> Result<()> {
+        let mut watermarks = self.input_watermarks.lock().unwrap();
+        watermarks.insert(channel_id.to_string(), watermark);
+        
+        // Update current watermark to be the minimum of all input watermarks
+        let min_watermark = watermarks.values().min().copied().unwrap_or(0);
+        self.current_watermark.store(min_watermark, Ordering::SeqCst);
+        
+        Ok(())
+    }
+
+    pub fn get_current_watermark(&self) -> u64 {
+        self.current_watermark.load(Ordering::SeqCst)
     }
 }
 

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use kameo::Actor;
 use kameo::message::Context;
-use crate::runtime::stream_task::StreamTask;
+use crate::runtime::stream_task::{StreamTask, StreamTaskStatus, StreamTaskState};
 use crate::runtime::partition::PartitionType;
 use crate::transport::transport_client_actor::{TransportClientActor, TransportClientActorMessage, TransportClientActorType};
 use tokio::sync::mpsc;
@@ -13,6 +13,7 @@ use async_trait::async_trait;
 pub enum StreamTaskMessage {
     Run,
     Close,
+    GetState,
     CreateCollector {
         channel_id: String,
         partition_type: PartitionType,
@@ -32,21 +33,38 @@ impl StreamTaskActor {
 }
 
 impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
-    type Reply = Result<()>;
+    type Reply = Result<StreamTaskState>;
 
-    async fn handle(&mut self, msg: StreamTaskMessage, _ctx: &mut Context<StreamTaskActor, Result<()>>) -> Self::Reply {
+    async fn handle(&mut self, msg: StreamTaskMessage, _ctx: &mut Context<StreamTaskActor, Result<StreamTaskState>>) -> Self::Reply {
         match msg {
             StreamTaskMessage::Run => {
                 self.task.run().await?;
+                Ok(StreamTaskState {
+                    vertex_id: self.task.vertex_id().to_string(),
+                    status: self.task.get_status(),
+                })
             }
             StreamTaskMessage::Close => {
-                self.task.close().await?;
+                self.task.close_and_wait().await?;
+                Ok(StreamTaskState {
+                    vertex_id: self.task.vertex_id().to_string(),
+                    status: self.task.get_status(),
+                })
+            }
+            StreamTaskMessage::GetState => {
+                Ok(StreamTaskState {
+                    vertex_id: self.task.vertex_id().to_string(),
+                    status: self.task.get_status(),
+                })
             }
             StreamTaskMessage::CreateCollector { channel_id, partition_type, target_operator_id } => {
                 self.task.create_or_update_collector(channel_id, partition_type, target_operator_id).await?;
+                Ok(StreamTaskState {
+                    vertex_id: self.task.vertex_id().to_string(),
+                    status: self.task.get_status(),
+                })
             }
         }
-        Ok(())
     }
 }
 

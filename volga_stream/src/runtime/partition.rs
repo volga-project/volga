@@ -9,7 +9,7 @@ pub trait PartitionTrait: Send + Sync + fmt::Debug {
 #[derive(Debug, Clone)]
 pub enum PartitionType {
     Broadcast,
-    Key,
+    Hash,
     RoundRobin,
     Forward,
 }
@@ -17,7 +17,7 @@ pub enum PartitionType {
 #[derive(Debug, Clone)]
 pub enum Partition {
     Broadcast(BroadcastPartition),
-    Key(HashPartition),
+    Hash(HashPartition),
     RoundRobin(RoundRobinPartition),
     Forward(ForwardPartition),
 }
@@ -26,7 +26,7 @@ impl PartitionTrait for Partition {
     fn partition(&mut self, message: &Message, num_partitions: usize) -> Result<Vec<usize>> {
         match self {
             Partition::Broadcast(p) => p.partition(message, num_partitions),
-            Partition::Key(p) => p.partition(message, num_partitions),
+            Partition::Hash(p) => p.partition(message, num_partitions),
             Partition::RoundRobin(p) => p.partition(message, num_partitions),
             Partition::Forward(p) => p.partition(message, num_partitions),
         }
@@ -37,7 +37,7 @@ impl PartitionType {
     pub fn create(&self) -> Partition {
         match self {
             PartitionType::Broadcast => Partition::Broadcast(BroadcastPartition::new()),
-            PartitionType::Key => Partition::Key(HashPartition::new()),
+            PartitionType::Hash => Partition::Hash(HashPartition::new()),
             PartitionType::RoundRobin => Partition::RoundRobin(RoundRobinPartition::new()),
             PartitionType::Forward => Partition::Forward(ForwardPartition::new()),
         }

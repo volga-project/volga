@@ -1,7 +1,7 @@
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::runtime::stream_task::StreamTask;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::execution_graph::OperatorConfig;
+use crate::runtime::execution_graph::{ExecutionGraph, OperatorConfig};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
@@ -42,6 +42,8 @@ fn test_stream_task_actor() -> Result<()> {
             Message::new(None, create_test_string_batch(vec!["test3".to_string()])?),
         ];
 
+        let dummy_execution_graph = ExecutionGraph::new();
+
         // Create task with MapOperator
         let task = StreamTask::new(
             "task1".to_string(),
@@ -52,6 +54,7 @@ fn test_stream_task_actor() -> Result<()> {
                 1, // parallelism
                 None, // job_config
             ),
+            dummy_execution_graph.clone(),
         )?;
 
         // Create transport backend actor

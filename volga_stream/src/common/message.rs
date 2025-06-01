@@ -37,10 +37,19 @@ impl KeyedMessage {
     }
 }
 
-#[derive(Clone, Debug)]
+pub const MAX_WATERMARK_VALUE: u64 = u64::MAX;
+
+#[derive(Debug, Clone)]
+pub struct WatermarkMessage {
+    pub source_vertex_id: String,
+    pub watermark_value: u64,
+}
+
+#[derive(Debug, Clone)]
 pub enum Message {
     Regular(BaseMessage),
     Keyed(KeyedMessage),
+    Watermark(WatermarkMessage),
 }
 
 impl Message {
@@ -59,6 +68,7 @@ impl Message {
         match self {
             Message::Regular(message) => message.upstream_vertex_id.clone(),
             Message::Keyed(message) => message.base.upstream_vertex_id.clone(),
+            Message::Watermark(message) => Some(message.source_vertex_id.clone()),
         }
     }
 
@@ -66,6 +76,7 @@ impl Message {
         match self {
             Message::Regular(message) => &message.record_batch,
             Message::Keyed(message) => &message.base.record_batch,
+            Message::Watermark(_) => unreachable!("Watermark message does not have a record batch"),
         }
     }
 
@@ -73,6 +84,7 @@ impl Message {
         match self {
             Message::Regular(_) => Err(anyhow::anyhow!("Regular message does not have a key")),
             Message::Keyed(message) => Ok(&message.key),
+            Message::Watermark(_) => Err(anyhow::anyhow!("Watermark message does not have a key")),
         }
     }
 } 
