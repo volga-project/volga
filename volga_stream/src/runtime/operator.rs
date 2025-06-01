@@ -18,7 +18,7 @@ use crate::runtime::functions::{
 };
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::any::Any;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,6 +127,7 @@ pub struct OperatorBase {
     thread_pool: ThreadPool,
 }
 
+// TODO configure threadpool size
 impl OperatorBase {
     pub fn new() -> Self {
         let thread_pool = ThreadPoolBuilder::new()
@@ -431,7 +432,7 @@ impl OperatorTrait for KeyByOperator {
 #[derive(Debug)]
 pub struct ReduceOperator {
     base: OperatorBase,
-    accumulators: HashMap<Key, Accumulator>,
+    accumulators: HashMap<Key, Arc<Mutex<Accumulator>>>,
     result_extractor: AggregationResultExtractor,
 }
 
@@ -473,19 +474,27 @@ impl OperatorTrait for ReduceOperator {
 
                 if !acc_exists {
                     // Create a new accumulator
-                    self.accumulators.insert(key.clone(), function.create_accumulator()?);
+                    self.accumulators.insert(key.clone(), Arc::new(Mutex::new(function.create_accumulator()?)));
                 }
                 
                 // Now that we've updated the accumulator, get the result
-                let mut acc = self.accumulators.get_mut(&key)
+                let acc = self.accumulators.get_mut(&key)
                     .ok_or_else(|| anyhow::anyhow!("Accumulator not found"))?;
                 
-                // TODO call on rayon threadpool
-                function.update_accumulator(&mut acc, &keyed_message)?;
+                let keyed_message = keyed_message.clone();
+                let function = function.clone();
+                let result_extractor = self.result_extractor.clone();
+                let acc = acc.clone();
                 
-                let agg_result = function.get_result(acc)?;
-                let result_message = self.result_extractor.extract_result(&key, &agg_result)?;
-                return Ok(Some(vec![result_message]));
+                let result = self.base.thread_pool.spawn_fifo_async(move || {
+                    let mut acc = acc.lock().unwrap();
+                    function.update_accumulator(&mut acc, &keyed_message)?;
+                    let agg_result = function.get_result(&acc)?;
+                    let result_message = result_extractor.extract_result(&key, &agg_result)?;
+                    Ok::<Option<Vec<Message>>, anyhow::Error>(Some(vec![result_message]))
+                }).await?;
+
+                return Ok(result);
             },
             _ => {
                 Err(anyhow::anyhow!("ReduceOperator requires KeyedMessage input"))
