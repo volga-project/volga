@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use anyhow::Result;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
-use std::fmt;
 use crate::common::message::Message;
 use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
 use kameo::prelude::ActorRef;
@@ -19,7 +17,7 @@ pub struct ExecutionEdge {
     pub source_vertex_id: String,
     pub target_vertex_id: String,
     pub edge_id: String,
-    pub job_edge_id: String,
+    pub target_operator_id: String,
     pub partition_type: PartitionType,
     pub channel: Channel,
 }
@@ -28,6 +26,7 @@ impl ExecutionEdge {
     pub fn new(
         source_vertex_id: String,
         target_vertex_id: String,
+        target_operator_id: String,
         partition_type: PartitionType,
         channel: Channel,
     ) -> Self {
@@ -35,7 +34,7 @@ impl ExecutionEdge {
             source_vertex_id: source_vertex_id.clone(),
             target_vertex_id: target_vertex_id.clone(),
             edge_id: format!("{}-{}", source_vertex_id, target_vertex_id),
-            job_edge_id: format!("{}-{}", source_vertex_id, target_vertex_id),
+            target_operator_id: target_operator_id.clone(),
             partition_type,
             channel,
         }
@@ -124,17 +123,17 @@ impl ExecutionGraph {
         self.vertices.insert(vertex.vertex_id.clone(), vertex);
     }
 
-    pub fn add_edge(&mut self, edge: ExecutionEdge) -> Result<()> {
+    pub fn add_edge(&mut self, edge: ExecutionEdge) {
         let source_id = edge.source_vertex_id.clone();
         let target_id = edge.target_vertex_id.clone();
         let edge_id = edge.edge_id.clone();
 
         // Verify both vertices exist
         if !self.vertices.contains_key(&source_id) {
-            anyhow::bail!("Source vertex {} does not exist", source_id);
+            panic!("Source vertex {} does not exist", source_id);
         }
         if !self.vertices.contains_key(&target_id) {
-            anyhow::bail!("Target vertex {} does not exist", target_id);
+            panic!("Target vertex {} does not exist", target_id);
         }
 
         // Add edge to the graph
@@ -147,8 +146,6 @@ impl ExecutionGraph {
         if let Some(target_vertex) = self.vertices.get_mut(&target_id) {
             target_vertex.add_input_edge(edge_id);
         }
-
-        Ok(())
     }
 
     pub fn get_vertex(&self, vertex_id: &str) -> Option<&ExecutionVertex> {

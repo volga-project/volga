@@ -35,18 +35,15 @@ impl MapFunctionTrait for IdentityMapFunction {
 
 #[test]
 fn test_worker() -> Result<()> {
-    // Create runtime for async operations
     let runtime = Runtime::new()?;
 
-    // Create test data
     let test_messages = vec![
-        Message::new(None, create_test_string_batch(vec!["test1".to_string()])?),
-        Message::new(None, create_test_string_batch(vec!["test2".to_string()])?),
-        Message::new(None, create_test_string_batch(vec!["test3".to_string()])?),
+        Message::new(None, create_test_string_batch(vec!["test1".to_string()])),
+        Message::new(None, create_test_string_batch(vec!["test2".to_string()])),
+        Message::new(None, create_test_string_batch(vec!["test3".to_string()])),
     ];
 
     println!("Creating storage actor...");
-    // Create storage actor
     let storage_actor = InMemoryStorageActor::new();
     let storage_ref = runtime.block_on(async {
         spawn(storage_actor)
@@ -54,7 +51,6 @@ fn test_worker() -> Result<()> {
 
     println!("Created storage actor");
 
-    // Create execution graph
     let mut graph = ExecutionGraph::new();
 
     // Create source vertex
@@ -88,24 +84,25 @@ fn test_worker() -> Result<()> {
     let source_to_map = ExecutionEdge::new(
         "source".to_string(),
         "map".to_string(),
+        "map".to_string(),
         PartitionType::Forward,
         Channel::Local {
             channel_id: "source_to_map".to_string(),
         },
     );
-    graph.add_edge(source_to_map)?;
+    graph.add_edge(source_to_map);
 
     let map_to_sink = ExecutionEdge::new(
         "map".to_string(),
+        "sink".to_string(),
         "sink".to_string(),
         PartitionType::Forward,
         Channel::Local {
             channel_id: "map_to_sink".to_string(),
         },
     );
-    graph.add_edge(map_to_sink)?;
+    graph.add_edge(map_to_sink);
 
-    // Create and start worker
     let mut worker = Worker::new(
         graph,
         vec!["source".to_string(), "map".to_string(), "sink".to_string()],
@@ -113,7 +110,7 @@ fn test_worker() -> Result<()> {
     );
 
     println!("Worker starting...");
-    worker.start()?;
+    worker.start();
     println!("Worker started");
 
     // Wait for processing to complete
@@ -136,8 +133,7 @@ fn test_worker() -> Result<()> {
         _ => panic!("Expected Vector reply from storage actor"),
     }
 
-    // Close worker
-    worker.close()?;
+    worker.close();
 
     Ok(())
 } 

@@ -1,17 +1,32 @@
+use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, OperatorConfig, ExecutionEdge};
+use crate::runtime::partition::PartitionType;
+use crate::runtime::functions::{
+    map::MapFunction,
+    map::MapFunctionTrait,
+};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::channel::Channel;
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
-use crate::transport::transport_client_actor::TransportClientActorType;
+use crate::transport::{InMemoryTransportBackend, TransportBackend};
 use arrow::array::StringArray;
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use std::collections::HashMap;
 
+#[derive(Debug, Clone)]
+struct IdentityMapFunction;
+
+impl MapFunctionTrait for IdentityMapFunction {
+    fn map(&self, message: Message) -> Result<Message> {
+        Ok(message)
+    }
+}
+
 // TODO test ordered delivery
 #[tokio::test]
-async fn test_actor_transport() -> Result<()> {
+async fn test_actor_transport() {
     // Initialize console subscriber for tracing
     // console_subscriber::init();
 
@@ -20,76 +35,75 @@ async fn test_actor_transport() -> Result<()> {
     let num_readers = 10;
     let messages_per_writer = 10;
 
+    let writer_vertex_ids = (0..num_writers).map(|i| format!("writer{}", i)).collect::<Vec<_>>();
+    let reader_vertex_ids = (0..num_readers).map(|i| format!("reader{}", i)).collect::<Vec<_>>();
+
+    let mut graph = ExecutionGraph::new();
+    for i in 0..num_writers {
+        graph.add_vertex(ExecutionVertex::new(
+            writer_vertex_ids[i].clone(),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            1,
+            0
+        ));
+    }
+    for i in 0..num_readers {
+        graph.add_vertex(ExecutionVertex::new(
+            reader_vertex_ids[i].clone(),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            1,
+            0
+        ));
+    }
+
+    for i in 0..num_writers {
+        for j in 0..num_readers {
+            let edge = ExecutionEdge::new(
+                writer_vertex_ids[i].clone(),
+                reader_vertex_ids[j].clone(),
+                reader_vertex_ids[j].clone(),
+                PartitionType::Forward,
+                Channel::Local { channel_id: format!("writer{}_to_reader{}", i, j) }
+            );
+            graph.add_edge(edge);
+        }
+    }
+
+    let mut backend = InMemoryTransportBackend::new();
+    let all_vertex_ids = writer_vertex_ids.clone().into_iter().chain(reader_vertex_ids.clone()).collect::<Vec<_>>();
+    let mut configs = backend.init_channels(&graph, all_vertex_ids);
+    
+
     // Create transport backend actor
-    let backend_actor = TransportBackendActor::new();
+    let backend_actor = TransportBackendActor::new(backend);
     let backend_ref = spawn(backend_actor);
 
     // Create writer actors
     let mut writer_refs = Vec::new();
-    for i in 0..num_writers {
-        let writer_actor = TestDataWriterActor::new(format!("writer{}", i));
+    for vertex_id in writer_vertex_ids {
+        // let vertex_id = writer_vertex_ids[i].clone();
+        let writer_actor = TestDataWriterActor::new(vertex_id.clone(), configs.remove(&vertex_id.clone()).unwrap());
         let writer_ref = spawn(writer_actor);
         writer_refs.push(writer_ref.clone());
-
-        // Register writer with backend
-        backend_ref.ask(TransportBackendActorMessage::RegisterActor {
-            vertex_id: format!("writer{}", i),
-            actor: TransportClientActorType::TestWriter(writer_ref),
-        }).await?;
     }
 
     // Create reader actors
     let mut reader_refs = Vec::new();
-    for i in 0..num_readers {
-        let reader_actor = TestDataReaderActor::new(format!("reader{}", i));
+    for vertex_id in reader_vertex_ids {
+        let reader_actor = TestDataReaderActor::new(vertex_id.clone(), configs.remove(&vertex_id.clone()).unwrap());
         let reader_ref = spawn(reader_actor);
         reader_refs.push(reader_ref.clone());
-
-        // Register reader with backend
-        backend_ref.ask(TransportBackendActorMessage::RegisterActor {
-            vertex_id: format!("reader{}", i),
-            actor: TransportClientActorType::TestReader(reader_ref),
-        }).await?;
-    }
-
-    // Create and register channels between each writer and reader
-    let mut channel_registrations = Vec::new();
-    for writer_idx in 0..num_writers {
-        for reader_idx in 0..num_readers {
-            let channel = Channel::Local {
-                channel_id: format!("writer{}_to_reader{}", writer_idx, reader_idx),
-            };
-
-            // Register channel for writer (output)
-            channel_registrations.push(backend_ref.ask(TransportBackendActorMessage::RegisterChannel {
-                vertex_id: format!("writer{}", writer_idx),
-                channel: channel.clone(),
-                is_input: false,
-            }).await);
-
-            // Register channel for reader (input)
-            channel_registrations.push(backend_ref.ask(TransportBackendActorMessage::RegisterChannel {
-                vertex_id: format!("reader{}", reader_idx),
-                channel: channel.clone(),
-                is_input: true,
-            }).await);
-        }
-    }
-
-    // Wait for all channel registrations to complete
-    for result in channel_registrations {
-        result?;
     }
 
     // Start the backend
-    backend_ref.ask(TransportBackendActorMessage::Start).await?;
+    backend_ref.ask(TransportBackendActorMessage::Start).await.unwrap();
 
     // Create test data and send from each writer
     for writer_idx in 0..num_writers {
         for message_idx in 0..messages_per_writer {
             let message = Message::new(
                 Some(format!("writer{}_stream", writer_idx)),
-                create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, message_idx)])?
+                create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, message_idx)])
             );
 
             // Send message to each reader
@@ -98,7 +112,7 @@ async fn test_actor_transport() -> Result<()> {
                 writer_refs[writer_idx].ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                     channel_id,
                     message: message.clone(),
-                }).await?;
+                }).await.unwrap();
             }
         }
     }
@@ -109,7 +123,7 @@ async fn test_actor_transport() -> Result<()> {
         
         // Read all expected batches
         for _ in 0..(num_writers * messages_per_writer) {
-            let result = reader_refs[reader_idx].ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage).await?;
+            let result = reader_refs[reader_idx].ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage).await.unwrap();
             if let Some(message) = result {
                 received_messages.push(message);
             }
@@ -150,7 +164,5 @@ async fn test_actor_transport() -> Result<()> {
     }
 
     // Close the backend
-    backend_ref.ask(TransportBackendActorMessage::Close).await?;
-
-    Ok(())
+    backend_ref.ask(TransportBackendActorMessage::Close).await.unwrap();
 } 

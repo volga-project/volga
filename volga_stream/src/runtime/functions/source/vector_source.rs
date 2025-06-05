@@ -6,7 +6,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use tokio::sync::mpsc::{self, Sender, Receiver};
-use tokio::time::{timeout, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use super::source_function::SourceFunctionTrait;
 
 #[derive(Debug)]
@@ -68,11 +68,11 @@ impl SourceFunctionTrait for VectorSourceFunction {
         if let Some(receiver) = &mut self.channel {
             match timeout(Duration::from_millis(1), receiver.recv()).await {
                 Ok(Some(message)) => Ok(Some(message)),
-                Ok(None) => Ok(None), // Channel closed
+                Ok(None) => panic!("VectorSourceFunction channel closed"),
                 Err(_) => Ok(None),   // Timeout
             }
         } else {
-            Ok(None) // Not initialized
+            panic!("VectorSourceFunction channel not inited")
         }
     }
 } 

@@ -182,23 +182,23 @@ mod tests {
 
         // Create test data
         let regular_messages = vec![
-            Message::new(None, create_test_string_batch(vec!["regular1".to_string()])?),
-            Message::new(None, create_test_string_batch(vec!["regular2".to_string()])?),
-            Message::new(None, create_test_string_batch(vec!["regular3".to_string()])?),
+            Message::new(None, create_test_string_batch(vec!["regular1".to_string()])),
+            Message::new(None, create_test_string_batch(vec!["regular2".to_string()])),
+            Message::new(None, create_test_string_batch(vec!["regular3".to_string()])),
         ];
 
         // Create keyed messages
-        let key1_batch = create_test_string_batch(vec!["key1".to_string()])?;
-        let key2_batch = create_test_string_batch(vec!["key2".to_string()])?;
+        let key1_batch = create_test_string_batch(vec!["key1".to_string()]);
+        let key2_batch = create_test_string_batch(vec!["key2".to_string()]);
         let key1 = Key::new(key1_batch.clone())?;
         let key2 = Key::new(key2_batch.clone())?;
         let keyed_messages = vec![
             Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(None, create_test_string_batch(vec!["value1".to_string()])?),
+                BaseMessage::new(None, create_test_string_batch(vec!["value1".to_string()])),
                 key1.clone(),
             )),
             Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(None, create_test_string_batch(vec!["value2".to_string()])?),
+                BaseMessage::new(None, create_test_string_batch(vec!["value2".to_string()])),
                 key2.clone(),
             )),
         ];

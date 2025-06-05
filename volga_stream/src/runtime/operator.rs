@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::message::{Message, KeyedMessage, BaseMessage, WatermarkMessage};
+use crate::common::message::{Message, WatermarkMessage};
 use crate::common::Key;
 use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
@@ -12,14 +12,13 @@ use crate::runtime::functions::{
     source::{SourceFunction, SourceFunctionTrait, create_source_function},
     sink::{SinkFunction, SinkFunctionTrait},
     sink::sink_function::create_sink_function,
-    map::{MapFunction, MapFunctionTrait},
+    map::MapFunction,
     key_by::{KeyByFunction, KeyByFunctionTrait},
     reduce::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait}
 };
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::any::Any;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -417,9 +416,11 @@ impl OperatorTrait for SinkOperator {
     }
 
     async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
+        // println!("SinkOperator process_message {:?}", message);
         if let Some(function) = self.base.get_function_mut::<SinkFunction>() {
             function.sink(message.clone()).await?;
             Ok(Some(vec![message]))
+            // Ok(None)
         } else {
             Err(anyhow::anyhow!("SinkFunction not available"))
         }
@@ -553,6 +554,8 @@ impl OperatorTrait for ReduceOperator {
     }
 
     async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
+        println!("ReduceOperator process_message {:?}", message);
+        
         // Explicitly check and handle only KeyedMessage
         match message {
             Message::Keyed(keyed_message) => {

@@ -1,79 +1,103 @@
-use anyhow::Result;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use crate::common::message::Message;
+use crate::runtime::execution_graph::ExecutionGraph;
 use crate::transport::channel::Channel;
-use crate::transport::transport_client_actor::TransportClientActorType;
 use async_trait::async_trait;
+
+use super::transport_client::TransportClientConfig;
 
 #[async_trait]
 pub trait TransportBackend: Send + Sync {
-    async fn start(&mut self) -> Result<()>;
-    async fn close(&mut self) -> Result<()>;
-    async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_input: bool) -> Result<()>;
-    async fn register_actor(&mut self, vertex_id: String, actor: TransportClientActorType) -> Result<()>;
+    async fn start(&mut self);
+    async fn close(&mut self);
+    fn init_channels(&mut self, execution_graph: &ExecutionGraph, vertex_ids: Vec<String>) -> HashMap<String, TransportClientConfig>;
 }
 
 pub struct InMemoryTransportBackend {
-    actors: HashMap<String, TransportClientActorType>,
-    senders: HashMap<String, mpsc::Sender<Message>>,
+    senders: HashMap<String, mpsc::Sender<Message>>, // keep references so channels are not closed
     receivers: HashMap<String, mpsc::Receiver<Message>>,
 }
 
 impl InMemoryTransportBackend {
+    const CHANNEL_BUFFER_SIZE: usize = 100;
+
     pub fn new() -> Self {
         Self {
-            actors: HashMap::new(),
             senders: HashMap::new(),
             receivers: HashMap::new(),
+        }
+    }
+
+    fn register_channel(
+        &mut self,
+        transport_client_configs: &mut HashMap<String, TransportClientConfig>, 
+        vertex_id: String, 
+        channel: Channel, 
+        is_in: bool
+    ) {
+        // Only handle local channels
+        let channel_id = match &channel {
+            Channel::Local { channel_id } => channel_id.clone(),
+            _ => panic!("Only local channels are supported"),
+        };
+
+        // Create a new channel if it doesn't exist
+        if !self.senders.contains_key(&channel_id) {
+            let (tx, rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
+            self.senders.insert(channel_id.clone(), tx);
+            self.receivers.insert(channel_id.clone(), rx);
+        }
+
+        let config = transport_client_configs.entry(vertex_id.clone()).or_insert(TransportClientConfig::new(vertex_id.clone()));
+
+        if is_in {
+            // For readers, we need to move the receiver since it can't be cloned
+            if let Some(rx) = self.receivers.remove(&channel_id) {
+                config.add_reader_receiver(channel_id, rx);
+            }
+        } else {
+            // For writers, we can clone the sender since it's designed for multiple producers
+            if let Some(tx) = self.senders.get(&channel_id) {
+                config.add_writer_sender(channel_id, tx.clone());
+            }
         }
     }
 }
 
 #[async_trait]
 impl TransportBackend for InMemoryTransportBackend {
-    async fn start(&mut self) -> Result<()> {
-        Ok(())
+    async fn start(&mut self) {
     }
 
-    async fn close(&mut self) -> Result<()> {
-        Ok(())
+    async fn close(&mut self) {
     }
 
-    async fn register_channel(&mut self, vertex_id: String, channel: Channel, is_in: bool) -> Result<()> {
-        // Only handle local channels
-        let channel_id = match &channel {
-            Channel::Local { channel_id } => channel_id.clone(),
-            _ => return Err(anyhow::anyhow!("Only local channels are supported")),
-        };
+    fn init_channels(&mut self, execution_graph: &ExecutionGraph, vertex_ids: Vec<String>) -> HashMap<String, TransportClientConfig> {
+        let mut transport_client_configs: HashMap<String, TransportClientConfig> = HashMap::new();
+        
+        for vertex_id in vertex_ids {
+            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
+            for edge in input_edges {
+                let channel = edge.channel.clone();
+                self.register_channel(
+                    &mut transport_client_configs,
+                    vertex_id.clone(),
+                    channel,
+                    true,
+                );
+            }
 
-        // Create a new channel if it doesn't exist
-        if !self.senders.contains_key(&channel_id) {
-            let (tx, rx) = mpsc::channel(100); // Buffer size of 100
-            self.senders.insert(channel_id.clone(), tx);
-            self.receivers.insert(channel_id.clone(), rx);
-        }
-
-        // Register the channel with the appropriate actor using message passing
-        if let Some(actor) = self.actors.get(&vertex_id) {
-            if is_in {
-                // For readers, we need to move the receiver since it can't be cloned
-                if let Some(rx) = self.receivers.remove(&channel_id) {
-                    actor.register_receiver(channel_id, rx).await?;
-                }
-            } else {
-                // For writers, we can clone the sender since it's designed for multiple producers
-                if let Some(tx) = self.senders.get(&channel_id) {
-                    actor.register_sender(channel_id, tx.clone()).await?;
-                }
+            for edge in output_edges {
+                let channel = edge.channel.clone();
+                self.register_channel(
+                    &mut transport_client_configs,
+                    vertex_id.clone(),
+                    channel,
+                    false,
+                );
             }
         }
-
-        Ok(())
-    }
-
-    async fn register_actor(&mut self, vertex_id: String, actor: TransportClientActorType) -> Result<()> {
-        self.actors.insert(vertex_id, actor);
-        Ok(())
+        return transport_client_configs;
     }
 } 

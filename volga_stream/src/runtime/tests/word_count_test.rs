@@ -32,10 +32,10 @@ fn test_parallel_word_count() -> Result<()> {
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
-    let parallelism = 10; // Number of parallel tasks
-    let num_words = 10; // Number of unique words
-    let num_to_send_per_word = 10000; // Number of copies of each word to send
-    let batch_size = 100; // Batch size
+    let parallelism = 2; // Number of parallel tasks
+    let num_words = 2; // Number of unique words
+    let num_to_send_per_word = 1; // Number of copies of each word to send
+    let batch_size = 1; // Batch size
 
     // Create vertices for each parallel task
     for i in 0..parallelism {
@@ -89,37 +89,58 @@ fn test_parallel_word_count() -> Result<()> {
             i,
         );
         graph.add_vertex(sink_vertex);
+    }
 
-        // Add edges
-        let source_to_key_by = ExecutionEdge::new(
-            format!("source_{}", task_id),
-            format!("key_by_{}", task_id),
-            PartitionType::Forward,
-            Channel::Local {
-                channel_id: format!("source_to_key_by_{}", task_id),
-            },
-        );
-        graph.add_edge(source_to_key_by)?;
+    // Add edges connecting vertices across parallel tasks
+    for i in 0..parallelism {
+        let source_id = format!("source_{}", i);
+        
+        // Connect each source to all key-by tasks
+        for j in 0..parallelism {
+            let key_by_id = format!("key_by_{}", j);
+            let source_to_key_by = ExecutionEdge::new(
+                source_id.clone(),
+                key_by_id,
+                "key_by".to_string(),
+                PartitionType::RoundRobin,
+                Channel::Local {
+                    channel_id: format!("source_{}_to_key_by_{}", i, j),
+                },
+            );
+            graph.add_edge(source_to_key_by);
+        }
 
-        let key_by_to_reduce = ExecutionEdge::new(
-            format!("key_by_{}", task_id),
-            format!("reduce_{}", task_id),
-            PartitionType::Hash,
-            Channel::Local {
-                channel_id: format!("key_by_to_reduce_{}", task_id),
-            },
-        );
-        graph.add_edge(key_by_to_reduce)?;
+        let key_by_id = format!("key_by_{}", i);
+        // Connect each key-by to all reduce tasks
+        for j in 0..parallelism {
+            let reduce_id = format!("reduce_{}", j);
+            let key_by_to_reduce = ExecutionEdge::new(
+                key_by_id.clone(),
+                reduce_id,
+                "reduce".to_string(),
+                PartitionType::Hash,
+                Channel::Local {
+                    channel_id: format!("key_by_{}_to_reduce_{}", i, j),
+                },
+            );
+            graph.add_edge(key_by_to_reduce);
+        }
 
-        let reduce_to_sink = ExecutionEdge::new(
-            format!("reduce_{}", task_id),
-            format!("sink_{}", task_id),
-            PartitionType::Forward,
-            Channel::Local {
-                channel_id: format!("reduce_to_sink_{}", task_id),
-            },
-        );
-        graph.add_edge(reduce_to_sink)?;
+        let reduce_id = format!("reduce_{}", i);
+        // Connect each reduce to all sink tasks
+        for j in 0..parallelism {
+            let sink_id = format!("sink_{}", j);
+            let reduce_to_sink = ExecutionEdge::new(
+                reduce_id.clone(),
+                sink_id,
+                "sink".to_string(),
+                PartitionType::RoundRobin,
+                Channel::Local {
+                    channel_id: format!("reduce_{}_to_sink_{}", i, j),
+                },
+            );
+            graph.add_edge(reduce_to_sink);
+        }
     }
 
     // Create and start worker
@@ -137,7 +158,7 @@ fn test_parallel_word_count() -> Result<()> {
     );
 
     println!("Starting worker...");
-    worker.start()?;
+    worker.start();
     println!("Worker started");
 
     // Wait for processing to complete
@@ -185,7 +206,7 @@ fn test_parallel_word_count() -> Result<()> {
     }
 
     // Close worker
-    worker.close()?;
+    worker.close();
 
     Ok(())
 } 

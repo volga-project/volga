@@ -26,6 +26,7 @@ impl Collector {
     }
 
     pub fn add_output_channel_id(&mut self, channel_id: String) {
+        // println!("Adding output channel id {:?}", channel_id);
         if self.output_channel_ids.contains(&channel_id) {
             panic!("Output channel id already exists");
         }
@@ -38,7 +39,8 @@ impl Collector {
 
     pub async fn collect_message(&mut self, message: Message, channel_ids_to_send: Option<Vec<String>>) -> Result<Vec<String>> {
         let num_partitions = self.output_channel_ids.len();
-        let mut partitioned_messages: Vec<Message> = vec![Message::new(None, message.record_batch().clone()); num_partitions];
+        // println!("Num partitions {:?}", num_partitions);
+        let mut partitioned_messages: Vec<Message> = vec![message.clone(); num_partitions];
         
         // Use BroadcastPartition for watermark messages, otherwise use the configured partition strategy
         let partitions = if let Message::Watermark(_) = &message {
@@ -50,6 +52,10 @@ impl Collector {
         for partition_idx in partitions {
             partitioned_messages[partition_idx] = message.clone();
         }
+
+        let vertex_id = self.data_writer.vertex_id.clone();
+
+        // println!("Collector {:?} collect message", vertex_id);
 
         // Create channel to partition mapping
         let channel_to_partition: HashMap<_, _> = self.output_channel_ids.iter()
@@ -65,9 +71,6 @@ impl Collector {
         for channel_id in channels_to_send {
             if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
                 let partition_message = partitioned_messages[partition_idx].clone();
-                if partition_message.record_batch().num_rows() == 0 {
-                    continue;
-                }
                 
                 let mut writer = self.data_writer.clone();
                 let channel_id_clone = channel_id.clone();
@@ -88,6 +91,7 @@ impl Collector {
             .filter_map(|result| result.ok())
             .collect();
 
+        // println!("Collector {:?} successful channels {:?}", vertex_id, successful_channels);
         Ok(successful_channels)
     }
 }

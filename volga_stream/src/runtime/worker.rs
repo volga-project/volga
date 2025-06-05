@@ -1,14 +1,7 @@
-use crate::runtime::{
-    execution_graph::ExecutionGraph,
-    stream_task::{StreamTask, StreamTaskStatus, StreamTaskState},
-    runtime_context::RuntimeContext,
-    stream_task_actor::{StreamTaskActor, StreamTaskMessage},
-};
-use crate::transport::{
-    transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage},
-    transport_client_actor::TransportClientActorType,
-};
-use anyhow::Result;
+use crate::{runtime::{
+    execution_graph::ExecutionGraph, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+}, transport::{InMemoryTransportBackend, TransportBackend}};
+use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::collections::HashMap;
 use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Runtime};
@@ -42,25 +35,25 @@ impl Worker {
         }
     }
 
-    pub fn start(&mut self) -> Result<()> {
+    pub fn start(&mut self) {
         println!("Starting worker");
 
-        // Create runtime for transport backend
         let backend_runtime = Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .thread_name("transport-backend-runtime")
-            .build()?;
+            .build().unwrap();
 
-        // Create backend actor in its runtime
+        let mut backend = InMemoryTransportBackend::new();
+        let mut transport_client_configs = backend.init_channels(&self.graph, self.vertex_ids.clone());
+
         let backend_actor = backend_runtime.block_on(async {
-            spawn(TransportBackendActor::new())
+            spawn(TransportBackendActor::new(backend))
         });
 
         self.backend_runtime = Some(backend_runtime);
         self.backend_actor = Some(backend_actor.clone());
 
-        // Create and register task actors
         for vertex_id in &self.vertex_ids {
             let vertex = self.graph.get_vertex(vertex_id).expect("Vertex should exist");
             
@@ -69,76 +62,36 @@ impl Worker {
                 .worker_threads(self.num_io_threads)
                 .enable_all()
                 .thread_name(format!("task-runtime-{}", vertex_id))
-                .build()?;
+                .build().unwrap();
 
             // Create runtime context for the vertex
             let runtime_context = RuntimeContext::new(
-                vertex_id.clone(), // vertex_id
-                vertex.task_index, // task_index
-                vertex.parallelism, // parallelism
-                None, // job_config
+                vertex_id.clone(),
+                vertex.task_index,
+                vertex.parallelism,
+                None,
             );
 
             // Create the task and its actor in the task's runtime
             let task = StreamTask::new(
                 vertex_id.clone(),
                 vertex.operator_config.clone(),
+                transport_client_configs.remove(&vertex_id.clone()).unwrap(),
                 runtime_context,
                 self.graph.clone(),
-            )?;
+            );
             let task_actor = StreamTaskActor::new(task);
             let task_ref = runtime.block_on(async {
                 spawn(task_actor)
             });
             self.task_actors.insert(vertex_id.clone(), task_ref.clone());
-
-            // Get edges for this vertex
-            let (input_edges, output_edges) = self.graph.get_edges_for_vertex(vertex_id).unwrap();
-
-            // Register everything in a single block_on call
-            runtime.block_on(async {
-                // Register task actor with backend
-                self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::RegisterActor {
-                    vertex_id: vertex_id.clone(),
-                    actor: TransportClientActorType::StreamTask(task_ref.clone()),
-                }).await?;
-
-                // Register input channels
-                for edge in input_edges {
-                    self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::RegisterChannel {
-                        vertex_id: vertex_id.clone(),
-                        channel: edge.channel.clone(),
-                        is_input: true,
-                    }).await?;
-                }
-
-                // Register output channels
-                for edge in output_edges {
-                    self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::RegisterChannel {
-                        vertex_id: vertex_id.clone(),
-                        channel: edge.channel.clone(),
-                        is_input: false,
-                    }).await?;
-
-                    // Create collector for output channel
-                    task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::CreateCollector {
-                        channel_id: edge.channel.get_channel_id().clone(),
-                        partition_type: edge.partition_type.clone(),
-                        target_operator_id: edge.job_edge_id.clone(),
-                    }).await?;
-                }
-
-                Ok::<(), anyhow::Error>(())
-            })?;
-
-            // Store the runtime after all async operations are done
             self.task_runtimes.insert(vertex_id.clone(), runtime);
         }
 
         // Start the backend
         self.backend_runtime.as_ref().unwrap().block_on(async {
             self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::Start).await
-        })?;
+        }).unwrap();
 
         // Start all tasks
         let mut start_futures = Vec::new();
@@ -146,7 +99,6 @@ impl Worker {
             let vertex_id = vertex_id.clone();
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
 
-            // Run task asynchronously without blocking
             let task_ref = task_ref.clone();
             let fut = runtime.spawn(async move {
                 if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await {
@@ -160,13 +112,12 @@ impl Worker {
                 let _ = f.await?;
             }
             Ok::<(), anyhow::Error>(())
-        })?;
+        }).unwrap();
 
         println!("Started worker");
-        Ok(())
     }
 
-    pub fn close(&mut self) -> Result<()> {
+    pub fn close(&mut self) {
         println!("Closing worker");
 
         // Close all tasks in parallel
@@ -185,13 +136,13 @@ impl Worker {
                 let _ = f.await?;
             }
             Ok::<(), anyhow::Error>(())
-        })?;
+        }).unwrap();
 
         // Close the backend
         if let Some(backend_actor) = &self.backend_actor {
             self.backend_runtime.as_ref().unwrap().block_on(async {
                 backend_actor.ask(TransportBackendActorMessage::Close).await
-            })?;
+            }).unwrap();
         }
 
         // Shutdown all runtimes
@@ -207,10 +158,9 @@ impl Worker {
         }
 
         println!("Closed worker");
-        Ok(())
     }
 
-    async fn wait_for_completion(&self) -> Result<()> {
+    async fn wait_for_completion(&self) {
         let mut all_closed = false;
         while !all_closed {
             // Create futures for all task state checks
@@ -233,36 +183,32 @@ impl Worker {
             for result in states {
                 match result {
                     Ok((vertex_id, state)) => {
+                        println!("Task {} is in state {:?}", vertex_id, state.status);
                         if state.status != StreamTaskStatus::Closed {
                             all_closed = false;
-                            println!("Task {} is still in state {:?}", vertex_id, state.status);
-                            break;
                         }
                     }
                     Err(e) => {
                         println!("Error getting task state: {}", e);
                         all_closed = false;
-                        break;
                     }
                 }
             }
 
             if !all_closed {
-                sleep(Duration::from_millis(100)).await;
+                sleep(Duration::from_millis(5000)).await;
             }
         }
         println!("All tasks have completed");
-        Ok(())
     }
 
-    pub fn execute(&mut self) -> Result<()> {
+    pub fn execute(&mut self) {
         println!("Starting worker execution");
-        self.start()?;
-        let runtime = Runtime::new()?;
+        self.start();
+        let runtime = Runtime::new().unwrap();
         runtime.block_on(async {
-            self.wait_for_completion().await?;
+            self.wait_for_completion().await;
             println!("Worker execution completed");
-            Ok(())
-        })
+        });
     }
 }

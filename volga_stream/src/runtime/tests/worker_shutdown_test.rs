@@ -2,9 +2,7 @@ use crate::runtime::{
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig}, 
     partition::PartitionType, 
     worker::Worker,
-    functions::{
-        key_by::KeyByFunction,
-    },
+    functions::key_by::KeyByFunction,
     storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
 };
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
@@ -29,7 +27,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
-    let parallelism = 2i32; // Number of parallel tasks
+    let parallelism = 2; // Number of parallel tasks
     let num_messages_per_source = 5; // Number of regular messages per source
 
     // Create test data for each source
@@ -40,7 +38,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         for j in 0..num_messages_per_source {
             messages.push(Message::new(
                 Some(format!("source_{}", i)),
-                create_test_string_batch(vec![format!("key_{}", j % 3)])? // Use modulo to create 3 unique keys
+                create_test_string_batch(vec![format!("key_{}", j % 3)]) // Use modulo to create 3 unique keys
             ));
         }
         // Add max watermark as the last message
@@ -86,22 +84,24 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         let source_to_key_by = ExecutionEdge::new(
             format!("source_{}", task_id),
             format!("key_by_{}", task_id),
+            "key_by".to_string(),
             PartitionType::Forward,
             Channel::Local {
                 channel_id: format!("source_to_key_by_{}", task_id),
             },
         );
-        graph.add_edge(source_to_key_by)?;
+        graph.add_edge(source_to_key_by);
 
         let key_by_to_sink = ExecutionEdge::new(
             format!("key_by_{}", task_id),
             format!("sink_{}", task_id),
+            "sink".to_string(),
             PartitionType::Hash,
             Channel::Local {
                 channel_id: format!("key_by_to_sink_{}", task_id),
             },
         );
-        graph.add_edge(key_by_to_sink)?;
+        graph.add_edge(key_by_to_sink);
     }
 
     // Create and start worker
@@ -118,7 +118,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     );
 
     println!("Starting worker...");
-    worker.execute()?;
+    worker.execute();
     println!("Worker completed");
 
     // Verify results by reading from storage actor

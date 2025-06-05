@@ -1,18 +1,16 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::Collector, execution_graph::{ExecutionGraph, ExecutionVertex, OperatorConfig}, functions::{
-        key_by::KeyByFunction, map::MapFunction, reduce::{AggregationResultExtractor, ReduceFunction}, sink::SinkFunction, source::SourceFunction
-    }, partition::{PartitionTrait, PartitionType}, runtime_context::RuntimeContext
-}, transport::{DataReader, DataWriter}};
+    collector::Collector, execution_graph::{ExecutionGraph, OperatorConfig}, runtime_context::RuntimeContext
+}, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
-use tokio::{sync::mpsc::{Receiver, Sender, channel}, task::JoinHandle, time::Instant};
+use tokio::task::JoinHandle;
 use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, mem, sync::{atomic::{AtomicBool, Ordering, AtomicU8, AtomicU32}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{atomic::{Ordering, AtomicU8}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use futures::future::join_all;
-use std::fmt;
 use std::collections::HashSet;
 use std::sync::Mutex;
+
 // Helper function to get current timestamp
 fn timestamp() -> String {
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
@@ -45,31 +43,14 @@ impl From<u8> for StreamTaskStatus {
     }
 }
 
-pub enum StreamTaskConfigurationRequest {
-    CreateOrUpdateCollector {
-        channel_id: String,
-        partition_type: PartitionType,
-        target_operator_id: String,
-    },
-    RegisterReaderReceiver {
-        channel_id: String,
-        receiver: Receiver<Message>,
-    },
-    RegisterWriterSender {  
-        channel_id: String,
-        sender: Sender<Message>,
-    },
-}
-
 #[derive(Debug)]
 pub struct StreamTask {
     vertex_id: String,
     runtime_context: RuntimeContext,
     status: Arc<AtomicU8>,
     run_loop_handle: Option<JoinHandle<Result<()>>>,
-    configuration_sender: Sender<StreamTaskConfigurationRequest>,
-    configuration_receiver: Option<Receiver<StreamTaskConfigurationRequest>>,
     operator_config: OperatorConfig,
+    transport_client_config: Option<TransportClientConfig>,
     execution_graph: ExecutionGraph,
     max_watermark_source_ids: Arc<Mutex<HashSet<String>>>, // tracks which source have finished
 }
@@ -78,97 +59,21 @@ impl StreamTask {
     pub fn new(
         vertex_id: String,
         operator_config: OperatorConfig,
+        transport_client_config: TransportClientConfig,
         runtime_context: RuntimeContext,
         execution_graph: ExecutionGraph,
-    ) -> Result<Self> {
-        let (sender, receiver) = channel::<StreamTaskConfigurationRequest>(100);
+    ) -> Self {
         
-        Ok(Self {
+        Self {
             vertex_id,
             runtime_context,
             status: Arc::new(AtomicU8::new(StreamTaskStatus::Created as u8)),
             run_loop_handle: None,
-            configuration_sender: sender,
-            configuration_receiver: Some(receiver),
             operator_config,
+            transport_client_config: Some(transport_client_config),
             execution_graph,
             max_watermark_source_ids: Arc::new(Mutex::new(HashSet::new())),
-        })
-    }
-    
-    pub async fn create_or_update_collector(
-        &mut self,
-        channel_id: String,
-        partition_type: PartitionType,
-        target_operator_id: String,
-    ) -> Result<()> {
-        self.configuration_sender.send(StreamTaskConfigurationRequest::CreateOrUpdateCollector {
-            channel_id,
-            partition_type,
-            target_operator_id,
-        }).await.map_err(|e| anyhow::anyhow!("Failed to send configuration request: {}", e))?;
-        
-        Ok(())
-    }
-
-    pub async fn register_reader_receiver(&mut self, channel_id: String, receiver: Receiver<Message>) -> Result<()> {
-        self.configuration_sender.send(StreamTaskConfigurationRequest::RegisterReaderReceiver {
-            channel_id,
-            receiver,
-        }).await.map_err(|e| anyhow::anyhow!("Failed to send configuration request: {}", e))?;
-        
-        Ok(())
-    }
-
-    pub async fn register_writer_sender(&mut self, channel_id: String, sender: Sender<Message>) -> Result<()> {
-        self.configuration_sender.send(StreamTaskConfigurationRequest::RegisterWriterSender {
-            channel_id,
-            sender,
-        }).await.map_err(|e| anyhow::anyhow!("Failed to send configuration request: {}", e))?;
-        
-        Ok(())
-    }
-
-    async fn process_configuration_requests(
-        config_receiver: &mut Receiver<StreamTaskConfigurationRequest>,
-        transport_client: &mut TransportClient,
-        collectors: &mut HashMap<String, Collector>,
-    ) -> Result<()> {
-        while let Ok(request) = config_receiver.try_recv() {
-            match request {
-                StreamTaskConfigurationRequest::CreateOrUpdateCollector { 
-                    channel_id, 
-                    partition_type, 
-                    target_operator_id 
-                } => {
-                    let writer = transport_client.writer.as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
-                    
-                    let partition = partition_type.create();
-                    
-                    let collector = collectors.entry(target_operator_id).or_insert_with(|| {
-                        Collector::new(
-                            writer.clone(),
-                            partition,
-                        )
-                    });
-                    
-                    collector.add_output_channel_id(channel_id);
-                },
-                StreamTaskConfigurationRequest::RegisterReaderReceiver { channel_id, receiver } => {
-                    if let Some(reader) = transport_client.reader.as_mut() {
-                        reader.register_receiver(channel_id, receiver);
-                    }
-                },
-                StreamTaskConfigurationRequest::RegisterWriterSender { channel_id, sender } => {
-                    if let Some(writer) = transport_client.writer.as_mut() {
-                        writer.register_sender(channel_id, sender);
-                    }
-                },
-            }
         }
-        
-        Ok(())
     }
 
     async fn collect_message_parallel(
@@ -241,9 +146,8 @@ impl StreamTask {
         let execution_graph = self.execution_graph.clone();
         let received_source_ids = self.max_watermark_source_ids.clone();
         let num_source_vertices = execution_graph.get_source_vertices().len() as u32;
-        
-        // Move receiver, nulling property on streamtask struct and removing ownership
-        let mut receiver = self.configuration_receiver.take().unwrap();
+
+        let transport_client_config = self.transport_client_config.take().unwrap();
         
         // Main stream task lifecycle loop
         let run_loop_handle = tokio::spawn(async move {
@@ -256,8 +160,32 @@ impl StreamTask {
                 OperatorConfig::ReduceConfig(reduce_function, extractor) => Operator::Reduce(ReduceOperator::new(reduce_function, extractor)),
             };
             
-            let mut transport_client = TransportClient::new(vertex_id.clone());
+            let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
+            
             let mut collectors: HashMap<String, Collector> = HashMap::new();
+
+            let (_, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
+
+            for edge in output_edges {
+                let channel_id = edge.channel.get_channel_id();
+                let partition_type = edge.partition_type.clone();
+                let target_operator_id = edge.target_vertex_id.clone();
+
+                let writer = transport_client.writer.as_ref()
+                .ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
+            
+                let partition = partition_type.create();
+                
+                let collector = collectors.entry(target_operator_id).or_insert_with(|| {
+                    Collector::new(
+                        writer.clone(),
+                        partition,
+                    )
+                });
+                
+                collector.add_output_channel_id(channel_id.clone());
+            }
+            
             
             operator.open(&runtime_context).await?;
             println!("{:?} Operator {:?} opened", timestamp(), vertex_id);
@@ -265,26 +193,37 @@ impl StreamTask {
             status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
             
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
-                Self::process_configuration_requests(
-                    &mut receiver,
-                    &mut transport_client,
-                    &mut collectors
-                ).await?;
-                
                 let messages = match operator.operator_type() {
                     crate::runtime::operator::OperatorType::SOURCE => {
-                        match operator.fetch().await? {
-                            Some(message) => Some(vec![message]),
-                            None => None,
+                        if let Some(message) = operator.fetch().await? {
+                            match message {
+                                Message::Watermark(watermark) => {
+                                    println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.source_vertex_id);
+                                    Self::handle_watermark(
+                                        watermark.clone(),
+                                        status.clone(),
+                                        received_source_ids.clone(),
+                                        num_source_vertices,
+                                        vertex_id.clone(),
+                                    ).await?;
+                                    Some(vec![Message::Watermark(watermark)])
+                                }
+                                _ => {
+                                    println!("StreamTask {:?} received message", vertex_id);
+                                    Some(vec![message])
+                                }
+                            }
+                        } else {
+                            None
                         }
                     }
                     _ => {
                         let reader = transport_client.reader.as_mut()
                             .expect("Reader should be initialized for non-SOURCE operator");
                         if let Some(message) = reader.read_message().await? {
-                            println!("StreamTask {:?} received message", vertex_id);
                             match message {
                                 Message::Watermark(watermark) => {
+                                    println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.source_vertex_id);
                                     Self::handle_watermark(
                                         watermark.clone(),
                                         status.clone(),
@@ -295,7 +234,10 @@ impl StreamTask {
                                     Some(vec![Message::Watermark(watermark)])
                                 }
                                 _ => match operator.process_message(message).await.unwrap() {
-                                    Some(messages) => Some(messages),
+                                    Some(messages) => {
+                                        // println!("StreamTask {:?} received message", vertex_id);
+                                        Some(messages)
+                                    }
                                     None => None,
                                 }
                             }
@@ -308,6 +250,12 @@ impl StreamTask {
                 if messages.is_none() {
                     continue;
                 }
+
+                if collectors.len() == 0 {
+                    // TODO assert it is sink
+                    // println!("StreamTask {:?} no collectors, skipping message", vertex_id);
+                    continue;
+                }
                 
                 let messages = messages.unwrap();
                 
@@ -318,6 +266,9 @@ impl StreamTask {
                     }
                 
                     let mut retries_before_close = 3;
+                    // if vertex_id.contains("sink") {
+                    //     println!("StreamTask {:?} retries before close {:?}", vertex_id, retries_before_close);
+                    // }
                     while !channels_to_retry.is_empty() {
                         if status.load(Ordering::SeqCst) != StreamTaskStatus::Running as u8 && retries_before_close <= 0 {
                             break;
@@ -344,6 +295,7 @@ impl StreamTask {
                         }
                         
                         retries_before_close -= 1;
+                        // println!("StreamTask {:?} retries before close {:?}", vertex_id, retries_before_close);
                     }
                 }
             }
