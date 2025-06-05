@@ -76,11 +76,12 @@ impl StreamTask {
         }
     }
 
+    // TODO retrying collect() updates partition state - fix this
     async fn collect_message_parallel(
         collectors: &mut HashMap<String, Collector>,
         message: Message,
         channels_to_send: Option<HashMap<String, Vec<String>>>
-    ) -> Result<HashMap<String, Vec<String>>> {
+    ) -> HashMap<String, Vec<String>> {
         let mut futures = Vec::new();
         for (collector_id, collector) in collectors.iter_mut() {
             let message_clone = message.clone();
@@ -89,7 +90,7 @@ impl StreamTask {
                 .and_then(|map| map.get(&collector_id).cloned());
             
             futures.push(async move {
-                let result = collector.collect_message(message_clone, channels).await?;
+                let result = collector.collect_message(message_clone, channels).await;
                 Ok::<_, anyhow::Error>((collector_id, result))
             });
         }
@@ -108,7 +109,7 @@ impl StreamTask {
             }
         }
         
-        Ok(successful_channels)
+        successful_channels
     }
 
     pub fn get_status(&self) -> StreamTaskStatus {
@@ -138,7 +139,7 @@ impl StreamTask {
         Ok(())
     }
 
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) {
         let vertex_id = self.vertex_id.clone();
         let runtime_context = self.runtime_context.clone();
         let status = self.status.clone();
@@ -169,10 +170,10 @@ impl StreamTask {
             for edge in output_edges {
                 let channel_id = edge.channel.get_channel_id();
                 let partition_type = edge.partition_type.clone();
-                let target_operator_id = edge.target_vertex_id.clone();
+                let target_operator_id = edge.target_operator_id.clone();
 
                 let writer = transport_client.writer.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("Writer not initialized"))?;
+                    .unwrap_or_else(|| panic!("Writer not initialized"));
             
                 let partition = partition_type.create();
                 
@@ -185,6 +186,13 @@ impl StreamTask {
                 
                 collector.add_output_channel_id(channel_id.clone());
             }
+
+            // for collector in collectors.values() {
+            //     println!("Collector {:?} output channel ids: {:?}", vertex_id, collector.output_channel_ids());
+            //     println!("Writer senders {:?}", collector.data_writer.senders.keys());
+            // }
+
+            // panic!("Stop here");
             
             
             operator.open(&runtime_context).await?;
@@ -195,7 +203,7 @@ impl StreamTask {
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 let messages = match operator.operator_type() {
                     crate::runtime::operator::OperatorType::SOURCE => {
-                        if let Some(message) = operator.fetch().await? {
+                        if let Some(message) = operator.fetch().await {
                             match message {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.source_vertex_id);
@@ -209,7 +217,7 @@ impl StreamTask {
                                     Some(vec![Message::Watermark(watermark)])
                                 }
                                 _ => {
-                                    println!("StreamTask {:?} received message", vertex_id);
+                                    // println!("StreamTask {:?} received message", vertex_id);
                                     Some(vec![message])
                                 }
                             }
@@ -233,7 +241,7 @@ impl StreamTask {
                                     ).await?;
                                     Some(vec![Message::Watermark(watermark)])
                                 }
-                                _ => match operator.process_message(message).await.unwrap() {
+                                _ => match operator.process_message(message).await {
                                     Some(messages) => {
                                         // println!("StreamTask {:?} received message", vertex_id);
                                         Some(messages)
@@ -265,6 +273,9 @@ impl StreamTask {
                         channels_to_retry.insert(collector_id.clone(), collector.output_channel_ids());
                     }
                 
+
+                    // TODO retrying collect() updates partition state - fix this
+
                     let mut retries_before_close = 3;
                     // if vertex_id.contains("sink") {
                     //     println!("StreamTask {:?} retries before close {:?}", vertex_id, retries_before_close);
@@ -278,7 +289,7 @@ impl StreamTask {
                             &mut collectors, 
                             message.clone(), 
                             Some(channels_to_retry.clone())
-                        ).await?;
+                        ).await;
                         
                         channels_to_retry.clear();
                         for (collector_id, successful) in successful_channels {
@@ -309,7 +320,6 @@ impl StreamTask {
         });
         
         self.run_loop_handle = Some(run_loop_handle);
-        Ok(())
     }
 
     fn mark_closing(status: Arc<AtomicU8>, vertex_id: String) {
@@ -317,9 +327,9 @@ impl StreamTask {
         status.store(StreamTaskStatus::Closing as u8, Ordering::SeqCst);
     }
 
-    pub async fn close_and_wait(&mut self) -> Result<()> {
+    pub async fn close_and_wait(&mut self) {
         if self.status.load(Ordering::SeqCst) != StreamTaskStatus::Running as u8 {
-            return Ok(());
+            return;
         }
 
         Self::mark_closing(self.status.clone(), self.vertex_id.clone());
@@ -334,7 +344,6 @@ impl StreamTask {
                 }
             }
         }
-        Ok(())
     }
 
     pub fn vertex_id(&self) -> &str {

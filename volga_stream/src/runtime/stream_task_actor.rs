@@ -27,14 +27,14 @@ impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
     async fn handle(&mut self, msg: StreamTaskMessage, _ctx: &mut Context<StreamTaskActor, Result<StreamTaskState>>) -> Self::Reply {
         match msg {
             StreamTaskMessage::Run => {
-                self.task.run().await?;
+                self.task.run().await;
                 Ok(StreamTaskState {
                     vertex_id: self.task.vertex_id().to_string(),
                     status: self.task.get_status(),
                 })
             }
             StreamTaskMessage::Close => {
-                self.task.close_and_wait().await?;
+                self.task.close_and_wait().await;
                 Ok(StreamTaskState {
                     vertex_id: self.task.vertex_id().to_string(),
                     status: self.task.get_status(),

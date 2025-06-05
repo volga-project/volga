@@ -10,7 +10,7 @@ use super::word_count_source::WordCountSourceFunction;
 
 #[async_trait]
 pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
-    async fn fetch(&mut self) -> Result<Option<Message>>;
+    async fn fetch(&mut self) -> Option<Message>;
 }
 
 #[derive(Debug)]
@@ -21,7 +21,7 @@ pub enum SourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for SourceFunction {
-    async fn fetch(&mut self) -> Result<Option<Message>> {
+    async fn fetch(&mut self) -> Option<Message> {
         match self {
             SourceFunction::Vector(f) => f.fetch().await,
             SourceFunction::WordCount(f) => f.fetch().await,
@@ -42,13 +42,6 @@ impl FunctionTrait for SourceFunction {
         match self {
             SourceFunction::Vector(f) => f.close().await,
             SourceFunction::WordCount(f) => f.close().await,
-        }
-    }
-    
-    async fn finish(&mut self) -> Result<()> {
-        match self {
-            SourceFunction::Vector(f) => f.finish().await,
-            SourceFunction::WordCount(f) => f.finish().await,
         }
     }
     

@@ -42,12 +42,6 @@ impl FunctionTrait for SinkFunction {
         }
     }
     
-    async fn finish(&mut self) -> Result<()> {
-        match self {
-            SinkFunction::InMemoryStorageActor(f) => f.finish().await,
-        }
-    }
-    
     fn as_any(&self) -> &dyn Any {
         self
     }

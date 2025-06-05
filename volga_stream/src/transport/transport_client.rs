@@ -54,10 +54,6 @@ impl DataReader {
         }
     }
 
-    // pub fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<Message>) {
-    //     self.receivers.insert(channel_id, receiver);
-    // }
-
     pub async fn read_message(&mut self) -> Result<Option<Message>> {
         self.read_message_with_params(None, None).await
     }
@@ -113,7 +109,7 @@ impl DataReader {
 #[derive(Debug, Clone)]
 pub struct DataWriter {
     pub vertex_id: String,
-    senders: HashMap<String, mpsc::Sender<Message>>,
+    pub senders: HashMap<String, mpsc::Sender<Message>>,
     default_timeout: Duration,
     default_retries: usize,
 }
@@ -127,10 +123,6 @@ impl DataWriter {
             default_retries: 0,
         }
     }
-
-    // pub fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<Message>) {
-    //     self.senders.insert(channel_id, sender);
-    // }
 
     pub async fn write_message(&mut self, channel_id: &str, message: Message) -> Result<()> {
         self.write_message_with_params(channel_id, message, None, None).await
@@ -203,33 +195,9 @@ impl TransportClient {
             reader,
             writer,
         }
-
-        // Self {
-        //     vertex_id: vertex_id.clone(),
-        //     reader: config.reader_receivers.map(|receivers| DataReader::new(vertex_id.clone(), receivers)),
-        //     writer: config.writersenders.map(|senders| DataWriter::new(vertex_id.clone(), senders)),
-        // }
     }
 
     pub fn vertex_id(&self) -> &str {
         &self.vertex_id
     }
-
-    // pub async fn register_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<Message>) -> Result<()> {
-    //     if let Some(reader) = &mut self.reader {
-    //         reader.register_receiver(channel_id, receiver);
-    //         Ok(())
-    //     } else {
-    //         Err(anyhow!("Reader not initialized"))
-    //     }
-    // }
-
-    // pub async fn register_sender(&mut self, channel_id: String, sender: mpsc::Sender<Message>) -> Result<()> {
-    //     if let Some(writer) = &mut self.writer {
-    //         writer.register_sender(channel_id, sender);
-    //         Ok(())
-    //     } else {
-    //         Err(anyhow!("Writer not initialized"))
-    //     }
-    // }
 }

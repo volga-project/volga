@@ -17,7 +17,7 @@ use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 
 pub trait KeyByFunctionTrait: Send + Sync + fmt::Debug {
-    fn key_by(&self, batch: Message) -> Result<Vec<KeyedMessage>>;
+    fn key_by(&self, batch: Message) -> Vec<KeyedMessage>;
 }
 
 /// Generic key-by function that can be used for any key-by function
@@ -38,7 +38,7 @@ impl CustomKeyByFunction {
 }
 
 impl KeyByFunctionTrait for CustomKeyByFunction {
-    fn key_by(&self, batch: Message) -> Result<Vec<KeyedMessage>> {
+    fn key_by(&self, batch: Message) -> Vec<KeyedMessage> {
         self.function.key_by(batch)
     }
 }
@@ -55,7 +55,7 @@ impl ArrowKeyByFunction {
     }
 
     /// Fast lexicographic sort implementation using arrow-row
-    fn fast_lexsort_indices(&self, arrays: &[ArrayRef]) -> Result<UInt32Array> {
+    fn fast_lexsort_indices(&self, arrays: &[ArrayRef]) -> UInt32Array {
         // Create SortField objects for each array
         let fields: Vec<SortField> = arrays
             .iter()
@@ -63,28 +63,28 @@ impl ArrowKeyByFunction {
             .collect();
         
         // Create a RowConverter for the fields
-        let converter = RowConverter::new(fields)?;
+        let converter = RowConverter::new(fields).unwrap();
         
         // Convert columns to row format
-        let rows = converter.convert_columns(arrays)?;
+        let rows = converter.convert_columns(arrays).unwrap();
         
         // Sort the rows
         let mut indices: Vec<_> = rows.iter().enumerate().collect();
         indices.sort_by(|(_, a), (_, b)| a.cmp(b));
         
         // Create the UInt32Array of sorted indices
-        Ok(UInt32Array::from_iter_values(indices.iter().map(|(i, _)| *i as u32)))
+        UInt32Array::from_iter_values(indices.iter().map(|(i, _)| *i as u32))
     }
 }
 
 impl KeyByFunctionTrait for ArrowKeyByFunction {
-    fn key_by(&self, message: Message) -> Result<Vec<KeyedMessage>> {
+    fn key_by(&self, message: Message) -> Vec<KeyedMessage> {
         let record_batch = message.record_batch();
         let schema = record_batch.schema();
         
         // If batch is empty, return empty result
         if record_batch.num_rows() == 0 {
-            return Ok(Vec::new());
+            return Vec::new();
         }
         
         // Step 1: Identify the key columns
@@ -98,22 +98,22 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
                 key_fields.push(field.clone());
                 key_arrays.push(record_batch.column(idx).clone());
             } else {
-                return Err(anyhow::anyhow!("Key column '{}' not found", key_column));
+                panic!("Key column '{}' not found", key_column);
             }
         }
         
         // Step 2: Sort the data using arrow-row's fast sorting
-        let sorted_indices = self.fast_lexsort_indices(&key_arrays)?;
+        let sorted_indices = self.fast_lexsort_indices(&key_arrays);
         
         // Step 3: Create sorted arrays for all columns
         let mut sorted_columns = Vec::with_capacity(record_batch.num_columns());
         for i in 0..record_batch.num_columns() {
-            let sorted_array = compute::take(record_batch.column(i).as_ref(), &sorted_indices, None)?;
+            let sorted_array = compute::take(record_batch.column(i).as_ref(), &sorted_indices, None).unwrap();
             sorted_columns.push(sorted_array);
         }
         
         // Create a new sorted batch
-        let sorted_batch = RecordBatch::try_new(record_batch.schema(), sorted_columns)?;
+        let sorted_batch = RecordBatch::try_new(record_batch.schema(), sorted_columns).unwrap();
         
         // Step 4: Extract sorted key columns
         let sorted_key_arrays: Vec<ArrayRef> = key_column_indices
@@ -122,7 +122,7 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
             .collect();
         
         // Step 5: Use Arrow's partition function to find ranges with equal keys
-        let partitions = partition(&sorted_key_arrays)?;
+        let partitions = partition(&sorted_key_arrays).unwrap();
         let ranges = partitions.ranges();
         
         // Step 6: Create keyed batches for each partition
@@ -144,10 +144,10 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
             
             // Create key RecordBatch with a single row
             let key_schema = Arc::new(Schema::new(key_fields.clone()));
-            let key_batch = RecordBatch::try_new(key_schema, key_arrays_for_first_row)?;
+            let key_batch = RecordBatch::try_new(key_schema, key_arrays_for_first_row).unwrap();
             
             // Create Key object
-            let key = Key::new(key_batch)?;
+            let key = Key::new(key_batch).unwrap();
             
             // Create a KeyedDataBatch with this partition data
             let keyed_batch = KeyedMessage::new(
@@ -158,7 +158,7 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
             keyed_batches.push(keyed_batch);
         }
         
-        Ok(keyed_batches)
+        keyed_batches
     }
 }
 
@@ -169,7 +169,7 @@ pub enum KeyByFunction {
 }
 
 impl KeyByFunctionTrait for KeyByFunction {
-    fn key_by(&self, message: Message) -> Result<Vec<KeyedMessage>> {
+    fn key_by(&self, message: Message) -> Vec<KeyedMessage> {
         match self {
             KeyByFunction::Custom(function) => function.key_by(message),
             KeyByFunction::Arrow(function) => function.key_by(message),
@@ -193,17 +193,10 @@ impl KeyByFunction {
 #[async_trait]
 impl FunctionTrait for KeyByFunction {
     async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
-        // Default implementation does nothing
         Ok(())
     }
     
     async fn close(&mut self) -> Result<()> {
-        // Default implementation does nothing
-        Ok(())
-    }
-    
-    async fn finish(&mut self) -> Result<()> {
-        // Default implementation does nothing
         Ok(())
     }
     
@@ -244,7 +237,7 @@ mod tests {
         let key_by_function = ArrowKeyByFunction::new(vec!["id".to_string()]);
         
         // Execute key-by
-        let keyed_messages = key_by_function.key_by(message).unwrap();
+        let keyed_messages = key_by_function.key_by(message);
         
         // We should have 3 distinct keys (1, 2, 3)
         assert_eq!(keyed_messages.len(), 3);
@@ -319,7 +312,7 @@ mod tests {
         );
         
         // Execute key-by
-        let keyed_messages = key_by_function.key_by(message).unwrap();
+        let keyed_messages = key_by_function.key_by(message);
         
         // We should have 4 distinct keys: (1,1), (1,2), (2,1), (3,1)
         assert_eq!(keyed_messages.len(), 4);

@@ -66,7 +66,7 @@ impl WordCountSourceFunction {
             .collect()
     }
 
-    fn create_batch(&self, words: &[String]) -> Result<Message> {
+    fn create_batch(&self, words: &[String]) -> Message {
         let schema = Arc::new(Schema::new(vec![
             Field::new("word", arrow::datatypes::DataType::Utf8, false),
             Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
@@ -85,9 +85,9 @@ impl WordCountSourceFunction {
         let batch = arrow::record_batch::RecordBatch::try_new(
             schema,
             vec![Arc::new(word_array), Arc::new(timestamp_array)],
-        )?;
+        ).unwrap();
 
-        Ok(Message::new(None, batch))
+        Message::new(None, batch)
     }
 
     fn collect_words_for_batch(&mut self) -> Option<Vec<String>> {
@@ -153,10 +153,6 @@ impl FunctionTrait for WordCountSourceFunction {
     async fn close(&mut self) -> Result<()> {
         Ok(())
     }
-    
-    async fn finish(&mut self) -> Result<()> {
-        Ok(())
-    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -169,13 +165,13 @@ impl FunctionTrait for WordCountSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for WordCountSourceFunction {
-    async fn fetch(&mut self) -> Result<Option<Message>> {
+    async fn fetch(&mut self) -> Option<Message> {
         // Check if we should stop based on time
         if let Some(run_for_s) = self.run_for_s {
             if let Some(start_time) = self.start_time {
                 if start_time.elapsed().as_secs() >= run_for_s {
                     tokio::task::yield_now().await;
-                    return Ok(None);
+                    return None;
                 }
             }
         }
@@ -185,17 +181,17 @@ impl SourceFunctionTrait for WordCountSourceFunction {
             Some(words) => words,
             None => {
                 tokio::task::yield_now().await;
-                return Ok(None);
+                return None;
             }
         };
 
         // Create and return batch
-        let message = self.create_batch(&batch_words)?;
+        let message = self.create_batch(&batch_words);
         
         // Yield to other tasks
         tokio::task::yield_now().await;
         
-        Ok(Some(message))
+        Some(message)
     }
 }
 
@@ -224,7 +220,7 @@ mod tests {
         let mut messages = Vec::new();
         let mut word_counts = HashMap::new();
         
-        while let Some(message) = source.fetch().await.unwrap() {
+        while let Some(message) = source.fetch().await {
             let record_batch = message.record_batch();
             let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
             

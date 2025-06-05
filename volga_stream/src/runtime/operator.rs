@@ -31,13 +31,12 @@ pub enum OperatorType {
 pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
-    async fn finish(&mut self) -> Result<()>;
-    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
-        Err(anyhow::anyhow!("process_message not implemented for this operator"))
+    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
+        panic!("process_message not implemented for this operator")
     }
     fn operator_type(&self) -> OperatorType;
-    async fn fetch(&mut self) -> Result<Option<Message>> {
-        Err(anyhow::anyhow!("fetch not implemented for this operator"))
+    async fn fetch(&mut self) -> Option<Message> {
+        panic!("fetch not implemented for this operator")
     }
 }
 
@@ -75,79 +74,10 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn finish(&mut self) -> Result<()> {
-        match self {
-            Operator::Map(op) => op.finish().await,
-            Operator::Join(op) => op.finish().await,
-            Operator::Sink(op) => op.finish().await,
-            Operator::Source(op) => op.finish().await,
-            Operator::KeyBy(op) => op.finish().await,
-            Operator::Reduce(op) => op.finish().await,
-        }
-    }
-
-    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
+    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         match &message {
             Message::Watermark(watermark) => {
-                // Update watermark for the input channel
-                let channel_id = watermark.source_vertex_id.clone();
-                let watermark_value = watermark.watermark_value;
-                
-                match self {
-                    Operator::Map(op) => op.base.update_watermark(&channel_id, watermark_value)?,
-                    Operator::Join(op) => op.base.update_watermark(&channel_id, watermark_value)?,
-                    Operator::Sink(op) => op.base.update_watermark(&channel_id, watermark_value)?,
-                    Operator::Source(op) => op.base.update_watermark(&channel_id, watermark_value)?,
-                    Operator::KeyBy(op) => op.base.update_watermark(&channel_id, watermark_value)?,
-                    Operator::Reduce(op) => op.base.update_watermark(&channel_id, watermark_value)?,
-                }
-                
-                // Forward the watermark to downstream operators if it's new
-                let current_watermark = match self {
-                    Operator::Map(op) => op.base.get_current_watermark(),
-                    Operator::Join(op) => op.base.get_current_watermark(),
-                    Operator::Sink(op) => op.base.get_current_watermark(),
-                    Operator::Source(op) => op.base.get_current_watermark(),
-                    Operator::KeyBy(op) => op.base.get_current_watermark(),
-                    Operator::Reduce(op) => op.base.get_current_watermark(),
-                };
-
-                let last_forwarded = match self {
-                    Operator::Map(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
-                    Operator::Join(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
-                    Operator::Sink(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
-                    Operator::Source(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
-                    Operator::KeyBy(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
-                    Operator::Reduce(op) => op.base.last_forwarded_watermark.load(Ordering::SeqCst),
-                };
-
-                if current_watermark > last_forwarded {
-                    match self {
-                        Operator::Map(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
-                        Operator::Join(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
-                        Operator::Sink(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
-                        Operator::Source(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
-                        Operator::KeyBy(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
-                        Operator::Reduce(op) => op.base.last_forwarded_watermark.store(current_watermark, Ordering::SeqCst),
-                    }
-
-                    let runtime_context = match self {
-                        Operator::Map(op) => op.base.runtime_context.as_ref().unwrap(),
-                        Operator::Join(op) => op.base.runtime_context.as_ref().unwrap(),
-                        Operator::Sink(op) => op.base.runtime_context.as_ref().unwrap(),
-                        Operator::Source(op) => op.base.runtime_context.as_ref().unwrap(),
-                        Operator::KeyBy(op) => op.base.runtime_context.as_ref().unwrap(),
-                        Operator::Reduce(op) => op.base.runtime_context.as_ref().unwrap(),
-                    };
-
-                    let watermark = WatermarkMessage {
-                        source_vertex_id: runtime_context.vertex_id().to_string(),
-                        watermark_value: current_watermark,
-                    };
-                    Ok(Some(vec![Message::Watermark(watermark)]))
-                } else {
-                    Ok(None)
-                }
+                panic!("Watermark should not be processed for operator");
             }
             _ => {
                 // Process regular messages as before
@@ -174,7 +104,7 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn fetch(&mut self) -> Result<Option<Message>> {
+    async fn fetch(&mut self) -> Option<Message> {
         match self {
             Operator::Map(op) => op.fetch().await,
             Operator::Join(op) => op.fetch().await,
@@ -279,15 +209,6 @@ impl OperatorTrait for OperatorBase {
         Ok(())
     }
 
-    async fn finish(&mut self) -> Result<()> {
-        // If we have a function, finish it
-        if let Some(function) = &mut self.function {
-            function.finish().await?;
-        }
-        
-        Ok(())
-    }
-
     fn operator_type(&self) -> OperatorType {
         OperatorType::PROCESSOR
     }
@@ -312,18 +233,15 @@ impl OperatorTrait for MapOperator {
         self.base.open(context).await
     }
 
-    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
-        if let Some(function) = self.base.get_function_mut::<MapFunction>() {
-            let function = function.clone();
-            let message = message.clone();
+    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
+        let function = self.base.get_function_mut::<MapFunction>().unwrap();
+        let function = function.clone();
+        let message = message.clone();
 
-            self.base.thread_pool.spawn_fifo_async(move || {
-                let processed = function.map(message).unwrap();
-                Ok(Some(vec![processed]))
-            }).await
-        } else {
-            Err(anyhow::anyhow!("MapFunction not available"))
-        }
+        self.base.thread_pool.spawn_fifo_async(move || {
+            let processed = function.map(message).unwrap();
+            Some(vec![processed])
+        }).await
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -332,10 +250,6 @@ impl OperatorTrait for MapOperator {
 
     async fn close(&mut self) -> Result<()> {
         self.base.close().await
-    }
-
-    async fn finish(&mut self) -> Result<()> {
-        self.base.finish().await
     }
 }
 
@@ -366,11 +280,7 @@ impl OperatorTrait for JoinOperator {
         self.base.close().await
     }
 
-    async fn finish(&mut self) -> Result<()> {
-        self.base.finish().await
-    }
-
-    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
+    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         // TODO proper lookup for upstream_vertex_id position (left or right)
         if let Some(upstream_id) = message.upstream_vertex_id() {
             if upstream_id.contains("left") {
@@ -379,7 +289,7 @@ impl OperatorTrait for JoinOperator {
                 self.right_buffer.push(message.clone());
             }
         }
-        Ok(Some(vec![message]))
+        Some(vec![message])
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -411,19 +321,11 @@ impl OperatorTrait for SinkOperator {
         self.base.close().await
     }
 
-    async fn finish(&mut self) -> Result<()> {
-        self.base.finish().await
-    }
-
-    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
+    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         // println!("SinkOperator process_message {:?}", message);
-        if let Some(function) = self.base.get_function_mut::<SinkFunction>() {
-            function.sink(message.clone()).await?;
-            Ok(Some(vec![message]))
-            // Ok(None)
-        } else {
-            Err(anyhow::anyhow!("SinkFunction not available"))
-        }
+        let function = self.base.get_function_mut::<SinkFunction>().unwrap();
+        function.sink(message.clone()).await;
+        Some(vec![message])
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -455,20 +357,13 @@ impl OperatorTrait for SourceOperator {
         self.base.close().await
     }
 
-    async fn finish(&mut self) -> Result<()> {
-        self.base.finish().await
-    }
-
     fn operator_type(&self) -> OperatorType {
         OperatorType::SOURCE
     }
 
-    async fn fetch(&mut self) -> Result<Option<Message>> {
-        if let Some(function) = self.base.get_function_mut::<SourceFunction>() {
-            function.fetch().await
-        } else {
-            Err(anyhow::anyhow!("SourceFunction not available"))
-        }
+    async fn fetch(&mut self) -> Option<Message> {
+        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
+        function.fetch().await
     }
 }
 
@@ -491,22 +386,19 @@ impl OperatorTrait for KeyByOperator {
         self.base.open(context).await
     }
 
-    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
-        if let Some(function) = self.base.get_function_mut::<KeyByFunction>() {
-            let function = function.clone();
-            let message = message.clone();
+    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
+        let function = self.base.get_function_mut::<KeyByFunction>().unwrap();
+        let function = function.clone();
+        let message = message.clone();
 
-            self.base.thread_pool.spawn_fifo_async(move || {
-                let keyed_messages = function.key_by(message)?;
-                // Convert
-                let messages = keyed_messages.into_iter()
-                    .map(Message::Keyed)
-                    .collect();
-                Ok(Some(messages))
-            }).await
-        } else {
-            Err(anyhow::anyhow!("KeyByFunction not available"))
-        }
+        self.base.thread_pool.spawn_fifo_async(move || {
+            let keyed_messages = function.key_by(message);
+            // Convert
+            let messages = keyed_messages.into_iter()
+                .map(Message::Keyed)
+                .collect();
+            Some(messages)
+        }).await
     }
 
     fn operator_type(&self) -> OperatorType {
@@ -515,10 +407,6 @@ impl OperatorTrait for KeyByOperator {
 
     async fn close(&mut self) -> Result<()> {
         self.base.close().await
-    }
-
-    async fn finish(&mut self) -> Result<()> {
-        self.base.finish().await
     }
 }
 
@@ -549,13 +437,7 @@ impl OperatorTrait for ReduceOperator {
         self.base.close().await
     }
 
-    async fn finish(&mut self) -> Result<()> {
-        self.base.finish().await
-    }
-
-    async fn process_message(&mut self, message: Message) -> Result<Option<Vec<Message>>> {
-        println!("ReduceOperator process_message {:?}", message);
-        
+    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         // Explicitly check and handle only KeyedMessage
         match message {
             Message::Keyed(keyed_message) => {
@@ -564,17 +446,16 @@ impl OperatorTrait for ReduceOperator {
                 // Check if we need to create a new accumulator or update an existing one
                 let acc_exists = self.accumulators.contains_key(&key);
                 
-                let function = self.base.get_function_mut::<ReduceFunction>()
-                    .ok_or_else(|| anyhow::anyhow!("ReduceFunction not available"))?;
+                let function = self.base.get_function_mut::<ReduceFunction>().unwrap();
 
                 if !acc_exists {
                     // Create a new accumulator
-                    self.accumulators.insert(key.clone(), Arc::new(Mutex::new(function.create_accumulator()?)));
+                    self.accumulators.insert(key.clone(), Arc::new(Mutex::new(function.create_accumulator())));
                 }
                 
                 // Now that we've updated the accumulator, get the result
                 let acc = self.accumulators.get_mut(&key)
-                    .ok_or_else(|| anyhow::anyhow!("Accumulator not found"))?;
+                    .unwrap();
                 
                 let keyed_message = keyed_message.clone();
                 let function = function.clone();
@@ -583,16 +464,16 @@ impl OperatorTrait for ReduceOperator {
                 
                 let result = self.base.thread_pool.spawn_fifo_async(move || {
                     let mut acc = acc.lock().unwrap();
-                    function.update_accumulator(&mut acc, &keyed_message)?;
-                    let agg_result = function.get_result(&acc)?;
-                    let result_message = result_extractor.extract_result(&key, &agg_result)?;
-                    Ok::<Option<Vec<Message>>, anyhow::Error>(Some(vec![result_message]))
-                }).await?;
+                    function.update_accumulator(&mut acc, &keyed_message);
+                    let agg_result = function.get_result(&acc);
+                    let result_message = result_extractor.extract_result(&key, &agg_result);
+                    Some(vec![result_message])
+                }).await;
 
-                return Ok(result);
+                return result;
             },
             _ => {
-                Err(anyhow::anyhow!("ReduceOperator requires KeyedMessage input"))
+                panic!("ReduceOperator requires KeyedMessage input")
             }
         }
     }

@@ -149,11 +149,6 @@ impl FunctionTrait for InMemoryStorageActorSinkFunction {
         Ok(())
     }
     
-    async fn finish(&mut self) -> Result<()> {
-        // Same as close for this implementation
-        self.close().await
-    }
-    
     fn as_any(&self) -> &dyn Any {
         self
     }

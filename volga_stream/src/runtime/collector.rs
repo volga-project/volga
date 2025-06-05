@@ -8,7 +8,7 @@ use futures::future::join_all;
 
 #[derive(Clone)]
 pub struct Collector {
-    data_writer: DataWriter,
+    pub data_writer: DataWriter,
     output_channel_ids: Vec<String>,
     partition: Partition,
 }
@@ -37,31 +37,31 @@ impl Collector {
         self.output_channel_ids.clone()
     }
 
-    pub async fn collect_message(&mut self, message: Message, channel_ids_to_send: Option<Vec<String>>) -> Result<Vec<String>> {
+    pub async fn collect_message(&mut self, message: Message, channel_ids_to_send: Option<Vec<String>>) -> Vec<String> {
         let num_partitions = self.output_channel_ids.len();
         // println!("Num partitions {:?}", num_partitions);
-        let mut partitioned_messages: Vec<Message> = vec![message.clone(); num_partitions];
+        // let mut partitioned_messages: Vec<Message> = vec![message.clone(); num_partitions];
         
         // Use BroadcastPartition for watermark messages, otherwise use the configured partition strategy
         let partitions = if let Message::Watermark(_) = &message {
-            crate::runtime::partition::BroadcastPartition::new().partition(&message, num_partitions)?
+            crate::runtime::partition::BroadcastPartition::new().partition(&message, num_partitions)
         } else {
-            self.partition.partition(&message, num_partitions)?
+            self.partition.partition(&message, num_partitions)
         };
 
-        for partition_idx in partitions {
-            partitioned_messages[partition_idx] = message.clone();
-        }
+        // for partition_idx in partitions {
+        //     partitioned_messages[partition_idx] = message.clone();
+        // }
 
         let vertex_id = self.data_writer.vertex_id.clone();
 
         // println!("Collector {:?} collect message", vertex_id);
 
         // Create channel to partition mapping
-        let channel_to_partition: HashMap<_, _> = self.output_channel_ids.iter()
-            .enumerate()
-            .map(|(idx, channel_id)| (channel_id.clone(), idx))
-            .collect();
+        // let channel_to_partition: HashMap<_, _> = self.output_channel_ids.iter()
+        //     .enumerate()
+        //     .map(|(idx, channel_id)| (channel_id.clone(), idx))
+        //     .collect();
 
         // Use provided channel IDs or default to all output channels
         let channels_to_send = channel_ids_to_send.unwrap_or_else(|| self.output_channel_ids.clone());
@@ -69,18 +69,18 @@ impl Collector {
         // Create futures for parallel writes
         let mut write_futures = Vec::new();
         for channel_id in channels_to_send {
-            if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
-                let partition_message = partitioned_messages[partition_idx].clone();
-                
-                let mut writer = self.data_writer.clone();
-                let channel_id_clone = channel_id.clone();
-                write_futures.push(async move {
-                    match writer.write_message(&channel_id_clone, partition_message).await {
-                        Ok(_) => Ok(channel_id_clone),
-                        Err(_) => Err(anyhow::anyhow!("Failed to write message"))
-                    }
-                });
-            }
+            // if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
+            let partition_message = message.clone();
+            
+            let mut writer = self.data_writer.clone();
+            let channel_id_clone = channel_id.clone();
+            write_futures.push(async move {
+                match writer.write_message(&channel_id_clone, partition_message).await {
+                    Ok(_) => Ok(channel_id_clone),
+                    Err(_) => Err(anyhow::anyhow!("Failed to write message"))
+                }
+            });
+            // }
         }
 
         // Execute all writes in parallel
@@ -92,6 +92,6 @@ impl Collector {
             .collect();
 
         // println!("Collector {:?} successful channels {:?}", vertex_id, successful_channels);
-        Ok(successful_channels)
+        successful_channels
     }
 }

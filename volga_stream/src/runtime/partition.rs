@@ -3,7 +3,7 @@ use crate::common::message::Message;
 use std::fmt;
 
 pub trait PartitionTrait: Send + Sync + fmt::Debug {
-    fn partition(&mut self, batch: &Message, num_partitions: usize) -> Result<Vec<usize>>;
+    fn partition(&mut self, batch: &Message, num_partitions: usize) -> Vec<usize>;
 }
 
 #[derive(Debug, Clone)]
@@ -23,7 +23,7 @@ pub enum Partition {
 }
 
 impl PartitionTrait for Partition {
-    fn partition(&mut self, message: &Message, num_partitions: usize) -> Result<Vec<usize>> {
+    fn partition(&mut self, message: &Message, num_partitions: usize) -> Vec<usize> {
         match self {
             Partition::Broadcast(p) => p.partition(message, num_partitions),
             Partition::Hash(p) => p.partition(message, num_partitions),
@@ -54,8 +54,8 @@ impl BroadcastPartition {
 }
 
 impl PartitionTrait for BroadcastPartition {
-    fn partition(&mut self, _message: &Message, num_partitions: usize) -> Result<Vec<usize>> {
-        Ok((0..num_partitions).collect())
+    fn partition(&mut self, _message: &Message, num_partitions: usize) -> Vec<usize> {
+        (0..num_partitions).collect()
     }
 }
 
@@ -69,10 +69,12 @@ impl HashPartition {
 }
 
 impl PartitionTrait for HashPartition {
-    fn partition(&mut self, message: &Message, num_partitions: usize) -> Result<Vec<usize>> {
-        let key = message.key()?;
+    fn partition(&mut self, message: &Message, num_partitions: usize) -> Vec<usize> {
+        let key = message.key().unwrap();
         let hash = key.hash();
-        Ok(vec![(hash % num_partitions as u64) as usize])
+        let partition = (hash % num_partitions as u64) as usize;
+        // println!("Hash partition: {}, num_partitions: {}", partition, num_partitions);
+        vec![partition]
     }
 }
 
@@ -88,10 +90,11 @@ impl RoundRobinPartition {
 }
 
 impl PartitionTrait for RoundRobinPartition {
-    fn partition(&mut self, _message: &Message, num_partitions: usize) -> Result<Vec<usize>> {
+    fn partition(&mut self, _message: &Message, num_partitions: usize) -> Vec<usize> {
         let partition = self.counter % num_partitions;
         self.counter += 1;
-        Ok(vec![partition])
+        println!("RoundRobin partition: {}, num_partitions: {}", partition, num_partitions);
+        vec![partition]
     }
 }
 
@@ -105,10 +108,10 @@ impl ForwardPartition {
 }
 
 impl PartitionTrait for ForwardPartition {
-    fn partition(&mut self, _message: &Message, num_partitions: usize) -> Result<Vec<usize>> {
+    fn partition(&mut self, _message: &Message, num_partitions: usize) -> Vec<usize> {
         if num_partitions != 1 {
-            return Err(Error::msg("Forward partition requires exactly one partition"));
+            panic!("Forward partition requires exactly one partition");
         }
-        Ok(vec![0])
+        vec![0]
     }
 }

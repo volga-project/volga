@@ -67,11 +67,6 @@ impl FunctionTrait for MapFunction {
         Ok(())
     }
     
-    async fn finish(&mut self) -> Result<()> {
-        // Default implementation does nothing
-        Ok(())
-    }
-    
     fn as_any(&self) -> &dyn Any {
         self
     }

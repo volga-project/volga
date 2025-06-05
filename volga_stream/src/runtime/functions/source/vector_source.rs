@@ -48,10 +48,6 @@ impl FunctionTrait for VectorSourceFunction {
         self.channel.take();
         Ok(())
     }
-    
-    async fn finish(&mut self) -> Result<()> {
-        Ok(())
-    }
 
     fn as_any(&self) -> &dyn Any {
         self
@@ -64,12 +60,12 @@ impl FunctionTrait for VectorSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for VectorSourceFunction {
-    async fn fetch(&mut self) -> Result<Option<Message>> {
+    async fn fetch(&mut self) -> Option<Message> {
         if let Some(receiver) = &mut self.channel {
             match timeout(Duration::from_millis(1), receiver.recv()).await {
-                Ok(Some(message)) => Ok(Some(message)),
+                Ok(Some(message)) => Some(message),
                 Ok(None) => panic!("VectorSourceFunction channel closed"),
-                Err(_) => Ok(None),   // Timeout
+                Err(_) => None,   // Timeout
             }
         } else {
             panic!("VectorSourceFunction channel not inited")
