@@ -1,4 +1,3 @@
-use anyhow::Result;
 use crate::common::message::Message;
 use std::collections::HashMap;
 use crate::transport::transport_client::DataWriter;
@@ -6,9 +5,10 @@ use crate::runtime::partition::Partition;
 use crate::runtime::partition::PartitionTrait;
 use futures::future::join_all;
 
+// Routes messages to multiple channels based on the partition strategy
 #[derive(Clone)]
 pub struct Collector {
-    pub data_writer: DataWriter,
+    data_writer: DataWriter,
     output_channel_ids: Vec<String>,
     partition: Partition,
 }
@@ -37,10 +37,10 @@ impl Collector {
         self.output_channel_ids.clone()
     }
 
-    pub async fn collect_message(&mut self, message: Message, channel_ids_to_send: Option<Vec<String>>) -> Vec<String> {
+    // generate which channels the message goes to
+    // Note: calling this updates partition state - do not call for the same message twice
+    pub fn gen_partitioned_channel_ids(&mut self, message: Message) -> Vec<String> {
         let num_partitions = self.output_channel_ids.len();
-        // println!("Num partitions {:?}", num_partitions);
-        // let mut partitioned_messages: Vec<Message> = vec![message.clone(); num_partitions];
         
         // Use BroadcastPartition for watermark messages, otherwise use the configured partition strategy
         let partitions = if let Message::Watermark(_) = &message {
@@ -49,49 +49,54 @@ impl Collector {
             self.partition.partition(&message, num_partitions)
         };
 
-        // for partition_idx in partitions {
-        //     partitioned_messages[partition_idx] = message.clone();
-        // }
+        partitions.iter().map(|partition_idx| self.output_channel_ids[*partition_idx].clone()).collect()
+    }
 
-        let vertex_id = self.data_writer.vertex_id.clone();
-
-        // println!("Collector {:?} collect message", vertex_id);
-
-        // Create channel to partition mapping
-        // let channel_to_partition: HashMap<_, _> = self.output_channel_ids.iter()
-        //     .enumerate()
-        //     .map(|(idx, channel_id)| (channel_id.clone(), idx))
-        //     .collect();
-
-        // Use provided channel IDs or default to all output channels
-        let channels_to_send = channel_ids_to_send.unwrap_or_else(|| self.output_channel_ids.clone());
-
-        // Create futures for parallel writes
+    async fn write_message_to_channels(&mut self, message: Message, channel_ids_to_send: Vec<String>) -> HashMap<String, (bool, u32)> {
+        
+        // parallel write
         let mut write_futures = Vec::new();
-        for channel_id in channels_to_send {
-            // if let Some(&partition_idx) = channel_to_partition.get(&channel_id) {
+        for channel_id in channel_ids_to_send.clone() {
             let partition_message = message.clone();
             
             let mut writer = self.data_writer.clone();
             let channel_id_clone = channel_id.clone();
             write_futures.push(async move {
-                match writer.write_message(&channel_id_clone, partition_message).await {
-                    Ok(_) => Ok(channel_id_clone),
-                    Err(_) => Err(anyhow::anyhow!("Failed to write message"))
-                }
+                return writer.write_message(&channel_id_clone, partition_message).await;
             });
-            // }
         }
-
-        // Execute all writes in parallel
         let results = join_all(write_futures).await;
         
-        // Collect successful channel IDs
-        let successful_channels: Vec<String> = results.into_iter()
-            .filter_map(|result| result.ok())
-            .collect();
+        let mut channel_results = HashMap::new();
+        for (i, (success, backpressure_time_ms)) in results.into_iter().enumerate() {
+            channel_results.insert(channel_ids_to_send[i].clone(), (success, backpressure_time_ms));
+        }
+        channel_results
+    }
 
-        // println!("Collector {:?} successful channels {:?}", vertex_id, successful_channels);
-        successful_channels
+    pub async fn write_message_to_operators(
+        collectors: &mut HashMap<String, Collector>,
+        message: Message,
+        channels_per_operator: HashMap<String, Vec<String>>
+    ) -> HashMap<String, HashMap<String, (bool, u32)>> {
+        let mut futures = Vec::new();
+        for (operator_id, collector) in collectors.iter_mut() {
+            let message_clone = message.clone();
+            let operator_id = operator_id.clone();
+            let channels = channels_per_operator.get(&operator_id).unwrap().clone();
+            
+            futures.push(async move {
+                (operator_id, collector.write_message_to_channels(message_clone, channels).await)
+            });
+        }
+        
+        let results = join_all(futures).await;
+        
+        let mut res = HashMap::new();
+        for (operator_id, write_results) in results {
+            res.insert(operator_id, write_results);
+        }
+        
+        res
     }
 }

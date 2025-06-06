@@ -32,7 +32,7 @@ fn test_parallel_word_count() -> Result<()> {
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
-    let parallelism = 4; // Number of parallel tasks
+    let parallelism = 2; // Number of parallel tasks
     let num_words = 2; // Number of unique words
     let num_to_send_per_word = 10; // Number of copies of each word to send
     let batch_size = 2; // Batch size

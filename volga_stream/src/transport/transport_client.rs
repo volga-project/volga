@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use ordered_float::Float;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use crate::common::message::Message;
@@ -124,38 +125,32 @@ impl DataWriter {
         }
     }
 
-    pub async fn write_message(&mut self, channel_id: &str, message: Message) -> Result<()> {
-        self.write_message_with_params(channel_id, message, None, None).await
+    pub async fn write_message(&mut self, channel_id: &str, message: Message) -> (bool, u32) {
+        self.write_message_with_params(channel_id, message, self.default_timeout, self.default_retries).await
     }
 
     pub async fn write_message_with_params(
         &mut self,
         channel_id: &str,
         message: Message,
-        timeout_duration: Option<Duration>,
-        retries: Option<usize>
-    ) -> Result<()> {
-        let timeout_duration = timeout_duration.unwrap_or(self.default_timeout);
-        let retries = retries.unwrap_or(self.default_retries);
+        timeout_duration: Duration,
+        retries: usize
+    ) -> (bool, u32) {
         let mut attempts = 0;
+        let start_time = std::time::Instant::now();
 
         while attempts <= retries {
             if self.senders.is_empty() {
-                println!("DataWriter {:?} no channels registered", self.vertex_id);
-                return Err(anyhow!("Attempted to write message to DataWriter with no channels registered"));
+                panic!("DataWriter {:?} no channels registered", self.vertex_id);
             }
             
             if let Some(sender) = self.senders.get(channel_id) {
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {
-                        // println!("{} DataWriter {:?} wrote message: {:?}", timestamp(), self.vertex_id, message);
-                        
-                        // println!("DataWriter {:?} wrote message: {:?}", self.vertex_id, message);
-                        return Ok(());
+                        return (true, start_time.elapsed().as_millis() as u32)
                     }
                     Ok(Err(_)) => {
-                        println!("DataWriter {:?} channel {} closed", self.vertex_id, channel_id);
-                        return Err(anyhow!("Channel {} closed", channel_id));
+                        panic!("DataWriter {:?} channel {} closed", self.vertex_id, channel_id);
                     }
                     Err(_) => {
                         println!("DataWriter {:?} timeout", self.vertex_id);
@@ -164,10 +159,11 @@ impl DataWriter {
                     }
                 }
             } else {
-                return Err(anyhow!("Channel {} not found", channel_id));
+                panic!("DataWriter {:?} channel {} not found", self.vertex_id, channel_id);
             }
         }
-        Err(anyhow!("Failed to write message after {} retries", retries))
+    
+        (false, start_time.elapsed().as_millis() as u32)
     }
 }
 

@@ -76,42 +76,6 @@ impl StreamTask {
         }
     }
 
-    // TODO retrying collect() updates partition state - fix this
-    async fn collect_message_parallel(
-        collectors: &mut HashMap<String, Collector>,
-        message: Message,
-        channels_to_send: Option<HashMap<String, Vec<String>>>
-    ) -> HashMap<String, Vec<String>> {
-        let mut futures = Vec::new();
-        for (collector_id, collector) in collectors.iter_mut() {
-            let message_clone = message.clone();
-            let collector_id = collector_id.clone();
-            let channels = channels_to_send.as_ref()
-                .and_then(|map| map.get(&collector_id).cloned());
-            
-            futures.push(async move {
-                let result = collector.collect_message(message_clone, channels).await;
-                Ok::<_, anyhow::Error>((collector_id, result))
-            });
-        }
-        
-        let results = join_all(futures).await;
-        
-        let mut successful_channels = HashMap::new();
-        for result in results {
-            match result {
-                Ok((id, channels)) => {
-                    successful_channels.insert(id, channels);
-                },
-                Err(e) => {
-                    println!("Error collecting message: {:?}", e);
-                }
-            }
-        }
-        
-        successful_channels
-    }
-
     pub fn get_status(&self) -> StreamTaskStatus {
         StreamTaskStatus::from(self.status.load(Ordering::SeqCst))
     }
@@ -163,7 +127,7 @@ impl StreamTask {
             
             let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
             
-            let mut collectors: HashMap<String, Collector> = HashMap::new();
+            let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
             let (_, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
 
@@ -177,7 +141,7 @@ impl StreamTask {
             
                 let partition = partition_type.create();
                 
-                let collector = collectors.entry(target_operator_id).or_insert_with(|| {
+                let collector = collectors_per_target_operator.entry(target_operator_id).or_insert_with(|| {
                     Collector::new(
                         writer.clone(),
                         partition,
@@ -259,54 +223,45 @@ impl StreamTask {
                     continue;
                 }
 
-                if collectors.len() == 0 {
+                if collectors_per_target_operator.len() == 0 {
                     // TODO assert it is sink
-                    // println!("StreamTask {:?} no collectors, skipping message", vertex_id);
                     continue;
                 }
                 
                 let messages = messages.unwrap();
                 
                 for message in messages {
-                    let mut channels_to_retry = HashMap::new();
-                    for (collector_id, collector) in &collectors {
-                        channels_to_retry.insert(collector_id.clone(), collector.output_channel_ids());
+                    let mut channels_to_send_per_operator = HashMap::new();
+                    for (target_operator_id, collector) in &mut collectors_per_target_operator {
+                        let partitioned_channel_ids = collector.gen_partitioned_channel_ids(message.clone());
+                        channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channel_ids);
                     }
-                
 
-                    // TODO retrying collect() updates partition state - fix this
-
-                    let mut retries_before_close = 3;
-                    // if vertex_id.contains("sink") {
-                    //     println!("StreamTask {:?} retries before close {:?}", vertex_id, retries_before_close);
-                    // }
-                    while !channels_to_retry.is_empty() {
-                        if status.load(Ordering::SeqCst) != StreamTaskStatus::Running as u8 && retries_before_close <= 0 {
-                            break;
-                        }
-                        
-                        let successful_channels = Self::collect_message_parallel(
-                            &mut collectors, 
+                    // send message to all destinations until no backpressure
+                    // TODO track backpreessure stats
+                    while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
+                        let write_results = Collector::write_message_to_operators(
+                            &mut collectors_per_target_operator, 
                             message.clone(), 
-                            Some(channels_to_retry.clone())
+                            channels_to_send_per_operator.clone()
                         ).await;
                         
-                        channels_to_retry.clear();
-                        for (collector_id, successful) in successful_channels {
-                            if let Some(collector) = collectors.get(&collector_id) {
-                                let unsuccessful: Vec<String> = collector.output_channel_ids()
-                                    .into_iter()
-                                    .filter(|channel| !successful.contains(channel))
-                                    .collect();
-                                    
-                                if !unsuccessful.is_empty() {
-                                    channels_to_retry.insert(collector_id, unsuccessful);
+                        channels_to_send_per_operator.clear();
+                        for (target_operator_id, write_res) in write_results {
+                            let mut resend_channels = vec![];
+                            for channel_id in write_res.keys() {
+                                let (success, backpressure_time_ms) = write_res.get(channel_id).unwrap();
+                                if !success {
+                                    resend_channels.push(channel_id.clone());
                                 }
                             }
+                            if !resend_channels.is_empty() {
+                                channels_to_send_per_operator.insert(target_operator_id.clone(), resend_channels);
+                            }
                         }
-                        
-                        retries_before_close -= 1;
-                        // println!("StreamTask {:?} retries before close {:?}", vertex_id, retries_before_close);
+                        if channels_to_send_per_operator.len() == 0 {
+                            break;
+                        }
                     }
                 }
             }

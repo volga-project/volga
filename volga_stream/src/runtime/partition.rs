@@ -93,7 +93,6 @@ impl PartitionTrait for RoundRobinPartition {
     fn partition(&mut self, _message: &Message, num_partitions: usize) -> Vec<usize> {
         let partition = self.counter % num_partitions;
         self.counter += 1;
-        println!("RoundRobin partition: {}, num_partitions: {}", partition, num_partitions);
         vec![partition]
     }
 }
