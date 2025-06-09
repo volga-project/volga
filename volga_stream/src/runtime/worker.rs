@@ -1,12 +1,66 @@
 use crate::{runtime::{
-    execution_graph::ExecutionGraph, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+    execution_graph::ExecutionGraph, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus, StreamTaskMetrics}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
 }, transport::{InMemoryTransportBackend, TransportBackend}};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::collections::HashMap;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
+
+#[derive(Debug, Clone)]
+pub struct WorkerState {
+    pub task_statuses: HashMap<String, StreamTaskStatus>,
+    pub task_metrics: HashMap<String, StreamTaskMetrics>,
+    pub aggregated_metrics: AggregatedMetrics,
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregatedMetrics {
+    pub total_messages: u64,
+    pub total_records: u64,
+    pub latency_histogram: Vec<u64>, // Combined histogram from all tasks
+}
+
+impl AggregatedMetrics {
+    pub fn new() -> Self {
+        Self {
+            total_messages: 0,
+            total_records: 0,
+            latency_histogram: vec![0, 0, 0, 0, 0], // 5 buckets
+        }
+    }
+
+    pub fn aggregate_from_sink_metrics(&mut self, sink_metrics: &[StreamTaskMetrics]) {
+        self.total_messages = 0;
+        self.total_records = 0;
+        self.latency_histogram = vec![0, 0, 0, 0, 0];
+
+        for metrics in sink_metrics {
+            self.total_messages += metrics.num_messages;
+            self.total_records += metrics.num_records;
+            
+            for (i, &count) in metrics.latency_histogram.iter().enumerate() {
+                self.latency_histogram[i] += count;
+            }
+        }
+    }
+}
+
+impl WorkerState {
+    pub fn new() -> Self {
+        Self {
+            task_statuses: HashMap::new(),
+            task_metrics: HashMap::new(),
+            aggregated_metrics: AggregatedMetrics::new(),
+        }
+    }
+
+    pub fn all_tasks_closed(&self) -> bool {
+        self.task_statuses.values().all(|status| *status == StreamTaskStatus::Closed)
+    }
+}
 
 pub struct Worker {
     graph: ExecutionGraph,
@@ -16,6 +70,9 @@ pub struct Worker {
     task_runtimes: HashMap<String, Runtime>,
     backend_runtime: Option<Runtime>,
     num_io_threads: usize,
+    state: Arc<std::sync::Mutex<WorkerState>>,
+    running: Arc<AtomicBool>,
+    polling_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -32,6 +89,48 @@ impl Worker {
             task_runtimes: HashMap::new(),
             backend_runtime: None,
             num_io_threads,
+            state: Arc::new(std::sync::Mutex::new(WorkerState::new())),
+            running: Arc::new(AtomicBool::new(false)),
+            polling_handle: None,
+        }
+    }
+
+    async fn tasks_state_polling_loop(
+        running: Arc<AtomicBool>,
+        task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
+        graph: ExecutionGraph,
+        state: Arc<std::sync::Mutex<WorkerState>>,
+    ) {
+        while running.load(Ordering::SeqCst) {
+            // Collect states and metrics from all tasks
+            let mut task_statuses = HashMap::new();
+            let mut task_metrics = HashMap::new();
+            let mut sink_metrics = Vec::new();
+
+            for (vertex_id, task_ref) in &task_actors {
+                if let Ok(state) = task_ref.ask(StreamTaskMessage::GetState).await {
+                    task_statuses.insert(vertex_id.clone(), state.status.clone());
+                    task_metrics.insert(vertex_id.clone(), state.metrics.clone());
+                    
+                    // Check if this is a sink vertex
+                    if let Some(operator_type) = graph.get_vertex_type(vertex_id) {
+                        if operator_type == crate::runtime::operator::OperatorType::SINK {
+                            sink_metrics.push(state.metrics);
+                        }
+                    }
+                }
+            }
+
+            // Update shared WorkerState
+            {
+                let mut state_guard = state.lock().unwrap();
+                state_guard.task_statuses = task_statuses;
+                state_guard.task_metrics = task_metrics;
+                state_guard.aggregated_metrics.aggregate_from_sink_metrics(&sink_metrics);
+            } // Release lock before sleep
+
+            // Sleep before next poll
+            sleep(Duration::from_millis(1000)).await;
         }
     }
 
@@ -114,11 +213,27 @@ impl Worker {
             Ok::<(), anyhow::Error>(())
         }).unwrap();
 
+        // Start tasks state polling loop
+        self.running.store(true, Ordering::SeqCst);
+        let running = self.running.clone();
+        let task_actors = self.task_actors.clone();
+        let graph = self.graph.clone();
+        let shared_state = self.state.clone();
+        
+        let polling_handle = tokio::spawn(async move {
+            Self::tasks_state_polling_loop(running, task_actors, graph, shared_state).await;
+        });
+
+        self.polling_handle = Some(polling_handle);
+
         println!("Started worker");
     }
 
     pub fn close(&mut self) {
         println!("Closing worker");
+
+        // Stop polling first
+        self.running.store(false, Ordering::SeqCst);
 
         // Close all tasks in parallel
         let mut close_futures = Vec::new();
@@ -145,6 +260,15 @@ impl Worker {
             }).unwrap();
         }
 
+        // Wait for polling task to finish
+        if let Some(handle) = self.polling_handle.take() {
+            tokio::runtime::Runtime::new().unwrap().block_on(async {
+                if let Err(e) = handle.await {
+                    eprintln!("Polling task failed: {:?}", e);
+                }
+            });
+        }
+
         // Shutdown all runtimes
         for (vertex_id, runtime) in self.task_runtimes.drain() {
             println!("Shutting down runtime for task {}", vertex_id);
@@ -160,46 +284,34 @@ impl Worker {
         println!("Closed worker");
     }
 
-    async fn wait_for_completion(&self) {
-        let mut all_closed = false;
-        while !all_closed {
-            // Create futures for all task state checks
-            let state_futures: Vec<_> = self.task_actors.iter()
-                .map(|(vertex_id, task_ref)| {
-                    let task_ref = task_ref.clone();
-                    let vertex_id = vertex_id.clone();
-                    async move {
-                        let state = task_ref.ask(StreamTaskMessage::GetState).await?;
-                        Ok::<_, anyhow::Error>((vertex_id, state))
-                    }
-                })
-                .collect();
-
-            // Wait for all state checks to complete in parallel
-            let states = join_all(state_futures).await;
-            
-            // Check if any task is not closed
-            all_closed = true;
-            for result in states {
-                match result {
-                    Ok((vertex_id, state)) => {
-                        println!("Task {} is in state {:?}", vertex_id, state.status);
-                        if state.status != StreamTaskStatus::Closed {
-                            all_closed = false;
-                        }
-                    }
-                    Err(e) => {
-                        println!("Error getting task state: {}", e);
-                        all_closed = false;
-                    }
-                }
+    async fn wait_for_completion(&mut self) {
+        // Wait for completion by checking the shared state
+        while self.running.load(Ordering::SeqCst) {
+            let all_tasks_closed = {
+                let state_guard = self.state.lock().unwrap();
+                state_guard.all_tasks_closed()
+            };
+            if all_tasks_closed {
+                break;
             }
+            sleep(Duration::from_millis(100)).await;
+        }
 
-            if !all_closed {
-                sleep(Duration::from_millis(1000)).await;
+        // Stop polling
+        self.running.store(false, Ordering::SeqCst);
+        
+        // Wait for polling task to finish
+        if let Some(handle) = self.polling_handle.take() {
+            if let Err(e) = handle.await {
+                eprintln!("Polling task failed: {:?}", e);
             }
         }
+        
         println!("All tasks have completed");
+    }
+
+    pub fn get_state(&self) -> WorkerState {
+        self.state.lock().unwrap().clone()
     }
 
     pub fn execute(&mut self) {

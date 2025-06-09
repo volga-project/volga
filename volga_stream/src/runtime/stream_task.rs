@@ -7,7 +7,6 @@ use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{Ordering, AtomicU8}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
-use futures::future::join_all;
 use std::collections::HashSet;
 use std::sync::Mutex;
 
@@ -28,9 +27,48 @@ pub enum StreamTaskStatus {
 }
 
 #[derive(Debug, Clone)]
+pub struct StreamTaskMetrics {
+    pub vertex_id: String,
+    pub latency_histogram: Vec<u64>, // Simple histogram: [0-1ms, 1-10ms, 10-100ms, 100ms-1s, >1s]
+    pub num_messages: u64,
+    pub num_records: u64,
+}
+
+impl StreamTaskMetrics {
+    pub fn new(vertex_id: String) -> Self {
+        Self {
+            vertex_id,
+            latency_histogram: vec![0, 0, 0, 0, 0], // 5 buckets
+            num_messages: 0,
+            num_records: 0,
+        }
+    }
+
+    pub fn update_latency(&mut self, latency_ms: u64) {
+        let bucket = match latency_ms {
+            0..=1 => 0,
+            2..=10 => 1,
+            11..=100 => 2,
+            101..=1000 => 3,
+            _ => 4,
+        };
+        self.latency_histogram[bucket] += 1;
+    }
+
+    pub fn increment_messages(&mut self) {
+        self.num_messages += 1;
+    }
+
+    pub fn add_records(&mut self, count: usize) {
+        self.num_records += count as u64;
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct StreamTaskState {
     pub vertex_id: String,
     pub status: StreamTaskStatus,
+    pub metrics: StreamTaskMetrics,
 }
 
 impl From<u8> for StreamTaskStatus {
@@ -55,6 +93,7 @@ pub struct StreamTask {
     transport_client_config: Option<TransportClientConfig>,
     execution_graph: ExecutionGraph,
     max_watermark_source_ids: Arc<Mutex<HashSet<String>>>, // tracks which source have finished
+    metrics: Arc<Mutex<StreamTaskMetrics>>,
 }
 
 impl StreamTask {
@@ -67,7 +106,7 @@ impl StreamTask {
     ) -> Self {
         
         Self {
-            vertex_id,
+            vertex_id: vertex_id.clone(),
             runtime_context,
             status: Arc::new(AtomicU8::new(StreamTaskStatus::Created as u8)),
             run_loop_handle: None,
@@ -75,27 +114,24 @@ impl StreamTask {
             transport_client_config: Some(transport_client_config),
             execution_graph,
             max_watermark_source_ids: Arc::new(Mutex::new(HashSet::new())),
+            metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id))),
         }
     }
 
-    pub fn get_status(&self) -> StreamTaskStatus {
-        StreamTaskStatus::from(self.status.load(Ordering::SeqCst))
-    }
-
-    async fn handle_watermark(
+    fn handle_watermark(
         operator_type: OperatorType,
         watermark: WatermarkMessage,
         status: Arc<AtomicU8>,
         max_watermark_source_ids: Arc<Mutex<HashSet<String>>>,
         num_source_vertices: u32,
         vertex_id: String,
-    ) -> Result<()> {
+    ) {
         if watermark.watermark_value == MAX_WATERMARK_VALUE {
             if operator_type == OperatorType::SOURCE {
                 println!("source vertex_id {:?} received max watermark, initiating shutdown", 
                     vertex_id);
                 Self::mark_closing(status, vertex_id);
-                return Ok(());
+                return;
             }
 
             let source_id = watermark.source_vertex_id.clone();
@@ -112,8 +148,24 @@ impl StreamTask {
                 // Self::mark_closing(status, vertex_id);
             }
         }
+    }
+
+    fn upate_metrics(
+        metrics: Arc<Mutex<StreamTaskMetrics>>,
+        message: Message,
+    ) {
+        let mut metrics_guard = metrics.lock().unwrap();
+        metrics_guard.increment_messages();
+        metrics_guard.add_records(message.record_batch().num_rows());
         
-        Ok(())
+        if let Some(ingest_timestamp) = message.ingest_timestamp() {
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let latency = current_time.saturating_sub(ingest_timestamp);
+            metrics_guard.update_latency(latency);
+        }
     }
 
     pub async fn run(&mut self) {
@@ -123,6 +175,7 @@ impl StreamTask {
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
         let received_source_ids = self.max_watermark_source_ids.clone();
+        let metrics = self.metrics.clone();
         let num_source_vertices = execution_graph.get_source_vertices().len() as u32;
 
         let transport_client_config = self.transport_client_config.take().unwrap();
@@ -173,7 +226,12 @@ impl StreamTask {
                 let operator_type = operator.operator_type();
                 let messages = match operator_type {
                     crate::runtime::operator::OperatorType::SOURCE => {
-                        if let Some(message) = operator.fetch().await {
+                        if let Some(mut message) = operator.fetch().await {
+                            // source should set ingest timestamp
+                            message.set_ingest_timestamp(SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64);
                             match message {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.source_vertex_id);
@@ -184,7 +242,7 @@ impl StreamTask {
                                         received_source_ids.clone(),
                                         num_source_vertices,
                                         vertex_id.clone(),
-                                    ).await?;
+                                    );
                                     Some(vec![Message::Watermark(watermark)])
                                 }
                                 _ => {
@@ -199,6 +257,9 @@ impl StreamTask {
                         let reader = transport_client.reader.as_mut()
                             .expect("Reader should be initialized for non-SOURCE operator");
                         if let Some(message) = reader.read_message().await? {
+                            // Update metrics for non-source messages
+                            Self::upate_metrics(metrics.clone(), message.clone());
+
                             match message {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.source_vertex_id);
@@ -209,7 +270,7 @@ impl StreamTask {
                                         received_source_ids.clone(),
                                         num_source_vertices,
                                         vertex_id.clone(),
-                                    ).await?;
+                                    );
                                     Some(vec![Message::Watermark(watermark)])
                                 }
                                 _ => match operator.process_message(message).await {
@@ -323,6 +384,22 @@ impl StreamTask {
                 }
             }
         }
+    }
+
+    pub fn get_state(&self) -> StreamTaskState {
+        StreamTaskState {
+            vertex_id: self.vertex_id.clone(),
+            status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),
+            metrics: self.metrics.lock().unwrap().clone(),
+        }
+    }
+
+    pub fn get_status(&self) -> StreamTaskStatus {
+        StreamTaskStatus::from(self.status.load(Ordering::SeqCst))
+    }
+
+    pub fn get_metrics(&self) -> StreamTaskMetrics {
+        self.metrics.lock().unwrap().clone()
     }
 
     pub fn vertex_id(&self) -> &str {

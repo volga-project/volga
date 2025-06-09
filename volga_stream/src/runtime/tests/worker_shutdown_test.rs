@@ -67,10 +67,10 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
             msg_id += 1;
         }
         // Add max watermark as the last message
-        messages.push(Message::Watermark(WatermarkMessage {
-            source_vertex_id: format!("source_{}", i),
-            watermark_value: MAX_WATERMARK_VALUE,
-        }));
+        messages.push(Message::Watermark(WatermarkMessage::new(
+            format!("source_{}", i),
+            MAX_WATERMARK_VALUE,
+        )));
         source_messages.push(messages);
     }
 

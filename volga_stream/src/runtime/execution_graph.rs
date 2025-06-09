@@ -9,6 +9,7 @@ use crate::runtime::functions::{
     key_by::KeyByFunction,
     reduce::{ReduceFunction, AggregationResultExtractor},
 };
+use crate::runtime::operator::OperatorType;
 
 use super::functions::source::word_count_source::BatchingMode;
 
@@ -184,6 +185,32 @@ impl ExecutionGraph {
         self.vertices.values()
             .filter(|v| matches!(v.operator_config, OperatorConfig::SourceConfig(_)))
             .cloned()
+            .collect()
+    }
+
+    pub fn get_vertex_type(&self, vertex_id: &str) -> Option<OperatorType> {
+        if let Some(vertex) = self.vertices.get(vertex_id) {
+            match &vertex.operator_config {
+                OperatorConfig::SourceConfig(_) => Some(OperatorType::SOURCE),
+                OperatorConfig::SinkConfig(_) => Some(OperatorType::SINK),
+                OperatorConfig::MapConfig(_) | 
+                OperatorConfig::JoinConfig(_) | 
+                OperatorConfig::KeyByConfig(_) | 
+                OperatorConfig::ReduceConfig(_, _) => Some(OperatorType::PROCESSOR),
+            }
+        } else {
+            None
+        }
+    }
+
+    pub fn get_sink_vertices(&self) -> Vec<String> {
+        self.vertices.iter()
+            .filter_map(|(id, vertex)| {
+                match &vertex.operator_config {
+                    OperatorConfig::SinkConfig(_) => Some(id.clone()),
+                    _ => None,
+                }
+            })
             .collect()
     }
 } 

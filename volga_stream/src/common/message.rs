@@ -7,6 +7,7 @@ use super::Key;
 pub struct BaseMessage {
     pub upstream_vertex_id: Option<String>,
     pub record_batch: RecordBatch,
+    pub ingest_timestamp: Option<u64>,
 }
 
 impl BaseMessage {
@@ -14,7 +15,12 @@ impl BaseMessage {
         Self {
             upstream_vertex_id,
             record_batch,
+            ingest_timestamp: None,
         }
+    }
+
+    pub fn set_ingest_timestamp(&mut self, ingest_timestamp: u64) {
+        self.ingest_timestamp = Some(ingest_timestamp);
     }
 }
 
@@ -43,6 +49,21 @@ pub const MAX_WATERMARK_VALUE: u64 = u64::MAX;
 pub struct WatermarkMessage {
     pub source_vertex_id: String,
     pub watermark_value: u64,
+    pub ingest_timestamp: Option<u64>,
+}
+
+impl WatermarkMessage {
+    pub fn new(source_vertex_id: String, watermark_value: u64) -> Self {
+        Self {
+            source_vertex_id,
+            watermark_value,
+            ingest_timestamp: None,
+        }
+    }
+
+    pub fn set_ingest_timestamp(&mut self, ingest_timestamp: u64) {
+        self.ingest_timestamp = Some(ingest_timestamp);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -85,6 +106,22 @@ impl Message {
             Message::Regular(_) => Err(anyhow::anyhow!("Regular message does not have a key")),
             Message::Keyed(message) => Ok(&message.key),
             Message::Watermark(_) => Err(anyhow::anyhow!("Watermark message does not have a key")),
+        }
+    }
+
+    pub fn ingest_timestamp(&self) -> Option<u64> {
+        match self {
+            Message::Regular(message) => message.ingest_timestamp,
+            Message::Keyed(message) => message.base.ingest_timestamp,
+            Message::Watermark(message) => message.ingest_timestamp,
+        }
+    }
+
+    pub fn set_ingest_timestamp(&mut self, ingest_timestamp: u64) {
+        match self {
+            Message::Regular(message) => message.set_ingest_timestamp(ingest_timestamp),
+            Message::Keyed(message) => message.base.set_ingest_timestamp(ingest_timestamp),
+            Message::Watermark(message) => message.set_ingest_timestamp(ingest_timestamp),
         }
     }
 } 

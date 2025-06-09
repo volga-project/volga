@@ -24,6 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
     SOURCE,
+    SINK,
     PROCESSOR,
 }
 
@@ -302,7 +303,7 @@ impl OperatorTrait for SinkOperator {
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::PROCESSOR
+        OperatorType::SINK
     }
 }
 
