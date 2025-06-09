@@ -32,6 +32,7 @@ pub struct WordCountSourceFunction {
     current_index: usize,
     start_time: Option<Instant>,
     words_sent_per_word: HashMap<String, usize>,
+    runtime_context: Option<RuntimeContext>,
 }
 
 impl WordCountSourceFunction {
@@ -54,6 +55,7 @@ impl WordCountSourceFunction {
             current_index: 0,
             start_time: None,
             words_sent_per_word: HashMap::new(),
+            runtime_context: None,
         }
     }
 
@@ -141,7 +143,8 @@ impl WordCountSourceFunction {
 
 #[async_trait]
 impl FunctionTrait for WordCountSourceFunction {
-    async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
+    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        self.runtime_context = Some(context.clone());
         // Generate the pool of words
         self.words = (0..self.num_words)
             .map(|_| self.generate_random_word())
@@ -151,6 +154,8 @@ impl FunctionTrait for WordCountSourceFunction {
     }
     
     async fn close(&mut self) -> Result<()> {
+        let n = self.words_sent_per_word.clone();
+        println!("WordCountSourceFunction {:?} close, words_sent_per_word {:?}", self.runtime_context.as_ref().unwrap().vertex_id(), n);
         Ok(())
     }
 

@@ -26,7 +26,6 @@ impl Collector {
     }
 
     pub fn add_output_channel_id(&mut self, channel_id: String) {
-        // println!("Adding output channel id {:?}", channel_id);
         if self.output_channel_ids.contains(&channel_id) {
             panic!("Output channel id already exists");
         }
@@ -53,7 +52,6 @@ impl Collector {
     }
 
     async fn write_message_to_channels(&mut self, message: Message, channel_ids_to_send: Vec<String>) -> HashMap<String, (bool, u32)> {
-        
         // parallel write
         let mut write_futures = Vec::new();
         for channel_id in channel_ids_to_send.clone() {

@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::fmt;
 use arrow::compute;
 use arrow::compute::kernels::partition::partition;
-use arrow::array::{Array, ArrayRef, UInt32Array};
+use arrow::array::{Array, ArrayRef, StringArray, UInt32Array};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use arrow_row::{RowConverter, SortField};
@@ -24,6 +24,7 @@ pub trait KeyByFunctionTrait: Send + Sync + fmt::Debug {
 #[derive(Debug, Clone)]
 pub struct CustomKeyByFunction {
     function: Arc<dyn KeyByFunctionTrait>,
+    runtime_context: Option<RuntimeContext>,
 }
 
 impl CustomKeyByFunction {
@@ -33,6 +34,7 @@ impl CustomKeyByFunction {
     {
         Self {
             function: Arc::new(function),
+            runtime_context: None,
         }
     }
 }
@@ -47,11 +49,12 @@ impl KeyByFunctionTrait for CustomKeyByFunction {
 #[derive(Debug, Clone)]
 pub struct ArrowKeyByFunction {
     key_columns: Vec<String>,
+    runtime_context: Option<RuntimeContext>,
 }
 
 impl ArrowKeyByFunction {
     pub fn new(key_columns: Vec<String>) -> Self {
-        Self { key_columns }
+        Self { key_columns, runtime_context: None }
     }
 
     /// Fast lexicographic sort implementation using arrow-row
@@ -79,6 +82,10 @@ impl ArrowKeyByFunction {
 
 impl KeyByFunctionTrait for ArrowKeyByFunction {
     fn key_by(&self, message: Message) -> Vec<KeyedMessage> {
+        let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id()).unwrap();
+        let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+        println!("{:?} key_by rcvd, value {:?}", vertex_id, value);
+
         let record_batch = message.record_batch();
         let schema = record_batch.schema();
         
@@ -193,6 +200,10 @@ impl KeyByFunction {
 #[async_trait]
 impl FunctionTrait for KeyByFunction {
     async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
+        match self {
+            KeyByFunction::Custom(function) => function.runtime_context = Some(_context.clone()),
+            KeyByFunction::Arrow(function) => function.runtime_context = Some(_context.clone()),
+        }
         Ok(())
     }
     

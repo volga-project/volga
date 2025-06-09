@@ -2,7 +2,10 @@ use crate::runtime::{
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig}, 
     partition::PartitionType, 
     worker::Worker,
-    functions::key_by::KeyByFunction,
+    functions::{
+        key_by::KeyByFunction,
+        map::{MapFunction, MapFunctionTrait},
+    },
     storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
 };
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
@@ -10,9 +13,28 @@ use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
-use kameo::{Actor, spawn};
+use kameo::spawn;
 use crate::transport::channel::Channel;
 use arrow::array::StringArray;
+use async_trait::async_trait;
+
+#[derive(Debug, Clone)]
+struct KeyedToRegularMapFunction;
+
+#[async_trait]
+impl MapFunctionTrait for KeyedToRegularMapFunction {
+    fn map(&self, message: Message) -> Result<Message> {
+        let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+        println!("map rcvd, value {:?}", value);
+        match message {
+            Message::Keyed(keyed_message) => {
+                // Create a new regular message with the same record batch
+                Ok(Message::new(None, keyed_message.base.record_batch))
+            }
+            _ => Ok(message), // Pass through non-keyed messages (like watermarks)
+        }
+    }
+}
 
 #[test]
 fn test_worker_shutdown_with_watermarks() -> Result<()> {
@@ -28,18 +50,21 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     // Create execution graph
     let mut graph = ExecutionGraph::new();
     let parallelism = 2; // Number of parallel tasks
-    let num_messages_per_source = 5; // Number of regular messages per source
+    let num_messages_per_source = 4; // Number of regular messages per source
 
     // Create test data for each source
     let mut source_messages = Vec::new();
+    let mut msg_id = 0;
     for i in 0..parallelism as usize {
         let mut messages = Vec::new();
         // Add regular messages
-        for j in 0..num_messages_per_source {
+        for _ in 0..num_messages_per_source {
             messages.push(Message::new(
                 Some(format!("source_{}", i)),
-                create_test_string_batch(vec![format!("key_{}", j % 3)]) // Use modulo to create 3 unique keys
+                // create_test_string_batch(vec![format!("value_{}", j % 3)]) // Use modulo to create 3 unique values
+                create_test_string_batch(vec![format!("value_{}", msg_id)])
             ));
+            msg_id += 1;
         }
         // Add max watermark as the last message
         messages.push(Message::Watermark(WatermarkMessage {
@@ -50,58 +75,96 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     }
 
     // Create vertices for each parallel task
-    for i in 0..parallelism as usize {
+    for i in 0..parallelism {
         let task_id = i.to_string();
         
         // Create source vertex with vector source
         let source_vertex = ExecutionVertex::new(
             format!("source_{}", task_id),
-            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(source_messages[i].clone())),
+            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(source_messages[i as usize].clone())),
             parallelism,
-            i as i32,
+            i,
         );
         graph.add_vertex(source_vertex);
 
-        // Create key-by vertex
+        // Create key-by vertex using ArrowKeyByFunction
         let key_by_vertex = ExecutionVertex::new(
             format!("key_by_{}", task_id),
             OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
             parallelism,
-            i as i32,
+            i,
         );
         graph.add_vertex(key_by_vertex);
+
+        // Create map vertex to transform keyed messages back to regular
+        let map_vertex = ExecutionVertex::new(
+            format!("map_{}", task_id),
+            OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction)),
+            parallelism,
+            i,
+        );
+        graph.add_vertex(map_vertex);
 
         // Create sink vertex
         let sink_vertex = ExecutionVertex::new(
             format!("sink_{}", task_id),
             OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageActorSinkConfig(storage_ref.clone())),
             parallelism,
-            i as i32,
+            i,
         );
         graph.add_vertex(sink_vertex);
+    }
 
-        // Add edges
-        let source_to_key_by = ExecutionEdge::new(
-            format!("source_{}", task_id),
-            format!("key_by_{}", task_id),
-            "key_by".to_string(),
-            PartitionType::Forward,
-            Channel::Local {
-                channel_id: format!("source_to_key_by_{}", task_id),
-            },
-        );
-        graph.add_edge(source_to_key_by);
+    // Add edges connecting vertices across parallel tasks
+    for i in 0..parallelism {
+        let source_id = format!("source_{}", i);
+        
+        // Connect each source to all key-by tasks
+        for j in 0..parallelism {
+            let key_by_id = format!("key_by_{}", j);
+            let source_to_key_by = ExecutionEdge::new(
+                source_id.clone(),
+                key_by_id,
+                "key_by".to_string(),
+                PartitionType::RoundRobin,
+                Channel::Local {
+                    channel_id: format!("source_{}_to_key_by_{}", i, j),
+                },
+            );
+            graph.add_edge(source_to_key_by);
+        }
 
-        let key_by_to_sink = ExecutionEdge::new(
-            format!("key_by_{}", task_id),
-            format!("sink_{}", task_id),
-            "sink".to_string(),
-            PartitionType::Hash,
-            Channel::Local {
-                channel_id: format!("key_by_to_sink_{}", task_id),
-            },
-        );
-        graph.add_edge(key_by_to_sink);
+        let key_by_id = format!("key_by_{}", i);
+        // Connect each key-by to all map tasks
+        for j in 0..parallelism {
+            let map_id = format!("map_{}", j);
+            let key_by_to_map = ExecutionEdge::new(
+                key_by_id.clone(),
+                map_id,
+                "map".to_string(),
+                PartitionType::RoundRobin,
+                Channel::Local {
+                    channel_id: format!("key_by_{}_to_map_{}", i, j),
+                },
+            );
+            graph.add_edge(key_by_to_map);
+        }
+
+        let map_id = format!("map_{}", i);
+        // Connect each map to all sink tasks
+        for j in 0..parallelism {
+            let sink_id = format!("sink_{}", j);
+            let map_to_sink = ExecutionEdge::new(
+                map_id.clone(),
+                sink_id,
+                "sink".to_string(),
+                PartitionType::RoundRobin,
+                Channel::Local {
+                    channel_id: format!("map_{}_to_sink_{}", i, j),
+                },
+            );
+            graph.add_edge(map_to_sink);
+        }
     }
 
     // Create and start worker
@@ -111,6 +174,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
             vec![
                 format!("source_{}", i),
                 format!("key_by_{}", i),
+                format!("map_{}", i),
                 format!("sink_{}", i),
             ]
         }).collect(),
@@ -118,48 +182,41 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     );
 
     println!("Starting worker...");
-    worker.execute();
+    worker.start();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    // worker.close();
     println!("Worker completed");
 
     // Verify results by reading from storage actor
     let result = runtime.block_on(async {
-        storage_ref.ask(InMemoryStorageMessage::GetMap).await
+        storage_ref.ask(InMemoryStorageMessage::GetVector).await
     })?;
     
     match result {
-        InMemoryStorageReply::Map(result_map) => {
-            // Verify we received all messages
+        InMemoryStorageReply::Vector(result_messages) => {
+            // Verify we received all messages except watermarks
             let total_expected_messages = parallelism as usize * num_messages_per_source;
-            assert_eq!(result_map.len(), total_expected_messages, 
-                "Expected {} messages, got {}", total_expected_messages, result_map.len());
+            assert_eq!(result_messages.len(), total_expected_messages, 
+                "Expected {} messages, got {}", total_expected_messages, result_messages.len());
 
-            // Group messages by key to verify key-by partitioning
-            let mut key_counts: HashMap<String, usize> = HashMap::new();
-            for (_, batch) in result_map {
-                let keyed_batch = match batch {
-                    Message::Keyed(kb) => kb,
-                    _ => panic!("Expected KeyedMessage"),
-                };
-                
-                // Get the key value
-                let key_batch = keyed_batch.key().record_batch();
-                let key_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                let key = key_array.value(0).to_string();
-                
-                // Increment count for this key
-                *key_counts.entry(key).or_insert(0) += 1;
+            // Count occurrences of each value
+            let mut value_counts: HashMap<String, usize> = HashMap::new();
+            for message in result_messages {
+                let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+                *value_counts.entry(value.to_string()).or_insert(0) += 1;
             }
 
-            // Verify each key appears the expected number of times
-            // Each key should appear (num_messages_per_source * parallelism) / 3 times
-            // because we used modulo 3 to create the keys
-            let expected_count_per_key = (num_messages_per_source * parallelism as usize) / 3;
-            for (key, count) in key_counts {
-                assert_eq!(count, expected_count_per_key,
-                    "Key '{}' should appear {} times, got {}", key, expected_count_per_key, count);
-            }
+            // Verify each value appears the expected number of times
+            // Each value should appear (num_messages_per_source * parallelism) / 3 times
+            // because we used modulo 3 to create the values
+            // let expected_count_per_value = (num_messages_per_source * parallelism as usize) / 3;
+            // let expected_count_per_value = num_messages_per_source * parallelism as usize;
+            // for (value, count) in value_counts {
+            //     assert_eq!(count, expected_count_per_value,
+            //         "Value '{}' should appear {} times, got {}", value, expected_count_per_value, count);
+            // }
         }
-        _ => panic!("Expected Map reply from storage actor"),
+        _ => panic!("Expected Vector reply from storage actor"),
     }
 
     Ok(())

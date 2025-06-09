@@ -2,7 +2,7 @@ use crate::{common::MAX_WATERMARK_VALUE, runtime::{
     collector::Collector, execution_graph::{ExecutionGraph, OperatorConfig}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
-use tokio::task::JoinHandle;
+use tokio::{task::JoinHandle, time::sleep};
 use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
@@ -10,6 +10,8 @@ use std::{collections::HashMap, sync::{atomic::{Ordering, AtomicU8}, Arc}, time:
 use futures::future::join_all;
 use std::collections::HashSet;
 use std::sync::Mutex;
+
+use super::operator::OperatorType;
 
 // Helper function to get current timestamp
 fn timestamp() -> String {
@@ -81,6 +83,7 @@ impl StreamTask {
     }
 
     async fn handle_watermark(
+        operator_type: OperatorType,
         watermark: WatermarkMessage,
         status: Arc<AtomicU8>,
         max_watermark_source_ids: Arc<Mutex<HashSet<String>>>,
@@ -88,15 +91,25 @@ impl StreamTask {
         vertex_id: String,
     ) -> Result<()> {
         if watermark.watermark_value == MAX_WATERMARK_VALUE {
+            if operator_type == OperatorType::SOURCE {
+                println!("source vertex_id {:?} received max watermark, initiating shutdown", 
+                    vertex_id);
+                Self::mark_closing(status, vertex_id);
+                return Ok(());
+            }
+
             let source_id = watermark.source_vertex_id.clone();
+            
+            // TODO: we need to check only sources this operator depends on
             let mut done_sources = max_watermark_source_ids.lock().unwrap();
             done_sources.insert(source_id);
+            println!("vertex_id {:?}, done sources {:?}", vertex_id, done_sources);
             
             // If we've received watermarks from all sources, initiate shutdown
             if done_sources.len() as u32 >= num_source_vertices {
-                println!("{} Received max watermarks from all sources ({}), initiating shutdown", 
-                    timestamp(), done_sources.len());
-                Self::mark_closing(status, vertex_id);
+                println!("vertex_id {:?} Received max watermarks from all sources {:?}, initiating shutdown", 
+                    vertex_id, done_sources);
+                // Self::mark_closing(status, vertex_id);
             }
         }
         
@@ -150,14 +163,6 @@ impl StreamTask {
                 
                 collector.add_output_channel_id(channel_id.clone());
             }
-
-            // for collector in collectors.values() {
-            //     println!("Collector {:?} output channel ids: {:?}", vertex_id, collector.output_channel_ids());
-            //     println!("Writer senders {:?}", collector.data_writer.senders.keys());
-            // }
-
-            // panic!("Stop here");
-            
             
             operator.open(&runtime_context).await?;
             println!("{:?} Operator {:?} opened", timestamp(), vertex_id);
@@ -165,13 +170,15 @@ impl StreamTask {
             status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
             
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
-                let messages = match operator.operator_type() {
+                let operator_type = operator.operator_type();
+                let messages = match operator_type {
                     crate::runtime::operator::OperatorType::SOURCE => {
                         if let Some(message) = operator.fetch().await {
                             match message {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.source_vertex_id);
                                     Self::handle_watermark(
+                                        operator_type,
                                         watermark.clone(),
                                         status.clone(),
                                         received_source_ids.clone(),
@@ -181,7 +188,6 @@ impl StreamTask {
                                     Some(vec![Message::Watermark(watermark)])
                                 }
                                 _ => {
-                                    // println!("StreamTask {:?} received message", vertex_id);
                                     Some(vec![message])
                                 }
                             }
@@ -197,6 +203,7 @@ impl StreamTask {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.source_vertex_id);
                                     Self::handle_watermark(
+                                        operator_type,
                                         watermark.clone(),
                                         status.clone(),
                                         received_source_ids.clone(),
@@ -230,16 +237,32 @@ impl StreamTask {
                 
                 let messages = messages.unwrap();
                 
+                let mut retries_before_close = 3; // shared between all messages
                 for message in messages {
                     let mut channels_to_send_per_operator = HashMap::new();
                     for (target_operator_id, collector) in &mut collectors_per_target_operator {
                         let partitioned_channel_ids = collector.gen_partitioned_channel_ids(message.clone());
                         channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channel_ids);
                     }
+                    // let is_watermark = match message {
+                    //     Message::Watermark(_) => true,
+                    //     _ => false,
+                    // };
+                    // println!("vertex_id {:?}, is watermark {:?}, channels_to_send_per_operator {:?}", vertex_id, is_watermark, channels_to_send_per_operator);
+                    
 
                     // send message to all destinations until no backpressure
                     // TODO track backpreessure stats
-                    while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
+                    while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
+                        status.load(Ordering::SeqCst) == StreamTaskStatus::Closing as u8 {
+
+                        if status.load(Ordering::SeqCst) == StreamTaskStatus::Closing as u8 {
+                            if retries_before_close == 0 {
+                                break;
+                            }
+                            retries_before_close -= 1;
+                        }
+
                         let write_results = Collector::write_message_to_operators(
                             &mut collectors_per_target_operator, 
                             message.clone(), 
@@ -269,6 +292,7 @@ impl StreamTask {
             operator.close().await?;
 
             status.store(StreamTaskStatus::Closed as u8, Ordering::SeqCst);
+            sleep(Duration::from_secs(1000)).await;
             println!("{:?} StreamTask {:?} closed", timestamp(), vertex_id);
             
             Ok(())

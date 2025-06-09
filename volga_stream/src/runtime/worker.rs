@@ -196,7 +196,7 @@ impl Worker {
             }
 
             if !all_closed {
-                sleep(Duration::from_millis(5000)).await;
+                sleep(Duration::from_millis(1000)).await;
             }
         }
         println!("All tasks have completed");

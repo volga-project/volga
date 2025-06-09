@@ -16,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 #[derive(Debug, Clone)]
 pub struct Key {
     /// The RecordBatch containing a single row of key data
-    record_batch: RecordBatch,
+    pub record_batch: RecordBatch,
     /// Precomputed hash
     pub hash: u64,
 }

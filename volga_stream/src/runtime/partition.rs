@@ -1,4 +1,3 @@
-use anyhow::{Error, Result};
 use crate::common::message::Message;
 use std::fmt;
 
@@ -73,7 +72,6 @@ impl PartitionTrait for HashPartition {
         let key = message.key().unwrap();
         let hash = key.hash();
         let partition = (hash % num_partitions as u64) as usize;
-        // println!("Hash partition: {}, num_partitions: {}", partition, num_partitions);
         vec![partition]
     }
 }

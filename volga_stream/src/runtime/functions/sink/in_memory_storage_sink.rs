@@ -1,3 +1,4 @@
+use arrow::array::{Float64Array, StringArray};
 use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
@@ -14,7 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 const BUFFER_FLUSH_INTERVAL_MS: u64 = 100;
-const MAX_BUFFER_SIZE: usize = 1000;
 
 #[derive(Debug)]
 pub struct InMemoryStorageActorSinkFunction {
@@ -23,6 +23,7 @@ pub struct InMemoryStorageActorSinkFunction {
     keyed_buffer: Arc<Mutex<HashMap<u64, Message>>>,
     flush_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<AtomicBool>,
+    runtime_context: Option<RuntimeContext>,
 }
 
 impl InMemoryStorageActorSinkFunction {
@@ -33,24 +34,30 @@ impl InMemoryStorageActorSinkFunction {
             keyed_buffer: Arc::new(Mutex::new(HashMap::new())),
             flush_handle: None,
             running: Arc::new(AtomicBool::new(false)),
+            runtime_context: None,
         }
     }
 
-    async fn flush_buffers(&self) -> Result<()> {
+    async fn flush_buffers(
+        storage_actor: &ActorRef<InMemoryStorageActor>,
+        buffer: &Arc<Mutex<Vec<Message>>>,
+        keyed_buffer: &Arc<Mutex<HashMap<u64, Message>>>,
+        vertex_id: Option<&str>,
+    ) -> Result<()> {
         // Flush regular batches
-        let mut regular_batches = self.buffer.lock().await;
+        let mut regular_batches = buffer.lock().await;
         if !regular_batches.is_empty() {
-            let batches = regular_batches.drain(..).collect();
-            self.storage_actor.ask(InMemoryStorageMessage::AppendMany { messages: batches }).await?;
+            let batches: Vec<Message> = regular_batches.drain(..).collect();
+            storage_actor.ask(InMemoryStorageMessage::AppendMany { messages: batches.clone() }).await?;
         }
 
         // Flush keyed batches
-        let mut keyed_batches = self.keyed_buffer.lock().await;
+        let mut keyed_batches = keyed_buffer.lock().await;
         if !keyed_batches.is_empty() {
-            let batches = keyed_batches.drain()
+            let batches: HashMap<String, Message> = keyed_batches.drain()
                 .map(|(key, batch)| (key.to_string(), batch))
                 .collect();
-            self.storage_actor.ask(InMemoryStorageMessage::InsertKeyedMany { keyed_messages: batches }).await?;
+            storage_actor.ask(InMemoryStorageMessage::InsertKeyedMany { keyed_messages: batches.clone() }).await?;
         }
 
         Ok(())
@@ -60,29 +67,20 @@ impl InMemoryStorageActorSinkFunction {
 #[async_trait]
 impl crate::runtime::functions::sink::sink_function::SinkFunctionTrait for InMemoryStorageActorSinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
+        let r = message.record_batch();
+        let v = r.column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+        let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id()).unwrap();
+        println!("{:?} sink rcvd, value {:?}", vertex_id, v);
+
         match &message {
             Message::Keyed(keyed_message) => {
                 let key = keyed_message.key().hash();
                 let mut keyed_buffer = self.keyed_buffer.lock().await;
                 keyed_buffer.insert(key, message);
-                
-                // If buffer is full, flush it
-                if keyed_buffer.len() >= MAX_BUFFER_SIZE {
-                    let messages = keyed_buffer.drain()
-                        .map(|(key, message)| (key.to_string(), message))
-                        .collect();
-                    self.storage_actor.ask(InMemoryStorageMessage::InsertKeyedMany { keyed_messages: messages }).await?;
-                }
             }
             _ => {
                 let mut buffer = self.buffer.lock().await;
                 buffer.push(message);
-                
-                // If buffer is full, flush it
-                if buffer.len() >= MAX_BUFFER_SIZE {
-                    let messages = buffer.drain(..).collect();
-                    self.storage_actor.ask(InMemoryStorageMessage::AppendMany { messages: messages }).await?;
-                }
             }
         }
         Ok(())
@@ -91,61 +89,42 @@ impl crate::runtime::functions::sink::sink_function::SinkFunctionTrait for InMem
 
 #[async_trait]
 impl FunctionTrait for InMemoryStorageActorSinkFunction {
-    async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
+    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        self.runtime_context = Some(context.clone());
         self.running.store(true, Ordering::SeqCst);
         
         // Start periodic flush task
+        let storage_actor = self.storage_actor.clone();
         let buffer = self.buffer.clone();
         let keyed_buffer = self.keyed_buffer.clone();
-        let storage_actor = self.storage_actor.clone();
         let running = self.running.clone();
+        let vertex_id = context.vertex_id().to_string();
         
-        let handle = tokio::spawn(async move {
+        self.flush_handle = Some(tokio::spawn(async move {
             let mut interval = interval(Duration::from_millis(BUFFER_FLUSH_INTERVAL_MS));
-            
             while running.load(Ordering::SeqCst) {
                 interval.tick().await;
-                
-                // Flush regular messages
-                let mut regular_messages = buffer.lock().await;
-                if !regular_messages.is_empty() {
-                    let messages = regular_messages.drain(..).collect();
-                    if let Err(e) = storage_actor.ask(InMemoryStorageMessage::AppendMany { messages: messages }).await {
-                        eprintln!("Error flushing regular messages: {}", e);
-                    }
-                }
-
-                // Flush keyed messages
-                let mut keyed_messages = keyed_buffer.lock().await;
-                if !keyed_messages.is_empty() {
-                    let messages = keyed_messages.drain()
-                        .map(|(key, message)| (key.to_string(), message))
-                        .collect();
-                    if let Err(e) = storage_actor.ask(InMemoryStorageMessage::InsertKeyedMany { keyed_messages: messages }).await {
-                        eprintln!("Error flushing keyed messages: {}", e);
-                    }
+                if let Err(e) = InMemoryStorageActorSinkFunction::flush_buffers(&storage_actor, &buffer, &keyed_buffer, Some(&vertex_id)).await {
+                    panic!("Error flushing buffers: {:?}", e);
                 }
             }
-        });
+        }));
         
-        self.flush_handle = Some(handle);
         Ok(())
     }
-    
+
     async fn close(&mut self) -> Result<()> {
-        // Stop the flush task
         self.running.store(false, Ordering::SeqCst);
         
-        // Wait for the task to finish
+        // Wait for flush task to complete
         if let Some(handle) = self.flush_handle.take() {
-            if let Err(e) = handle.await {
-                eprintln!("Error waiting for flush task to finish: {}", e);
-            }
+            handle.await?;
         }
         
-        // Flush any remaining messages
-        self.flush_buffers().await?;
-        
+        // Final flush
+        let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id());
+        Self::flush_buffers(&self.storage_actor, &self.buffer, &self.keyed_buffer, vertex_id.as_deref()).await?;
+    
         Ok(())
     }
     

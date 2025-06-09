@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use arrow::array::StringArray;
 use ordered_float::Float;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
@@ -76,13 +77,17 @@ impl DataReader {
             // Create a future that completes when any channel has data
             let mut futures = Vec::new();
             for (channel_id, receiver) in self.receivers.iter_mut() {
+                let vertex_id = self.vertex_id.clone();
                 futures.push(Box::pin(async move {
                     match time::timeout(timeout_duration, receiver.recv()).await {
                         Ok(Some(message)) => Some((channel_id.clone(), message)),
                         Ok(None) => {
                             panic!("DataReader channel {} closed", channel_id);
                         },
-                        Err(_) => None,
+                        Err(_) => {
+                            // println!("DataReader {:?} timeout", vertex_id);
+                            None
+                        },
                     }
                 }));
             }
@@ -98,7 +103,26 @@ impl DataReader {
             };
 
             if result.is_some() {
-                // println!("{} DataReader {:?} read message: {:?}", timestamp(), self.vertex_id, result.clone());
+                let message = result.clone().unwrap();
+                let mut source_vertex_id = None;
+                let is_watermark = match message.clone() {
+                    Message::Watermark(watermark) => {
+                        source_vertex_id = Some(watermark.source_vertex_id);
+                        true
+                    }
+                    _ => false,
+                };
+
+                    // if self.vertex_id.contains("map") || self.vertex_id.contains("key_by") {
+                if !is_watermark {
+                    let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+            
+                    println!("DataReader {:?} read message: {:?}", self.vertex_id, value);
+                } else {
+
+                    println!("DataReader {:?} read watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
+                }
+                // }
                 return Ok(result);
             }
             attempts += 1;
@@ -147,13 +171,30 @@ impl DataWriter {
             if let Some(sender) = self.senders.get(channel_id) {
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {
+                        let mut source_vertex_id = None;
+                        let is_watermark = match message.clone() {
+                            Message::Watermark(watermark) => {
+                                source_vertex_id = Some(watermark.source_vertex_id);
+                                true
+                            }
+                            _ => false,
+                        };
+        
+                        if !is_watermark {
+                            let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+                            // if self.vertex_id.contains("map") || self.vertex_id.contains("key_by") {
+                            println!("DataWriter {:?} wrote message: {:?}", self.vertex_id, value);
+                            // }
+                        } else {
+                            println!("DataWriter {:?} wrote watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
+                        }
                         return (true, start_time.elapsed().as_millis() as u32)
                     }
                     Ok(Err(_)) => {
                         panic!("DataWriter {:?} channel {} closed", self.vertex_id, channel_id);
                     }
                     Err(_) => {
-                        println!("DataWriter {:?} timeout", self.vertex_id);
+                        // println!("DataWriter {:?} timeout", self.vertex_id);
                         attempts += 1;
                         continue;
                     }

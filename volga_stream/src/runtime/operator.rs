@@ -121,11 +121,6 @@ pub struct OperatorBase {
     runtime_context: Option<RuntimeContext>,
     function: Option<Box<dyn FunctionTrait>>,
     thread_pool: ThreadPool,
-    // Track watermarks from each input channel
-    input_watermarks: Arc<Mutex<HashMap<String, u64>>>,
-    // Current watermark is the minimum of all input watermarks
-    current_watermark: AtomicU64,
-    last_forwarded_watermark: AtomicU64,
 }
 
 impl OperatorBase {
@@ -138,9 +133,6 @@ impl OperatorBase {
             runtime_context: None,
             function: None,
             thread_pool,
-            input_watermarks: Arc::new(Mutex::new(HashMap::new())),
-            current_watermark: AtomicU64::new(0),
-            last_forwarded_watermark: AtomicU64::new(0),
         }
     }
     
@@ -153,9 +145,6 @@ impl OperatorBase {
             runtime_context: None,
             function: Some(Box::new(function)),
             thread_pool,
-            input_watermarks: Arc::new(Mutex::new(HashMap::new())),
-            current_watermark: AtomicU64::new(0),
-            last_forwarded_watermark: AtomicU64::new(0),
         }
     }
     
@@ -169,21 +158,6 @@ impl OperatorBase {
     pub fn get_function_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.function.as_mut()
             .and_then(|f| f.as_any_mut().downcast_mut::<T>())
-    }
-
-    pub fn update_watermark(&self, channel_id: &str, watermark: u64) -> Result<()> {
-        let mut watermarks = self.input_watermarks.lock().unwrap();
-        watermarks.insert(channel_id.to_string(), watermark);
-        
-        // Update current watermark to be the minimum of all input watermarks
-        let min_watermark = watermarks.values().min().copied().unwrap_or(0);
-        self.current_watermark.store(min_watermark, Ordering::SeqCst);
-        
-        Ok(())
-    }
-
-    pub fn get_current_watermark(&self) -> u64 {
-        self.current_watermark.load(Ordering::SeqCst)
     }
 }
 
@@ -322,9 +296,8 @@ impl OperatorTrait for SinkOperator {
     }
 
     async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-        // println!("SinkOperator process_message {:?}", message);
         let function = self.base.get_function_mut::<SinkFunction>().unwrap();
-        function.sink(message.clone()).await;
+        function.sink(message.clone()).await.unwrap();
         Some(vec![message])
     }
 
@@ -434,6 +407,7 @@ impl OperatorTrait for ReduceOperator {
     }
 
     async fn close(&mut self) -> Result<()> {
+        let vertex_id = self.base.runtime_context.as_ref().unwrap().vertex_id();
         self.base.close().await
     }
 

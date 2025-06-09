@@ -32,10 +32,11 @@ fn test_parallel_word_count() -> Result<()> {
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
-    let parallelism = 2; // Number of parallel tasks
+    let parallelism = 2;
+    let word_length = 10;
     let num_words = 2; // Number of unique words
     let num_to_send_per_word = 10; // Number of copies of each word to send
-    let batch_size = 2; // Batch size
+    let batch_size = 1;
 
     // Create vertices for each parallel task
     for i in 0..parallelism {
@@ -45,7 +46,7 @@ fn test_parallel_word_count() -> Result<()> {
         let source_vertex = ExecutionVertex::new(
             format!("source_{}", task_id),
             OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
-                word_length: 10,
+                word_length: word_length,
                 num_words,
                 num_to_send_per_word: Some(num_to_send_per_word),
                 run_for_s: None,     // No time limit
@@ -127,6 +128,9 @@ fn test_parallel_word_count() -> Result<()> {
         }
 
         let reduce_id = format!("reduce_{}", i);
+
+        // TODO having round robin here makes same keys end up in different sinks - leads to write 
+        // races and inconsistent resulst - figure out how to fix this
         // Connect each reduce to all sink tasks
         for j in 0..parallelism {
             let sink_id = format!("sink_{}", j);
@@ -162,16 +166,19 @@ fn test_parallel_word_count() -> Result<()> {
     println!("Worker started");
 
     // Wait for processing to complete
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
     // Verify results by reading from storage actor
     let result = runtime.block_on(async {
         storage_ref.ask(InMemoryStorageMessage::GetMap).await
     })?;
+
+    // Close worker
+    worker.close();
     
     match result {
         InMemoryStorageReply::Map(result_map) => {
-            println!("Result map: {:?}", result_map);
+            // println!("Result map: {:?}", result_map);
             println!("Result map len: {:?}", result_map.len());
             // Count occurrences of each word
             let mut word_counts = HashMap::new();
@@ -200,13 +207,10 @@ fn test_parallel_word_count() -> Result<()> {
                     "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
             }
             
-            println!("Word counts: {:?}", word_counts);
+            // println!("Word counts: {:?}", word_counts);
         }
         _ => panic!("Expected Map reply from storage actor"),
     }
-
-    // Close worker
-    worker.close();
 
     Ok(())
 } 
