@@ -11,11 +11,11 @@ pub struct BaseMessage {
 }
 
 impl BaseMessage {
-    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch) -> Self {
+    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>) -> Self {
         Self {
             upstream_vertex_id,
             record_batch,
-            ingest_timestamp: None,
+            ingest_timestamp: ingest_timestamp,
         }
     }
 
@@ -74,13 +74,13 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch) -> Self {
-        Message::Regular(BaseMessage::new(upstream_vertex_id, record_batch))
+    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>) -> Self {
+        Message::Regular(BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp))
     }
 
-    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: Key) -> Self {
+    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: Key, ingest_timestamp: Option<u64>) -> Self {
         Message::Keyed(KeyedMessage::new(
-            BaseMessage::new(upstream_vertex_id, record_batch),
+            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp),
             key,
         ))
     }

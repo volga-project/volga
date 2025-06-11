@@ -4,7 +4,7 @@ use crate::common::message::{Message, KeyedMessage, BaseMessage};
 use crate::common::Key;
 use anyhow::Result;
 use std::fmt;
-use arrow::array::{Array, ArrayRef, Float64Array, Int64Array};
+use arrow::array::{Array, ArrayRef, Float64Array};
 use arrow::compute;
 use arrow::compute::kernels::aggregate::{sum, min, max};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -68,7 +68,7 @@ pub trait ReduceFunctionTrait: Send + Sync + fmt::Debug {
 
 /// Trait for extracting final results from aggregated data
 pub trait AggregationResultExtractorTrait: Send + Sync + fmt::Debug {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Message;
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message;
 }
 
 /// Default implementation of ResultExtractor that includes all aggregation values
@@ -76,7 +76,7 @@ pub trait AggregationResultExtractorTrait: Send + Sync + fmt::Debug {
 pub struct AllAggregationsResultExtractor;
 
 impl AggregationResultExtractorTrait for AllAggregationsResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Message {
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message {
         // Create a schema with all aggregation fields
         let schema = Arc::new(Schema::new(vec![
             Field::new("min", DataType::Float64, false),
@@ -104,7 +104,7 @@ impl AggregationResultExtractorTrait for AllAggregationsResultExtractor {
         ).unwrap();
         
         Message::Keyed(KeyedMessage::new(
-            BaseMessage::new(None, record_batch),
+            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp),
             key.clone(),
         ))
     }
@@ -135,7 +135,7 @@ impl SingleAggregationResultExtractor {
 }
 
 impl AggregationResultExtractorTrait for SingleAggregationResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Message {
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message {
         let value = match self.aggregation_type {
             AggregationType::Min => result.min,
             AggregationType::Max => result.max,
@@ -156,7 +156,7 @@ impl AggregationResultExtractorTrait for SingleAggregationResultExtractor {
         ).unwrap();
         
         Message::Keyed(KeyedMessage::new(
-            BaseMessage::new(None, record_batch),
+            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp),
             key.clone(),
         ))
     }
@@ -171,11 +171,11 @@ pub enum AggregationResultExtractor {
 }
 
 impl AggregationResultExtractorTrait for AggregationResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult) -> Message {
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message {
         match self {
-            AggregationResultExtractor::All(e) => e.extract_result(key, result),
-            AggregationResultExtractor::Single(e) => e.extract_result(key, result),
-            AggregationResultExtractor::Custom(e) => e.extract_result(key, result),
+            AggregationResultExtractor::All(e) => e.extract_result(key, result, upstream_vertex_id, ingest_timestamp),
+            AggregationResultExtractor::Single(e) => e.extract_result(key, result, upstream_vertex_id, ingest_timestamp),
+            AggregationResultExtractor::Custom(e) => e.extract_result(key, result, upstream_vertex_id, ingest_timestamp),
         }
     }
 }
@@ -379,7 +379,7 @@ mod tests {
             vec![Arc::new(value_array)]
         ).unwrap();
         
-        let base_message = BaseMessage::new(None, record_batch);
+        let base_message = BaseMessage::new(None, record_batch, None);
         
         // Create key batch with a single row
         let key_schema = Arc::new(arrow::datatypes::Schema::new(vec![
@@ -451,25 +451,25 @@ mod tests {
 
         // Test min aggregation
         let min_extractor = SingleAggregationResultExtractor::new(AggregationType::Min, "min_value".to_string());
-        let min_message = min_extractor.extract_result(&key, &result);
+        let min_message = min_extractor.extract_result(&key, &result, None, None);
         let min_value = min_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(min_value, 3.0);
         
         // Test max aggregation
         let max_extractor = SingleAggregationResultExtractor::new(AggregationType::Max, "max_value".to_string());
-        let max_message = max_extractor.extract_result(&key, &result);
+        let max_message = max_extractor.extract_result(&key, &result, None, None);
         let max_value = max_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(max_value, 50.0);
         
         // Test sum aggregation
         let sum_extractor = SingleAggregationResultExtractor::new(AggregationType::Sum, "sum_value".to_string());
-        let sum_message = sum_extractor.extract_result(&key, &result);
+        let sum_message = sum_extractor.extract_result(&key, &result, None, None);
         let sum_value = sum_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(sum_value, 168.0);
         
         // Test count aggregation
         let count_extractor = SingleAggregationResultExtractor::new(AggregationType::Count, "count_value".to_string());
-        let count_message = count_extractor.extract_result(&key, &result);
+        let count_message = count_extractor.extract_result(&key, &result, None, None);
         let count_value = count_message.record_batch().column(0).as_any().downcast_ref::<Float64Array>().unwrap().value(0);
         assert_eq!(count_value, 8.0);
     }
@@ -489,11 +489,11 @@ mod tests {
             vec![Arc::new(string_array)]
         ).unwrap();
         let string_message = KeyedMessage::new(
-            BaseMessage::new(None, string_batch),
+            BaseMessage::new(None, string_batch, None),
             Key::new(RecordBatch::try_new(
                 Arc::new(Schema::new(vec![Field::new("key", DataType::Int32, false)])),
                 vec![Arc::new(Int32Array::from(vec![1]))]
-            ).unwrap()).unwrap()
+            ).unwrap()).unwrap(),
         );
 
         // Test float column

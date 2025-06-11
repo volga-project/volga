@@ -103,7 +103,8 @@ async fn test_actor_transport() {
         for message_idx in 0..messages_per_writer {
             let message = Message::new(
                 Some(format!("writer{}_stream", writer_idx)),
-                create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, message_idx)])
+                create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, message_idx)]),
+                None
             );
 
             // Send message to each reader

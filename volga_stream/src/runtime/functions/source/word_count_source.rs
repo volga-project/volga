@@ -89,7 +89,7 @@ impl WordCountSourceFunction {
             vec![Arc::new(word_array), Arc::new(timestamp_array)],
         ).unwrap();
 
-        Message::new(None, batch)
+        Message::new(None, batch, None)
     }
 
     fn collect_words_for_batch(&mut self) -> Option<Vec<String>> {

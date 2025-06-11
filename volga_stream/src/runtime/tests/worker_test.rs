@@ -38,9 +38,9 @@ fn test_worker() -> Result<()> {
     let runtime = Runtime::new()?;
 
     let test_messages = vec![
-        Message::new(None, create_test_string_batch(vec!["test1".to_string()])),
-        Message::new(None, create_test_string_batch(vec!["test2".to_string()])),
-        Message::new(None, create_test_string_batch(vec!["test3".to_string()])),
+        Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
+        Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
+        Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None),
     ];
 
     println!("Creating storage actor...");

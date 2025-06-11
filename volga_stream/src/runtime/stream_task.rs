@@ -2,13 +2,13 @@ use crate::{common::MAX_WATERMARK_VALUE, runtime::{
     collector::Collector, execution_graph::{ExecutionGraph, OperatorConfig}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
-use tokio::{task::JoinHandle, time::sleep};
+use tokio::{task::JoinHandle, time::sleep, sync::Mutex};
 use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{Ordering, AtomicU8}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use std::collections::HashSet;
-use std::sync::Mutex;
+// use std::sync::Mutex;
 
 use super::operator::OperatorType;
 
@@ -104,7 +104,6 @@ impl StreamTask {
         runtime_context: RuntimeContext,
         execution_graph: ExecutionGraph,
     ) -> Self {
-        
         Self {
             vertex_id: vertex_id.clone(),
             runtime_context,
@@ -114,11 +113,11 @@ impl StreamTask {
             transport_client_config: Some(transport_client_config),
             execution_graph,
             max_watermark_source_ids: Arc::new(Mutex::new(HashSet::new())),
-            metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id))),
+            metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id.clone()))),
         }
     }
 
-    fn handle_watermark(
+    async fn handle_watermark(
         operator_type: OperatorType,
         watermark: WatermarkMessage,
         status: Arc<AtomicU8>,
@@ -137,7 +136,7 @@ impl StreamTask {
             let source_id = watermark.source_vertex_id.clone();
             
             // TODO: we need to check only sources this operator depends on
-            let mut done_sources = max_watermark_source_ids.lock().unwrap();
+            let mut done_sources = max_watermark_source_ids.lock().await;
             done_sources.insert(source_id);
             println!("vertex_id {:?}, done sources {:?}", vertex_id, done_sources);
             
@@ -150,21 +149,29 @@ impl StreamTask {
         }
     }
 
-    fn upate_metrics(
+    async fn update_metrics(
         metrics: Arc<Mutex<StreamTaskMetrics>>,
         message: Message,
     ) {
-        let mut metrics_guard = metrics.lock().unwrap();
-        metrics_guard.increment_messages();
-        metrics_guard.add_records(message.record_batch().num_rows());
+        let is_watermark = matches!(message, Message::Watermark(_));
         
-        if let Some(ingest_timestamp) = message.ingest_timestamp() {
-            let current_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let latency = current_time.saturating_sub(ingest_timestamp);
-            metrics_guard.update_latency(latency);
+        if !is_watermark {
+            let mut metrics_guard = metrics.lock().await;
+            metrics_guard.increment_messages();
+            metrics_guard.add_records(message.record_batch().num_rows());
+        
+            
+            // Update latency if available
+            if let Some(ingest_timestamp) = message.ingest_timestamp() {
+                let current_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let latency = current_time.saturating_sub(ingest_timestamp);
+                metrics_guard.update_latency(latency);
+            } else {
+                println!("no ts msg: {:?}", message)
+            }
         }
     }
 
@@ -227,6 +234,7 @@ impl StreamTask {
                 let messages = match operator_type {
                     crate::runtime::operator::OperatorType::SOURCE => {
                         if let Some(mut message) = operator.fetch().await {
+                            
                             // source should set ingest timestamp
                             message.set_ingest_timestamp(SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -242,7 +250,7 @@ impl StreamTask {
                                         received_source_ids.clone(),
                                         num_source_vertices,
                                         vertex_id.clone(),
-                                    );
+                                    ).await;
                                     Some(vec![Message::Watermark(watermark)])
                                 }
                                 _ => {
@@ -258,7 +266,7 @@ impl StreamTask {
                             .expect("Reader should be initialized for non-SOURCE operator");
                         if let Some(message) = reader.read_message().await? {
                             // Update metrics for non-source messages
-                            Self::upate_metrics(metrics.clone(), message.clone());
+                            Self::update_metrics(metrics.clone(), message.clone()).await;
 
                             match message {
                                 Message::Watermark(watermark) => {
@@ -270,7 +278,7 @@ impl StreamTask {
                                         received_source_ids.clone(),
                                         num_source_vertices,
                                         vertex_id.clone(),
-                                    );
+                                    ).await;
                                     Some(vec![Message::Watermark(watermark)])
                                 }
                                 _ => match operator.process_message(message).await {
@@ -386,23 +394,11 @@ impl StreamTask {
         }
     }
 
-    pub fn get_state(&self) -> StreamTaskState {
+    pub async fn get_state(&self) -> StreamTaskState {
         StreamTaskState {
             vertex_id: self.vertex_id.clone(),
             status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),
-            metrics: self.metrics.lock().unwrap().clone(),
+            metrics: self.metrics.lock().await.clone(),
         }
-    }
-
-    pub fn get_status(&self) -> StreamTaskStatus {
-        StreamTaskStatus::from(self.status.load(Ordering::SeqCst))
-    }
-
-    pub fn get_metrics(&self) -> StreamTaskMetrics {
-        self.metrics.lock().unwrap().clone()
-    }
-
-    pub fn vertex_id(&self) -> &str {
-        &self.vertex_id
     }
 }

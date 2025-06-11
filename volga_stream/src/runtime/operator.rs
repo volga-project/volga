@@ -413,6 +413,8 @@ impl OperatorTrait for ReduceOperator {
     }
 
     async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
+        let upstream_vertex_id = message.upstream_vertex_id();
+        let ingest_ts = message.ingest_timestamp();
         // Explicitly check and handle only KeyedMessage
         match message {
             Message::Keyed(keyed_message) => {
@@ -436,12 +438,12 @@ impl OperatorTrait for ReduceOperator {
                 let function = function.clone();
                 let result_extractor = self.result_extractor.clone();
                 let acc = acc.clone();
-                
+
                 let result = self.base.thread_pool.spawn_fifo_async(move || {
                     let mut acc = acc.lock().unwrap();
                     function.update_accumulator(&mut acc, &keyed_message);
                     let agg_result = function.get_result(&acc);
-                    let result_message = result_extractor.extract_result(&key, &agg_result);
+                    let result_message = result_extractor.extract_result(&key, &agg_result, upstream_vertex_id, ingest_ts);
                     Some(vec![result_message])
                 }).await;
 

@@ -26,10 +26,12 @@ impl MapFunctionTrait for KeyedToRegularMapFunction {
     fn map(&self, message: Message) -> Result<Message> {
         let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
         println!("map rcvd, value {:?}", value);
+        let upstream_vertex_id = message.upstream_vertex_id();
+        let ingest_ts = message.ingest_timestamp();
         match message {
             Message::Keyed(keyed_message) => {
                 // Create a new regular message with the same record batch
-                Ok(Message::new(None, keyed_message.base.record_batch))
+                Ok(Message::new(upstream_vertex_id, keyed_message.base.record_batch, ingest_ts))
             }
             _ => Ok(message), // Pass through non-keyed messages (like watermarks)
         }
@@ -62,7 +64,8 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
             messages.push(Message::new(
                 Some(format!("source_{}", i)),
                 // create_test_string_batch(vec![format!("value_{}", j % 3)]) // Use modulo to create 3 unique values
-                create_test_string_batch(vec![format!("value_{}", msg_id)])
+                create_test_string_batch(vec![format!("value_{}", msg_id)]),
+                None
             ));
             msg_id += 1;
         }
@@ -186,6 +189,30 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     std::thread::sleep(std::time::Duration::from_secs(2));
     // worker.close();
     println!("Worker completed");
+    let worker_state = runtime.block_on(async {
+        worker.get_state().await
+    });
+
+    // print metrics
+    println!("\n=== Worker Metrics ===");
+    println!("Task Statuses:");
+    for (vertex_id, status) in &worker_state.task_statuses {
+        println!("  {}: {:?}", vertex_id, status);
+    }
+    
+    println!("\nTask Metrics:");
+    for (vertex_id, metrics) in &worker_state.task_metrics {
+        println!("  {}:", vertex_id);
+        println!("    Messages: {}", metrics.num_messages);
+        println!("    Records: {}", metrics.num_records);
+        println!("    Latency Histogram: {:?}", metrics.latency_histogram);
+    }
+    
+    println!("\nAggregated Metrics:");
+    println!("  Total Messages: {}", worker_state.aggregated_metrics.total_messages);
+    println!("  Total Records: {}", worker_state.aggregated_metrics.total_records);
+    println!("  Latency Histogram: {:?}", worker_state.aggregated_metrics.latency_histogram);
+    println!("===================\n");
 
     // Verify results by reading from storage actor
     let result = runtime.block_on(async {

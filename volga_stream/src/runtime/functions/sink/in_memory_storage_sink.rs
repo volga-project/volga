@@ -156,9 +156,9 @@ mod tests {
 
         // Create test data
         let regular_messages = vec![
-            Message::new(None, create_test_string_batch(vec!["regular1".to_string()])),
-            Message::new(None, create_test_string_batch(vec!["regular2".to_string()])),
-            Message::new(None, create_test_string_batch(vec!["regular3".to_string()])),
+            Message::new(None, create_test_string_batch(vec!["regular1".to_string()]), None),
+            Message::new(None, create_test_string_batch(vec!["regular2".to_string()]), None),
+            Message::new(None, create_test_string_batch(vec!["regular3".to_string()]), None),
         ];
 
         // Create keyed messages
@@ -168,11 +168,11 @@ mod tests {
         let key2 = Key::new(key2_batch.clone())?;
         let keyed_messages = vec![
             Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(None, create_test_string_batch(vec!["value1".to_string()])),
+                BaseMessage::new(None, create_test_string_batch(vec!["value1".to_string()]), None),
                 key1.clone(),
             )),
             Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(None, create_test_string_batch(vec!["value2".to_string()])),
+                BaseMessage::new(None, create_test_string_batch(vec!["value2".to_string()]), None),
                 key2.clone(),
             )),
         ];

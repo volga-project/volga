@@ -5,7 +5,7 @@ use crate::transport::transport_backend_actor::{TransportBackendActor, Transport
 use std::collections::HashMap;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use kameo::{spawn, prelude::ActorRef};
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 
@@ -68,11 +68,12 @@ pub struct Worker {
     task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<String, Runtime>,
-    backend_runtime: Option<Runtime>,
+    transport_backend_runtime: Option<Runtime>,
     num_io_threads: usize,
-    state: Arc<std::sync::Mutex<WorkerState>>,
+    state: Arc<tokio::sync::Mutex<WorkerState>>,
     running: Arc<AtomicBool>,
-    polling_handle: Option<tokio::task::JoinHandle<()>>,
+    tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
+    worker_runtime: Runtime
 }
 
 impl Worker {
@@ -87,51 +88,59 @@ impl Worker {
             task_actors: HashMap::new(),
             backend_actor: None,
             task_runtimes: HashMap::new(),
-            backend_runtime: None,
+            transport_backend_runtime: None,
             num_io_threads,
-            state: Arc::new(std::sync::Mutex::new(WorkerState::new())),
+            state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
             running: Arc::new(AtomicBool::new(false)),
-            polling_handle: None,
+            tasks_state_polling_handle: None,
+            worker_runtime: tokio::runtime::Runtime::new().unwrap()
         }
     }
 
-    async fn tasks_state_polling_loop(
-        running: Arc<AtomicBool>,
+    async fn poll_tasks_state(
+        task_runtimes: HashMap<String, Handle>,
         task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
-        state: Arc<std::sync::Mutex<WorkerState>>,
+        state: Arc<tokio::sync::Mutex<WorkerState>>,
     ) {
-        while running.load(Ordering::SeqCst) {
-            // Collect states and metrics from all tasks
-            let mut task_statuses = HashMap::new();
-            let mut task_metrics = HashMap::new();
-            let mut sink_metrics = Vec::new();
+        let mut task_futures = Vec::new();
+        for (vertex_id, runtime) in &task_runtimes {
+            let vertex_id = vertex_id.clone();
+            let task_ref = task_actors.get(&vertex_id).unwrap().clone();
 
-            for (vertex_id, task_ref) in &task_actors {
-                if let Ok(state) = task_ref.ask(StreamTaskMessage::GetState).await {
-                    task_statuses.insert(vertex_id.clone(), state.status.clone());
-                    task_metrics.insert(vertex_id.clone(), state.metrics.clone());
-                    
-                    // Check if this is a sink vertex
-                    if let Some(operator_type) = graph.get_vertex_type(vertex_id) {
-                        if operator_type == crate::runtime::operator::OperatorType::SINK {
-                            sink_metrics.push(state.metrics);
-                        }
+            let task_ref = task_ref.clone();
+            let fut = runtime.spawn(async move {
+                (vertex_id.clone(), task_ref.ask(StreamTaskMessage::GetState).await.unwrap())
+            });
+            task_futures.push(fut);
+        }
+        let task_results = join_all(task_futures).await;
+
+        let mut task_statuses = HashMap::new();
+        let mut task_metrics = HashMap::new();
+        let mut sink_metrics = Vec::new();
+
+        for result in task_results {
+            if let Ok((vertex_id, state)) = result {
+                task_statuses.insert(vertex_id.clone(), state.status.clone());
+                task_metrics.insert(vertex_id.clone(), state.metrics.clone());
+                
+                // Check if this is a sink vertex
+                if let Some(operator_type) = graph.get_vertex_type(&vertex_id) {
+                    if operator_type == crate::runtime::operator::OperatorType::SINK {
+                        sink_metrics.push(state.metrics);
                     }
                 }
             }
-
-            // Update shared WorkerState
-            {
-                let mut state_guard = state.lock().unwrap();
-                state_guard.task_statuses = task_statuses;
-                state_guard.task_metrics = task_metrics;
-                state_guard.aggregated_metrics.aggregate_from_sink_metrics(&sink_metrics);
-            } // Release lock before sleep
-
-            // Sleep before next poll
-            sleep(Duration::from_millis(1000)).await;
         }
+
+        // Update shared WorkerState
+        {
+            let mut state_guard = state.lock().await;
+            state_guard.task_statuses = task_statuses;
+            state_guard.task_metrics = task_metrics;
+            state_guard.aggregated_metrics.aggregate_from_sink_metrics(&sink_metrics);
+        } // Release lock before sleep
     }
 
     pub fn start(&mut self) {
@@ -150,7 +159,7 @@ impl Worker {
             spawn(TransportBackendActor::new(backend))
         });
 
-        self.backend_runtime = Some(backend_runtime);
+        self.transport_backend_runtime = Some(backend_runtime);
         self.backend_actor = Some(backend_actor.clone());
 
         for vertex_id in &self.vertex_ids {
@@ -188,7 +197,7 @@ impl Worker {
         }
 
         // Start the backend
-        self.backend_runtime.as_ref().unwrap().block_on(async {
+        self.transport_backend_runtime.as_ref().unwrap().block_on(async {
             self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::Start).await
         }).unwrap();
 
@@ -206,7 +215,7 @@ impl Worker {
             });
             start_futures.push(fut);
         }
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        self.worker_runtime.block_on(async {
             for f in start_futures {
                 let _ = f.await?;
             }
@@ -218,13 +227,24 @@ impl Worker {
         let running = self.running.clone();
         let task_actors = self.task_actors.clone();
         let graph = self.graph.clone();
-        let shared_state = self.state.clone();
+        let state = self.state.clone();
         
-        let polling_handle = tokio::spawn(async move {
-            Self::tasks_state_polling_loop(running, task_actors, graph, shared_state).await;
+        let task_runtime_handles: HashMap<String, Handle> = self.task_runtimes.iter()
+            .map(|(k, v)| (k.clone(), v.handle().clone()))
+            .collect();
+        
+        let polling_handle = self.worker_runtime.spawn(async move {
+            // Self::tasks_state_polling_loop(running, task_runtime_handles, task_actors, graph, state).await;
+            while running.load(Ordering::SeqCst) {
+                Self::poll_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone()).await;
+                sleep(Duration::from_millis(100)).await;
+            }
+            // final poll
+            Self::poll_tasks_state(task_runtime_handles, task_actors, graph, state).await;
+            println!("Final poll done");
         });
 
-        self.polling_handle = Some(polling_handle);
+        self.tasks_state_polling_handle = Some(polling_handle);
 
         println!("Started worker");
     }
@@ -246,7 +266,7 @@ impl Worker {
             close_futures.push(fut);
         }
 
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
+        self.worker_runtime.block_on(async {
             for f in close_futures {
                 let _ = f.await?;
             }
@@ -255,28 +275,29 @@ impl Worker {
 
         // Close the backend
         if let Some(backend_actor) = &self.backend_actor {
-            self.backend_runtime.as_ref().unwrap().block_on(async {
+            self.transport_backend_runtime.as_ref().unwrap().block_on(async {
                 backend_actor.ask(TransportBackendActorMessage::Close).await
             }).unwrap();
         }
 
-        // Wait for polling task to finish
-        if let Some(handle) = self.polling_handle.take() {
-            tokio::runtime::Runtime::new().unwrap().block_on(async {
+        // Wait for task state polling to finish
+        let h = self.worker_runtime.handle().clone();
+        if let Some(handle) = self.tasks_state_polling_handle.take() {
+            h.block_on(async {
                 if let Err(e) = handle.await {
                     eprintln!("Polling task failed: {:?}", e);
                 }
             });
         }
 
-        // Shutdown all runtimes
+        // Shutdown all task runtimes
         for (vertex_id, runtime) in self.task_runtimes.drain() {
             println!("Shutting down runtime for task {}", vertex_id);
             runtime.shutdown_timeout(std::time::Duration::from_secs(1));
         }
 
         // Shutdown backend runtime
-        if let Some(runtime) = self.backend_runtime.take() {
+        if let Some(runtime) = self.transport_backend_runtime.take() {
             println!("Shutting down transport backend runtime");
             runtime.shutdown_timeout(std::time::Duration::from_secs(1));
         }
@@ -288,7 +309,7 @@ impl Worker {
         // Wait for completion by checking the shared state
         while self.running.load(Ordering::SeqCst) {
             let all_tasks_closed = {
-                let state_guard = self.state.lock().unwrap();
+                let state_guard = self.state.lock().await;
                 state_guard.all_tasks_closed()
             };
             if all_tasks_closed {
@@ -301,7 +322,7 @@ impl Worker {
         self.running.store(false, Ordering::SeqCst);
         
         // Wait for polling task to finish
-        if let Some(handle) = self.polling_handle.take() {
+        if let Some(handle) = self.tasks_state_polling_handle.take() {
             if let Err(e) = handle.await {
                 eprintln!("Polling task failed: {:?}", e);
             }
@@ -310,14 +331,14 @@ impl Worker {
         println!("All tasks have completed");
     }
 
-    pub fn get_state(&self) -> WorkerState {
-        self.state.lock().unwrap().clone()
+    pub async fn get_state(&self) -> WorkerState {
+        self.state.lock().await.clone()
     }
 
     pub fn execute(&mut self) {
         println!("Starting worker execution");
         self.start();
-        let runtime = Runtime::new().unwrap();
+        let runtime = Runtime::new().unwrap(); // TODO use worker runtime
         runtime.block_on(async {
             self.wait_for_completion().await;
             println!("Worker execution completed");

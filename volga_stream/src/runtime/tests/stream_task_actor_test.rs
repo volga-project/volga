@@ -37,9 +37,9 @@ fn test_stream_task_actor() -> Result<()> {
     runtime.block_on(async {
         // Create test data
         let test_messages = vec![
-            Message::new(None, create_test_string_batch(vec!["test1".to_string()])),
-            Message::new(None, create_test_string_batch(vec!["test2".to_string()])),
-            Message::new(None, create_test_string_batch(vec!["test3".to_string()])),
+            Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
+            Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
+            Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None),
         ];
 
         let mut graph = ExecutionGraph::new();

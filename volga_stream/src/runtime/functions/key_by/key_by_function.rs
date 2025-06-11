@@ -158,7 +158,7 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
             
             // Create a KeyedDataBatch with this partition data
             let keyed_batch = KeyedMessage::new(
-                BaseMessage::new(message.upstream_vertex_id(), group_batch),
+                BaseMessage::new(message.upstream_vertex_id(), group_batch, message.ingest_timestamp()),
                 key,
             );
             
@@ -242,7 +242,7 @@ mod tests {
             vec![Arc::new(id_array), Arc::new(value_array)]
         ).unwrap();
         
-        let message = Message::new(None, record_batch);
+        let message = Message::new(None, record_batch, None);
         
         // Create a key-by function with 'id' as the key column
         let key_by_function = ArrowKeyByFunction::new(vec!["id".to_string()]);
@@ -315,7 +315,7 @@ mod tests {
             ]
         ).unwrap();
         
-        let message = Message::new(None, record_batch);
+        let message = Message::new(None, record_batch, None);
         
         // Create a key-by function with both columns as keys
         let key_by_function = ArrowKeyByFunction::new(
