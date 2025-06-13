@@ -174,7 +174,7 @@ fn test_parallel_word_count() -> Result<()> {
     })?;
 
     // Close worker
-    worker.close();
+    // worker.close();
     
     match result {
         InMemoryStorageReply::Map(result_map) => {

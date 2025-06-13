@@ -2,7 +2,7 @@ use crate::{common::MAX_WATERMARK_VALUE, runtime::{
     collector::Collector, execution_graph::{ExecutionGraph, OperatorConfig}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
-use tokio::{task::JoinHandle, time::sleep, sync::Mutex};
+use tokio::{task::JoinHandle, time::sleep, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
@@ -20,10 +20,11 @@ fn timestamp() -> String {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamTaskStatus {
-    Created = 0,
-    Running = 1,
-    Closing = 2,
-    Closed = 3,
+    Opening = 0,
+    Opened = 1,
+    Running = 2,
+    Closing = 3,
+    Closed = 4,
 }
 
 #[derive(Debug, Clone)]
@@ -74,10 +75,11 @@ pub struct StreamTaskState {
 impl From<u8> for StreamTaskStatus {
     fn from(value: u8) -> Self {
         match value {
-            0 => StreamTaskStatus::Created,
-            1 => StreamTaskStatus::Running,
-            2 => StreamTaskStatus::Closing,
-            3 => StreamTaskStatus::Closed,
+            0 => StreamTaskStatus::Opening,
+            1 => StreamTaskStatus::Opened,
+            2 => StreamTaskStatus::Running,
+            3 => StreamTaskStatus::Closing,
+            4 => StreamTaskStatus::Closed,
             _ => panic!("Invalid task status value"),
         }
     }
@@ -94,6 +96,8 @@ pub struct StreamTask {
     execution_graph: ExecutionGraph,
     max_watermark_source_ids: Arc<Mutex<HashSet<String>>>, // tracks which source have finished
     metrics: Arc<Mutex<StreamTaskMetrics>>,
+    run_signal_sender: Option<watch::Sender<bool>>,
+    close_signal_sender: Option<watch::Sender<bool>>,
 }
 
 impl StreamTask {
@@ -107,13 +111,15 @@ impl StreamTask {
         Self {
             vertex_id: vertex_id.clone(),
             runtime_context,
-            status: Arc::new(AtomicU8::new(StreamTaskStatus::Created as u8)),
+            status: Arc::new(AtomicU8::new(StreamTaskStatus::Opening as u8)),
             run_loop_handle: None,
             operator_config,
             transport_client_config: Some(transport_client_config),
             execution_graph,
             max_watermark_source_ids: Arc::new(Mutex::new(HashSet::new())),
             metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id.clone()))),
+            run_signal_sender: None,
+            close_signal_sender: None
         }
     }
 
@@ -135,7 +141,7 @@ impl StreamTask {
 
             let source_id = watermark.source_vertex_id.clone();
             
-            // TODO: we need to check only sources this operator depends on
+            // TODO: we need to check only the sources which this operator depends on
             let mut done_sources = max_watermark_source_ids.lock().await;
             done_sources.insert(source_id);
             println!("vertex_id {:?}, done sources {:?}", vertex_id, done_sources);
@@ -144,7 +150,7 @@ impl StreamTask {
             if done_sources.len() as u32 >= num_source_vertices {
                 println!("vertex_id {:?} Received max watermarks from all sources {:?}, initiating shutdown", 
                     vertex_id, done_sources);
-                // Self::mark_closing(status, vertex_id);
+                Self::mark_closing(status, vertex_id);
             }
         }
     }
@@ -162,20 +168,17 @@ impl StreamTask {
         
             
             // Update latency if available
-            if let Some(ingest_timestamp) = message.ingest_timestamp() {
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let latency = current_time.saturating_sub(ingest_timestamp);
-                metrics_guard.update_latency(latency);
-            } else {
-                println!("no ts msg: {:?}", message)
-            }
+            let ingest_timestamp= message.ingest_timestamp().unwrap();
+            let current_time = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            let latency = current_time.saturating_sub(ingest_timestamp);
+            metrics_guard.update_latency(latency);
         }
     }
 
-    pub async fn run(&mut self) {
+    pub async fn start(&mut self) {
         let vertex_id = self.vertex_id.clone();
         let runtime_context = self.runtime_context.clone();
         let status = self.status.clone();
@@ -186,6 +189,12 @@ impl StreamTask {
         let num_source_vertices = execution_graph.get_source_vertices().len() as u32;
 
         let transport_client_config = self.transport_client_config.take().unwrap();
+        
+        let (run_sender, mut run_receiver) = watch::channel(false);
+        self.run_signal_sender = Some(run_sender);
+
+        let (close_sender, mut close_receiver) = watch::channel(false);
+        self.close_signal_sender = Some(close_sender);
         
         // Main stream task lifecycle loop
         let run_loop_handle = tokio::spawn(async move {
@@ -226,6 +235,15 @@ impl StreamTask {
             
             operator.open(&runtime_context).await?;
             println!("{:?} Operator {:?} opened", timestamp(), vertex_id);
+
+            // TODO what if early close
+            
+            status.store(StreamTaskStatus::Opened as u8, Ordering::SeqCst);
+            
+            // Wait for signal to start processing
+            println!("{:?} Task {:?} waiting for run signal", timestamp(), vertex_id);
+            run_receiver.changed().await.unwrap();
+            println!("{:?} Task {:?} received run signal, starting processing", timestamp(), vertex_id);
             
             status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
             
@@ -354,14 +372,20 @@ impl StreamTask {
                         if channels_to_send_per_operator.len() == 0 {
                             break;
                         }
+                        println!("Retry");
                     }
                 }
             }
             
+            // we should wait for all tasks to close
+            // sleep(Duration::from_millis(50)).await;
+            println!("{:?} Task {:?} waiting for close signal", timestamp(), vertex_id);
+            close_receiver.changed().await.unwrap();
+            println!("{:?} Task {:?} received close signal, performing close", timestamp(), vertex_id);
+
             operator.close().await?;
 
             status.store(StreamTaskStatus::Closed as u8, Ordering::SeqCst);
-            sleep(Duration::from_secs(1000)).await;
             println!("{:?} StreamTask {:?} closed", timestamp(), vertex_id);
             
             Ok(())
@@ -371,28 +395,27 @@ impl StreamTask {
     }
 
     fn mark_closing(status: Arc<AtomicU8>, vertex_id: String) {
-        println!("StreamTask {:?} closing", vertex_id);
+        println!("StreamTask {:?} closing...", vertex_id);
         status.store(StreamTaskStatus::Closing as u8, Ordering::SeqCst);
     }
 
-    pub async fn close_and_wait(&mut self) {
-        if self.status.load(Ordering::SeqCst) != StreamTaskStatus::Running as u8 {
-            return;
-        }
+    // pub async fn close_and_wait(&mut self) {
 
-        Self::mark_closing(self.status.clone(), self.vertex_id.clone());
+    //     Self::mark_closing(self.status.clone(), self.vertex_id.clone());
         
-        if let Some(handle) = self.run_loop_handle.take() {
-            match handle.await {
-                Ok(result) => {
-                    println!("Run loop {:?} finished with result: {:?}", self.vertex_id, result);
-                },
-                Err(e) => {
-                    println!("Run loop {:?} failed: {:?}", self.vertex_id, e);
-                }
-            }
-        }
-    }
+    //     if let Some(handle) = self.run_loop_handle.take() {
+    //         match handle.await {
+    //             Ok(result) => {
+    //                 println!("Run loop {:?} finished with result: {:?}", self.vertex_id, result);
+    //             },
+    //             Err(e) => {
+    //                 println!("Run loop {:?} failed: {:?}", self.vertex_id, e);
+    //             }
+    //         }
+    //     } else {
+    //         self.status.store(StreamTaskStatus::Closed as u8, Ordering::SeqCst);
+    //     }
+    // }
 
     pub async fn get_state(&self) -> StreamTaskState {
         StreamTaskState {
@@ -400,5 +423,15 @@ impl StreamTask {
             status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),
             metrics: self.metrics.lock().await.clone(),
         }
+    }
+
+    pub fn signal_to_run(&mut self) {
+        let run_signal_sender = self.run_signal_sender.as_ref().unwrap();
+        let _ = run_signal_sender.send(true);
+    }
+
+    pub fn signal_to_close(&mut self) {
+        let close_signal_sender = self.close_signal_sender.as_ref().unwrap();
+        let _ = close_signal_sender.send(true);
     }
 }

@@ -133,7 +133,7 @@ fn test_worker() -> Result<()> {
         _ => panic!("Expected Vector reply from storage actor"),
     }
 
-    worker.close();
+    // worker.close();
 
     Ok(())
 } 

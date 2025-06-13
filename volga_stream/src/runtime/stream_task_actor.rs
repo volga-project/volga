@@ -5,9 +5,10 @@ use crate::runtime::stream_task::{StreamTask, StreamTaskState};
 
 #[derive(Debug)]
 pub enum StreamTaskMessage {
-    Run,
+    Start,
     Close,
-    GetState
+    GetState,
+    Run
 }
 
 #[derive(Actor)]
@@ -26,15 +27,19 @@ impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
 
     async fn handle(&mut self, msg: StreamTaskMessage, _ctx: &mut Context<StreamTaskActor, Result<StreamTaskState>>) -> Self::Reply {
         match msg {
-            StreamTaskMessage::Run => {
-                self.task.run().await;
+            StreamTaskMessage::Start => {
+                self.task.start().await;
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::Close => {
-                self.task.close_and_wait().await;
+                self.task.signal_to_close();
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::GetState => {
+                Ok(self.task.get_state().await)
+            }
+            StreamTaskMessage::Run => {
+                self.task.signal_to_run();
                 Ok(self.task.get_state().await)
             }
         }

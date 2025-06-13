@@ -113,7 +113,7 @@ fn test_stream_task_actor() -> Result<()> {
         backend_ref.ask(TransportBackendActorMessage::Start).await?;
 
         // Run task
-        task_ref.ask(StreamTaskMessage::Run).await?;
+        task_ref.ask(StreamTaskMessage::Start).await?;
 
         // Write test data using external writer
         for message in &test_messages {

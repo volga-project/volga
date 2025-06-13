@@ -11,7 +11,7 @@ use crate::runtime::{
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
 use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
 use anyhow::Result;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::runtime::Runtime;
 use kameo::spawn;
 use crate::transport::channel::Channel;
@@ -63,7 +63,6 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         for _ in 0..num_messages_per_source {
             messages.push(Message::new(
                 Some(format!("source_{}", i)),
-                // create_test_string_batch(vec![format!("value_{}", j % 3)]) // Use modulo to create 3 unique values
                 create_test_string_batch(vec![format!("value_{}", msg_id)]),
                 None
             ));
@@ -185,9 +184,10 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     );
 
     println!("Starting worker...");
-    worker.start();
-    std::thread::sleep(std::time::Duration::from_secs(2));
-    // worker.close();
+    // worker.start();
+    // std::thread::sleep(std::time::Duration::from_secs(2));
+    // worker.close(); // TODO test when the worker is still running
+    worker.execute();
     println!("Worker completed");
     let worker_state = runtime.block_on(async {
         worker.get_state().await
@@ -222,26 +222,22 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     match result {
         InMemoryStorageReply::Vector(result_messages) => {
             // Verify we received all messages except watermarks
-            let total_expected_messages = parallelism as usize * num_messages_per_source;
-            assert_eq!(result_messages.len(), total_expected_messages, 
-                "Expected {} messages, got {}", total_expected_messages, result_messages.len());
-
-            // Count occurrences of each value
-            let mut value_counts: HashMap<String, usize> = HashMap::new();
+            let result_len = result_messages.len();
+            let mut values = Vec::new();
             for message in result_messages {
                 let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-                *value_counts.entry(value.to_string()).or_insert(0) += 1;
+                values.push(value.to_string());
             }
 
-            // Verify each value appears the expected number of times
-            // Each value should appear (num_messages_per_source * parallelism) / 3 times
-            // because we used modulo 3 to create the values
-            // let expected_count_per_value = (num_messages_per_source * parallelism as usize) / 3;
-            // let expected_count_per_value = num_messages_per_source * parallelism as usize;
-            // for (value, count) in value_counts {
-            //     assert_eq!(count, expected_count_per_value,
-            //         "Value '{}' should appear {} times, got {}", value, expected_count_per_value, count);
-            // }
+            println!("Result values: {:?}", values);
+            let total_expected_messages = parallelism as usize * num_messages_per_source;
+            assert_eq!(result_len, total_expected_messages, 
+                "Expected {} messages, got {}", total_expected_messages, values.len());
+
+            for msg_id in 0..(num_messages_per_source * parallelism as usize) {
+                let value = format!("value_{}", msg_id);
+                assert!(values.contains(&value));
+            }
         }
         _ => panic!("Expected Vector reply from storage actor"),
     }

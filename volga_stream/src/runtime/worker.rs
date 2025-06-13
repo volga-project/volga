@@ -2,7 +2,7 @@ use crate::{runtime::{
     execution_graph::ExecutionGraph, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus, StreamTaskMetrics}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
 }, transport::{InMemoryTransportBackend, TransportBackend}};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
-use std::collections::HashMap;
+use std::{collections::HashMap};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Handle, Runtime};
@@ -28,7 +28,7 @@ impl AggregatedMetrics {
         Self {
             total_messages: 0,
             total_records: 0,
-            latency_histogram: vec![0, 0, 0, 0, 0], // 5 buckets
+            latency_histogram: vec![0, 0, 0, 0, 0],
         }
     }
 
@@ -57,8 +57,8 @@ impl WorkerState {
         }
     }
 
-    pub fn all_tasks_closed(&self) -> bool {
-        self.task_statuses.values().all(|status| *status == StreamTaskStatus::Closed)
+    pub fn all_tasks_have_status(&self, status: StreamTaskStatus) -> bool {
+        self.task_statuses.values().all(|_status| *_status == status)
     }
 }
 
@@ -143,6 +143,31 @@ impl Worker {
         } // Release lock before sleep
     }
 
+    async fn wait_for_all_tasks_status(&self, status: StreamTaskStatus) {
+        println!("Waiting for all tasks to be {:?}...", status);
+        let start_time = std::time::Instant::now();
+        let timeout_duration = Duration::from_secs(10);
+        
+        while self.running.load(Ordering::SeqCst) {
+            // Check timeout
+            if start_time.elapsed() > timeout_duration {
+                panic!("Timeout waiting for all tasks to be {:?} after {:?}", status, timeout_duration);
+            }
+            
+            let all_opened = {
+                let state_guard = self.state.lock().await;
+                state_guard.all_tasks_have_status(status)
+            };
+            
+            if all_opened {
+                println!("All tasks are {:?}", status);
+                break;
+            }
+            
+            sleep(Duration::from_millis(50)).await;
+        }
+    }
+
     pub fn start(&mut self) {
         println!("Starting worker");
 
@@ -209,8 +234,8 @@ impl Worker {
 
             let task_ref = task_ref.clone();
             let fut = runtime.spawn(async move {
-                if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await {
-                    eprintln!("Error running task {}: {}", vertex_id, e);
+                if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Start).await {
+                    eprintln!("Error starting task {}: {}", vertex_id, e);
                 }
             });
             start_futures.push(fut);
@@ -246,50 +271,142 @@ impl Worker {
 
         self.tasks_state_polling_handle = Some(polling_handle);
 
+        // Wait for all tasks to be opened
+        self.worker_runtime.block_on(async {
+            self.wait_for_all_tasks_status(StreamTaskStatus::Opened).await;
+        });
+
+        // Signal all tasks to start processing
+        println!("Signaling all tasks to start processing");
+        for (vertex_id, runtime) in &self.task_runtimes {
+            let vertex_id = vertex_id.clone();
+            let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
+            let fut = runtime.spawn(async move {
+                if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await {
+                    eprintln!("Error signaling task {} to run: {}", vertex_id, e);
+                }
+            });
+            self.worker_runtime.block_on(async {
+                let _ = fut.await;
+            });
+        }
+
         println!("Started worker");
     }
 
-    pub fn close(&mut self) {
-        println!("Closing worker");
+    // pub fn close(&mut self) {
+    //     println!("Closing worker");
 
-        // Stop polling first
-        self.running.store(false, Ordering::SeqCst);
+    //     // Close all tasks in parallel
+    //     let mut close_futures = Vec::new();
+    //     for (vertex_id, runtime) in &self.task_runtimes {
+    //         let task_ref = self.task_actors.get(&vertex_id.clone()).unwrap().clone();
+    //         let fut = runtime.spawn(async move {
+    //             task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await?;
+    //             Ok::<(), anyhow::Error>(())
+    //         });
+    //         close_futures.push(fut);
+    //     }
 
-        // Close all tasks in parallel
-        let mut close_futures = Vec::new();
-        for (vertex_id, runtime) in &self.task_runtimes {
-            let task_ref = self.task_actors.get(&vertex_id.clone()).unwrap().clone();
-            let fut = runtime.spawn(async move {
-                task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await?;
-                Ok::<(), anyhow::Error>(())
-            });
-            close_futures.push(fut);
-        }
+    //     self.worker_runtime.block_on(async {
+    //         for f in close_futures {
+    //             let _ = f.await?;
+    //         }
+    //         Ok::<(), anyhow::Error>(())
+    //     }).unwrap();
 
-        self.worker_runtime.block_on(async {
-            for f in close_futures {
-                let _ = f.await?;
+    //     // Close the backend
+    //     if let Some(backend_actor) = &self.backend_actor {
+    //         self.transport_backend_runtime.as_ref().unwrap().block_on(async {
+    //             backend_actor.ask(TransportBackendActorMessage::Close).await
+    //         }).unwrap();
+    //     }
+
+    //     // Stop polling first
+    //     self.running.store(false, Ordering::SeqCst);
+    //     // Wait for task state polling to finish
+    //     let h = self.worker_runtime.handle().clone();
+    //     if let Some(handle) = self.tasks_state_polling_handle.take() {
+    //         h.block_on(async {
+    //             if let Err(e) = handle.await {
+    //                 eprintln!("Polling task failed: {:?}", e);
+    //             }
+    //         });
+    //     }
+
+    //     // Shutdown all task runtimes
+    //     for (vertex_id, runtime) in self.task_runtimes.drain() {
+    //         println!("Shutting down runtime for task {}", vertex_id);
+    //         runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    //     }
+
+    //     // Shutdown backend runtime
+    //     if let Some(runtime) = self.transport_backend_runtime.take() {
+    //         println!("Shutting down transport backend runtime");
+    //         runtime.shutdown_timeout(std::time::Duration::from_secs(1));
+    //     }
+
+    //     println!("Closed worker");
+    // }
+
+    // async fn wait_for_completion(&mut self) {
+    //     // Wait for completion by checking the shared state
+    //     while self.running.load(Ordering::SeqCst) {
+    //         let all_tasks_closing = {
+    //             let state_guard = self.state.lock().await;
+    //             state_guard.all_tasks_have_status(StreamTaskStatus::Closing)
+    //         };
+    //         if all_tasks_closing {
+    //             break;
+    //         }
+    //         sleep(Duration::from_millis(50)).await;
+    //     }
+
+    //     // Stop polling
+    //     self.running.store(false, Ordering::SeqCst);
+        
+    //     // Wait for polling task to finish
+    //     if let Some(handle) = self.tasks_state_polling_handle.take() {
+    //         if let Err(e) = handle.await {
+    //             eprintln!("Polling task failed: {:?}", e);
+    //         }
+    //     }
+    //     println!("All tasks have completed");
+    // }
+
+    pub async fn get_state(&self) -> WorkerState {
+        self.state.lock().await.clone()
+    }
+
+    pub fn execute(&mut self) {
+        println!("Starting worker execution");
+        self.start();
+        // std::thread::sleep(Duration::from_millis(2000));
+        let runtime = Runtime::new().unwrap(); // TODO use worker runtime
+        runtime.block_on(async {
+            self.wait_for_all_tasks_status(StreamTaskStatus::Closing).await;
+            // send close to all tasks
+            let mut close_futures = Vec::new();
+            for (vertex_id, runtime) in &self.task_runtimes {
+                let task_ref = self.task_actors.get(&vertex_id.clone()).unwrap().clone();
+                let fut = runtime.spawn(async move {
+                    task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await?;
+                    Ok::<(), anyhow::Error>(())
+                });
+                close_futures.push(fut);
             }
-            Ok::<(), anyhow::Error>(())
-        }).unwrap();
+            for f in close_futures {
+                let _ = f.await.unwrap();
+            }
+            self.wait_for_all_tasks_status(StreamTaskStatus::Closed).await;
 
-        // Close the backend
-        if let Some(backend_actor) = &self.backend_actor {
-            self.transport_backend_runtime.as_ref().unwrap().block_on(async {
-                backend_actor.ask(TransportBackendActorMessage::Close).await
-            }).unwrap();
-        }
-
-        // Wait for task state polling to finish
-        let h = self.worker_runtime.handle().clone();
-        if let Some(handle) = self.tasks_state_polling_handle.take() {
-            h.block_on(async {
+            self.running.store(false, Ordering::SeqCst);
+            if let Some(handle) = self.tasks_state_polling_handle.take() {
                 if let Err(e) = handle.await {
                     eprintln!("Polling task failed: {:?}", e);
                 }
-            });
-        }
-
+            }
+        });
         // Shutdown all task runtimes
         for (vertex_id, runtime) in self.task_runtimes.drain() {
             println!("Shutting down runtime for task {}", vertex_id);
@@ -303,45 +420,5 @@ impl Worker {
         }
 
         println!("Closed worker");
-    }
-
-    async fn wait_for_completion(&mut self) {
-        // Wait for completion by checking the shared state
-        while self.running.load(Ordering::SeqCst) {
-            let all_tasks_closed = {
-                let state_guard = self.state.lock().await;
-                state_guard.all_tasks_closed()
-            };
-            if all_tasks_closed {
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-
-        // Stop polling
-        self.running.store(false, Ordering::SeqCst);
-        
-        // Wait for polling task to finish
-        if let Some(handle) = self.tasks_state_polling_handle.take() {
-            if let Err(e) = handle.await {
-                eprintln!("Polling task failed: {:?}", e);
-            }
-        }
-        
-        println!("All tasks have completed");
-    }
-
-    pub async fn get_state(&self) -> WorkerState {
-        self.state.lock().await.clone()
-    }
-
-    pub fn execute(&mut self) {
-        println!("Starting worker execution");
-        self.start();
-        let runtime = Runtime::new().unwrap(); // TODO use worker runtime
-        runtime.block_on(async {
-            self.wait_for_completion().await;
-            println!("Worker execution completed");
-        });
     }
 }
