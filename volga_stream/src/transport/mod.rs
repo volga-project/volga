@@ -5,6 +5,7 @@ pub mod transport_backend_actor;
 pub mod tests;
 pub mod test_utils;
 pub mod grpc;
+pub mod grpc_transport_backend;
 
 pub use transport_client::{TransportClient, DataReader, DataWriter};
 pub use transport_backend::{TransportBackend, InMemoryTransportBackend};

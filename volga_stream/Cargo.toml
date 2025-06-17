@@ -48,12 +48,8 @@ tracing = "0.1.41"
 arrow-row = "55.1.0"
 hdrhistogram = "7.5.2"
 
-# Arrow Flight dependencies
 tonic = "0.11"
 prost = "0.12"
-arrow-flight = "55.0.0"
-uuid = { version = "1.0", features = ["v4"] }
-async-stream = "0.3"
 tokio-stream = "0.1"
 
 [build]
