@@ -29,7 +29,7 @@ impl InMemoryTransportBackend {
         }
     }
 
-    fn register_channel(
+    fn register_local_channel(
         &mut self,
         transport_client_configs: &mut HashMap<String, TransportClientConfig>, 
         vertex_id: String, 
@@ -80,7 +80,7 @@ impl TransportBackend for InMemoryTransportBackend {
             let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
             for edge in input_edges {
                 let channel = edge.channel.clone();
-                self.register_channel(
+                self.register_local_channel(
                     &mut transport_client_configs,
                     vertex_id.clone(),
                     channel,
@@ -90,7 +90,7 @@ impl TransportBackend for InMemoryTransportBackend {
 
             for edge in output_edges {
                 let channel = edge.channel.clone();
-                self.register_channel(
+                self.register_local_channel(
                     &mut transport_client_configs,
                     vertex_id.clone(),
                     channel,

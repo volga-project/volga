@@ -11,6 +11,9 @@ crate-type = ["cdylib"]
 # crate-type = ["rlib"]
 path = "src/lib.rs"
 
+[build-dependencies]
+tonic-build = "0.11"
+
 [dependencies]
 pyo3 = {version = "0.20.3", features = ["extension-module"]}
 zmq = "0.10.0"
@@ -36,6 +39,7 @@ futures = "0.3"
 ordered-float = { version = "3.7", features = ["serde"] }
 arrow = "55.0.0"
 tokio-util = "0.7"
+bytes = "1.0"
 rayon = "1.7"
 lazy_static = "1.4"
 kameo = "0.16.0"
@@ -43,6 +47,14 @@ console-subscriber = "0.1.5"
 tracing = "0.1.41"
 arrow-row = "55.1.0"
 hdrhistogram = "7.5.2"
+
+# Arrow Flight dependencies
+tonic = "0.11"
+prost = "0.12"
+arrow-flight = "55.0.0"
+uuid = { version = "1.0", features = ["v4"] }
+async-stream = "0.3"
+tokio-stream = "0.1"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

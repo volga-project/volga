@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package message_stream;
+
+service MessageStreamService {
+  // Client streams messages to server
+  rpc StreamMessages(stream GrpcMessage) returns (EmptyResponse);
+}
+
+message GrpcMessage {
+  bytes message_data = 1;
+  string channel_id = 2;
+}
+
+message EmptyResponse {
+} 
