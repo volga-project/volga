@@ -1,6 +1,6 @@
 pub mod channel;
 pub mod transport_client;
-pub mod transport_backend;
+pub mod in_memory_transport_backend;
 pub mod transport_backend_actor;
 pub mod tests;
 pub mod test_utils;
@@ -8,5 +8,6 @@ pub mod grpc;
 pub mod grpc_transport_backend;
 
 pub use transport_client::{TransportClient, DataReader, DataWriter};
-pub use transport_backend::{TransportBackend, InMemoryTransportBackend};
-pub use transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
+pub use in_memory_transport_backend::InMemoryTransportBackend;
+pub use grpc_transport_backend::GrpcTransportBackend;
+pub use transport_backend_actor::{TransportBackend, TransportBackendActor, TransportBackendActorMessage};

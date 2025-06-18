@@ -3,16 +3,10 @@ use tokio::sync::mpsc;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::transport::channel::Channel;
+use crate::transport::TransportBackend;
 use async_trait::async_trait;
 
 use super::transport_client::TransportClientConfig;
-
-#[async_trait]
-pub trait TransportBackend: Send + Sync {
-    async fn start(&mut self);
-    async fn close(&mut self);
-    fn init_channels(&mut self, execution_graph: &ExecutionGraph, vertex_ids: Vec<String>) -> HashMap<String, TransportClientConfig>;
-}
 
 pub struct InMemoryTransportBackend {
     senders: HashMap<String, mpsc::Sender<Message>>, // keep references so channels are not closed

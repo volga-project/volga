@@ -10,6 +10,7 @@ use crate::transport::grpc::grpc_streaming_service::{
     MessageStreamClient, MessageStreamServiceImpl,
     message_stream::message_stream_service_server::MessageStreamServiceServer,
 };
+use crate::transport::TransportBackend;
 use async_trait::async_trait;
 use tonic::transport::Server;
 use std::sync::Arc;
@@ -103,7 +104,7 @@ impl GrpcTransportBackend {
 }
 
 #[async_trait]
-impl super::transport_backend::TransportBackend for GrpcTransportBackend {
+impl TransportBackend for GrpcTransportBackend {
     async fn start(&mut self) {
         self.running.store(true, std::sync::atomic::Ordering::Release);
 
@@ -127,6 +128,7 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
         self.server_handle = Some(server_handle);
 
         // Start reader task
+        // routes data from server to reader channels
         let runnning = self.running.clone();
         let reader_senders = self.reader_senders.take().unwrap();
         let reader_task = tokio::spawn(async move {
@@ -180,6 +182,9 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
 
         let writer_receivers = self.writer_receivers.take().unwrap();
         let running = self.running.clone();
+        
+        // Start writer task
+        // routes data from writer channels to clients based on peer node<->channel mapping
         let writer_task = tokio::spawn(async move {
             let mut receiver_futures = Vec::new();
             
@@ -191,7 +196,9 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
                 
                 let r = running.clone();
                 let future = async move {
-                    while r.load(std::sync::atomic::Ordering::Relaxed) { // TODO timeout and running check
+                    
+                    // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
+                    while r.load(std::sync::atomic::Ordering::Relaxed) {
                         match time::timeout(Duration::from_millis(100), receiver.recv()).await {
                             Ok(Some(message)) => {
                                 let node_id = channel_to_node_clone.get(&channel_id_clone).unwrap();
@@ -232,7 +239,7 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
 
     async fn close(&mut self) {
         self.running.store(false, std::sync::atomic::Ordering::Release);
-        
+
         // Send shutdown signal to server
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
@@ -249,6 +256,10 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
 
         if let Some(reader_task) = self.reader_task.take() {
             let _ = reader_task.await;
+        }
+
+        if let Some(writer_task) = self.writer_task.take() {
+            let _ = writer_task.await;
         }
 
         println!("[GRPC_BACKEND] All tasks completed");

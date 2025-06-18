@@ -1,7 +1,18 @@
-use crate::transport::transport_backend::{TransportBackend, InMemoryTransportBackend};
+use std::collections::HashMap;
+
+use crate::runtime::execution_graph::ExecutionGraph;
+use crate::transport::transport_client::TransportClientConfig;
 use kameo::Actor;
 use kameo::message::{Context, Message};
 use anyhow::Result;
+use tonic::async_trait;
+
+#[async_trait]
+pub trait TransportBackend: Send + Sync {
+    async fn start(&mut self);
+    async fn close(&mut self);
+    fn init_channels(&mut self, execution_graph: &ExecutionGraph, vertex_ids: Vec<String>) -> HashMap<String, TransportClientConfig>;
+}
 
 #[derive(Debug)]
 pub enum TransportBackendActorMessage {
@@ -11,13 +22,13 @@ pub enum TransportBackendActorMessage {
 
 #[derive(Actor)]
 pub struct TransportBackendActor {
-    backend: InMemoryTransportBackend,
+    backend: Box<dyn TransportBackend + Send + 'static>,
 }
 
 impl TransportBackendActor {
-    pub fn new(backend: InMemoryTransportBackend) -> Self {
+    pub fn new<T: TransportBackend + Send + 'static>(backend: T) -> Self {
         Self {
-            backend,
+            backend: Box::new(backend),
         }
     }
 }
