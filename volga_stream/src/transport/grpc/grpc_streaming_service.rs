@@ -1,5 +1,6 @@
 use tonic::{Request, Response, Status};
 use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 use crate::common::message::Message;
 
 pub mod message_stream {
@@ -62,8 +63,35 @@ pub struct MessageStreamClient {
 
 impl MessageStreamClient {
     pub async fn connect(addr: String) -> Result<Self, Box<dyn std::error::Error>> {
-        let client = MessageStreamServiceClient::connect(addr).await?;
-        Ok(Self { client })
+        Self::connect_with_retry(addr, 10, Duration::from_millis(100)).await
+    }
+
+    pub async fn connect_with_retry(
+        addr: String, 
+        max_retries: u32, 
+        delay: Duration
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut last_error = None;
+
+        for attempt in 0..=max_retries {
+            match MessageStreamServiceClient::connect(addr.clone()).await {
+                Ok(client) => {
+                    println!("[GRPC_CLIENT] Successfully connected to {} after {} attempts", addr, attempt + 1);
+                    return Ok(Self { client });
+                }
+                Err(e) => {
+                    last_error = Some(e);
+                    if attempt < max_retries {
+                        println!("[GRPC_CLIENT] Connection attempt {} failed for {}: {}. Retrying in {:?}...", 
+                                attempt + 1, addr, last_error.as_ref().unwrap(), delay);
+                        sleep(delay).await;
+                    }
+                }
+            }
+        }
+
+        Err(format!("Failed to connect to {} after {} attempts. Last error: {}", 
+                   addr, max_retries + 1, last_error.unwrap()).into())
     }
 
     pub async fn stream_messages(
