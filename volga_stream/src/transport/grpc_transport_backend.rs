@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
+use std::time::Duration;
 use tokio::sync::mpsc;
+use tokio::time;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::transport::channel::Channel;
@@ -41,10 +43,8 @@ impl GrpcTransportBackend {
             client_handles: Vec::new(),
             reader_task: None,
             writer_task: None,
-            // writer_senders: None,
             reader_senders: None,
             writer_receivers: None,
-            // reader_receivers: None,
             nodes: None,
             channel_to_node: None,
             port: None,
@@ -105,8 +105,9 @@ impl GrpcTransportBackend {
 #[async_trait]
 impl super::transport_backend::TransportBackend for GrpcTransportBackend {
     async fn start(&mut self) {
+        self.running.store(true, std::sync::atomic::Ordering::Release);
+
         // Start server
-        // let (port, server_tx) = self.server_config.take().unwrap();
         let port = self.port.unwrap();
         let (server_tx, mut server_rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
         let server_handle = tokio::spawn(async move {
@@ -126,13 +127,36 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
         self.server_handle = Some(server_handle);
 
         // Start reader task
+        let runnning = self.running.clone();
         let reader_senders = self.reader_senders.take().unwrap();
         let reader_task = tokio::spawn(async move {
-            // TODO add timeout and running check
-            while let Some((message, channel_id)) = server_rx.recv().await {
-                let sender = reader_senders.get(&channel_id).unwrap();
-                if let Err(e) = sender.send(message).await {
-                    panic!("[GRPC_BACKEND] Failed to forward message to channel {}: {}", channel_id, e);
+            while runnning.load(std::sync::atomic::Ordering::Relaxed) {
+                match time::timeout(Duration::from_millis(100), server_rx.recv()).await {
+                    Ok(Some((message, channel_id))) => {
+                        // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
+                        let sender = reader_senders.get(&channel_id).unwrap();
+                        while runnning.load(std::sync::atomic::Ordering::Relaxed) {
+                            match time::timeout(Duration::from_millis(100), sender.send(message.clone())).await {
+                                Ok(Ok(())) => {
+                                    break;
+                                }, 
+                                Ok(Err(e)) => {
+                                    panic!("[GRPC_BACKEND] Failed to forward message to channel {}: {}", channel_id, e);
+                                },
+                                Err(_) => {
+                                    // timeout
+                                    continue;
+                                }
+                            }
+                        }
+                    },
+                    Ok(None) => {
+                        panic!("[GRPC_BACKEND] Server channel closed");
+                    },
+                    Err(_) => {
+                        // timeout
+                        continue
+                    },
                 }
             }
         });
@@ -155,6 +179,7 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
         }
 
         let writer_receivers = self.writer_receivers.take().unwrap();
+        let running = self.running.clone();
         let writer_task = tokio::spawn(async move {
             let mut receiver_futures = Vec::new();
             
@@ -164,19 +189,35 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
                 let client_txs_clone = client_txs.clone();
                 let channel_to_node_clone = channel_to_node.clone();
                 
+                let r = running.clone();
                 let future = async move {
-                    loop { // TODO timeout and running check
-                        match receiver.recv().await {
-                            Some(message) => {
-                                
-                                // Find the target node for this channel
+                    while r.load(std::sync::atomic::Ordering::Relaxed) { // TODO timeout and running check
+                        match time::timeout(Duration::from_millis(100), receiver.recv()).await {
+                            Ok(Some(message)) => {
                                 let node_id = channel_to_node_clone.get(&channel_id_clone).unwrap();
                                 let client_tx = client_txs_clone.get(node_id).unwrap();
-                                if let Err(e) = client_tx.send((message, channel_id_clone.clone())).await {
-                                    panic!("[GRPC_BACKEND] Failed to send message to client {}: {}", node_id, e);
+                                while r.load(std::sync::atomic::Ordering::Relaxed) {
+                                    match time::timeout(Duration::from_millis(100), client_tx.send((message.clone(), channel_id_clone.clone()))).await {
+                                        Ok(Ok(())) => {
+                                            break;
+                                        }, 
+                                        Ok(Err(e)) => {
+                                            panic!("[GRPC_BACKEND] Failed to send message to client {}: {}", node_id, e);
+                                        },
+                                        Err(_) => {
+                                            // timeout
+                                            continue;
+                                        }
+                                    }
                                 }
-                            }
-                            None => break, // Receiver closed
+                            },
+                            Ok(None) => {
+                                panic!("[GRPC_BACKEND] Client channel closed");
+                            },
+                            Err(_) => {
+                                // timeout
+                                continue
+                            },
                         }
                     }
                 };
@@ -184,13 +225,14 @@ impl super::transport_backend::TransportBackend for GrpcTransportBackend {
                 receiver_futures.push(Box::pin(future));
             }
             
-            // Wait for all receiver tasks to complete
             let _ = futures::future::join_all(receiver_futures).await;
         });
         self.writer_task = Some(writer_task);
     }
 
     async fn close(&mut self) {
+        self.running.store(false, std::sync::atomic::Ordering::Release);
+        
         // Send shutdown signal to server
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
             let _ = shutdown_tx.send(());
