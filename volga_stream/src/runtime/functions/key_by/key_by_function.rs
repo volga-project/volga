@@ -82,10 +82,6 @@ impl ArrowKeyByFunction {
 
 impl KeyByFunctionTrait for ArrowKeyByFunction {
     fn key_by(&self, message: Message) -> Vec<KeyedMessage> {
-        let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id()).unwrap();
-        let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-        println!("{:?} key_by rcvd, value {:?}", vertex_id, value);
-
         let record_batch = message.record_batch();
         let schema = record_batch.schema();
         
