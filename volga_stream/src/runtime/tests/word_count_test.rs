@@ -161,20 +161,14 @@ fn test_parallel_word_count() -> Result<()> {
         1,
     );
 
-    println!("Starting worker...");
-    worker.start();
-    println!("Worker started");
-
-    // Wait for processing to complete
-    std::thread::sleep(std::time::Duration::from_secs(2));
+    runtime.block_on(async {
+        worker.execute_worker_lifecycle_for_testing().await;
+    });
 
     // Verify results by reading from storage actor
     let result = runtime.block_on(async {
         storage_ref.ask(InMemoryStorageMessage::GetMap).await
     })?;
-
-    // Close worker
-    // worker.close();
     
     match result {
         InMemoryStorageReply::Map(result_map) => {

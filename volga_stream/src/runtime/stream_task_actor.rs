@@ -3,7 +3,7 @@ use kameo::Actor;
 use kameo::message::Context;
 use crate::runtime::stream_task::{StreamTask, StreamTaskState};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StreamTaskMessage {
     Start,
     Close,

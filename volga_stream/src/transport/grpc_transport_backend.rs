@@ -309,9 +309,6 @@ impl TransportBackend for GrpcTransportBackend {
         let input_channels: Vec<Channel> = all_input_edges.iter().map(|edge| edge.channel.clone()).collect();
         let output_channels: Vec<Channel> = all_output_edges.iter().map(|edge| edge.channel.clone()).collect();
 
-        println!("input_channels: {:?}", input_channels.len());
-        println!("output_channels: {:?}", output_channels.len());
-
         if input_channels.len() != 0 {
             self.port = Some(self.get_port_from_remote_channels(&input_channels));
         }

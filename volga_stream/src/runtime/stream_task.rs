@@ -2,32 +2,35 @@ use crate::{common::MAX_WATERMARK_VALUE, runtime::{
     collector::Collector, execution_graph::{ExecutionGraph, OperatorConfig}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
-use tokio::{task::JoinHandle, time::sleep, sync::Mutex, sync::watch};
+use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{Ordering, AtomicU8}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{atomic::{AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use std::collections::HashSet;
-// use std::sync::Mutex;
+use serde::{Serialize, Deserialize};
 
 use super::operator::OperatorType;
 
 // Helper function to get current timestamp
 fn timestamp() -> String {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::from_secs(0));
-    format!("[{}.{:03}]", now.as_secs(), now.subsec_millis())
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamTaskStatus {
-    Opening = 0,
+    Created = 0,
     Opened = 1,
     Running = 2,
-    Closing = 3,
+    Finished = 3,
     Closed = 4,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamTaskMetrics {
     pub vertex_id: String,
     pub latency_histogram: Vec<u64>, // Simple histogram: [0-1ms, 1-10ms, 10-100ms, 100ms-1s, >1s]
@@ -75,10 +78,10 @@ pub struct StreamTaskState {
 impl From<u8> for StreamTaskStatus {
     fn from(value: u8) -> Self {
         match value {
-            0 => StreamTaskStatus::Opening,
+            0 => StreamTaskStatus::Created,
             1 => StreamTaskStatus::Opened,
             2 => StreamTaskStatus::Running,
-            3 => StreamTaskStatus::Closing,
+            3 => StreamTaskStatus::Finished,
             4 => StreamTaskStatus::Closed,
             _ => panic!("Invalid task status value"),
         }
@@ -111,7 +114,7 @@ impl StreamTask {
         Self {
             vertex_id: vertex_id.clone(),
             runtime_context,
-            status: Arc::new(AtomicU8::new(StreamTaskStatus::Opening as u8)),
+            status: Arc::new(AtomicU8::new(StreamTaskStatus::Created as u8)),
             run_loop_handle: None,
             operator_config,
             transport_client_config: Some(transport_client_config),
@@ -135,7 +138,7 @@ impl StreamTask {
             if operator_type == OperatorType::SOURCE {
                 println!("source vertex_id {:?} received max watermark, initiating shutdown", 
                     vertex_id);
-                Self::mark_closing(status, vertex_id);
+                status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                 return;
             }
 
@@ -146,11 +149,11 @@ impl StreamTask {
             done_sources.insert(source_id);
             println!("vertex_id {:?}, done sources {:?}", vertex_id, done_sources);
             
-            // If we've received watermarks from all sources, initiate shutdown
+            // If we've received max watermarks from all sources, initiate shutdown
             if done_sources.len() as u32 >= num_source_vertices {
                 println!("vertex_id {:?} Received max watermarks from all sources {:?}, initiating shutdown", 
                     vertex_id, done_sources);
-                Self::mark_closing(status, vertex_id);
+                status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
             }
         }
     }
@@ -190,10 +193,10 @@ impl StreamTask {
 
         let transport_client_config = self.transport_client_config.take().unwrap();
         
-        let (run_sender, mut run_receiver) = watch::channel(false);
+        let (run_sender, run_receiver) = watch::channel(false);
         self.run_signal_sender = Some(run_sender);
 
-        let (close_sender, mut close_receiver) = watch::channel(false);
+        let (close_sender, close_receiver) = watch::channel(false);
         self.close_signal_sender = Some(close_sender);
         
         // Main stream task lifecycle loop
@@ -232,21 +235,27 @@ impl StreamTask {
                 
                 collector.add_output_channel_id(channel_id.clone());
             }
-            
+
             operator.open(&runtime_context).await?;
             println!("{:?} Operator {:?} opened", timestamp(), vertex_id);
 
-            // TODO what if early close
-            
-            status.store(StreamTaskStatus::Opened as u8, Ordering::SeqCst);
+            // if task is not finished/closed early, mark as opened
+            if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
+                status.store(StreamTaskStatus::Opened as u8, Ordering::SeqCst);
+            }
             
             // Wait for signal to start processing
             println!("{:?} Task {:?} waiting for run signal", timestamp(), vertex_id);
-            run_receiver.changed().await.unwrap();
+            Self::wait_for_signal_or_finished(run_receiver, status.clone()).await;
             println!("{:?} Task {:?} received run signal, starting processing", timestamp(), vertex_id);
             
-            status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
+
+            // if task is not finished/closed early, mark as runnning
+            if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
+                status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
+            }
             
+            // processing loop
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 let operator_type = operator.operator_type();
                 let messages = match operator_type {
@@ -331,19 +340,13 @@ impl StreamTask {
                         let partitioned_channel_ids = collector.gen_partitioned_channel_ids(message.clone());
                         channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channel_ids);
                     }
-                    // let is_watermark = match message {
-                    //     Message::Watermark(_) => true,
-                    //     _ => false,
-                    // };
-                    // println!("vertex_id {:?}, is watermark {:?}, channels_to_send_per_operator {:?}", vertex_id, is_watermark, channels_to_send_per_operator);
                     
-
                     // send message to all destinations until no backpressure
                     // TODO track backpreessure stats
                     while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
-                        status.load(Ordering::SeqCst) == StreamTaskStatus::Closing as u8 {
+                        status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
 
-                        if status.load(Ordering::SeqCst) == StreamTaskStatus::Closing as u8 {
+                        if status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
                             if retries_before_close == 0 {
                                 break;
                             }
@@ -372,15 +375,12 @@ impl StreamTask {
                         if channels_to_send_per_operator.len() == 0 {
                             break;
                         }
-                        println!("Retry");
                     }
                 }
             }
             
-            // we should wait for all tasks to close
-            // sleep(Duration::from_millis(50)).await;
             println!("{:?} Task {:?} waiting for close signal", timestamp(), vertex_id);
-            close_receiver.changed().await.unwrap();
+            Self::wait_for_signal_or_finished(close_receiver, status.clone()).await;
             println!("{:?} Task {:?} received close signal, performing close", timestamp(), vertex_id);
 
             operator.close().await?;
@@ -393,29 +393,6 @@ impl StreamTask {
         
         self.run_loop_handle = Some(run_loop_handle);
     }
-
-    fn mark_closing(status: Arc<AtomicU8>, vertex_id: String) {
-        println!("StreamTask {:?} closing...", vertex_id);
-        status.store(StreamTaskStatus::Closing as u8, Ordering::SeqCst);
-    }
-
-    // pub async fn close_and_wait(&mut self) {
-
-    //     Self::mark_closing(self.status.clone(), self.vertex_id.clone());
-        
-    //     if let Some(handle) = self.run_loop_handle.take() {
-    //         match handle.await {
-    //             Ok(result) => {
-    //                 println!("Run loop {:?} finished with result: {:?}", self.vertex_id, result);
-    //             },
-    //             Err(e) => {
-    //                 println!("Run loop {:?} failed: {:?}", self.vertex_id, e);
-    //             }
-    //         }
-    //     } else {
-    //         self.status.store(StreamTaskStatus::Closed as u8, Ordering::SeqCst);
-    //     }
-    // }
 
     pub async fn get_state(&self) -> StreamTaskState {
         StreamTaskState {
@@ -433,5 +410,26 @@ impl StreamTask {
     pub fn signal_to_close(&mut self) {
         let close_signal_sender = self.close_signal_sender.as_ref().unwrap();
         let _ = close_signal_sender.send(true);
+    }
+
+    async fn wait_for_signal_or_finished(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>) {
+        loop {
+            let current_status = status.load(Ordering::SeqCst);
+            if current_status == StreamTaskStatus::Finished as u8 || current_status == StreamTaskStatus::Closed as u8 {
+                println!("{:?} Task status is {:?}, stopping wait for signal", timestamp(), StreamTaskStatus::from(current_status));
+                return;
+            }
+
+            match tokio::time::timeout(Duration::from_millis(100), receiver.changed()).await {
+                Ok(_) => {
+                    // Signal received
+                    return;
+                }
+                Err(_) => {
+                    // Timeout, continue loop to check status
+                    continue;
+                }
+            }
+        }
     }
 }

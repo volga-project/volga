@@ -33,10 +33,12 @@ impl MapFunctionTrait for IdentityMapFunction {
     }
 }
 
+// TODO test early worker interruption/shutdown via setting state to finished from outside
 #[test]
 fn test_worker() -> Result<()> {
     let runtime = Runtime::new()?;
 
+    // TODO use max watermarks for shutdown
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
         Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
@@ -109,12 +111,9 @@ fn test_worker() -> Result<()> {
         1,
     );
 
-    println!("Worker starting...");
-    worker.start();
-    println!("Worker started");
-
-    // Wait for processing to complete
-    thread::sleep(Duration::from_secs(1));
+    runtime.block_on(async {
+        worker.execute_worker_lifecycle_for_testing().await;
+    });
 
     // Verify results by reading from storage actor
     let result = runtime.block_on(async {
@@ -132,8 +131,6 @@ fn test_worker() -> Result<()> {
         }
         _ => panic!("Expected Vector reply from storage actor"),
     }
-
-    // worker.close();
 
     Ok(())
 } 

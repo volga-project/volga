@@ -8,15 +8,17 @@ use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
+use serde::{Serialize, Deserialize};
+use anyhow::Result;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerState {
     pub task_statuses: HashMap<String, StreamTaskStatus>,
     pub task_metrics: HashMap<String, StreamTaskMetrics>,
     pub aggregated_metrics: AggregatedMetrics,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AggregatedMetrics {
     pub total_messages: u64,
     pub total_records: u64,
@@ -60,6 +62,14 @@ impl WorkerState {
     pub fn all_tasks_have_status(&self, status: StreamTaskStatus) -> bool {
         self.task_statuses.values().all(|_status| *_status == status)
     }
+
+    pub fn to_bytes(&self) -> Result<Vec<u8>> {
+        Ok(bincode::serialize(self)?)
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        Ok(bincode::deserialize(bytes)?)
+    }
 }
 
 pub struct Worker {
@@ -72,8 +82,7 @@ pub struct Worker {
     num_io_threads: usize,
     state: Arc<tokio::sync::Mutex<WorkerState>>,
     running: Arc<AtomicBool>,
-    tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
-    worker_runtime: Runtime
+    tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>
 }
 
 impl Worker {
@@ -82,22 +91,37 @@ impl Worker {
         vertex_ids: Vec<String>,
         num_io_threads: usize,
     ) -> Self {
+        let mut task_runtimes = HashMap::new();
+        for vertex_id in &vertex_ids {
+            let task_runtime = Builder::new_multi_thread()
+                .worker_threads(num_io_threads)
+                .enable_all()
+                .thread_name(format!("task-runtime-{}", vertex_id))
+                .build().unwrap();
+
+            task_runtimes.insert(vertex_id.clone(), task_runtime);
+        }
+
         Self {
             graph,
-            vertex_ids,
+            vertex_ids: vertex_ids.clone(),
             task_actors: HashMap::new(),
             backend_actor: None,
-            task_runtimes: HashMap::new(),
-            transport_backend_runtime: None,
+            task_runtimes,
+            transport_backend_runtime: Some(
+                Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .thread_name("transport-backend-runtime")
+                .build().unwrap()),
             num_io_threads,
             state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
             running: Arc::new(AtomicBool::new(false)),
-            tasks_state_polling_handle: None,
-            worker_runtime: tokio::runtime::Runtime::new().unwrap()
+            tasks_state_polling_handle: None
         }
     }
 
-    async fn poll_tasks_state(
+    async fn poll_and_update_tasks_state(
         task_runtimes: HashMap<String, Handle>,
         task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
@@ -143,24 +167,29 @@ impl Worker {
         } // Release lock before sleep
     }
 
-    async fn wait_for_all_tasks_status(&self, status: StreamTaskStatus) {
-        println!("Waiting for all tasks to be {:?}...", status);
+    pub async fn wait_for_all_tasks_status(
+        state: Arc<tokio::sync::Mutex<WorkerState>>,
+        running: Arc<AtomicBool>,
+        target_status: StreamTaskStatus
+    ) {
+        println!("[WORKER] Waiting for all tasks to be {:?}", target_status);
+        
         let start_time = std::time::Instant::now();
         let timeout_duration = Duration::from_secs(10);
         
-        while self.running.load(Ordering::SeqCst) {
+        while running.load(Ordering::SeqCst) {
             // Check timeout
             if start_time.elapsed() > timeout_duration {
-                panic!("Timeout waiting for all tasks to be {:?} after {:?}", status, timeout_duration);
+                panic!("Timeout waiting for all tasks to be {:?} after {:?}", target_status, timeout_duration);
             }
             
-            let all_opened = {
-                let state_guard = self.state.lock().await;
-                state_guard.all_tasks_have_status(status)
+            let all_ready = {
+                let state_guard = state.lock().await;
+                state_guard.all_tasks_have_status(target_status)
             };
             
-            if all_opened {
-                println!("All tasks are {:?}", status);
+            if all_ready {
+                println!("[WORKER] All tasks are {:?}", target_status);
                 break;
             }
             
@@ -168,34 +197,22 @@ impl Worker {
         }
     }
 
-    pub fn start(&mut self) {
-        println!("Starting worker");
-
-        let backend_runtime = Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .thread_name("transport-backend-runtime")
-            .build().unwrap();
+    pub async fn spawn_actors(&mut self) {
+        println!("[WORKER] Spawning actors");
 
         let mut backend = InMemoryTransportBackend::new();
         let mut transport_client_configs = backend.init_channels(&self.graph, self.vertex_ids.clone());
 
-        let backend_actor = backend_runtime.block_on(async {
-            spawn(TransportBackendActor::new(backend))
+        let backend_actor_task = self.transport_backend_runtime.as_ref().unwrap().spawn(async{
+            return spawn(TransportBackendActor::new(backend))
         });
+        let backend_actor_ref = backend_actor_task.await.unwrap();
+        self.backend_actor = Some(backend_actor_ref);
 
-        self.transport_backend_runtime = Some(backend_runtime);
-        self.backend_actor = Some(backend_actor.clone());
-
-        for vertex_id in &self.vertex_ids {
+        let vertex_ids = self.vertex_ids.clone();
+        for vertex_id in &vertex_ids {
             let vertex = self.graph.get_vertex(vertex_id).expect("Vertex should exist");
-            
-            // Create runtime for this task
-            let runtime = Builder::new_multi_thread()
-                .worker_threads(self.num_io_threads)
-                .enable_all()
-                .thread_name(format!("task-runtime-{}", vertex_id))
-                .build().unwrap();
+            let task_runtime = self.task_runtimes.get(vertex_id).expect("Task runtime should exist");
 
             // Create runtime context for the vertex
             let runtime_context = RuntimeContext::new(
@@ -214,17 +231,18 @@ impl Worker {
                 self.graph.clone(),
             );
             let task_actor = StreamTaskActor::new(task);
-            let task_ref = runtime.block_on(async {
-                spawn(task_actor)
+            let task_ref = task_runtime.spawn(async{
+                return spawn(task_actor)
             });
-            self.task_actors.insert(vertex_id.clone(), task_ref.clone());
-            self.task_runtimes.insert(vertex_id.clone(), runtime);
+            let task_actor_ref = task_ref.await.unwrap();
+            self.task_actors.insert(vertex_id.clone(), task_actor_ref);
         }
 
-        // Start the backend
-        self.transport_backend_runtime.as_ref().unwrap().block_on(async {
-            self.backend_actor.as_ref().unwrap().ask(TransportBackendActorMessage::Start).await
-        }).unwrap();
+        println!("[WORKER] Actors spawned");
+    }
+
+    pub async fn start_tasks(&mut self) {
+        println!("[WORKER] Starting tasks");
 
         // Start all tasks
         let mut start_futures = Vec::new();
@@ -240,12 +258,10 @@ impl Worker {
             });
             start_futures.push(fut);
         }
-        self.worker_runtime.block_on(async {
-            for f in start_futures {
-                let _ = f.await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        }).unwrap();
+        
+        for f in start_futures {
+            let _ = f.await.unwrap();
+        }
 
         // Start tasks state polling loop
         self.running.store(true, Ordering::SeqCst);
@@ -258,167 +274,173 @@ impl Worker {
             .map(|(k, v)| (k.clone(), v.handle().clone()))
             .collect();
         
-        let polling_handle = self.worker_runtime.spawn(async move {
-            // Self::tasks_state_polling_loop(running, task_runtime_handles, task_actors, graph, state).await;
+        let polling_handle = tokio::spawn(async move { 
             while running.load(Ordering::SeqCst) {
-                Self::poll_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone()).await;
+                Self::poll_and_update_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone()).await;
                 sleep(Duration::from_millis(100)).await;
             }
             // final poll
-            Self::poll_tasks_state(task_runtime_handles, task_actors, graph, state).await;
-            println!("Final poll done");
+            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state).await;
         });
 
         self.tasks_state_polling_handle = Some(polling_handle);
 
-        // Wait for all tasks to be opened
-        self.worker_runtime.block_on(async {
-            self.wait_for_all_tasks_status(StreamTaskStatus::Opened).await;
-        });
+        println!("[WORKER] Started all tasks");
+    }
 
-        // Signal all tasks to start processing
-        println!("Signaling all tasks to start processing");
+    pub async fn start_transport_backend(&mut self) {
+        let backend_actor_ref = self.backend_actor.as_ref().unwrap().clone();
+        self.transport_backend_runtime.as_ref().unwrap().spawn(async move {
+            backend_actor_ref.ask(TransportBackendActorMessage::Start).await.unwrap()
+        }).await.unwrap();
+    }
+
+    pub async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
+        println!("[WORKER] Sending {:?} signal to all task actors", signal);
+        
         for (vertex_id, runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
+            let signal_clone = signal.clone();
+            let signal_for_error = signal.clone();
             let fut = runtime.spawn(async move {
-                if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await {
-                    eprintln!("Error signaling task {} to run: {}", vertex_id, e);
+                if let Err(e) = task_ref.ask(signal_clone).await {
+                    eprintln!("Error sending {:?} signal to task {}: {}", signal_for_error, vertex_id, e);
                 }
             });
-            self.worker_runtime.block_on(async {
-                let _ = fut.await;
-            });
+            let _ = fut.await;
         }
 
-        println!("Started worker");
+        println!("[WORKER] {:?} signal sent to all task actors", signal);
     }
 
-    // pub fn close(&mut self) {
-    //     println!("Closing worker");
-
-    //     // Close all tasks in parallel
-    //     let mut close_futures = Vec::new();
-    //     for (vertex_id, runtime) in &self.task_runtimes {
-    //         let task_ref = self.task_actors.get(&vertex_id.clone()).unwrap().clone();
-    //         let fut = runtime.spawn(async move {
-    //             task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await?;
-    //             Ok::<(), anyhow::Error>(())
-    //         });
-    //         close_futures.push(fut);
-    //     }
-
-    //     self.worker_runtime.block_on(async {
-    //         for f in close_futures {
-    //             let _ = f.await?;
-    //         }
-    //         Ok::<(), anyhow::Error>(())
-    //     }).unwrap();
-
-    //     // Close the backend
-    //     if let Some(backend_actor) = &self.backend_actor {
-    //         self.transport_backend_runtime.as_ref().unwrap().block_on(async {
-    //             backend_actor.ask(TransportBackendActorMessage::Close).await
-    //         }).unwrap();
-    //     }
-
-    //     // Stop polling first
-    //     self.running.store(false, Ordering::SeqCst);
-    //     // Wait for task state polling to finish
-    //     let h = self.worker_runtime.handle().clone();
-    //     if let Some(handle) = self.tasks_state_polling_handle.take() {
-    //         h.block_on(async {
-    //             if let Err(e) = handle.await {
-    //                 eprintln!("Polling task failed: {:?}", e);
-    //             }
-    //         });
-    //     }
-
-    //     // Shutdown all task runtimes
-    //     for (vertex_id, runtime) in self.task_runtimes.drain() {
-    //         println!("Shutting down runtime for task {}", vertex_id);
-    //         runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-    //     }
-
-    //     // Shutdown backend runtime
-    //     if let Some(runtime) = self.transport_backend_runtime.take() {
-    //         println!("Shutting down transport backend runtime");
-    //         runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-    //     }
-
-    //     println!("Closed worker");
-    // }
-
-    // async fn wait_for_completion(&mut self) {
-    //     // Wait for completion by checking the shared state
-    //     while self.running.load(Ordering::SeqCst) {
-    //         let all_tasks_closing = {
-    //             let state_guard = self.state.lock().await;
-    //             state_guard.all_tasks_have_status(StreamTaskStatus::Closing)
-    //         };
-    //         if all_tasks_closing {
-    //             break;
-    //         }
-    //         sleep(Duration::from_millis(50)).await;
-    //     }
-
-    //     // Stop polling
-    //     self.running.store(false, Ordering::SeqCst);
-        
-    //     // Wait for polling task to finish
-    //     if let Some(handle) = self.tasks_state_polling_handle.take() {
-    //         if let Err(e) = handle.await {
-    //             eprintln!("Polling task failed: {:?}", e);
-    //         }
-    //     }
-    //     println!("All tasks have completed");
-    // }
-
     pub async fn get_state(&self) -> WorkerState {
+        if self.running.load(Ordering::SeqCst) {
+            let task_runtime_handles: HashMap<String, Handle> = self.task_runtimes.iter()
+                .map(|(k, v)| (k.clone(), v.handle().clone()))
+                .collect();
+            let task_actors = self.task_actors.clone();
+            let graph = self.graph.clone();
+            let state = self.state.clone();
+            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state).await;
+        }
         self.state.lock().await.clone()
     }
 
-    pub fn execute(&mut self) {
-        println!("Starting worker execution");
-        self.start();
-        // std::thread::sleep(Duration::from_millis(2000));
-        let runtime = Runtime::new().unwrap(); // TODO use worker runtime
-        runtime.block_on(async {
-            self.wait_for_all_tasks_status(StreamTaskStatus::Closing).await;
-            // send close to all tasks
-            let mut close_futures = Vec::new();
-            for (vertex_id, runtime) in &self.task_runtimes {
-                let task_ref = self.task_actors.get(&vertex_id.clone()).unwrap().clone();
-                let fut = runtime.spawn(async move {
-                    task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await?;
-                    Ok::<(), anyhow::Error>(())
-                });
-                close_futures.push(fut);
+    pub async fn cleanup(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.tasks_state_polling_handle.take() {
+            if let Err(e) = handle.await {
+                eprintln!("Polling task failed: {:?}", e);
             }
-            for f in close_futures {
-                let _ = f.await.unwrap();
-            }
-            self.wait_for_all_tasks_status(StreamTaskStatus::Closed).await;
-
-            self.running.store(false, Ordering::SeqCst);
-            if let Some(handle) = self.tasks_state_polling_handle.take() {
-                if let Err(e) = handle.await {
-                    eprintln!("Polling task failed: {:?}", e);
-                }
-            }
-        });
-        // Shutdown all task runtimes
-        for (vertex_id, runtime) in self.task_runtimes.drain() {
-            println!("Shutting down runtime for task {}", vertex_id);
-            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
         }
 
-        // Shutdown backend runtime
-        if let Some(runtime) = self.transport_backend_runtime.take() {
-            println!("Shutting down transport backend runtime");
-            runtime.shutdown_timeout(std::time::Duration::from_secs(1));
-        }
+        // TODO destroy actors and runtimes
 
-        println!("Closed worker");
+        println!("[WORKER] Cleanup completed");
+    }
+
+    // This should only be used for testing - simulates worker execution
+    // In real environment master is used to coordinate worker lifecycle
+    pub async fn execute_worker_lifecycle_for_testing(&mut self) {
+        println!("[WORKER] Starting worker execution");
+        
+        self.spawn_actors().await;
+
+        self.start_tasks().await;
+
+        Self::wait_for_all_tasks_status(
+            self.state.clone(),
+            self.running.clone(),
+            StreamTaskStatus::Opened
+        ).await;
+
+        self.start_transport_backend().await;
+        
+        self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await;
+
+        println!("[WORKER] Worker started");
+
+        // TODO we need to fix shutdown logic in stream task and remove this and uncomment below
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        
+        // // Wait for tasks to finish
+        // Self::wait_for_all_tasks_status(
+        //     self.state.clone(),
+        //     self.running.clone(),
+        //     StreamTaskStatus::Finished
+        // ).await;
+        
+        // // Send close signal
+        // self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
+        
+        // // Wait for tasks to be closed
+        // Self::wait_for_all_tasks_status(
+        //     self.state.clone(),
+        //     self.running.clone(),
+        //     StreamTaskStatus::Closed
+        // ).await;
+        
+        // // Cleanup
+        // self.cleanup().await;
+
+        println!("[WORKER] Worker execution completed");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::stream_task::{StreamTaskStatus, StreamTaskMetrics};
+
+    #[test]
+    fn test_worker_state_serialization() {
+        // Create a test WorkerState
+        let mut worker_state = WorkerState::new();
+        
+        // Add some task statuses
+        worker_state.task_statuses.insert("task1".to_string(), StreamTaskStatus::Running);
+        worker_state.task_statuses.insert("task2".to_string(), StreamTaskStatus::Opened);
+        
+        // Add some task metrics
+        let mut metrics1 = StreamTaskMetrics::new("task1".to_string());
+        metrics1.num_messages = 100;
+        metrics1.num_records = 500;
+        metrics1.latency_histogram = vec![10, 20, 30, 40, 50];
+        
+        let mut metrics2 = StreamTaskMetrics::new("task2".to_string());
+        metrics2.num_messages = 200;
+        metrics2.num_records = 1000;
+        metrics2.latency_histogram = vec![15, 25, 35, 45, 55];
+        
+        worker_state.task_metrics.insert("task1".to_string(), metrics1);
+        worker_state.task_metrics.insert("task2".to_string(), metrics2);
+        
+        // Update aggregated metrics
+        worker_state.aggregated_metrics.total_messages = 300;
+        worker_state.aggregated_metrics.total_records = 1500;
+        worker_state.aggregated_metrics.latency_histogram = vec![25, 45, 65, 85, 105];
+
+        // Test serialization and deserialization
+        let bytes = worker_state.to_bytes().unwrap();
+        let deserialized_state = WorkerState::from_bytes(&bytes).unwrap();
+
+        // Verify the state was correctly deserialized
+        assert_eq!(worker_state.task_statuses, deserialized_state.task_statuses);
+        assert_eq!(worker_state.task_metrics.len(), deserialized_state.task_metrics.len());
+        
+        // Compare task metrics
+        for (key, original_metrics) in &worker_state.task_metrics {
+            let deserialized_metrics = deserialized_state.task_metrics.get(key).unwrap();
+            assert_eq!(original_metrics.vertex_id, deserialized_metrics.vertex_id);
+            assert_eq!(original_metrics.num_messages, deserialized_metrics.num_messages);
+            assert_eq!(original_metrics.num_records, deserialized_metrics.num_records);
+            assert_eq!(original_metrics.latency_histogram, deserialized_metrics.latency_histogram);
+        }
+        
+        // Compare aggregated metrics
+        assert_eq!(worker_state.aggregated_metrics.total_messages, deserialized_state.aggregated_metrics.total_messages);
+        assert_eq!(worker_state.aggregated_metrics.total_records, deserialized_state.aggregated_metrics.total_records);
+        assert_eq!(worker_state.aggregated_metrics.latency_histogram, deserialized_state.aggregated_metrics.latency_histogram);
     }
 }

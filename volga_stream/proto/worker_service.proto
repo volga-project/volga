@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package worker_service;
+
+// WorkerService provides RPC methods for managing worker lifecycle and state
+service WorkerService {
+  // Get the current state of the worker including task statuses and metrics
+  rpc GetWorkerState(GetWorkerStateRequest) returns (GetWorkerStateResponse);
+  
+  // Start the worker and initialize all components
+  rpc StartWorker(StartWorkerRequest) returns (StartWorkerResponse);
+  
+  // Start all tasks in the worker
+  rpc StartTasks(StartTasksRequest) returns (StartTasksResponse);
+  
+  // Close all tasks in the worker
+  rpc CloseTasks(CloseTasksRequest) returns (CloseTasksResponse);
+  
+  // Close the worker and cleanup all resources
+  rpc CloseWorker(CloseWorkerRequest) returns (CloseWorkerResponse);
+}
+
+// Request message for GetWorkerState
+message GetWorkerStateRequest {
+  // Empty request - no parameters needed
+}
+
+// Response message for GetWorkerState
+message GetWorkerStateResponse {
+  bytes worker_state_bytes = 1;
+}
+
+// Request message for StartWorker
+message StartWorkerRequest {
+  // Empty request - no parameters needed
+}
+
+// Response message for StartWorker
+message StartWorkerResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Request message for StartTasks
+message StartTasksRequest {
+  // Empty request - no parameters needed
+}
+
+// Response message for StartTasks
+message StartTasksResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Request message for CloseTasks
+message CloseTasksRequest {
+  // Empty request - no parameters needed
+}
+
+// Response message for CloseTasks
+message CloseTasksResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Request message for CloseWorker
+message CloseWorkerRequest {
+  // Empty request - no parameters needed
+}
+
+// Response message for CloseWorker
+message CloseWorkerResponse {
+  bool success = 1;
+  string error_message = 2;
+} 

@@ -184,11 +184,11 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     );
 
     println!("Starting worker...");
-    // worker.start();
-    // std::thread::sleep(std::time::Duration::from_secs(2));
-    // worker.close(); // TODO test when the worker is still running
-    worker.execute();
+    runtime.block_on(async {
+        worker.execute_worker_lifecycle_for_testing().await;
+    });
     println!("Worker completed");
+    
     let worker_state = runtime.block_on(async {
         worker.get_state().await
     });

@@ -63,7 +63,7 @@ pub struct MessageStreamClient {
 
 impl MessageStreamClient {
     pub async fn connect(addr: String) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::connect_with_retry(addr, 10, Duration::from_millis(100)).await
+        Self::connect_with_retry(addr, 10, Duration::from_millis(1000)).await
     }
 
     pub async fn connect_with_retry(

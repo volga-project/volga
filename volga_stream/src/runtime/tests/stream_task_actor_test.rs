@@ -31,15 +31,17 @@ impl MapFunctionTrait for IdentityMapFunction {
     }
 }
 
+// TODO update with watermark shutdown
+// TODO verify proper shutdown
 #[test]
 fn test_stream_task_actor() -> Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
         // Create test data
         let test_messages = vec![
-            Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
-            Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
-            Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None),
+            Message::new(None, create_test_string_batch(vec!["test1".to_string()]), Some(1)),
+            Message::new(None, create_test_string_batch(vec!["test2".to_string()]), Some(2)),
+            Message::new(None, create_test_string_batch(vec!["test3".to_string()]), Some(3)),
         ];
 
         let mut graph = ExecutionGraph::new();
@@ -114,6 +116,9 @@ fn test_stream_task_actor() -> Result<()> {
 
         // Run task
         task_ref.ask(StreamTaskMessage::Start).await?;
+
+        // Signal to run
+        task_ref.ask(StreamTaskMessage::Run).await?;
 
         // Write test data using external writer
         for message in &test_messages {
