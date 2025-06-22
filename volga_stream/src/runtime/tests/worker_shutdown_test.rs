@@ -72,6 +72,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         messages.push(Message::Watermark(WatermarkMessage::new(
             format!("source_{}", i),
             MAX_WATERMARK_VALUE,
+            None,
         )));
         source_messages.push(messages);
     }

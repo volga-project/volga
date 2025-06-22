@@ -1,9 +1,9 @@
 use crate::runtime::{collector::Collector, runtime_context::RuntimeContext};
+use crate::common::{data_batch::DataBatch, message::{Message, WatermarkMessage}};
 use anyhow::{Error, Result};
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::common::data_batch::DataBatch;
 // use arrow::record_batch::RecordBatch;
 
 #[async_trait]
@@ -66,6 +66,8 @@ impl SourceContext for SourceContextImpl {
         if let Some(num_records) = self.num_records {
             if self.num_fetched_records >= num_records {
                 self.finished = true;
+                // Send EOS watermark to all downstream operators
+                self.send_eos_watermark().await?;
             }
         }
 
@@ -76,6 +78,21 @@ impl SourceContext for SourceContextImpl {
             }
         }
 
+        Ok(())
+    }
+
+    async fn send_eos_watermark(&mut self) -> Result<()> {
+        // Create EOS watermark
+        let eos_watermark = Message::Watermark(WatermarkMessage::new_eos(
+            self.runtime_context.vertex_id.clone()
+        ));
+        
+        // Send EOS watermark to all downstream operators
+        for collector in &mut self.collectors {
+            collector.collect_batch(DataBatch::new(eos_watermark.clone()), None).await?;
+        }
+        
+        println!("Source {} sent EOS watermark to all downstream operators", self.runtime_context.vertex_id);
         Ok(())
     }
 

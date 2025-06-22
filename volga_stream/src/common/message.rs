@@ -160,17 +160,17 @@ pub const MAX_WATERMARK_VALUE: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatermarkMessage {
-    pub source_vertex_id: String,
+    pub upstream_vertex_id: String,
     pub watermark_value: u64,
     pub ingest_timestamp: Option<u64>,
 }
 
 impl WatermarkMessage {
-    pub fn new(source_vertex_id: String, watermark_value: u64) -> Self {
+    pub fn new(upstream_vertex_id: String, watermark_value: u64, ingest_timestamp: Option<u64>) -> Self {
         Self {
-            source_vertex_id,
+            upstream_vertex_id,
             watermark_value,
-            ingest_timestamp: None,
+            ingest_timestamp,
         }
     }
 
@@ -212,7 +212,7 @@ impl Message {
         match self {
             Message::Regular(message) => message.metadata.upstream_vertex_id.clone(),
             Message::Keyed(message) => message.base.metadata.upstream_vertex_id.clone(),
-            Message::Watermark(message) => Some(message.source_vertex_id.clone()),
+            Message::Watermark(message) => Some(message.upstream_vertex_id.clone()),
         }
     }
 
@@ -426,7 +426,8 @@ mod tests {
         // Create a watermark message
         let mut original_message = Message::Watermark(WatermarkMessage::new(
             "source_vertex".to_string(),
-            9876543210
+            9876543210,
+            None
         ));
 
         // Set ingest timestamp
@@ -445,7 +446,7 @@ mod tests {
         // Compare watermark specific fields
         if let (Message::Watermark(original), Message::Watermark(deserialized)) = 
             (&original_message, &deserialized_message) {
-            assert_eq!(original.source_vertex_id, deserialized.source_vertex_id);
+            assert_eq!(original.upstream_vertex_id, deserialized.upstream_vertex_id);
             assert_eq!(original.watermark_value, deserialized.watermark_value);
             assert_eq!(original.ingest_timestamp, deserialized.ingest_timestamp);
         } else {

@@ -1,14 +1,6 @@
-use crate::runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig}, 
-    operator::SourceOperator, 
-    partition::{ForwardPartition, PartitionType}, 
-    worker::Worker,
-    functions::{
-        map::MapFunction,
-        map::MapFunctionTrait,
-    },
-    storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
-};
+use crate::{common::{WatermarkMessage, MAX_WATERMARK_VALUE}, runtime::{
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::map::{MapFunction, MapFunctionTrait}, operator::SourceOperator, partition::{ForwardPartition, PartitionType}, storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply}, worker::Worker
+}};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use anyhow::Result;
@@ -38,12 +30,19 @@ impl MapFunctionTrait for IdentityMapFunction {
 fn test_worker() -> Result<()> {
     let runtime = Runtime::new()?;
 
-    // TODO use max watermarks for shutdown
-    let test_messages = vec![
+    let mut test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
         Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
         Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None),
     ];
+
+    let num_messages = test_messages.len();
+
+    test_messages.push(Message::Watermark(WatermarkMessage::new(
+        "source".to_string(),
+        MAX_WATERMARK_VALUE,
+        None,
+    )));
 
     println!("Creating storage actor...");
     let storage_actor = InMemoryStorageActor::new();
@@ -122,8 +121,11 @@ fn test_worker() -> Result<()> {
     
     match result {
         InMemoryStorageReply::Vector(result_messages) => {
-            assert_eq!(result_messages.len(), test_messages.len());
+            assert_eq!(result_messages.len(), num_messages);
             for (expected, actual) in test_messages.iter().zip(result_messages.iter()) {
+                if matches!(expected, Message::Watermark(_)) {
+                    continue;
+                }
                 let expected_value = expected.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
                 let actual_value = actual.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
                 assert_eq!(actual_value, expected_value);

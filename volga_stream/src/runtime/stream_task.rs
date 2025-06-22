@@ -6,7 +6,7 @@ use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
 use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{atomic::{AtomicBool, AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
@@ -97,7 +97,7 @@ pub struct StreamTask {
     operator_config: OperatorConfig,
     transport_client_config: Option<TransportClientConfig>,
     execution_graph: ExecutionGraph,
-    max_watermark_source_ids: Arc<Mutex<HashSet<String>>>, // tracks which source have finished
+    finished_upstream_ids: Arc<Mutex<HashSet<String>>>, // tracks which upstream vertices have finished
     metrics: Arc<Mutex<StreamTaskMetrics>>,
     run_signal_sender: Option<watch::Sender<bool>>,
     close_signal_sender: Option<watch::Sender<bool>>,
@@ -119,10 +119,10 @@ impl StreamTask {
             operator_config,
             transport_client_config: Some(transport_client_config),
             execution_graph,
-            max_watermark_source_ids: Arc::new(Mutex::new(HashSet::new())),
+            finished_upstream_ids: Arc::new(Mutex::new(HashSet::new())),
             metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id.clone()))),
             run_signal_sender: None,
-            close_signal_sender: None
+            close_signal_sender: None,
         }
     }
 
@@ -130,32 +130,35 @@ impl StreamTask {
         operator_type: OperatorType,
         watermark: WatermarkMessage,
         status: Arc<AtomicU8>,
-        max_watermark_source_ids: Arc<Mutex<HashSet<String>>>,
-        num_source_vertices: u32,
-        vertex_id: String,
-    ) {
+        finished_upstream_ids: Arc<Mutex<HashSet<String>>>,
+        upstream_vertices: Vec<String>,
+        vertex_id: String
+    ) -> Option<WatermarkMessage> {
         if watermark.watermark_value == MAX_WATERMARK_VALUE {
             if operator_type == OperatorType::SOURCE {
                 println!("source vertex_id {:?} received max watermark, initiating shutdown", 
                     vertex_id);
                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                return;
+                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.ingest_timestamp));
             }
 
-            let source_id = watermark.source_vertex_id.clone();
+            let upstream_vertex_id = watermark.upstream_vertex_id.clone();
             
-            // TODO: we need to check only the sources which this operator depends on
-            let mut done_sources = max_watermark_source_ids.lock().await;
-            done_sources.insert(source_id);
-            println!("vertex_id {:?}, done sources {:?}", vertex_id, done_sources);
+            let mut finished_upstreams = finished_upstream_ids.lock().await;
+            finished_upstreams.insert(upstream_vertex_id);
+            println!("vertex_id {:?}, finished upstreams {:?}", vertex_id, finished_upstreams);
             
-            // If we've received max watermarks from all sources, initiate shutdown
-            if done_sources.len() as u32 >= num_source_vertices {
-                println!("vertex_id {:?} Received max watermarks from all sources {:?}, initiating shutdown", 
-                    vertex_id, done_sources);
+            // If we've received max watermarks from all upstreams, initiate shutdown
+            let upstream_vertices_set: HashSet<String> = upstream_vertices.iter().cloned().collect();
+            if finished_upstreams.len() == upstream_vertices_set.len() && 
+               upstream_vertices_set.iter().all(|id| finished_upstreams.contains(id)) {
+                println!("vertex_id {:?} Received max watermarks from all upstreams {:?}, initiating shutdown", 
+                    vertex_id, finished_upstreams);
                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.ingest_timestamp));
             }
         }
+        None
     }
 
     async fn update_metrics(
@@ -187,16 +190,19 @@ impl StreamTask {
         let status = self.status.clone();
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
-        let received_source_ids = self.max_watermark_source_ids.clone();
+        let finished_upstream_ids = self.finished_upstream_ids.clone();
         let metrics = self.metrics.clone();
-        let num_source_vertices = execution_graph.get_source_vertices().len() as u32;
+        
+        let upstream_vertices: Vec<String> = execution_graph.get_edges_for_vertex(&vertex_id)
+            .map(|(input_edges, _)| input_edges.iter().map(|e| e.source_vertex_id.clone()).collect())
+            .unwrap_or_default();
 
         let transport_client_config = self.transport_client_config.take().unwrap();
         
         let (run_sender, run_receiver) = watch::channel(false);
         self.run_signal_sender = Some(run_sender);
 
-        let (close_sender, close_receiver) = watch::channel(false);
+        let (close_sender, mut close_receiver) = watch::channel(false);
         self.close_signal_sender = Some(close_sender);
         
         // Main stream task lifecycle loop
@@ -246,7 +252,7 @@ impl StreamTask {
             
             // Wait for signal to start processing
             println!("{:?} Task {:?} waiting for run signal", timestamp(), vertex_id);
-            Self::wait_for_signal_or_finished(run_receiver, status.clone()).await;
+            Self::wait_for_signal(run_receiver, status.clone(), true).await;
             println!("{:?} Task {:?} received run signal, starting processing", timestamp(), vertex_id);
             
 
@@ -261,7 +267,6 @@ impl StreamTask {
                 let messages = match operator_type {
                     crate::runtime::operator::OperatorType::SOURCE => {
                         if let Some(mut message) = operator.fetch().await {
-                            
                             // source should set ingest timestamp
                             message.set_ingest_timestamp(SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -269,16 +274,20 @@ impl StreamTask {
                                 .as_millis() as u64);
                             match message {
                                 Message::Watermark(watermark) => {
-                                    println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.source_vertex_id);
-                                    Self::handle_watermark(
+                                    println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.upstream_vertex_id);
+                                    let wm = Self::handle_watermark(
                                         operator_type,
                                         watermark.clone(),
                                         status.clone(),
-                                        received_source_ids.clone(),
-                                        num_source_vertices,
-                                        vertex_id.clone(),
+                                        finished_upstream_ids.clone(),
+                                        upstream_vertices.clone(),
+                                        vertex_id.clone()
                                     ).await;
-                                    Some(vec![Message::Watermark(watermark)])
+                                    if let Some(wm) = wm {
+                                        Some(vec![Message::Watermark(wm)])
+                                    } else {
+                                        None
+                                    }
                                 }
                                 _ => {
                                     Some(vec![message])
@@ -292,21 +301,24 @@ impl StreamTask {
                         let reader = transport_client.reader.as_mut()
                             .expect("Reader should be initialized for non-SOURCE operator");
                         if let Some(message) = reader.read_message().await? {
-                            // Update metrics for non-source messages
                             Self::update_metrics(metrics.clone(), message.clone()).await;
 
                             match message {
                                 Message::Watermark(watermark) => {
-                                    println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.source_vertex_id);
-                                    Self::handle_watermark(
+                                    println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.upstream_vertex_id);
+                                    let wm = Self::handle_watermark(
                                         operator_type,
                                         watermark.clone(),
                                         status.clone(),
-                                        received_source_ids.clone(),
-                                        num_source_vertices,
-                                        vertex_id.clone(),
+                                        finished_upstream_ids.clone(),
+                                        upstream_vertices.clone(),
+                                        vertex_id.clone()
                                     ).await;
-                                    Some(vec![Message::Watermark(watermark)])
+                                    if let Some(wm) = wm {
+                                        Some(vec![Message::Watermark(wm)])
+                                    } else {
+                                        None
+                                    }
                                 }
                                 _ => match operator.process_message(message).await {
                                     Some(messages) => {
@@ -380,7 +392,7 @@ impl StreamTask {
             }
             
             println!("{:?} Task {:?} waiting for close signal", timestamp(), vertex_id);
-            Self::wait_for_signal_or_finished(close_receiver, status.clone()).await;
+            Self::wait_for_signal(close_receiver, status.clone(), false).await;
             println!("{:?} Task {:?} received close signal, performing close", timestamp(), vertex_id);
 
             operator.close().await?;
@@ -412,15 +424,24 @@ impl StreamTask {
         let _ = close_signal_sender.send(true);
     }
 
-    async fn wait_for_signal_or_finished(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>) {
+    async fn wait_for_signal(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>, skip_on_finished: bool) {
+        let timeout = Duration::from_millis(5000);
+        let start_time = SystemTime::now();
+        
         loop {
-            let current_status = status.load(Ordering::SeqCst);
-            if current_status == StreamTaskStatus::Finished as u8 || current_status == StreamTaskStatus::Closed as u8 {
-                println!("{:?} Task status is {:?}, stopping wait for signal", timestamp(), StreamTaskStatus::from(current_status));
-                return;
+            if skip_on_finished {
+                let current_status = status.load(Ordering::SeqCst);
+                if current_status == StreamTaskStatus::Finished as u8 || current_status == StreamTaskStatus::Closed as u8 {
+                    println!("{:?} Task status is {:?}, stopping wait for signal", timestamp(), StreamTaskStatus::from(current_status));
+                    return;
+                }
             }
 
-            match tokio::time::timeout(Duration::from_millis(100), receiver.changed()).await {
+            if start_time.elapsed().unwrap_or_default() > timeout {
+                panic!("Timeout waiting for signal after {:?}", timeout);
+            }
+
+            match tokio::time::timeout(Duration::from_millis(50), receiver.changed()).await {
                 Ok(_) => {
                     // Signal received
                     return;

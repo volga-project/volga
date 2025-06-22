@@ -175,11 +175,27 @@ impl Worker {
         println!("[WORKER] Waiting for all tasks to be {:?}", target_status);
         
         let start_time = std::time::Instant::now();
-        let timeout_duration = Duration::from_secs(10);
+        let timeout_duration = Duration::from_secs(5);
         
         while running.load(Ordering::SeqCst) {
             // Check timeout
             if start_time.elapsed() > timeout_duration {
+                // Print statuses that are different from expected
+                let state_guard = state.lock().await;
+                let mut different_statuses = Vec::new();
+                for (task_id, status) in &state_guard.task_statuses {
+                    if *status != target_status {
+                        different_statuses.push((task_id.clone(), *status));
+                    }
+                }
+                
+                if !different_statuses.is_empty() {
+                    println!("[WORKER] Timeout waiting for {:?}. Tasks with different statuses:", target_status);
+                    for (task_id, status) in different_statuses {
+                        println!("  - {}: {:?}", task_id, status);
+                    }
+                }
+                
                 panic!("Timeout waiting for all tasks to be {:?} after {:?}", target_status, timeout_duration);
             }
             
@@ -362,29 +378,29 @@ impl Worker {
         println!("[WORKER] Worker started");
 
         // TODO we need to fix shutdown logic in stream task and remove this and uncomment below
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        // tokio::time::sleep(Duration::from_secs(2)).await;
         
-        // // Wait for tasks to finish
-        // Self::wait_for_all_tasks_status(
-        //     self.state.clone(),
-        //     self.running.clone(),
-        //     StreamTaskStatus::Finished
-        // ).await;
+        // Wait for tasks to finish
+        Self::wait_for_all_tasks_status(
+            self.state.clone(),
+            self.running.clone(),
+            StreamTaskStatus::Finished
+        ).await;
         
-        // // Send close signal
-        // self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
+        // Send close signal
+        self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
         
-        // // Wait for tasks to be closed
-        // Self::wait_for_all_tasks_status(
-        //     self.state.clone(),
-        //     self.running.clone(),
-        //     StreamTaskStatus::Closed
-        // ).await;
+        // Wait for tasks to be closed
+        Self::wait_for_all_tasks_status(
+            self.state.clone(),
+            self.running.clone(),
+            StreamTaskStatus::Closed
+        ).await;
         
-        // // Cleanup
-        // self.cleanup().await;
+        // Cleanup
+        self.cleanup().await;
 
-        println!("[WORKER] Worker execution completed");
+        // println!("[WORKER] Worker execution completed");
     }
 }
 

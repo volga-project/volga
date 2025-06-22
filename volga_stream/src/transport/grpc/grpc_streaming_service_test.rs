@@ -157,7 +157,7 @@ pub async fn stream_grpc_many_clients_one_server() {
             }
             Message::Watermark(watermark_msg) => {
                 println!("[TEST] Watermark message: {} -> {}", 
-                        watermark_msg.source_vertex_id, watermark_msg.watermark_value);
+                        watermark_msg.upstream_vertex_id, watermark_msg.watermark_value);
             }
         }
         
@@ -216,7 +216,7 @@ pub async fn stream_grpc_many_clients_one_server() {
                               "Row count mismatch for channel {} message {}", channel_id, i + 1);
                 }
                 (Message::Watermark(sent), Message::Watermark(received)) => {
-                    assert_eq!(sent.source_vertex_id, received.source_vertex_id,
+                    assert_eq!(sent.upstream_vertex_id, received.upstream_vertex_id,
                               "Source vertex ID mismatch for channel {} message {}", channel_id, i + 1);
                     assert_eq!(sent.watermark_value, received.watermark_value,
                               "Watermark value mismatch for channel {} message {}", channel_id, i + 1);
@@ -325,7 +325,8 @@ fn create_test_message_for_client(client_name: &str, index: usize) -> Message {
             Message::Watermark(
                 crate::common::message::WatermarkMessage::new(
                     format!("source_{}", client_name),
-                    9876543210 + index as u64
+                    9876543210 + index as u64,
+                    Some(1234567890 + index as u64)
                 )
             )
         }

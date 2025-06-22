@@ -1,3 +1,4 @@
+use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
 use crate::runtime::partition::PartitionType;
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::runtime::stream_task::StreamTask;
@@ -31,18 +32,24 @@ impl MapFunctionTrait for IdentityMapFunction {
     }
 }
 
-// TODO update with watermark shutdown
-// TODO verify proper shutdown
 #[test]
 fn test_stream_task_actor() -> Result<()> {
     let runtime = Runtime::new()?;
     runtime.block_on(async {
         // Create test data
-        let test_messages = vec![
+        let mut test_messages = vec![
             Message::new(None, create_test_string_batch(vec!["test1".to_string()]), Some(1)),
             Message::new(None, create_test_string_batch(vec!["test2".to_string()]), Some(2)),
             Message::new(None, create_test_string_batch(vec!["test3".to_string()]), Some(3)),
         ];
+
+        let num_messages = test_messages.len();
+
+        test_messages.push(Message::Watermark(WatermarkMessage::new(
+            "source".to_string(),
+            MAX_WATERMARK_VALUE,
+            None,
+        )));
 
         let mut graph = ExecutionGraph::new();
         graph.add_vertex(ExecutionVertex::new(
@@ -138,8 +145,11 @@ fn test_stream_task_actor() -> Result<()> {
         }
 
         // Verify received data
-        assert_eq!(received_messages.len(), test_messages.len());
+        assert_eq!(received_messages.len(), num_messages);
         for (expected, actual) in test_messages.iter().zip(received_messages.iter()) {
+            if matches!(expected, Message::Watermark(_)) {
+                continue;
+            }
             assert_eq!(actual.record_batch(), expected.record_batch());
         }
 

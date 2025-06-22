@@ -107,7 +107,7 @@ impl DataReader {
                 let mut source_vertex_id = None;
                 let is_watermark = match message.clone() {
                     Message::Watermark(watermark) => {
-                        source_vertex_id = Some(watermark.source_vertex_id);
+                        source_vertex_id = Some(watermark.upstream_vertex_id);
                         true
                     }
                     _ => false,
@@ -144,8 +144,8 @@ impl DataWriter {
         Self {
             vertex_id,
             senders,
-            default_timeout: Duration::from_millis(100),
-            default_retries: 0,
+            default_timeout: Duration::from_millis(5000),
+            default_retries: 10,
         }
     }
 
@@ -174,7 +174,7 @@ impl DataWriter {
                         let mut source_vertex_id = None;
                         let is_watermark = match message.clone() {
                             Message::Watermark(watermark) => {
-                                source_vertex_id = Some(watermark.source_vertex_id);
+                                source_vertex_id = Some(watermark.upstream_vertex_id);
                                 true
                             }
                             _ => false,

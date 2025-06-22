@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::message::{Message, WatermarkMessage};
+use crate::common::message::Message;
 use crate::common::Key;
 use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
@@ -19,7 +19,6 @@ use crate::runtime::functions::{
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -213,6 +212,7 @@ impl OperatorTrait for MapOperator {
         let function = function.clone();
         let message = message.clone();
 
+        // make sure we use fifo to maintain order
         self.base.thread_pool.spawn_fifo_async(move || {
             let processed = function.map(message).unwrap();
             Some(vec![processed])
@@ -364,7 +364,8 @@ impl OperatorTrait for KeyByOperator {
         let function = self.base.get_function_mut::<KeyByFunction>().unwrap();
         let function = function.clone();
         let message = message.clone();
-
+        
+        // make sure we use fifo to maintain order
         self.base.thread_pool.spawn_fifo_async(move || {
             let keyed_messages = function.key_by(message);
             // Convert
@@ -438,7 +439,8 @@ impl OperatorTrait for ReduceOperator {
                 let function = function.clone();
                 let result_extractor = self.result_extractor.clone();
                 let acc = acc.clone();
-
+  
+                // make sure we use fifo to maintain order 
                 let result = self.base.thread_pool.spawn_fifo_async(move || {
                     let mut acc = acc.lock().unwrap();
                     function.update_accumulator(&mut acc, &keyed_message);
