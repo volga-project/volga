@@ -11,10 +11,10 @@ service WorkerService {
   rpc StartWorker(StartWorkerRequest) returns (StartWorkerResponse);
   
   // Start all tasks in the worker
-  rpc StartTasks(StartTasksRequest) returns (StartTasksResponse);
+  rpc RunWorkerTasks(RunWorkerTasksRequest) returns (RunWorkerTasksResponse);
   
   // Close all tasks in the worker
-  rpc CloseTasks(CloseTasksRequest) returns (CloseTasksResponse);
+  rpc CloseWorkerTasks(CloseWorkerTasksRequest) returns (CloseWorkerTasksResponse);
   
   // Close the worker and cleanup all resources
   rpc CloseWorker(CloseWorkerRequest) returns (CloseWorkerResponse);
@@ -41,24 +41,24 @@ message StartWorkerResponse {
   string error_message = 2;
 }
 
-// Request message for StartTasks
-message StartTasksRequest {
+// Request message for RunWorkerTasks
+message RunWorkerTasksRequest {
   // Empty request - no parameters needed
 }
 
-// Response message for StartTasks
-message StartTasksResponse {
+// Response message for RunWorkerTasks
+message RunWorkerTasksResponse {
   bool success = 1;
   string error_message = 2;
 }
 
-// Request message for CloseTasks
-message CloseTasksRequest {
+// Request message for CloseWorkerTasks
+message CloseWorkerTasksRequest {
   // Empty request - no parameters needed
 }
 
-// Response message for CloseTasks
-message CloseTasksResponse {
+// Response message for CloseWorkerTasks
+message CloseWorkerTasksResponse {
   bool success = 1;
   string error_message = 2;
 }

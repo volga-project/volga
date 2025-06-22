@@ -47,13 +47,19 @@ pub async fn run_master_step_by_step() -> Result<(), Box<dyn std::error::Error>>
     master.wait_for_all_tasks_status(crate::runtime::stream_task::StreamTaskStatus::Opened).await?;
     
     // Step 5: Start all tasks
-    master.start_all_tasks().await?;
+    master.run_all_tasks().await?;
     
     // Step 6: Wait for all tasks to be closing
     master.wait_for_all_tasks_status(crate::runtime::stream_task::StreamTaskStatus::Finished).await?;
     
     // Step 7: Close all tasks
     master.close_all_tasks().await?;
+    
+    // Step 8: Wait for all tasks to be closed
+    master.wait_for_all_tasks_status(crate::runtime::stream_task::StreamTaskStatus::Closed).await?;
+    
+    // Step 9: Close all workers
+    master.close_all_workers().await?;
     
     println!("[MASTER_EXAMPLE] Step-by-step execution completed");
     Ok(())

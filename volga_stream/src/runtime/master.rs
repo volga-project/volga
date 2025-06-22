@@ -12,7 +12,7 @@ pub mod worker_service {
 
 use worker_service::{
     worker_service_client::WorkerServiceClient,
-    GetWorkerStateRequest, StartWorkerRequest, StartTasksRequest, CloseTasksRequest,
+    GetWorkerStateRequest, StartWorkerRequest, RunWorkerTasksRequest, CloseWorkerTasksRequest, CloseWorkerRequest,
 };
 
 /// Client for communicating with a worker server
@@ -49,31 +49,42 @@ impl WorkerClient {
         Ok(success)
     }
 
-    pub async fn start_tasks(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        let request = tonic::Request::new(StartTasksRequest {});
-        let response = self.client.start_tasks(request).await?;
-        
+    pub async fn run_worker_tasks(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let request = tonic::Request::new(RunWorkerTasksRequest {});
+        let response = self.client.run_worker_tasks(request).await?;
         let success = response.get_ref().success;
         if !success {
             let error_msg = &response.get_ref().error_message;
-            println!("[MASTER] Failed to start tasks on worker {}: {}", self.worker_ip, error_msg);
+            println!("[MASTER] Failed to run tasks on worker {}: {}", self.worker_ip, error_msg);
         } else {
-            println!("[MASTER] Successfully started tasks on worker {}", self.worker_ip);
+            println!("[MASTER] Successfully ran tasks on worker {}", self.worker_ip);
         }
-        
         Ok(success)
     }
 
-    pub async fn close_tasks(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
-        let request = tonic::Request::new(CloseTasksRequest {});
-        let response = self.client.close_tasks(request).await?;
-        
+    pub async fn close_worker_tasks(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let request = tonic::Request::new(CloseWorkerTasksRequest {});
+        let response = self.client.close_worker_tasks(request).await?;
         let success = response.get_ref().success;
         if !success {
             let error_msg = &response.get_ref().error_message;
             println!("[MASTER] Failed to close tasks on worker {}: {}", self.worker_ip, error_msg);
         } else {
             println!("[MASTER] Successfully closed tasks on worker {}", self.worker_ip);
+        }
+        Ok(success)
+    }
+
+    pub async fn close_worker(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+        let request = tonic::Request::new(CloseWorkerRequest {});
+        let response = self.client.close_worker(request).await?;
+        
+        let success = response.get_ref().success;
+        if !success {
+            let error_msg = &response.get_ref().error_message;
+            println!("[MASTER] Failed to close worker {}: {}", self.worker_ip, error_msg);
+        } else {
+            println!("[MASTER] Successfully closed worker {}", self.worker_ip);
         }
         
         Ok(success)
@@ -250,45 +261,39 @@ impl Master {
     }
 
     /// Start all tasks on all workers
-    pub async fn start_all_tasks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("[MASTER] Starting all tasks on all workers");
-        
-        // Collect worker IPs first
+    pub async fn run_all_tasks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("[MASTER] Running all tasks on all workers");
         let worker_ips: Vec<String> = {
             let clients_guard = self.worker_clients.lock().await;
             clients_guard.keys().cloned().collect()
         };
-        
-        let mut start_futures = Vec::new();
+        let mut run_futures = Vec::new();
         for worker_ip in worker_ips {
             let worker_clients = self.worker_clients.clone();
             let future = async move {
                 let mut clients_guard = worker_clients.lock().await;
                 if let Some(client) = clients_guard.get_mut(&worker_ip) {
-                    let result = client.start_tasks().await;
+                    let result = client.run_worker_tasks().await;
                     (worker_ip, result)
                 } else {
                     (worker_ip, Err("Worker client not found".into()))
                 }
             };
-            start_futures.push(future);
+            run_futures.push(future);
         }
-        
-        let results = futures::future::join_all(start_futures).await;
-        
+        let results = futures::future::join_all(run_futures).await;
         for (worker_ip, result) in results {
             match result {
                 Ok(success) => {
                     if !success {
-                        return Err(format!("Failed to start tasks on worker {}", worker_ip).into());
+                        return Err(format!("Failed to run tasks on worker {}", worker_ip).into());
                     }
                 }
                 Err(e) => {
-                    return Err(format!("Error starting tasks on worker {}: {}", worker_ip, e).into());
+                    return Err(format!("Error running tasks on worker {}: {}", worker_ip, e).into());
                 }
             }
         }
-        
         println!("[MASTER] All tasks started successfully");
         Ok(())
     }
@@ -309,7 +314,7 @@ impl Master {
             let future = async move {
                 let mut clients_guard = worker_clients.lock().await;
                 if let Some(client) = clients_guard.get_mut(&worker_ip) {
-                    let result = client.close_tasks().await;
+                    let result = client.close_worker_tasks().await;
                     (worker_ip, result)
                 } else {
                     (worker_ip, Err("Worker client not found".into()))
@@ -337,32 +342,82 @@ impl Master {
         Ok(())
     }
 
-    /// Execute the complete job lifecycle
+    /// Close all workers
+    pub async fn close_all_workers(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        println!("[MASTER] Closing all workers");
+        
+        // Collect worker IPs first
+        let worker_ips: Vec<String> = {
+            let clients_guard = self.worker_clients.lock().await;
+            clients_guard.keys().cloned().collect()
+        };
+        
+        let mut close_futures = Vec::new();
+        for worker_ip in worker_ips {
+            let worker_clients = self.worker_clients.clone();
+            let future = async move {
+                let mut clients_guard = worker_clients.lock().await;
+                if let Some(client) = clients_guard.get_mut(&worker_ip) {
+                    let result = client.close_worker().await;
+                    (worker_ip, result)
+                } else {
+                    (worker_ip, Err("Worker client not found".into()))
+                }
+            };
+            close_futures.push(future);
+        }
+        
+        let results = futures::future::join_all(close_futures).await;
+        
+        for (worker_ip, result) in results {
+            match result {
+                Ok(success) => {
+                    if !success {
+                        return Err(format!("Failed to close worker {}", worker_ip).into());
+                    }
+                }
+                Err(e) => {
+                    return Err(format!("Error closing worker {}: {}", worker_ip, e).into());
+                }
+            }
+        }
+        
+        println!("[MASTER] All workers closed successfully");
+        Ok(())
+    }
+
+    /// Execute the complete job lifecycle according to the new protocol
     pub async fn execute(&mut self, worker_ips: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
         println!("[MASTER] Starting execution with {} workers", worker_ips.len());
         
         self.running.store(true, std::sync::atomic::Ordering::Relaxed);
         
-        // 1. Create clients for all workers
+        // 1. Master connects to all workers
         self.connect_to_workers(worker_ips).await?;
         
-        // 2. Call start worker on each worker
+        // 2. Master starts all workers
         self.start_all_workers().await?;
         
-        // 3. Start a task that periodically polls state of each worker
+        // 3. Start state polling to monitor worker states
         self.start_state_polling();
         
-        // 4. Wait for all workers all tasks to be opened
+        // 4. Master waits for all tasks on all workers to be opened
         self.wait_for_all_tasks_status(StreamTaskStatus::Opened).await?;
         
-        // 5. Start tasks
-        self.start_all_tasks().await?;
+        // 5. Master runs all tasks on all workers
+        self.run_all_tasks().await?;
         
-        // 6. Wait for all workers tasks to be closing
+        // 6. Master waits for all tasks on all workers to be finished
         self.wait_for_all_tasks_status(StreamTaskStatus::Finished).await?;
         
-        // 7. Close tasks
+        // 7. Master closes all tasks on all workers
         self.close_all_tasks().await?;
+        
+        // 8. Master waits for all tasks on all workers to be closed
+        self.wait_for_all_tasks_status(StreamTaskStatus::Closed).await?;
+        
+        // 9. Master closes workers
+        self.close_all_workers().await?;
         
         // Stop state polling
         self.running.store(false, std::sync::atomic::Ordering::Relaxed);

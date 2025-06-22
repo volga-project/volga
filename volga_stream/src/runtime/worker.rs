@@ -257,7 +257,7 @@ impl Worker {
         println!("[WORKER] Actors spawned");
     }
 
-    pub async fn start_tasks(&mut self) {
+    async fn start_tasks(&mut self) {
         println!("[WORKER] Starting tasks");
 
         // Start all tasks
@@ -304,14 +304,14 @@ impl Worker {
         println!("[WORKER] Started all tasks");
     }
 
-    pub async fn start_transport_backend(&mut self) {
+    async fn start_transport_backend(&mut self) {
         let backend_actor_ref = self.backend_actor.as_ref().unwrap().clone();
         self.transport_backend_runtime.as_ref().unwrap().spawn(async move {
             backend_actor_ref.ask(TransportBackendActorMessage::Start).await.unwrap()
         }).await.unwrap();
     }
 
-    pub async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
+    async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
         println!("[WORKER] Sending {:?} signal to all task actors", signal);
         
         for (vertex_id, runtime) in &self.task_runtimes {
@@ -343,7 +343,7 @@ impl Worker {
         self.state.lock().await.clone()
     }
 
-    pub async fn cleanup(&mut self) {
+    async fn cleanup(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.tasks_state_polling_handle.take() {
             if let Err(e) = handle.await {
@@ -356,14 +356,31 @@ impl Worker {
         println!("[WORKER] Cleanup completed");
     }
 
+    // control functions
+    pub async fn start(&mut self) {
+        self.spawn_actors().await;
+        self.start_tasks().await;
+    }
+
+    pub async fn run_tasks(&mut self) {
+        self.start_transport_backend().await;
+        self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await;
+    }
+
+    pub async fn close_tasks(&mut self) {
+        self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
+    }
+
+    pub async fn close(&mut self) {
+        self.cleanup().await;
+    }
+
     // This should only be used for testing - simulates worker execution
     // In real environment master is used to coordinate worker lifecycle
     pub async fn execute_worker_lifecycle_for_testing(&mut self) {
         println!("[WORKER] Starting worker execution");
         
-        self.spawn_actors().await;
-
-        self.start_tasks().await;
+        self.start().await;
 
         Self::wait_for_all_tasks_status(
             self.state.clone(),
@@ -371,14 +388,9 @@ impl Worker {
             StreamTaskStatus::Opened
         ).await;
 
-        self.start_transport_backend().await;
-        
-        self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await;
+        self.run_tasks().await;
 
         println!("[WORKER] Worker started");
-
-        // TODO we need to fix shutdown logic in stream task and remove this and uncomment below
-        // tokio::time::sleep(Duration::from_secs(2)).await;
         
         // Wait for tasks to finish
         Self::wait_for_all_tasks_status(
@@ -388,8 +400,8 @@ impl Worker {
         ).await;
         
         // Send close signal
-        self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
-        
+        self.close_tasks().await;
+
         // Wait for tasks to be closed
         Self::wait_for_all_tasks_status(
             self.state.clone(),
@@ -398,9 +410,9 @@ impl Worker {
         ).await;
         
         // Cleanup
-        self.cleanup().await;
+        self.close().await;
 
-        // println!("[WORKER] Worker execution completed");
+        println!("[WORKER] Worker execution completed");
     }
 }
 

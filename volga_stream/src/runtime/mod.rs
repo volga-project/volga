@@ -5,7 +5,6 @@ pub mod stream_task;
 pub mod stream_task_actor;
 pub mod worker;
 pub mod worker_server;
-pub mod worker_server_example;
 pub mod master;
 pub mod master_example;
 pub mod functions;
