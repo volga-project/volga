@@ -7,9 +7,7 @@ use super::Key;
 
 #[derive(Debug, Clone)]
 pub struct BaseMessage {
-    // pub upstream_vertex_id: Option<String>,
     pub record_batch: RecordBatch,
-    // pub ingest_timestamp: Option<u64>,
     pub metadata: MessageMetadata
 }
 
