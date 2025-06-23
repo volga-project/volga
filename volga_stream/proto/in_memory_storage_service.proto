@@ -1,0 +1,93 @@
+syntax = "proto3";
+
+package in_memory_storage_service;
+
+// InMemoryStorageService provides RPC methods for storing and retrieving data
+service InMemoryStorageService {
+  // Append a single message to vector storage
+  rpc Append(AppendRequest) returns (AppendResponse);
+  
+  // Append multiple messages to vector storage
+  rpc AppendMany(AppendManyRequest) returns (AppendManyResponse);
+  
+  // Insert a message with a key into map storage
+  rpc Insert(InsertRequest) returns (InsertResponse);
+  
+  // Insert multiple keyed messages into map storage
+  rpc InsertKeyedMany(InsertKeyedManyRequest) returns (InsertKeyedManyResponse);
+  
+  // Get all messages from vector storage
+  rpc GetVector(GetVectorRequest) returns (GetVectorResponse);
+  
+  // Get all messages from map storage
+  rpc GetMap(GetMapRequest) returns (GetMapResponse);
+}
+
+// Request message for Append
+message AppendRequest {
+  bytes message_bytes = 1;
+}
+
+// Response message for Append
+message AppendResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Request message for AppendMany
+message AppendManyRequest {
+  repeated bytes messages_bytes = 1;
+}
+
+// Response message for AppendMany
+message AppendManyResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Request message for Insert
+message InsertRequest {
+  string key = 1;
+  bytes message_bytes = 2;
+}
+
+// Response message for Insert
+message InsertResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Request message for InsertKeyedMany
+message InsertKeyedManyRequest {
+  map<string, bytes> keyed_messages = 1;
+}
+
+// Response message for InsertKeyedMany
+message InsertKeyedManyResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+// Request message for GetVector
+message GetVectorRequest {
+  // Empty request - no parameters needed
+}
+
+// Response message for GetVector
+message GetVectorResponse {
+  bool success = 1;
+  string error_message = 2;
+  repeated bytes messages_bytes = 3;
+}
+
+// Request message for GetMap
+message GetMapRequest {
+  // Empty request - no parameters needed
+}
+
+// Response message for GetMap
+message GetMapResponse {
+  bool success = 1;
+  string error_message = 2;
+  map<string, bytes> keyed_messages = 3;
+} 
