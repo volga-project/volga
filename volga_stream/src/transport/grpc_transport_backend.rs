@@ -27,7 +27,7 @@ pub struct GrpcTransportBackend {
     reader_senders: Option<HashMap<String, mpsc::Sender<Message>>>,
     writer_receivers: Option<HashMap<String, mpsc::Receiver<Message>>>,
 
-    nodes: Option<Vec<(String, String)>>,
+    nodes: Option<Vec<(String, String, i32)>>,
     channel_to_node: Option<HashMap<String, String>>,
     port: Option<i32>,
 
@@ -57,19 +57,19 @@ impl GrpcTransportBackend {
         }
     }
 
-    fn get_port_from_remote_channels(&self, channels: &[Channel]) -> i32 {
-        if channels.len() == 0 {
+    fn get_host_port_from_in_channels(&self, in_channels: &[Channel]) -> i32 {
+        if in_channels.len() == 0 {
             panic!("No channels provided");
         }
 
         let mut p: Option<i32> = None;
-        for channel in channels {
-            if let Channel::Remote { port, .. } = channel {
+        for channel in in_channels {
+            if let Channel::Remote { target_port: port, .. } = channel {
                 if p.is_none() {
                     p = Some(*port);
                 } else {
                     if p.unwrap() != *port {
-                        panic!("All ports should be the same");
+                        panic!("All ports should be the same, channels: {:?}", in_channels);
                     }
                 }
             } else {
@@ -77,29 +77,29 @@ impl GrpcTransportBackend {
             }
         }
         if p.is_none() {
-            panic!("All ports should be the same {:?}", channels)
+            panic!("All ports should be the same {:?}", in_channels)
         }
 
         return p.unwrap()
     }
 
-    fn get_remote_nodes_from_channels(&self, channels: &[Channel]) -> (Vec<(String, String)>, HashMap<String, String>) {
-        if channels.len() == 0 {
+    fn get_remote_nodes_from_out_channels(&self, out_channels: &[Channel]) -> (Vec<(String, String, i32)>, HashMap<String, String>) {
+        if out_channels.len() == 0 {
             panic!("No channels provided");
         }
         let mut nodes = HashMap::new();
         let mut channel_to_node = HashMap::new();
         
-        for channel in channels {
-            if let Channel::Remote { target_node_ip, target_node_id, .. } = channel {
+        for channel in out_channels {
+            if let Channel::Remote { target_node_ip, target_node_id, target_port, .. } = channel {
                 let channel_id = channel.get_channel_id().clone();
                 channel_to_node.insert(channel_id, target_node_id.clone());
                 
-                let ip = nodes.get(target_node_id);
-                if ip.is_none() {
-                    nodes.insert(target_node_id.clone(), target_node_ip.clone());
+                let ip_and_port = nodes.get(target_node_id);
+                if ip_and_port.is_none() {
+                    nodes.insert(target_node_id.clone(), (target_node_ip.clone(), *target_port));
                 } else {
-                    if ip.unwrap() != target_node_ip {
+                    if ip_and_port.unwrap().0 != *target_node_ip {
                         panic!("Node id<->ip mismatch");
                     }
                 }
@@ -108,7 +108,9 @@ impl GrpcTransportBackend {
             }
         }
         
-        let node_list: Vec<(String, String)> = nodes.into_iter().collect();
+        let node_list: Vec<(String, String, i32)> = nodes.into_iter()
+            .map(|(node_id, (ip, port))| (node_id, ip, port))
+            .collect();
         (node_list, channel_to_node)
     }
 }
@@ -196,10 +198,10 @@ impl TransportBackend for GrpcTransportBackend {
             // println!("[GRPC_BACKEND] Setting up clients for nodes: {:?}", nodes);
             // println!("[GRPC_BACKEND] Channel to node mapping: {:?}", channel_to_node);
             
-            for (node_id, node_ip) in nodes {
-                let server_addr = format!("http://{}", node_ip); // TODO add port from channel
+            for (peer_node_id, peer_node_ip, target_port) in nodes {
+                let server_addr = format!("http://{}:{}", peer_node_ip, target_port);
                 let (client_tx, client_rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
-                client_txs.insert(node_id.clone(), client_tx);
+                client_txs.insert(peer_node_id.clone(), client_tx);
                 // println!("[GRPC_BACKEND] Created client for node_id: {} at {}", node_id, server_addr);
                 let client_stream_task = tokio::spawn(async move {
                     let mut client = MessageStreamClient::connect(server_addr).await.unwrap();
@@ -310,11 +312,11 @@ impl TransportBackend for GrpcTransportBackend {
         let output_channels: Vec<Channel> = all_output_edges.iter().map(|edge| edge.channel.clone()).collect();
 
         if input_channels.len() != 0 {
-            self.port = Some(self.get_port_from_remote_channels(&input_channels));
+            self.port = Some(self.get_host_port_from_in_channels(&input_channels));
         }
 
         if output_channels.len() != 0 {
-            let (remote_nodes, channel_to_node) = self.get_remote_nodes_from_channels(&output_channels);
+            let (remote_nodes, channel_to_node) = self.get_remote_nodes_from_out_channels(&output_channels);
             self.channel_to_node = Some(channel_to_node);
             self.nodes = Some(remote_nodes);
         }

@@ -3,8 +3,8 @@ use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
         key_by::KeyByFunction,
         reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
         source::word_count_source::{BatchingMode, WordCountSourceFunction},
-    }, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::Worker
-}};
+    }, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
+}, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
 use anyhow::Result;
@@ -144,7 +144,7 @@ fn test_parallel_word_count() -> Result<()> {
     }
 
     // Create and start worker
-    let mut worker = Worker::new(
+    let worker_config = WorkerConfig::new(
         graph,
         (0..parallelism).flat_map(|i| {
             vec![
@@ -155,7 +155,9 @@ fn test_parallel_word_count() -> Result<()> {
             ]
         }).collect(),
         1,
+        TransportBackendType::InMemory,
     );
+    let mut worker = Worker::new(worker_config);
 
     let result_map = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();

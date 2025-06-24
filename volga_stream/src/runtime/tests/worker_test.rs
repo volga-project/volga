@@ -1,6 +1,6 @@
 use crate::{common::{test_utils::gen_unique_grpc_port, WatermarkMessage, MAX_WATERMARK_VALUE}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::map::{MapFunction, MapFunctionTrait}, operator::SourceOperator, partition::{ForwardPartition, PartitionType}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::Worker
-}};
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::map::{MapFunction, MapFunctionTrait}, operator::SourceOperator, partition::{ForwardPartition, PartitionType}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
+}, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use anyhow::Result;
@@ -98,11 +98,14 @@ fn test_worker() -> Result<()> {
     );
     graph.add_edge(map_to_sink);
 
-    let mut worker = Worker::new(
+
+    let worker_config = WorkerConfig::new(
         graph,
         vec!["source".to_string(), "map".to_string(), "sink".to_string()],
         1,
+        TransportBackendType::InMemory,
     );
+    let mut worker = Worker::new(worker_config);
 
     let (vector_messages, map_messages) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();

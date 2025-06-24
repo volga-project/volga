@@ -9,7 +9,7 @@ pub enum Channel {
         source_node_id: String,
         target_node_ip: String,
         target_node_id: String,
-        port: i32,
+        target_port: i32,
     }
 }
 

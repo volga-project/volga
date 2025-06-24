@@ -87,7 +87,7 @@ fn test_stream_task_actor() -> Result<()> {
             Channel::Local { channel_id: format!("task_to_output") }
         ));
 
-        let mut backend = InMemoryTransportBackend::new();
+        let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
         let mut configs = backend.init_channels(&graph, vec!["input".to_string(), "task".to_string(), "output".to_string()]);
 
 

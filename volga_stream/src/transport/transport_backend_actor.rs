@@ -20,15 +20,21 @@ pub enum TransportBackendActorMessage {
     Close
 }
 
+#[derive(Debug, Clone)]
+pub enum TransportBackendType {
+    Grpc,
+    InMemory,
+}
+
 #[derive(Actor)]
 pub struct TransportBackendActor {
     backend: Box<dyn TransportBackend + Send + 'static>,
 }
 
 impl TransportBackendActor {
-    pub fn new<T: TransportBackend + Send + 'static>(backend: T) -> Self {
+    pub fn new(backend: Box<dyn TransportBackend + Send + 'static>) -> Self {
         Self {
-            backend: Box::new(backend),
+            backend,
         }
     }
 }

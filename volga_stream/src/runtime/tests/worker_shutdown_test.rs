@@ -2,8 +2,8 @@ use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
-    }, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::Worker
-}};
+    }, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
+}, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
 use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
 use anyhow::Result;
@@ -137,7 +137,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
                 key_by_id.clone(),
                 map_id,
                 "map".to_string(),
-                PartitionType::RoundRobin,
+                PartitionType::Hash,
                 Channel::Local {
                     channel_id: format!("key_by_{}_to_map_{}", i, j),
                 },
@@ -163,7 +163,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     }
 
     // Create and start worker
-    let mut worker = Worker::new(
+    let worker_config = WorkerConfig::new(
         graph,
         (0..parallelism).flat_map(|i| {
             vec![
@@ -174,7 +174,9 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
             ]
         }).collect(),
         1,
+        TransportBackendType::InMemory,
     );
+    let mut worker = Worker::new(worker_config);
 
     println!("Starting worker...");
     let (worker_state, result_messages) = runtime.block_on(async {

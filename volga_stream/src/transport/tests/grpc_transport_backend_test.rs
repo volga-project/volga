@@ -88,7 +88,7 @@ async fn test_grpc_transport_backend() {
             let source_node_id = writer_idx / num_writers_per_node;
             
             // Use port based on target node ID to ensure same node gets same port
-            let port = 50051 + target_node_id as i32;
+            let target_port = 50051 + target_node_id as i32;
             
             let edge = ExecutionEdge::new(
                 writer_vertex_id.clone(),
@@ -97,11 +97,11 @@ async fn test_grpc_transport_backend() {
                 PartitionType::Forward,
                 Channel::Remote { 
                     channel_id: format!("writer_{}_to_reader_{}", writer_idx, reader_idx),
-                    source_node_ip: format!("127.0.0.1:{}", port),
+                    source_node_ip: "127.0.0.1".to_string(),
                     source_node_id: format!("writer_node_{}", source_node_id),
-                    target_node_ip: format!("127.0.0.1:{}", port),
+                    target_node_ip: "127.0.0.1".to_string(),
                     target_node_id: format!("reader_node_{}", target_node_id),
-                    port 
+                    target_port,
                 }
             );
             
@@ -115,7 +115,7 @@ async fn test_grpc_transport_backend() {
 
     // Create writer node backends
     for node_idx in 0..num_writer_nodes {
-        let mut backend = GrpcTransportBackend::new();
+        let mut backend: Box<dyn TransportBackend> = Box::new(GrpcTransportBackend::new());
         let vertex_ids = (0..num_writers_per_node)
             .map(|writer_idx| format!("writer_node_{}_writer_{}", node_idx, writer_idx))
             .collect::<Vec<_>>();
@@ -126,7 +126,7 @@ async fn test_grpc_transport_backend() {
 
     // Create reader node backends
     for node_idx in 0..num_reader_nodes {
-        let mut backend = GrpcTransportBackend::new();
+        let mut backend: Box<dyn TransportBackend> = Box::new(GrpcTransportBackend::new());
         let vertex_ids = (0..num_readers_per_node)
             .map(|reader_idx| format!("reader_node_{}_reader_{}", node_idx, reader_idx))
             .collect::<Vec<_>>();

@@ -1,7 +1,7 @@
 use tonic::{Request, Response, Status};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::runtime::worker::Worker;
+use crate::{runtime::worker::{Worker, WorkerConfig}, transport::transport_backend_actor::TransportBackendType};
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::stream_task::StreamTaskStatus;
 
@@ -24,8 +24,8 @@ pub struct WorkerServiceImpl {
 }
 
 impl WorkerServiceImpl {
-    pub fn new(graph: ExecutionGraph, vertex_ids: Vec<String>, num_io_threads: usize) -> Self {
-        let worker = Worker::new(graph, vertex_ids, num_io_threads);
+    pub fn new(config: WorkerConfig) -> Self {
+        let worker = Worker::new(config);
         Self {
             worker: Arc::new(Mutex::new(worker)),
         }
@@ -111,9 +111,9 @@ pub struct WorkerServer {
 }
 
 impl WorkerServer {
-    pub fn new(graph: ExecutionGraph, vertex_ids: Vec<String>, num_io_threads: usize) -> Self {
+    pub fn new(config: WorkerConfig) -> Self {
         Self {
-            service: WorkerServiceImpl::new(graph, vertex_ids, num_io_threads),
+            service: WorkerServiceImpl::new(config),
             server_handle: None,
         }
     }

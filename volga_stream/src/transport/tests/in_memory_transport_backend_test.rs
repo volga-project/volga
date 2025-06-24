@@ -69,7 +69,7 @@ async fn test_actor_transport() {
         }
     }
 
-    let mut backend = InMemoryTransportBackend::new();
+    let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
     let all_vertex_ids = writer_vertex_ids.clone().into_iter().chain(reader_vertex_ids.clone()).collect::<Vec<_>>();
     let mut configs = backend.init_channels(&graph, all_vertex_ids);
     

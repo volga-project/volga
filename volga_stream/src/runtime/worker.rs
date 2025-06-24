@@ -1,6 +1,6 @@
 use crate::{runtime::{
-    execution_graph::ExecutionGraph, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus, StreamTaskMetrics}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
-}, transport::{InMemoryTransportBackend, TransportBackend}};
+    execution_graph::ExecutionGraph, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskMetrics, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+}, transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend}};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -10,6 +10,30 @@ use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 use serde::{Serialize, Deserialize};
 use anyhow::Result;
+
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    pub graph: ExecutionGraph,
+    pub vertex_ids: Vec<String>,
+    pub num_io_threads: usize,
+    pub transport_backend_type: TransportBackendType,
+}
+
+impl WorkerConfig {
+    pub fn new(
+        graph: ExecutionGraph,
+        vertex_ids: Vec<String>,
+        num_io_threads: usize,
+        transport_backend_type: TransportBackendType,
+    ) -> Self {
+        Self {
+            graph,
+            vertex_ids,
+            num_io_threads,
+            transport_backend_type,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerState {
@@ -75,26 +99,22 @@ impl WorkerState {
 pub struct Worker {
     graph: ExecutionGraph,
     vertex_ids: Vec<String>,
+    transport_backend_type: TransportBackendType,
     task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<String, Runtime>,
     transport_backend_runtime: Option<Runtime>,
-    num_io_threads: usize,
     state: Arc<tokio::sync::Mutex<WorkerState>>,
     running: Arc<AtomicBool>,
     tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>
 }
 
 impl Worker {
-    pub fn new(
-        graph: ExecutionGraph, 
-        vertex_ids: Vec<String>,
-        num_io_threads: usize,
-    ) -> Self {
+    pub fn new(config: WorkerConfig) -> Self {
         let mut task_runtimes = HashMap::new();
-        for vertex_id in &vertex_ids {
+        for vertex_id in &config.vertex_ids {
             let task_runtime = Builder::new_multi_thread()
-                .worker_threads(num_io_threads)
+                .worker_threads(config.num_io_threads)
                 .enable_all()
                 .thread_name(format!("task-runtime-{}", vertex_id))
                 .build().unwrap();
@@ -103,9 +123,10 @@ impl Worker {
         }
 
         Self {
-            graph,
-            vertex_ids: vertex_ids.clone(),
+            graph: config.graph,
+            vertex_ids: config.vertex_ids.clone(),
             task_actors: HashMap::new(),
+            transport_backend_type: config.transport_backend_type,
             backend_actor: None,
             task_runtimes,
             transport_backend_runtime: Some(
@@ -114,7 +135,6 @@ impl Worker {
                 .enable_all()
                 .thread_name("transport-backend-runtime")
                 .build().unwrap()),
-            num_io_threads,
             state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None
@@ -216,7 +236,10 @@ impl Worker {
     pub async fn spawn_actors(&mut self) {
         println!("[WORKER] Spawning actors");
 
-        let mut backend = InMemoryTransportBackend::new();
+        let mut backend: Box<dyn TransportBackend> = match self.transport_backend_type {
+            TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new()),
+            TransportBackendType::InMemory => Box::new(InMemoryTransportBackend::new()),
+        };
         let mut transport_client_configs = backend.init_channels(&self.graph, self.vertex_ids.clone());
 
         let backend_actor_task = self.transport_backend_runtime.as_ref().unwrap().spawn(async{
