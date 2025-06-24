@@ -251,7 +251,9 @@ impl TransportBackend for GrpcTransportBackend {
                                     }
                                 },
                                 Ok(None) => {
-                                    panic!("[GRPC_BACKEND] Client channel closed");
+                                    if r.load(std::sync::atomic::Ordering::Relaxed) {
+                                        panic!("[GRPC_BACKEND] Client channel closed");
+                                    }
                                 },
                                 Err(_) => {
                                     // timeout

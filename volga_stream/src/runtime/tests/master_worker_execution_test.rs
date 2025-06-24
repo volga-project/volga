@@ -269,9 +269,7 @@ async fn start_worker_servers(
         println!("[TEST] Started worker server {} on {}", worker_id, addr);
     }
 
-    // TODO is this needed?
     // Store worker servers in a static to prevent them from being dropped
-    // This is a simple approach - in a real implementation you'd want better lifecycle management
     lazy_static::lazy_static! {
         static ref WORKER_SERVERS: Arc<Mutex<Vec<WorkerServer>>> = Arc::new(Mutex::new(Vec::new()));
     }
@@ -288,7 +286,7 @@ async fn start_worker_servers(
 fn test_master_worker_execution() -> Result<()> {
     let num_workers_per_operator = 2;
     let parallelism_per_worker = 2;
-    let num_messages_per_source = 4;
+    let num_messages_per_source = 10; // TODO large number fails, debug why
     
     println!("[TEST] Running master-worker execution test with {} workers per operator, {} parallelism per worker, {} messages per source", 
              num_workers_per_operator, parallelism_per_worker, num_messages_per_source);
