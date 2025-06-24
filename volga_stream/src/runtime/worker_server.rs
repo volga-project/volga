@@ -80,7 +80,7 @@ impl WorkerService for WorkerServiceImpl {
         _request: Request<CloseWorkerRequest>,
     ) -> Result<Response<CloseWorkerResponse>, Status> {
         let mut worker_guard = self.worker.lock().await;
-        worker_guard.close();
+        worker_guard.close().await;
         
         println!("[WORKER_SERVER] Worker closed successfully");
         

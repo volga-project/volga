@@ -23,15 +23,39 @@ pub struct WorkerClient {
 
 impl WorkerClient {
     pub async fn connect(worker_ip: String) -> Result<Self, Box<dyn std::error::Error>> {
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 1000;
+        
         let addr = format!("http://{}", worker_ip);
-        let client = WorkerServiceClient::connect(addr.clone()).await?;
+        let mut last_error = None;
         
-        println!("[MASTER] Connected to worker at {}", worker_ip);
+        for attempt in 0..MAX_RETRIES {
+            match WorkerServiceClient::connect(addr.clone()).await {
+                Ok(client) => {
+                    println!("[MASTER] Successfully connected to worker {} on attempt {}", worker_ip, attempt + 1);
+                    return Ok(Self {
+                        client,
+                        worker_ip,
+                    });
+                }
+                Err(e) => {
+                    last_error = Some(e.to_string());
+                    println!("[MASTER] Connection attempt {} to worker {} failed: {}", attempt + 1, worker_ip, e);
+                    
+                    // Don't sleep on the last attempt
+                    if attempt < MAX_RETRIES - 1 {
+                        sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt + 1) as u64)).await;
+                    }
+                }
+            }
+        }
         
-        Ok(Self {
-            client,
-            worker_ip,
-        })
+        Err(format!(
+            "Failed to connect to worker {} after {} attempts. Last error: {:?}", 
+            worker_ip, 
+            MAX_RETRIES, 
+            last_error
+        ).into())
     }
 
     pub async fn start_worker(&mut self) -> Result<bool, Box<dyn std::error::Error>> {

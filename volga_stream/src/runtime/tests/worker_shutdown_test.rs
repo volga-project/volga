@@ -1,13 +1,9 @@
-use crate::runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SourceConfig, SinkConfig}, 
-    partition::PartitionType, 
-    worker::Worker,
-    functions::{
+use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
-    },
-    storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply},
-};
+    }, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::Worker
+}};
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
 use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
 use anyhow::Result;
@@ -43,11 +39,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     // Create runtime for async operations
     let runtime = Runtime::new()?;
 
-    // Create storage actor
-    let storage_actor = InMemoryStorageActor::new();
-    let storage_ref = runtime.block_on(async {
-        spawn(storage_actor)
-    });
+    let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
@@ -111,7 +103,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         // Create sink vertex
         let sink_vertex = ExecutionVertex::new(
             format!("sink_{}", task_id),
-            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageActorSinkConfig(storage_ref.clone())),
+            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
             parallelism,
             i,
         );
@@ -185,14 +177,17 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     );
 
     println!("Starting worker...");
-    runtime.block_on(async {
+    let (worker_state, result_messages) = runtime.block_on(async {
+        let mut storage_server = InMemoryStorageServer::new();
+        storage_server.start(&storage_server_addr).await.unwrap();
         worker.execute_worker_lifecycle_for_testing().await;
+        let worker_state = worker.get_state().await;
+        let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
+        let result_messages = client.get_vector().await.unwrap();
+        storage_server.stop().await;
+        (worker_state, result_messages)
     });
     println!("Worker completed");
-    
-    let worker_state = runtime.block_on(async {
-        worker.get_state().await
-    });
 
     // print metrics
     println!("\n=== Worker Metrics ===");
@@ -215,32 +210,22 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     println!("  Latency Histogram: {:?}", worker_state.aggregated_metrics.latency_histogram);
     println!("===================\n");
 
-    // Verify results by reading from storage actor
-    let result = runtime.block_on(async {
-        storage_ref.ask(InMemoryStorageMessage::GetVector).await
-    })?;
-    
-    match result {
-        InMemoryStorageReply::Vector(result_messages) => {
-            // Verify we received all messages except watermarks
-            let result_len = result_messages.len();
-            let mut values = Vec::new();
-            for message in result_messages {
-                let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-                values.push(value.to_string());
-            }
+    // Verify we received all messages except watermarks
+    let result_len = result_messages.len();
+    let mut values = Vec::new();
+    for message in result_messages {
+        let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+        values.push(value.to_string());
+    }
 
-            println!("Result values: {:?}", values);
-            let total_expected_messages = parallelism as usize * num_messages_per_source;
-            assert_eq!(result_len, total_expected_messages, 
-                "Expected {} messages, got {}", total_expected_messages, values.len());
+    println!("Result values: {:?}", values);
+    let total_expected_messages = parallelism as usize * num_messages_per_source;
+    assert_eq!(result_len, total_expected_messages, 
+        "Expected {} messages, got {}", total_expected_messages, values.len());
 
-            for msg_id in 0..(num_messages_per_source * parallelism as usize) {
-                let value = format!("value_{}", msg_id);
-                assert!(values.contains(&value));
-            }
-        }
-        _ => panic!("Expected Vector reply from storage actor"),
+    for msg_id in 0..(num_messages_per_source * parallelism as usize) {
+        let value = format!("value_{}", msg_id);
+        assert!(values.contains(&value));
     }
 
     Ok(())

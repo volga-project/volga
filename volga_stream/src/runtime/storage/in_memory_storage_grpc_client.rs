@@ -2,6 +2,7 @@ use tonic::transport::Channel;
 use std::collections::HashMap;
 use crate::common::message::Message;
 use anyhow::Result;
+use tokio::time::{Duration, sleep};
 
 pub mod in_memory_storage_service {
     tonic::include_proto!("in_memory_storage_service");
@@ -24,10 +25,37 @@ pub struct InMemoryStorageClient {
 }
 
 impl InMemoryStorageClient {
-    /// Create a new client connected to the specified address
+    /// Create a new client connected to the specified address with retry logic
     pub async fn new(addr: String) -> Result<Self> {
-        let client = InMemoryStorageServiceClient::connect(addr).await?;
-        Ok(Self { client })
+        const MAX_RETRIES: u32 = 5;
+        const RETRY_DELAY_MS: u64 = 1000;
+        
+        let mut last_error = None;
+        
+        for attempt in 0..MAX_RETRIES {
+            match InMemoryStorageServiceClient::connect(addr.clone()).await {
+                Ok(client) => {
+                    println!("[IN_MEMORY_STORAGE_CLIENT] Successfully connected to {} on attempt {}", addr, attempt + 1);
+                    return Ok(Self { client });
+                }
+                Err(e) => {
+                    last_error = Some(e.to_string());
+                    println!("[IN_MEMORY_STORAGE_CLIENT] Connection attempt {} failed: {}", attempt + 1, e);
+                    
+                    // Don't sleep on the last attempt
+                    if attempt < MAX_RETRIES - 1 {
+                        sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt + 1) as u64)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!(
+            "Failed to connect to {} after {} attempts. Last error: {:?}", 
+            addr, 
+            MAX_RETRIES, 
+            last_error
+        ))
     }
 
     /// Append a single message to vector storage

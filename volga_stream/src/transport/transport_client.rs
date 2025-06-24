@@ -113,16 +113,13 @@ impl DataReader {
                     _ => false,
                 };
 
-                    // if self.vertex_id.contains("map") || self.vertex_id.contains("key_by") {
                 if !is_watermark {
                     let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
             
                     println!("DataReader {:?} read message: {:?}", self.vertex_id, value);
                 } else {
-
                     println!("DataReader {:?} read watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
                 }
-                // }
                 return Ok(result);
             }
             attempts += 1;

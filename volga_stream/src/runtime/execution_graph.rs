@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use crate::common::message::Message;
-use crate::runtime::storage::in_memory_storage_actor::InMemoryStorageActor;
-use kameo::prelude::ActorRef;
 use crate::runtime::functions::{
     map::MapFunction,
     key_by::KeyByFunction,
@@ -57,7 +55,7 @@ pub enum SourceConfig {
 
 #[derive(Clone, Debug)]
 pub enum SinkConfig {
-    InMemoryStorageActorSinkConfig(ActorRef<InMemoryStorageActor>),
+    InMemoryStorageGrpcSinkConfig(String), // server_addr
 }
 
 #[derive(Clone, Debug)]

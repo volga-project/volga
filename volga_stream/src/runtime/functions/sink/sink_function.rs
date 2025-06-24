@@ -3,11 +3,10 @@ use anyhow::Result;
 use std::fmt;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::SinkConfig;
+use crate::runtime::functions::sink::in_memory_storage_sink::InMemoryStorageSinkFunction;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
-
-use super::in_memory_storage_sink::InMemoryStorageActorSinkFunction;
 
 #[async_trait]
 pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
@@ -16,14 +15,14 @@ pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
 
 #[derive(Debug)]
 pub enum SinkFunction {
-    InMemoryStorageActor(InMemoryStorageActorSinkFunction),
+    InMemoryStorageGrpc(InMemoryStorageSinkFunction),
 }
 
 #[async_trait]
 impl SinkFunctionTrait for SinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
         match self {
-            SinkFunction::InMemoryStorageActor(f) => f.sink(message).await,
+            SinkFunction::InMemoryStorageGrpc(f) => f.sink(message).await,
         }
     }
 }
@@ -32,13 +31,13 @@ impl SinkFunctionTrait for SinkFunction {
 impl FunctionTrait for SinkFunction {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         match self {
-            SinkFunction::InMemoryStorageActor(f) => f.open(context).await,
+            SinkFunction::InMemoryStorageGrpc(f) => f.open(context).await,
         }
     }
     
     async fn close(&mut self) -> Result<()> {
         match self {
-            SinkFunction::InMemoryStorageActor(f) => f.close().await,
+            SinkFunction::InMemoryStorageGrpc(f) => f.close().await,
         }
     }
     
@@ -53,8 +52,8 @@ impl FunctionTrait for SinkFunction {
 
 pub fn create_sink_function(config: SinkConfig) -> SinkFunction {
     match config {
-        SinkConfig::InMemoryStorageActorSinkConfig(storage_actor) => {
-            SinkFunction::InMemoryStorageActor(InMemoryStorageActorSinkFunction::new(storage_actor))
+        SinkConfig::InMemoryStorageGrpcSinkConfig(server_addr) => {
+            SinkFunction::InMemoryStorageGrpc(InMemoryStorageSinkFunction::new(server_addr))
         }
     }
 }

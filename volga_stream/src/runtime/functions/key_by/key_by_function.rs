@@ -6,7 +6,7 @@ use anyhow::Result;
 use std::fmt;
 use arrow::compute;
 use arrow::compute::kernels::partition::partition;
-use arrow::array::{Array, ArrayRef, StringArray, UInt32Array};
+use arrow::array::{Array, ArrayRef, UInt32Array};
 use arrow::datatypes::Schema;
 use arrow::record_batch::RecordBatch;
 use arrow_row::{RowConverter, SortField};

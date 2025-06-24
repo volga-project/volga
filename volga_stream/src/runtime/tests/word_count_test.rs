@@ -1,10 +1,10 @@
-use crate::runtime::{
+use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::{
         key_by::KeyByFunction,
         reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
         source::word_count_source::{BatchingMode, WordCountSourceFunction},
-    }, partition::PartitionType, storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply}, worker::Worker
-};
+    }, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::Worker
+}};
 use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
 use anyhow::Result;
@@ -24,11 +24,7 @@ fn test_parallel_word_count() -> Result<()> {
     // Create runtime for async operations
     let runtime = Runtime::new()?;
 
-    // Create storage actor
-    let storage_actor = InMemoryStorageActor::new();
-    let storage_ref = runtime.block_on(async {
-        spawn(storage_actor)
-    });
+    let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Create execution graph
     let mut graph = ExecutionGraph::new();
@@ -85,7 +81,7 @@ fn test_parallel_word_count() -> Result<()> {
         // Create sink vertex
         let sink_vertex = ExecutionVertex::new(
             format!("sink_{}", task_id),
-            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageActorSinkConfig(storage_ref.clone())),
+            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
             parallelism,
             i,
         );
@@ -161,49 +157,41 @@ fn test_parallel_word_count() -> Result<()> {
         1,
     );
 
-    runtime.block_on(async {
+    let result_map = runtime.block_on(async {
+        let mut storage_server = InMemoryStorageServer::new();
+        storage_server.start(&storage_server_addr).await.unwrap();
         worker.execute_worker_lifecycle_for_testing().await;
+        let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
+        let result_map = client.get_map().await.unwrap();
+        storage_server.stop().await;
+        result_map
     });
-
-    // Verify results by reading from storage actor
-    let result = runtime.block_on(async {
-        storage_ref.ask(InMemoryStorageMessage::GetMap).await
-    })?;
+    println!("Result map len: {:?}", result_map.len());
+    // Count occurrences of each word
+    let mut word_counts = HashMap::new();
+    for (_, batch) in result_map {
+        // Get the keyed batch and extract the word from its key
+        let keyed_batch = match batch {
+            Message::Keyed(kb) => kb,
+            _ => panic!("Expected KeyedBatch"),
+        };
+        
+        // Extract word from the key's record batch
+        let key_batch = keyed_batch.key().record_batch();
+        let word_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let word = word_array.value(0).to_string();
+        // Get count from the single column in the batch
+        let count_array = keyed_batch.base.record_batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count = count_array.value(0);
+        
+        word_counts.insert(word, count);
+    }
     
-    match result {
-        InMemoryStorageReply::Map(result_map) => {
-            // println!("Result map: {:?}", result_map);
-            println!("Result map len: {:?}", result_map.len());
-            // Count occurrences of each word
-            let mut word_counts = HashMap::new();
-            for (_, batch) in result_map {
-                // Get the keyed batch and extract the word from its key
-                let keyed_batch = match batch {
-                    Message::Keyed(kb) => kb,
-                    _ => panic!("Expected KeyedBatch"),
-                };
-                
-                // Extract word from the key's record batch
-                let key_batch = keyed_batch.key().record_batch();
-                let word_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                let word = word_array.value(0).to_string();
-                // Get count from the single column in the batch
-                let count_array = keyed_batch.base.record_batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
-                let count = count_array.value(0);
-                
-                word_counts.insert(word, count);
-            }
-            
-            assert_eq!(word_counts.len(), num_words * parallelism as usize, "Should have exactly num_words * parallelism unique words");
-            
-            for (word, count) in &word_counts {
-                assert_eq!(*count, num_to_send_per_word as f64, 
-                    "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
-            }
-            
-            // println!("Word counts: {:?}", word_counts);
-        }
-        _ => panic!("Expected Map reply from storage actor"),
+    assert_eq!(word_counts.len(), num_words * parallelism as usize, "Should have exactly num_words * parallelism unique words");
+    
+    for (word, count) in &word_counts {
+        assert_eq!(*count, num_to_send_per_word as f64, 
+            "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
     }
 
     Ok(())

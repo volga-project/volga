@@ -1,5 +1,5 @@
-use crate::{common::{WatermarkMessage, MAX_WATERMARK_VALUE}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::map::{MapFunction, MapFunctionTrait}, operator::SourceOperator, partition::{ForwardPartition, PartitionType}, storage::in_memory_storage_actor::{InMemoryStorageActor, InMemoryStorageMessage, InMemoryStorageReply}, worker::Worker
+use crate::{common::{test_utils::gen_unique_grpc_port, WatermarkMessage, MAX_WATERMARK_VALUE}, runtime::{
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::map::{MapFunction, MapFunctionTrait}, operator::SourceOperator, partition::{ForwardPartition, PartitionType}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::Worker
 }};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
@@ -44,13 +44,7 @@ fn test_worker() -> Result<()> {
         None,
     )));
 
-    println!("Creating storage actor...");
-    let storage_actor = InMemoryStorageActor::new();
-    let storage_ref = runtime.block_on(async {
-        spawn(storage_actor)
-    });
-
-    println!("Created storage actor");
+    let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     let mut graph = ExecutionGraph::new();
 
@@ -75,7 +69,7 @@ fn test_worker() -> Result<()> {
     // Create sink vertex with storage actor
     let sink_vertex = ExecutionVertex::new(
         "sink".to_string(),
-        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageActorSinkConfig(storage_ref.clone())),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
         1,
         0,
     );
@@ -110,28 +104,21 @@ fn test_worker() -> Result<()> {
         1,
     );
 
-    runtime.block_on(async {
+    let (vector_messages, map_messages) = runtime.block_on(async {
+        let mut storage_server = InMemoryStorageServer::new();
+        storage_server.start(&storage_server_addr).await.unwrap();
         worker.execute_worker_lifecycle_for_testing().await;
+        let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
+        let vector_messages = client.get_vector().await.unwrap();
+        let map_messages = client.get_map().await.unwrap();
+        storage_server.stop().await;
+        (vector_messages, map_messages)
     });
 
-    // Verify results by reading from storage actor
-    let result = runtime.block_on(async {
-        storage_ref.ask(InMemoryStorageMessage::GetVector).await
-    })?;
-    
-    match result {
-        InMemoryStorageReply::Vector(result_messages) => {
-            assert_eq!(result_messages.len(), num_messages);
-            for (expected, actual) in test_messages.iter().zip(result_messages.iter()) {
-                if matches!(expected, Message::Watermark(_)) {
-                    continue;
-                }
-                let expected_value = expected.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-                let actual_value = actual.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-                assert_eq!(actual_value, expected_value);
-            }
-        }
-        _ => panic!("Expected Vector reply from storage actor"),
+    assert_eq!(vector_messages.len(), num_messages);
+    assert_eq!(map_messages.len(), 0);
+    for (expected, actual) in test_messages.iter().zip(vector_messages.iter()) {
+        assert_eq!(actual.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), expected.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0));
     }
 
     Ok(())
