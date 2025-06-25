@@ -161,13 +161,16 @@ impl ExecutionGraph {
 
     pub fn get_vertex_type(&self, vertex_id: &str) -> Option<OperatorType> {
         if let Some(vertex) = self.vertices.get(vertex_id) {
+            // TODO better way to get opeartor type from vertex
             match &vertex.operator_config {
                 OperatorConfig::SourceConfig(_) => Some(OperatorType::SOURCE),
                 OperatorConfig::SinkConfig(_) => Some(OperatorType::SINK),
                 OperatorConfig::MapConfig(_) | 
                 OperatorConfig::JoinConfig(_) | 
                 OperatorConfig::KeyByConfig(_) | 
-                OperatorConfig::ReduceConfig(_, _) => Some(OperatorType::PROCESSOR),
+                OperatorConfig::ReduceConfig(_, _) |
+                // TODO this is wrong, chained can be any of 3
+                OperatorConfig::ChainedConfig(_) => Some(OperatorType::PROCESSOR),
             }
         } else {
             None

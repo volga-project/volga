@@ -45,8 +45,13 @@ impl OperatorTrait for SourceOperator {
         OperatorType::SOURCE
     }
 
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(&mut self) -> Option<Vec<Message>> {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        function.fetch().await
+        let msg = function.fetch().await;
+        if msg.is_none() {
+            None
+        } else {
+            Some(vec![msg.unwrap()])
+        }
     }
 }

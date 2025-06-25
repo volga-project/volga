@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crate::runtime::operators::chained::chained_operator::ChainedOperator;
 use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
 use crate::runtime::operators::map::map_operator::MapOperator;
@@ -40,7 +41,7 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
         panic!("process_message not implemented for this operator")
     }
     fn operator_type(&self) -> OperatorType;
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(&mut self) -> Option<Vec<Message>> {
         panic!("fetch not implemented for this operator")
     }
 }
@@ -53,6 +54,7 @@ pub enum Operator {
     Source(SourceOperator),
     KeyBy(KeyByOperator),
     Reduce(ReduceOperator),
+    Chained(ChainedOperator),
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +65,7 @@ pub enum OperatorConfig {
     SourceConfig(SourceConfig),
     KeyByConfig(KeyByFunction),
     ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
+    ChainedConfig(Vec<OperatorConfig>),
 }
 
 #[async_trait]
@@ -75,6 +78,7 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.open(context).await,
             Operator::KeyBy(op) => op.open(context).await,
             Operator::Reduce(op) => op.open(context).await,
+            Operator::Chained(op) => op.open(context).await
         }
     }
 
@@ -86,6 +90,7 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.close().await,
             Operator::KeyBy(op) => op.close().await,
             Operator::Reduce(op) => op.close().await,
+            Operator::Chained(op) => op.close().await
         }
     }
 
@@ -103,6 +108,7 @@ impl OperatorTrait for Operator {
                     Operator::Source(op) => op.process_message(message).await,
                     Operator::KeyBy(op) => op.process_message(message).await,
                     Operator::Reduce(op) => op.process_message(message).await,
+                    Operator::Chained(op) => op.process_message(message).await,
                 }
             }
         }
@@ -116,10 +122,11 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.operator_type(),
             Operator::KeyBy(op) => op.operator_type(),
             Operator::Reduce(op) => op.operator_type(),
+            Operator::Chained(op) => op.operator_type(),
         }
     }
 
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(&mut self) -> Option<Vec<Message>> {
         match self {
             Operator::Map(op) => op.fetch().await,
             Operator::Join(op) => op.fetch().await,
@@ -127,6 +134,7 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.fetch().await,
             Operator::KeyBy(op) => op.fetch().await,
             Operator::Reduce(op) => op.fetch().await,
+            Operator::Chained(op) => op.fetch().await,
         }
     }
 }
@@ -212,6 +220,7 @@ pub fn from_operator_config(operator_config: OperatorConfig) -> Operator {
         OperatorConfig::SourceConfig(config) => Operator::Source(SourceOperator::new(config)),
         OperatorConfig::KeyByConfig(key_by_function) => Operator::KeyBy(KeyByOperator::new(key_by_function)),
         OperatorConfig::ReduceConfig(reduce_function, extractor) => Operator::Reduce(ReduceOperator::new(reduce_function, extractor)),
+        OperatorConfig::ChainedConfig(configs) => Operator::Chained(ChainedOperator::new(configs)),
     };
     operator
 }

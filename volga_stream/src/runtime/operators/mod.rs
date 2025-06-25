@@ -5,3 +5,4 @@ pub mod source;
 pub mod key_by;
 pub mod reduce;
 pub mod operator;
+pub mod chained;

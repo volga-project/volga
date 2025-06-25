@@ -257,32 +257,38 @@ impl StreamTask {
                 let operator_type = operator.operator_type();
                 let messages = match operator_type {
                     OperatorType::SOURCE => {
-                        if let Some(mut message) = operator.fetch().await {
-                            // source should set ingest timestamp
-                            message.set_ingest_timestamp(SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64);
-                            match message {
-                                Message::Watermark(watermark) => {
-                                    println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.upstream_vertex_id);
-                                    let wm = Self::handle_watermark(
-                                        operator_type,
-                                        watermark.clone(),
-                                        status.clone(),
-                                        finished_upstream_ids.clone(),
-                                        upstream_vertices.clone(),
-                                        vertex_id.clone()
-                                    ).await;
-                                    if let Some(wm) = wm {
-                                        Some(vec![Message::Watermark(wm)])
-                                    } else {
-                                        None
+                        if let Some(fetched_msgs) = operator.fetch().await {
+                            let mut filtered = vec![];
+                            for mut message in fetched_msgs {
+                                // source should set ingest timestamp
+                                message.set_ingest_timestamp(SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64);
+                                match message {
+                                    Message::Watermark(watermark) => {
+                                        println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.upstream_vertex_id);
+                                        let wm = Self::handle_watermark(
+                                            operator_type,
+                                            watermark.clone(),
+                                            status.clone(),
+                                            finished_upstream_ids.clone(),
+                                            upstream_vertices.clone(),
+                                            vertex_id.clone()
+                                        ).await;
+                                        if let Some(wm) = wm {
+                                            filtered.push(Message::Watermark(wm));
+                                        }
+                                    }
+                                    _ => {
+                                        filtered.push(message)
                                     }
                                 }
-                                _ => {
-                                    Some(vec![message])
-                                }
+                            }
+                            if filtered.len() != 0 {
+                                Some(filtered)
+                            } else {
+                                None
                             }
                         } else {
                             None
