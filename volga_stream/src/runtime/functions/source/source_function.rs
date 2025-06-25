@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
 use crate::common::message::Message;
+use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
@@ -54,12 +55,12 @@ impl FunctionTrait for SourceFunction {
     }
 }
 
-pub fn create_source_function(config: crate::runtime::execution_graph::SourceConfig) -> SourceFunction {
+pub fn create_source_function(config: SourceConfig) -> SourceFunction {
     match config {
-        crate::runtime::execution_graph::SourceConfig::VectorSourceConfig(messages) => {
+        SourceConfig::VectorSourceConfig(messages) => {
             SourceFunction::Vector(VectorSourceFunction::new(messages))
         }
-        crate::runtime::execution_graph::SourceConfig::WordCountSourceConfig { 
+        SourceConfig::WordCountSourceConfig { 
             word_length, 
             num_words, 
             num_to_send_per_word,

@@ -1,5 +1,5 @@
 use crate::{common::{test_utils::gen_unique_grpc_port, WatermarkMessage, MAX_WATERMARK_VALUE}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::map::{MapFunction, MapFunctionTrait}, operator::SourceOperator, partition::{ForwardPartition, PartitionType}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::map::{MapFunction, MapFunctionTrait}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::SourceConfig}, partition::{ForwardPartition, PartitionType}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;

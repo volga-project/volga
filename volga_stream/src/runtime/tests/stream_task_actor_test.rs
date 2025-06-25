@@ -1,9 +1,10 @@
 use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
+use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::runtime::stream_task::StreamTask;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig};
+use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};

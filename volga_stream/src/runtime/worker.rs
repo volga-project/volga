@@ -1,5 +1,5 @@
 use crate::{runtime::{
-    execution_graph::ExecutionGraph, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskMetrics, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+    execution_graph::ExecutionGraph, operators::operator::OperatorType, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskMetrics, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
 }, transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend}};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
@@ -171,7 +171,7 @@ impl Worker {
                 
                 // Check if this is a sink vertex
                 if let Some(operator_type) = graph.get_vertex_type(&vertex_id) {
-                    if operator_type == crate::runtime::operator::OperatorType::SINK {
+                    if operator_type == OperatorType::SINK {
                         sink_metrics.push(state.metrics);
                     }
                 }

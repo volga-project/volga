@@ -1,4 +1,5 @@
-use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, OperatorConfig, ExecutionEdge};
+use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
+use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::runtime::functions::{
     map::MapFunction,

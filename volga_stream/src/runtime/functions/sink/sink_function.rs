@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
 use crate::common::message::Message;
-use crate::runtime::execution_graph::SinkConfig;
+use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::functions::sink::in_memory_storage_sink::InMemoryStorageSinkFunction;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;

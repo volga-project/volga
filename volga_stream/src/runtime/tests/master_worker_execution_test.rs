@@ -1,8 +1,8 @@
 use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex, OperatorConfig, SinkConfig, SourceConfig}, functions::{
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
-    }, master::Master, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::WorkerConfig, worker_server::WorkerServer
+    }, master::Master, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::SourceConfig}, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::WorkerConfig, worker_server::WorkerServer
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;

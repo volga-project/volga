@@ -1,16 +1,14 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::Collector, execution_graph::{ExecutionGraph, OperatorConfig}, runtime_context::RuntimeContext
+    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{from_operator_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
-use crate::runtime::operator::{Operator, OperatorTrait, MapOperator, JoinOperator, SinkOperator, SourceOperator, KeyByOperator, ReduceOperator};
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicBool, AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
-use super::operator::OperatorType;
 
 // Helper function to get current timestamp
 fn timestamp() -> String {
@@ -202,19 +200,12 @@ impl StreamTask {
         let (run_sender, run_receiver) = watch::channel(false);
         self.run_signal_sender = Some(run_sender);
 
-        let (close_sender, mut close_receiver) = watch::channel(false);
+        let (close_sender, close_receiver) = watch::channel(false);
         self.close_signal_sender = Some(close_sender);
         
         // Main stream task lifecycle loop
         let run_loop_handle = tokio::spawn(async move {
-            let mut operator = match operator_config {
-                OperatorConfig::MapConfig(map_function) => Operator::Map(MapOperator::new(map_function)),
-                OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new()),
-                OperatorConfig::SinkConfig(config) => Operator::Sink(SinkOperator::new(config)),
-                OperatorConfig::SourceConfig(config) => Operator::Source(SourceOperator::new(config)),
-                OperatorConfig::KeyByConfig(key_by_function) => Operator::KeyBy(KeyByOperator::new(key_by_function)),
-                OperatorConfig::ReduceConfig(reduce_function, extractor) => Operator::Reduce(ReduceOperator::new(reduce_function, extractor)),
-            };
+            let mut operator = from_operator_config(operator_config);
             
             let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
             
@@ -265,7 +256,7 @@ impl StreamTask {
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 let operator_type = operator.operator_type();
                 let messages = match operator_type {
-                    crate::runtime::operator::OperatorType::SOURCE => {
+                    OperatorType::SOURCE => {
                         if let Some(mut message) = operator.fetch().await {
                             // source should set ingest timestamp
                             message.set_ingest_timestamp(SystemTime::now()

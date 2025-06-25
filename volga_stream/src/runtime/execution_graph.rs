@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use crate::common::message::Message;
@@ -7,7 +8,7 @@ use crate::runtime::functions::{
     key_by::KeyByFunction,
     reduce::{ReduceFunction, AggregationResultExtractor},
 };
-use crate::runtime::operator::OperatorType;
+use crate::runtime::operators::operator::OperatorType;
 
 use super::functions::source::word_count_source::BatchingMode;
 
@@ -38,34 +39,6 @@ impl ExecutionEdge {
             channel,
         }
     }
-}
-
-#[derive(Debug, Clone)]
-pub enum SourceConfig {
-    VectorSourceConfig(Vec<Message>),
-    WordCountSourceConfig {
-        word_length: usize,
-        num_words: usize, // Total pool of words to generate
-        num_to_send_per_word: Option<usize>, // Optional: how many copies of each word to send
-        run_for_s: Option<u64>,
-        batch_size: usize,
-        batching_mode: BatchingMode, // Controls how words are batched together
-    },
-}
-
-#[derive(Clone, Debug)]
-pub enum SinkConfig {
-    InMemoryStorageGrpcSinkConfig(String), // server_addr
-}
-
-#[derive(Clone, Debug)]
-pub enum OperatorConfig {
-    MapConfig(MapFunction),
-    JoinConfig(HashMap<String, String>),
-    SinkConfig(SinkConfig),
-    SourceConfig(SourceConfig),
-    KeyByConfig(KeyByFunction),
-    ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
 }
 
 #[derive(Debug, Clone)]
