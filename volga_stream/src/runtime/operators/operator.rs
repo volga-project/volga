@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::chained::chained_operator::ChainedOperator;
 use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
@@ -28,9 +29,10 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
-    SOURCE,
-    SINK,
-    PROCESSOR,
+    Source,
+    Sink,
+    Processor,
+    ChainedSourceSink,
 }
 
 #[async_trait]
@@ -60,7 +62,7 @@ pub enum Operator {
 #[derive(Clone, Debug)]
 pub enum OperatorConfig {
     MapConfig(MapFunction),
-    JoinConfig(HashMap<String, String>),
+    JoinConfig(JoinFunction),
     SinkConfig(SinkConfig),
     SourceConfig(SourceConfig),
     KeyByConfig(KeyByFunction),
@@ -144,10 +146,11 @@ pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
     pub function: Option<Box<dyn FunctionTrait>>,
     pub thread_pool: ThreadPool,
+    pub operator_config: OperatorConfig
 }
 
 impl OperatorBase {
-    pub fn new() -> Self {
+    pub fn new(operator_config: OperatorConfig) -> Self {
         // TODO config thread pool size
         let thread_pool = ThreadPoolBuilder::new()
             .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
@@ -157,18 +160,21 @@ impl OperatorBase {
             runtime_context: None,
             function: None,
             thread_pool,
+            operator_config
         }
     }
     
-    pub fn new_with_function<F: FunctionTrait + 'static>(function: F) -> Self {
+    pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig) -> Self {
         let thread_pool = ThreadPoolBuilder::new()
             .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
             .build()
             .expect("Failed to create thread pool");
+        
         Self {
             runtime_context: None,
             function: Some(Box::new(function)),
             thread_pool,
+            operator_config
         }
     }
     
@@ -208,19 +214,57 @@ impl OperatorTrait for OperatorBase {
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::PROCESSOR
+        operator_type_from_config(&self.operator_config)
     }
 }
 
 pub fn from_operator_config(operator_config: OperatorConfig) -> Operator {
     let operator = match operator_config {
-        OperatorConfig::MapConfig(map_function) => Operator::Map(MapOperator::new(map_function)),
-        OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new()),
-        OperatorConfig::SinkConfig(config) => Operator::Sink(SinkOperator::new(config)),
-        OperatorConfig::SourceConfig(config) => Operator::Source(SourceOperator::new(config)),
-        OperatorConfig::KeyByConfig(key_by_function) => Operator::KeyBy(KeyByOperator::new(key_by_function)),
-        OperatorConfig::ReduceConfig(reduce_function, extractor) => Operator::Reduce(ReduceOperator::new(reduce_function, extractor)),
-        OperatorConfig::ChainedConfig(configs) => Operator::Chained(ChainedOperator::new(configs)),
+        OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config)),
+        OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config)),
+        OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config)),
+        OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config)),
+        OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
+        OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config)),
+        OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config)),
     };
     operator
+}
+
+pub fn operator_type_from_config(operator_config: &OperatorConfig) -> OperatorType {
+    match operator_config {
+        OperatorConfig::SourceConfig(_) => OperatorType::Source,
+        OperatorConfig::SinkConfig(_) => OperatorType::Sink,
+        OperatorConfig::ChainedConfig(configs   ) => {
+            let mut has_source = false;
+            let mut has_sink = false;
+            for config in configs {
+                match config {
+                    OperatorConfig::SourceConfig(_) => {
+                        has_source = true;
+                    },
+                    OperatorConfig::SinkConfig(_) => {
+                        has_sink = true;
+                    },
+                    _ => {}
+                }
+            }
+
+            if has_source && has_sink {
+                OperatorType::ChainedSourceSink
+            } else if has_source {
+                OperatorType::Source
+            } else if has_sink {
+                OperatorType::Sink
+            } else {
+                OperatorType::Processor
+            }
+        },
+        OperatorConfig::MapConfig(_) | 
+        OperatorConfig::JoinConfig(_) | 
+        OperatorConfig::KeyByConfig(_) | 
+        OperatorConfig::ReduceConfig(_, _) => {
+            OperatorType::Processor
+        }
+    }
 }

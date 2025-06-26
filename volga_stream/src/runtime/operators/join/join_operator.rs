@@ -1,4 +1,4 @@
-use crate::{common::Message, runtime::{operators::operator::{OperatorBase, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use async_trait::async_trait;
 use anyhow::Result;
 
@@ -10,9 +10,13 @@ pub struct JoinOperator {
 }
 
 impl JoinOperator {
-    pub fn new() -> Self {
-        Self {
-            base: OperatorBase::new(),
+    pub fn new(config: OperatorConfig) -> Self {
+        let join_function = match config.clone() {
+            OperatorConfig::JoinConfig(join_function) => join_function,
+            _ => panic!("Expected JoinConfig, got {:?}", config),
+        };
+        Self { 
+            base: OperatorBase::new_with_function(join_function, config),
             left_buffer: Vec::new(),
             right_buffer: Vec::new(),
         }
@@ -42,6 +46,6 @@ impl OperatorTrait for JoinOperator {
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::PROCESSOR
+        self.base.operator_type()
     }
 }

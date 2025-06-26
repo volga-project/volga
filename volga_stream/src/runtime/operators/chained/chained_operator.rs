@@ -6,12 +6,18 @@ use futures::future::try_join_all;
 
 #[derive(Debug)]
 pub struct ChainedOperator {
+    base: OperatorBase,
     operators: Vec<Operator>,
 }
 
 impl ChainedOperator {
-    pub fn new(configs: Vec<OperatorConfig>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
+        let configs = match config.clone() {
+            OperatorConfig::ChainedConfig(configs) => configs,
+            _ => panic!("Expected ChainedConfig, got {:?}", config),
+        };
         Self { 
+            base: OperatorBase::new(config),
             operators: configs.iter().map(|config| from_operator_config(config.clone())).collect(),
         }
     }
@@ -60,7 +66,7 @@ impl OperatorTrait for ChainedOperator {
     // when chained operator starts with source
     async fn fetch(&mut self) -> Option<Vec<Message>> {
         let first_op = self.operators.get_mut(0).expect("chained operator can not be empty");
-        if first_op.operator_type() != OperatorType::SOURCE {
+        if first_op.operator_type() != OperatorType::Source {
             panic!("Can not fetch chained operator without source operator being first");
         }
 
@@ -93,9 +99,8 @@ impl OperatorTrait for ChainedOperator {
         }
     }
 
-    // TODO what if we have both source and sink chained
     fn operator_type(&self) -> OperatorType {
-        self.operators.get(0).expect("chained operator can not be empty").operator_type()
+        self.base.operator_type()
     }
 
     async fn close(&mut self) -> Result<()> {

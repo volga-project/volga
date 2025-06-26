@@ -1,16 +1,18 @@
 use crate::{
-    common::{Message, test_utils::create_test_string_batch, WatermarkMessage, MAX_WATERMARK_VALUE},
+    common::{Message, test_utils::{create_test_string_batch, gen_unique_grpc_port}, WatermarkMessage, MAX_WATERMARK_VALUE},
     runtime::{
         operators::{
             chained::chained_operator::ChainedOperator,
             operator::{OperatorConfig, OperatorTrait, OperatorType},
             source::source_operator::SourceConfig,
+            sink::sink_operator::SinkConfig,
         },
         functions::{
             map::{MapFunction, MapFunctionTrait},
             key_by::KeyByFunction,
         },
         runtime_context::RuntimeContext,
+        storage::{InMemoryStorageClient, InMemoryStorageServer},
     },
 };
 use anyhow::Result;
@@ -80,7 +82,7 @@ async fn test_chained_operator_map_map() {
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
     
-    let mut chained_operator = ChainedOperator::new(configs);
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -121,7 +123,7 @@ async fn test_chained_operator_source_map() {
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
     
-    let mut chained_operator = ChainedOperator::new(configs);
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -173,7 +175,7 @@ async fn test_chained_operator_source_keyby() {
         OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["key".to_string()])),
     ];
     
-    let mut chained_operator = ChainedOperator::new(configs);
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -236,7 +238,7 @@ async fn test_chained_operator_source_map_keyby() {
         OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
     ];
     
-    let mut chained_operator = ChainedOperator::new(configs);
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -279,4 +281,96 @@ async fn test_chained_operator_source_map_keyby() {
     
     // Test close
     chained_operator.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn test_chained_operator_type() {
+    // Test with only map operators (Processor)
+    let map_configs = vec![
+        OperatorConfig::MapConfig(MapFunction::new_custom(AddPrefixMapFunction { prefix: "PREFIX_".to_string() })),
+        OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
+    ];
+    let map_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(map_configs));
+    assert_eq!(map_chained.operator_type(), OperatorType::Processor);
+    
+    // Test with source operator (Source)
+    let source_configs = vec![
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(vec![])),
+        OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
+    ];
+    let source_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_configs));
+    assert_eq!(source_chained.operator_type(), OperatorType::Source);
+    
+    // Test with sink operator (Sink)
+    let sink_configs = vec![
+        OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("test".to_string())),
+    ];
+    let sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(sink_configs));
+    assert_eq!(sink_chained.operator_type(), OperatorType::Sink);
+    
+    // Test with both source and sink operators (ChainedSourceSink)
+    let source_sink_configs = vec![
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(vec![])),
+        OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("test".to_string())),
+    ];
+    let source_sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_sink_configs));
+    assert_eq!(source_sink_chained.operator_type(), OperatorType::ChainedSourceSink);
+}
+
+#[tokio::test]
+async fn test_chained_operator_source_map_sink() {
+    // Create test messages for source
+    let test_messages = vec![
+        Message::new(None, create_test_string_batch(vec!["hello".to_string()]), None),
+        Message::new(None, create_test_string_batch(vec!["world".to_string()]), None),
+    ];
+
+    let num_messages = test_messages.len();
+    
+    // Set up gRPC storage server
+    let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
+    let mut storage_server = InMemoryStorageServer::new();
+    storage_server.start(&storage_server_addr).await.unwrap();
+    
+    let configs = vec![
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages)),
+        OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
+    ];
+    
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
+    
+    // Verify operator type is ChainedSourceSink
+    assert_eq!(chained_operator.operator_type(), OperatorType::ChainedSourceSink);
+    
+    let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
+    
+    // Test open
+    chained_operator.open(&context).await.unwrap();
+    
+    for _ in 0..num_messages {
+        chained_operator.fetch().await.unwrap();
+    }
+    
+    // Test close
+    chained_operator.close().await.unwrap();
+    
+    // Verify messages were actually stored in the gRPC storage
+    let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
+    let stored_messages = client.get_vector().await.unwrap();
+    
+    // Should have received 2 messages
+    assert_eq!(stored_messages.len(), 2);
+    
+    // Verify the stored messages are uppercase
+    let stored_array1 = stored_messages[0].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap();
+    let stored_array2 = stored_messages[1].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap();
+    
+    assert_eq!(stored_array1.value(0), "HELLO");
+    assert_eq!(stored_array2.value(0), "WORLD");
+    
+    // Clean up
+    storage_server.stop().await;
 }

@@ -1,4 +1,3 @@
-
 use std::{collections::HashMap, sync::{Arc, Mutex}};
 
 use anyhow::Result;
@@ -6,7 +5,7 @@ use async_trait::async_trait;
 
 use tokio_rayon::AsyncThreadPool;
 
-use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
 
 
 #[derive(Debug)]
@@ -17,9 +16,13 @@ pub struct ReduceOperator {
 }
 
 impl ReduceOperator {
-    pub fn new(reduce_function: ReduceFunction, extractor: Option<AggregationResultExtractor>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
+        let (reduce_function, extractor) = match config.clone() {
+            OperatorConfig::ReduceConfig(reduce_function, extractor) => (reduce_function, extractor),
+            _ => panic!("Expected ReduceConfig, got {:?}", config),
+        };
         Self {
-            base: OperatorBase::new_with_function(reduce_function),
+            base: OperatorBase::new_with_function(reduce_function, config),
             accumulators: HashMap::new(),
             result_extractor: extractor.unwrap_or_else(AggregationResultExtractor::all_aggregations),
         }
@@ -82,6 +85,6 @@ impl OperatorTrait for ReduceOperator {
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::PROCESSOR
+        self.base.operator_type()
     }
 }

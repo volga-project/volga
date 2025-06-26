@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use tokio_rayon::AsyncThreadPool;
 
-use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
 
 #[derive(Debug)]
 pub struct KeyByOperator {
@@ -10,9 +10,13 @@ pub struct KeyByOperator {
 }
 
 impl KeyByOperator {
-    pub fn new(key_by_function: KeyByFunction) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
+        let key_by_function = match config.clone() {
+            OperatorConfig::KeyByConfig(key_by_function) => key_by_function,
+            _ => panic!("Expected KeyByConfig, got {:?}", config),
+        };
         Self { 
-            base: OperatorBase::new_with_function(key_by_function),
+            base: OperatorBase::new_with_function(key_by_function, config),
         }
     }
 }
@@ -40,7 +44,7 @@ impl OperatorTrait for KeyByOperator {
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::PROCESSOR
+        self.base.operator_type()
     }
 
     async fn close(&mut self) -> Result<()> {

@@ -125,7 +125,7 @@ impl StreamTask {
     }
 
     async fn handle_watermark(
-        operator_type: OperatorType,
+        is_source: bool,
         watermark: WatermarkMessage,
         status: Arc<AtomicU8>,
         finished_upstream_ids: Arc<Mutex<HashSet<String>>>,
@@ -133,7 +133,7 @@ impl StreamTask {
         vertex_id: String
     ) -> Option<WatermarkMessage> {
         if watermark.watermark_value == MAX_WATERMARK_VALUE {
-            if operator_type == OperatorType::SOURCE {
+            if is_source {
                 println!("source vertex_id {:?} received max watermark, initiating shutdown", 
                     vertex_id);
                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
@@ -255,56 +255,23 @@ impl StreamTask {
             // processing loop
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 let operator_type = operator.operator_type();
-                let messages = match operator_type {
-                    OperatorType::SOURCE => {
-                        if let Some(fetched_msgs) = operator.fetch().await {
-                            let mut filtered = vec![];
-                            for mut message in fetched_msgs {
-                                // source should set ingest timestamp
-                                message.set_ingest_timestamp(SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis() as u64);
-                                match message {
-                                    Message::Watermark(watermark) => {
-                                        println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.upstream_vertex_id);
-                                        let wm = Self::handle_watermark(
-                                            operator_type,
-                                            watermark.clone(),
-                                            status.clone(),
-                                            finished_upstream_ids.clone(),
-                                            upstream_vertices.clone(),
-                                            vertex_id.clone()
-                                        ).await;
-                                        if let Some(wm) = wm {
-                                            filtered.push(Message::Watermark(wm));
-                                        }
-                                    }
-                                    _ => {
-                                        filtered.push(message)
-                                    }
-                                }
-                            }
-                            if filtered.len() != 0 {
-                                Some(filtered)
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    }
-                    _ => {
-                        let reader = transport_client.reader.as_mut()
-                            .expect("Reader should be initialized for non-SOURCE operator");
-                        if let Some(message) = reader.read_message().await? {
-                            Self::update_metrics(metrics.clone(), message.clone()).await;
-
+                let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
+                let mut processed_messages: Option<Vec<Message>> = None;
+                
+                if is_source {
+                    if let Some(fetched_msgs) = operator.fetch().await {
+                        let mut filtered = vec![]; // remove watermarks if needed, etc.
+                        for mut message in fetched_msgs {
+                            // source should set ingest timestamp
+                            message.set_ingest_timestamp(SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64);
                             match message {
                                 Message::Watermark(watermark) => {
-                                    println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.upstream_vertex_id);
+                                    println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.upstream_vertex_id);
                                     let wm = Self::handle_watermark(
-                                        operator_type,
+                                        is_source,
                                         watermark.clone(),
                                         status.clone(),
                                         finished_upstream_ids.clone(),
@@ -312,26 +279,47 @@ impl StreamTask {
                                         vertex_id.clone()
                                     ).await;
                                     if let Some(wm) = wm {
-                                        Some(vec![Message::Watermark(wm)])
-                                    } else {
-                                        None
+                                        filtered.push(Message::Watermark(wm));
                                     }
                                 }
-                                _ => match operator.process_message(message).await {
-                                    Some(messages) => {
-                                        // println!("StreamTask {:?} received message", vertex_id);
-                                        Some(messages)
-                                    }
-                                    None => None,
+                                _ => {
+                                    filtered.push(message)
                                 }
                             }
-                        } else {
-                            None
+                        }
+                        if filtered.len() != 0 {
+                            processed_messages = Some(filtered)
                         }
                     }
-                };
+                } else { 
+                    let reader = transport_client.reader.as_mut()
+                        .expect("Reader should be initialized for non-SOURCE operator");
+                    if let Some(message) = reader.read_message().await? {
+                        Self::update_metrics(metrics.clone(), message.clone()).await;
 
-                if messages.is_none() {
+                        match message {
+                            Message::Watermark(watermark) => {
+                                println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.upstream_vertex_id);
+                                let wm = Self::handle_watermark(
+                                    is_source,
+                                    watermark.clone(),
+                                    status.clone(),
+                                    finished_upstream_ids.clone(),
+                                    upstream_vertices.clone(),
+                                    vertex_id.clone()
+                                ).await;
+                                if let Some(wm) = wm {
+                                    processed_messages = Some(vec![Message::Watermark(wm)])
+                                }
+                            }
+                            _ => {
+                                processed_messages = operator.process_message(message).await;
+                            }
+                        }
+                    } 
+                }
+
+                if processed_messages.is_none() {
                     continue;
                 }
 
@@ -340,7 +328,7 @@ impl StreamTask {
                     continue;
                 }
                 
-                let messages = messages.unwrap();
+                let messages = processed_messages.unwrap();
                 
                 let mut retries_before_close = 3; // shared between all messages
                 for message in messages {

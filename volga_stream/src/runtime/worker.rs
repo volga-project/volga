@@ -170,10 +170,9 @@ impl Worker {
                 task_metrics.insert(vertex_id.clone(), state.metrics.clone());
                 
                 // Check if this is a sink vertex
-                if let Some(operator_type) = graph.get_vertex_type(&vertex_id) {
-                    if operator_type == OperatorType::SINK {
-                        sink_metrics.push(state.metrics);
-                    }
+                let operator_type = graph.get_vertex_type(&vertex_id);
+                if operator_type == OperatorType::Sink || operator_type == OperatorType::ChainedSourceSink {
+                    sink_metrics.push(state.metrics);
                 }
             }
         }

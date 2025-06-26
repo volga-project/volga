@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
 
 
 #[derive(Debug, Clone)]
@@ -23,10 +23,14 @@ pub struct SourceOperator {
 }
 
 impl SourceOperator {
-    pub fn new(config: SourceConfig) -> Self {
-        let source_function = create_source_function(config);
+    pub fn new(config: OperatorConfig) -> Self {
+        let source_config = match config.clone() {
+            OperatorConfig::SourceConfig(source_config) => source_config,
+            _ => panic!("Expected SourceConfig, got {:?}", config),
+        };
+        let source_function = create_source_function(source_config);
         Self {
-            base: OperatorBase::new_with_function(source_function),
+            base: OperatorBase::new_with_function(source_function, config),
         }
     }
 }
@@ -42,7 +46,7 @@ impl OperatorTrait for SourceOperator {
     }
 
     fn operator_type(&self) -> OperatorType {
-        OperatorType::SOURCE
+        OperatorType::Source
     }
 
     async fn fetch(&mut self) -> Option<Vec<Message>> {
