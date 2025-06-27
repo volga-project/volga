@@ -5,7 +5,7 @@ pub trait PartitionTrait: Send + Sync + fmt::Debug {
     fn partition(&mut self, batch: &Message, num_partitions: usize) -> Vec<usize>;
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PartitionType {
     Broadcast,
     Hash,

@@ -7,6 +7,7 @@ use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
+use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
@@ -25,123 +26,42 @@ fn test_parallel_word_count() -> Result<()> {
     let runtime = Runtime::new()?;
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-
-    // Create execution graph
-    let mut graph = ExecutionGraph::new();
     let parallelism = 2;
     let word_length = 10;
     let num_words = 2; // Number of unique words
     let num_to_send_per_word = 10; // Number of copies of each word to send
     let batch_size = 1;
 
-    // Create vertices for each parallel task
-    for i in 0..parallelism {
-        let task_id = i.to_string();
-        
-        // Create source vertex with word count source
-        let source_vertex = ExecutionVertex::new(
-            format!("source_{}", task_id),
-            OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
-                word_length: word_length,
-                num_words,
-                num_to_send_per_word: Some(num_to_send_per_word),
-                run_for_s: None,     // No time limit
-                batch_size: batch_size,
-                batching_mode: BatchingMode::SameWord,
-            }),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(source_vertex);
+    // Define operator chain: source -> keyby -> reduce -> sink
+    let operators = vec![
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
+            word_length: word_length,
+            num_words,
+            num_to_send_per_word: Some(num_to_send_per_word),
+            run_for_s: None,     // No time limit
+            batch_size: batch_size,
+            batching_mode: BatchingMode::SameWord,
+        })),
+        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()]))),
+        ("reduce".to_string(), OperatorConfig::ReduceConfig(
+            ReduceFunction::new_arrow_reduce("word".to_string()),
+            Some(AggregationResultExtractor::single_aggregation(
+                AggregationType::Count,
+                "count".to_string(),
+            )),
+        )),
+        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+    ];
 
-        // Create key-by vertex using ArrowKeyByFunction
-        let key_by_vertex = ExecutionVertex::new(
-            format!("key_by_{}", task_id),
-            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()])),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(key_by_vertex);
+    let config = TestGraphConfig {
+        operators,
+        parallelism,
+        chained: false,
+        is_remote: false,
+        worker_vertex_distribution: None,
+    };
 
-        // Create reduce vertex using ArrowReduceFunction
-        let reduce_vertex = ExecutionVertex::new(
-            format!("reduce_{}", task_id),
-            OperatorConfig::ReduceConfig(
-                ReduceFunction::new_arrow_reduce("word".to_string()),
-                Some(AggregationResultExtractor::single_aggregation(
-                    AggregationType::Count,
-                    "count".to_string(),
-                )),
-            ),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(reduce_vertex);
-
-        // Create sink vertex
-        let sink_vertex = ExecutionVertex::new(
-            format!("sink_{}", task_id),
-            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(sink_vertex);
-    }
-
-    // Add edges connecting vertices across parallel tasks
-    for i in 0..parallelism {
-        let source_id = format!("source_{}", i);
-        
-        // Connect each source to all key-by tasks
-        for j in 0..parallelism {
-            let key_by_id = format!("key_by_{}", j);
-            let source_to_key_by = ExecutionEdge::new(
-                source_id.clone(),
-                key_by_id,
-                "key_by".to_string(),
-                PartitionType::RoundRobin,
-                Channel::Local {
-                    channel_id: format!("source_{}_to_key_by_{}", i, j),
-                },
-            );
-            graph.add_edge(source_to_key_by);
-        }
-
-        let key_by_id = format!("key_by_{}", i);
-        // Connect each key-by to all reduce tasks
-        for j in 0..parallelism {
-            let reduce_id = format!("reduce_{}", j);
-            let key_by_to_reduce = ExecutionEdge::new(
-                key_by_id.clone(),
-                reduce_id,
-                "reduce".to_string(),
-                PartitionType::Hash,
-                Channel::Local {
-                    channel_id: format!("key_by_{}_to_reduce_{}", i, j),
-                },
-            );
-            graph.add_edge(key_by_to_reduce);
-        }
-
-        let reduce_id = format!("reduce_{}", i);
-
-        // TODO having round robin here makes same keys end up in different sinks - leads to write 
-        // races and inconsistent resulst - figure out how to fix this
-        // Connect each reduce to all sink tasks
-        for j in 0..parallelism {
-            let sink_id = format!("sink_{}", j);
-            let reduce_to_sink = ExecutionEdge::new(
-                reduce_id.clone(),
-                sink_id,
-                "sink".to_string(),
-                PartitionType::RoundRobin,
-                Channel::Local {
-                    channel_id: format!("reduce_{}_to_sink_{}", i, j),
-                },
-            );
-            graph.add_edge(reduce_to_sink);
-        }
-    }
+    let graph = create_test_execution_graph(config);
 
     // Create and start worker
     let worker_config = WorkerConfig::new(
@@ -149,7 +69,7 @@ fn test_parallel_word_count() -> Result<()> {
         (0..parallelism).flat_map(|i| {
             vec![
                 format!("source_{}", i),
-                format!("key_by_{}", i),
+                format!("keyby_{}", i),
                 format!("reduce_{}", i),
                 format!("sink_{}", i),
             ]

@@ -165,6 +165,8 @@ impl OperatorBase {
     }
     
     pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig) -> Self {
+        
+        // TODO config thread pool size
         let thread_pool = ThreadPoolBuilder::new()
             .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
             .build()
@@ -178,13 +180,11 @@ impl OperatorBase {
         }
     }
     
-    /// Get a reference to the function as a specific type
     pub fn get_function<T: 'static>(&self) -> Option<&T> {
         self.function.as_ref()
             .and_then(|f| f.as_any().downcast_ref::<T>())
     }
     
-    /// Get a mutable reference to the function as a specific type
     pub fn get_function_mut<T: 'static>(&mut self) -> Option<&mut T> {
         self.function.as_mut()
             .and_then(|f| f.as_any_mut().downcast_mut::<T>())
@@ -195,8 +195,6 @@ impl OperatorBase {
 impl OperatorTrait for OperatorBase {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
-        
-        // If we have a function, open it
         if let Some(function) = &mut self.function {
             function.open(context).await?;
         }
@@ -205,7 +203,6 @@ impl OperatorTrait for OperatorBase {
     }
 
     async fn close(&mut self) -> Result<()> {
-        // If we have a function, close it
         if let Some(function) = &mut self.function {
             function.close().await?;
         }
@@ -214,11 +211,11 @@ impl OperatorTrait for OperatorBase {
     }
 
     fn operator_type(&self) -> OperatorType {
-        operator_type_from_config(&self.operator_config)
+        get_operator_type_from_config(&self.operator_config)
     }
 }
 
-pub fn from_operator_config(operator_config: OperatorConfig) -> Operator {
+pub fn create_operator_from_config(operator_config: OperatorConfig) -> Operator {
     let operator = match operator_config {
         OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config)),
         OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config)),
@@ -231,7 +228,7 @@ pub fn from_operator_config(operator_config: OperatorConfig) -> Operator {
     operator
 }
 
-pub fn operator_type_from_config(operator_config: &OperatorConfig) -> OperatorType {
+pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> OperatorType {
     match operator_config {
         OperatorConfig::SourceConfig(_) => OperatorType::Source,
         OperatorConfig::SinkConfig(_) => OperatorType::Sink,

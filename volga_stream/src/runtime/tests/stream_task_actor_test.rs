@@ -15,6 +15,7 @@ use crate::runtime::functions::{
     map::MapFunctionTrait,
 };
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
+use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use tokio::runtime::Runtime;
@@ -52,45 +53,23 @@ fn test_stream_task_actor() -> Result<()> {
             None,
         )));
 
-        let mut graph = ExecutionGraph::new();
-        graph.add_vertex(ExecutionVertex::new(
-            "input".to_string(),
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            1,
-            0
-        ));
-        graph.add_vertex(ExecutionVertex::new(
-            "task".to_string(),
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            1,
-            0
-        ));
-        graph.add_vertex(ExecutionVertex::new(
-            "output".to_string(),
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            1,
-            0
-        ));
+        // Define operator chain: input -> task -> output
+        let operators = vec![
+            ("input".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
+            ("task".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
+            ("output".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
+        ];
 
-        graph.add_edge(ExecutionEdge::new(
-            "input".to_string(),
-            "task".to_string(),
-            "task".to_string(),
-            PartitionType::Forward,
-            Channel::Local { channel_id: format!("input_to_task") }
-        ));
-
-        graph.add_edge(ExecutionEdge::new(
-            "task".to_string(),
-            "output".to_string(),
-            "output".to_string(),
-            PartitionType::Forward,
-            Channel::Local { channel_id: format!("task_to_output") }
-        ));
+        let graph = create_test_execution_graph(TestGraphConfig {
+            operators,
+            parallelism: 1,
+            chained: false,
+            is_remote: false,
+            worker_vertex_distribution: None,
+        });
 
         let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
         let mut configs = backend.init_channels(&graph, vec!["input".to_string(), "task".to_string(), "output".to_string()]);
-
 
         // Create task with MapOperator
         let task = StreamTask::new(

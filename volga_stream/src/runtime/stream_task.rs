@@ -1,5 +1,5 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{from_operator_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
+    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{create_operator_from_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
@@ -205,7 +205,7 @@ impl StreamTask {
         
         // Main stream task lifecycle loop
         let run_loop_handle = tokio::spawn(async move {
-            let mut operator = from_operator_config(operator_config);
+            let mut operator = create_operator_from_config(operator_config);
             
             let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
             

@@ -6,6 +6,7 @@ use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
 use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
+use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use tokio::runtime::Runtime;
@@ -40,127 +41,45 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     let runtime = Runtime::new()?;
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-
-    // Create execution graph
-    let mut graph = ExecutionGraph::new();
     let parallelism = 2; // Number of parallel tasks
-    let num_messages_per_source = 4; // Number of regular messages per source
+    let num_messages = 4; // Number of regular messages
 
-    // Create test data for each source
+    // Create single test data vector
     let mut source_messages = Vec::new();
-    let mut msg_id = 0;
-    for i in 0..parallelism as usize {
-        let mut messages = Vec::new();
-        // Add regular messages
-        for _ in 0..num_messages_per_source {
-            messages.push(Message::new(
-                Some(format!("source_{}", i)),
-                create_test_string_batch(vec![format!("value_{}", msg_id)]),
-                None
-            ));
-            msg_id += 1;
-        }
-        // Add max watermark as the last message
-        messages.push(Message::Watermark(WatermarkMessage::new(
-            format!("source_{}", i),
-            MAX_WATERMARK_VALUE,
+    
+    // Add regular messages
+    for i in 0..num_messages {
+        source_messages.push(Message::new(
             None,
-        )));
-        source_messages.push(messages);
+            create_test_string_batch(vec![format!("value_{}", i)]),
+            None
+        ));
     }
+    
+    // Add max watermark as the last message
+    source_messages.push(Message::Watermark(WatermarkMessage::new(
+        "source".to_string(),
+        MAX_WATERMARK_VALUE,
+        None,
+    )));
 
-    // Create vertices for each parallel task
-    for i in 0..parallelism {
-        let task_id = i.to_string();
-        
-        // Create source vertex with vector source
-        let source_vertex = ExecutionVertex::new(
-            format!("source_{}", task_id),
-            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(source_messages[i as usize].clone())),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(source_vertex);
+    // Define operator chain: source -> keyby -> map -> sink
+    let operators = vec![
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(source_messages))),
+        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
+        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction))),
+        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+    ];
 
-        // Create key-by vertex using ArrowKeyByFunction
-        let key_by_vertex = ExecutionVertex::new(
-            format!("key_by_{}", task_id),
-            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(key_by_vertex);
+    let config = TestGraphConfig {
+        operators,
+        parallelism,
+        chained: false,
+        is_remote: false,
+        worker_vertex_distribution: None,
+    };
 
-        // Create map vertex to transform keyed messages back to regular
-        let map_vertex = ExecutionVertex::new(
-            format!("map_{}", task_id),
-            OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction)),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(map_vertex);
-
-        // Create sink vertex
-        let sink_vertex = ExecutionVertex::new(
-            format!("sink_{}", task_id),
-            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
-            parallelism,
-            i,
-        );
-        graph.add_vertex(sink_vertex);
-    }
-
-    // Add edges connecting vertices across parallel tasks
-    for i in 0..parallelism {
-        let source_id = format!("source_{}", i);
-        
-        // Connect each source to all key-by tasks
-        for j in 0..parallelism {
-            let key_by_id = format!("key_by_{}", j);
-            let source_to_key_by = ExecutionEdge::new(
-                source_id.clone(),
-                key_by_id,
-                "key_by".to_string(),
-                PartitionType::RoundRobin,
-                Channel::Local {
-                    channel_id: format!("source_{}_to_key_by_{}", i, j),
-                },
-            );
-            graph.add_edge(source_to_key_by);
-        }
-
-        let key_by_id = format!("key_by_{}", i);
-        // Connect each key-by to all map tasks
-        for j in 0..parallelism {
-            let map_id = format!("map_{}", j);
-            let key_by_to_map = ExecutionEdge::new(
-                key_by_id.clone(),
-                map_id,
-                "map".to_string(),
-                PartitionType::Hash,
-                Channel::Local {
-                    channel_id: format!("key_by_{}_to_map_{}", i, j),
-                },
-            );
-            graph.add_edge(key_by_to_map);
-        }
-
-        let map_id = format!("map_{}", i);
-        // Connect each map to all sink tasks
-        for j in 0..parallelism {
-            let sink_id = format!("sink_{}", j);
-            let map_to_sink = ExecutionEdge::new(
-                map_id.clone(),
-                sink_id,
-                "sink".to_string(),
-                PartitionType::RoundRobin,
-                Channel::Local {
-                    channel_id: format!("map_{}_to_sink_{}", i, j),
-                },
-            );
-            graph.add_edge(map_to_sink);
-        }
-    }
+    let graph = create_test_execution_graph(config);
 
     // Create and start worker
     let worker_config = WorkerConfig::new(
@@ -168,7 +87,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         (0..parallelism).flat_map(|i| {
             vec![
                 format!("source_{}", i),
-                format!("key_by_{}", i),
+                format!("keyby_{}", i),
                 format!("map_{}", i),
                 format!("sink_{}", i),
             ]
@@ -221,13 +140,18 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     }
 
     println!("Result values: {:?}", values);
-    let total_expected_messages = parallelism as usize * num_messages_per_source;
-    assert_eq!(result_len, total_expected_messages, 
-        "Expected {} messages, got {}", total_expected_messages, values.len());
+    let expected_total_messages = num_messages * parallelism as usize;
+    assert_eq!(result_len, expected_total_messages, 
+        "Expected {} messages ({} unique values × {} parallelism), got {}", 
+        expected_total_messages, num_messages, parallelism, values.len());
 
-    for msg_id in 0..(num_messages_per_source * parallelism as usize) {
-        let value = format!("value_{}", msg_id);
-        assert!(values.contains(&value));
+    // Verify all expected values are present, each appearing parallelism times
+    for i in 0..num_messages {
+        let value = format!("value_{}", i);
+        let count = values.iter().filter(|&v| v == &value).count();
+        assert_eq!(count, parallelism as usize, 
+            "Expected value '{}' to appear {} times (parallelism), but found {} times", 
+            value, parallelism, count);
     }
 
     Ok(())

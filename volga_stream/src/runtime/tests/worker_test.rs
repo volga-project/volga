@@ -3,6 +3,7 @@ use crate::{common::{test_utils::gen_unique_grpc_port, WatermarkMessage, MAX_WAT
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
+use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -46,58 +47,22 @@ fn test_worker() -> Result<()> {
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
-    let mut graph = ExecutionGraph::new();
+    // Define operator chain: source -> map -> sink
+    let operators = vec![
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages.clone()))),
+        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
+        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+    ];
 
-    // Create source vertex
-    let source_vertex = ExecutionVertex::new(
-        "source".to_string(),
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages.clone())),
-        1,
-        0,
-    );
-    graph.add_vertex(source_vertex);
+    let config = TestGraphConfig {
+        operators,
+        parallelism: 1,
+        chained: false,
+        is_remote: false,
+        worker_vertex_distribution: None,
+    };
 
-    // Create map vertex with identity function
-    let map_vertex = ExecutionVertex::new(
-        "map".to_string(),
-        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-        1,
-        0,
-    );
-    graph.add_vertex(map_vertex);
-
-    // Create sink vertex with storage actor
-    let sink_vertex = ExecutionVertex::new(
-        "sink".to_string(),
-        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
-        1,
-        0,
-    );
-    graph.add_vertex(sink_vertex);
-
-    // Add edges
-    let source_to_map = ExecutionEdge::new(
-        "source".to_string(),
-        "map".to_string(),
-        "map".to_string(),
-        PartitionType::Forward,
-        Channel::Local {
-            channel_id: "source_to_map".to_string(),
-        },
-    );
-    graph.add_edge(source_to_map);
-
-    let map_to_sink = ExecutionEdge::new(
-        "map".to_string(),
-        "sink".to_string(),
-        "sink".to_string(),
-        PartitionType::Forward,
-        Channel::Local {
-            channel_id: "map_to_sink".to_string(),
-        },
-    );
-    graph.add_edge(map_to_sink);
-
+    let graph = create_test_execution_graph(config);
 
     let worker_config = WorkerConfig::new(
         graph,

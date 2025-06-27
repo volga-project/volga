@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::runtime::operators::operator::{operator_type_from_config, OperatorConfig};
+use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use crate::common::message::Message;
@@ -161,7 +161,7 @@ impl ExecutionGraph {
 
     pub fn get_vertex_type(&self, vertex_id: &str) -> OperatorType {
         let vertex = self.vertices.get(vertex_id).expect("vertex should exist");
-        operator_type_from_config(&vertex.operator_config)
+        get_operator_type_from_config(&vertex.operator_config)
     }
 
     pub fn get_sink_vertices(&self) -> Vec<String> {

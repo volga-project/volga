@@ -1,4 +1,4 @@
-use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{from_operator_config, Operator, OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{create_operator_from_config, Operator, OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_rayon::AsyncThreadPool;
@@ -18,7 +18,7 @@ impl ChainedOperator {
         };
         Self { 
             base: OperatorBase::new(config),
-            operators: configs.iter().map(|config| from_operator_config(config.clone())).collect(),
+            operators: configs.iter().map(|config| create_operator_from_config(config.clone())).collect(),
         }
     }
 
