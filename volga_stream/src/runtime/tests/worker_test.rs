@@ -28,7 +28,7 @@ impl MapFunctionTrait for IdentityMapFunction {
 
 // TODO test early worker interruption/shutdown via setting state to finished from outside
 #[test]
-fn test_worker() -> Result<()> {
+fn test_worker_execution() -> Result<()> {
     let runtime = Runtime::new()?;
 
     let mut test_messages = vec![
@@ -54,23 +54,20 @@ fn test_worker() -> Result<()> {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];
 
-    let config = TestGraphConfig {
+    let (graph, _) = create_test_execution_graph(TestGraphConfig {
         operators,
         parallelism: 1,
         chained: false,
         is_remote: false,
-        worker_vertex_distribution: None,
-    };
+        num_workers_per_operator: None,
+    });
 
-    let graph = create_test_execution_graph(config);
-
-    let worker_config = WorkerConfig::new(
+    let mut worker = Worker::new(WorkerConfig::new(
         graph,
         vec!["source".to_string(), "map".to_string(), "sink".to_string()],
         1,
         TransportBackendType::InMemory,
-    );
-    let mut worker = Worker::new(worker_config);
+    ));
 
     let (vector_messages, map_messages) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();

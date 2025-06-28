@@ -60,12 +60,12 @@ fn test_stream_task_actor() -> Result<()> {
             ("output".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ];
 
-        let graph = create_test_execution_graph(TestGraphConfig {
+        let (graph, _) = create_test_execution_graph(TestGraphConfig {
             operators,
             parallelism: 1,
             chained: false,
             is_remote: false,
-            worker_vertex_distribution: None,
+            num_workers_per_operator: None,
         });
 
         let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());

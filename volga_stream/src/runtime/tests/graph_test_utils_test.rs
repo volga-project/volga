@@ -47,10 +47,10 @@ fn test_create_simple_graph() {
         parallelism: 2,
         chained: false,
         is_remote: false,
-        worker_vertex_distribution: None,
+        num_workers_per_operator: None,
     };
 
-    let graph = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 6); // 3 operators * 2 parallelism
@@ -86,10 +86,10 @@ fn test_create_chained_graph() {
         parallelism: 2,
         chained: true,
         is_remote: false,
-        worker_vertex_distribution: None,
+        num_workers_per_operator: None,
     };
 
-    let graph = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Verify vertices - should be chained into a single chain operator (containing source, map1, map2, sink)
     assert_eq!(graph.get_vertices().len(), 2); // 1 group * 2 parallelism
@@ -122,10 +122,10 @@ fn test_create_chained_graph_with_keyby() {
         parallelism: 2,
         chained: true,
         is_remote: false,
-        worker_vertex_distribution: None,
+        num_workers_per_operator: None,
     };
 
-    let graph = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Verify vertices - KeyBy should break the chain
     // source -> map1 -> keyby -> map2 -> sink becomes: chain_source->map1->keyby -> chain_map2->sink
@@ -160,10 +160,10 @@ fn test_create_graph_with_keyby() {
         parallelism: 2,
         chained: false,
         is_remote: false,
-        worker_vertex_distribution: None,
+        num_workers_per_operator: None,
     };
 
-    let graph = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 8); // 4 operators * 2 parallelism
@@ -208,10 +208,10 @@ fn test_create_remote_graph() {
         parallelism: total_parallelism,
         chained: false,
         is_remote: true,
-        worker_vertex_distribution: Some(worker_distribution),
+        num_workers_per_operator: Some(num_workers_per_operator),
     };
 
-    let graph = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), total_parallelism * num_operators);
@@ -291,10 +291,10 @@ fn test_create_graph_with_reduce_chained() {
         parallelism: 2,
         chained: true,
         is_remote: false,
-        worker_vertex_distribution: None,
+        num_workers_per_operator: None,
     };
 
-    let graph = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 4); // 2 chained operators * 2 parallelism

@@ -76,10 +76,10 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         parallelism,
         chained: false,
         is_remote: false,
-        worker_vertex_distribution: None,
+        num_workers_per_operator: None,
     };
 
-    let graph = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Create and start worker
     let worker_config = WorkerConfig::new(

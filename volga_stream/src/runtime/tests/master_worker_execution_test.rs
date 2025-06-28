@@ -71,22 +71,17 @@ async fn start_worker_servers(
         ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];
-    
-    // Create worker-to-vertex distribution using the utility function
-    let worker_vertex_distribution = create_operator_based_worker_distribution(
-        num_workers_per_operator,
-        &operators,
-        parallelism_per_worker,
-    );
 
     // Create execution graph
-    let graph = create_test_execution_graph(TestGraphConfig {
+    let (graph, worker_vertex_distribution) = create_test_execution_graph(TestGraphConfig {
         operators,
         parallelism: num_workers_per_operator * parallelism_per_worker,
         chained: false,
         is_remote: true,
-        worker_vertex_distribution: Some(worker_vertex_distribution.clone()),
+        num_workers_per_operator: Some(num_workers_per_operator),
     });
+
+    let worker_vertex_distribution = worker_vertex_distribution.unwrap();
     
     // Start worker servers
     for worker_id in worker_vertex_distribution.keys() {

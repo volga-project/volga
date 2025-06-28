@@ -16,28 +16,17 @@ pub struct TestGraphConfig {
     pub chained: bool,
     /// Whether to use remote channels instead of local
     pub is_remote: bool,
-    /// Optional worker-vertex distribution for remote channels
-    /// Maps worker_id to list of vertex_ids assigned to that worker
-    pub worker_vertex_distribution: Option<HashMap<String, Vec<String>>>,
+    /// For remote case
+    pub num_workers_per_operator: Option<usize>
 }
 
 /// Generates a test execution graph based on the provided configuration
-pub fn create_test_execution_graph(config: TestGraphConfig) -> ExecutionGraph {
+pub fn create_test_execution_graph(config: TestGraphConfig) -> (ExecutionGraph, Option<HashMap<String, Vec<String>>>) {
     // Validate configuration
     validate_configs(&config.operators);
 
     let mut graph = ExecutionGraph::new();
-    let mut worker_to_port = HashMap::new();
-
-    // Assign ports for remote channels if needed
-    if config.is_remote {
-        if let Some(ref worker_distribution) = config.worker_vertex_distribution {
-            for worker_id in worker_distribution.keys() {
-                worker_to_port.insert(worker_id.clone(), gen_unique_grpc_port() as i32);
-            }
-        }
-    }
-
+    
     // Group operators based on chaining configuration
     let grouped_operators = if config.chained {
         group_operators_for_chaining(&config.operators)
@@ -65,6 +54,19 @@ pub fn create_test_execution_graph(config: TestGraphConfig) -> ExecutionGraph {
         }
     }
 
+    let mut worker_to_port = HashMap::new();
+    let mut worker_distribution = None;
+    // Assign ports for remote channels if needed
+    if config.is_remote {
+        let num_workers_per_operator = config.num_workers_per_operator.unwrap();
+        let parallelism_per_worker = config.parallelism / num_workers_per_operator;
+        worker_distribution = Some(create_operator_based_worker_distribution(num_workers_per_operator, &grouped_operators, parallelism_per_worker));
+        for worker_id in worker_distribution.clone().unwrap().keys() {
+            worker_to_port.insert(worker_id.clone(), gen_unique_grpc_port() as i32);
+        }
+    }
+
+
     // Create edges between operators
     for i in 0..grouped_operators.len() - 1 {
         let (source_name, source_config) = &grouped_operators[i];
@@ -87,12 +89,12 @@ pub fn create_test_execution_graph(config: TestGraphConfig) -> ExecutionGraph {
                 } else {
                     format!("{}_{}", target_name, target_idx)
                 };
-                
+                let wd = worker_distribution.clone();
                 let channel = create_channel(
                     &source_id,
                     &target_id,
                     config.is_remote,
-                    &config.worker_vertex_distribution,
+                    &wd,
                     &worker_to_port,
                 );
                 
@@ -108,7 +110,7 @@ pub fn create_test_execution_graph(config: TestGraphConfig) -> ExecutionGraph {
         }
     }
 
-    graph
+    (graph, worker_distribution.clone())
 }
 
 /// Validates operator configurations
