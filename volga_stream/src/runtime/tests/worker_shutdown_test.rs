@@ -6,7 +6,7 @@ use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
 use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
-use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use tokio::runtime::Runtime;

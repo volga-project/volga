@@ -6,6 +6,7 @@ use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
+use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig, create_operator_based_worker_distribution};
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
@@ -35,178 +36,6 @@ impl MapFunctionTrait for KeyedToRegularMapFunction {
     }
 }
 
-/// Creates the execution graph for testing
-fn create_test_graph(
-    storage_server_addr: &str, 
-    parallelism: usize, 
-    num_messages_per_source: usize,
-    worker_vertex_distribution: &HashMap<String, Vec<String>>,
-) -> ExecutionGraph {
-    let mut graph = ExecutionGraph::new();
-    let mut worker_to_port = HashMap::new();
-
-    // Assign one port per worker
-    for worker_id in worker_vertex_distribution.keys() {
-        worker_to_port.insert(worker_id.clone(), gen_unique_grpc_port() as i32);
-    }
-
-    // Create test data for each source
-    let mut source_messages = Vec::new();
-    let mut msg_id = 0;
-    for i in 0..parallelism {
-        let mut messages = Vec::new();
-        // Add regular messages
-        for _ in 0..num_messages_per_source {
-            messages.push(Message::new(
-                Some(format!("source_{}", i)),
-                create_test_string_batch(vec![format!("value_{}", msg_id)]),
-                None
-            ));
-            msg_id += 1;
-        }
-        // Add max watermark as the last message
-        messages.push(Message::Watermark(WatermarkMessage::new(
-            format!("source_{}", i),
-            MAX_WATERMARK_VALUE,
-            None,
-        )));
-        source_messages.push(messages);
-    }
-
-    // Create vertices for each parallel task
-    for i in 0..parallelism {
-        let task_id = i.to_string();
-        
-        // Create source vertex with vector source
-        let source_vertex_id = format!("source_{}", task_id);
-        let source_vertex = ExecutionVertex::new(
-            source_vertex_id,
-            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(source_messages[i].clone())),
-            parallelism as i32,
-            i as i32,
-        );
-        graph.add_vertex(source_vertex);
-
-        // Create key-by vertex using ArrowKeyByFunction
-        let key_by_vertex_id = format!("key_by_{}", task_id);
-        let key_by_vertex = ExecutionVertex::new(
-            key_by_vertex_id,
-            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
-            parallelism as i32,
-            i as i32,
-        );
-        graph.add_vertex(key_by_vertex);
-
-        // Create map vertex to transform keyed messages back to regular
-        let map_vertex_id = format!("map_{}", task_id);
-        let map_vertex = ExecutionVertex::new(
-            map_vertex_id,
-            OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction)),
-            parallelism as i32,
-            i as i32,
-        );
-        graph.add_vertex(map_vertex);
-
-        // Create sink vertex
-        let sink_vertex_id = format!("sink_{}", task_id);
-        let sink_vertex = ExecutionVertex::new(
-            sink_vertex_id,
-            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
-            parallelism as i32,
-            i as i32,
-        );
-        graph.add_vertex(sink_vertex);
-    }
-
-    // Helper function to find worker ID for a vertex
-    fn find_worker_id_for_vertex(vertex_id: &str, worker_vertex_distribution: &HashMap<String, Vec<String>>) -> String {
-        for (worker_id, vertex_ids) in worker_vertex_distribution {
-            if vertex_ids.contains(&vertex_id.to_string()) {
-                return worker_id.clone();
-            }
-        }
-        panic!("No worker found for vertex: {}", vertex_id);
-    }
-
-    // Add edges connecting vertices across parallel tasks
-    for i in 0..parallelism {
-        let source_id = format!("source_{}", i);
-        let source_worker_id = find_worker_id_for_vertex(&source_id, worker_vertex_distribution);
-        
-        // Connect each source to all key-by tasks
-        for j in 0..parallelism {
-            let key_by_id = format!("key_by_{}", j);
-            let key_by_worker_id = find_worker_id_for_vertex(&key_by_id, worker_vertex_distribution);
-            let target_port = worker_to_port.get(&key_by_worker_id).unwrap();
-            let source_to_key_by = ExecutionEdge::new(
-                source_id.clone(),
-                key_by_id.clone(),
-                "key_by".to_string(),
-                PartitionType::RoundRobin,
-                Channel::Remote {
-                    channel_id: format!("source_{}_to_key_by_{}", i, j),
-                    source_node_ip: "127.0.0.1".to_string(),
-                    source_node_id: source_worker_id.clone(),
-                    target_node_ip: "127.0.0.1".to_string(),
-                    target_node_id: key_by_worker_id.clone(),
-                    target_port: *target_port,
-                },
-            );
-            graph.add_edge(source_to_key_by);
-        }
-
-        let key_by_id = format!("key_by_{}", i);
-        let key_by_worker_id = find_worker_id_for_vertex(&key_by_id, worker_vertex_distribution);
-        // Connect each key-by to all map tasks
-        for j in 0..parallelism {
-            let map_id = format!("map_{}", j);
-            let map_worker_id = find_worker_id_for_vertex(&map_id, worker_vertex_distribution);
-            let target_port = worker_to_port.get(&map_worker_id).unwrap();
-            let key_by_to_map = ExecutionEdge::new(
-                key_by_id.clone(),
-                map_id.clone(),
-                "map".to_string(),
-                PartitionType::Hash,
-                Channel::Remote {
-                    channel_id: format!("key_by_{}_to_map_{}", i, j),
-                    source_node_ip: "127.0.0.1".to_string(),
-                    source_node_id: key_by_worker_id.clone(),
-                    target_node_ip: "127.0.0.1".to_string(),
-                    target_node_id: map_worker_id.clone(),
-                    target_port: *target_port,
-                },
-            );
-            graph.add_edge(key_by_to_map);
-        }
-
-        let map_id = format!("map_{}", i);
-        let map_worker_id = find_worker_id_for_vertex(&map_id, worker_vertex_distribution);
-        // Connect each map to all sink tasks
-        for j in 0..parallelism {
-            let sink_id = format!("sink_{}", j);
-            let sink_worker_id = find_worker_id_for_vertex(&sink_id, worker_vertex_distribution);
-            let target_port = worker_to_port.get(&sink_worker_id).unwrap();
-            let map_to_sink = ExecutionEdge::new(
-                map_id.clone(),
-                sink_id.clone(),
-                "sink".to_string(),
-                PartitionType::RoundRobin,
-                Channel::Remote {
-                    channel_id: format!("map_{}_to_sink_{}", i, j),
-                    source_node_ip: "127.0.0.1".to_string(),
-                    source_node_id: map_worker_id.clone(),
-                    target_node_ip: "127.0.0.1".to_string(),
-                    target_node_id: sink_worker_id.clone(),
-                    target_port: *target_port,
-                },
-            );
-            graph.add_edge(map_to_sink);
-        }
-    }
-
-    graph
-}
-
 /// Starts worker servers and returns their addresses
 async fn start_worker_servers(
     num_workers_per_operator: usize,
@@ -217,35 +46,48 @@ async fn start_worker_servers(
     let mut worker_servers = Vec::new();
     let mut worker_addresses = Vec::new();
 
-    // Calculate total parallelism for each operator type
-    let total_parallelism = num_workers_per_operator * parallelism_per_worker;
+    // Create single test data vector
+    let mut source_messages = Vec::new();
     
-    // Create worker-to-vertex distribution
-    let mut worker_vertex_distribution: HashMap<String, Vec<String>> = HashMap::new();
-    let operator_types = vec!["source", "key_by", "map", "sink"];
-    let mut worker_id = 0;
-
-    // distribute vertices to workers - for this test each worker has vertices of one operator type
-    for operator_type in &operator_types {
-        for worker_idx in 0..num_workers_per_operator {
-            let worker_id_str = format!("worker_{}", worker_id);
-            
-            // Assign vertices for this worker (only vertices of the specific operator type)
-            let mut vertex_ids = Vec::new();
-            for vertex_idx in 0..parallelism_per_worker {
-                let global_vertex_idx = worker_idx * parallelism_per_worker + vertex_idx;
-                vertex_ids.push(format!("{}_{}", operator_type, global_vertex_idx));
-            }
-            
-            worker_vertex_distribution.insert(worker_id_str, vertex_ids);
-            worker_id += 1;
-        }
+    // Add regular messages
+    for i in 0..num_messages_per_source {
+        source_messages.push(Message::new(
+            None,
+            create_test_string_batch(vec![format!("value_{}", i)]),
+            None
+        ));
     }
     
-    // Create execution graph
-    let graph = create_test_graph(storage_server_addr, total_parallelism, num_messages_per_source, &worker_vertex_distribution);
+    // Add max watermark as the last message
+    source_messages.push(Message::Watermark(WatermarkMessage::new(
+        "source".to_string(),
+        MAX_WATERMARK_VALUE,
+        None,
+    )));
 
-    // println!("worker_vertex_distribution: {:?}", worker_vertex_distribution);
+    let operators = vec![
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(source_messages))),
+        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
+        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction))),
+        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+    ];
+    
+    // Create worker-to-vertex distribution using the utility function
+    let worker_vertex_distribution = create_operator_based_worker_distribution(
+        num_workers_per_operator,
+        &operators,
+        parallelism_per_worker,
+    );
+
+    // Create execution graph
+    let graph = create_test_execution_graph(TestGraphConfig {
+        operators,
+        parallelism: num_workers_per_operator * parallelism_per_worker,
+        chained: false,
+        is_remote: true,
+        worker_vertex_distribution: Some(worker_vertex_distribution.clone()),
+    });
+    
     // Start worker servers
     for worker_id in worker_vertex_distribution.keys() {
         let port = gen_unique_grpc_port();
@@ -296,7 +138,7 @@ fn test_master_worker_execution() -> Result<()> {
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
-    let (worker_addresses, result_messages) = runtime.block_on(async {
+    let (_, result_messages) = runtime.block_on(async {
         // Start storage server
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
@@ -343,15 +185,19 @@ fn test_master_worker_execution() -> Result<()> {
 
     println!("[TEST] Result values: {:?}", values);
     let total_parallelism = num_workers_per_operator * parallelism_per_worker;
-    let total_expected_messages = total_parallelism * num_messages_per_source;
-    assert_eq!(result_len, total_expected_messages, 
-        "Expected {} messages, got {}", total_expected_messages, values.len());
+    let expected_total_messages = num_messages_per_source * total_parallelism;
+    assert_eq!(result_len, expected_total_messages, 
+        "Expected {} messages ({} unique values × {} parallelism), got {}", 
+        expected_total_messages, num_messages_per_source, total_parallelism, values.len());
 
-    for msg_id in 0..(num_messages_per_source * total_parallelism) {
-        let value = format!("value_{}", msg_id);
-        assert!(values.contains(&value), "Expected value {} not found in results", value);
+    // Verify all expected values are present, each appearing parallelism times
+    for i in 0..num_messages_per_source {
+        let value = format!("value_{}", i);
+        let count = values.iter().filter(|&v| v == &value).count();
+        assert_eq!(count, total_parallelism, 
+            "Expected value '{}' to appear {} times (parallelism), but found {} times", 
+            value, total_parallelism, count);
     }
 
-    println!("[TEST] All expected messages found in results");
     Ok(())
 } 

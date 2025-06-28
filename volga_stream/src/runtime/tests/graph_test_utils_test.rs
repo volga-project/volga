@@ -1,4 +1,4 @@
-use crate::runtime::tests::test_utils::{
+use crate::runtime::tests::graph_test_utils::{
     create_test_execution_graph, TestGraphConfig, 
     create_operator_based_worker_distribution
 };
@@ -194,12 +194,18 @@ fn test_create_remote_graph() {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
 
+    let num_operators = operators.len();
+
+    let num_workers_per_operator = 2;
+    let parallelism_per_worker = 2;
+    let total_parallelism = num_workers_per_operator * parallelism_per_worker;
+
     // Create worker distribution
-    let worker_distribution = create_operator_based_worker_distribution(2, &operators, 2);
+    let worker_distribution = create_operator_based_worker_distribution(num_workers_per_operator, &operators, parallelism_per_worker);
 
     let config = TestGraphConfig {
         operators,
-        parallelism: 2,
+        parallelism: total_parallelism,
         chained: false,
         is_remote: true,
         worker_vertex_distribution: Some(worker_distribution),
@@ -208,7 +214,7 @@ fn test_create_remote_graph() {
     let graph = create_test_execution_graph(config);
 
     // Verify vertices
-    assert_eq!(graph.get_vertices().len(), 6);
+    assert_eq!(graph.get_vertices().len(), total_parallelism * num_operators);
 
     // Verify edges use remote channels
     for edge in graph.get_edges().values() {

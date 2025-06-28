@@ -3,7 +3,7 @@ use crate::{common::{test_utils::gen_unique_grpc_port, WatermarkMessage, MAX_WAT
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
-use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;

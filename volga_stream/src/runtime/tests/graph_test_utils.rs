@@ -91,8 +91,6 @@ pub fn create_test_execution_graph(config: TestGraphConfig) -> ExecutionGraph {
                 let channel = create_channel(
                     &source_id,
                     &target_id,
-                    source_idx,
-                    target_idx,
                     config.is_remote,
                     &config.worker_vertex_distribution,
                     &worker_to_port,
@@ -204,8 +202,6 @@ fn determine_partition_type(source_config: &OperatorConfig, target_config: &Oper
 fn create_channel(
     source_id: &str,
     target_id: &str,
-    source_idx: usize,
-    target_idx: usize,
     is_remote: bool,
     worker_distribution: &Option<HashMap<String, Vec<String>>>,
     worker_to_port: &HashMap<String, i32>,
@@ -231,10 +227,7 @@ fn create_channel(
             target_port: *target_port,
         }
     } else {
-        // Fallback to local if no worker distribution provided
-        Channel::Local {
-            channel_id: format!("{}_to_{}", source_id, target_id),
-        }
+        panic!("No worker distribution provided");
     }
 }
 
@@ -252,7 +245,7 @@ fn find_worker_for_vertex(vertex_id: &str, worker_distribution: &HashMap<String,
 pub fn create_operator_based_worker_distribution(
     num_workers_per_operator: usize,
     operators: &[(String, OperatorConfig)],
-    parallelism: usize,
+    parallelism_per_worker: usize,
 ) -> HashMap<String, Vec<String>> {
     let mut distribution = HashMap::new();
     let mut worker_id = 0;
@@ -263,9 +256,9 @@ pub fn create_operator_based_worker_distribution(
             
             // Assign vertices for this worker (only vertices of the specific operator type)
             let mut vertex_ids = Vec::new();
-            for vertex_idx in 0..parallelism {
-                let global_vertex_idx = worker_idx * parallelism + vertex_idx;
-                let vertex_id = if parallelism == 1 {
+            for vertex_idx in 0..parallelism_per_worker {
+                let global_vertex_idx = worker_idx * parallelism_per_worker + vertex_idx;
+                let vertex_id = if parallelism_per_worker == 1 {
                     op_name.clone()
                 } else {
                     format!("{}_{}", op_name, global_vertex_idx)

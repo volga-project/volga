@@ -7,7 +7,7 @@ use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
-use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;

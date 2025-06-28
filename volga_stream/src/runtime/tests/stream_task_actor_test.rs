@@ -15,7 +15,7 @@ use crate::runtime::functions::{
     map::MapFunctionTrait,
 };
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
-use crate::runtime::tests::test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use tokio::runtime::Runtime;
