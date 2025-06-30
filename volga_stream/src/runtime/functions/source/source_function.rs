@@ -62,7 +62,7 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
         }
         SourceConfig::WordCountSourceConfig { 
             word_length, 
-            num_words, 
+            dictionary_size: num_words, 
             num_to_send_per_word,
             run_for_s, 
             batch_size,

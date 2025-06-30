@@ -1,11 +1,11 @@
-use crate::{runtime::{
+use crate::{common::test_utils::print_worker_metrics, runtime::{
     execution_graph::ExecutionGraph, operators::operator::OperatorType, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskMetrics, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
 }, transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend}};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use kameo::{spawn, prelude::ActorRef};
-use tokio::runtime::{Builder, Handle, Runtime};
+use tokio::{runtime::{Builder, Handle, Runtime}, time::Instant};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 use serde::{Serialize, Deserialize};
@@ -194,7 +194,7 @@ impl Worker {
         println!("[WORKER] Waiting for all tasks to be {:?}", target_status);
         
         let start_time = std::time::Instant::now();
-        let timeout_duration = Duration::from_secs(5);
+        let timeout_duration = Duration::from_secs(30);
         
         while running.load(Ordering::SeqCst) {
             // Check timeout
@@ -313,9 +313,19 @@ impl Worker {
             .collect();
         
         let polling_handle = tokio::spawn(async move { 
+            let mut last_print_time = Instant::now();
             while running.load(Ordering::SeqCst) {
+                let state_clone = state.clone();
+
                 Self::poll_and_update_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone()).await;
                 sleep(Duration::from_millis(100)).await;
+
+                // // Print tasks state every 1 sec
+                // if last_print_time.elapsed() > Duration::from_secs(1) {
+                //     let state_guard = state_clone.lock().await;
+                //     print_worker_metrics(&state_guard);
+                //     last_print_time = Instant::now();
+                // }
             }
             // final poll
             Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state).await;
@@ -404,16 +414,20 @@ impl Worker {
         
         self.start().await;
 
+        println!("[WORKER] Worker started, waiting for all tasks to be opened");
+
         Self::wait_for_all_tasks_status(
             self.state.clone(),
             self.running.clone(),
             StreamTaskStatus::Opened
         ).await;
 
+        println!("[WORKER] All tasks opened, running tasks");
+
         self.run_tasks().await;
 
-        println!("[WORKER] Worker started");
-        
+        println!("[WORKER] Tasks running, waiting for all tasks to be finished");
+
         // Wait for tasks to finish
         Self::wait_for_all_tasks_status(
             self.state.clone(),
@@ -421,8 +435,11 @@ impl Worker {
             StreamTaskStatus::Finished
         ).await;
         
+        println!("[WORKER] All tasks finished, sending close signal");
         // Send close signal
         self.close_tasks().await;
+
+        println!("[WORKER] All tasks closed, waiting for all tasks to be closed");
 
         // Wait for tasks to be closed
         Self::wait_for_all_tasks_status(
@@ -430,6 +447,8 @@ impl Worker {
             self.running.clone(),
             StreamTaskStatus::Closed
         ).await;
+
+        println!("[WORKER] All tasks closed, cleaning up");
         
         // Cleanup
         self.close().await;

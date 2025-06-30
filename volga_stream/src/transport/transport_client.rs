@@ -113,13 +113,14 @@ impl DataReader {
                     _ => false,
                 };
 
-                if !is_watermark {
-                    let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+                // TODO config to enable/disable per-message printing
+                // if !is_watermark {
+                //     let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
             
-                    println!("DataReader {:?} read message: {:?}", self.vertex_id, value);
-                } else {
-                    println!("DataReader {:?} read watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
-                }
+                //     println!("DataReader {:?} read message: {:?}", self.vertex_id, value);
+                // } else {
+                //     println!("DataReader {:?} read watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
+                // }
                 return Ok(result);
             }
             attempts += 1;
@@ -176,15 +177,16 @@ impl DataWriter {
                             }
                             _ => false,
                         };
-        
-                        if !is_watermark {
-                            let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-                            // if self.vertex_id.contains("map") || self.vertex_id.contains("key_by") {
-                            println!("DataWriter {:?} wrote message: {:?}", self.vertex_id, value);
-                            // }
-                        } else {
-                            println!("DataWriter {:?} wrote watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
-                        }
+                        
+                        // TODO config to enable/disable per-message printing
+                        // if !is_watermark {
+                        //     let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
+                        //     // if self.vertex_id.contains("map") || self.vertex_id.contains("key_by") {
+                        //     println!("DataWriter {:?} wrote message: {:?}", self.vertex_id, value);
+                        //     // }
+                        // } else {
+                        //     println!("DataWriter {:?} wrote watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
+                        // }
                         return (true, start_time.elapsed().as_millis() as u32)
                     }
                     Ok(Err(_)) => {

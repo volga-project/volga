@@ -134,8 +134,8 @@ impl StreamTask {
     ) -> Option<WatermarkMessage> {
         if watermark.watermark_value == MAX_WATERMARK_VALUE {
             if is_source {
-                println!("source vertex_id {:?} received max watermark, initiating shutdown", 
-                    vertex_id);
+                // println!("source vertex_id {:?} received max watermark, initiating shutdown", 
+                //     vertex_id);
                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                 return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.ingest_timestamp));
             }
@@ -144,14 +144,14 @@ impl StreamTask {
             
             let mut finished_upstreams = finished_upstream_ids.lock().await;
             finished_upstreams.insert(upstream_vertex_id);
-            println!("vertex_id {:?}, finished upstreams {:?}", vertex_id, finished_upstreams);
+            // println!("vertex_id {:?}, finished upstreams {:?}", vertex_id, finished_upstreams);
             
             // If we've received max watermarks from all upstreams, initiate shutdown
             let upstream_vertices_set: HashSet<String> = upstream_vertices.iter().cloned().collect();
             if finished_upstreams.len() == upstream_vertices_set.len() && 
                upstream_vertices_set.iter().all(|id| finished_upstreams.contains(id)) {
-                println!("vertex_id {:?} Received max watermarks from all upstreams {:?}, initiating shutdown", 
-                    vertex_id, finished_upstreams);
+                // println!("vertex_id {:?} Received max watermarks from all upstreams {:?}, initiating shutdown", 
+                //     vertex_id, finished_upstreams);
                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                 return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.ingest_timestamp));
             }

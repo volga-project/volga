@@ -23,15 +23,15 @@ pub enum BatchingMode {
 #[derive(Debug)]
 pub struct WordCountSourceFunction {
     word_length: usize,
-    num_words: usize,
+    dictionary_size: usize,
     num_to_send_per_word: Option<usize>,
     run_for_s: Option<u64>,
     batch_size: usize,
     batching_mode: BatchingMode,
-    words: Vec<String>,
+    dictionary: Vec<String>,
     current_index: usize,
     start_time: Option<Instant>,
-    words_sent_per_word: HashMap<String, usize>,
+    copies_sent_per_word: HashMap<String, usize>,
     runtime_context: Option<RuntimeContext>,
     max_watermark_sent: bool,
 }
@@ -39,7 +39,7 @@ pub struct WordCountSourceFunction {
 impl WordCountSourceFunction {
     pub fn new(
         word_length: usize,
-        num_words: usize,
+        dictionary_size: usize,
         num_to_send_per_word: Option<usize>,
         run_for_s: Option<u64>,
         batch_size: usize,
@@ -47,15 +47,15 @@ impl WordCountSourceFunction {
     ) -> Self {
         Self {
             word_length,
-            num_words,
+            dictionary_size,
             num_to_send_per_word,
             run_for_s,
             batch_size,
             batching_mode,
-            words: Vec::new(),
+            dictionary: Vec::new(),
             current_index: 0,
             start_time: None,
-            words_sent_per_word: HashMap::new(),
+            copies_sent_per_word: HashMap::new(),
             runtime_context: None,
             max_watermark_sent: false,
         }
@@ -99,11 +99,14 @@ impl WordCountSourceFunction {
         
         match self.batching_mode {
             BatchingMode::SameWord => {
-                loop {
-                    let word = &self.words[self.current_index];
-                    let sent_count = *self.words_sent_per_word.get(word).unwrap_or(&0);
-                    
-                    if let Some(num_to_send) = self.num_to_send_per_word {
+                let word = &self.dictionary[self.current_index];
+                
+                if let Some(num_to_send) = self.num_to_send_per_word {
+                    // case when we send a fixed num of words
+
+                    loop {
+                        let sent_count = *self.copies_sent_per_word.get(word).unwrap_or(&0);
+                
                         if sent_count < num_to_send {
                             // Calculate how many more copies we can send of this word
                             let remaining = num_to_send - sent_count;
@@ -118,31 +121,47 @@ impl WordCountSourceFunction {
                             }
                             
                             // Update sent count for this word
-                            *self.words_sent_per_word.entry(word.clone()).or_insert(0) += to_add;
+                            *self.copies_sent_per_word.entry(word.clone()).or_insert(0) += to_add;
                             
                             // If we've sent all copies of this word, move to next word
                             if sent_count + to_add >= num_to_send {
-                                self.current_index = (self.current_index + 1) % self.words.len();
+                                self.current_index = (self.current_index + 1) % self.dictionary.len();
                             }
                             
                             return Some(batch_words);
                         }
+                        // Move to next word
+                        self.current_index = (self.current_index + 1) % self.dictionary.len();
+
+                        // If we've checked all words, break
+                        if self.current_index == start_index {
+                            break;
+                        }
                     }
-                    
-                    // Move to next word
-                    self.current_index = (self.current_index + 1) % self.words.len();
-                    
-                    // If we've checked all words, break
-                    if self.current_index == start_index {
-                        break;
+                } else {
+                    // case when we send for a time period
+
+                    if self.start_time.is_none() {
+                        self.start_time = Some(Instant::now());
                     }
+                    let run_for_s = self.run_for_s.unwrap();
+                    let start_time = self.start_time.unwrap();
+                    if start_time.elapsed().as_secs() >= run_for_s {
+                        return None;
+                    }
+
+                    let batch_words = vec![word.clone(); self.batch_size];
+
+                    self.current_index = (self.current_index + 1) % self.dictionary.len();
+
+                    return Some(batch_words);
                 }
             }
         }
         None
     }
 
-    async fn send_max_watermark_if_needed(&mut self) -> Option<Message> {
+    fn send_max_watermark_if_needed(&mut self) -> Option<Message> {
         if !self.max_watermark_sent {
             self.max_watermark_sent = true;
             let vertex_id = self.runtime_context.as_ref().unwrap().vertex_id().to_string();
@@ -165,14 +184,14 @@ impl FunctionTrait for WordCountSourceFunction {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
         // Generate the pool of words
-        self.words = (0..self.num_words)
+        self.dictionary = (0..self.dictionary_size)
             .map(|_| self.generate_random_word())
             .collect();
         Ok(())
     }
     
     async fn close(&mut self) -> Result<()> {
-        let n = self.words_sent_per_word.clone();
+        let n = self.copies_sent_per_word.clone();
         println!("WordCountSourceFunction {:?} close, words_sent_per_word {:?}", self.runtime_context.as_ref().unwrap().vertex_id(), n);
         Ok(())
     }
@@ -189,29 +208,16 @@ impl FunctionTrait for WordCountSourceFunction {
 #[async_trait]
 impl SourceFunctionTrait for WordCountSourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
-        if self.start_time.is_none() {
-            self.start_time = Some(Instant::now());
-        }
-        // Check if we should stop based on time
-        if let Some(run_for_s) = self.run_for_s {
-            if let Some(start_time) = self.start_time {
-                if start_time.elapsed().as_secs() >= run_for_s {
-                    return self.send_max_watermark_if_needed().await;
-                }
-            }
-        }
 
         // Collect words for this batch
-        let batch_words = match self.collect_words_for_batch() {
-            Some(words) => words,
+        match self.collect_words_for_batch() {
+            Some(words) => {
+                Some(self.create_batch(&words))
+            },
             None => {
-                return self.send_max_watermark_if_needed().await;
+                self.send_max_watermark_if_needed()
             }
-        };
-
-        // Create and return batch
-        let message = self.create_batch(&batch_words);
-        Some(message)
+        }
     }
 }
 
@@ -220,15 +226,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_word_count_source() {
+    async fn test_word_count_source_fixed_size() {
         let word_length = 5;
-        let num_words = 1000;
+        let dictionary_size = 1000;
         let num_to_send_per_word = 100;
         let batch_size = 50;
 
         let mut source = WordCountSourceFunction::new(
             word_length,
-            num_words,
+            dictionary_size,
             Some(num_to_send_per_word),
             None,
             batch_size,
@@ -266,12 +272,82 @@ mod tests {
         }
 
         // Verify each word was sent exactly num_to_send_per_word times
-        assert_eq!(word_counts.len(), num_words);
+        assert_eq!(word_counts.len(), dictionary_size);
         for (_, count) in word_counts {
             assert_eq!(count, num_to_send_per_word);
         }
 
         // Verify we received a watermark at the end
         assert!(watermark_received, "Should have received a watermark message at the end");
+    }
+
+    #[tokio::test]
+    async fn test_word_count_source_fixed_time() {
+        let word_length = 5;
+        let dictionary_size = 100;
+        let run_for_s = 2; // Run for 2 seconds
+        let batch_size = 10;
+
+        let mut source = WordCountSourceFunction::new(
+            word_length,
+            dictionary_size,
+            None, // No fixed number per word - use time-based
+            Some(run_for_s),
+            batch_size,
+            BatchingMode::SameWord,
+        );
+
+        source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
+
+        let mut word_counts = HashMap::new();
+        let mut watermark_received = false;
+        let mut total_messages = 0;
+        let start_time = std::time::Instant::now();
+        
+        while let Some(message) = source.fetch().await {
+            match message {
+                Message::Regular(_) | Message::Keyed(_) => {
+                    let record_batch = message.record_batch();
+                    let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                    
+                    // Verify all words in batch are the same
+                    let first_word = word_array.value(0).to_string();
+                    for i in 1..word_array.len() {
+                        assert_eq!(word_array.value(i), first_word, "All words in batch should be identical");
+                    }
+
+                    // Count words
+                    for i in 0..word_array.len() {
+                        let word = word_array.value(i).to_string();
+                        *word_counts.entry(word).or_insert(0) += 1;
+                    }
+                    
+                    total_messages += 1;
+                }
+                Message::Watermark(watermark) => {
+                    assert_eq!(watermark.watermark_value, MAX_WATERMARK_VALUE, "Watermark should have max value");
+                    watermark_received = true;
+                }
+            }
+        }
+
+        let elapsed_time = start_time.elapsed().as_secs();
+        
+        // Verify the source ran for approximately the specified time
+        assert!(elapsed_time >= run_for_s, "Source should have run for at least {} seconds, but ran for {}", run_for_s, elapsed_time);
+        assert!(elapsed_time <= run_for_s + 1, "Source should not have run much longer than {} seconds, but ran for {}", run_for_s, elapsed_time);
+        
+        // Verify we received some messages (the exact number depends on timing)
+        assert!(total_messages > 0, "Should have received some messages during the time period");
+        
+        // Verify we received a watermark at the end
+        assert!(watermark_received, "Should have received a watermark message at the end");
+        
+        // Verify that words were cycled through the dictionary
+        assert!(word_counts.len() > 0, "Should have sent words from the dictionary");
+        assert!(word_counts.len() <= dictionary_size, "Should not have sent more unique words than dictionary size");
+        
+        println!("Fixed time test: Ran for {} seconds, sent {} messages with {} unique words", 
+                elapsed_time, total_messages, word_counts.len());
     }
 } 

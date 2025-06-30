@@ -21,22 +21,22 @@ use std::sync::Arc;
 
 // TODO: we may have colliding words since each source worker generates it's own
 #[test]
-fn test_parallel_word_count() -> Result<()> {
+fn test_word_count() -> Result<()> {
     // Create runtime for async operations
     let runtime = Runtime::new()?;
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-    let parallelism = 10;
+    let parallelism = 4;
     let word_length = 10;
-    let num_words_per_source_instance = 2; // Number of unique words per source vertex
-    let num_to_send_per_word = 2; // Number of copies of each word to send
-    let batch_size = 1;
+    let dictionary_size_per_source = 2; // Number of unique words per source vertex
+    let num_to_send_per_word = 20000; // Number of copies of each word to send
+    let batch_size = 100;
 
     // Define operator chain: source -> keyby -> reduce -> sink
     let operators = vec![
         ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
             word_length: word_length,
-            num_words: num_words_per_source_instance,
+            dictionary_size: dictionary_size_per_source,
             num_to_send_per_word: Some(num_to_send_per_word),
             run_for_s: None, // No time limit
             batch_size: batch_size,
@@ -105,7 +105,7 @@ fn test_parallel_word_count() -> Result<()> {
         word_counts.insert(word, count);
     }
     
-    assert_eq!(word_counts.len(), num_words_per_source_instance * parallelism as usize, "Should have exactly num_words * parallelism unique words");
+    assert_eq!(word_counts.len(), dictionary_size_per_source * parallelism as usize, "Should have exactly num_words * parallelism unique words");
     
     let mut failed_words = Vec::new();
     for (word, count) in &word_counts {
@@ -121,11 +121,6 @@ fn test_parallel_word_count() -> Result<()> {
         }
         panic!("Found {} words with incorrect counts", failed_words.len());
     }
-    
-    // for (word, count) in &word_counts {
-    //     assert_eq!(*count, num_to_send_per_word as f64, 
-    //         "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
-    // }
 
     Ok(())
 } 

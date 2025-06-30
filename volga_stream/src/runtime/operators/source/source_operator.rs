@@ -9,7 +9,7 @@ pub enum SourceConfig {
     VectorSourceConfig(Vec<Message>),
     WordCountSourceConfig {
         word_length: usize,
-        num_words: usize, // Total pool of words to generate
+        dictionary_size: usize, // Total pool of words to generate
         num_to_send_per_word: Option<usize>, // Optional: how many copies of each word to send
         run_for_s: Option<u64>,
         batch_size: usize,
