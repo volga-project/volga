@@ -23,6 +23,10 @@ impl BaseMessage {
         self.metadata.ingest_timestamp = Some(ingest_timestamp);
     }
 
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+        self.metadata.upstream_vertex_id = Some(upstream_vertex_id);
+    }
+
     /// Serialize the BaseMessage to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();
@@ -176,6 +180,10 @@ impl WatermarkMessage {
         self.ingest_timestamp = Some(ingest_timestamp);
     }
 
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+        self.upstream_vertex_id = upstream_vertex_id;
+    }
+
     /// Serialize the WatermarkMessage to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         bincode::serialize(self).unwrap()
@@ -243,6 +251,14 @@ impl Message {
             Message::Regular(message) => message.set_ingest_timestamp(ingest_timestamp),
             Message::Keyed(message) => message.base.set_ingest_timestamp(ingest_timestamp),
             Message::Watermark(message) => message.set_ingest_timestamp(ingest_timestamp),
+        }
+    }
+
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+        match self {
+            Message::Regular(message) => message.set_upstream_vertex_id(upstream_vertex_id),
+            Message::Keyed(message) => message.base.set_upstream_vertex_id(upstream_vertex_id),
+            Message::Watermark(message) => message.set_upstream_vertex_id(upstream_vertex_id),
         }
     }
 

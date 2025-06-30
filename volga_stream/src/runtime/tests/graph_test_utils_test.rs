@@ -63,6 +63,13 @@ fn test_create_simple_graph() {
 
     // Verify edges
     assert_eq!(graph.get_edges().len(), 8); // 2 source -> 2 map + 2 map -> 2 sink
+
+    // Verify partition types for edges
+    for edge in graph.get_edges().values() {
+        // source -> map and map -> sink should use RoundRobin partitioning
+        assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+            "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+    }
 }
 
 #[test]
@@ -137,6 +144,14 @@ fn test_create_chained_graph_with_keyby() {
 
     // Verify edges between groups
     assert_eq!(graph.get_edges().len(), 4); // 1 connection * 4 edges
+
+    // Verify partition types for edges
+    for edge in graph.get_edges().values() {
+        // chain_source->map1->keyby -> chain_map2->sink should use Hash partitioning
+        // because keyby is the last operator in the source chain
+        assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
+            "Edge {} -> {} should use Hash partitioning (keyby -> map2)", edge.source_vertex_id, edge.target_vertex_id);
+    }
 }
 
 #[test]
@@ -171,10 +186,22 @@ fn test_create_graph_with_keyby() {
     // Verify edges - keyby should use hash partitioning
     assert_eq!(graph.get_edges().len(), 12); // 2 source -> 2 keyby + 2 keyby -> 2 map + 2 map -> 2 sink
 
-    // Check that edges to keyby use hash partitioning
+    // Check partition types for all edges
     for edge in graph.get_edges().values() {
-        if edge.source_vertex_id.starts_with("keyby") {
-            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash));
+        if edge.source_vertex_id.starts_with("source") && edge.target_vertex_id.starts_with("keyby") {
+            // source -> keyby should use RoundRobin
+            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+                "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+        } else if edge.source_vertex_id.starts_with("keyby") && edge.target_vertex_id.starts_with("map") {
+            // keyby -> map should use Hash partitioning
+            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
+                "Edge {} -> {} should use Hash partitioning", edge.source_vertex_id, edge.target_vertex_id);
+        } else if edge.source_vertex_id.starts_with("map") && edge.target_vertex_id.starts_with("sink") {
+            // map -> sink should use RoundRobin
+            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+                "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+        } else {
+            panic!("Unexpected edge: {} -> {}", edge.source_vertex_id, edge.target_vertex_id);
         }
     }
 }
@@ -200,9 +227,6 @@ fn test_create_remote_graph() {
     let parallelism_per_worker = 2;
     let total_parallelism = num_workers_per_operator * parallelism_per_worker;
 
-    // Create worker distribution
-    let worker_distribution = create_operator_based_worker_distribution(num_workers_per_operator, &operators, parallelism_per_worker);
-
     let config = TestGraphConfig {
         operators,
         parallelism: total_parallelism,
@@ -226,6 +250,10 @@ fn test_create_remote_graph() {
                 panic!("Expected remote channels but got local");
             }
         }
+        
+        // Verify partition types - all should use RoundRobin for source -> map -> sink
+        assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+            "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
     }
 }
 
@@ -301,9 +329,9 @@ fn test_create_graph_with_reduce_chained() {
 
     assert_eq!(graph.get_edges().len(), 4);
 
+    // Verify partition types for edges
     for edge in graph.get_edges().values() {
-        if edge.source_vertex_id.starts_with("keyby") || edge.target_vertex_id.starts_with("reduce") {
-            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash));
-        }
+        assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
+            "Edge {} -> {} should use Hash partitioning, but got {:?}", edge.source_vertex_id, edge.target_vertex_id, edge.partition_type);
     }
 }

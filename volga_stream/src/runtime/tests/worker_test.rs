@@ -62,9 +62,10 @@ fn test_worker_execution() -> Result<()> {
         num_workers_per_operator: None,
     });
 
+    let vertex_ids = graph.get_vertices().keys().cloned().collect();
     let mut worker = Worker::new(WorkerConfig::new(
         graph,
-        vec!["source".to_string(), "map".to_string(), "sink".to_string()],
+        vertex_ids,
         1,
         TransportBackendType::InMemory,
     ));

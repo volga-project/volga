@@ -1,4 +1,4 @@
-use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
+use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, runtime::{
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
         key_by::KeyByFunction,
         reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
@@ -26,19 +26,19 @@ fn test_parallel_word_count() -> Result<()> {
     let runtime = Runtime::new()?;
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-    let parallelism = 2;
+    let parallelism = 10;
     let word_length = 10;
-    let num_words = 2; // Number of unique words
-    let num_to_send_per_word = 10; // Number of copies of each word to send
+    let num_words_per_source_instance = 2; // Number of unique words per source vertex
+    let num_to_send_per_word = 2; // Number of copies of each word to send
     let batch_size = 1;
 
     // Define operator chain: source -> keyby -> reduce -> sink
     let operators = vec![
         ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
             word_length: word_length,
-            num_words,
+            num_words: num_words_per_source_instance,
             num_to_send_per_word: Some(num_to_send_per_word),
-            run_for_s: None,     // No time limit
+            run_for_s: None, // No time limit
             batch_size: batch_size,
             batching_mode: BatchingMode::SameWord,
         })),
@@ -53,41 +53,37 @@ fn test_parallel_word_count() -> Result<()> {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];
 
-    let config = TestGraphConfig {
+    let (graph, _) = create_test_execution_graph(TestGraphConfig {
         operators,
         parallelism,
-        chained: false,
+        chained: true,
         is_remote: false,
         num_workers_per_operator: None,
-    };
+    });
 
-    let (graph, _) = create_test_execution_graph(config);
-
+    let vertex_ids = graph.get_vertices().keys().cloned().collect();
     // Create and start worker
     let worker_config = WorkerConfig::new(
         graph,
-        (0..parallelism).flat_map(|i| {
-            vec![
-                format!("source_{}", i),
-                format!("keyby_{}", i),
-                format!("reduce_{}", i),
-                format!("sink_{}", i),
-            ]
-        }).collect(),
+        vertex_ids,
         1,
         TransportBackendType::InMemory,
     );
     let mut worker = Worker::new(worker_config);
 
-    let result_map = runtime.block_on(async {
+    let (result_map, worker_state) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
         worker.execute_worker_lifecycle_for_testing().await;
+        let worker_state = worker.get_state().await;
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let result_map = client.get_map().await.unwrap();
         storage_server.stop().await;
-        result_map
+        (result_map, worker_state)
     });
+
+    print_worker_metrics(&worker_state);
+
     println!("Result map len: {:?}", result_map.len());
     // Count occurrences of each word
     let mut word_counts = HashMap::new();
@@ -109,12 +105,27 @@ fn test_parallel_word_count() -> Result<()> {
         word_counts.insert(word, count);
     }
     
-    assert_eq!(word_counts.len(), num_words * parallelism as usize, "Should have exactly num_words * parallelism unique words");
+    assert_eq!(word_counts.len(), num_words_per_source_instance * parallelism as usize, "Should have exactly num_words * parallelism unique words");
     
+    let mut failed_words = Vec::new();
     for (word, count) in &word_counts {
-        assert_eq!(*count, num_to_send_per_word as f64, 
-            "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
+        if (*count - num_to_send_per_word as f64).abs() > f64::EPSILON {
+            failed_words.push((word.clone(), *count));
+        }
     }
+    
+    if !failed_words.is_empty() {
+        println!("Words that don't match expected count of {}:", num_to_send_per_word);
+        for (word, count) in &failed_words {
+            println!("  Word: '{}', Expected: {}, Actual: {}", word, num_to_send_per_word, count);
+        }
+        panic!("Found {} words with incorrect counts", failed_words.len());
+    }
+    
+    // for (word, count) in &word_counts {
+    //     assert_eq!(*count, num_to_send_per_word as f64, 
+    //         "Word '{}' should appear exactly {} times", word, num_to_send_per_word);
+    // }
 
     Ok(())
 } 

@@ -1,4 +1,4 @@
-use crate::{common::test_utils::gen_unique_grpc_port, runtime::{
+use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, runtime::{
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
@@ -81,17 +81,11 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
 
     let (graph, _) = create_test_execution_graph(config);
 
+    let vertex_ids = graph.get_vertices().keys().cloned().collect();
     // Create and start worker
     let worker_config = WorkerConfig::new(
         graph,
-        (0..parallelism).flat_map(|i| {
-            vec![
-                format!("source_{}", i),
-                format!("keyby_{}", i),
-                format!("map_{}", i),
-                format!("sink_{}", i),
-            ]
-        }).collect(),
+        vertex_ids,
         1,
         TransportBackendType::InMemory,
     );
@@ -110,26 +104,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
     });
     println!("Worker completed");
 
-    // print metrics
-    println!("\n=== Worker Metrics ===");
-    println!("Task Statuses:");
-    for (vertex_id, status) in &worker_state.task_statuses {
-        println!("  {}: {:?}", vertex_id, status);
-    }
-    
-    println!("\nTask Metrics:");
-    for (vertex_id, metrics) in &worker_state.task_metrics {
-        println!("  {}:", vertex_id);
-        println!("    Messages: {}", metrics.num_messages);
-        println!("    Records: {}", metrics.num_records);
-        println!("    Latency Histogram: {:?}", metrics.latency_histogram);
-    }
-    
-    println!("\nAggregated Metrics:");
-    println!("  Total Messages: {}", worker_state.aggregated_metrics.total_messages);
-    println!("  Total Records: {}", worker_state.aggregated_metrics.total_records);
-    println!("  Latency Histogram: {:?}", worker_state.aggregated_metrics.latency_histogram);
-    println!("===================\n");
+    print_worker_metrics(&worker_state);
 
     // Verify we received all messages except watermarks
     let result_len = result_messages.len();

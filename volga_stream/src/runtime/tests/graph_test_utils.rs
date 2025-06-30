@@ -12,9 +12,9 @@ pub struct TestGraphConfig {
     pub operators: Vec<(String, OperatorConfig)>,
     /// Parallelism level for each operator
     pub parallelism: usize,
-    /// Whether to chain sequential operators (connected via non-hash partition)
+    /// Whether to enable chaining
     pub chained: bool,
-    /// Whether to use remote channels instead of local
+    /// Whether to simulate remote connections
     pub is_remote: bool,
     /// For remote case
     pub num_workers_per_operator: Option<usize>
@@ -193,8 +193,26 @@ fn create_operator_from_chain(chain: &[(String, OperatorConfig)]) -> (String, Op
 /// Determines the appropriate partition type between two operators
 fn determine_partition_type(source_config: &OperatorConfig, target_config: &OperatorConfig) -> PartitionType {
     match (source_config, target_config) {
-        // Hash partitioning only when source is KeyBy
+        // Hash partitioning when source is KeyBy
         (OperatorConfig::KeyByConfig(_), _) => PartitionType::Hash,
+        // Hash partitioning when source is ChainedConfig and the last operator in the chain is KeyBy
+        (OperatorConfig::ChainedConfig(configs), _) => {
+            let mut has_key_by = false;
+            for config in configs {
+                match config {
+                    OperatorConfig::KeyByConfig(_) => {
+                        has_key_by = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if has_key_by {
+                PartitionType::Hash
+            } else {
+                PartitionType::RoundRobin
+            }
+        }
         // All other cases use round-robin
         _ => PartitionType::RoundRobin,
     }

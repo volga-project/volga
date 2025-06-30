@@ -267,6 +267,8 @@ impl StreamTask {
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as u64);
+
+                            Self::update_metrics(metrics.clone(), message.clone()).await;
                             match message {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.upstream_vertex_id);
@@ -331,7 +333,10 @@ impl StreamTask {
                 let messages = processed_messages.unwrap();
                 
                 let mut retries_before_close = 3; // shared between all messages
-                for message in messages {
+                for mut message in messages {
+                    // set upstream vertex id for all messages before sending downstream
+                    message.set_upstream_vertex_id(vertex_id.clone());
+
                     let mut channels_to_send_per_operator = HashMap::new();
                     for (target_operator_id, collector) in &mut collectors_per_target_operator {
                         let partitioned_channel_ids = collector.gen_partitioned_channel_ids(message.clone());

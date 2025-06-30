@@ -58,7 +58,7 @@ async fn run_test_with_config(
         num_workers_per_operator: None,
     };
 
-    let (graph, _worker_vertex_distribution) = create_test_execution_graph(config);
+    let (graph, _) = create_test_execution_graph(config);
 
     // Create worker config - use all vertices from the graph
     let vertex_ids: Vec<String> = graph.get_vertices().keys().cloned().collect();

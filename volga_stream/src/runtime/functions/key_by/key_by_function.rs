@@ -128,8 +128,8 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
         let partitions = partition(&sorted_key_arrays).unwrap();
         let ranges = partitions.ranges();
         
-        // Step 6: Create keyed batches for each partition
-        let mut keyed_batches = Vec::with_capacity(ranges.len());
+        // Step 6: Create keyed messages for each partition
+        let mut keyed_messages = Vec::with_capacity(ranges.len());
         
         for range in ranges {
             // Extract this range from the sorted batch
@@ -152,16 +152,16 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
             // Create Key object
             let key = Key::new(key_batch).unwrap();
             
-            // Create a KeyedDataBatch with this partition data
-            let keyed_batch = KeyedMessage::new(
+            // Create a KeyedMessage with this partition data
+            let keyed_message = KeyedMessage::new(
                 BaseMessage::new(message.upstream_vertex_id(), group_batch, message.ingest_timestamp()),
                 key,
             );
             
-            keyed_batches.push(keyed_batch);
+            keyed_messages.push(keyed_message);
         }
         
-        keyed_batches
+        keyed_messages
     }
 }
 

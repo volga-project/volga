@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
-use crate::common::message::Message;
+use crate::common::message::{Message, MAX_WATERMARK_VALUE};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
@@ -33,6 +33,7 @@ pub struct WordCountSourceFunction {
     start_time: Option<Instant>,
     words_sent_per_word: HashMap<String, usize>,
     runtime_context: Option<RuntimeContext>,
+    max_watermark_sent: bool,
 }
 
 impl WordCountSourceFunction {
@@ -56,6 +57,7 @@ impl WordCountSourceFunction {
             start_time: None,
             words_sent_per_word: HashMap::new(),
             runtime_context: None,
+            max_watermark_sent: false,
         }
     }
 
@@ -139,6 +141,23 @@ impl WordCountSourceFunction {
         }
         None
     }
+
+    async fn send_max_watermark_if_needed(&mut self) -> Option<Message> {
+        if !self.max_watermark_sent {
+            self.max_watermark_sent = true;
+            let vertex_id = self.runtime_context.as_ref().unwrap().vertex_id().to_string();
+            let watermark = Message::Watermark(crate::common::message::WatermarkMessage::new(
+                vertex_id,
+                MAX_WATERMARK_VALUE,
+                Some(SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as u64)
+            ));
+            return Some(watermark);
+        }
+        None
+    }   
 }
 
 #[async_trait]
@@ -149,7 +168,6 @@ impl FunctionTrait for WordCountSourceFunction {
         self.words = (0..self.num_words)
             .map(|_| self.generate_random_word())
             .collect();
-        self.start_time = Some(Instant::now());
         Ok(())
     }
     
@@ -171,12 +189,14 @@ impl FunctionTrait for WordCountSourceFunction {
 #[async_trait]
 impl SourceFunctionTrait for WordCountSourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
+        if self.start_time.is_none() {
+            self.start_time = Some(Instant::now());
+        }
         // Check if we should stop based on time
         if let Some(run_for_s) = self.run_for_s {
             if let Some(start_time) = self.start_time {
                 if start_time.elapsed().as_secs() >= run_for_s {
-                    tokio::task::yield_now().await;
-                    return None;
+                    return self.send_max_watermark_if_needed().await;
                 }
             }
         }
@@ -185,17 +205,12 @@ impl SourceFunctionTrait for WordCountSourceFunction {
         let batch_words = match self.collect_words_for_batch() {
             Some(words) => words,
             None => {
-                tokio::task::yield_now().await;
-                return None;
+                return self.send_max_watermark_if_needed().await;
             }
         };
 
         // Create and return batch
         let message = self.create_batch(&batch_words);
-        
-        // Yield to other tasks
-        tokio::task::yield_now().await;
-        
         Some(message)
     }
 }
@@ -222,26 +237,32 @@ mod tests {
 
         source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
 
-        let mut messages = Vec::new();
         let mut word_counts = HashMap::new();
+        let mut watermark_received = false;
         
         while let Some(message) = source.fetch().await {
-            let record_batch = message.record_batch();
-            let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            
-            // Verify all words in batch are the same
-            let first_word = word_array.value(0).to_string();
-            for i in 1..word_array.len() {
-                assert_eq!(word_array.value(i), first_word, "All words in batch should be identical");
-            }
+            match message {
+                Message::Regular(_) | Message::Keyed(_) => {
+                    let record_batch = message.record_batch();
+                    let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                    
+                    // Verify all words in batch are the same
+                    let first_word = word_array.value(0).to_string();
+                    for i in 1..word_array.len() {
+                        assert_eq!(word_array.value(i), first_word, "All words in batch should be identical");
+                    }
 
-            // Count words
-            for i in 0..word_array.len() {
-                let word = word_array.value(i).to_string();
-                *word_counts.entry(word).or_insert(0) += 1;
+                    // Count words
+                    for i in 0..word_array.len() {
+                        let word = word_array.value(i).to_string();
+                        *word_counts.entry(word).or_insert(0) += 1;
+                    }
+                }
+                Message::Watermark(watermark) => {
+                    assert_eq!(watermark.watermark_value, MAX_WATERMARK_VALUE, "Watermark should have max value");
+                    watermark_received = true;
+                }
             }
-            
-            messages.push(message);
         }
 
         // Verify each word was sent exactly num_to_send_per_word times
@@ -249,5 +270,8 @@ mod tests {
         for (_, count) in word_counts {
             assert_eq!(count, num_to_send_per_word);
         }
+
+        // Verify we received a watermark at the end
+        assert!(watermark_received, "Should have received a watermark message at the end");
     }
 } 
