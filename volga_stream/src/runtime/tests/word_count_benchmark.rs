@@ -10,7 +10,8 @@ use crate::common::Key;
 use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
 use crate::runtime::worker::WorkerState;
 use anyhow::Result;
-use std::collections::HashMap;
+use core::sync::atomic::{AtomicBool, Ordering};
+use std::{collections::HashMap};
 use tokio::runtime::Runtime;
 use kameo::{Actor, spawn};
 use crate::transport::channel::Channel;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct BenchmarkMetrics {
@@ -127,13 +129,13 @@ fn calculate_stddev(values: &[f64]) -> f64 {
 }
 
 async fn poll_worker_metrics(
-    worker: &Worker,
+    metrics_receiver: &mut mpsc::Receiver<WorkerState>,
     benchmark_metrics: &mut BenchmarkMetrics,
     last_metrics: &mut Option<(u64, u64)>, // (messages, records)
     last_timestamp: &mut Instant,
 ) {
     let current_time = Instant::now();
-    let worker_state = worker.get_state().await;
+    let worker_state = metrics_receiver.recv().await.unwrap();
     
     let current_messages = worker_state.aggregated_metrics.total_messages;
     let current_records = worker_state.aggregated_metrics.total_records;
@@ -229,68 +231,67 @@ pub async fn run_word_count_benchmark(
         1,
         TransportBackendType::InMemory,
     );
-    let worker = Worker::new(worker_config);
-    let worker = Arc::new(Mutex::new(worker));
+    let mut worker = Worker::new(worker_config);
+    let (metrics_sender, mut metrics_receiver) = mpsc::channel(100);
+    let running = Arc::new(AtomicBool::new(true));
 
-    let (result_map, benchmark_metrics) = tokio::spawn(async move {
-        let mut storage_server = InMemoryStorageServer::new();
-        storage_server.start(&storage_server_addr).await.unwrap();
+    let mut storage_server = InMemoryStorageServer::new();
+    storage_server.start(&storage_server_addr).await.unwrap();
+    
+    // Start metrics polling task
+    let benchmark_metrics = Arc::new(Mutex::new(BenchmarkMetrics::new()));
+    let benchmark_metrics_clone = benchmark_metrics.clone();
+    
+    let running_clone = running.clone();
+    let metrics_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(polling_interval_ms));
+        let mut last_metrics: Option<(u64, u64)> = None;
+        let mut last_timestamp = Instant::now();
         
-        // Start metrics polling task
-        let benchmark_metrics = Arc::new(Mutex::new(BenchmarkMetrics::new()));
-        let benchmark_metrics_clone = benchmark_metrics.clone();
-        let worker_clone = worker.clone();
-        
-        let metrics_task = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(polling_interval_ms));
-            let mut last_metrics: Option<(u64, u64)> = None;
-            let mut last_timestamp = Instant::now();
+        while running_clone.load(Ordering::SeqCst) {
+            interval.tick().await;
             
-            loop {
-                interval.tick().await;
+            {
+                // let worker_guard = worker_clone.lock().await;
+                let mut metrics_guard = benchmark_metrics_clone.lock().await;
                 
-                {
-                    let worker_guard = worker_clone.lock().await;
-                    let mut metrics_guard = benchmark_metrics_clone.lock().await;
-                    
-                    poll_worker_metrics(
-                        &worker_guard,
-                        &mut *metrics_guard,
-                        &mut last_metrics,
-                        &mut last_timestamp,
-                    ).await;
-                }
-                
-                // Check if all tasks are finished
-                {
-                    let worker_guard = worker_clone.lock().await;
-                    let state = worker_guard.get_state().await;
-                    if state.all_tasks_have_status(crate::runtime::stream_task::StreamTaskStatus::Finished) {
-                        break;
-                    }
-                }
+                println!("[{}] Polling worker metrics", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                poll_worker_metrics(
+                    &mut metrics_receiver,
+                    &mut *metrics_guard,
+                    &mut last_metrics,
+                    &mut last_timestamp,
+                ).await;
             }
-        });
-        
-        // Execute the worker lifecycle (similar to word count test)
-        {
-            let mut worker_guard = worker.lock().await;
-            worker_guard.execute_worker_lifecycle_for_testing().await;
+            
+            // Check if all tasks are finished
+            // {
+            //     let worker_guard = worker_clone.lock().await;
+            //     let state = worker_guard.get_state().await;
+            //     if state.all_tasks_have_status(crate::runtime::stream_task::StreamTaskStatus::Finished) {
+            //         break;
+            //     }
+            // }
         }
-        
-        // Wait for metrics task to complete
-        let _ = metrics_task.await;
-        
-        // Get final metrics
-        let benchmark_metrics = benchmark_metrics.lock().await.clone();
-        
-        // Get results
-        let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
-        let result_map = client.get_map().await.unwrap();
-        storage_server.stop().await;
-        
-        (result_map, benchmark_metrics)
-    }).await.unwrap();
+    });
+    
+    // Execute the worker lifecycle (similar to word count test)
+    worker.execute_worker_lifecycle_for_testing_with_metrics(metrics_sender).await;
+    running.store(false, Ordering::Relaxed);
+
+    // Wait for metrics task to complete
+    let _ = metrics_task.await;
+    
+    // Explicitly close the worker to clean up its internal runtimes
+    worker.close().await;
+    
+    // Get final metrics
+    let benchmark_metrics = benchmark_metrics.lock().await.clone();
+    
+    // Get results
+    let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
+    let result_map = client.get_map().await.unwrap();
+    storage_server.stop().await;
 
     // Process results
     let mut word_counts = HashMap::new();
@@ -313,27 +314,23 @@ pub async fn run_word_count_benchmark(
     Ok((word_counts, benchmark_metrics))
 }
 
-#[test]
-fn test_word_count_benchmark() -> Result<()> {
-    let runtime = Runtime::new()?;
-    
+#[tokio::test]
+async fn test_word_count_benchmark() -> Result<()> {
     let parallelism = 4;
     let word_length = 10;
     let dictionary_size_per_source = 2;
-    let run_for_s = 20; // Run for 10 seconds
+    let run_for_s = 5;
     let batch_size = 10;
     let polling_interval_ms = 1000; // Poll every 100ms
 
-    let (word_counts, benchmark_metrics) = runtime.block_on(async {
-        run_word_count_benchmark(
-            parallelism,
-            word_length,
-            dictionary_size_per_source,
-            run_for_s,
-            batch_size,
-            polling_interval_ms,
-        ).await
-    })?;
+    let (word_counts, benchmark_metrics) = run_word_count_benchmark(
+        parallelism,
+        word_length,
+        dictionary_size_per_source,
+        run_for_s,
+        batch_size,
+        polling_interval_ms,
+    ).await?;
 
     // Print benchmark results
     println!("\n=== Word Count Benchmark Results ===");

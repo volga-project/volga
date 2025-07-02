@@ -11,6 +11,8 @@ use futures::future::join_all;
 use serde::{Serialize, Deserialize};
 use anyhow::Result;
 
+use tokio::sync::mpsc;
+
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub graph: ExecutionGraph,
@@ -106,7 +108,7 @@ pub struct Worker {
     transport_backend_runtime: Option<Runtime>,
     state: Arc<tokio::sync::Mutex<WorkerState>>,
     running: Arc<AtomicBool>,
-    tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>
+    tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -137,7 +139,7 @@ impl Worker {
                 .build().unwrap()),
             state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
             running: Arc::new(AtomicBool::new(false)),
-            tasks_state_polling_handle: None
+            tasks_state_polling_handle: None,
         }
     }
 
@@ -146,6 +148,7 @@ impl Worker {
         task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
         state: Arc<tokio::sync::Mutex<WorkerState>>,
+        metrics_sender: Option<mpsc::Sender<WorkerState>>
     ) {
         let mut task_futures = Vec::new();
         for (vertex_id, runtime) in &task_runtimes {
@@ -183,6 +186,9 @@ impl Worker {
             state_guard.task_statuses = task_statuses;
             state_guard.task_metrics = task_metrics;
             state_guard.aggregated_metrics.aggregate_from_sink_metrics(&sink_metrics);
+            if metrics_sender.is_some() {
+                metrics_sender.unwrap().send(state_guard.clone()).await.unwrap();
+            }
         } // Release lock before sleep
     }
 
@@ -279,7 +285,9 @@ impl Worker {
         println!("[WORKER] Actors spawned");
     }
 
-    async fn start_tasks(&mut self) {
+    async fn start_tasks(&mut self, 
+        metrics_sender: Option<mpsc::Sender<WorkerState>>
+    ) {
         println!("[WORKER] Starting tasks");
 
         // Start all tasks
@@ -313,11 +321,10 @@ impl Worker {
             .collect();
         
         let polling_handle = tokio::spawn(async move { 
-            let mut last_print_time = Instant::now();
             while running.load(Ordering::SeqCst) {
                 let state_clone = state.clone();
 
-                Self::poll_and_update_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone()).await;
+                Self::poll_and_update_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone(), metrics_sender.clone()).await;
                 sleep(Duration::from_millis(100)).await;
 
                 // // Print tasks state every 1 sec
@@ -328,7 +335,7 @@ impl Worker {
                 // }
             }
             // final poll
-            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state).await;
+            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state, metrics_sender.clone()).await;
         });
 
         self.tasks_state_polling_handle = Some(polling_handle);
@@ -370,7 +377,7 @@ impl Worker {
             let task_actors = self.task_actors.clone();
             let graph = self.graph.clone();
             let state = self.state.clone();
-            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state).await;
+            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state, None).await;
         }
         self.state.lock().await.clone()
     }
@@ -383,7 +390,20 @@ impl Worker {
             }
         }
 
-        // TODO destroy actors and runtimes
+        // Shutdown transport backend runtime
+        if let Some(runtime) = self.transport_backend_runtime.take() {
+            runtime.shutdown_background();
+        }
+
+        // Shutdown task runtimes
+        for (_, runtime) in self.task_runtimes.drain() {
+            runtime.shutdown_background();
+        }
+
+        // Clear actor references
+        // TODO destroy actors
+        self.backend_actor = None;
+        self.task_actors.clear();
 
         println!("[WORKER] Cleanup completed");
     }
@@ -391,7 +411,7 @@ impl Worker {
     // control functions
     pub async fn start(&mut self) {
         self.spawn_actors().await;
-        self.start_tasks().await;
+        self.start_tasks(None).await;
     }
 
     pub async fn run_tasks(&mut self) {
@@ -409,10 +429,31 @@ impl Worker {
 
     // This should only be used for testing - simulates worker execution
     // In real environment master is used to coordinate worker lifecycle
-    pub async fn execute_worker_lifecycle_for_testing(&mut self) {
+    pub async fn execute_worker_lifecycle_for_testing(
+        &mut self,
+    ) {
+        self._execute_worker_lifecycle_for_testing(None).await
+    }
+
+    pub async fn execute_worker_lifecycle_for_testing_with_metrics(
+        &mut self,
+        metrics_sender: mpsc::Sender<WorkerState>
+    ) {
+        self._execute_worker_lifecycle_for_testing(Some(metrics_sender)).await
+    }
+
+    async fn _execute_worker_lifecycle_for_testing(
+        &mut self,
+        metrics_sender: Option<mpsc::Sender<WorkerState>>
+    ) {
         println!("[WORKER] Starting worker execution");
         
-        self.start().await;
+        if metrics_sender.is_none() {
+            self.start().await;
+        } else {
+            self.spawn_actors().await;
+            self.start_tasks(metrics_sender).await;
+        }
 
         println!("[WORKER] Worker started, waiting for all tasks to be opened");
 
