@@ -10,7 +10,7 @@ use crate::common::Key;
 use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
 use crate::runtime::worker::WorkerState;
 use anyhow::Result;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::{collections::HashMap};
 use tokio::runtime::Runtime;
 use kameo::{Actor, spawn};
@@ -24,6 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use crate::runtime::stream_task::{LATENCY_BUCKET_BOUNDARIES, calculate_latency_bucket_centers};
 
 #[derive(Debug, Clone)]
 pub struct BenchmarkMetrics {
@@ -133,7 +134,7 @@ async fn poll_worker_metrics(
     benchmark_metrics: &mut BenchmarkMetrics,
     last_metrics: &mut Option<(u64, u64)>, // (messages, records)
     last_timestamp: &mut Instant,
-) {
+) -> WorkerState {
     let current_time = Instant::now();
     let worker_state = metrics_receiver.recv().await.unwrap();
     
@@ -155,12 +156,10 @@ async fn poll_worker_metrics(
             benchmark_metrics.add_sample(messages_per_sec, records_per_sec, latency_ms);
         }
     }
-
-    // TODO print worker state
-    print_worker_metrics(&worker_state);
     
     *last_metrics = Some((current_messages, current_records));
     *last_timestamp = current_time;
+    worker_state
 }
 
 fn calculate_average_latency(histogram: &[u64]) -> u64 {
@@ -173,8 +172,9 @@ fn calculate_average_latency(histogram: &[u64]) -> u64 {
         return 0;
     }
     
-    // Histogram buckets: [0-1ms, 1-10ms, 10-100ms, 100ms-1s, >1s]
-    let bucket_centers = [0, 5, 55, 550, 1000]; // Approximate centers
+    // Calculate weighted average using bucket centers that match StreamTaskMetrics
+    // Buckets: [0-1ms, 2-10ms, 11-100ms, 101-1000ms, >1000ms]
+    let bucket_centers = calculate_latency_bucket_centers();
     let weighted_sum: u64 = histogram.iter()
         .zip(bucket_centers.iter())
         .map(|(&count, &center)| count * center)
@@ -190,6 +190,7 @@ pub async fn run_word_count_benchmark(
     run_for_s: u64,
     batch_size: usize,
     polling_interval_ms: u64,
+    batching_mode: BatchingMode,
 ) -> Result<(HashMap<String, f64>, BenchmarkMetrics)> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
@@ -201,7 +202,7 @@ pub async fn run_word_count_benchmark(
             num_to_send_per_word: None, // Use time-based instead
             run_for_s: Some(run_for_s),
             batch_size: batch_size,
-            batching_mode: BatchingMode::SameWord,
+            batching_mode: batching_mode,
         })),
         ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()]))),
         ("reduce".to_string(), OperatorConfig::ReduceConfig(
@@ -247,6 +248,7 @@ pub async fn run_word_count_benchmark(
         let mut interval = tokio::time::interval(Duration::from_millis(polling_interval_ms));
         let mut last_metrics: Option<(u64, u64)> = None;
         let mut last_timestamp = Instant::now();
+        let mut last_print_timestamp = Instant::now();
         
         while running_clone.load(Ordering::SeqCst) {
             interval.tick().await;
@@ -255,23 +257,20 @@ pub async fn run_word_count_benchmark(
                 // let worker_guard = worker_clone.lock().await;
                 let mut metrics_guard = benchmark_metrics_clone.lock().await;
                 
-                println!("[{}] Polling worker metrics", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
-                poll_worker_metrics(
+                let worker_state = poll_worker_metrics(
                     &mut metrics_receiver,
                     &mut *metrics_guard,
                     &mut last_metrics,
                     &mut last_timestamp,
                 ).await;
+
+                let now = Instant::now();
+                if now.duration_since(last_print_timestamp).as_secs() >= 1 {
+                    println!("[{}] Worker State", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+                    print_worker_metrics(&worker_state);
+                    last_print_timestamp = now;
+                }
             }
-            
-            // Check if all tasks are finished
-            // {
-            //     let worker_guard = worker_clone.lock().await;
-            //     let state = worker_guard.get_state().await;
-            //     if state.all_tasks_have_status(crate::runtime::stream_task::StreamTaskStatus::Finished) {
-            //         break;
-            //     }
-            // }
         }
     });
     
@@ -316,12 +315,13 @@ pub async fn run_word_count_benchmark(
 
 #[tokio::test]
 async fn test_word_count_benchmark() -> Result<()> {
-    let parallelism = 4;
+    let parallelism = 1;
     let word_length = 10;
-    let dictionary_size_per_source = 2;
-    let run_for_s = 5;
-    let batch_size = 10;
-    let polling_interval_ms = 1000; // Poll every 100ms
+    let dictionary_size_per_source = 100;
+    let run_for_s = 10;
+    let batch_size = 1000;
+    let polling_interval_ms = 100; // Poll every 100ms
+    let batching_mode = BatchingMode::RoundRobin;
 
     let (word_counts, benchmark_metrics) = run_word_count_benchmark(
         parallelism,
@@ -330,6 +330,7 @@ async fn test_word_count_benchmark() -> Result<()> {
         run_for_s,
         batch_size,
         polling_interval_ms,
+        batching_mode
     ).await?;
 
     // Print benchmark results

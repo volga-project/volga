@@ -68,13 +68,20 @@ impl OperatorTrait for ReduceOperator {
                 let acc = acc.clone();
   
                 // make sure we use fifo to maintain order 
-                let result = self.base.thread_pool.spawn_fifo_async(move || {
-                    let mut acc = acc.lock().unwrap();
-                    function.update_accumulator(&mut acc, &keyed_message);
-                    let agg_result = function.get_result(&acc);
-                    let result_message = result_extractor.extract_result(&key, &agg_result, upstream_vertex_id, ingest_ts);
-                    Some(vec![result_message])
-                }).await;
+                // let result = self.base.thread_pool.spawn_fifo_async(move || {
+                //     let mut acc = acc.lock().unwrap();
+                //     function.update_accumulator(&mut acc, &keyed_message);
+                //     let agg_result = function.get_result(&acc);
+                //     let result_message = result_extractor.extract_result(&key, &agg_result, upstream_vertex_id, ingest_ts);
+                //     Some(vec![result_message])
+                // }).await;
+
+
+                let mut acc = acc.lock().unwrap();
+                function.update_accumulator(&mut acc, &keyed_message);
+                let agg_result = function.get_result(&acc);
+                let result_message = result_extractor.extract_result(&key, &agg_result, upstream_vertex_id, ingest_ts);
+                let result = Some(vec![result_message]);
 
                 return result;
             },

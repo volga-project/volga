@@ -18,6 +18,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchingMode {
     SameWord,  // Batch identical words together
+    RoundRobin, // Batch words in round robin order
 }
 
 #[derive(Debug)]
@@ -95,16 +96,15 @@ impl WordCountSourceFunction {
     }
 
     fn collect_words_for_batch(&mut self) -> Option<Vec<String>> {
-        let start_index = self.current_index;
         
         match self.batching_mode {
             BatchingMode::SameWord => {
-                let word = &self.dictionary[self.current_index];
                 
                 if let Some(num_to_send) = self.num_to_send_per_word {
                     // case when we send a fixed num of words
-
+                    let start_index = self.current_index;
                     loop {
+                        let word = &self.dictionary[self.current_index];
                         let sent_count = *self.copies_sent_per_word.get(word).unwrap_or(&0);
                 
                         if sent_count < num_to_send {
@@ -140,7 +140,7 @@ impl WordCountSourceFunction {
                     }
                 } else {
                     // case when we send for a time period
-
+                    let word = &self.dictionary[self.current_index];
                     if self.start_time.is_none() {
                         self.start_time = Some(Instant::now());
                     }
@@ -155,6 +155,53 @@ impl WordCountSourceFunction {
                     self.current_index = (self.current_index + 1) % self.dictionary.len();
 
                     return Some(batch_words);
+                }
+            },
+            BatchingMode::RoundRobin => {
+                let mut batch_words = vec![];
+                if let Some(num_to_send) = self.num_to_send_per_word {
+                    // case when we send a fixed num of words
+                    loop {
+                        let word = &self.dictionary[self.current_index];
+                        let sent_count = *self.copies_sent_per_word.get(word).unwrap_or(&0);
+                        if sent_count < num_to_send {
+                            batch_words.push(word.clone());
+                            *self.copies_sent_per_word.entry(word.clone()).or_insert(0) += 1;
+                        }
+                        self.current_index = (self.current_index + 1) % self.dictionary.len();
+                        if batch_words.len() == self.batch_size {
+                            return Some(batch_words);
+                        }
+
+                        // check if we've sent all words
+                        let all_sent = self.copies_sent_per_word.values().all(|count| *count >= num_to_send);
+                        if all_sent {
+                            if batch_words.len() > 0 {
+                                return Some(batch_words);
+                            } else {
+                                return None;
+                            }
+                        }
+                    }
+                } else {
+                    // case when we send for a time period
+                    loop {
+                        let word = &self.dictionary[self.current_index];
+                        batch_words.push(word.clone());
+                        self.current_index = (self.current_index + 1) % self.dictionary.len();
+
+                        if batch_words.len() == self.batch_size {
+                            return Some(batch_words);
+                        }
+                        if self.start_time.is_none() {
+                            self.start_time = Some(Instant::now());
+                        }
+                        let run_for_s = self.run_for_s.unwrap();
+                        let start_time = self.start_time.unwrap();
+                        if start_time.elapsed().as_secs() >= run_for_s {
+                            return None;
+                        }
+                    }
                 }
             }
         }
@@ -221,133 +268,100 @@ impl SourceFunctionTrait for WordCountSourceFunction {
     }
 }
 
+async fn test_word_count_source(
+    word_length: usize,
+    dictionary_size: usize,
+    num_to_send_per_word: Option<usize>,
+    run_for_s: Option<u64>,
+    batch_size: usize,
+    batching_mode: BatchingMode,
+) {
+    let is_fixed_size = num_to_send_per_word.is_some();
+    
+    let mut source = WordCountSourceFunction::new(
+        word_length,
+        dictionary_size,
+        num_to_send_per_word,
+        run_for_s,
+        batch_size,
+        batching_mode,
+    );
+
+    source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
+
+    let mut word_counts = HashMap::new();
+    let mut watermark_received = false;
+    
+    let start_time = std::time::Instant::now();
+    while let Some(message) = source.fetch().await {
+        match message {
+            Message::Regular(_) | Message::Keyed(_) => {
+                let record_batch = message.record_batch();
+                let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                
+                if batching_mode == BatchingMode::SameWord {
+                    // Verify all words in batch are the same
+                    let first_word = word_array.value(0).to_string();
+                    for i in 1..word_array.len() {
+                        assert_eq!(word_array.value(i), first_word, "All words in batch should be identical");
+                    }
+                }
+
+                // Count words
+                for i in 0..word_array.len() {
+                    let word = word_array.value(i).to_string();
+                    *word_counts.entry(word).or_insert(0) += 1;
+                }
+            }
+            Message::Watermark(watermark) => {
+                assert_eq!(watermark.watermark_value, MAX_WATERMARK_VALUE, "Watermark should have max value");
+                watermark_received = true;
+            }
+        }
+    }
+
+    // Verify each word was sent exactly num_to_send_per_word times
+    if is_fixed_size {
+        assert_eq!(word_counts.len(), dictionary_size);
+        for (_, count) in word_counts {
+            assert_eq!(count, num_to_send_per_word.unwrap());
+        }
+    } else {
+        assert!(word_counts.len() > 0, "Should have sent some words");
+        assert!(word_counts.len() <= dictionary_size, "Should not have sent more unique words than dictionary size");
+
+        let elapsed_time = start_time.elapsed().as_secs();
+        
+        // Verify the source ran for approximately the specified time
+        assert!(elapsed_time >= run_for_s.unwrap(), "Source should have run for at least {} seconds, but ran for {}", run_for_s.unwrap(), elapsed_time);
+        assert!(elapsed_time <= run_for_s.unwrap() + 1, "Source should not have run much longer than {} seconds, but ran for {}", run_for_s.unwrap(), elapsed_time);
+    }
+
+    // Verify we received a watermark at the end
+    assert!(watermark_received, "Should have received a watermark message at the end");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_word_count_source_fixed_size() {
-        let word_length = 5;
-        let dictionary_size = 1000;
-        let num_to_send_per_word = 100;
-        let batch_size = 50;
-
-        let mut source = WordCountSourceFunction::new(
-            word_length,
-            dictionary_size,
-            Some(num_to_send_per_word),
-            None,
-            batch_size,
-            BatchingMode::SameWord,
-        );
-
-        source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
-
-        let mut word_counts = HashMap::new();
-        let mut watermark_received = false;
-        
-        while let Some(message) = source.fetch().await {
-            match message {
-                Message::Regular(_) | Message::Keyed(_) => {
-                    let record_batch = message.record_batch();
-                    let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                    
-                    // Verify all words in batch are the same
-                    let first_word = word_array.value(0).to_string();
-                    for i in 1..word_array.len() {
-                        assert_eq!(word_array.value(i), first_word, "All words in batch should be identical");
-                    }
-
-                    // Count words
-                    for i in 0..word_array.len() {
-                        let word = word_array.value(i).to_string();
-                        *word_counts.entry(word).or_insert(0) += 1;
-                    }
-                }
-                Message::Watermark(watermark) => {
-                    assert_eq!(watermark.watermark_value, MAX_WATERMARK_VALUE, "Watermark should have max value");
-                    watermark_received = true;
-                }
-            }
-        }
-
-        // Verify each word was sent exactly num_to_send_per_word times
-        assert_eq!(word_counts.len(), dictionary_size);
-        for (_, count) in word_counts {
-            assert_eq!(count, num_to_send_per_word);
-        }
-
-        // Verify we received a watermark at the end
-        assert!(watermark_received, "Should have received a watermark message at the end");
+    async fn test_word_count_source_same_word_fixed_size() {
+        test_word_count_source(5, 100, Some(100), None, 10, BatchingMode::SameWord).await;
     }
 
     #[tokio::test]
-    async fn test_word_count_source_fixed_time() {
-        let word_length = 5;
-        let dictionary_size = 100;
-        let run_for_s = 2; // Run for 2 seconds
-        let batch_size = 10;
+    async fn test_word_count_source_same_word_fixed_time() {
+        test_word_count_source(5, 100, None, Some(2), 10, BatchingMode::SameWord).await;
+    }
 
-        let mut source = WordCountSourceFunction::new(
-            word_length,
-            dictionary_size,
-            None, // No fixed number per word - use time-based
-            Some(run_for_s),
-            batch_size,
-            BatchingMode::SameWord,
-        );
+    #[tokio::test]
+    async fn test_word_count_source_round_robin_fixed_size() {
+        test_word_count_source(5, 100, Some(100), None, 10, BatchingMode::RoundRobin).await;
+    }
 
-        source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
-
-        let mut word_counts = HashMap::new();
-        let mut watermark_received = false;
-        let mut total_messages = 0;
-        let start_time = std::time::Instant::now();
-        
-        while let Some(message) = source.fetch().await {
-            match message {
-                Message::Regular(_) | Message::Keyed(_) => {
-                    let record_batch = message.record_batch();
-                    let word_array = record_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                    
-                    // Verify all words in batch are the same
-                    let first_word = word_array.value(0).to_string();
-                    for i in 1..word_array.len() {
-                        assert_eq!(word_array.value(i), first_word, "All words in batch should be identical");
-                    }
-
-                    // Count words
-                    for i in 0..word_array.len() {
-                        let word = word_array.value(i).to_string();
-                        *word_counts.entry(word).or_insert(0) += 1;
-                    }
-                    
-                    total_messages += 1;
-                }
-                Message::Watermark(watermark) => {
-                    assert_eq!(watermark.watermark_value, MAX_WATERMARK_VALUE, "Watermark should have max value");
-                    watermark_received = true;
-                }
-            }
-        }
-
-        let elapsed_time = start_time.elapsed().as_secs();
-        
-        // Verify the source ran for approximately the specified time
-        assert!(elapsed_time >= run_for_s, "Source should have run for at least {} seconds, but ran for {}", run_for_s, elapsed_time);
-        assert!(elapsed_time <= run_for_s + 1, "Source should not have run much longer than {} seconds, but ran for {}", run_for_s, elapsed_time);
-        
-        // Verify we received some messages (the exact number depends on timing)
-        assert!(total_messages > 0, "Should have received some messages during the time period");
-        
-        // Verify we received a watermark at the end
-        assert!(watermark_received, "Should have received a watermark message at the end");
-        
-        // Verify that words were cycled through the dictionary
-        assert!(word_counts.len() > 0, "Should have sent words from the dictionary");
-        assert!(word_counts.len() <= dictionary_size, "Should not have sent more unique words than dictionary size");
-        
-        println!("Fixed time test: Ran for {} seconds, sent {} messages with {} unique words", 
-                elapsed_time, total_messages, word_counts.len());
+    #[tokio::test]
+    async fn test_word_count_source_round_robin_fixed_time() {
+        test_word_count_source(5, 100, None, Some(2), 10, BatchingMode::RoundRobin).await;
     }
 } 

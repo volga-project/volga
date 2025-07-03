@@ -33,14 +33,20 @@ impl OperatorTrait for KeyByOperator {
         let message = message.clone();
         
         // make sure we use fifo to maintain order
-        self.base.thread_pool.spawn_fifo_async(move || {
-            let keyed_messages = function.key_by(message);
-            // Convert
-            let messages = keyed_messages.into_iter()
-                .map(Message::Keyed)
-                .collect();
-            Some(messages)
-        }).await
+        // self.base.thread_pool.spawn_fifo_async(move || {
+        //     let keyed_messages = function.key_by(message);
+        //     // Convert
+        //     let messages = keyed_messages.into_iter()
+        //         .map(Message::Keyed)
+        //         .collect();
+        //     Some(messages)
+        // }).await
+        let keyed_messages = function.key_by(message);
+        // Convert
+        let messages = keyed_messages.into_iter()
+            .map(Message::Keyed)
+            .collect();
+        Some(messages)
     }
 
     fn operator_type(&self) -> OperatorType {

@@ -66,7 +66,7 @@ fn test_worker_execution() -> Result<()> {
     let mut worker = Worker::new(WorkerConfig::new(
         graph,
         vertex_ids,
-        1,
+        4,
         TransportBackendType::InMemory,
     ));
 

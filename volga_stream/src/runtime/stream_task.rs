@@ -5,10 +5,24 @@ use anyhow::Result;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicBool, AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use core::sync::atomic::AtomicU64;
+use std::{collections::HashMap, sync::{atomic::{AtomicBool, AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH, Instant}};
 use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
+// Latency histogram bucket configuration
+pub const LATENCY_BUCKET_BOUNDARIES: [u64; 5] = [1, 10, 100, 1000, u64::MAX];
+
+/// Calculate the center of each latency bucket based on boundaries
+pub fn calculate_latency_bucket_centers() -> [u64; 5] {
+    [
+        0, // Center of 0-1ms bucket (0-1ms)
+        (2 + LATENCY_BUCKET_BOUNDARIES[1]) / 2, // Center of 2-10ms bucket
+        (LATENCY_BUCKET_BOUNDARIES[1] + 1 + LATENCY_BUCKET_BOUNDARIES[2]) / 2, // Center of 11-100ms bucket
+        (LATENCY_BUCKET_BOUNDARIES[2] + 1 + LATENCY_BUCKET_BOUNDARIES[3]) / 2, // Center of 101-1000ms bucket
+        LATENCY_BUCKET_BOUNDARIES[3] + 100, // Center of >1000ms bucket (assume 1100ms as representative)
+    ]
+}
 
 // Helper function to get current timestamp
 fn timestamp() -> String {
@@ -47,12 +61,18 @@ impl StreamTaskMetrics {
     }
 
     pub fn update_latency(&mut self, latency_ms: u64) {
-        let bucket = match latency_ms {
-            0..=1 => 0,
-            2..=10 => 1,
-            11..=100 => 2,
-            101..=1000 => 3,
-            _ => 4,
+        // Bucket boundaries: [0-1ms, 2-10ms, 11-100ms, 101-1000ms, >1000ms]
+        // Must match LATENCY_BUCKET_BOUNDARIES and LATENCY_BUCKET_CENTERS constants
+        let bucket = if latency_ms <= LATENCY_BUCKET_BOUNDARIES[0] {
+            0
+        } else if latency_ms <= LATENCY_BUCKET_BOUNDARIES[1] {
+            1
+        } else if latency_ms <= LATENCY_BUCKET_BOUNDARIES[2] {
+            2
+        } else if latency_ms <= LATENCY_BUCKET_BOUNDARIES[3] {
+            3
+        } else {
+            4
         };
         self.latency_histogram[bucket] += 1;
     }
