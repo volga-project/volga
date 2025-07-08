@@ -63,7 +63,7 @@ impl kameo::message::Message<TestDataWriterMessage> for TestDataWriterActor {
     async fn handle(&mut self, msg: TestDataWriterMessage, _ctx: &mut Context<TestDataWriterActor, Result<()>>) -> Self::Reply {
         match msg {
             TestDataWriterMessage::WriteMessage { channel_id, message } => {
-                let (success, _) = self.writer.write_message(&channel_id, message).await;
+                let (success, _) = self.writer.write_message(&channel_id, &message).await;
                 if success {
                     Ok(())
                 } else {

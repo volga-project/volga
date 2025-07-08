@@ -89,12 +89,27 @@ impl BaseMessage {
             metadata
         }
     }
+
+    pub fn get_memory_size(&self) -> usize {
+        self.metadata.get_memory_size() + self.record_batch.get_array_memory_size()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct MessageMetadata {
-    upstream_vertex_id: Option<String>,
-    ingest_timestamp: Option<u64>,
+pub struct MessageMetadata {
+    pub upstream_vertex_id: Option<String>,
+    pub ingest_timestamp: Option<u64>,
+}
+
+impl MessageMetadata {
+    pub fn get_memory_size(&self) -> usize {
+        // Option<u64> = 8 bytes, Option<String> = 24 bytes + string length
+        let mut len = 0;
+        if self.upstream_vertex_id.is_some() {
+            len = self.upstream_vertex_id.as_ref().unwrap().len();
+        }
+        8 + 24 + len
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -156,32 +171,39 @@ impl KeyedMessage {
         
         Self { base, key }
     }
+
+    pub fn get_memory_size(&self) -> usize {
+        self.base.get_memory_size() + self.key.get_memory_size()
+    }
 }
 
 pub const MAX_WATERMARK_VALUE: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WatermarkMessage {
-    pub upstream_vertex_id: String,
+    // pub upstream_vertex_id: String,
     pub watermark_value: u64,
-    pub ingest_timestamp: Option<u64>,
+    // pub ingest_timestamp: Option<u64>,
+    pub metadata: MessageMetadata
 }
 
 impl WatermarkMessage {
     pub fn new(upstream_vertex_id: String, watermark_value: u64, ingest_timestamp: Option<u64>) -> Self {
         Self {
-            upstream_vertex_id,
             watermark_value,
-            ingest_timestamp,
+            metadata: MessageMetadata {
+                upstream_vertex_id: Some(upstream_vertex_id),
+                ingest_timestamp
+            }
         }
     }
 
     pub fn set_ingest_timestamp(&mut self, ingest_timestamp: u64) {
-        self.ingest_timestamp = Some(ingest_timestamp);
+        self.metadata.ingest_timestamp = Some(ingest_timestamp);
     }
 
     pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
-        self.upstream_vertex_id = upstream_vertex_id;
+        self.metadata.upstream_vertex_id = Some(upstream_vertex_id);
     }
 
     /// Serialize the WatermarkMessage to bytes
@@ -193,6 +215,12 @@ impl WatermarkMessage {
     pub fn from_bytes(bytes: &[u8]) -> Self {
         bincode::deserialize(bytes).unwrap()
     }
+
+    pub fn get_memory_size(&self) -> usize {
+        self.metadata.get_memory_size() + 8 // 8 bytes for watermark value
+    }
+
+
 }
 
 #[derive(Debug, Clone)]
@@ -218,7 +246,7 @@ impl Message {
         match self {
             Message::Regular(message) => message.metadata.upstream_vertex_id.clone(),
             Message::Keyed(message) => message.base.metadata.upstream_vertex_id.clone(),
-            Message::Watermark(message) => Some(message.upstream_vertex_id.clone()),
+            Message::Watermark(message) => message.metadata.upstream_vertex_id.clone(),
         }
     }
 
@@ -242,7 +270,7 @@ impl Message {
         match self {
             Message::Regular(message) => message.metadata.ingest_timestamp,
             Message::Keyed(message) => message.base.metadata.ingest_timestamp,
-            Message::Watermark(message) => message.ingest_timestamp,
+            Message::Watermark(message) => message.metadata.ingest_timestamp,
         }
     }
 
@@ -259,6 +287,14 @@ impl Message {
             Message::Regular(message) => message.set_upstream_vertex_id(upstream_vertex_id),
             Message::Keyed(message) => message.base.set_upstream_vertex_id(upstream_vertex_id),
             Message::Watermark(message) => message.set_upstream_vertex_id(upstream_vertex_id),
+        }
+    }
+
+    pub fn get_memory_size(&self) -> usize {
+        match self {
+            Message::Regular(msg) => msg.get_memory_size(),
+            Message::Keyed(msg) => msg.get_memory_size(),
+            Message::Watermark(msg) => msg.get_memory_size()
         }
     }
 
@@ -460,9 +496,9 @@ mod tests {
         // Compare watermark specific fields
         if let (Message::Watermark(original), Message::Watermark(deserialized)) = 
             (&original_message, &deserialized_message) {
-            assert_eq!(original.upstream_vertex_id, deserialized.upstream_vertex_id);
+            assert_eq!(original.metadata.upstream_vertex_id, deserialized.metadata.upstream_vertex_id);
             assert_eq!(original.watermark_value, deserialized.watermark_value);
-            assert_eq!(original.ingest_timestamp, deserialized.ingest_timestamp);
+            assert_eq!(original.metadata.ingest_timestamp, deserialized.metadata.ingest_timestamp);
         } else {
             panic!("Expected watermark messages");
         }

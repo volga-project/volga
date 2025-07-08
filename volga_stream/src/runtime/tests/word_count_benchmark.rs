@@ -24,7 +24,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::time::sleep;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-use crate::runtime::stream_task::{LATENCY_BUCKET_BOUNDARIES, calculate_latency_bucket_centers};
+use crate::runtime::stream_task::LATENCY_BUCKET_BOUNDARIES;
 
 #[derive(Debug, Clone)]
 pub struct BenchmarkMetrics {
@@ -162,6 +162,18 @@ async fn poll_worker_metrics(
     worker_state
 }
 
+
+/// Calculate the center of each latency bucket based on boundaries
+fn calculate_latency_bucket_centers() -> [u64; 5] {
+    [
+        0, // Center of 0-1ms bucket (0-1ms)
+        (2 + LATENCY_BUCKET_BOUNDARIES[1]) / 2, // Center of 2-10ms bucket
+        (LATENCY_BUCKET_BOUNDARIES[1] + 1 + LATENCY_BUCKET_BOUNDARIES[2]) / 2, // Center of 11-100ms bucket
+        (LATENCY_BUCKET_BOUNDARIES[2] + 1 + LATENCY_BUCKET_BOUNDARIES[3]) / 2, // Center of 101-1000ms bucket
+        LATENCY_BUCKET_BOUNDARIES[3] + 100, // Center of >1000ms bucket (assume 1100ms as representative)
+    ]
+}
+
 fn calculate_average_latency(histogram: &[u64]) -> u64 {
     if histogram.len() != 5 {
         return 0;
@@ -171,9 +183,6 @@ fn calculate_average_latency(histogram: &[u64]) -> u64 {
     if total_samples == 0 {
         return 0;
     }
-    
-    // Calculate weighted average using bucket centers that match StreamTaskMetrics
-    // Buckets: [0-1ms, 2-10ms, 11-100ms, 101-1000ms, >1000ms]
     let bucket_centers = calculate_latency_bucket_centers();
     let weighted_sum: u64 = histogram.iter()
         .zip(bucket_centers.iter())
@@ -319,9 +328,9 @@ async fn test_word_count_benchmark() -> Result<()> {
     let word_length = 10;
     let dictionary_size_per_source = 100;
     let run_for_s = 10;
-    let batch_size = 1000;
+    let batch_size = 1;
     let polling_interval_ms = 100; // Poll every 100ms
-    let batching_mode = BatchingMode::RoundRobin;
+    let batching_mode = BatchingMode::SameWord;
 
     let (word_counts, benchmark_metrics) = run_word_count_benchmark(
         parallelism,

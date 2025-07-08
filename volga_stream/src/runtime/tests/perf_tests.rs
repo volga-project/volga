@@ -222,7 +222,7 @@ async fn reader_task(
 }
 
 async fn run_benchmark(message_type: MessageType) {
-    let num_messages = 1_000_000;
+    let num_messages = 500_000;
     let message_size = 10;
     let processing_delay_ms = 0; // No artificial delay for max throughput
     let channel_buffer_size = 100;
@@ -300,8 +300,8 @@ async fn run_benchmark(message_type: MessageType) {
 #[tokio::test]
 async fn benchmark_engine_flow() {
     // Run both message types for comparison
-    run_benchmark(MessageType::Simple).await;
-    println!("\n{}", "=".repeat(80));
+    // run_benchmark(MessageType::Simple).await;
+    // println!("\n{}", "=".repeat(80));
     run_benchmark(MessageType::Arrow).await;
 }
 

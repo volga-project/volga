@@ -195,6 +195,10 @@ impl Key {
         
         Ok(hash)
     }
+
+    pub fn get_memory_size(&self) -> usize {
+        self.record_batch.get_array_memory_size() + 8 // 8 bytes for u64 hash
+    }
 }
 
 impl PartialEq for Key {

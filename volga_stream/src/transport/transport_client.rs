@@ -1,11 +1,12 @@
 use anyhow::{Result, anyhow};
 use arrow::array::StringArray;
 use ordered_float::Float;
-use std::collections::HashMap;
+use std::{collections::HashMap, rc::Rc};
 use tokio::sync::mpsc;
 use crate::common::message::Message;
 use std::time::Duration;
 use tokio::time;
+use crate::transport::batcher::{Batcher, BatcherConfig};
 
 #[derive(Debug)]
 pub struct TransportClientConfig {
@@ -60,7 +61,7 @@ impl DataReader {
         self.read_message_with_params(None, None).await
     }
 
-    pub async fn read_message_with_params(
+    async fn read_message_with_params(
         &mut self,
         timeout_duration: Option<Duration>,
         retries: Option<usize>
@@ -103,24 +104,6 @@ impl DataReader {
             };
 
             if result.is_some() {
-                let message = result.clone().unwrap();
-                let mut source_vertex_id = None;
-                let is_watermark = match message.clone() {
-                    Message::Watermark(watermark) => {
-                        source_vertex_id = Some(watermark.upstream_vertex_id);
-                        true
-                    }
-                    _ => false,
-                };
-
-                // TODO config to enable/disable per-message printing
-                // if !is_watermark {
-                //     let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-            
-                //     println!("DataReader {:?} read message: {:?}", self.vertex_id, value);
-                // } else {
-                //     println!("DataReader {:?} read watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
-                // }
                 return Ok(result);
             }
             attempts += 1;
@@ -133,28 +116,48 @@ impl DataReader {
 pub struct DataWriter {
     pub vertex_id: String,
     pub senders: HashMap<String, mpsc::Sender<Message>>,
+    batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
+    batching_config: BatcherConfig,
 }
 
 impl DataWriter {
     pub fn new(vertex_id: String, senders: HashMap<String, mpsc::Sender<Message>>) -> Self {
+        let batching_config = BatcherConfig::default();
+        let batcher = Batcher::new(batching_config.clone(), senders.clone());
+        
         Self {
             vertex_id,
             senders,
+            batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
+            batching_config,
         }
     }
 
-    pub async fn write_message(&mut self, channel_id: &str, message: Message) -> (bool, u32) {
+    pub async fn start(&mut self) {
+        self.batcher.start().await
+    }
+
+    pub async fn flush_and_close(&mut self) -> Result<(), mpsc::error::SendError<Message>> {
+        self.batcher.flush_and_close().await
+    }
+
+    pub async fn write_message(&mut self, channel_id: &String, message: &Message) -> (bool, u32) {
+        // TODO use batching layer
+        // match self.batcher.add_message(channel_id, message.clone()).await {
+        //     Ok(()) => (true, 0), // Success, no latency for batching
+        //     Err(_) => (false, 0), // Failed to add to buffer
+        // }
         self.write_message_with_params(channel_id, message, self.default_timeout, self.default_retries).await
     }
 
-    pub async fn write_message_with_params(
+    async fn write_message_with_params(
         &mut self,
         channel_id: &str,
-        message: Message,
+        message: &Message,
         timeout_duration: Duration,
         retries: usize
     ) -> (bool, u32) {
@@ -169,24 +172,6 @@ impl DataWriter {
             if let Some(sender) = self.senders.get(channel_id) {
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {
-                        let mut source_vertex_id = None;
-                        let is_watermark = match message.clone() {
-                            Message::Watermark(watermark) => {
-                                source_vertex_id = Some(watermark.upstream_vertex_id);
-                                true
-                            }
-                            _ => false,
-                        };
-                        
-                        // TODO config to enable/disable per-message printing
-                        // if !is_watermark {
-                        //     let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-                        //     // if self.vertex_id.contains("map") || self.vertex_id.contains("key_by") {
-                        //     println!("DataWriter {:?} wrote message: {:?}", self.vertex_id, value);
-                        //     // }
-                        // } else {
-                        //     println!("DataWriter {:?} wrote watermark: {:?}", self.vertex_id, source_vertex_id.unwrap());
-                        // }
                         return (true, start_time.elapsed().as_millis() as u32)
                     }
                     Ok(Err(_)) => {

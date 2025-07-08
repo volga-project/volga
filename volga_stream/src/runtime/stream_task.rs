@@ -1,28 +1,16 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{create_operator_from_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
+    collector::{self, Collector}, execution_graph::ExecutionGraph, operators::operator::{create_operator_from_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
-use core::sync::atomic::AtomicU64;
-use std::{collections::HashMap, sync::{atomic::{AtomicBool, AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH, Instant}};
+use std::{collections::HashMap, sync::{atomic::{AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH, Instant}};
 use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
 // Latency histogram bucket configuration
 pub const LATENCY_BUCKET_BOUNDARIES: [u64; 5] = [1, 10, 100, 1000, u64::MAX];
-
-/// Calculate the center of each latency bucket based on boundaries
-pub fn calculate_latency_bucket_centers() -> [u64; 5] {
-    [
-        0, // Center of 0-1ms bucket (0-1ms)
-        (2 + LATENCY_BUCKET_BOUNDARIES[1]) / 2, // Center of 2-10ms bucket
-        (LATENCY_BUCKET_BOUNDARIES[1] + 1 + LATENCY_BUCKET_BOUNDARIES[2]) / 2, // Center of 11-100ms bucket
-        (LATENCY_BUCKET_BOUNDARIES[2] + 1 + LATENCY_BUCKET_BOUNDARIES[3]) / 2, // Center of 101-1000ms bucket
-        LATENCY_BUCKET_BOUNDARIES[3] + 100, // Center of >1000ms bucket (assume 1100ms as representative)
-    ]
-}
 
 // Helper function to get current timestamp
 fn timestamp() -> String {
@@ -157,10 +145,10 @@ impl StreamTask {
                 // println!("source vertex_id {:?} received max watermark, initiating shutdown", 
                 //     vertex_id);
                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.ingest_timestamp));
+                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.metadata.ingest_timestamp));
             }
 
-            let upstream_vertex_id = watermark.upstream_vertex_id.clone();
+            let upstream_vertex_id = watermark.metadata.upstream_vertex_id.clone().unwrap();
             
             let mut finished_upstreams = finished_upstream_ids.lock().await;
             finished_upstreams.insert(upstream_vertex_id);
@@ -173,7 +161,7 @@ impl StreamTask {
                 // println!("vertex_id {:?} Received max watermarks from all upstreams {:?}, initiating shutdown", 
                 //     vertex_id, finished_upstreams);
                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.ingest_timestamp));
+                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.metadata.ingest_timestamp));
             }
         }
         None
@@ -181,7 +169,7 @@ impl StreamTask {
 
     async fn update_metrics(
         metrics: Arc<Mutex<StreamTaskMetrics>>,
-        message: Message,
+        message: &Message,
     ) {
         let is_watermark = matches!(message, Message::Watermark(_));
         
@@ -253,6 +241,11 @@ impl StreamTask {
                 collector.add_output_channel_id(channel_id.clone());
             }
 
+            // start collectors
+            for (_, collector) in collectors_per_target_operator.iter_mut() {
+                collector.start().await;
+            }
+
             operator.open(&runtime_context).await?;
             println!("{:?} Operator {:?} opened", timestamp(), vertex_id);
 
@@ -288,10 +281,10 @@ impl StreamTask {
                                 .unwrap_or_default()
                                 .as_millis() as u64);
 
-                            Self::update_metrics(metrics.clone(), message.clone()).await;
+                            Self::update_metrics(metrics.clone(), &message).await;
                             match message {
                                 Message::Watermark(watermark) => {
-                                    println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.upstream_vertex_id);
+                                    println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.metadata.upstream_vertex_id);
                                     let wm = Self::handle_watermark(
                                         is_source,
                                         watermark.clone(),
@@ -317,11 +310,11 @@ impl StreamTask {
                     let reader = transport_client.reader.as_mut()
                         .expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(message) = reader.read_message().await? {
-                        Self::update_metrics(metrics.clone(), message.clone()).await;
+                        Self::update_metrics(metrics.clone(), &message).await;
 
                         match message {
                             Message::Watermark(watermark) => {
-                                println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.upstream_vertex_id);
+                                println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.metadata.upstream_vertex_id);
                                 let wm = Self::handle_watermark(
                                     is_source,
                                     watermark.clone(),
@@ -359,7 +352,7 @@ impl StreamTask {
 
                     let mut channels_to_send_per_operator = HashMap::new();
                     for (target_operator_id, collector) in &mut collectors_per_target_operator {
-                        let partitioned_channel_ids = collector.gen_partitioned_channel_ids(message.clone());
+                        let partitioned_channel_ids = collector.gen_partitioned_channel_ids(&message);
                         channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channel_ids);
                     }
                     
@@ -377,7 +370,7 @@ impl StreamTask {
 
                         let write_results = Collector::write_message_to_operators(
                             &mut collectors_per_target_operator, 
-                            message.clone(), 
+                            &message, 
                             channels_to_send_per_operator.clone()
                         ).await;
                         
@@ -399,6 +392,12 @@ impl StreamTask {
                         }
                     }
                 }
+            }
+
+            // flush all buffered messages and close collector
+            // start collectors
+            for (_, collector) in collectors_per_target_operator.iter_mut() {
+                collector.flush_and_close().await.unwrap(); // TODO proper error handle
             }
             
             println!("{:?} Task {:?} waiting for close signal", timestamp(), vertex_id);

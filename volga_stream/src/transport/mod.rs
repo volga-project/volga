@@ -1,3 +1,4 @@
+pub mod batcher;
 pub mod channel;
 pub mod transport_client;
 pub mod in_memory_transport_backend;
