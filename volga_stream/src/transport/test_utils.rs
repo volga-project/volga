@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Ok, Result};
 use kameo::Actor;
 use kameo::message::Context;
 use crate::common::message::Message;
@@ -42,6 +42,8 @@ pub enum TestDataWriterMessage {
         channel_id: String,
         message: Message,
     },
+    Start,
+    FlushAndClose
 }
 
 #[derive(Actor)]
@@ -69,6 +71,14 @@ impl kameo::message::Message<TestDataWriterMessage> for TestDataWriterActor {
                 } else {
                     Err(anyhow::anyhow!("Failed to write message"))
                 }
+            },
+            TestDataWriterMessage::Start => {
+                self.writer.start().await;
+                Ok(())
+            },
+            TestDataWriterMessage::FlushAndClose => {
+                self.writer.flush_and_close().await.unwrap();
+                Ok(())
             }
         }
     }

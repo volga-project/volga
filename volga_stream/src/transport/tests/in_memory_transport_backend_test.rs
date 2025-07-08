@@ -79,10 +79,9 @@ async fn test_actor_transport() {
     let backend_actor = TransportBackendActor::new(backend);
     let backend_ref = spawn(backend_actor);
 
-    // Create writer actors
+    // Create and start writer actors
     let mut writer_refs = Vec::new();
     for vertex_id in writer_vertex_ids {
-        // let vertex_id = writer_vertex_ids[i].clone();
         let writer_actor = TestDataWriterActor::new(vertex_id.clone(), configs.remove(&vertex_id.clone()).unwrap());
         let writer_ref = spawn(writer_actor);
         writer_refs.push(writer_ref.clone());
@@ -101,23 +100,30 @@ async fn test_actor_transport() {
 
     // Create test data and send from each writer
     for writer_idx in 0..num_writers {
+        // Start writer
+        let writer_ref = &writer_refs[writer_idx];
+        writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::Start).await.unwrap();
+        
+        // Send message to each reader
         for message_idx in 0..messages_per_writer {
             let message = Message::new(
                 Some(format!("writer{}_stream", writer_idx)),
                 create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, message_idx)]),
-                None
+                Some(100)
             );
-
-            // Send message to each reader
             for reader_idx in 0..num_readers {
                 let channel_id = format!("writer{}_to_reader{}", writer_idx, reader_idx);
-                writer_refs[writer_idx].ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
+                writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                     channel_id,
                     message: message.clone(),
                 }).await.unwrap();
             }
         }
+
+        // Flush and close writers
+        writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::FlushAndClose).await.unwrap();
     }
+
 
     // Verify data received by each reader
     for reader_idx in 0..num_readers {

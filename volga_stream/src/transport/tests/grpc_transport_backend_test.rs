@@ -179,26 +179,31 @@ async fn test_grpc_transport_backend() {
     // Give the backends some time to start up
     sleep(Duration::from_millis(1000)).await;
 
-    // Create test data and send from each writer
+    // Create test data and send from each writer to each reader
     for writer_idx in 0..writer_vertex_ids.len() {
+        // Start writer
+        let writer_vertex_id = &writer_vertex_ids[writer_idx];
+        let writer_ref = writer_refs.get(writer_vertex_id).unwrap();
+        writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::Start).await.unwrap();
+        
         for message_idx in 0..messages_per_writer {
             let message = Message::new(
                 Some(format!("writer_{}_stream", writer_idx)),
                 create_test_string_batch(vec![format!("writer_{}_batch_{}", writer_idx, message_idx)]),
-                None
+                Some(100)
             );
 
-            // Send message to each reader
             for reader_idx in 0..reader_vertex_ids.len() {
                 let channel_id = format!("writer_{}_to_reader_{}", writer_idx, reader_idx);
-                let writer_vertex_id = &writer_vertex_ids[writer_idx];
-                let writer_ref = writer_refs.get(writer_vertex_id).unwrap();
                 writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                     channel_id,
                     message: message.clone(),
                 }).await.unwrap();
             }
         }
+
+        // flush and close
+        writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::FlushAndClose).await.unwrap();
     }
 
     // Give some time for messages to be processed

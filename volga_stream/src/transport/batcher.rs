@@ -17,7 +17,7 @@ pub struct BatcherConfig {
 impl Default for BatcherConfig {
     fn default() -> Self {
         Self {
-            batch_size: 1000,
+            batch_size: 1,
             max_memory_bytes: 100 * 1024 * 1024, // 100MB
             flush_interval_ms: 100, // 100ms
         }
