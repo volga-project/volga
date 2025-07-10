@@ -326,11 +326,11 @@ pub async fn run_word_count_benchmark(
 async fn test_word_count_benchmark() -> Result<()> {
     let parallelism = 1;
     let word_length = 10;
-    let dictionary_size_per_source = 100;
+    let dictionary_size_per_source = 1000;
     let run_for_s = 10;
-    let batch_size = 1;
+    let batch_size = 1000;
     let polling_interval_ms = 100; // Poll every 100ms
-    let batching_mode = BatchingMode::SameWord;
+    let batching_mode = BatchingMode::RoundRobin;
 
     let (word_counts, benchmark_metrics) = run_word_count_benchmark(
         parallelism,

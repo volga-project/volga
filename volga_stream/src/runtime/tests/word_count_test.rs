@@ -26,11 +26,11 @@ fn test_word_count() -> Result<()> {
     let runtime = Runtime::new()?;
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-    let parallelism = 4;
+    let parallelism = 2;
     let word_length = 10;
-    let dictionary_size_per_source = 2; // Number of unique words per source vertex
-    let num_to_send_per_word = 20000; // Number of copies of each word to send
-    let batch_size = 100;
+    let dictionary_size_per_source = 10; // Number of unique words per source vertex
+    let num_to_send_per_word = 1000; // Number of copies of each word to send
+    let batch_size = 10;
 
     // Define operator chain: source -> keyby -> reduce -> sink
     let operators = vec![

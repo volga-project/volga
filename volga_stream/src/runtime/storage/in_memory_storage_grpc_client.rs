@@ -36,6 +36,10 @@ impl InMemoryStorageClient {
             match InMemoryStorageServiceClient::connect(addr.clone()).await {
                 Ok(client) => {
                     println!("[IN_MEMORY_STORAGE_CLIENT] Successfully connected to {} on attempt {}", addr, attempt + 1);
+                    let client = client
+                        .max_decoding_message_size(12*1024*1024)
+                        .max_encoding_message_size(12*1024*1024); // 12 MB
+                    
                     return Ok(Self { client });
                 }
                 Err(e) => {

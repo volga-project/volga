@@ -322,17 +322,8 @@ impl Worker {
         
         let polling_handle = tokio::spawn(async move { 
             while running.load(Ordering::SeqCst) {
-                let state_clone = state.clone();
-
                 Self::poll_and_update_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone(), metrics_sender.clone()).await;
                 sleep(Duration::from_millis(100)).await;
-
-                // // Print tasks state every 1 sec
-                // if last_print_time.elapsed() > Duration::from_secs(1) {
-                //     let state_guard = state_clone.lock().await;
-                //     print_worker_metrics(&state_guard);
-                //     last_print_time = Instant::now();
-                // }
             }
             // final poll
             Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state, metrics_sender.clone()).await;
@@ -414,12 +405,12 @@ impl Worker {
         self.start_tasks(None).await;
     }
 
-    pub async fn run_tasks(&mut self) {
+    pub async fn signal_tasks_run(&mut self) {
         self.start_transport_backend().await;
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await;
     }
 
-    pub async fn close_tasks(&mut self) {
+    pub async fn signal_tasks_close(&mut self) {
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
     }
 
@@ -465,7 +456,7 @@ impl Worker {
 
         println!("[WORKER] All tasks opened, running tasks");
 
-        self.run_tasks().await;
+        self.signal_tasks_run().await;
 
         println!("[WORKER] Tasks running, waiting for all tasks to be finished");
 
@@ -478,9 +469,9 @@ impl Worker {
         
         println!("[WORKER] All tasks finished, sending close signal");
         // Send close signal
-        self.close_tasks().await;
+        self.signal_tasks_close().await;
 
-        println!("[WORKER] All tasks closed, waiting for all tasks to be closed");
+        println!("[WORKER] Waiting for all tasks to be closed");
 
         // Wait for tasks to be closed
         Self::wait_for_all_tasks_status(

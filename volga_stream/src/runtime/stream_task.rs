@@ -280,7 +280,7 @@ impl StreamTask {
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as u64);
-
+                            // println!("msg fetched by {:?}: {:?}", vertex_id.clone(), message);
                             Self::update_metrics(metrics.clone(), &message).await;
                             match message {
                                 Message::Watermark(watermark) => {
@@ -310,6 +310,8 @@ impl StreamTask {
                     let reader = transport_client.reader.as_mut()
                         .expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(message) = reader.read_message().await? {
+
+                        // println!("msg rcvd by {:?}: {:?}", vertex_id.clone(), message);
                         Self::update_metrics(metrics.clone(), &message).await;
 
                         match message {
@@ -350,6 +352,7 @@ impl StreamTask {
                     // set upstream vertex id for all messages before sending downstream
                     message.set_upstream_vertex_id(vertex_id.clone());
 
+                    // println!("msg sent by {:?}: {:?}", vertex_id.clone(), message);
                     let mut channels_to_send_per_operator = HashMap::new();
                     for (target_operator_id, collector) in &mut collectors_per_target_operator {
                         let partitioned_channel_ids = collector.gen_partitioned_channel_ids(&message);

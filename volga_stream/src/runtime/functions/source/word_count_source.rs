@@ -239,7 +239,7 @@ impl FunctionTrait for WordCountSourceFunction {
     
     async fn close(&mut self) -> Result<()> {
         let n = self.copies_sent_per_word.clone();
-        println!("WordCountSourceFunction {:?} close, words_sent_per_word {:?}", self.runtime_context.as_ref().unwrap().vertex_id(), n);
+        // println!("WordCountSourceFunction {:?} close, words_sent_per_word {:?}", self.runtime_context.as_ref().unwrap().vertex_id(), n);
         Ok(())
     }
 

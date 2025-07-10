@@ -6,20 +6,25 @@ use tokio::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};
 use arrow::compute::concat_batches;
 use std::collections::HashSet;
+use tokio_util::sync::CancellationToken;
+
 
 #[derive(Debug, Clone)]
 pub struct BatcherConfig {
     pub batch_size: usize,
     pub max_memory_bytes: usize,
     pub flush_interval_ms: u64,
+    pub send_timeout_ms: u64,
 }
 
+// TODO figure out why disabling flushing can 5x throughput
 impl Default for BatcherConfig {
     fn default() -> Self {
         Self {
-            batch_size: 1,
+            batch_size: 2000,
             max_memory_bytes: 100 * 1024 * 1024, // 100MB
             flush_interval_ms: 100, // 100ms
+            send_timeout_ms: 1000, // 1 second
         }
     }
 }
@@ -28,23 +33,24 @@ impl Default for BatcherConfig {
 pub struct Batcher {
     config: BatcherConfig,
     regular_queues: HashMap<String, Arc<Mutex<Vec<Message>>>>,
-    keyed_queues: HashMap<String, HashMap<u64, Arc<Mutex<Vec<Message>>>>>,
+    keyed_queues: HashMap<String, Arc<Mutex<HashMap<u64, Arc<Mutex<Vec<Message>>>>>>>,
     current_memory_bytes: Arc<AtomicUsize>,
     last_flush: Arc<AtomicU64>,
     last_memory_sync: Arc<AtomicU64>,
     senders: HashMap<String, mpsc::Sender<Message>>,
-    running: Arc<AtomicBool>,
+
     flush_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     memory_sync_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    cancel_token: Arc<CancellationToken>,
 }
 
 impl Batcher {
     pub fn new(config: BatcherConfig, senders: HashMap<String, mpsc::Sender<Message>>) -> Self {
         let mut regular_queues: HashMap<String, Arc<Mutex<Vec<Message>>>> = HashMap::new();
-        let mut keyed_queues: HashMap<String, HashMap<u64, Arc<Mutex<Vec<Message>>>>> = HashMap::new();
+        let mut keyed_queues: HashMap<String, Arc<Mutex<HashMap<u64, Arc<Mutex<Vec<Message>>>>>>> = HashMap::new();
         for channel_id in senders.keys() {
             regular_queues.insert(channel_id.clone(), Arc::new(Mutex::new(Vec::new())));
-            keyed_queues.insert(channel_id.clone(), HashMap::new());
+            keyed_queues.insert(channel_id.clone(), Arc::new(Mutex::new(HashMap::new())));
         }
 
         let now = std::time::SystemTime::now()
@@ -59,21 +65,26 @@ impl Batcher {
             last_flush: Arc::new(AtomicU64::new(now)),
             last_memory_sync: Arc::new(AtomicU64::new(now)),
             senders,
-            running: Arc::new(AtomicBool::new(false)),
+
             flush_handle: Arc::new(Mutex::new(None)),
             memory_sync_handle: Arc::new(Mutex::new(None)),
+            cancel_token: Arc::new(CancellationToken::new()),
         }
     }
 
-    pub async fn add_message(&mut self, channel_id: &String, message: Message) -> Result<(), mpsc::error::SendError<Message>> {
-        
-        // For watermark, flush channel immidiatelly and pass watermark through
+    // TODO remove keyes on flush
+    pub async fn write_message(&mut self, channel_id: &String, message: Message) -> Result<(), mpsc::error::SendError<Message>> {
+        // For watermark, flush channel immediatelly and pass watermark through
         if let Message::Watermark(_) = message {
             self.flush_channel(channel_id).await?;
             let sender = self.senders.get(channel_id).unwrap();
-            return sender.send(message).await;
+            let timeout_duration = Duration::from_millis(self.config.send_timeout_ms);
+            match tokio::time::timeout(timeout_duration, sender.send(message.clone())).await {
+                Ok(result) => return result,
+                Err(_) => return Err(mpsc::error::SendError(message)),
+            }
         }
-        
+
         let message_size = message.get_memory_size();
         
         // Check if we need to flush due to memory pressure
@@ -81,30 +92,47 @@ impl Batcher {
             self.flush_all().await?;
         }
         
-        let mut queue_guard = match &message {
+        let sender = self.senders.get(channel_id).unwrap();
+        
+        match &message {
             Message::Keyed(keyed_msg) => {
                 let hash = keyed_msg.key.hash;
-                let channel_keyed_queues = self.keyed_queues.get_mut(channel_id).unwrap();
-                let keyed_queue = channel_keyed_queues.entry(hash).or_insert(Arc::new(Mutex::new(Vec::new())));
-                keyed_queue.lock().await
+                let channel_keyed_queues = self.keyed_queues.get(channel_id).unwrap();
+                let mut keyed_queues_guard = channel_keyed_queues.lock().await;
+                if !keyed_queues_guard.contains_key(&hash) {
+                    keyed_queues_guard.insert(hash, Arc::new(Mutex::new(Vec::new())));
+                }
+                let keyed_queue = keyed_queues_guard.get_mut(&hash).unwrap();
+                let mut keyed_queue_guard = keyed_queue.lock().await;
+                return Self::handle_queue_with_message(message, keyed_queue_guard.as_mut(), sender, self.config.batch_size, self.current_memory_bytes.clone(), self.config.send_timeout_ms).await
             }
             Message::Regular(_) => {
                 let regular_queue = self.regular_queues.get(channel_id).unwrap();
-                regular_queue.lock().await
+                let mut regular_queue_guard = regular_queue.lock().await;
+                return Self::handle_queue_with_message(message, regular_queue_guard.as_mut(), sender, self.config.batch_size, self.current_memory_bytes.clone(), self.config.send_timeout_ms).await
             }
             Message::Watermark(_) => {
                 panic!("No batching for watermarks")
             }
-        };
-
-        queue_guard.push(message);
-        Self::inc_memory_usage(message_size, self.current_memory_bytes.clone());
-                
-        let (has_full_batch, _) = Self::get_front_batch_start(queue_guard.as_mut(), self.config.batch_size);
-        if has_full_batch {
-            Self::batch_and_flush(queue_guard.as_mut(), self.config.batch_size, self.senders.get(channel_id).unwrap(), self.current_memory_bytes.clone()).await?;
         }
+    }
 
+    async fn handle_queue_with_message(
+        message: Message, 
+        queue: &mut Vec<Message>, 
+        sender: &mpsc::Sender<Message>,
+        batch_size: usize, 
+        current_memory_bytes: Arc<AtomicUsize>,
+        send_timeout_ms: u64
+    ) -> Result<(), mpsc::error::SendError<Message>> {
+        let message_size = message.get_memory_size();
+        queue.push(message);
+        Self::inc_memory_usage(message_size, current_memory_bytes.clone());
+                
+        let (has_full_batch, _) = Self::get_front_batch_start(queue.as_mut(), batch_size);
+        if has_full_batch {
+            Self::batch_and_flush(queue.as_mut(), batch_size, sender, current_memory_bytes, send_timeout_ms).await?;
+        }
         Ok(())
     }
 
@@ -126,6 +154,8 @@ impl Batcher {
             i -= 1;
         }
 
+        // println!("Get front {:?}, batch_size: {}, queue_len: {}", total_size, batch_size, queue.len());
+
         // true if we have full batch, false otherwise
         if total_size >= batch_size {
             (true, i)
@@ -139,7 +169,8 @@ impl Batcher {
         queue: &mut Vec<Message>, 
         batch_size: usize, 
         sender: &mpsc::Sender<Message>,
-        current_memory_bytes: Arc<AtomicUsize>
+        current_memory_bytes: Arc<AtomicUsize>,
+        send_timeout_ms: u64
     ) -> Result<(), mpsc::error::SendError<Message>> {
         while queue.len() != 0 {
             let (_, batch_start) = Self::get_front_batch_start(queue, batch_size);
@@ -147,7 +178,11 @@ impl Batcher {
             let flushed_memory: usize = messages_to_batch.iter().map(|m| m.get_memory_size()).sum();
             
             let batched_message = Self::batch_messages(messages_to_batch);
-            sender.send(batched_message).await?;
+            let timeout_duration = Duration::from_millis(send_timeout_ms);
+            match tokio::time::timeout(timeout_duration, sender.send(batched_message.clone())).await {
+                Ok(result) => result?,
+                Err(_) => return Err(mpsc::error::SendError(batched_message)),
+            }
             Self::dec_memory_usage(flushed_memory, current_memory_bytes.clone());
         }
 
@@ -211,23 +246,38 @@ impl Batcher {
 
     pub async fn flush_channel(&mut self, channel_id: &String) -> Result<(), mpsc::error::SendError<Message>> {
         let sender = self.senders.get(channel_id).unwrap();
+        let mut num_flushed = 0;
         if let Some(regular_queue) = self.regular_queues.get(channel_id) {
             let mut regular_queue_guard = regular_queue.lock().await;
+            num_flushed += regular_queue_guard.len();
             if !regular_queue_guard.is_empty() {
-                Self::batch_and_flush(regular_queue_guard.as_mut(), self.config.batch_size, sender, self.current_memory_bytes.clone()).await?;
+                Self::batch_and_flush(regular_queue_guard.as_mut(), self.config.batch_size, sender, self.current_memory_bytes.clone(), self.config.send_timeout_ms).await?;
             }
             drop(regular_queue_guard);
+        } else {
+            panic!("No reg queue");
         }
 
         if let Some(keyed_queues) = self.keyed_queues.get_mut(channel_id) {
-            for (_, queue) in keyed_queues.iter_mut() {
+            let mut keyed_queues_guard = keyed_queues.lock().await;
+            // println!("flush_channel: found {} keyed queues for channel {}", keyed_queues_guard.len(), channel_id);
+            for (hash, queue) in keyed_queues_guard.iter_mut() {
+                // println!("flush_channel: checking keyed queue with hash {}, address {:p}", hash, queue.as_ref());
                 let mut keyed_queue_guard = queue.lock().await;
+                // println!("flush_channel: keyed queue hash {} length = {}", hash, keyed_queue_guard.len());
+                num_flushed += keyed_queue_guard.len();
+            
                 if !keyed_queue_guard.is_empty() {
+                    // println!("flush_channel: flushing keyed queue hash {} with {} messages", hash, keyed_queue_guard.len());
                     let sender = self.senders.get(channel_id).unwrap();
-                    Self::batch_and_flush(keyed_queue_guard.as_mut(), self.config.batch_size, sender, self.current_memory_bytes.clone()).await?;
+                    Self::batch_and_flush(keyed_queue_guard.as_mut(), self.config.batch_size, sender, self.current_memory_bytes.clone(), self.config.send_timeout_ms).await?;
+                } else {
+                    // println!("flush_channel: keyed queue hash {} is empty", hash);
                 }
                 drop(keyed_queue_guard);
             }
+        } else {
+            panic!("No keyed queue");
         }
 
         Ok(())
@@ -238,6 +288,8 @@ impl Batcher {
         let mut all_channels: HashSet<String> = HashSet::new();
         all_channels.extend(self.keyed_queues.keys().cloned());
         all_channels.extend(self.regular_queues.keys().cloned());
+
+        // TODO diabeling this 10x throughput
         for channel_id in all_channels {
             self.flush_channel(&channel_id).await?;
         }
@@ -262,7 +314,8 @@ impl Batcher {
         
         // Calculate memory from keyed queues
         for channel_queues in self.keyed_queues.values() {
-            for queue in channel_queues.values() {
+            let channel_queues_guard = channel_queues.lock().await;
+            for queue in channel_queues_guard.values() {
                 let queue_guard = queue.lock().await;
                 actual_memory += queue_guard.iter().map(|m| m.get_memory_size()).sum::<usize>();
             }
@@ -279,60 +332,69 @@ impl Batcher {
     }
 
     pub async fn start(&mut self) {
-        if self.running.load(std::sync::atomic::Ordering::Relaxed) {
-            return; // Already running
-        }
-        
-        self.running.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Reset cancellation token for new start
+        self.cancel_token = Arc::new(CancellationToken::new());
         
         // Start the background flushing loop
         let config = self.config.clone();
-        let running = self.running.clone();
         let last_flush = self.last_flush.clone();
         let mut batcher = self.clone();
+        let cancel_token = self.cancel_token.clone();
         
         let flush_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(config.flush_interval_ms));
             
-            while running.load(std::sync::atomic::Ordering::Relaxed) {
-                interval.tick().await;
-                
-                // Check if it's time to flush
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let last_flush_ms = last_flush.load(std::sync::atomic::Ordering::Relaxed);
-                if now_ms >= last_flush_ms + config.flush_interval_ms {
-                    if let Err(e) = batcher.flush_all().await {
-                        eprintln!("Error in background flush: {:?}", e);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Interval ticked, check if it's time to flush
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let last_flush_ms = last_flush.load(std::sync::atomic::Ordering::Relaxed);
+                        if now_ms >= last_flush_ms + config.flush_interval_ms {
+                            if let Err(e) = batcher.flush_all().await {
+                                eprintln!("Error in background flush: {:?}", e);
+                            }
+                            
+                            last_flush.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        }
                     }
-                    
-                    last_flush.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                    _ = cancel_token.cancelled() => {
+                        // Cancellation signal received, break immediately
+                        break;
+                    }
                 }
             }
         });
 
         let mut batcher = self.clone();
-        let running = self.running.clone();
         let last_memory_sync = self.last_memory_sync.clone();
+        let cancel_token = self.cancel_token.clone();
         
         let memory_sync_handle = tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(config.flush_interval_ms));
+            let mut interval = tokio::time::interval(Duration::from_millis(100)); // 100ms for memory sync
             
-            while running.load(std::sync::atomic::Ordering::Relaxed) {
-                interval.tick().await;
-                
-                // Check if it's time to flush
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let last_memory_sync_ms = last_memory_sync.load(std::sync::atomic::Ordering::Relaxed);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        // Interval ticked, check if it's time to sync memory
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let last_memory_sync_ms = last_memory_sync.load(std::sync::atomic::Ordering::Relaxed);
 
-                if now_ms >= last_memory_sync_ms + 100 {
-                    batcher.sync_memory_tracker().await;
-                    last_memory_sync.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        if now_ms >= last_memory_sync_ms + 100 {
+                            batcher.sync_memory_tracker().await;
+                            last_memory_sync.store(now_ms, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    _ = cancel_token.cancelled() => {
+                        // Cancellation signal received, break immediately
+                        break;
+                    }
                 }
             }
         });
@@ -343,8 +405,8 @@ impl Batcher {
     }
 
     pub async fn flush_and_close(&mut self) -> Result<(), mpsc::error::SendError<Message>> {
-        // Set running to false
-        self.running.store(false, std::sync::atomic::Ordering::Relaxed);
+        // Cancel background tasks
+        self.cancel_token.cancel();
         
         // Wait for the background tasks to finish
         if let Some(handle) = self.flush_handle.lock().await.take() {
@@ -506,7 +568,7 @@ mod tests {
             "test".to_string(), 100, Some(100)
         ));
         
-        batcher.add_message(&"test_channel".to_string(), watermark).await.unwrap();
+        batcher.write_message(&"test_channel".to_string(), watermark).await.unwrap();
         
         // Watermark should be sent immediately
         let received = rx.recv().await.unwrap();
@@ -529,7 +591,7 @@ mod tests {
         // Add messages that should be batched
         for i in 0..3 {
             let msg = create_test_message(2, 100 + i);
-            batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         }
         
         // Should receive one batched message
@@ -544,13 +606,12 @@ mod tests {
         // Add messages should not be batched
         for i in 0..2 {
             let msg = create_test_message(2, 100 + i);
-            batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         }
 
         // assert not received
         let r = rx.try_recv();
         assert!(r.is_err());
-
 
         batcher.flush_all().await.unwrap();
         // Should receive one batched message
@@ -580,13 +641,13 @@ mod tests {
         // Add keyed messages with same key 1 
         for i in 0..3 {
             let msg = create_test_keyed_message(2, 100 + i, key1.clone());
-            batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         }
 
         // Add keyed messages with same key 2
         for i in 0..3 {
             let msg = create_test_keyed_message(2, 100 + i, key2.clone());
-            batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         }
         
         // Should receive one batched keyed message per key
@@ -617,12 +678,12 @@ mod tests {
         // Add not-full batch msg and check flush
         for i in 0..2 {
             let msg = create_test_keyed_message(2, 100 + i, key1.clone());
-            batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         }
 
         for i in 0..2 {
             let msg = create_test_keyed_message(2, 100 + i, key2.clone());
-            batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         }
 
         // assert not received
@@ -674,7 +735,7 @@ mod tests {
             let msg = create_test_message(2, 100 + i);
             let msg_size = msg.get_memory_size();
             expected_memory += msg_size;
-            batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         }
         
         // Check that memory tracking is accurate before correction
@@ -690,7 +751,7 @@ mod tests {
         let msg = create_test_message(8, 105);
 
         // this should batch 8 + 2 and flush memory
-        batcher.add_message(&"test_channel".to_string(), msg).await.unwrap();
+        batcher.write_message(&"test_channel".to_string(), msg).await.unwrap();
         let tracked_memory = batcher.current_memory_bytes.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(tracked_memory, 0, "Memory tracking should be accurate");
     
@@ -702,8 +763,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_watermark() {
-        println!("[DEBUG] Starting watermark test");
-        
         // Create channels for different types
         let (tx_regular, mut rx_regular) = mpsc::channel(100);
         let (tx_keyed, mut rx_keyed) = mpsc::channel(100);
@@ -722,22 +781,22 @@ mod tests {
         // Regular channel - add 3 regular messages
         for i in 0..3 {
             let msg = create_test_message(2, 100 + i);
-            batcher.add_message(&"regular_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"regular_channel".to_string(), msg).await.unwrap();
         }
         
         // Keyed channel - add 3 keyed messages with same key
         for i in 0..3 {
             let msg = create_test_keyed_message(2, 200 + i, "key1".to_string());
-            batcher.add_message(&"keyed_channel".to_string(), msg).await.unwrap();
+            batcher.write_message(&"keyed_channel".to_string(), msg).await.unwrap();
         }
         
         // Mixed channel - add 2 regular and 2 keyed messages
         for i in 0..2 {
             let regular_msg = create_test_message(2, 300 + i);
-            batcher.add_message(&"mixed_channel".to_string(), regular_msg).await.unwrap();
+            batcher.write_message(&"mixed_channel".to_string(), regular_msg).await.unwrap();
             
             let keyed_msg = create_test_keyed_message(2, 400 + i, "key2".to_string());
-            batcher.add_message(&"mixed_channel".to_string(), keyed_msg).await.unwrap();
+            batcher.write_message(&"mixed_channel".to_string(), keyed_msg).await.unwrap();
         }
         
         // Verify no messages have been sent yet (no auto-flush)
@@ -748,17 +807,17 @@ mod tests {
         let watermark_regular = Message::Watermark(crate::common::message::WatermarkMessage::new(
             "watermark_regular".to_string(), 1000, Some(1000)
         ));
-        batcher.add_message(&"regular_channel".to_string(), watermark_regular).await.unwrap();
+        batcher.write_message(&"regular_channel".to_string(), watermark_regular).await.unwrap();
         
         let watermark_keyed = Message::Watermark(crate::common::message::WatermarkMessage::new(
             "watermark_keyed".to_string(), 2000, Some(2000)
         ));
-        batcher.add_message(&"keyed_channel".to_string(), watermark_keyed).await.unwrap();
+        batcher.write_message(&"keyed_channel".to_string(), watermark_keyed).await.unwrap();
         
         let watermark_mixed = Message::Watermark(crate::common::message::WatermarkMessage::new(
             "watermark_mixed".to_string(), 3000, Some(3000)
         ));
-        batcher.add_message(&"mixed_channel".to_string(), watermark_mixed).await.unwrap();
+        batcher.write_message(&"mixed_channel".to_string(), watermark_mixed).await.unwrap();
         
         // Verify results for each channel
         // Regular channel: should have 1 batched message + 1 watermark
@@ -766,7 +825,6 @@ mod tests {
         match regular_batch {
             Message::Regular(base_msg) => {
                 assert_eq!(base_msg.record_batch.num_rows(), 6); // 3 messages * 2 rows each
-                println!("[DEBUG] Regular channel: received batched message with {} rows", base_msg.record_batch.num_rows());
             }
             _ => panic!("Expected regular batched message"),
         }
@@ -775,7 +833,6 @@ mod tests {
         match regular_watermark {
             Message::Watermark(wm) => {
                 assert_eq!(wm.watermark_value, 1000);
-                println!("[DEBUG] Regular channel: received watermark with value {}", wm.watermark_value);
             }
             _ => panic!("Expected watermark message"),
         }
@@ -892,7 +949,6 @@ mod tests {
                         let mut watermarks = Vec::new();
                         let mut msg_count = 0;
                         
-                        // TODO interrupt
                         while let Some(msg) = rx.recv().await {
                             msg_count += 1;
                             if msg_count % 100 == 0 {
@@ -970,7 +1026,7 @@ mod tests {
                             .push(regular_msg.clone());
                         
                         // Send to batcher immediately
-                        batcher_clone.add_message(channel_id, regular_msg).await.unwrap();
+                        batcher_clone.write_message(channel_id, regular_msg).await.unwrap();
                         total_sent += 1;
                         message_id += 1;
                         
@@ -984,7 +1040,7 @@ mod tests {
                             .push(keyed_msg.clone());
                         
                         // Send to batcher immediately
-                        batcher_clone.add_message(channel_id, keyed_msg).await.unwrap();
+                        batcher_clone.write_message(channel_id, keyed_msg).await.unwrap();
                         total_sent += 1;
                         message_id += 1;
                         
@@ -998,7 +1054,7 @@ mod tests {
                             sent_watermarks.get_mut(channel_id).unwrap().push(watermark.clone());
                             
                             // Send watermark immediately
-                            batcher_clone.add_message(channel_id, watermark).await.unwrap();
+                            batcher_clone.write_message(channel_id, watermark).await.unwrap();
                             total_sent += 1;
                             message_id += 1;
                         }
@@ -1022,7 +1078,7 @@ mod tests {
                         Some(message_id)
                     ));
                     sent_watermarks.get_mut(channel_id).unwrap().push(watermark.clone());
-                    batcher_clone.add_message(channel_id, watermark).await.unwrap();
+                    batcher_clone.write_message(channel_id, watermark).await.unwrap();
                     total_sent += 1;
                     message_id += 1;
                 }

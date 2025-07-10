@@ -185,6 +185,7 @@ impl InMemoryStorageServer {
         
         let server_handle = tokio::spawn(async move {
             match tonic::transport::Server::builder()
+                .max_frame_size(Some(12 * 1024 * 1024)) // 12MB
                 .add_service(service)
                 .serve_with_shutdown(addr, async {
                     shutdown_receiver.await.ok();

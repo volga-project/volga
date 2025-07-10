@@ -147,7 +147,7 @@ impl DataWriter {
 
     pub async fn write_message(&mut self, channel_id: &String, message: &Message) -> (bool, u32) {
         // TODO use batching layer
-        match self.batcher.add_message(channel_id, message.clone()).await {
+        match self.batcher.write_message(channel_id, message.clone()).await {
             Ok(()) => (true, 0), // Success, no latency for batching
             Err(_) => (false, 0), // Failed to add to buffer
         }

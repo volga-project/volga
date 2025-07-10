@@ -67,7 +67,7 @@ impl WorkerService for WorkerServiceImpl {
         _request: Request<RunWorkerTasksRequest>,
     ) -> Result<Response<RunWorkerTasksResponse>, Status> {
         let mut worker_guard = self.worker.lock().await;
-        worker_guard.run_tasks().await;
+        worker_guard.signal_tasks_run().await;
         println!("[WORKER_SERVER] Tasks started successfully");
         Ok(Response::new(RunWorkerTasksResponse {
             success: true,
@@ -95,7 +95,7 @@ impl WorkerService for WorkerServiceImpl {
         _request: Request<CloseWorkerTasksRequest>,
     ) -> Result<Response<CloseWorkerTasksResponse>, Status> {
         let mut worker_guard = self.worker.lock().await;
-        worker_guard.close_tasks().await;
+        worker_guard.signal_tasks_close().await;
         println!("[WORKER_SERVER] Tasks closed successfully");
         Ok(Response::new(CloseWorkerTasksResponse {
             success: true,
