@@ -364,6 +364,6 @@ your dev env back to these versions.
 Volga is in active development and requires a number of features to get to prod-ready release (mostly around fault-tolerance: streaming engine checkpointing and state backend, 
 watermarks, on-demand worker health, etc.), you can see the release roadmap here:
 
-**[Volga v1.0 Relase Roadmap](https://github.com/volga-project/volga/issues/69)**
+**[Volga v1.0 Release Roadmap](https://github.com/volga-project/volga/issues/69)**
 
 Any feedback is extremely valuable, issues and PRs are always welcome.
