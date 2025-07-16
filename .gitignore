@@ -77,4 +77,5 @@ rust/target
 golem
 volga_stream/target
 volga_stream/Cargo.lock
-
+volga_stream/arroyo/
+volga_stream/datafusion/

@@ -21,7 +21,7 @@ pub struct BatcherConfig {
 impl Default for BatcherConfig {
     fn default() -> Self {
         Self {
-            batch_size: 2000,
+            batch_size: 1000,
             max_memory_bytes: 100 * 1024 * 1024, // 100MB
             flush_interval_ms: 100, // 100ms
             send_timeout_ms: 1000, // 1 second
@@ -289,7 +289,7 @@ impl Batcher {
         all_channels.extend(self.keyed_queues.keys().cloned());
         all_channels.extend(self.regular_queues.keys().cloned());
 
-        // TODO diabeling this 10x throughput
+        // TODO disabeling this 10x throughput
         for channel_id in all_channels {
             self.flush_channel(&channel_id).await?;
         }

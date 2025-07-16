@@ -31,6 +31,7 @@ impl OperatorTrait for MapOperator {
         let function = function.clone();
         let message = message.clone();
 
+        // TODO this slow perf - remove?
         // make sure we use fifo to maintain order
         self.base.thread_pool.spawn_fifo_async(move || {
             let processed = function.map(message).unwrap();

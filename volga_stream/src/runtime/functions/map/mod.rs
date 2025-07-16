@@ -1,4 +1,5 @@
 pub mod map_function;
-// Add more concrete maps here
+pub mod filter_function;
  
-pub use map_function::{MapFunction, MapFunctionTrait}; 
+pub use map_function::{MapFunction, MapFunctionTrait};
+pub use filter_function::FilterFunction; 

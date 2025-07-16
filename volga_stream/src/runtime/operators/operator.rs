@@ -21,7 +21,7 @@ use crate::runtime::functions::{
     sink::sink_function::create_sink_function,
     map::MapFunction,
     key_by::{KeyByFunction, KeyByFunctionTrait},
-    reduce::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait}
+    reduce::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait},
 };
 
 use std::collections::HashMap;
