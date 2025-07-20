@@ -617,9 +617,9 @@ mod tests {
         examples.setup_test_data().await.unwrap();
         
         // Test a simple example
-        // examples.example_simple_projection_filter().await.unwrap();
+        examples.example_simple_projection_filter().await.unwrap();
         // examples.example_redundant_projections().await.unwrap();
-        examples.example_redundant_filters().await.unwrap();
+        // examples.example_redundant_filters().await.unwrap();
         // examples.example_join_projection_pushdown().await.unwrap();
         // examples.example_complex_nested_query().await.unwrap();
         // examples.example_window_functions().await.unwrap();

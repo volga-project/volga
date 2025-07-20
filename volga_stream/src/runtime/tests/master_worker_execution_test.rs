@@ -2,7 +2,7 @@ use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
-    }, master::Master, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::SourceConfig}, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::WorkerConfig, worker_server::WorkerServer
+    }, master::Master, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::WorkerConfig, worker_server::WorkerServer
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
@@ -66,7 +66,7 @@ async fn start_worker_servers(
     )));
 
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(source_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(source_messages)))),
         ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
         ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),

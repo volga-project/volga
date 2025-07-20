@@ -1,3 +1,4 @@
+use crate::runtime::operators::source::source_operator::VectorSourceConfig;
 use crate::runtime::tests::graph_test_utils::{
     create_test_execution_graph, TestGraphConfig, 
     create_operator_based_worker_distribution
@@ -37,7 +38,7 @@ fn test_create_simple_graph() {
 
     // Define operator chain: source -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
@@ -82,7 +83,7 @@ fn test_create_chained_graph() {
 
     // Define operator chain: source -> map1 -> map2 -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("map1".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("map2".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
@@ -117,7 +118,7 @@ fn test_create_chained_graph_with_keyby() {
 
     // Define operator chain: source -> map1 -> keyby -> map2 -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("map1".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
         ("map2".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
@@ -164,7 +165,7 @@ fn test_create_graph_with_keyby() {
 
     // Define operator chain: source -> keyby -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
         ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
@@ -216,7 +217,7 @@ fn test_create_remote_graph() {
 
     // Define operator chain: source -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
@@ -267,7 +268,7 @@ fn test_create_operator_based_worker_distribution() {
 
     // Define operator chain: source -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
@@ -308,7 +309,7 @@ fn test_create_graph_with_reduce_chained() {
 
     // Define operator chain: source -> keyby -> reduce -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
         ("reduce".to_string(), OperatorConfig::ReduceConfig(ReduceFunction::new_arrow_reduce("value".to_string()), None)),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),

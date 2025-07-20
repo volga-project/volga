@@ -1,18 +1,11 @@
 use crate::{
-    common::{Message, test_utils::{create_test_string_batch, gen_unique_grpc_port}, WatermarkMessage, MAX_WATERMARK_VALUE},
+    common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, Message, WatermarkMessage, MAX_WATERMARK_VALUE},
     runtime::{
-        operators::{
-            chained::chained_operator::ChainedOperator,
-            operator::{OperatorConfig, OperatorTrait, OperatorType},
-            source::source_operator::SourceConfig,
-            sink::sink_operator::SinkConfig,
-        },
         functions::{
-            map::{MapFunction, MapFunctionTrait},
-            key_by::KeyByFunction,
-        },
-        runtime_context::RuntimeContext,
-        storage::{InMemoryStorageClient, InMemoryStorageServer},
+            key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}
+        }, operators::{
+            chained::chained_operator::ChainedOperator, operator::{OperatorConfig, OperatorTrait, OperatorType}, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}
+        }, runtime_context::RuntimeContext, storage::{InMemoryStorageClient, InMemoryStorageServer}
     },
 };
 use anyhow::Result;
@@ -117,9 +110,8 @@ async fn test_chained_operator_source_map() {
         Message::new(None, create_test_string_batch(vec!["world".to_string()]), None),
         Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
     ];
-    
     let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages)),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
     
@@ -171,7 +163,7 @@ async fn test_chained_operator_source_keyby() {
     ];
     
     let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages)),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
         OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["key".to_string()])),
     ];
     
@@ -233,7 +225,7 @@ async fn test_chained_operator_source_map_keyby() {
     ];
     
     let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages)),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
         OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
     ];
@@ -295,7 +287,7 @@ async fn test_chained_operator_type() {
     
     // Test with source operator (Source)
     let source_configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(vec![])),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
     let source_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_configs));
@@ -311,7 +303,7 @@ async fn test_chained_operator_type() {
     
     // Test with both source and sink operators (ChainedSourceSink)
     let source_sink_configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(vec![])),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("test".to_string())),
     ];
@@ -335,7 +327,7 @@ async fn test_chained_operator_source_map_sink() {
     storage_server.start(&storage_server_addr).await.unwrap();
     
     let configs = vec![
-        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages)),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];

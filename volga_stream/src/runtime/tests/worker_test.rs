@@ -1,5 +1,5 @@
 use crate::{common::{test_utils::gen_unique_grpc_port, WatermarkMessage, MAX_WATERMARK_VALUE}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::map::{MapFunction, MapFunctionTrait}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::SourceConfig}, partition::{ForwardPartition, PartitionType}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
+    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::map::{MapFunction, MapFunctionTrait}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, partition::{ForwardPartition, PartitionType}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
@@ -49,7 +49,7 @@ fn test_worker_execution() -> Result<()> {
 
     // Define operator chain: source -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages.clone()))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages.clone())))),
         ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];

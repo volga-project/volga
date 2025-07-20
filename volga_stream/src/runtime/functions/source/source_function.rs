@@ -57,24 +57,17 @@ impl FunctionTrait for SourceFunction {
 
 pub fn create_source_function(config: SourceConfig) -> SourceFunction {
     match config {
-        SourceConfig::VectorSourceConfig(messages) => {
-            SourceFunction::Vector(VectorSourceFunction::new(messages))
+        SourceConfig::VectorSourceConfig(vector_config) => {
+            SourceFunction::Vector(VectorSourceFunction::new(vector_config.messages))
         }
-        SourceConfig::WordCountSourceConfig { 
-            word_length, 
-            dictionary_size: num_words, 
-            num_to_send_per_word,
-            run_for_s, 
-            batch_size,
-            batching_mode,
-        } => {
+        SourceConfig::WordCountSourceConfig(word_config) => {
             SourceFunction::WordCount(WordCountSourceFunction::new(
-                word_length,
-                num_words,
-                num_to_send_per_word,
-                run_for_s,
-                batch_size,
-                batching_mode,
+                word_config.word_length,
+                word_config.dictionary_size,
+                word_config.num_to_send_per_word,
+                word_config.run_for_s,
+                word_config.batch_size,
+                word_config.batching_mode,
             ))
         }
     }

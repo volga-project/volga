@@ -3,7 +3,7 @@ use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, ru
         key_by::KeyByFunction,
         reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
         source::word_count_source::{BatchingMode, WordCountSourceFunction},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::SourceConfig}, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
+    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
@@ -34,14 +34,14 @@ fn test_word_count() -> Result<()> {
 
     // Define operator chain: source -> keyby -> reduce -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig {
-            word_length: word_length,
-            dictionary_size: dictionary_size_per_source,
-            num_to_send_per_word: Some(num_to_send_per_word),
-            run_for_s: None, // No time limit
-            batch_size: batch_size,
-            batching_mode: BatchingMode::SameWord,
-        })),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
+            word_length,
+            dictionary_size_per_source,
+            Some(num_to_send_per_word),
+            None, // No time limit
+            batch_size,
+            BatchingMode::SameWord,
+        )))),
         ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()]))),
         ("reduce".to_string(), OperatorConfig::ReduceConfig(
             ReduceFunction::new_arrow_reduce("word".to_string()),

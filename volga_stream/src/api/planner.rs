@@ -75,11 +75,16 @@ impl Planner {
     }
 
     fn create_source_node(&mut self, table_scan: &TableScan) -> Result<NodeIndex> {
-
         let table_name = table_scan.table_name.table();
-        let source_config = self.context.connector_configs.get(table_name)
+        let mut source_config = self.context.connector_configs.get(table_name)
             .ok_or_else(|| DataFusionError::Plan(format!("No source configuration found for table '{}'", table_name)))?
             .clone();
+
+        if table_scan.projection.is_some() {
+            let projection = table_scan.projection.as_ref().unwrap().clone();
+            let schema = table_scan.projected_schema.inner().clone();
+            source_config.set_projection(projection, schema);
+        }
         
         let node = LogicalNode::new(
             OperatorConfig::SourceConfig(source_config),
@@ -189,6 +194,8 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
 
 #[cfg(test)]
 mod tests {
+    use crate::runtime::operators::source::source_operator::VectorSourceConfig;
+
     use super::*;
     use arrow::datatypes::{Schema, Field, DataType};
     use arrow::array::{Int32Array, StringArray, Float64Array};
@@ -223,7 +230,7 @@ mod tests {
         // ctx.register_batch("test_table", batch).unwrap();
 
         // Register source
-        planner.register_source("test_table".to_string(), SourceConfig::VectorSourceConfig(vec![]), schema);
+        planner.register_source("test_table".to_string(), SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), schema);
         
         planner
     }

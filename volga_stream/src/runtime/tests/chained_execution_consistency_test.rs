@@ -2,7 +2,7 @@ use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}
     functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::SourceConfig}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
+    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
@@ -43,7 +43,7 @@ async fn run_test_with_config(
 
     // Define operator chain: source -> map1 -> keyby -> map2 -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(test_messages))),
+        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
         ("map1".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
         ("map2".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
