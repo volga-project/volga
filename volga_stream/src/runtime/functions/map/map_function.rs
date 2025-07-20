@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use crate::common::message::Message;
-use crate::runtime::functions::map::FilterFunction;
+use crate::runtime::functions::map::{FilterFunction, ProjectionFunction};
 use anyhow::Result;
 use std::fmt;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -39,7 +39,8 @@ impl MapFunctionTrait for CustomMapFunction {
 #[derive(Debug, Clone)]
 pub enum MapFunction {
     Custom(CustomMapFunction),
-    Filter(FilterFunction)
+    Filter(FilterFunction),
+    Projection(ProjectionFunction)
 }
 
 impl MapFunction {
@@ -53,7 +54,8 @@ impl MapFunction {
     pub fn map(&self, message: Message) -> Result<Message> {
         match self {
             MapFunction::Custom(function) => function.map(message),
-            MapFunction::Filter(function) => function.map(message)
+            MapFunction::Filter(function) => function.map(message),
+            MapFunction::Projection(function) => function.map(message)
         }
     }
 }

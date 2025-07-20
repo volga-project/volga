@@ -17,6 +17,10 @@ pub enum SourceConfig {
     },
 }
 
+impl SourceConfig {
+    
+}
+
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
