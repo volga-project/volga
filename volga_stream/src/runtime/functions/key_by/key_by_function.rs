@@ -171,6 +171,15 @@ pub enum KeyByFunction {
     Arrow(ArrowKeyByFunction),
 }
 
+impl fmt::Display for KeyByFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            KeyByFunction::Custom(_) => write!(f, "Custom"),
+            KeyByFunction::Arrow(_) => write!(f, "Arrow"),
+        }
+    }
+}
+
 impl KeyByFunctionTrait for KeyByFunction {
     fn key_by(&self, message: Message) -> Vec<KeyedMessage> {
         match self {

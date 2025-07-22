@@ -14,6 +14,19 @@ pub trait JoinFunctionTrait: Send + Sync + fmt::Debug {
 #[derive(Debug, Clone)]
 pub enum JoinFunction {
     // TODO implement variants
+    Unimplemented,
+}
+
+impl JoinFunction {
+    pub fn new() -> Self {
+        JoinFunction::Unimplemented
+    }
+}
+
+impl fmt::Display for JoinFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Unimplemented")
+    }
 }
 
 impl JoinFunctionTrait for JoinFunction {

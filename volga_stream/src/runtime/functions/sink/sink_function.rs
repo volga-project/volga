@@ -18,6 +18,14 @@ pub enum SinkFunction {
     InMemoryStorageGrpc(InMemoryStorageSinkFunction),
 }
 
+impl fmt::Display for SinkFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SinkFunction::InMemoryStorageGrpc(_) => write!(f, "InMemoryStorageGrpc"),
+        }
+    }
+}
+
 #[async_trait]
 impl SinkFunctionTrait for SinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {

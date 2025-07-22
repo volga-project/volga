@@ -29,7 +29,6 @@ impl std::fmt::Debug for FilterFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("FilterFunction")
             .field("predicate", &self.predicate)
-            .field("session_context", &"SessionContext")
             .finish()
     }
 }

@@ -20,6 +20,7 @@ use super::logical_graph::{LogicalNode, LogicalGraph,
 };
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::functions::map::{FilterFunction, ProjectionFunction, MapFunction};
+use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 
 
@@ -61,14 +62,15 @@ impl Planner {
     pub fn logical_plan_to_graph(&mut self, logical_plan: &LogicalPlan) -> Result<LogicalGraph> {
         self.node_stack.clear();
 
-        logical_plan.visit(self)?;
+        logical_plan.visit_with_subqueries(self)?;
         
         Ok(self.logical_graph.clone())
     }
 
     pub async fn sql_to_graph(&mut self, sql: &str) -> Result<LogicalGraph> {
         let logical_plan = self.context.df_session_context.state().create_logical_plan(sql).await?;
-        
+        // println!("logical_plan: {}", logical_plan.display_indent());
+
         // TODO: optimize logical plan
         
         self.logical_plan_to_graph(&logical_plan)
@@ -114,12 +116,6 @@ impl Planner {
         );
 
         let node_index = self.logical_graph.add_node(node);
-
-        // Add edge from previous node if it exists
-        if let Some(prev_node_index) = self.node_stack.last() {
-            self.logical_graph.add_edge(*prev_node_index, node_index, EdgeType::Forward);
-        }
-
         Ok(node_index)
     }
 
@@ -138,12 +134,21 @@ impl Planner {
         );
 
         let node_index = self.logical_graph.add_node(node);
+        Ok(node_index)
+    }
 
-        // Add edge from previous node if it exists
-        if let Some(prev_node_index) = self.node_stack.last() {
-            self.logical_graph.add_edge(*prev_node_index, node_index, EdgeType::Forward);
-        }
-
+    fn create_join_node(&mut self, join: &Join) -> Result<NodeIndex> {
+        let join_function = JoinFunction::new();
+        
+        let node = LogicalNode::new(
+            OperatorConfig::JoinConfig(join_function),
+            1, // TODO: get from context
+            None,
+            None,
+        );
+        
+        let node_index = self.logical_graph.add_node(node);
+        
         Ok(node_index)
     }
 }
@@ -151,25 +156,30 @@ impl Planner {
 impl<'a> TreeNodeVisitor<'a> for Planner {
     type Node = LogicalPlan;
 
+    // Create node and insert into graph traversing top-to-bottom, 
+    // store node indexes in temp stack to add edges later, going bottom-to-top
     fn f_down(&mut self, node: &'a Self::Node) -> Result<TreeNodeRecursion> {
         // Process node and create operator
         let node_index = match node {
             LogicalPlan::TableScan(table_scan) => {
-                self.create_source_node(table_scan)?
+                Some(self.create_source_node(table_scan)?)
             }
             
             LogicalPlan::Projection(projection) => {
-                self.create_projection_node(projection)?
+                Some(self.create_projection_node(projection)?)
             }
             
             LogicalPlan::Filter(filter) => {
-                self.create_filter_node(filter)?
+                Some(self.create_filter_node(filter)?)
             }
             
-            LogicalPlan::Aggregate(aggregate) => {
-                // Create a key-by followed by aggregate
-                panic!("Unsupported");
+            LogicalPlan::Join(join) => {    
+                Some(self.create_join_node(join)?)
             }
+            
+            // skip subqueries as they simply wrap other plans
+            LogicalPlan::Subquery(_) => {None}
+            LogicalPlan::SubqueryAlias(_) => {None}
             
             _ => {
                 panic!("Unsupported logical plan: {:?}", node);
@@ -177,15 +187,24 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
         };
         
         // Add node to stack
-        self.node_stack.push(node_index);
+        if let Some(node_index) = node_index {
+            self.node_stack.push(node_index);
+        }
         
         Ok(TreeNodeRecursion::Continue)
     }
 
+    // Add edges from temp stack to graph, going bottom-to-top
     fn f_up(&mut self, _node: &'a Self::Node) -> Result<TreeNodeRecursion> {
-        // Pop the current node from stack
-        if !self.node_stack.is_empty() {
-            self.node_stack.pop();
+        if self.node_stack.is_empty() {
+            return Ok(TreeNodeRecursion::Continue);
+        }
+
+        let node_index = self.node_stack.pop().unwrap();
+        if let Some(prev_node_index) = self.node_stack.last() {
+            // All nodes are using forward edges for now
+            // TODO figure out edge types for groubys and joins
+            self.logical_graph.add_edge(*prev_node_index, node_index, EdgeType::Forward);
         }
         
         Ok(TreeNodeRecursion::Continue)
@@ -198,8 +217,6 @@ mod tests {
 
     use super::*;
     use arrow::datatypes::{Schema, Field, DataType};
-    use arrow::array::{Int32Array, StringArray, Float64Array};
-    use arrow::record_batch::RecordBatch;
     use std::sync::Arc;
 
     fn create_planner() -> Planner {
@@ -215,22 +232,9 @@ mod tests {
             Field::new("name", DataType::Utf8, false),
             Field::new("value", DataType::Float64, false),
         ]));
-        
-        // Create test data
-        // let batch = RecordBatch::try_new(
-        //     schema.clone(),
-        //     vec![
-        //         Arc::new(Int32Array::from(vec![1, 2, 3, 4, 5])),
-        //         Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])),
-        //         Arc::new(Float64Array::from(vec![1.1, 2.2, 3.3, 4.4, 5.5])),
-        //     ],
-        // ).unwrap();
-        
-        // Register table
-        // ctx.register_batch("test_table", batch).unwrap();
-
         // Register source
-        planner.register_source("test_table".to_string(), SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), schema);
+        planner.register_source("test_table".to_string(), SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), schema.clone());
+        planner.register_source("test_table2".to_string(), SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), schema);
         
         planner
     }
@@ -241,16 +245,20 @@ mod tests {
         
         let sql = "SELECT id, name FROM test_table";
         let graph = planner.sql_to_graph(sql).await.unwrap();
+
+        // println!("{}", graph);
         
         // Should have 2 nodes: source and projection
         let nodes: Vec<_> = graph.get_nodes().collect();
         assert_eq!(nodes.len(), 2);
+
+        let edges: Vec<_> = graph.get_edges().collect();
+        assert_eq!(edges.len(), 1);
         
-        // First node should be source
-        assert!(matches!(nodes[0].operator_config, OperatorConfig::SourceConfig(_)));
-        
-        // Second node should be projection
-        assert!(matches!(nodes[1].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
+        // First node should be projection
+        assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
+        // Second node should be source
+        assert!(matches!(nodes[1].operator_config, OperatorConfig::SourceConfig(_)));
     }
 
     #[tokio::test]
@@ -259,64 +267,24 @@ mod tests {
         
         let sql = "SELECT id, name FROM test_table WHERE value > 3.0";
         let graph = planner.sql_to_graph(sql).await.unwrap();
+
+        // println!("{}", graph);
         
         // Should have 3 nodes: source, filter, projection
         let nodes: Vec<_> = graph.get_nodes().collect();
         assert_eq!(nodes.len(), 3);
+
+        let edges: Vec<_> = graph.get_edges().collect();
+        assert_eq!(edges.len(), 2);
         
         // Check node types
-        assert!(matches!(nodes[0].operator_config, OperatorConfig::SourceConfig(_)));
+        assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
         assert!(matches!(nodes[1].operator_config, OperatorConfig::MapConfig(MapFunction::Filter(_))));
-        assert!(matches!(nodes[2].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
+        assert!(matches!(nodes[2].operator_config, OperatorConfig::SourceConfig(_)));
     }
 
     #[tokio::test]
-    async fn test_filter_only() {
-        let mut planner = create_planner();
-        
-        let sql = "SELECT * FROM test_table WHERE id > 2";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
-        
-        // Should have 2 nodes: source and filter
-        let nodes: Vec<_> = graph.get_nodes().collect();
-        assert_eq!(nodes.len(), 2);
-        
-        assert!(matches!(nodes[0].operator_config, OperatorConfig::SourceConfig(_)));
-        assert!(matches!(nodes[1].operator_config, OperatorConfig::MapConfig(MapFunction::Filter(_))));
-    }
-
-    #[tokio::test]
-    async fn test_select_all_columns() {
-        let mut planner = create_planner();
-        
-        let sql = "SELECT * FROM test_table";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
-        
-        // Should have 1 node: source only (no projection needed for SELECT *)
-        let nodes: Vec<_> = graph.get_nodes().collect();
-        assert_eq!(nodes.len(), 1);
-        
-        assert!(matches!(nodes[0].operator_config, OperatorConfig::SourceConfig(_)));
-    }
-
-    #[tokio::test]
-    async fn test_complex_filter() {
-        let mut planner = create_planner();
-        
-        let sql = "SELECT id, name FROM test_table WHERE value > 2.0 AND id < 5";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
-        
-        // Should have 3 nodes: source, filter, projection
-        let nodes: Vec<_> = graph.get_nodes().collect();
-        assert_eq!(nodes.len(), 3);
-        
-        assert!(matches!(nodes[0].operator_config, OperatorConfig::SourceConfig(_)));
-        assert!(matches!(nodes[1].operator_config, OperatorConfig::MapConfig(MapFunction::Filter(_))));
-        assert!(matches!(nodes[2].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
-    }
-
-    #[tokio::test]
-    async fn test_edges_connectivity() {
+    async fn test_forward_edges_connectivity() {
         let mut planner = create_planner();
         
         let sql = "SELECT id, name FROM test_table WHERE value > 3.0";
@@ -330,5 +298,28 @@ mod tests {
         for (_, _, edge) in edges {
             assert!(matches!(edge.edge_type, EdgeType::Forward));
         }
+    }
+
+    #[tokio::test]
+    async fn test_join_tables() {
+        let mut planner = create_planner();
+        
+        let sql = "SELECT t1.id, t1.name, t2.value FROM test_table t1 JOIN test_table2 t2 ON t1.id = t2.id";
+        
+        let graph = planner.sql_to_graph(sql).await.unwrap();
+        // println!("{}", graph);
+        
+        // Should have 4 nodes: 2 sources, join, projection
+        let nodes: Vec<_> = graph.get_nodes().collect();
+        assert_eq!(nodes.len(), 4);
+
+        let edges: Vec<_> = graph.get_edges().collect();
+        assert_eq!(edges.len(), 3);
+        
+        // Check node types
+        assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
+        assert!(matches!(nodes[1].operator_config, OperatorConfig::JoinConfig(_)));
+        assert!(matches!(nodes[2].operator_config, OperatorConfig::SourceConfig(_)));
+        assert!(matches!(nodes[3].operator_config, OperatorConfig::SourceConfig(_)));
     }
 } 

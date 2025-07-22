@@ -302,6 +302,15 @@ pub enum ReduceFunction {
     Arrow(ArrowReduceFunction),
 }
 
+impl fmt::Display for ReduceFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ReduceFunction::Custom(_) => write!(f, "Custom"),
+            ReduceFunction::Arrow(_) => write!(f, "Arrow"),
+        }
+    }
+}
+
 impl ReduceFunctionTrait for ReduceFunction {
     fn create_accumulator(&self) -> Accumulator {
         match self {

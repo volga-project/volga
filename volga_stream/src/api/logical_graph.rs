@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::fmt;
 use arrow::datatypes::Schema as ArrowSchema;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
+use petgraph::dot::{Dot, Config};
 use crate::runtime::operators::operator::OperatorConfig;
 
 #[derive(Debug, Clone)]
@@ -56,7 +58,6 @@ pub struct LogicalEdge {
 pub struct LogicalGraph {
     graph: DiGraph<LogicalNode, LogicalEdge>,
     node_counter: u32,
-    node_mapping: HashMap<String, NodeIndex>,
 }
 
 impl LogicalGraph {
@@ -64,7 +65,6 @@ impl LogicalGraph {
         Self {
             graph: DiGraph::new(),
             node_counter: 0,
-            node_mapping: HashMap::new(),
         }
     }
 
@@ -93,5 +93,37 @@ impl LogicalGraph {
 
     pub fn get_edges(&self) -> impl Iterator<Item = (NodeIndex, NodeIndex, &LogicalEdge)> {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
+    }
+
+
+    /// Generate DOT format string
+    pub fn to_dot(&self) -> String {
+        let mut dot_string = String::from("digraph LogicalGraph {\n");
+        
+        // Add nodes with labels
+        for node in self.graph.node_weights() {
+            dot_string.push_str(&format!("  {} [label=\"{}: {}\"];\n", node.node_id, node.node_id, node.operator_config));
+        }
+        
+        // Add edges with labels
+        for edge in self.graph.edge_references() {
+            let source_id = self.graph[edge.source()].node_id;
+            let target_id = self.graph[edge.target()].node_id;
+            let edge_type = match edge.weight().edge_type {
+                EdgeType::Forward => "Forward",
+                EdgeType::Shuffle => "Shuffle",
+                EdgeType::Broadcast => "Broadcast",
+            };
+            dot_string.push_str(&format!("  {} -> {} [label=\"{}\"];\n", source_id, target_id, edge_type));
+        }
+        
+        dot_string.push_str("}\n");
+        dot_string
+    }
+}
+
+impl fmt::Display for LogicalGraph {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.to_dot())
     }
 }

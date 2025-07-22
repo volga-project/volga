@@ -43,6 +43,16 @@ pub enum MapFunction {
     Projection(ProjectionFunction)
 }
 
+impl fmt::Display for MapFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            MapFunction::Custom(_) => write!(f, "Custom"),
+            MapFunction::Filter(_) => write!(f, "Filter"),
+            MapFunction::Projection(_) => write!(f, "Projection"),
+        }
+    }
+}
+
 impl MapFunction {
     pub fn new_custom<F>(function: F) -> Self 
     where

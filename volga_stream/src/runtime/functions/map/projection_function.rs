@@ -27,7 +27,6 @@ impl std::fmt::Debug for ProjectionFunction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProjectionFunction")
             .field("exprs", &self.exprs)
-            .field("session_context", &"SessionContext")
             .finish()
     }
 }

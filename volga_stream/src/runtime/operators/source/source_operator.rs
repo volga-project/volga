@@ -96,6 +96,15 @@ impl SourceConfig {
     }
 }
 
+impl std::fmt::Display for SourceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SourceConfig::VectorSourceConfig(_) => write!(f, "Vector"),
+            SourceConfig::WordCountSourceConfig(_) => write!(f, "WordCount"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,

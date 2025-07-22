@@ -70,6 +70,20 @@ pub enum OperatorConfig {
     ChainedConfig(Vec<OperatorConfig>),
 }
 
+impl fmt::Display for OperatorConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            OperatorConfig::MapConfig(map_func) => write!(f, "Map({})", map_func),
+            OperatorConfig::JoinConfig(join_func) => write!(f, "Join({})", join_func),
+            OperatorConfig::SinkConfig(sink_config) => write!(f, "Sink({})", sink_config),
+            OperatorConfig::SourceConfig(source_config) => write!(f, "Source({})", source_config),
+            OperatorConfig::KeyByConfig(key_by_func) => write!(f, "KeyBy({})", key_by_func),
+            OperatorConfig::ReduceConfig(reduce_func, _) => write!(f, "Reduce({})", reduce_func),
+            OperatorConfig::ChainedConfig(configs) => write!(f, "Chained({} ops)", configs.len()),
+        }
+    }
+}
+
 #[async_trait]
 impl OperatorTrait for Operator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {

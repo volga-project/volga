@@ -8,6 +8,14 @@ pub enum SinkConfig {
     InMemoryStorageGrpcSinkConfig(String), // server_addr
 }
 
+impl std::fmt::Display for SinkConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SinkConfig::InMemoryStorageGrpcSinkConfig(_) => write!(f, "InMemoryStorageGrpc"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct SinkOperator {
     base: OperatorBase,

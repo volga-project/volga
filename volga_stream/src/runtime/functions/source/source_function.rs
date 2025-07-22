@@ -20,6 +20,15 @@ pub enum SourceFunction {
     WordCount(WordCountSourceFunction),
 }
 
+impl fmt::Display for SourceFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SourceFunction::Vector(_) => write!(f, "Vector"),
+            SourceFunction::WordCount(_) => write!(f, "WordCount"),
+        }
+    }
+}
+
 #[async_trait]
 impl SourceFunctionTrait for SourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
