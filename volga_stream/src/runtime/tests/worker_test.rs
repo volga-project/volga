@@ -3,7 +3,7 @@ use crate::{common::{test_utils::gen_unique_grpc_port, WatermarkMessage, MAX_WAT
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
-use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -54,7 +54,7 @@ fn test_worker_execution() -> Result<()> {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];
 
-    let (graph, _) = create_test_execution_graph(TestGraphConfig {
+    let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
         operators,
         parallelism: 1,
         chained: false,

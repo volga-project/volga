@@ -222,7 +222,8 @@ impl StreamTask {
             let (_, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
 
             for edge in output_edges {
-                let channel_id = edge.channel.get_channel_id();
+                let channel = edge.get_channel();
+                let channel_id = channel.get_channel_id();
                 let partition_type = edge.partition_type.clone();
                 let target_operator_id = edge.target_operator_id.clone();
 

@@ -6,7 +6,7 @@ use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
-use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
 use anyhow::Result;
 use tokio::runtime::Runtime;
 use arrow::array::StringArray;
@@ -50,7 +50,7 @@ async fn run_test_with_config(
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism: 4,
         chained,
@@ -58,7 +58,7 @@ async fn run_test_with_config(
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     // Create worker config - use all vertices from the graph
     let vertex_ids: Vec<String> = graph.get_vertices().keys().cloned().collect();

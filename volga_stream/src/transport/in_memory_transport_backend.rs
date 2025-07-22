@@ -73,7 +73,7 @@ impl TransportBackend for InMemoryTransportBackend {
         for vertex_id in vertex_ids {
             let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
             for edge in input_edges {
-                let channel = edge.channel.clone();
+                let channel = edge.get_channel();
                 self.register_local_channel(
                     &mut transport_client_configs,
                     vertex_id.clone(),
@@ -83,7 +83,7 @@ impl TransportBackend for InMemoryTransportBackend {
             }
 
             for edge in output_edges {
-                let channel = edge.channel.clone();
+                let channel = edge.get_channel();
                 self.register_local_channel(
                     &mut transport_client_configs,
                     vertex_id.clone(),

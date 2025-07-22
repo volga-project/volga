@@ -64,7 +64,7 @@ async fn test_actor_transport() {
                 reader_vertex_ids[j].clone(),
                 reader_vertex_ids[j].clone(),
                 PartitionType::Forward,
-                Channel::Local { channel_id: format!("writer{}_to_reader{}", i, j) }
+                Some(Channel::Local { channel_id: format!("writer{}_to_reader{}", i, j) })
             );
             graph.add_edge(edge);
         }

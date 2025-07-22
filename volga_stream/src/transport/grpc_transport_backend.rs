@@ -310,8 +310,8 @@ impl TransportBackend for GrpcTransportBackend {
             all_output_edges.extend(output_edges);
         }
 
-        let input_channels: Vec<Channel> = all_input_edges.iter().map(|edge| edge.channel.clone()).collect();
-        let output_channels: Vec<Channel> = all_output_edges.iter().map(|edge| edge.channel.clone()).collect();
+        let input_channels: Vec<Channel> = all_input_edges.iter().map(|edge| edge.get_channel()).collect();
+        let output_channels: Vec<Channel> = all_output_edges.iter().map(|edge| edge.get_channel()).collect();
 
         if input_channels.len() != 0 {
             self.port = Some(self.get_host_port_from_in_channels(&input_channels));
@@ -327,7 +327,8 @@ impl TransportBackend for GrpcTransportBackend {
         let mut reader_senders = HashMap::new();
         
         for edge in &all_input_edges {
-            let channel_id = edge.channel.get_channel_id().clone();
+            let channel = edge.get_channel();
+            let channel_id = channel.get_channel_id();
             let (tx, rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
             reader_senders.insert(channel_id.clone(), tx);
             reader_receivers.insert(channel_id.clone(), rx);
@@ -337,7 +338,8 @@ impl TransportBackend for GrpcTransportBackend {
         let mut writer_senders = HashMap::new();
 
         for edge in &all_output_edges {
-            let channel_id = edge.channel.get_channel_id().clone();
+            let channel = edge.get_channel();
+            let channel_id = channel.get_channel_id();
             let (tx, rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
             writer_senders.insert(channel_id.clone(), tx);
             writer_receivers.insert(channel_id.clone(), rx);
@@ -351,12 +353,14 @@ impl TransportBackend for GrpcTransportBackend {
             let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
             
             for edge in input_edges {
-                let channel_id = edge.channel.get_channel_id().clone();
+                let channel = edge.get_channel();
+                let channel_id = channel.get_channel_id();
                 config.add_reader_receiver(channel_id.clone(), reader_receivers.remove(&channel_id).unwrap());
             }
 
             for edge in output_edges {
-                let channel_id = edge.channel.get_channel_id().clone();
+                let channel = edge.get_channel();
+                let channel_id = channel.get_channel_id();
                 config.add_writer_sender(channel_id.clone(), writer_senders.get(&channel_id).unwrap().clone());
             }
         }

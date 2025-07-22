@@ -6,7 +6,7 @@ use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, ru
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
 use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
-use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use tokio::runtime::Runtime;
@@ -71,7 +71,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism,
         chained: false,
@@ -79,7 +79,7 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     let vertex_ids = graph.get_vertices().keys().cloned().collect();
     // Create and start worker

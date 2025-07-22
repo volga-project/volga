@@ -14,13 +14,13 @@ pub enum Channel {
 }
 
 impl Channel {
-    pub fn get_channel_id(&self) -> &String {
+    pub fn get_channel_id(&self) -> String {
         match &self {
             Channel::Local { channel_id, ..} => {
-                channel_id
+                channel_id.clone()
             },
             Channel::Remote { channel_id, ..} => {
-                channel_id
+                channel_id.clone()  
             }
         }
     }

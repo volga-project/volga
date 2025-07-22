@@ -19,7 +19,7 @@ pub struct ExecutionEdge {
     pub edge_id: String,
     pub target_operator_id: String,
     pub partition_type: PartitionType,
-    pub channel: Channel,
+    pub channel: Option<Channel>,
 }
  
 impl ExecutionEdge {
@@ -28,7 +28,7 @@ impl ExecutionEdge {
         target_vertex_id: String,
         target_operator_id: String,
         partition_type: PartitionType,
-        channel: Channel,
+        channel: Option<Channel>,
     ) -> Self {
         Self {
             source_vertex_id: source_vertex_id.clone(),
@@ -38,6 +38,10 @@ impl ExecutionEdge {
             partition_type,
             channel,
         }
+    }
+
+    pub fn get_channel(&self) -> Channel {
+        self.channel.as_ref().expect("channel should be present").clone()
     }
 }
 
@@ -174,4 +178,13 @@ impl ExecutionGraph {
             })
             .collect()
     }
-} 
+
+    /// Update channels for edges based on edge_id -> channel mapping
+    pub fn update_channels(&mut self, edge_channels: HashMap<String, Channel>) {
+        for edge_id in edge_channels.keys() {
+            let channel = edge_channels.get(edge_id).expect("channel for edge {edge_id} should be present");
+            let edge = self.edges.get_mut(edge_id).expect("edge {edge_id} should exist");
+            edge.channel = Some(channel.clone());
+        }
+    }
+}

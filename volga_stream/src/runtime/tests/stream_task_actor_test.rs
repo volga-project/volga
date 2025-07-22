@@ -15,7 +15,7 @@ use crate::runtime::functions::{
     map::MapFunctionTrait,
 };
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
-use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use tokio::runtime::Runtime;
@@ -60,7 +60,7 @@ fn test_stream_task_actor() -> Result<()> {
             ("output".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
         ];
 
-        let (graph, _) = create_test_execution_graph(TestGraphConfig {
+        let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
             operators,
             parallelism: 1,
             chained: false,

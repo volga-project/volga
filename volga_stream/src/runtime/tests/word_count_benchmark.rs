@@ -7,7 +7,7 @@ use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, ru
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
-use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig};
+use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
 use crate::runtime::worker::WorkerState;
 use anyhow::Result;
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -224,7 +224,7 @@ pub async fn run_word_count_benchmark(
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
     ];
 
-    let (graph, _) = create_test_execution_graph(TestGraphConfig {
+    let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
         operators,
         parallelism,
         chained: true,

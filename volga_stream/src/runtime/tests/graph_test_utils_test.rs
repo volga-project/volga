@@ -1,6 +1,6 @@
 use crate::runtime::operators::source::source_operator::VectorSourceConfig;
 use crate::runtime::tests::graph_test_utils::{
-    create_test_execution_graph, TestGraphConfig, 
+    create_linear_test_execution_graph, TestLinearGraphConfig, 
     create_operator_based_worker_distribution
 };
 use crate::runtime::operators::operator::OperatorConfig;
@@ -43,7 +43,7 @@ fn test_create_simple_graph() {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism: 2,
         chained: false,
@@ -51,7 +51,7 @@ fn test_create_simple_graph() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 6); // 3 operators * 2 parallelism
@@ -89,7 +89,7 @@ fn test_create_chained_graph() {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism: 2,
         chained: true,
@@ -97,7 +97,7 @@ fn test_create_chained_graph() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     // Verify vertices - should be chained into a single chain operator (containing source, map1, map2, sink)
     assert_eq!(graph.get_vertices().len(), 2); // 1 group * 2 parallelism
@@ -125,7 +125,7 @@ fn test_create_chained_graph_with_keyby() {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism: 2,
         chained: true,
@@ -133,7 +133,7 @@ fn test_create_chained_graph_with_keyby() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     // Verify vertices - KeyBy should break the chain
     // source -> map1 -> keyby -> map2 -> sink becomes: chain_source->map1->keyby -> chain_map2->sink
@@ -171,7 +171,7 @@ fn test_create_graph_with_keyby() {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism: 2,
         chained: false,
@@ -179,7 +179,7 @@ fn test_create_graph_with_keyby() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 8); // 4 operators * 2 parallelism
@@ -228,7 +228,7 @@ fn test_create_remote_graph() {
     let parallelism_per_worker = 2;
     let total_parallelism = num_workers_per_operator * parallelism_per_worker;
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism: total_parallelism,
         chained: false,
@@ -236,14 +236,14 @@ fn test_create_remote_graph() {
         num_workers_per_operator: Some(num_workers_per_operator),
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), total_parallelism * num_operators);
 
     // Verify edges use remote channels
     for edge in graph.get_edges().values() {
-        match &edge.channel {
+        match edge.channel.as_ref().expect("channel should be present") {
             crate::transport::channel::Channel::Remote { .. } => {
                 // This is expected for remote channels
             }
@@ -315,7 +315,7 @@ fn test_create_graph_with_reduce_chained() {
         ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
     ];
 
-    let config = TestGraphConfig {
+    let config = TestLinearGraphConfig {
         operators,
         parallelism: 2,
         chained: true,
@@ -323,7 +323,7 @@ fn test_create_graph_with_reduce_chained() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config);
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 4); // 2 chained operators * 2 parallelism

@@ -5,9 +5,11 @@ use crate::transport::channel::Channel;
 use crate::common::test_utils::gen_unique_grpc_port;
 use std::collections::HashMap;
 
+/// TODO use logical graph to create execution graph
+
 /// Configuration for generating test execution graphs
 #[derive(Debug, Clone)]
-pub struct TestGraphConfig {
+pub struct TestLinearGraphConfig {
     /// List of (vertex_name, operator_config) tuples defining the operator chain
     pub operators: Vec<(String, OperatorConfig)>,
     /// Parallelism level for each operator
@@ -21,7 +23,7 @@ pub struct TestGraphConfig {
 }
 
 /// Generates a test execution graph based on the provided configuration
-pub fn create_test_execution_graph(config: TestGraphConfig) -> (ExecutionGraph, Option<HashMap<String, Vec<String>>>) {
+pub fn create_linear_test_execution_graph(config: TestLinearGraphConfig) -> (ExecutionGraph, Option<HashMap<String, Vec<String>>>) {
     // Validate configuration
     validate_configs(&config.operators);
 
@@ -103,7 +105,7 @@ pub fn create_test_execution_graph(config: TestGraphConfig) -> (ExecutionGraph, 
                     target_id.clone(),
                     target_name.clone(),
                     partition_type.clone(),
-                    channel,
+                    Some(channel),
                 );
                 graph.add_edge(edge);
             }

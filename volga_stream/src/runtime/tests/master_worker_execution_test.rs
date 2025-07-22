@@ -6,7 +6,7 @@ use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
-use crate::runtime::tests::graph_test_utils::{create_test_execution_graph, TestGraphConfig, create_operator_based_worker_distribution};
+use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig, create_operator_based_worker_distribution};
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
@@ -73,7 +73,7 @@ async fn start_worker_servers(
     ];
 
     // Create execution graph
-    let (graph, worker_vertex_distribution) = create_test_execution_graph(TestGraphConfig {
+    let (graph, worker_vertex_distribution) = create_linear_test_execution_graph(TestLinearGraphConfig {
         operators,
         parallelism: num_workers_per_operator * parallelism_per_worker,
         chained: false,
