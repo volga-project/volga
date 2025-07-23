@@ -243,7 +243,8 @@ fn test_create_remote_graph() {
 
     // Verify edges use remote channels
     for edge in graph.get_edges().values() {
-        match edge.channel.as_ref().expect("channel should be present") {
+        let channel = edge.channel.as_ref().expect("channel should be present");
+        match channel {
             crate::transport::channel::Channel::Remote { .. } => {
                 // This is expected for remote channels
             }

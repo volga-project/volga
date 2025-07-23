@@ -12,7 +12,7 @@ use crate::cluster::cluster_provider::ClusterNode;
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
-    pub node_id: u32,
+    pub operator_id: String,
     pub operator_config: OperatorConfig,
     pub parallelism: usize,
     pub in_schema: Option<Arc<ArrowSchema>>,
@@ -22,7 +22,7 @@ pub struct LogicalNode {
 impl LogicalNode {
     pub fn new(operator_config: OperatorConfig, parallelism: usize, in_schema: Option<Arc<ArrowSchema>>, out_schema: Option<Arc<ArrowSchema>>) -> Self {
         Self {
-            node_id: 0, // Will be set by add_node
+            operator_id: String::new(), // Will be set by add_node
             operator_config,
             parallelism,
             in_schema,
@@ -60,21 +60,25 @@ pub struct LogicalEdge {
 #[derive(Debug, Clone)]
 pub struct LogicalGraph {
     graph: DiGraph<LogicalNode, LogicalEdge>,
-    node_counter: u32,
+    operator_type_counters: HashMap<String, u32>,
 }
 
 impl LogicalGraph {
     pub fn new() -> Self {
         Self {
             graph: DiGraph::new(),
-            node_counter: 0,
+            operator_type_counters: HashMap::new(),
         }
     }
 
     pub fn add_node(&mut self, mut node: LogicalNode) -> NodeIndex {
-        node.node_id = self.node_counter;
+        // Generate unique operator_id based on operator type name
+        let operator_type_name = format!("{}", node.operator_config);
+        let counter = self.operator_type_counters.entry(operator_type_name.clone()).or_insert(0);
+        *counter += 1;
+        node.operator_id = format!("{}_{}", operator_type_name, counter);
+        
         let node_index = self.graph.add_node(node);
-        self.node_counter += 1;
         node_index
     }
 
@@ -86,8 +90,8 @@ impl LogicalGraph {
         self.graph.add_edge(source, target, edge)
     }
 
-    pub fn get_node(&self, node_id: u32) -> Option<&LogicalNode> {
-        self.graph.node_weights().find(|node| node.node_id == node_id)
+    pub fn get_node(&self, operator_id: String) -> Option<&LogicalNode> {
+        self.graph.node_weights().find(|node| node.operator_id == operator_id)
     }
 
     pub fn get_nodes(&self) -> impl Iterator<Item = &LogicalNode> {
@@ -98,33 +102,27 @@ impl LogicalGraph {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
     }
 
-    /// TODO parallelism should come from logical graph, not as a param
-    /// Convert logical graph to execution graph with parallelism
-    pub fn to_execution_graph(
-        &self, 
-        parallelism: usize,
-    ) -> ExecutionGraph {
+    /// Convert logical graph to execution graph using parallelism from each logical node
+    pub fn to_execution_graph(&self) -> ExecutionGraph {
         let mut execution_graph = ExecutionGraph::new();
         let mut logical_to_execution_mapping: HashMap<NodeIndex, Vec<String>> = HashMap::new();
 
         // Create execution vertices for each logical node
         for logical_node in self.graph.node_weights() {
             let logical_node_index = self.graph.node_indices()
-                .find(|&idx| self.graph[idx].node_id == logical_node.node_id)
+                .find(|&idx| self.graph[idx].operator_id == logical_node.operator_id)
                 .unwrap();
 
             let mut execution_vertex_ids = Vec::new();
+            let parallelism = logical_node.parallelism;
 
             // Create parallel execution vertices for this logical node
             for i in 0..parallelism {
-                let execution_vertex_id = if parallelism == 1 {
-                    format!("{}", logical_node.node_id)
-                } else {
-                    format!("{}_{}", logical_node.node_id, i)
-                };
+                let execution_vertex_id = format!("{}_{}", logical_node.operator_id, i);
 
                 let execution_vertex = ExecutionVertex::new(
                     execution_vertex_id.clone(),
+                    logical_node.operator_id.clone(),
                     logical_node.operator_config.clone(),
                     parallelism as i32,
                     i as i32,
@@ -139,14 +137,15 @@ impl LogicalGraph {
 
         // Create execution edges for each logical edge (without channels)
         for edge in self.graph.edge_references() {
-            let source_logical_node = edge.source();
-            let target_logical_node = edge.target();
+            let source_logical_node_index = edge.source();
+            let target_logical_node_index = edge.target();
             let logical_edge = edge.weight();
 
-            let source_execution_vertices = &logical_to_execution_mapping[&source_logical_node];
-            let target_execution_vertices = &logical_to_execution_mapping[&target_logical_node];
+            let source_execution_vertices = &logical_to_execution_mapping[&source_logical_node_index];
+            let target_execution_vertices = &logical_to_execution_mapping[&target_logical_node_index];
 
             // Determine partition type based on logical edge type
+            // TODO introduce forward partition and use it if parallelism of sequential operators is equal
             let partition_type = match logical_edge.edge_type {
                 EdgeType::Forward => PartitionType::RoundRobin,
                 EdgeType::Shuffle => PartitionType::Hash,
@@ -159,7 +158,7 @@ impl LogicalGraph {
                     let execution_edge = ExecutionEdge::new(
                         source_execution_vertex_id.clone(),
                         target_execution_vertex_id.clone(),
-                        target_execution_vertex_id.clone(), // target_operator_id
+                        self.graph[target_logical_node_index].operator_id.clone(),
                         partition_type.clone(),
                         None, // No channel initially
                     );
@@ -172,47 +171,7 @@ impl LogicalGraph {
         execution_graph
     }
 
-    /// Create channels for execution graph based on cluster mapping
-    pub fn create_channels_for_execution_graph(
-        execution_graph: &ExecutionGraph,
-        execution_vertex_to_cluster_node: Option<&HashMap<String, ClusterNode>>,
-    ) -> HashMap<String, Channel> {
-        let mut edge_channels = HashMap::new();
 
-        for edge in execution_graph.get_edges().values() {
-            let channel = if let Some(vertex_to_node) = execution_vertex_to_cluster_node {
-                // Check if vertices are on different nodes
-                let source_node = vertex_to_node.get(&edge.source_vertex_id).expect(&format!("Node with id {} expected", edge.source_vertex_id));
-                let target_node = vertex_to_node.get(&edge.target_vertex_id).expect(&format!("Node with id {} expected", edge.target_vertex_id));
-                
-                if source_node.node_id != target_node.node_id {
-                    // Vertices are on different nodes, create remote channel
-                    Channel::Remote {
-                        channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
-                        source_node_ip: source_node.node_ip.clone(),
-                        source_node_id: source_node.node_id.clone(),
-                        target_node_ip: target_node.node_ip.clone(),
-                        target_node_id: target_node.node_id.clone(),
-                        target_port: target_node.node_port as i32,
-                    }
-                } else {
-                    // Vertices are on same node, use local channel
-                    Channel::Local {
-                        channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
-                    }
-                }
-            } else {
-                // No cluster mapping provided, use local channels
-                Channel::Local {
-                    channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
-                }
-            };
-
-            edge_channels.insert(edge.edge_id.clone(), channel);
-        }
-
-        edge_channels
-    }
 
 
     /// Generate DOT format string
@@ -221,13 +180,13 @@ impl LogicalGraph {
         
         // Add nodes with labels
         for node in self.graph.node_weights() {
-            dot_string.push_str(&format!("  {} [label=\"{}: {}\"];\n", node.node_id, node.node_id, node.operator_config));
+            dot_string.push_str(&format!("  {} [label=\"{}: {}\"];\n", node.operator_id, node.operator_id, node.operator_config));
         }
         
         // Add edges with labels
         for edge in self.graph.edge_references() {
-            let source_id = self.graph[edge.source()].node_id;
-            let target_id = self.graph[edge.target()].node_id;
+            let source_id = self.graph[edge.source()].operator_id.clone();
+            let target_id = self.graph[edge.target()].operator_id.clone();
             let edge_type = match edge.weight().edge_type {
                 EdgeType::Forward => "Forward",
                 EdgeType::Shuffle => "Shuffle",
@@ -250,12 +209,16 @@ impl fmt::Display for LogicalGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cluster::cluster_provider::create_test_cluster_nodes;
+    use crate::cluster::node_assignment::{NodeAssignStrategy, OperatorPerNodeStrategy};
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-    use crate::runtime::functions::map::MapFunction;
+    use crate::runtime::functions::map::{MapFunction, ProjectionFunction};
     use crate::runtime::functions::map::filter_function::FilterFunction;
+    use arrow::compute::kernels::numeric;
+    use datafusion::common::{DFSchema, DFSchemaRef};
     use datafusion::execution::context::SessionContext;
-    use crate::common::message::Message;
     use arrow::datatypes::{Schema, Field, DataType};
+    use datafusion::prelude::{col, lit};
     use std::sync::Arc;
 
     #[test]
@@ -272,34 +235,34 @@ mod tests {
         let source_config = SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]));
         let source_node = LogicalNode::new(
             OperatorConfig::SourceConfig(source_config),
-            1,
+            2, // source parallelism
             None,
             None,
         );
         let source_index = logical_graph.add_node(source_node);
 
         let filter_function = FilterFunction::new(
-            datafusion::common::DFSchemaRef::from(datafusion::common::DFSchema::try_from(schema.clone()).unwrap()),
-            datafusion::logical_expr::col("id").gt(datafusion::logical_expr::lit(0)),
+            DFSchemaRef::from(DFSchema::try_from(schema.clone()).unwrap()),
+            col("id").gt(lit(0)),
             SessionContext::new(),
         );
         let filter_node = LogicalNode::new(
             OperatorConfig::MapConfig(MapFunction::Filter(filter_function)),
-            1,
+            3, // filter parallelism
             None,
             None,
         );
         let filter_index = logical_graph.add_node(filter_node);
 
-        let projection_function = crate::runtime::functions::map::projection_function::ProjectionFunction::new(
-            datafusion::common::DFSchemaRef::from(datafusion::common::DFSchema::try_from(schema.clone()).unwrap()),
-            datafusion::common::DFSchemaRef::from(datafusion::common::DFSchema::try_from(schema.clone()).unwrap()),
-            vec![datafusion::logical_expr::col("id"), datafusion::logical_expr::col("name")],
+        let projection_function = ProjectionFunction::new(
+            DFSchemaRef::from(DFSchema::try_from(schema.clone()).unwrap()),
+            DFSchemaRef::from(DFSchema::try_from(schema.clone()).unwrap()),
+            vec![col("id"), col("name")],
             SessionContext::new(),
         );
         let projection_node = LogicalNode::new(
             OperatorConfig::MapConfig(MapFunction::Projection(projection_function)),
-            1,
+            1, // projection parallelism
             None,
             None,
         );
@@ -309,16 +272,16 @@ mod tests {
         logical_graph.add_edge(source_index, filter_index, EdgeType::Forward);
         logical_graph.add_edge(filter_index, projection_index, EdgeType::Forward);
 
-        // Convert to execution graph with parallelism 2
-        let execution_graph = logical_graph.to_execution_graph(2);
+        // Convert to execution graph
+        let execution_graph = logical_graph.to_execution_graph();
 
         // Verify execution vertices
         let vertices = execution_graph.get_vertices();
-        assert_eq!(vertices.len(), 6); // 3 logical nodes * 2 parallelism
+        assert_eq!(vertices.len(), 6); // 2 + 3 + 1 = 6 vertices total
 
         // Verify execution edges
         let edges = execution_graph.get_edges();
-        assert_eq!(edges.len(), 8); // 2 logical edges * 2 source * 2 target
+        assert_eq!(edges.len(), 9); // 2 source * 3 filter + 3 filter * 1 projection = 9 edges
 
         // Verify partition types
         for edge in edges.values() {
@@ -327,40 +290,33 @@ mod tests {
             // Verify channels are not set initially
             assert!(edge.channel.is_none(), "Edge {} -> {} should not have channel set initially", edge.source_vertex_id, edge.target_vertex_id);
         }
-
-        // Verify vertex naming
-        assert!(vertices.contains_key("0_0"));
-        assert!(vertices.contains_key("0_1"));
-        assert!(vertices.contains_key("1_0"));
-        assert!(vertices.contains_key("1_1"));
-        assert!(vertices.contains_key("2_0"));
-        assert!(vertices.contains_key("2_1"));
     }
 
     #[test]
     fn test_logical_to_execution_graph_with_cluster() {
         let mut logical_graph = LogicalGraph::new();
+        let parallelism = 2;
 
         // Create a simple logical graph: source -> filter
         let source_config = SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]));
         let source_node = LogicalNode::new(
             OperatorConfig::SourceConfig(source_config),
-            1,
+            parallelism,
             None,
             None,
         );
         let source_index = logical_graph.add_node(source_node);
 
         let filter_function = FilterFunction::new(
-            datafusion::common::DFSchemaRef::from(datafusion::common::DFSchema::try_from(
+            DFSchemaRef::from(DFSchema::try_from(
                 Arc::new(Schema::new(vec![Field::new("id", DataType::Int32, false)]))
             ).unwrap()),
-            datafusion::logical_expr::col("id").gt(datafusion::logical_expr::lit(0)),
+            col("id").gt(lit(0)),
             SessionContext::new(),
         );
         let filter_node = LogicalNode::new(
             OperatorConfig::MapConfig(MapFunction::Filter(filter_function)),
-            1,
+            parallelism,
             None,
             None,
         );
@@ -368,47 +324,54 @@ mod tests {
 
         logical_graph.add_edge(source_index, filter_index, EdgeType::Forward);
 
-        // Create cluster mapping: source vertices on node1, filter vertices on node2
-        let mut vertex_to_node = HashMap::new();
-        vertex_to_node.insert("0_0".to_string(), ClusterNode::new("node1".to_string(), "192.168.1.10".to_string(), 8080));
-        vertex_to_node.insert("0_1".to_string(), ClusterNode::new("node1".to_string(), "192.168.1.10".to_string(), 8080));
-        vertex_to_node.insert("1_0".to_string(), ClusterNode::new("node2".to_string(), "192.168.1.11".to_string(), 8081));
-        vertex_to_node.insert("1_1".to_string(), ClusterNode::new("node2".to_string(), "192.168.1.11".to_string(), 8081));
+        let num_operators = logical_graph.get_nodes().count();
 
-        // Convert to execution graph with cluster mapping
-        let mut execution_graph = logical_graph.to_execution_graph(2);
+        // Convert to execution graph
+        let mut execution_graph = logical_graph.to_execution_graph();
         
-        // Create channels based on cluster mapping
-        let edge_channels = LogicalGraph::create_channels_for_execution_graph(&execution_graph, Some(&vertex_to_node));
-        
-        // Update execution graph with channels
-        execution_graph.update_channels(edge_channels);
+        // Create cluster nodes
+        let cluster_nodes = create_test_cluster_nodes(num_operators);
+
+        // Use OperatorPerNodeStrategy to assign vertices to nodes
+        let vertex_to_node = OperatorPerNodeStrategy.assign_nodes(&execution_graph, &cluster_nodes);
+
+        // Update channels based on cluster mapping
+        execution_graph.update_channels_with_node_mapping(Some(&vertex_to_node));
 
         // Verify execution vertices
         let vertices = execution_graph.get_vertices();
-        assert_eq!(vertices.len(), 4); // 2 logical nodes * 2 parallelism
+        assert_eq!(vertices.len(), num_operators * parallelism); // 2 logical nodes * 2 parallelism
 
         // Verify execution edges
         let edges = execution_graph.get_edges();
-        assert_eq!(edges.len(), 4); // 2 source * 2 target
+        assert_eq!(edges.len(), num_operators * num_operators); // 2 source * 2 target
 
         // Verify that edges between different nodes use remote channels
         for edge in edges.values() {
-            if edge.source_vertex_id.starts_with("0") && edge.target_vertex_id.starts_with("1") {
-                // Source to filter edges should be remote
+            // Get source and target nodes from the mapping
+            let source_node = vertex_to_node.get(&edge.source_vertex_id).expect("Source vertex should be mapped");
+            let target_node = vertex_to_node.get(&edge.target_vertex_id).expect("Target vertex should be mapped");
+            
+            // Check if vertices are on different nodes
+            if source_node.node_id != target_node.node_id {
+                // Vertices are on different nodes, should use remote channel
                 match &edge.channel {
                     Some(Channel::Remote { source_node_ip, target_node_ip, target_port, .. }) => {
-                        assert_eq!(source_node_ip, "192.168.1.10");
-                        assert_eq!(target_node_ip, "192.168.1.11");
-                        assert_eq!(*target_port, 8081);
+                        assert_eq!(source_node_ip, &source_node.node_ip);
+                        assert_eq!(target_node_ip, &target_node.node_ip);
+                        assert_eq!(*target_port, target_node.node_port as i32);
                     }
                     Some(Channel::Local { .. }) => {
-                        panic!("Expected remote channel for cross-node edge");
+                        panic!("Expected remote channel for cross-node edge {} -> {}", 
+                               edge.source_vertex_id, edge.target_vertex_id);
                     }
                     None => {
-                        panic!("Expected channel to be set");
+                        panic!("Expected channel to be set for edge {} -> {}", 
+                               edge.source_vertex_id, edge.target_vertex_id);
                     }
                 }
+            } else {
+               panic!("Expected different nodes for edge {}", edge.edge_id);
             }
         }
     }

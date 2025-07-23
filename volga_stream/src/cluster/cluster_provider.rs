@@ -63,3 +63,13 @@ impl Default for InMemoryClusterProvider {
         Self::new()
     }
 } 
+
+pub fn create_test_cluster_nodes(num_nodes: usize) -> Vec<ClusterNode> {
+    (0..num_nodes)
+        .map(|i| ClusterNode::new(
+            format!("node{}", i + 1),
+            format!("192.168.1.{}", 10 + i),
+            8080 + i as u16,
+        ))
+        .collect()
+}

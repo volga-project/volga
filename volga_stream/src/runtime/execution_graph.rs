@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
@@ -9,8 +10,6 @@ use crate::runtime::functions::{
     reduce::{ReduceFunction, AggregationResultExtractor},
 };
 use crate::runtime::operators::operator::OperatorType;
-
-use super::functions::source::word_count_source::BatchingMode;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionEdge {
@@ -48,6 +47,7 @@ impl ExecutionEdge {
 #[derive(Debug, Clone)]
 pub struct ExecutionVertex {
     pub vertex_id: String,
+    pub operator_id: String,
     pub operator_config: OperatorConfig,
     pub input_edges: Vec<String>,
     pub output_edges: Vec<String>,
@@ -58,12 +58,14 @@ pub struct ExecutionVertex {
 impl ExecutionVertex {
     pub fn new(
         vertex_id: String,
+        operator_id: String,
         operator_config: OperatorConfig,
         parallelism: i32,
         task_index: i32,
     ) -> Self {
         Self {
             vertex_id,
+            operator_id,
             operator_config,
             input_edges: Vec::new(),
             output_edges: Vec::new(),
@@ -179,12 +181,40 @@ impl ExecutionGraph {
             .collect()
     }
 
-    /// Update channels for edges based on edge_id -> channel mapping
-    pub fn update_channels(&mut self, edge_channels: HashMap<String, Channel>) {
-        for edge_id in edge_channels.keys() {
-            let channel = edge_channels.get(edge_id).expect("channel for edge {edge_id} should be present");
-            let edge = self.edges.get_mut(edge_id).expect("edge {edge_id} should exist");
-            edge.channel = Some(channel.clone());
+    pub fn update_channels_with_node_mapping(
+        &mut self,
+        execution_vertex_to_cluster_node: Option<&ExecutionVertexNodeMapping>,
+    ) {
+        for edge in self.edges.values_mut() {
+            let channel = if let Some(vertex_to_node) = execution_vertex_to_cluster_node {
+                // Check if vertices are on different nodes
+                let source_node = vertex_to_node.get(&edge.source_vertex_id).expect(&format!("Node with id {} expected", edge.source_vertex_id));
+                let target_node = vertex_to_node.get(&edge.target_vertex_id).expect(&format!("Node with id {} expected", edge.target_vertex_id));
+                
+                if source_node.node_id != target_node.node_id {
+                    // Vertices are on different nodes, create remote channel
+                    crate::transport::channel::Channel::Remote {
+                        channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
+                        source_node_ip: source_node.node_ip.clone(),
+                        source_node_id: source_node.node_id.clone(),
+                        target_node_ip: target_node.node_ip.clone(),
+                        target_node_id: target_node.node_id.clone(),
+                        target_port: target_node.node_port as i32,
+                    }
+                } else {
+                    // Vertices are on same node, use local channel
+                    crate::transport::channel::Channel::Local {
+                        channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
+                    }
+                }
+            } else {
+                // No cluster mapping provided, use local channels
+                crate::transport::channel::Channel::Local {
+                    channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
+                }
+            };
+
+            edge.channel = Some(channel);
         }
     }
 }

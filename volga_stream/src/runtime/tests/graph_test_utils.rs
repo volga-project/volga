@@ -48,6 +48,7 @@ pub fn create_linear_test_execution_graph(config: TestLinearGraphConfig) -> (Exe
             
             let vertex = ExecutionVertex::new(
                 vertex_id,
+                op_name.clone(),
                 op_config.clone(),
                 config.parallelism as i32,
                 i as i32,

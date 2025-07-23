@@ -60,6 +60,7 @@ async fn test_grpc_transport_backend() {
             let vertex_id = format!("writer_node_{}_writer_{}", node_idx, writer_idx);
             graph.add_vertex(ExecutionVertex::new(
                 vertex_id.clone(),
+                "writer_operator".to_string(),
                 OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
                 1,
                 0
@@ -73,6 +74,7 @@ async fn test_grpc_transport_backend() {
             let vertex_id = format!("reader_node_{}_reader_{}", node_idx, reader_idx);
             graph.add_vertex(ExecutionVertex::new(
                 vertex_id.clone(),
+                "reader_operator".to_string(),
                 OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
                 1,
                 0

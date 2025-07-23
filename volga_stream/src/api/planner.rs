@@ -37,6 +37,15 @@ pub struct PlanningContext {
     pub connector_configs: HashMap<String, SourceConfig>,
 }
 
+impl PlanningContext {
+    pub fn new(df_session_context: SessionContext) -> Self {
+        Self {
+            df_session_context,
+            connector_configs: HashMap::new(),
+        }
+    }
+}
+
 impl Planner {
     pub fn new(context: PlanningContext) -> Self {
         Self {

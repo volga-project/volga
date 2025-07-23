@@ -43,6 +43,7 @@ async fn test_actor_transport() {
     for i in 0..num_writers {
         graph.add_vertex(ExecutionVertex::new(
             writer_vertex_ids[i].clone(),
+            "writer_operator".to_string(),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
             1,
             0
@@ -51,6 +52,7 @@ async fn test_actor_transport() {
     for i in 0..num_readers {
         graph.add_vertex(ExecutionVertex::new(
             reader_vertex_ids[i].clone(),
+            "reader_operator".to_string(),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
             1,
             0
