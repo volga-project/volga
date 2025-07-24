@@ -214,7 +214,6 @@ mod tests {
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::functions::map::{MapFunction, ProjectionFunction};
     use crate::runtime::functions::map::filter_function::FilterFunction;
-    use arrow::compute::kernels::numeric;
     use datafusion::common::{DFSchema, DFSchemaRef};
     use datafusion::execution::context::SessionContext;
     use arrow::datatypes::{Schema, Field, DataType};
@@ -231,7 +230,7 @@ mod tests {
             Field::new("name", DataType::Utf8, false),
         ]));
 
-        // Create logical nodes: source -> filter -> projection
+        // Create logical nodes: source -> filter -> projection -> sink
         let source_config = SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]));
         let source_node = LogicalNode::new(
             OperatorConfig::SourceConfig(source_config),
@@ -268,20 +267,31 @@ mod tests {
         );
         let projection_index = logical_graph.add_node(projection_node);
 
+        // Add sink node
+        let sink_config = crate::runtime::operators::sink::sink_operator::SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string());
+        let sink_node = LogicalNode::new(
+            OperatorConfig::SinkConfig(sink_config),
+            1, // sink parallelism
+            None,
+            None,
+        );
+        let sink_index = logical_graph.add_node(sink_node);
+
         // Add edges
         logical_graph.add_edge(source_index, filter_index, EdgeType::Forward);
         logical_graph.add_edge(filter_index, projection_index, EdgeType::Forward);
+        logical_graph.add_edge(projection_index, sink_index, EdgeType::Forward);
 
         // Convert to execution graph
         let execution_graph = logical_graph.to_execution_graph();
 
         // Verify execution vertices
         let vertices = execution_graph.get_vertices();
-        assert_eq!(vertices.len(), 6); // 2 + 3 + 1 = 6 vertices total
+        assert_eq!(vertices.len(), 7); // 2 + 3 + 1 + 1 = 7 vertices total
 
         // Verify execution edges
         let edges = execution_graph.get_edges();
-        assert_eq!(edges.len(), 9); // 2 source * 3 filter + 3 filter * 1 projection = 9 edges
+        assert_eq!(edges.len(), 10); // 2 source * 3 filter + 3 filter * 1 projection + 1 projection * 1 sink = 10 edges
 
         // Verify partition types
         for edge in edges.values() {
