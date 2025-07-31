@@ -22,6 +22,8 @@ use datafusion::common::tree_node::TreeNodeVisitor;
 use datafusion::prelude::SessionContext;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::sql::TableReference;
+use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
+use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
 
 use super::logical_graph::{LogicalNode, LogicalGraph, EdgeType};
@@ -173,9 +175,11 @@ impl Planner {
         )?;
         println!("logical_plan: {}", logical_plan.display_indent());
 
-        // TODO: optimize logical plan
+        // Optimize the logical plan (apply type coercion, etc.)
+        let optimized_plan = self.optimize_plan(logical_plan)?;
+        println!("optimized_plan: {}", optimized_plan.display_indent());
         
-        self.logical_plan_to_graph(&logical_plan)
+        self.logical_plan_to_graph(&optimized_plan)
     }
 
     fn create_source_node(&mut self, table_scan: &TableScan, parallelism: usize) -> Result<NodeIndex> {
@@ -239,7 +243,7 @@ impl Planner {
         Ok(node_index)
     }
 
-    fn create_join_node(&mut self, join: &Join, parallelism: usize) -> Result<NodeIndex> {
+    fn create_join_node(&mut self, _join: &Join, parallelism: usize) -> Result<NodeIndex> {
         let join_function = JoinFunction::new();
         
         let node = LogicalNode::new(
@@ -267,9 +271,12 @@ impl Planner {
         self.logical_graph.add_edge(sink_node_index, root_node_index, EdgeType::Forward);
     }
 
+    // TODO figure out on final vs partial plan 
     fn handle_aggregate(&mut self, aggregate: &Aggregate, parallelism: usize) -> Result<NodeIndex> {
         // Create a logical plan node just for this aggregate
         let aggregate_plan = LogicalPlan::Aggregate(aggregate.clone());
+        
+        println!("Aggregate expressions: {:?}", aggregate.aggr_expr);
 
         // Use DataFusion's physical planner to convert to AggregateExec
         let rt = tokio::runtime::Runtime::new()
@@ -281,19 +288,36 @@ impl Planner {
             planner.create_physical_plan(&aggregate_plan, &session_state)
         ).unwrap();
         
+        println!("Full physical plan tree:");
+        Self::print_physical_plan(&physical_plan, 0);
+        
         // DataFusion creates a two-stage plan: Partial -> Final
-        // We want the Partial stage for our streaming use case
-        let aggregate_exec = Self::extract_partial_aggregate_exec(&physical_plan)
-            .ok_or_else(|| DataFusionError::Internal("Could not find Partial AggregateExec in physical plan".to_string()))?;
-
-        // Debug: Print the aggregate expressions and their types in detail
-        println!("Partial AggregateExec expressions:");
-        for (i, expr) in aggregate_exec.aggr_expr().iter().enumerate() {
-            println!("  [{}] {}: return_field={:?}", 
-                     i, expr.name(), expr.field());
-            println!("      expressions: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>());
-            println!("      input_fields: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e.data_type(&aggregate_exec.input_schema()))).collect::<Vec<_>>());
+        // Let's examine both stages to see which has proper coercion
+        let partial_aggregate_exec = Self::extract_partial_aggregate_exec(&physical_plan);
+        let final_aggregate_exec = Self::extract_final_aggregate_exec(&physical_plan);
+        
+        println!("\n=== PARTIAL AGGREGATE ===");
+        if let Some(ref partial) = partial_aggregate_exec {
+            Self::print_aggregate_details("Partial", partial);
+        } else {
+            println!("No Partial AggregateExec found");
         }
+        
+        println!("\n=== FINAL AGGREGATE ===");
+        if let Some(ref final_agg) = final_aggregate_exec {
+            Self::print_aggregate_details("Final", final_agg);
+        } else {
+            println!("No Final AggregateExec found");
+        }
+        
+        // For now, try the Final aggregate instead of Partial
+        let aggregate_exec = final_aggregate_exec
+            .or(partial_aggregate_exec)
+            .ok_or_else(|| DataFusionError::Internal("Could not find any AggregateExec in physical plan".to_string()))?;
+
+        // Debug: Print the selected aggregate expressions
+        println!("\n=== SELECTED AGGREGATE ({:?}) ===", aggregate_exec.mode());
+        Self::print_aggregate_details("Selected", &aggregate_exec);
 
         // Create our operator config
         let node = LogicalNode::new(
@@ -328,6 +352,61 @@ impl Planner {
         }
         
         None
+    }
+    
+    /// Recursively search for the Final/FinalPartitioned mode AggregateExec in the physical plan tree
+    fn extract_final_aggregate_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<AggregateExec> {
+        use datafusion::physical_plan::aggregates::AggregateMode;
+        
+        // Check if this is an AggregateExec with Final/FinalPartitioned mode
+        if let Some(agg_exec) = plan.as_any().downcast_ref::<AggregateExec>() {
+            if matches!(agg_exec.mode(), AggregateMode::Final | AggregateMode::FinalPartitioned) {
+                return Some(agg_exec.clone());
+            }
+        }
+        
+        // Recursively search in children
+        for child in plan.children() {
+            if let Some(final_agg) = Self::extract_final_aggregate_exec(&child) {
+                return Some(final_agg);
+            }
+        }
+        
+        None
+    }
+    
+    /// Print the physical plan tree structure
+    fn print_physical_plan(plan: &Arc<dyn ExecutionPlan>, indent: usize) {
+        let indent_str = "  ".repeat(indent);
+        println!("{}[{}] {:?}", indent_str, plan.name(), plan);
+        
+        for child in plan.children() {
+            Self::print_physical_plan(&child, indent + 1);
+        }
+    }
+    
+    /// Print detailed information about an AggregateExec
+    fn print_aggregate_details(label: &str, agg_exec: &AggregateExec) {
+        println!("{} AggregateExec mode: {:?}", label, agg_exec.mode());
+        println!("{} expressions:", label);
+        for (i, expr) in agg_exec.aggr_expr().iter().enumerate() {
+            println!("  [{}] {}: return_field={:?}", i, expr.name(), expr.field());
+            println!("      expressions: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>());
+            println!("      input_fields: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e.data_type(&agg_exec.input_schema()))).collect::<Vec<_>>());
+        }
+    }
+    
+    /// Apply optimization rules to a logical plan
+    /// Currently only applies type coercion
+    fn optimize_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
+        let session_state = self.context.df_session_context.state();
+        let config = session_state.config_options();
+        
+        // Apply type coercion analyzer
+        let type_coercion = TypeCoercion::new();
+        let coerced_plan = type_coercion.analyze(plan, config)?;
+        
+        Ok(coerced_plan)
     }
 }
 
@@ -545,7 +624,7 @@ mod tests {
         let sql = "SELECT name, COUNT(*) as count FROM test_table GROUP BY name";
         
         // This will fail until we implement GROUP BY support
-        let result = planner.sql_to_graph(sql);
+        let _result = planner.sql_to_graph(sql);
         // assert!(result.is_err(), "Expected error due to unimplemented GROUP BY support");
     }
 } 
