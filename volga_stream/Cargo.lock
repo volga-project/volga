@@ -3322,6 +3322,7 @@ dependencies = [
  "kameo",
  "lazy_static",
  "ordered-float 3.9.2",
+ "parking_lot",
  "petgraph 0.6.5",
  "prost",
  "rand 0.5.6",

@@ -79,10 +79,7 @@ mod tests {
         
         // Create logical graph from SQL
         let sql = "SELECT id FROM test_table WHERE value > 3.0";
-        let logical_graph = tokio::runtime::Runtime::new()
-            .unwrap()
-            .block_on(planner.sql_to_graph(sql))
-            .unwrap();
+        let logical_graph = planner.sql_to_graph(sql).unwrap();
         
         // Convert to execution graph
         logical_graph.to_execution_graph()

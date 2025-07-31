@@ -40,7 +40,7 @@ tokio-stream = "0.1"
 datafusion = "48.0.1"
 datafusion-optimizer = "48.0.1"
 petgraph = "0.6"
-
+parking_lot = "0.12"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

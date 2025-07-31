@@ -3,12 +3,8 @@ use std::hash::{Hash, Hasher};
 use std::collections::hash_map::DefaultHasher;
 use std::io::{Cursor, Read, Write};
 use arrow::array::{
-    Array, StringArray, Int64Array, Int32Array, Int16Array, Int8Array,
-    UInt64Array, UInt32Array, UInt16Array, UInt8Array,
-    Float64Array, Float32Array, Date32Array, Date64Array, BinaryArray,
-    TimestampSecondArray, TimestampMillisecondArray,
-    TimestampMicrosecondArray, TimestampNanosecondArray,
-    Decimal128Array, Decimal256Array, LargeBinaryArray,
+    Array, StringArray, Int64Array, Int32Array,
+    Float64Array, Float32Array,
 };
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
@@ -95,6 +91,7 @@ impl Key {
         Self { record_batch, hash }
     }
     
+    // TODO use datafusion create_hashes
     fn compute_hash(batch: &RecordBatch) -> Result<u64> {
         // We'll use a simple hash algorithm:
         // 1. Hash each column value

@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use crate::runtime::functions::join::join_function::JoinFunction;
+use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
 use crate::runtime::operators::chained::chained_operator::ChainedOperator;
 use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
@@ -9,23 +10,15 @@ use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
-use crate::common::Key;
 use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
-use tokio_rayon::AsyncThreadPool;
 use std::fmt;
 use crate::runtime::functions::{
     function_trait::FunctionTrait,
-    source::{SourceFunction, SourceFunctionTrait, create_source_function},
-    sink::{SinkFunction, SinkFunctionTrait},
-    sink::sink_function::create_sink_function,
     map::MapFunction,
-    key_by::{KeyByFunction, KeyByFunctionTrait},
-    reduce::{ReduceFunction, ReduceFunctionTrait, Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait},
+    key_by::{KeyByFunction},
+    reduce::{ReduceFunction, AggregationResultExtractor},
 };
-
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -56,6 +49,7 @@ pub enum Operator {
     Source(SourceOperator),
     KeyBy(KeyByOperator),
     Reduce(ReduceOperator),
+    Aggregate(AggregateOperator),
     Chained(ChainedOperator),
 }
 
@@ -67,6 +61,7 @@ pub enum OperatorConfig {
     SourceConfig(SourceConfig),
     KeyByConfig(KeyByFunction),
     ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
+    AggregateConfig(AggregateConfig),
     ChainedConfig(Vec<OperatorConfig>),
 }
 
@@ -79,6 +74,7 @@ impl fmt::Display for OperatorConfig {
             OperatorConfig::SourceConfig(source_config) => write!(f, "Source({})", source_config),
             OperatorConfig::KeyByConfig(key_by_func) => write!(f, "KeyBy({})", key_by_func),
             OperatorConfig::ReduceConfig(reduce_func, _) => write!(f, "Reduce({})", reduce_func),
+            OperatorConfig::AggregateConfig(_) => write!(f, "Aggregate"),
             OperatorConfig::ChainedConfig(configs) => write!(f, "Chained({} ops)", configs.len()),
         }
     }
@@ -94,6 +90,7 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.open(context).await,
             Operator::KeyBy(op) => op.open(context).await,
             Operator::Reduce(op) => op.open(context).await,
+            Operator::Aggregate(op) => op.open(context).await,
             Operator::Chained(op) => op.open(context).await
         }
     }
@@ -106,6 +103,7 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.close().await,
             Operator::KeyBy(op) => op.close().await,
             Operator::Reduce(op) => op.close().await,
+            Operator::Aggregate(op) => op.close().await,
             Operator::Chained(op) => op.close().await
         }
     }
@@ -117,15 +115,16 @@ impl OperatorTrait for Operator {
             }
             _ => {
                 // Process regular messages as before
-                match self {
-                    Operator::Map(op) => op.process_message(message).await,
-                    Operator::Join(op) => op.process_message(message).await,
-                    Operator::Sink(op) => op.process_message(message).await,
-                    Operator::Source(op) => op.process_message(message).await,
-                    Operator::KeyBy(op) => op.process_message(message).await,
-                    Operator::Reduce(op) => op.process_message(message).await,
-                    Operator::Chained(op) => op.process_message(message).await,
-                }
+                        match self {
+            Operator::Map(op) => op.process_message(message).await,
+            Operator::Join(op) => op.process_message(message).await,
+            Operator::Sink(op) => op.process_message(message).await,
+            Operator::Source(op) => op.process_message(message).await,
+            Operator::KeyBy(op) => op.process_message(message).await,
+            Operator::Reduce(op) => op.process_message(message).await,
+            Operator::Aggregate(op) => op.process_message(message).await,
+            Operator::Chained(op) => op.process_message(message).await,
+        }
             }
         }
     }
@@ -138,6 +137,7 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.operator_type(),
             Operator::KeyBy(op) => op.operator_type(),
             Operator::Reduce(op) => op.operator_type(),
+            Operator::Aggregate(op) => op.operator_type(),
             Operator::Chained(op) => op.operator_type(),
         }
     }
@@ -150,6 +150,7 @@ impl OperatorTrait for Operator {
             Operator::Source(op) => op.fetch().await,
             Operator::KeyBy(op) => op.fetch().await,
             Operator::Reduce(op) => op.fetch().await,
+            Operator::Aggregate(op) => op.fetch().await,
             Operator::Chained(op) => op.fetch().await,
         }
     }
@@ -237,6 +238,7 @@ pub fn create_operator_from_config(operator_config: OperatorConfig) -> Operator 
         OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config)),
         OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
         OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config)),
+        OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
         OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config)),
     };
     operator
@@ -274,7 +276,8 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
         OperatorConfig::MapConfig(_) | 
         OperatorConfig::JoinConfig(_) | 
         OperatorConfig::KeyByConfig(_) | 
-        OperatorConfig::ReduceConfig(_, _) => {
+        OperatorConfig::ReduceConfig(_, _) |
+        OperatorConfig::AggregateConfig(_) => {
             OperatorType::Processor
         }
     }

@@ -14,6 +14,7 @@ use datafusion::logical_expr::Expr;
 use datafusion::execution::context::SessionContext;
 use arrow::record_batch::RecordBatch;
 
+// TODO use Datafusion's ProjectionExec
 #[derive(Clone)]
 pub struct ProjectionFunction {
     in_schema: DFSchemaRef,

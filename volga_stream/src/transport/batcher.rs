@@ -8,6 +8,7 @@ use arrow::compute::concat_batches;
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
 
+// TODO use DataFusion's BatchCoalescer
 
 #[derive(Debug, Clone)]
 pub struct BatcherConfig {

@@ -1,28 +1,100 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::mem;
 use arrow::datatypes::SchemaRef;
-use datafusion::catalog::MemTable;
+use datafusion::datasource::TableProvider;
+use datafusion::physical_plan::{ExecutionPlan};
+use datafusion::physical_plan::memory::{LazyMemoryExec, LazyBatchGenerator};
+use arrow::record_batch::RecordBatch;
+use parking_lot::RwLock;
+use std::sync::Arc as StdArc;
+use std::fmt;
+use datafusion::logical_expr::TableType;
+use datafusion::catalog::Session;
+use async_trait::async_trait;
+use std::any::Any;
 use datafusion::logical_expr::{
-    LogicalPlan, Projection, Filter, Aggregate, Join, Window, TableScan, 
-    SubqueryAlias, Subquery, Sort, Union, Distinct, Limit, Repartition,
-    Expr, BinaryExpr, expr::ScalarFunction
+    LogicalPlan, Projection, Filter, Aggregate, Join, TableScan, Expr
 };
+use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::common::{Result, DataFusionError};
 use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::common::tree_node::{TreeNode, TreeNodeVisitor};
+use datafusion::common::tree_node::TreeNodeVisitor;
 use datafusion::prelude::SessionContext;
+use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::sql::TableReference;
 use petgraph::graph::NodeIndex;
 
-use super::logical_graph::{LogicalNode, LogicalGraph,
-    EdgeType, ConnectorConfig
-};
+use super::logical_graph::{LogicalNode, LogicalGraph, EdgeType};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::functions::map::{FilterFunction, ProjectionFunction, MapFunction};
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
+use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
+
+/// Custom table provider that creates execution plans with proper partitioning
+/// Similar to Arroyo's LogicalBatchInput
+#[derive(Debug, Clone)]
+pub struct VolgaTableProvider {
+    table_name: String,
+    schema: SchemaRef,
+}
+
+impl VolgaTableProvider {
+    pub fn new(table_name: String, schema: SchemaRef) -> Self {
+        Self { table_name, schema }
+    }
+}
+
+#[async_trait]
+impl TableProvider for VolgaTableProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::Temporary
+    }
+
+    async fn scan(
+        &self,
+        _state: &dyn Session,
+        _projection: Option<&Vec<usize>>,
+        _filters: &[Expr],
+        _limit: Option<usize>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        // Create a LazyMemoryExec with 1 empty partition instead of 0 partitions
+        // This prevents the "Plan does not satisfy distribution requirements" error
+        
+        // Simple generator that produces no batches
+        #[derive(Debug)]
+        struct EmptyBatchGenerator {
+            schema: SchemaRef,
+        }
+        
+        impl fmt::Display for EmptyBatchGenerator {
+            fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(f, "EmptyBatchGenerator")
+            }
+        }
+        
+        impl LazyBatchGenerator for EmptyBatchGenerator {
+            fn generate_next_batch(&mut self) -> Result<Option<RecordBatch>> {
+                Ok(None) // Always return None to indicate no more batches
+            }
+        }
+        
+        let generator = StdArc::new(RwLock::new(EmptyBatchGenerator {
+            schema: self.schema.clone(),
+        }));
+        
+        Ok(Arc::new(LazyMemoryExec::try_new(self.schema.clone(), vec![generator])?))
+    }
+}
 
 
 /// Converts DataFusion logical plans to Volga logical graphs
@@ -70,8 +142,8 @@ impl Planner {
     pub fn register_source(&mut self, table_name: String, config: SourceConfig, schema: SchemaRef) {
         self.context.connector_configs.insert(table_name.clone(), config);
 
-        // dummy mem table
-        let table = MemTable::try_new(schema, vec![]).unwrap();
+        // Use custom table provider that creates proper partitioning
+        let table = VolgaTableProvider::new(table_name.clone(), schema);
         self.context.df_session_context.register_table(
             TableReference::Bare {
                 table: table_name.as_str().into(),
@@ -92,9 +164,14 @@ impl Planner {
         Ok(self.logical_graph.clone())
     }
 
-    pub async fn sql_to_graph(&mut self, sql: &str) -> Result<LogicalGraph> {
-        let logical_plan = self.context.df_session_context.state().create_logical_plan(sql).await?;
-        // println!("logical_plan: {}", logical_plan.display_indent());
+    pub fn sql_to_graph(&mut self, sql: &str) -> Result<LogicalGraph> {
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        let logical_plan = rt.block_on(
+            self.context.df_session_context.state().create_logical_plan(sql)
+        )?;
+        println!("logical_plan: {}", logical_plan.display_indent());
 
         // TODO: optimize logical plan
         
@@ -189,6 +266,69 @@ impl Planner {
         
         self.logical_graph.add_edge(sink_node_index, root_node_index, EdgeType::Forward);
     }
+
+    fn handle_aggregate(&mut self, aggregate: &Aggregate, parallelism: usize) -> Result<NodeIndex> {
+        // Create a logical plan node just for this aggregate
+        let aggregate_plan = LogicalPlan::Aggregate(aggregate.clone());
+
+        // Use DataFusion's physical planner to convert to AggregateExec
+        let rt = tokio::runtime::Runtime::new()
+            .map_err(|e| DataFusionError::External(Box::new(e)))?;
+        
+        let planner = DefaultPhysicalPlanner::default();
+        let session_state = self.context.df_session_context.state();
+        let physical_plan = rt.block_on(
+            planner.create_physical_plan(&aggregate_plan, &session_state)
+        ).unwrap();
+        
+        // DataFusion creates a two-stage plan: Partial -> Final
+        // We want the Partial stage for our streaming use case
+        let aggregate_exec = Self::extract_partial_aggregate_exec(&physical_plan)
+            .ok_or_else(|| DataFusionError::Internal("Could not find Partial AggregateExec in physical plan".to_string()))?;
+
+        // Debug: Print the aggregate expressions and their types in detail
+        println!("Partial AggregateExec expressions:");
+        for (i, expr) in aggregate_exec.aggr_expr().iter().enumerate() {
+            println!("  [{}] {}: return_field={:?}", 
+                     i, expr.name(), expr.field());
+            println!("      expressions: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>());
+            println!("      input_fields: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e.data_type(&aggregate_exec.input_schema()))).collect::<Vec<_>>());
+        }
+
+        // Create our operator config
+        let node = LogicalNode::new(
+            OperatorConfig::AggregateConfig(AggregateConfig {
+                aggregate_exec,
+            }),
+            parallelism,
+            None,
+            None,
+        );
+
+        let node_index = self.logical_graph.add_node(node);
+        Ok(node_index)
+    }
+
+    /// Recursively search for the Partial mode AggregateExec in the physical plan tree
+    fn extract_partial_aggregate_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<AggregateExec> {
+        use datafusion::physical_plan::aggregates::AggregateMode;
+        
+        // Check if this is an AggregateExec with Partial mode
+        if let Some(agg_exec) = plan.as_any().downcast_ref::<AggregateExec>() {
+            if matches!(agg_exec.mode(), AggregateMode::Partial) {
+                return Some(agg_exec.clone());
+            }
+        }
+        
+        // Recursively search in children
+        for child in plan.children() {
+            if let Some(partial_agg) = Self::extract_partial_aggregate_exec(&child) {
+                return Some(partial_agg);
+            }
+        }
+        
+        None
+    }
 }
 
 impl<'a> TreeNodeVisitor<'a> for Planner {
@@ -213,6 +353,12 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             
             LogicalPlan::Join(join) => {    
                 Some(self.create_join_node(join, self.context.parallelism)?)
+            }
+
+            LogicalPlan::Aggregate(aggregate) => {
+                println!("Aggregate node");
+        
+                Some(self.handle_aggregate(aggregate, self.context.parallelism)?)
             }
             
             // skip subqueries as they simply wrap other plans
@@ -281,12 +427,12 @@ mod tests {
         planner
     }
 
-    #[tokio::test]
-    async fn test_simple_select() {
+    #[test]
+    fn test_simple_select() {
         let mut planner = create_planner();
         
         let sql = "SELECT id, name FROM test_table";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
 
         // println!("{}", graph);
         
@@ -303,15 +449,15 @@ mod tests {
         assert!(matches!(nodes[1].operator_config, OperatorConfig::SourceConfig(_)));
     }
 
-    #[tokio::test]
-    async fn test_simple_select_with_sink() {
+    #[test]
+    fn test_simple_select_with_sink() {
         let mut planner = create_planner();
         
         // Register sink
         planner.register_sink(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()));
         
         let sql = "SELECT id, name FROM test_table";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
 
         // println!("{}", graph);
         
@@ -330,12 +476,12 @@ mod tests {
         assert!(matches!(nodes[2].operator_config, OperatorConfig::SinkConfig(_)));
     }
 
-    #[tokio::test]
-    async fn test_select_with_filter() {
+    #[test]
+    fn test_select_with_filter() {
         let mut planner = create_planner();
         
         let sql = "SELECT id, name FROM test_table WHERE value > 3.0";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
 
         // println!("{}", graph);
         
@@ -352,12 +498,12 @@ mod tests {
         assert!(matches!(nodes[2].operator_config, OperatorConfig::SourceConfig(_)));
     }
 
-    #[tokio::test]
-    async fn test_forward_edges_connectivity() {
+    #[test]
+    fn test_forward_edges_connectivity() {
         let mut planner = create_planner();
         
         let sql = "SELECT id, name FROM test_table WHERE value > 3.0";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
         
         // Check edges
         let edges: Vec<_> = graph.get_edges().collect();
@@ -369,13 +515,13 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn test_join_tables() {
+    #[test]
+    fn test_join_tables() {
         let mut planner = create_planner();
         
         let sql = "SELECT t1.id, t1.name, t2.value FROM test_table t1 JOIN test_table2 t2 ON t1.id = t2.id";
         
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
         // println!("{}", graph);
         
         // Should have 4 nodes: 2 sources, join, projection
@@ -390,5 +536,16 @@ mod tests {
         assert!(matches!(nodes[1].operator_config, OperatorConfig::JoinConfig(_)));
         assert!(matches!(nodes[2].operator_config, OperatorConfig::SourceConfig(_)));
         assert!(matches!(nodes[3].operator_config, OperatorConfig::SourceConfig(_)));
+    }
+
+    #[test]
+    fn test_group_by() {
+        let mut planner = create_planner();
+        
+        let sql = "SELECT name, COUNT(*) as count FROM test_table GROUP BY name";
+        
+        // This will fail until we implement GROUP BY support
+        let result = planner.sql_to_graph(sql);
+        // assert!(result.is_err(), "Expected error due to unimplemented GROUP BY support");
     }
 } 

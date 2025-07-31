@@ -17,6 +17,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::compute::filter_record_batch;
 use arrow::array::BooleanArray;
 
+// TODO use Datafusion's FilterExec
 #[derive(Clone)]
 pub struct FilterFunction {
     schema: DFSchemaRef,
