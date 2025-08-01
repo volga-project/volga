@@ -38,32 +38,13 @@ impl AggregateOperator {
         }
     }
     
-    fn create_accumulators(&self) -> Result<Vec<Box<dyn Accumulator>>> {
-        let aggr_exprs = self.aggregate_exec.aggr_expr();
-        println!("create_accumulators: Found {} aggregate expressions", aggr_exprs.len());
-        for (i, expr) in aggr_exprs.iter().enumerate() {
-            println!("  [{}]: {}", i, expr.name());
-        }
-        
-        let result: Result<Vec<_>> = aggr_exprs
+    fn create_accumulators(&self) -> Vec<Box<dyn Accumulator>> {
+        self.aggregate_exec.aggr_expr()
             .iter()
-            .enumerate()
-            .map(|(i, expr)| {
-                println!("  Creating accumulator for [{}]: {}", i, expr.name());
-                println!("    return_field: {:?}", expr.field());
-                println!("    expressions: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>());
-                
-                let acc_result = expr.create_accumulator();
-                match &acc_result {
-                    Ok(_) => println!("    ✅ Success!"),
-                    Err(e) => println!("    ❌ Error: {:?}", e),
-                }
-                acc_result
+            .map(|expr| {
+                expr.create_accumulator().expect("should be able to create accumulator")
             })
-            .collect();
-        
-        println!("Final result: {} accumulators", result.as_ref().map(|v| v.len()).unwrap_or(0));
-        result
+            .collect()
     }
     
     #[allow(dead_code)]
@@ -91,11 +72,7 @@ impl AggregateOperator {
         let mut messages = Vec::new();
         let accumulators: Vec<_> = self.accumulators.drain().collect();
         
-        println!("emit_all_accumulators: Processing {} keys", accumulators.len());
-        
         for (key, (group_values, accumulators)) in accumulators {
-            println!("  Processing key with {} group values and {} accumulators", 
-                     group_values.len(), accumulators.len());
             let batch_result = {
                 let mut columns = Vec::new();
                 
@@ -146,7 +123,6 @@ impl OperatorTrait for AggregateOperator {
     async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         match message {
             Message::Keyed(keyed_message) => {
-                println!("Processing KeyedMessage with {} rows", keyed_message.base.record_batch.num_rows());
                 let key = keyed_message.key().clone();
                 
                 // Extract group by values from the batch using output_exprs
@@ -173,19 +149,11 @@ impl OperatorTrait for AggregateOperator {
                     Err(_) => return None, // Skip on error
                 };
                 
-                            // Get or create accumulators for this key
+                // Get or create accumulators for this key
                 let key_clone = key.clone();
                 if !self.accumulators.contains_key(&key_clone) {
-                    match self.create_accumulators() {
-                        Ok(accs) => {
-                            println!("Created {} accumulators for key: {:?}", accs.len(), key_clone);
-                            self.accumulators.insert(key_clone.clone(), (group_by_values.clone(), accs));
-                        }
-                        Err(e) => {
-                            println!("Error creating accumulators: {:?}", e);
-                            return None;
-                        }
-                    }
+                    let accs = self.create_accumulators();
+                    self.accumulators.insert(key_clone.clone(), (group_by_values.clone(), accs));
                 }
                 let (_stored_group_values, accumulators) = self.accumulators
                     .get_mut(&key_clone)
@@ -194,30 +162,29 @@ impl OperatorTrait for AggregateOperator {
                 // Update accumulators
                 for (i, accumulator) in accumulators.iter_mut().enumerate() {
                     if let Some(aggr_expr) = self.aggregate_exec.aggr_expr().get(i) {
-                        let values_result = aggr_expr
+                        let values = aggr_expr
                         .expressions()
                         .iter()
-                        .map(|expr| expr.evaluate(&keyed_message.base.record_batch))
-                            .collect::<Result<Vec<_>>>();
+                        .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expression"))
+                            .collect::<Vec<_>>();
                         
-                        if let Ok(values) = values_result {
-                            // Convert ColumnarValue to ArrayRef
-                            let arrays: Vec<ArrayRef> = values
-                                .into_iter()
-                                .filter_map(|v| match v {
-                                    ColumnarValue::Array(a) => Some(a),
-                                    ColumnarValue::Scalar(s) => {
-                                        // Convert scalar to array with batch size
-                                        let batch_size = keyed_message.base.record_batch.num_rows();
-                                        s.to_array_of_size(batch_size).ok()
-                                    }
-                                })
-                                .collect();
-                            
-                            if !arrays.is_empty() {
-                                let _ = accumulator.update_batch(&arrays);
-                            }
+                        // Convert ColumnarValue to ArrayRef
+                        let arrays: Vec<ArrayRef> = values
+                            .into_iter()
+                            .filter_map(|v| match v {
+                                ColumnarValue::Array(a) => Some(a),
+                                ColumnarValue::Scalar(s) => {
+                                    // Convert scalar to array with batch size
+                                    let batch_size = keyed_message.base.record_batch.num_rows();
+                                    s.to_array_of_size(batch_size).ok()
+                                }
+                            })
+                            .collect();
+                        
+                        if !arrays.is_empty() {
+                            let _ = accumulator.update_batch(&arrays);
                         }
+                        
                     }
                 }
                 
@@ -226,13 +193,10 @@ impl OperatorTrait for AggregateOperator {
             }
             Message::Watermark(_) => {
                 // Emit final results when receiving watermark
-                println!("Watermark: {} keys in accumulators", self.accumulators.len());
                 if !self.accumulators.is_empty() {
                     let messages = self.emit_all_accumulators();
-                    println!("Emitted {} messages", messages.len());
                     Some(messages)
                 } else {
-                    println!("No accumulators to emit");
                     None
                 }
             }

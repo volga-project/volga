@@ -41,6 +41,7 @@ datafusion = "48.0.1"
 datafusion-optimizer = "48.0.1"
 petgraph = "0.6"
 parking_lot = "0.12"
+ahash = "0.8"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

@@ -660,7 +660,7 @@ mod tests {
         for r in received {
             match r {
                 Message::Keyed(keyed_msg) => {
-                    let key_batch = keyed_msg.key.record_batch;
+                    let key_batch = keyed_msg.key.key_record_batch;
                     let key_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
                     let key = key_array.value(0).to_string();
                     received_keys.push(key);
@@ -702,7 +702,7 @@ mod tests {
         for r in received {
             match r {
                 Message::Keyed(keyed_msg) => {
-                    let key_batch = keyed_msg.key.record_batch;
+                    let key_batch = keyed_msg.key.key_record_batch;
                     let key_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
                     let key = key_array.value(0).to_string();
                     received_keys.push(key);
@@ -843,7 +843,7 @@ mod tests {
         match keyed_batch {
             Message::Keyed(keyed_msg) => {
                 assert_eq!(keyed_msg.base.record_batch.num_rows(), 6); // 3 messages * 2 rows each
-                let key_batch = &keyed_msg.key.record_batch;
+                let key_batch = &keyed_msg.key.key_record_batch;
                 let key_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
                 assert_eq!(key_array.value(0), "key1");
             }
@@ -871,7 +871,7 @@ mod tests {
         match mixed_keyed_batch {
             Message::Keyed(keyed_msg) => {
                 assert_eq!(keyed_msg.base.record_batch.num_rows(), 4); // 2 messages * 2 rows each
-                let key_batch = &keyed_msg.key.record_batch;
+                let key_batch = &keyed_msg.key.key_record_batch;
                 let key_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
                 assert_eq!(key_array.value(0), "key2");
             }
@@ -963,7 +963,7 @@ mod tests {
                                         .push(msg);
                                 }
                                 Message::Keyed(keyed_msg) => {
-                                    let key_batch = &keyed_msg.key.record_batch;
+                                    let key_batch = &keyed_msg.key.key_record_batch;
                                     let key_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
                                     let key = key_array.value(0).to_string();
                                     messages_by_key.entry(key)
