@@ -34,8 +34,7 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 
-/// Custom table provider that creates execution plans with proper partitioning
-/// Similar to Arroyo's LogicalBatchInput
+/// Custom table provider creating dummy tables with no execution logic
 #[derive(Debug, Clone)]
 pub struct VolgaTableProvider {
     table_name: String,
@@ -144,7 +143,6 @@ impl Planner {
     pub fn register_source(&mut self, table_name: String, config: SourceConfig, schema: SchemaRef) {
         self.context.connector_configs.insert(table_name.clone(), config);
 
-        // Use custom table provider that creates proper partitioning
         let table = VolgaTableProvider::new(table_name.clone(), schema);
         self.context.df_session_context.register_table(
             TableReference::Bare {
@@ -161,7 +159,8 @@ impl Planner {
     pub fn logical_plan_to_graph(&mut self, logical_plan: &LogicalPlan) -> Result<LogicalGraph> {
         self.node_stack.clear();
 
-        logical_plan.visit_with_subqueries(self)?;
+        let optimized_plan = self.optimize_plan(logical_plan.clone())?;
+        optimized_plan.visit_with_subqueries(self)?;
         
         Ok(self.logical_graph.clone())
     }
@@ -173,13 +172,8 @@ impl Planner {
         let logical_plan = rt.block_on(
             self.context.df_session_context.state().create_logical_plan(sql)
         )?;
-        println!("logical_plan: {}", logical_plan.display_indent());
-
-        // Optimize the logical plan (apply type coercion, etc.)
-        let optimized_plan = self.optimize_plan(logical_plan)?;
-        println!("optimized_plan: {}", optimized_plan.display_indent());
         
-        self.logical_plan_to_graph(&optimized_plan)
+        self.logical_plan_to_graph(&logical_plan)
     }
 
     fn create_source_node(&mut self, table_scan: &TableScan, parallelism: usize) -> Result<NodeIndex> {
@@ -271,14 +265,9 @@ impl Planner {
         self.logical_graph.add_edge(sink_node_index, root_node_index, EdgeType::Forward);
     }
 
-    // TODO figure out on final vs partial plan 
     fn handle_aggregate(&mut self, aggregate: &Aggregate, parallelism: usize) -> Result<NodeIndex> {
-        // Create a logical plan node just for this aggregate
-        let aggregate_plan = LogicalPlan::Aggregate(aggregate.clone());
-        
-        println!("Aggregate expressions: {:?}", aggregate.aggr_expr);
+       let aggregate_plan = LogicalPlan::Aggregate(aggregate.clone());
 
-        // Use DataFusion's physical planner to convert to AggregateExec
         let rt = tokio::runtime::Runtime::new()
             .map_err(|e| DataFusionError::External(Box::new(e)))?;
         
@@ -287,39 +276,14 @@ impl Planner {
         let physical_plan = rt.block_on(
             planner.create_physical_plan(&aggregate_plan, &session_state)
         ).unwrap();
-        
-        println!("Full physical plan tree:");
-        Self::print_physical_plan(&physical_plan, 0);
-        
-        // DataFusion creates a two-stage plan: Partial -> Final
-        // Let's examine both stages to see which has proper coercion
-        let partial_aggregate_exec = Self::extract_partial_aggregate_exec(&physical_plan);
-        let final_aggregate_exec = Self::extract_final_aggregate_exec(&physical_plan);
-        
-        println!("\n=== PARTIAL AGGREGATE ===");
-        if let Some(ref partial) = partial_aggregate_exec {
-            Self::print_aggregate_details("Partial", partial);
-        } else {
-            println!("No Partial AggregateExec found");
-        }
-        
-        println!("\n=== FINAL AGGREGATE ===");
-        if let Some(ref final_agg) = final_aggregate_exec {
-            Self::print_aggregate_details("Final", final_agg);
-        } else {
-            println!("No Final AggregateExec found");
-        }
-        
-        // For now, try the Final aggregate instead of Partial
-        let aggregate_exec = final_aggregate_exec
-            .or(partial_aggregate_exec)
-            .ok_or_else(|| DataFusionError::Internal("Could not find any AggregateExec in physical plan".to_string()))?;
 
-        // Debug: Print the selected aggregate expressions
-        println!("\n=== SELECTED AGGREGATE ({:?}) ===", aggregate_exec.mode());
-        Self::print_aggregate_details("Selected", &aggregate_exec);
+        // Does not matter if it's final or partial, we only need the expressions
+        let aggregate_exec = physical_plan
+            .as_any()
+            .downcast_ref::<AggregateExec>()
+            .ok_or_else(|| DataFusionError::Internal("Could not find AggregateExec in physical plan".to_string()))?
+            .clone();
 
-        // Create our operator config
         let node = LogicalNode::new(
             OperatorConfig::AggregateConfig(AggregateConfig {
                 aggregate_exec,
@@ -332,76 +296,12 @@ impl Planner {
         let node_index = self.logical_graph.add_node(node);
         Ok(node_index)
     }
-
-    /// Recursively search for the Partial mode AggregateExec in the physical plan tree
-    fn extract_partial_aggregate_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<AggregateExec> {
-        use datafusion::physical_plan::aggregates::AggregateMode;
-        
-        // Check if this is an AggregateExec with Partial mode
-        if let Some(agg_exec) = plan.as_any().downcast_ref::<AggregateExec>() {
-            if matches!(agg_exec.mode(), AggregateMode::Partial) {
-                return Some(agg_exec.clone());
-            }
-        }
-        
-        // Recursively search in children
-        for child in plan.children() {
-            if let Some(partial_agg) = Self::extract_partial_aggregate_exec(&child) {
-                return Some(partial_agg);
-            }
-        }
-        
-        None
-    }
     
-    /// Recursively search for the Final/FinalPartitioned mode AggregateExec in the physical plan tree
-    fn extract_final_aggregate_exec(plan: &Arc<dyn ExecutionPlan>) -> Option<AggregateExec> {
-        use datafusion::physical_plan::aggregates::AggregateMode;
-        
-        // Check if this is an AggregateExec with Final/FinalPartitioned mode
-        if let Some(agg_exec) = plan.as_any().downcast_ref::<AggregateExec>() {
-            if matches!(agg_exec.mode(), AggregateMode::Final | AggregateMode::FinalPartitioned) {
-                return Some(agg_exec.clone());
-            }
-        }
-        
-        // Recursively search in children
-        for child in plan.children() {
-            if let Some(final_agg) = Self::extract_final_aggregate_exec(&child) {
-                return Some(final_agg);
-            }
-        }
-        
-        None
-    }
-    
-    /// Print the physical plan tree structure
-    fn print_physical_plan(plan: &Arc<dyn ExecutionPlan>, indent: usize) {
-        let indent_str = "  ".repeat(indent);
-        println!("{}[{}] {:?}", indent_str, plan.name(), plan);
-        
-        for child in plan.children() {
-            Self::print_physical_plan(&child, indent + 1);
-        }
-    }
-    
-    /// Print detailed information about an AggregateExec
-    fn print_aggregate_details(label: &str, agg_exec: &AggregateExec) {
-        println!("{} AggregateExec mode: {:?}", label, agg_exec.mode());
-        println!("{} expressions:", label);
-        for (i, expr) in agg_exec.aggr_expr().iter().enumerate() {
-            println!("  [{}] {}: return_field={:?}", i, expr.name(), expr.field());
-            println!("      expressions: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e)).collect::<Vec<_>>());
-            println!("      input_fields: {:?}", expr.expressions().iter().map(|e| format!("{:?}", e.data_type(&agg_exec.input_schema()))).collect::<Vec<_>>());
-        }
-    }
-    
-    /// Apply optimization rules to a logical plan
-    /// Currently only applies type coercion
     fn optimize_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let session_state = self.context.df_session_context.state();
         let config = session_state.config_options();
         
+        // TODO we should use DataFusion's default Analyzer instead of custom analyzers
         // Apply type coercion analyzer
         let type_coercion = TypeCoercion::new();
         let coerced_plan = type_coercion.analyze(plan, config)?;

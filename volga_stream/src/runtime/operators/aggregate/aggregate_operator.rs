@@ -248,48 +248,6 @@ impl OperatorTrait for AggregateOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    #[test]
-    fn test_aggregate_operator_creation() {
-        use crate::api::planner::{Planner, PlanningContext};
-        use datafusion::prelude::SessionContext;
-        use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-        
-        // Create a planner and register a test table
-        let ctx = SessionContext::new();
-        let mut planner = Planner::new(PlanningContext::new(ctx));
-        
-        let schema = Arc::new(arrow::datatypes::Schema::new(vec![
-            arrow::datatypes::Field::new("name", arrow::datatypes::DataType::Utf8, false),
-            arrow::datatypes::Field::new("value", arrow::datatypes::DataType::Int64, false),
-        ]));
-        
-        planner.register_source(
-            "test_table".to_string(), 
-            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
-            schema
-        );
-        
-        // Create a GROUP BY query
-        let sql = "SELECT name, COUNT(*) as count FROM test_table GROUP BY name";
-        let logical_graph = planner.sql_to_graph(sql).unwrap();
-        
-        // Verify the graph contains an aggregate node
-        let nodes: Vec<_> = logical_graph.get_nodes().collect();
-        let has_aggregate = nodes.iter().any(|node| {
-            matches!(node.operator_config, OperatorConfig::AggregateConfig(_))
-        });
-        
-        assert!(has_aggregate, "Expected to find an AggregateConfig node in the logical graph");
-        
-        // Extract the AggregateConfig and create an AggregateOperator
-        for node in &nodes {
-            if let OperatorConfig::AggregateConfig(config) = &node.operator_config {
-                let _operator = AggregateOperator::new(OperatorConfig::AggregateConfig(config.clone()));
-                break;
-            }
-        }
-    }
 
     #[test]
     fn test_aggregate_operator() {
@@ -300,7 +258,6 @@ mod tests {
         use arrow::array::{StringArray, Int64Array, Float64Array};
         use arrow::record_batch::RecordBatch;
         
-        // Create a planner and register a test table
         let ctx = SessionContext::new();
         let mut planner = Planner::new(PlanningContext::new(ctx));
         
@@ -315,11 +272,9 @@ mod tests {
             schema.clone()
         );
         
-        // Create a GROUP BY query with multiple aggregates
         let sql = "SELECT name, COUNT(*) as count, SUM(value) as sum_value, AVG(value) as avg_value, MAX(value) as max_value, MIN(value) as min_value FROM test_table GROUP BY name";
         let logical_graph = planner.sql_to_graph(sql).unwrap();
         
-        // Extract the AggregateConfig and create an AggregateOperator
         let mut aggregate_operator = None;
         let nodes: Vec<_> = logical_graph.get_nodes().collect();
         for node in &nodes {
@@ -331,10 +286,8 @@ mod tests {
         
         let mut operator = aggregate_operator.expect("Should have found an aggregate operator");
         
-        // Create runtime for async calls
         let rt = tokio::runtime::Runtime::new().unwrap();
         
-        // Create sample test data
         let test_data = vec![
             // Multiple records with name "alice" - should count as 3
             ("alice", vec![10i64, 20i64, 30i64]),
@@ -344,7 +297,6 @@ mod tests {
             ("charlie", vec![60i64]),
         ];
         
-        // Process test messages
         for (name, values) in test_data {
             for value in values {
                 // Create RecordBatch with single row
@@ -460,12 +412,6 @@ mod tests {
             assert!((charlie_results.2 - 60.0).abs() < 1e-10, "Charlie should have avg of 60.0, got {}", charlie_results.2);
             assert_eq!(charlie_results.3, 60, "Charlie should have max of 60");
             assert_eq!(charlie_results.4, 60, "Charlie should have min of 60");
-            
-            println!("✅ Aggregate test passed:");
-            println!("  Alice: count={}, sum={}, avg={:.1}, max={}, min={}", alice_results.0, alice_results.1, alice_results.2, alice_results.3, alice_results.4);
-            println!("  Bob: count={}, sum={}, avg={:.1}, max={}, min={}", bob_results.0, bob_results.1, bob_results.2, bob_results.3, bob_results.4);
-            println!("  Charlie: count={}, sum={}, avg={:.1}, max={}, min={}", charlie_results.0, charlie_results.1, charlie_results.2, charlie_results.3, charlie_results.4);
-            println!("✅ Schema verification passed: {:?}", expected_schema.fields());
         } else {
             panic!("Expected final aggregate results from watermark message");
         }
