@@ -10,8 +10,8 @@ edition = "2021"
 [lib]
 name = "volga_stream"
 # crate-type = ["cdylib", "rlib"]
-crate-type = ["cdylib"]
-# crate-type = ["rlib"]
+# crate-type = ["cdylib"]
+crate-type = ["rlib"]
 path = "src/lib.rs"
 
 [build-dependencies]

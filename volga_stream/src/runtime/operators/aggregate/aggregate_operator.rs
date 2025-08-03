@@ -213,8 +213,8 @@ impl OperatorTrait for AggregateOperator {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_aggregate_operator() {
+    #[tokio::test]
+    async fn test_aggregate_operator() {
         use crate::api::planner::{Planner, PlanningContext};
         use datafusion::prelude::SessionContext;
         use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
@@ -237,7 +237,7 @@ mod tests {
         );
         
         let sql = "SELECT name, COUNT(*) as count, SUM(value) as sum_value, AVG(value) as avg_value, MAX(value) as max_value, MIN(value) as min_value FROM test_table GROUP BY name";
-        let logical_graph = planner.sql_to_graph(sql).unwrap();
+        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
         
         let mut aggregate_operator = None;
         let nodes: Vec<_> = logical_graph.get_nodes().collect();
@@ -249,8 +249,6 @@ mod tests {
         }
         
         let mut operator = aggregate_operator.expect("Should have found an aggregate operator");
-        
-        let rt = tokio::runtime::Runtime::new().unwrap();
         
         let test_data = vec![
             // Multiple records with name "alice" - should count as 3
@@ -288,14 +286,14 @@ mod tests {
                 );
                 
                 // Process the message
-                let _result = rt.block_on(operator.process_message(Message::Keyed(keyed_message)));
+                let _result = operator.process_message(Message::Keyed(keyed_message)).await;
                 // Intermediate results may or may not be produced depending on implementation
             }
         }
         
         // Send max watermark to finalize aggregation
         let watermark = WatermarkMessage::new("test_operator".to_string(), MAX_WATERMARK_VALUE, None);
-        let final_result = rt.block_on(operator.process_message(Message::Watermark(watermark)));
+        let final_result = operator.process_message(Message::Watermark(watermark)).await;
         
         // Verify results
         if let Some(messages) = final_result {
