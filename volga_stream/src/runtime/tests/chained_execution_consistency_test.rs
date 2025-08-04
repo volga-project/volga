@@ -2,8 +2,8 @@ use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}
     functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
-}, transport::transport_backend_actor::TransportBackendType};
+    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, worker::{Worker, WorkerConfig}
+}, transport::transport_backend_actor::TransportBackendType, storage::{InMemoryStorageClient, InMemoryStorageServer}};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};

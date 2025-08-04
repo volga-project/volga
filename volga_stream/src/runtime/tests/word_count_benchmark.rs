@@ -3,8 +3,8 @@ use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, ru
         key_by::KeyByFunction,
         reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
         source::word_count_source::{BatchingMode, WordCountSourceFunction},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, partition::PartitionType, storage::{InMemoryStorageClient, InMemoryStorageServer}, worker::{Worker, WorkerConfig}
-}, transport::transport_backend_actor::TransportBackendType};
+    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, partition::PartitionType, worker::{Worker, WorkerConfig}
+}, transport::transport_backend_actor::TransportBackendType, storage::{InMemoryStorageClient, InMemoryStorageServer}};
 use crate::common::message::{Message, KeyedMessage};
 use crate::common::Key;
 use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};

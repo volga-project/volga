@@ -3,13 +3,18 @@ use std::sync::Arc;
 use std::fmt;
 use datafusion::prelude::SessionContext;
 use arrow::datatypes::Schema;
+use crate::cluster::cluster_provider::ClusterNode;
+use crate::cluster::node_assignment::{ExecutionVertexNodeMapping, NodeAssignStrategy, OperatorPerNodeStrategy};
+use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
-use crate::cluster::node_assignment::{node_to_vertex_ids, ExecutionVertexNodeMapping, NodeAssignStrategy, OperatorPerNodeStrategy};
-use crate::cluster::cluster_provider::ClusterNode;
-use crate::runtime::execution_graph::ExecutionGraph;
+
 use crate::api::planner::{Planner, PlanningContext};
 use crate::api::logical_graph::LogicalGraph;
+use crate::executor::executor::Executor;
+use crate::runtime::worker::WorkerState;
+use tokio::sync::mpsc;
+use anyhow::Result;
 
 /// Context for streaming query execution containing sources, sinks, and execution parameters
 #[derive(Clone)]
@@ -26,6 +31,8 @@ pub struct StreamingContext {
     current_sql: Option<String>,
     /// Logical graph (set by with_logical_graph() method)
     logical_graph: Option<LogicalGraph>,
+    /// Executor for running the job
+    executor: Arc<Option<Box<dyn Executor>>>,
 }
 
 impl fmt::Debug for StreamingContext {
@@ -37,6 +44,7 @@ impl fmt::Debug for StreamingContext {
             .field("current_sql", &self.current_sql)
             .field("df_session_context", &"<SessionContext>")
             .field("logical_graph", &self.logical_graph)
+            .field("executor", &"<Executor>")
             .finish()
     }
 }
@@ -50,6 +58,7 @@ impl StreamingContext {
             parallelism: 1,
             current_sql: None,
             logical_graph: None,
+            executor: Arc::new(None),
         }
     }
 
@@ -82,6 +91,12 @@ impl StreamingContext {
         self
     }
 
+    /// Set executor for running the job (returns self for chaining)
+    pub fn with_executor(mut self, executor: Box<dyn Executor>) -> Self {
+        self.executor = Arc::new(Some(executor));
+        self
+    }
+
     /// Build logical graph from the current SQL query or return existing graph
     pub async fn build_logical_graph(&self) -> LogicalGraph {
         if let Some(ref graph) = self.logical_graph {
@@ -106,7 +121,6 @@ impl StreamingContext {
         planner.sql_to_graph(sql).await.expect("Failed to create logical graph from SQL")
     }
 
-    /// Build execution graph with optional cluster nodes and node assignment strategy
     pub async fn build_execution_graph(
         &self,
         cluster_nodes: Option<&[ClusterNode]>,
@@ -144,6 +158,23 @@ impl StreamingContext {
         };
 
         (execution_graph, node_mapping)
+    }
+
+    /// Execute the streaming job using the configured executor
+    pub async fn execute(self) -> Result<mpsc::Receiver<WorkerState>> {
+        // Build logical graph first
+        let logical_graph = self.build_logical_graph().await;
+
+        // Convert to execution graph
+        let execution_graph = logical_graph.to_execution_graph();
+
+        // Get executor or panic if not set
+        let executor_option = Arc::try_unwrap(self.executor)
+            .map_err(|_| anyhow::anyhow!("StreamingContext is still being referenced elsewhere"))?;
+        let mut executor = executor_option.expect("No executor set. Call with_executor() first.");
+
+        // Execute using the configured executor
+        executor.execute(execution_graph).await
     }
 }
 

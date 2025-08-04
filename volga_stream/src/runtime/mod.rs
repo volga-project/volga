@@ -11,4 +11,3 @@ pub mod functions;
 pub mod partition;
 pub mod collector;
 pub mod tests;
-pub mod storage;

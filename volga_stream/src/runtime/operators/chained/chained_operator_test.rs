@@ -5,8 +5,8 @@ use crate::{
             key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}
         }, operators::{
             chained::chained_operator::ChainedOperator, operator::{OperatorConfig, OperatorTrait, OperatorType}, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}
-        }, runtime_context::RuntimeContext, storage::{InMemoryStorageClient, InMemoryStorageServer}
-    },
+        }, runtime_context::RuntimeContext},
+    storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use async_trait::async_trait;

@@ -185,6 +185,9 @@ impl ExecutionGraph {
             .collect()
     }
 
+    // TODO we should separate execution graph and channel configurations - 
+    // execution graph should be static and compiled by planner,
+    // channel mapping depend on cluster configuration and are defined at runtime
     pub fn update_channels_with_node_mapping(
         &mut self,
         execution_vertex_to_cluster_node: Option<&ExecutionVertexNodeMapping>,

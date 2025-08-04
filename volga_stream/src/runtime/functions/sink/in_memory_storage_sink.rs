@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use crate::common::message::Message;
 use crate::runtime::functions::sink::SinkFunctionTrait;
-use crate::runtime::storage::in_memory_storage_grpc_client::InMemoryStorageClient;
+use crate::storage::in_memory_storage_grpc_client::InMemoryStorageClient;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
@@ -157,7 +157,7 @@ mod tests {
     use tokio::runtime::Runtime;
     use arrow::array::StringArray;
     use crate::common::message::{KeyedMessage, BaseMessage};
-    use crate::runtime::storage::in_memory_storage_grpc_server::InMemoryStorageServer;
+    use crate::storage::in_memory_storage_grpc_server::InMemoryStorageServer;
 
     #[test]
     fn test_in_memory_storage_grpc_sink_function() -> Result<()> {
