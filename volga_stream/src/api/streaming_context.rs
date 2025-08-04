@@ -124,7 +124,7 @@ impl StreamingContext {
                 // Remote execution - use provided strategy or default
                 let strategy = node_assignment_strategy.unwrap_or(&OperatorPerNodeStrategy);
                 let mapping = strategy.assign_nodes(&execution_graph, nodes);
-                let node_to_vertex_ids = node_to_vertex_ids(&mapping);
+                // let node_to_vertex_ids = node_to_vertex_ids(&mapping);
                 
                 // println!("mapping: {:?}", mapping);
                 // println!("node_to_vertex_ids: {:?}", node_to_vertex_ids);

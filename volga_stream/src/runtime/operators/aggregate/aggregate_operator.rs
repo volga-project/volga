@@ -47,27 +47,6 @@ impl AggregateOperator {
             .collect()
     }
     
-    #[allow(dead_code)]
-    fn create_result_batch(&self, group_values: Vec<ArrayRef>, mut accumulators: Vec<Box<dyn Accumulator>>) -> Result<RecordBatch> {
-        let mut columns = Vec::new();
-        
-        // 1. Add group by columns (use stored values)
-        for group_array in group_values {
-            columns.push(group_array);
-        }
-        
-        // 2. Add aggregate result columns
-        for accumulator in &mut accumulators {
-            let result = accumulator.evaluate()?;
-            let result_array = result.to_array_of_size(1)?;
-            columns.push(result_array);
-        }
-        
-        // TODO output schema should come from aggregateexec
-        let output_physical_schema = self.aggregate_exec.schema();
-        Ok(RecordBatch::try_new(output_physical_schema.clone(), columns)?)
-    }
-    
     fn emit_all_accumulators(&mut self) -> Vec<Message> {
         let mut messages = Vec::new();
         let accumulators: Vec<_> = self.accumulators.drain().collect();
@@ -129,25 +108,21 @@ impl OperatorTrait for AggregateOperator {
                 let group_by_result = self.aggregate_exec.group_expr()
                     .output_exprs()
                     .iter()
-                    .map(|expr| expr.evaluate(&keyed_message.base.record_batch))
-                    .collect::<Result<Vec<_>>>();
+                    .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expr"))
+                    .collect::<Vec<_>>();
                 
-                let group_by_values = match group_by_result {
-                    Ok(values) => {
-                        // Convert ColumnarValue to ArrayRef
-                        values
-                            .into_iter()
-                            .filter_map(|v| match v {
-                                ColumnarValue::Array(a) => Some(a),
-                                ColumnarValue::Scalar(s) => {
-                                    let batch_size = keyed_message.base.record_batch.num_rows();
-                                    s.to_array_of_size(batch_size).ok()
-                                }
-                            })
-                            .collect::<Vec<ArrayRef>>()
-                    },
-                    Err(_) => return None, // Skip on error
-                };
+                let group_by_values =
+                    // Convert ColumnarValue to ArrayRef
+                    group_by_result
+                        .into_iter()
+                        .filter_map(|v| match v {
+                            ColumnarValue::Array(a) => Some(a),
+                            ColumnarValue::Scalar(s) => {
+                                let batch_size = keyed_message.base.record_batch.num_rows();
+                                s.to_array_of_size(batch_size).ok()
+                            }
+                        })
+                        .collect::<Vec<ArrayRef>>();
                 
                 // Get or create accumulators for this key
                 let key_clone = key.clone();
@@ -200,7 +175,7 @@ impl OperatorTrait for AggregateOperator {
                     None
                 }
             }
-            _ => None,
+            _ => panic!("Aggregate operator expects keyed messages or watermarks"),
         }
     }
     

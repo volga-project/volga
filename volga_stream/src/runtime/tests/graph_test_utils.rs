@@ -44,9 +44,10 @@ pub async fn create_sql_test_execution_graph(
         None
     };
 
+    let strategy = OperatorPerNodeStrategy;
     context.build_execution_graph(
         cluster_nodes.as_deref(),
-        None, // Use default node assignment strategy
+        Some(&strategy),
     ).await
 }
 
