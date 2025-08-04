@@ -8,7 +8,7 @@ use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVe
 use crate::common::message::Message;
 use crate::common::test_utils::create_test_string_batch;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
-use crate::transport::channel::Channel;
+use crate::transport::channel::{gen_channel_id, Channel};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::runtime::functions::{
     map::MapFunction,
@@ -55,9 +55,9 @@ fn test_stream_task_actor() -> Result<()> {
 
         // Define operator chain: input -> task -> output
         let operators = vec![
-            ("input".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-            ("task".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-            ("output".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
         ];
 
         let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
@@ -66,18 +66,24 @@ fn test_stream_task_actor() -> Result<()> {
             chained: false,
             is_remote: false,
             num_workers_per_operator: None,
-        });
+        }).await;
+        let mut vertex_ids = graph.get_vertices().keys().cloned().collect::<Vec<String>>();
+        vertex_ids.sort();
 
         let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
-        let mut configs = backend.init_channels(&graph, vec!["input".to_string(), "task".to_string(), "output".to_string()]);
+        let mut configs = backend.init_channels(&graph, vertex_ids.clone());
+
+        let input_vertex_id = vertex_ids[0].clone();
+        let task_vertex_id = vertex_ids[1].clone();
+        let output_vertex_id = vertex_ids[2].clone();
 
         // Create task with MapOperator
         let task = StreamTask::new(
-            "task".to_string(),
+            task_vertex_id.clone(),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            configs.remove("task").unwrap(),
+            configs.remove(&task_vertex_id).unwrap(),
             RuntimeContext::new(
-                "task".to_string(),
+                task_vertex_id.clone(),
                 0,
                 1,
                 None,
@@ -90,8 +96,8 @@ fn test_stream_task_actor() -> Result<()> {
         let backend_ref = spawn(backend_actor);
 
         // Create external writer and reader actors
-        let input_actor = TestDataWriterActor::new("input".to_string(), configs.remove("input").unwrap());
-        let output_actor = TestDataReaderActor::new("output".to_string(), configs.remove("output").unwrap());
+        let input_actor = TestDataWriterActor::new(input_vertex_id.clone(), configs.remove(&input_vertex_id).unwrap());
+        let output_actor = TestDataReaderActor::new(output_vertex_id.clone(), configs.remove(&output_vertex_id).unwrap());
         let task_actor = StreamTaskActor::new(task);
 
         let input_ref = spawn(input_actor);
@@ -109,8 +115,9 @@ fn test_stream_task_actor() -> Result<()> {
 
         // Write test data using external writer
         for message in &test_messages {
+            let channel_id = gen_channel_id(&input_vertex_id, &task_vertex_id);
             input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
-                channel_id: "input_to_task".to_string(),
+                channel_id,
                 message: message.clone(),
             }).await?;
         }

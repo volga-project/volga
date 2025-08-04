@@ -43,3 +43,7 @@ pub fn to_local_and_remote(channels: &Vec<Channel>) -> (Vec<Channel>, Vec<Channe
 
     (local, remote)
 } 
+
+pub fn gen_channel_id(source_vertex_id: &str, target_vertex_id: &str) -> String {
+    format!("{}_to_{}", source_vertex_id, target_vertex_id)
+}

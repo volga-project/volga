@@ -1,17 +1,61 @@
-use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex};
+use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
-use crate::transport::channel::Channel;
-use crate::common::test_utils::gen_unique_grpc_port;
+
+use crate::api::{streaming_context::StreamingContext, logical_graph::{LogicalGraph, LogicalNode, EdgeType}};
+use crate::runtime::operators::source::source_operator::SourceConfig;
+use crate::runtime::operators::sink::sink_operator::SinkConfig;
+use crate::cluster::node_assignment::{ExecutionVertexNodeMapping, OperatorPerNodeStrategy};
+use crate::cluster::cluster_provider::create_test_cluster_nodes;
+
+use arrow::datatypes::Schema;
+use std::sync::Arc;
 use std::collections::HashMap;
 
-/// TODO use logical graph to create execution graph
+/// Creates a test execution graph from SQL query using streaming context
+pub async fn create_sql_test_execution_graph(
+    sql: &str,
+    sources: HashMap<String, (SourceConfig, Arc<Schema>)>,
+    sink_config: Option<SinkConfig>,
+    parallelism: usize,
+    num_cluster_nodes: usize,
+) -> (ExecutionGraph, Option<ExecutionVertexNodeMapping>) {
+    // Create streaming context
+    let mut context = StreamingContext::new()
+        .with_parallelism(parallelism);
+
+    // Register sources
+    for (table_name, (source_config, schema)) in sources {
+        context = context.with_source(table_name, source_config, schema);
+    }
+
+    // Register sink if provided
+    if let Some(sink_config) = sink_config {
+        context = context.with_sink(sink_config);
+    }
+
+    // Set SQL query and build execution graph
+    let context = context.sql(sql);
+
+    // Build execution graph with appropriate clustering
+    let cluster_nodes = if num_cluster_nodes > 1 {
+        Some(create_test_cluster_nodes(num_cluster_nodes))
+    } else {
+        None
+    };
+
+    context.build_execution_graph(
+        cluster_nodes.as_deref(),
+        None, // Use default node assignment strategy
+    ).await
+}
+
 
 /// Configuration for generating test execution graphs
 #[derive(Debug, Clone)]
 pub struct TestLinearGraphConfig {
     /// List of (vertex_name, operator_config) tuples defining the operator chain
-    pub operators: Vec<(String, OperatorConfig)>,
+    pub operators: Vec<OperatorConfig>,
     /// Parallelism level for each operator
     pub parallelism: usize,
     /// Whether to enable chaining
@@ -22,277 +66,196 @@ pub struct TestLinearGraphConfig {
     pub num_workers_per_operator: Option<usize>
 }
 
-/// Generates a test execution graph based on the provided configuration
-pub fn create_linear_test_execution_graph(config: TestLinearGraphConfig) -> (ExecutionGraph, Option<HashMap<String, Vec<String>>>) {
-    // Validate configuration
-    validate_configs(&config.operators);
+/// Creates a test execution graph using node assignment strategy
+pub async fn create_linear_test_execution_graph(config: TestLinearGraphConfig) -> (ExecutionGraph, Option<ExecutionVertexNodeMapping>) {
+    let logical_graph = LogicalGraph::from_operator_list(config.operators, config.parallelism, config.chained);
 
-    let mut graph = ExecutionGraph::new();
-    
-    // Group operators based on chaining configuration
-    let grouped_operators = if config.chained {
-        group_operators_for_chaining(&config.operators)
+    let num_operators = logical_graph.get_nodes().count();
+
+    // Create streaming context with the logical graph
+    let context = StreamingContext::new()
+        .with_parallelism(config.parallelism)
+        .with_logical_graph(logical_graph);
+
+    // Build execution graph with appropriate clustering
+    let cluster_nodes = if config.is_remote {
+        let num_workers = num_operators * config.num_workers_per_operator.unwrap();
+        Some(create_test_cluster_nodes(num_workers))
     } else {
-        // If no chaining, each operator becomes its own group
-        config.operators.clone()
+        None
     };
 
-    // Create vertices for each operator with parallelism
-    for (op_name, op_config) in &grouped_operators {
-        for i in 0..config.parallelism {
-            let vertex_id = if config.parallelism == 1 {
-                op_name.clone()
-            } else {
-                format!("{}_{}", op_name, i)
-            };
-            
-            let vertex = ExecutionVertex::new(
-                vertex_id,
-                op_name.clone(),
-                op_config.clone(),
-                config.parallelism as i32,
-                i as i32,
-            );
-            graph.add_vertex(vertex);
-        }
-    }
-
-    let mut worker_to_port = HashMap::new();
-    let mut worker_distribution = None;
-    // Assign ports for remote channels if needed
-    if config.is_remote {
-        let num_workers_per_operator = config.num_workers_per_operator.unwrap();
-        let parallelism_per_worker = config.parallelism / num_workers_per_operator;
-        worker_distribution = Some(create_operator_based_worker_distribution(num_workers_per_operator, &grouped_operators, parallelism_per_worker));
-        for worker_id in worker_distribution.clone().unwrap().keys() {
-            worker_to_port.insert(worker_id.clone(), gen_unique_grpc_port() as i32);
-        }
-    }
-
-
-    // Create edges between operators
-    for i in 0..grouped_operators.len() - 1 {
-        let (source_name, source_config) = &grouped_operators[i];
-        let (target_name, target_config) = &grouped_operators[i + 1];
-        
-        // Determine partition type based on operator types
-        let partition_type = determine_partition_type(source_config, target_config);
-        
-        // Create edges between all parallel instances
-        for source_idx in 0..config.parallelism {
-            let source_id = if config.parallelism == 1 {
-                source_name.clone()
-            } else {
-                format!("{}_{}", source_name, source_idx)
-            };
-            
-            for target_idx in 0..config.parallelism {
-                let target_id = if config.parallelism == 1 {
-                    target_name.clone()
-                } else {
-                    format!("{}_{}", target_name, target_idx)
-                };
-                let wd = worker_distribution.clone();
-                let channel = create_channel(
-                    &source_id,
-                    &target_id,
-                    config.is_remote,
-                    &wd,
-                    &worker_to_port,
-                );
-                
-                let edge = ExecutionEdge::new(
-                    source_id.clone(),
-                    target_id.clone(),
-                    target_name.clone(),
-                    partition_type.clone(),
-                    Some(channel),
-                );
-                graph.add_edge(edge);
-            }
-        }
-    }
-
-    (graph, worker_distribution.clone())
+    // Use node assignment strategy to build execution graph
+    let strategy = OperatorPerNodeStrategy;
+    context.build_execution_graph(
+        cluster_nodes.as_deref(),
+        Some(&strategy),
+    ).await
 }
 
 /// Validates operator configurations
-fn validate_configs(operators: &[(String, OperatorConfig)]) {
-    for (i, (op_name, op_config)) in operators.iter().enumerate() {
-        match op_config {
-            OperatorConfig::ReduceConfig(_, _) => {
-                // Check if there's a KeyBy operator right before this reduce
-                if i == 0 {
-                    panic!("Reduce operator '{}' requires a KeyBy operator before it", op_name);
-                }
-                
-                let prev_config = &operators[i - 1].1;
-                match prev_config {
-                    OperatorConfig::KeyByConfig(_) => {
-                        // This is valid - reduce has keyby right before it
-                    }
-                    _ => {
-                        panic!("Reduce operator '{}' requires a KeyBy operator immediately before it", op_name);
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-}
 
-/// Groups operators into chains based on partition types
-fn group_operators_for_chaining(operators: &[(String, OperatorConfig)]) -> Vec<(String, OperatorConfig)> {
-    let mut grouped_operators = Vec::new();
-    let mut current_chain = Vec::new();
+// /// Helper function to create a worker distribution where each worker handles one operator type
+// pub fn create_operator_based_worker_distribution(
+//     num_workers_per_operator: usize,
+//     operators: &[(String, OperatorConfig)],
+//     parallelism_per_worker: usize,
+// ) -> HashMap<String, Vec<String>> {
+//     let mut distribution = HashMap::new();
+//     let mut worker_id = 0;
     
-    for (op_name, op_config) in operators {
-        current_chain.push((op_name.clone(), op_config.clone()));
-        
-        // If this is the last operator or the next operator requires hash partitioning,
-        // end the current chain
-        if current_chain.len() > 1 {
-            let last_op = &current_chain[current_chain.len() - 2];
-            let current_op = &current_chain[current_chain.len() - 1];
+//     for (op_name, _) in operators {
+//         for worker_idx in 0..num_workers_per_operator {
+//             let worker_id_str = format!("worker_{}", worker_id);
             
-            if determine_partition_type(&last_op.1, &current_op.1) == PartitionType::Hash {
-                // Remove the last operator from current chain and start a new one
-                let last_op = current_chain.pop().unwrap();
-                grouped_operators.push(create_operator_from_chain(&current_chain));
-                current_chain = vec![last_op];
-            }
-        }
-    }
+//             // Assign vertices for this worker (only vertices of the specific operator type)
+//             let mut vertex_ids = Vec::new();
+//             for vertex_idx in 0..parallelism_per_worker {
+//                 let global_vertex_idx = worker_idx * parallelism_per_worker + vertex_idx;
+//                 let vertex_id = if parallelism_per_worker == 1 {
+//                     op_name.clone()
+//                 } else {
+//                     format!("{}_{}", op_name, global_vertex_idx)
+//                 };
+//                 vertex_ids.push(vertex_id);
+//             }
+            
+//             distribution.insert(worker_id_str, vertex_ids);
+//             worker_id += 1;
+//         }
+//     }
     
-    // Add the last chain
-    if !current_chain.is_empty() {
-        grouped_operators.push(create_operator_from_chain(&current_chain));
-    }
-    
-    grouped_operators
-}
+//     distribution
+// }
 
-/// Creates an operator from a chain of operators
-fn create_operator_from_chain(chain: &[(String, OperatorConfig)]) -> (String, OperatorConfig) {
-    if chain.len() == 1 {
-        // Single operator - no chaining needed
-        chain[0].clone()
-    } else {
-        // Multiple operators - create chained config
-        let chained_config = OperatorConfig::ChainedConfig(
-            chain.iter().map(|(_, config)| config.clone()).collect()
+// TODO these tests are mostly for creating execution graphs from SQL queries - move them to logical graph
+#[cfg(test)]
+mod sql_tests {
+    use super::*;
+    use crate::runtime::operators::source::source_operator::VectorSourceConfig;
+    use crate::transport::channel::Channel;
+    use arrow::datatypes::{Field, DataType};
+
+    #[tokio::test]
+    async fn test_simple_sql_execution_graph() {
+        // Create schema for test table
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Utf8, false),
+        ]));
+
+        // Create sources map
+        let mut sources = HashMap::new();
+        sources.insert(
+            "test_table".to_string(),
+            (SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), schema)
         );
-        
-        // Create name with all operator names joined by ->
-        let chain_name = chain.iter()
-            .map(|(name, _)| name.as_str())
-            .collect::<Vec<_>>()
-            .join("->");
-        
-        (format!("chain_{}", chain_name), chained_config)
-    }
-}
 
-/// Determines the appropriate partition type between two operators
-fn determine_partition_type(source_config: &OperatorConfig, target_config: &OperatorConfig) -> PartitionType {
-    match (source_config, target_config) {
-        // Hash partitioning when source is KeyBy
-        (OperatorConfig::KeyByConfig(_), _) => PartitionType::Hash,
-        // Hash partitioning when source is ChainedConfig and the last operator in the chain is KeyBy
-        (OperatorConfig::ChainedConfig(configs), _) => {
-            let mut has_key_by = false;
-            for config in configs {
-                match config {
-                    OperatorConfig::KeyByConfig(_) => {
-                        has_key_by = true;
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            if has_key_by {
-                PartitionType::Hash
+        // Create execution graph (local execution by default)
+        let (graph, node_mapping) = create_sql_test_execution_graph(
+            "SELECT value FROM test_table",
+            sources,
+            None, // No sink
+            2,    // Parallelism
+            1,    // Cluster nodes (local)
+        ).await;
+
+        // Verify execution vertices were created
+        assert!(!graph.get_vertices().is_empty(), "Should have created execution vertices");
+        
+        // Verify node mapping is None for local execution (num_cluster_nodes = 1)
+        assert!(node_mapping.is_none(), "Node mapping should be None for local execution");
+
+        // Verify edges have local channels (configured automatically)
+        for edge in graph.get_edges().values() {
+            assert!(edge.channel.is_some(), "Edge should have a channel");
+            if let Some(Channel::Local { .. }) = edge.channel {
+                // This is expected for local execution
             } else {
-                PartitionType::RoundRobin
+                panic!("Expected local channel for local execution");
             }
         }
-        // All other cases use round-robin
-        _ => PartitionType::RoundRobin,
     }
-}
 
-/// Creates a channel based on configuration
-fn create_channel(
-    source_id: &str,
-    target_id: &str,
-    is_remote: bool,
-    worker_distribution: &Option<HashMap<String, Vec<String>>>,
-    worker_to_port: &HashMap<String, i32>,
-) -> Channel {
-    if !is_remote {
-        return Channel::Local {
-            channel_id: format!("{}_to_{}", source_id, target_id),
-        };
-    }
-    
-    // For remote channels, we need worker distribution
-    if let Some(ref worker_dist) = worker_distribution {
-        let source_worker_id = find_worker_for_vertex(source_id, worker_dist);
-        let target_worker_id = find_worker_for_vertex(target_id, worker_dist);
-        let target_port = worker_to_port.get(&target_worker_id).unwrap_or(&50051);
+    #[tokio::test]
+    async fn test_sql_execution_graph_with_aggregation() {
+        // Create schema for test table
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Utf8, false),
+        ]));
+
+        // Create sources map
+        let mut sources = HashMap::new();
+        sources.insert(
+            "test_table".to_string(),
+            (SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), schema)
+        );
+
+        // Create execution graph with aggregation
+        let (graph, _) = create_sql_test_execution_graph(
+            "SELECT value, COUNT(*) as count FROM test_table GROUP BY value",
+            sources,
+            None, // No sink
+            2,    // Parallelism
+            1,    // Cluster nodes (local)
+        ).await;
+
+        // Verify that the graph contains aggregation operators
+        let vertices: Vec<_> = graph.get_vertices().values().collect();
         
-        Channel::Remote {
-            channel_id: format!("{}_to_{}", source_id, target_id),
-            source_node_ip: "127.0.0.1".to_string(),
-            source_node_id: source_worker_id,
-            target_node_ip: "127.0.0.1".to_string(),
-            target_node_id: target_worker_id,
-            target_port: *target_port,
-        }
-    } else {
-        panic!("No worker distribution provided");
-    }
-}
+        // Should have source, key_by, aggregate, and projection operators
+        let mut has_source = false;
+        let mut has_key_by = false;
+        let mut has_aggregate = false;
+        let mut has_projection = false;
 
-/// Helper function to find which worker a vertex is assigned to
-fn find_worker_for_vertex(vertex_id: &str, worker_distribution: &HashMap<String, Vec<String>>) -> String {
-    for (worker_id, vertex_ids) in worker_distribution {
-        if vertex_ids.contains(&vertex_id.to_string()) {
-            return worker_id.clone();
-        }
-    }
-    panic!("No worker found for vertex: {}", vertex_id);
-}
-
-/// Helper function to create a worker distribution where each worker handles one operator type
-pub fn create_operator_based_worker_distribution(
-    num_workers_per_operator: usize,
-    operators: &[(String, OperatorConfig)],
-    parallelism_per_worker: usize,
-) -> HashMap<String, Vec<String>> {
-    let mut distribution = HashMap::new();
-    let mut worker_id = 0;
-    
-    for (op_name, _) in operators {
-        for worker_idx in 0..num_workers_per_operator {
-            let worker_id_str = format!("worker_{}", worker_id);
-            
-            // Assign vertices for this worker (only vertices of the specific operator type)
-            let mut vertex_ids = Vec::new();
-            for vertex_idx in 0..parallelism_per_worker {
-                let global_vertex_idx = worker_idx * parallelism_per_worker + vertex_idx;
-                let vertex_id = if parallelism_per_worker == 1 {
-                    op_name.clone()
-                } else {
-                    format!("{}_{}", op_name, global_vertex_idx)
-                };
-                vertex_ids.push(vertex_id);
+        for vertex in vertices {
+            match &vertex.operator_config {
+                OperatorConfig::SourceConfig(_) => has_source = true,
+                OperatorConfig::KeyByConfig(_) => has_key_by = true,
+                OperatorConfig::AggregateConfig(_) => has_aggregate = true,
+                OperatorConfig::MapConfig(_) => has_projection = true,
+                _ => {}
             }
-            
-            distribution.insert(worker_id_str, vertex_ids);
-            worker_id += 1;
+        }
+
+        assert!(has_source, "Should have source operators");
+        assert!(has_key_by, "Should have key_by operators for GROUP BY");
+        assert!(has_aggregate, "Should have aggregate operators for COUNT");
+        assert!(has_projection, "Should have projection operators");
+    }
+
+    #[tokio::test]
+    async fn test_sql_execution_graph_remote() {
+        // Create schema for test table
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value", DataType::Utf8, false),
+        ]));
+
+        // Create sources map
+        let mut sources = HashMap::new();
+        sources.insert(
+            "test_table".to_string(),
+            (SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), schema)
+        );
+
+        // Create execution graph with remote execution (2 cluster nodes)
+        let (graph, node_mapping) = create_sql_test_execution_graph(
+            "SELECT value FROM test_table",
+            sources,
+            None, // No sink
+            2,    // Parallelism
+            2,    // Cluster nodes (remote)
+        ).await;
+
+        // Verify node mapping exists for remote execution (num_cluster_nodes > 1)
+        assert!(node_mapping.is_some(), "Node mapping should exist for remote execution");
+        
+        let mapping = node_mapping.as_ref().unwrap();
+        assert!(!mapping.is_empty(), "Node mapping should not be empty");
+
+        // All edges should have channels (configured automatically, local or remote depending on node assignment)
+        for edge in graph.get_edges().values() {
+            assert!(edge.channel.is_some(), "Edge should have a channel");
         }
     }
-    
-    distribution
 } 

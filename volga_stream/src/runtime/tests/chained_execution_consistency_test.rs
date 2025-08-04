@@ -43,11 +43,11 @@ async fn run_test_with_config(
 
     // Define operator chain: source -> map1 -> keyby -> map2 -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("map1".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
-        ("map2".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
     let config = TestLinearGraphConfig {
@@ -58,7 +58,7 @@ async fn run_test_with_config(
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_linear_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config).await;
 
     // Create worker config - use all vertices from the graph
     let vertex_ids: Vec<String> = graph.get_vertices().keys().cloned().collect();

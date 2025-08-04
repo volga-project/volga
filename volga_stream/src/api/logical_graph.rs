@@ -4,6 +4,7 @@ use std::fmt;
 use arrow::datatypes::Schema as ArrowSchema;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
+use crate::runtime::operators::chained::chained_operator::group_operators_for_chaining;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::partition::PartitionType;
@@ -50,6 +51,7 @@ pub enum EdgeType {
     Forward,
     Shuffle,
     Broadcast,
+    RoundRobin
 }
 
 #[derive(Debug, Clone)]
@@ -147,9 +149,10 @@ impl LogicalGraph {
             // Determine partition type based on logical edge type
             // TODO introduce forward partition and use it if parallelism of sequential operators is equal
             let partition_type = match logical_edge.edge_type {
-                EdgeType::Forward => PartitionType::RoundRobin,
+                EdgeType::Forward => PartitionType::Forward,
                 EdgeType::Shuffle => PartitionType::Hash,
                 EdgeType::Broadcast => PartitionType::Broadcast,
+                EdgeType::RoundRobin => PartitionType::RoundRobin,
             };
 
             // Connect each source execution vertex to each target execution vertex
@@ -171,8 +174,59 @@ impl LogicalGraph {
         execution_graph
     }
 
+    pub fn from_operator_list(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
+        // Validate configuration
+        validate_config_list(&operator_list);
 
+        // Group operators based on chaining configuration
+        let grouped_operators = if chained {
+            group_operators_for_chaining(&operator_list)
+        } else {
+            // If no chaining, each operator becomes its own group
+            operator_list.clone()
+        };
 
+        // Create a linear logical graph
+        let mut logical_graph = LogicalGraph::new();
+        let mut node_indices = Vec::new();
+        
+        // Add nodes for each operator
+        for op_config in &grouped_operators {
+            let node = LogicalNode::new(
+                op_config.clone(),
+                parallelism,
+                None, // in_schema
+                None, // out_schema
+            );
+            let node_idx = logical_graph.add_node(node);
+            node_indices.push(node_idx);
+        }
+
+        // Add edges between operators
+        for i in 0..grouped_operators.len() - 1 {
+            let source_config = &grouped_operators[i];
+            let target_config = &grouped_operators[i + 1];
+            
+            // Determine partition type based on operator types
+            let partition_type = determine_partition_type(source_config, target_config);
+            
+            // Convert partition type to edge type
+            let edge_type = match partition_type {
+                PartitionType::Forward => EdgeType::Forward,
+                PartitionType::RoundRobin => EdgeType::RoundRobin,
+                PartitionType::Broadcast => EdgeType::Broadcast,
+                PartitionType::Hash => EdgeType::Shuffle,
+            };
+            
+            logical_graph.add_edge(
+                node_indices[i],
+                node_indices[i + 1],
+                edge_type,
+            );
+        }
+
+        logical_graph
+    }
 
     /// Generate DOT format string
     pub fn to_dot(&self) -> String {
@@ -191,12 +245,65 @@ impl LogicalGraph {
                 EdgeType::Forward => "Forward",
                 EdgeType::Shuffle => "Shuffle",
                 EdgeType::Broadcast => "Broadcast",
+                EdgeType::RoundRobin => "RoundRobin",
             };
             dot_string.push_str(&format!("  {} -> {} [label=\"{}\"];\n", source_id, target_id, edge_type));
         }
         
         dot_string.push_str("}\n");
         dot_string
+    }
+}
+
+fn validate_config_list(operators: &[OperatorConfig]) {
+    for (i, op_config) in operators.iter().enumerate() {
+        match op_config {
+            OperatorConfig::ReduceConfig(_, _) => {
+                // Check if there's a KeyBy operator right before this reduce
+                if i == 0 {
+                    panic!("Reduce operator '{}' requires a KeyBy operator before it", op_config);
+                }
+                
+                let prev_config = &operators[i - 1];
+                match prev_config {
+                    OperatorConfig::KeyByConfig(_) => {
+                        // This is valid - reduce has keyby right before it
+                    }
+                    _ => {
+                        panic!("Reduce operator '{}' requires a KeyBy operator immediately before it", op_config);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Determines the appropriate partition type between two operators
+pub fn determine_partition_type(source_config: &OperatorConfig, target_config: &OperatorConfig) -> PartitionType {
+    match (source_config, target_config) {
+        // Hash partitioning when source is KeyBy
+        (OperatorConfig::KeyByConfig(_), _) => PartitionType::Hash,
+        // Hash partitioning when source is ChainedConfig and the last operator in the chain is KeyBy
+        (OperatorConfig::ChainedConfig(configs), _) => {
+            let mut has_key_by = false;
+            for config in configs {
+                match config {
+                    OperatorConfig::KeyByConfig(_) => {
+                        has_key_by = true;
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            if has_key_by {
+                PartitionType::Hash
+            } else {
+                PartitionType::RoundRobin
+            }
+        }
+        // All other cases use round-robin
+        _ => PartitionType::RoundRobin,
     }
 }
 
@@ -278,9 +385,9 @@ mod tests {
         let sink_index = logical_graph.add_node(sink_node);
 
         // Add edges
-        logical_graph.add_edge(source_index, filter_index, EdgeType::Forward);
-        logical_graph.add_edge(filter_index, projection_index, EdgeType::Forward);
-        logical_graph.add_edge(projection_index, sink_index, EdgeType::Forward);
+        logical_graph.add_edge(source_index, filter_index, EdgeType::RoundRobin);
+        logical_graph.add_edge(filter_index, projection_index, EdgeType::RoundRobin);
+        logical_graph.add_edge(projection_index, sink_index, EdgeType::RoundRobin);
 
         // Convert to execution graph
         let execution_graph = logical_graph.to_execution_graph();

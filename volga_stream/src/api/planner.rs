@@ -374,6 +374,8 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
         if self.node_stack.is_empty() {
         }
         
+        // TODO use determine_partition_type when generating edges
+
         // skip subqueries as they simply wrap other plans
         if matches!(node, LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)) {
             return Ok(TreeNodeRecursion::Continue);
@@ -400,6 +402,7 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
 
         let node_index = self.node_stack.pop().unwrap();
         if let Some(prev_node_index) = self.node_stack.last() {
+            // TODO use determine_partition_type when generating edges
             // All nodes are using forward edges for now
             self.logical_graph.add_edge(*prev_node_index, node_index, EdgeType::Forward);
         } else {

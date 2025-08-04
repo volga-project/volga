@@ -5,6 +5,14 @@ use crate::cluster::cluster_provider::ClusterNode;
 /// Mapping from execution vertex ID to cluster node
 pub type ExecutionVertexNodeMapping = HashMap<String, ClusterNode>;
 
+pub fn node_to_vertex_ids(mapping: &ExecutionVertexNodeMapping) -> HashMap<String, Vec<String>> {
+    let mut node_to_vertex_ids = HashMap::new();
+    for (vertex_id, node) in mapping {
+        node_to_vertex_ids.entry(node.node_id.clone()).or_insert_with(Vec::new).push(vertex_id.clone());
+    }
+    node_to_vertex_ids
+}
+
 /// Strategy for assigning execution vertices to cluster nodes
 pub trait NodeAssignStrategy {
     /// Assign execution vertices to cluster nodes
@@ -29,6 +37,11 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
             let vertex = execution_graph.get_vertices().get(vertex_id).expect("vertex should exist");
             let operator_id = vertex.operator_id.clone();
             operator_to_vertices.entry(operator_id).or_insert_with(Vec::new).push(vertex_id.clone());
+        }
+
+        // Check if we have enough nodes for all operators
+        if operator_to_vertices.len() > cluster_nodes.len() {
+            panic!("Not enough cluster nodes ({}) to assign all operators ({})", cluster_nodes.len(), operator_to_vertices.len());
         }
 
         // Assign each operator group to a cluster node

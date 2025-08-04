@@ -49,18 +49,18 @@ fn test_worker_execution() -> Result<()> {
 
     // Define operator chain: source -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages.clone())))),
-        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages.clone()))),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
-    let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
+    let (graph, _) = runtime.block_on(create_linear_test_execution_graph(TestLinearGraphConfig {
         operators,
         parallelism: 1,
         chained: false,
         is_remote: false,
         num_workers_per_operator: None,
-    });
+    }));
 
     let vertex_ids = graph.get_vertices().keys().cloned().collect();
     let mut worker = Worker::new(WorkerConfig::new(

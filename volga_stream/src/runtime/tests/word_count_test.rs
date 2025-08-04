@@ -34,32 +34,32 @@ fn test_word_count() -> Result<()> {
 
     // Define operator chain: source -> keyby -> reduce -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
+        OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
             word_length,
             dictionary_size_per_source,
             Some(num_to_send_per_word),
             None, // No time limit
             batch_size,
             BatchingMode::SameWord,
-        )))),
-        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()]))),
-        ("reduce".to_string(), OperatorConfig::ReduceConfig(
+        ))),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()])),
+        OperatorConfig::ReduceConfig(
             ReduceFunction::new_arrow_reduce("word".to_string()),
             Some(AggregationResultExtractor::single_aggregation(
                 AggregationType::Count,
                 "count".to_string(),
             )),
-        )),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+        ),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
-    let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
+    let (graph, _) = runtime.block_on(create_linear_test_execution_graph(TestLinearGraphConfig {
         operators,
         parallelism,
         chained: true,
         is_remote: false,
         num_workers_per_operator: None,
-    });
+    }));
 
     let vertex_ids = graph.get_vertices().keys().cloned().collect();
     // Create and start worker

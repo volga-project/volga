@@ -1,4 +1,4 @@
-use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{create_operator_from_config, Operator, OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{functions::map::MapFunction, operators::operator::{create_operator_from_config, Operator, OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_rayon::AsyncThreadPool;
@@ -111,5 +111,52 @@ impl OperatorTrait for ChainedOperator {
         
         try_join_all(close_futures).await?;
         Ok(())
+    }
+}
+
+
+/// Groups operators into chains based on partition types
+pub fn group_operators_for_chaining(operators: &[OperatorConfig]) -> Vec<OperatorConfig> {
+    let mut grouped_operators = Vec::new();
+    let mut current_chain = Vec::new();
+    
+    for op_config in operators {
+        current_chain.push(op_config.clone());
+        
+        // If this is the last operator or the next operator requires hash partitioning,
+        // end the current chain
+        if current_chain.len() > 1 {
+            let last_op = &current_chain[current_chain.len() - 2];
+            let current_op = &current_chain[current_chain.len() - 1];
+            
+            if determine_partition_type(&last_op, &current_op) == PartitionType::Hash {
+                // Remove the last operator from current chain and start a new one
+                let last_op = current_chain.pop().unwrap();
+                grouped_operators.push(create_operator_from_chain(&current_chain));
+                current_chain = vec![last_op];
+            }
+        }
+    }
+    
+    // Add the last chain
+    if !current_chain.is_empty() {
+        grouped_operators.push(create_operator_from_chain(&current_chain));
+    }
+    
+    grouped_operators
+}
+
+/// Creates an operator from a chain of operators
+pub fn create_operator_from_chain(chain: &[OperatorConfig]) -> OperatorConfig {
+    if chain.len() == 1 {
+        // Single operator - no chaining needed
+        chain[0].clone()
+    } else {
+        // Multiple operators - create chained config
+        let chained_config = OperatorConfig::ChainedConfig(
+            chain.iter().map(|config| config.clone()).collect()
+        );
+        
+        chained_config
     }
 }

@@ -1,7 +1,7 @@
 use crate::runtime::operators::source::source_operator::VectorSourceConfig;
 use crate::runtime::tests::graph_test_utils::{
     create_linear_test_execution_graph, TestLinearGraphConfig, 
-    create_operator_based_worker_distribution
+    // create_operator_based_worker_distribution
 };
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::functions::{
@@ -28,8 +28,10 @@ impl MapFunctionTrait for IdentityMapFunction {
     }
 }
 
-#[test]
-fn test_create_simple_graph() {
+// TODO these tests are mostly for creating execution graphs from operator configs - move them to logical graph tests
+
+#[tokio::test]
+async fn test_create_simple_graph() {
     // Create test messages
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
@@ -38,9 +40,9 @@ fn test_create_simple_graph() {
 
     // Define operator chain: source -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
     ];
 
     let config = TestLinearGraphConfig {
@@ -51,16 +53,28 @@ fn test_create_simple_graph() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_linear_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config).await;
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 6); // 3 operators * 2 parallelism
-    assert!(graph.get_vertex("source_0").is_some());
-    assert!(graph.get_vertex("source_1").is_some());
-    assert!(graph.get_vertex("map_0").is_some());
-    assert!(graph.get_vertex("map_1").is_some());
-    assert!(graph.get_vertex("sink_0").is_some());
-    assert!(graph.get_vertex("sink_1").is_some());
+
+    // Verify vertex types
+    let mut source_count = 0;
+    let mut map_count = 0;
+    let mut sink_count = 0;
+
+    for vertex in graph.get_vertices().values() {
+        match &vertex.operator_config {
+            OperatorConfig::SourceConfig(_) => source_count += 1,
+            OperatorConfig::MapConfig(_) => map_count += 1,
+            OperatorConfig::SinkConfig(_) => sink_count += 1,
+            _ => {}
+        }
+    }
+
+    assert_eq!(source_count, 2, "Expected 2 source vertices");
+    assert_eq!(map_count, 2, "Expected 2 map vertices"); 
+    assert_eq!(sink_count, 2, "Expected 2 sink vertices");
 
     // Verify edges
     assert_eq!(graph.get_edges().len(), 8); // 2 source -> 2 map + 2 map -> 2 sink
@@ -73,8 +87,8 @@ fn test_create_simple_graph() {
     }
 }
 
-#[test]
-fn test_create_chained_graph() {
+#[tokio::test]
+async fn test_create_chained_graph() {
     // Create test messages
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
@@ -83,10 +97,10 @@ fn test_create_chained_graph() {
 
     // Define operator chain: source -> map1 -> map2 -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("map1".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("map2".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
     ];
 
     let config = TestLinearGraphConfig {
@@ -97,19 +111,32 @@ fn test_create_chained_graph() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_linear_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config).await;
 
     // Verify vertices - should be chained into a single chain operator (containing source, map1, map2, sink)
     assert_eq!(graph.get_vertices().len(), 2); // 1 group * 2 parallelism
-    assert!(graph.get_vertex("chain_source->map1->map2->sink_0").is_some());
-    assert!(graph.get_vertex("chain_source->map1->map2->sink_1").is_some());
+
+    // Verify chained configs in vertices
+    let vertices = graph.get_vertices().values();
+    let chain_configs = vertices.filter(|v| {
+        if let OperatorConfig::ChainedConfig(chain) = &v.operator_config {
+            chain.len() == 4 && 
+            matches!(chain[0], OperatorConfig::SourceConfig(_)) &&
+            matches!(chain[1], OperatorConfig::MapConfig(_)) &&
+            matches!(chain[2], OperatorConfig::MapConfig(_)) &&
+            matches!(chain[3], OperatorConfig::SinkConfig(_))
+        } else {
+            false
+        }
+    }).count();
+    assert_eq!(chain_configs, 2); // 2 parallel instances of the chain
 
     // Verify no edges since everything is chained together
     assert_eq!(graph.get_edges().len(), 0);
 }
 
-#[test]
-fn test_create_chained_graph_with_keyby() {
+#[tokio::test]
+async fn test_create_chained_graph_with_keyby() {
     // Create test messages
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
@@ -118,11 +145,11 @@ fn test_create_chained_graph_with_keyby() {
 
     // Define operator chain: source -> map1 -> keyby -> map2 -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("map1".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
-        ("map2".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
     ];
 
     let config = TestLinearGraphConfig {
@@ -133,15 +160,42 @@ fn test_create_chained_graph_with_keyby() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_linear_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config).await;
 
     // Verify vertices - KeyBy should break the chain
     // source -> map1 -> keyby -> map2 -> sink becomes: chain_source->map1->keyby -> chain_map2->sink
     assert_eq!(graph.get_vertices().len(), 4); // 2 groups * 2 parallelism
-    assert!(graph.get_vertex("chain_source->map1->keyby_0").is_some());
-    assert!(graph.get_vertex("chain_source->map1->keyby_1").is_some());
-    assert!(graph.get_vertex("chain_map2->sink_0").is_some());
-    assert!(graph.get_vertex("chain_map2->sink_1").is_some());
+    // Verify chained configs in vertices
+    let vertices = graph.get_vertices().values();
+    
+    // Count vertices with source->map->keyby chain
+    let source_chains = vertices.clone()
+        .filter(|v| {
+            if let OperatorConfig::ChainedConfig(chain) = &v.operator_config {
+                chain.len() == 3 && 
+                matches!(chain[0], OperatorConfig::SourceConfig(_)) &&
+                matches!(chain[1], OperatorConfig::MapConfig(_)) &&
+                matches!(chain[2], OperatorConfig::KeyByConfig(_))
+            } else {
+                false
+            }
+        })
+        .count();
+    assert_eq!(source_chains, 2, "Should have 2 source->map->keyby chains");
+
+    // Count vertices with map->sink chain
+    let sink_chains = vertices
+        .filter(|v| {
+            if let OperatorConfig::ChainedConfig(chain) = &v.operator_config {
+                chain.len() == 2 &&
+                matches!(chain[0], OperatorConfig::MapConfig(_)) &&
+                matches!(chain[1], OperatorConfig::SinkConfig(_))
+            } else {
+                false
+            }
+        })
+        .count();
+    assert_eq!(sink_chains, 2, "Should have 2 map->sink chains");
 
     // Verify edges between groups
     assert_eq!(graph.get_edges().len(), 4); // 1 connection * 4 edges
@@ -155,8 +209,8 @@ fn test_create_chained_graph_with_keyby() {
     }
 }
 
-#[test]
-fn test_create_graph_with_keyby() {
+#[tokio::test]
+async fn test_create_graph_with_keyby() {
     // Create test messages
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
@@ -165,10 +219,10 @@ fn test_create_graph_with_keyby() {
 
     // Define operator chain: source -> keyby -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
-        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
     ];
 
     let config = TestLinearGraphConfig {
@@ -179,7 +233,7 @@ fn test_create_graph_with_keyby() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_linear_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config).await;
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 8); // 4 operators * 2 parallelism
@@ -189,26 +243,32 @@ fn test_create_graph_with_keyby() {
 
     // Check partition types for all edges
     for edge in graph.get_edges().values() {
-        if edge.source_vertex_id.starts_with("source") && edge.target_vertex_id.starts_with("keyby") {
-            // source -> keyby should use RoundRobin
-            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
-                "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
-        } else if edge.source_vertex_id.starts_with("keyby") && edge.target_vertex_id.starts_with("map") {
-            // keyby -> map should use Hash partitioning
-            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
-                "Edge {} -> {} should use Hash partitioning", edge.source_vertex_id, edge.target_vertex_id);
-        } else if edge.source_vertex_id.starts_with("map") && edge.target_vertex_id.starts_with("sink") {
-            // map -> sink should use RoundRobin
-            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
-                "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
-        } else {
-            panic!("Unexpected edge: {} -> {}", edge.source_vertex_id, edge.target_vertex_id);
+        let source_vertex = graph.get_vertex(&edge.source_vertex_id).unwrap();
+        let target_vertex = graph.get_vertex(&edge.target_vertex_id).unwrap();
+
+        match (&source_vertex.operator_config, &target_vertex.operator_config) {
+            (OperatorConfig::SourceConfig(_), OperatorConfig::KeyByConfig(_)) => {
+                // source -> keyby should use RoundRobin
+                assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+                    "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+            }
+            (OperatorConfig::KeyByConfig(_), OperatorConfig::MapConfig(_)) => {
+                // keyby -> map should use Hash partitioning
+                assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
+                    "Edge {} -> {} should use Hash partitioning", edge.source_vertex_id, edge.target_vertex_id);
+            }
+            (OperatorConfig::MapConfig(_), OperatorConfig::SinkConfig(_)) => {
+                // map -> sink should use RoundRobin
+                assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+                    "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+            }
+            _ => panic!("Unexpected edge: {} -> {}", edge.source_vertex_id, edge.target_vertex_id)
         }
     }
 }
 
-#[test]
-fn test_create_remote_graph() {
+#[tokio::test]
+async fn test_create_remote_graph() {
     // Create test messages
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
@@ -217,9 +277,9 @@ fn test_create_remote_graph() {
 
     // Define operator chain: source -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
     ];
 
     let num_operators = operators.len();
@@ -236,7 +296,7 @@ fn test_create_remote_graph() {
         num_workers_per_operator: Some(num_workers_per_operator),
     };
 
-    let (graph, _) = create_linear_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config).await;
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), total_parallelism * num_operators);
@@ -259,49 +319,8 @@ fn test_create_remote_graph() {
     }
 }
 
-#[test]
-fn test_create_operator_based_worker_distribution() {
-    // Create test messages
-    let test_messages = vec![
-        Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
-        Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
-    ];
-
-    // Define operator chain: source -> map -> sink
-    let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
-    ];
-
-    let worker_distribution = create_operator_based_worker_distribution(2, &operators, 2);
-
-    // Verify distribution
-    assert_eq!(worker_distribution.len(), 6); // 3 operators * 2 workers per operator
-
-    // Check that each worker has vertices of the same operator type
-    for (worker_id, vertex_ids) in &worker_distribution {
-        if worker_id.starts_with("worker_0") || worker_id.starts_with("worker_1") {
-            // Source workers
-            for vertex_id in vertex_ids {
-                assert!(vertex_id.starts_with("source"));
-            }
-        } else if worker_id.starts_with("worker_2") || worker_id.starts_with("worker_3") {
-            // Map workers
-            for vertex_id in vertex_ids {
-                assert!(vertex_id.starts_with("map"));
-            }
-        } else if worker_id.starts_with("worker_4") || worker_id.starts_with("worker_5") {
-            // Sink workers
-            for vertex_id in vertex_ids {
-                assert!(vertex_id.starts_with("sink"));
-            }
-        }
-    }
-}
-
-#[test]
-fn test_create_graph_with_reduce_chained() {
+#[tokio::test]
+async fn test_create_graph_with_reduce_chained() {
     // Create test messages
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
@@ -310,10 +329,10 @@ fn test_create_graph_with_reduce_chained() {
 
     // Define operator chain: source -> keyby -> reduce -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)))),
-        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
-        ("reduce".to_string(), OperatorConfig::ReduceConfig(ReduceFunction::new_arrow_reduce("value".to_string()), None)),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+        OperatorConfig::ReduceConfig(ReduceFunction::new_arrow_reduce("value".to_string()), None),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
     ];
 
     let config = TestLinearGraphConfig {
@@ -324,7 +343,7 @@ fn test_create_graph_with_reduce_chained() {
         num_workers_per_operator: None,
     };
 
-    let (graph, _) = create_linear_test_execution_graph(config);
+    let (graph, _) = create_linear_test_execution_graph(config).await;
 
     // Verify vertices
     assert_eq!(graph.get_vertices().len(), 4); // 2 chained operators * 2 parallelism

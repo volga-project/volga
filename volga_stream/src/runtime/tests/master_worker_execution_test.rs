@@ -1,4 +1,4 @@
-use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}, runtime::{
+use crate::{cluster::node_assignment::node_to_vertex_ids, common::test_utils::{create_test_string_batch, gen_unique_grpc_port}, runtime::{
     execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
         key_by::KeyByFunction,
         map::{MapFunction, MapFunctionTrait},
@@ -6,7 +6,7 @@ use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}
 }, transport::transport_backend_actor::TransportBackendType};
 use crate::common::message::{Message, WatermarkMessage};
 use crate::common::MAX_WATERMARK_VALUE;
-use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig, create_operator_based_worker_distribution};
+use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
@@ -66,29 +66,30 @@ async fn start_worker_servers(
     )));
 
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(source_messages)))),
-        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
-        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(source_messages))),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+        OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
     // Create execution graph
-    let (graph, worker_vertex_distribution) = create_linear_test_execution_graph(TestLinearGraphConfig {
+    let (graph, vertex_to_node) = create_linear_test_execution_graph(TestLinearGraphConfig {
         operators,
         parallelism: num_workers_per_operator * parallelism_per_worker,
         chained: false,
         is_remote: true,
         num_workers_per_operator: Some(num_workers_per_operator),
-    });
+    }).await;
 
-    let worker_vertex_distribution = worker_vertex_distribution.unwrap();
+    let vertex_to_node = vertex_to_node.unwrap();
+    let node_to_vertex_ids = node_to_vertex_ids(&vertex_to_node);
     
     // Start worker servers
-    for worker_id in worker_vertex_distribution.keys() {
+    for node_id in node_to_vertex_ids.keys() {
         let port = gen_unique_grpc_port();
         let addr = format!("127.0.0.1:{}", port);
         
-        let vertex_ids = worker_vertex_distribution.get(worker_id).unwrap().clone();
+        let vertex_ids = node_to_vertex_ids.get(node_id).unwrap().clone();
 
         // Create and start worker server
         let worker_config = WorkerConfig::new(
@@ -103,7 +104,7 @@ async fn start_worker_servers(
         worker_servers.push(worker_server);
         worker_addresses.push(addr.clone());
         
-        println!("[TEST] Started worker server {} on {}", worker_id, addr);
+        println!("[TEST] Started worker server for node {} on {}", node_id, addr);
     }
 
     // Store worker servers in a static to prevent them from being dropped
@@ -124,9 +125,6 @@ fn test_master_worker_execution() -> Result<()> {
     let num_workers_per_operator = 2;
     let parallelism_per_worker = 2;
     let num_messages_per_source = 10; // TODO large number fails, debug why
-    
-    println!("[TEST] Running master-worker execution test with {} workers per operator, {} parallelism per worker, {} messages per source", 
-             num_workers_per_operator, parallelism_per_worker, num_messages_per_source);
     
     // Create runtime for async operations
     let runtime = Runtime::new()?;

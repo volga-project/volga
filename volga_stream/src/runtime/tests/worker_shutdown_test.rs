@@ -65,21 +65,19 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
 
     // Define operator chain: source -> keyby -> map -> sink
     let operators = vec![
-        ("source".to_string(), OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(source_messages)))),
-        ("keyby".to_string(), OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()]))),
-        ("map".to_string(), OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction))),
-        ("sink".to_string(), OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))),
+        OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(source_messages))),
+        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+        OperatorConfig::MapConfig(MapFunction::new_custom(KeyedToRegularMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
-    let config = TestLinearGraphConfig {
+    let (graph, _) = runtime.block_on(create_linear_test_execution_graph(TestLinearGraphConfig {
         operators,
         parallelism,
         chained: false,
         is_remote: false,
         num_workers_per_operator: None,
-    };
-
-    let (graph, _) = create_linear_test_execution_graph(config);
+    }));
 
     let vertex_ids = graph.get_vertices().keys().cloned().collect();
     // Create and start worker

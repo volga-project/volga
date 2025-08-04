@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
-use crate::transport::channel::Channel;
+use crate::transport::channel::{gen_channel_id, Channel};
 use crate::common::message::Message;
 use crate::runtime::functions::{
     map::MapFunction,
@@ -32,7 +32,7 @@ impl ExecutionEdge {
         Self {
             source_vertex_id: source_vertex_id.clone(),
             target_vertex_id: target_vertex_id.clone(),
-            edge_id: format!("{}-{}", source_vertex_id, target_vertex_id),
+            edge_id: gen_edge_id(&source_vertex_id, &target_vertex_id),
             target_operator_id: target_operator_id.clone(),
             partition_type,
             channel,
@@ -42,6 +42,10 @@ impl ExecutionEdge {
     pub fn get_channel(&self) -> Channel {
         self.channel.as_ref().expect("channel should be present").clone()
     }
+}
+
+pub fn gen_edge_id(source_vertex_id: &str, target_vertex_id: &str) -> String {
+    format!("{}-{}", source_vertex_id, target_vertex_id)
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +198,7 @@ impl ExecutionGraph {
                 if source_node.node_id != target_node.node_id {
                     // Vertices are on different nodes, create remote channel
                     crate::transport::channel::Channel::Remote {
-                        channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
+                        channel_id: gen_channel_id(&edge.source_vertex_id, &edge.target_vertex_id),
                         source_node_ip: source_node.node_ip.clone(),
                         source_node_id: source_node.node_id.clone(),
                         target_node_ip: target_node.node_ip.clone(),
@@ -204,13 +208,13 @@ impl ExecutionGraph {
                 } else {
                     // Vertices are on same node, use local channel
                     crate::transport::channel::Channel::Local {
-                        channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
+                        channel_id: gen_channel_id(&edge.source_vertex_id, &edge.target_vertex_id),
                     }
                 }
             } else {
                 // No cluster mapping provided, use local channels
                 crate::transport::channel::Channel::Local {
-                    channel_id: format!("{}_to_{}", edge.source_vertex_id, edge.target_vertex_id),
+                    channel_id: gen_channel_id(&edge.source_vertex_id, &edge.target_vertex_id),
                 }
             };
 
