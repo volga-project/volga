@@ -27,7 +27,7 @@ use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
 
-use super::logical_graph::{LogicalNode, LogicalGraph, EdgeType};
+use super::logical_graph::{LogicalNode, LogicalGraph};
 use crate::runtime::functions::key_by::key_by_function::DataFusionKeyFunction;
 use crate::runtime::functions::key_by::KeyByFunction;
 use crate::runtime::operators::operator::OperatorConfig;
@@ -36,6 +36,7 @@ use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
+use crate::runtime::partition::PartitionType;
 
 /// Custom table provider creating dummy tables with no execution logic
 #[derive(Debug, Clone)]
@@ -264,7 +265,7 @@ impl Planner {
         );
         let sink_node_index = self.logical_graph.add_node(sink_node);
         
-        self.logical_graph.add_edge(sink_node_index, root_node_index, EdgeType::Forward);
+        self.logical_graph.add_edge(sink_node_index, root_node_index, PartitionType::Forward);
         Ok(())
     }
 
@@ -391,11 +392,11 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             let aggregate_node_index = self.node_stack.pop().unwrap();
 
             // add edge between key by and sggregate
-            self.logical_graph.add_edge(key_by_node_index, aggregate_node_index, EdgeType::Shuffle);
+            self.logical_graph.add_edge(key_by_node_index, aggregate_node_index, PartitionType::Hash);
 
             // add edge between prev node and key by
             let prev_node_index = self.node_stack.last().expect("key by should have a node before it");
-            self.logical_graph.add_edge(*prev_node_index, key_by_node_index, EdgeType::Forward);
+            self.logical_graph.add_edge(*prev_node_index, key_by_node_index, PartitionType::Forward);
 
             return Ok(TreeNodeRecursion::Continue);
         }
@@ -404,7 +405,7 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
         if let Some(prev_node_index) = self.node_stack.last() {
             // TODO use determine_partition_type when generating edges
             // All nodes are using forward edges for now
-            self.logical_graph.add_edge(*prev_node_index, node_index, EdgeType::Forward);
+            self.logical_graph.add_edge(*prev_node_index, node_index, PartitionType::Forward);
         } else {
             // no prev node - this is the root of the plan
             // if sink is configured add here
@@ -527,7 +528,7 @@ mod tests {
         
         // Verify edge types are Forward
         for (_, _, edge) in edges {
-            assert!(matches!(edge.edge_type, EdgeType::Forward));
+            assert!(matches!(edge.partition_type, PartitionType::Forward));
         }
     }
 
@@ -585,10 +586,10 @@ mod tests {
         for (from, to, edge) in edges {
             if matches!(nodes[from.index()].operator_config, OperatorConfig::KeyByConfig(_)) 
                && matches!(nodes[to.index()].operator_config, OperatorConfig::AggregateConfig(_)) {
-                assert!(matches!(edge.edge_type, EdgeType::Shuffle), "Edge between key_by and aggregate should be Shuffle");
+                assert!(matches!(edge.partition_type, PartitionType::Hash), "Edge between key_by and aggregate should be Hash");
                 found_shuffle = true;
             } else {
-                assert!(matches!(edge.edge_type, EdgeType::Forward), "Non key_by->aggregate edges should be Forward");
+                assert!(matches!(edge.partition_type, PartitionType::Forward), "Non key_by->aggregate edges should be Forward");
             }
         }
         assert!(found_shuffle, "Should have found a Shuffle edge between key_by and aggregate");
@@ -671,10 +672,10 @@ mod tests {
         for (from, to, edge) in edges {
             if matches!(nodes[from.index()].operator_config, OperatorConfig::KeyByConfig(_)) 
                && matches!(nodes[to.index()].operator_config, OperatorConfig::AggregateConfig(_)) {
-                assert!(matches!(edge.edge_type, EdgeType::Shuffle), "Edge between key_by and aggregate should be Shuffle");
+                assert!(matches!(edge.partition_type, PartitionType::Hash), "Edge between key_by and aggregate should be Hash");
                 shuffle_count += 1;
             } else {
-                assert!(matches!(edge.edge_type, EdgeType::Forward), "Non key_by->aggregate edges should be Forward");
+                assert!(matches!(edge.partition_type, PartitionType::Forward), "Non key_by->aggregate edges should be Forward");
             }
         }
         assert_eq!(shuffle_count, 2, "Should have found 2 Shuffle edges between key_by and aggregate nodes");

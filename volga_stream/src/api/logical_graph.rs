@@ -47,16 +47,8 @@ pub struct ConnectorConfig {
 }
 
 #[derive(Debug, Clone)]
-pub enum EdgeType {
-    Forward,
-    Shuffle,
-    Broadcast,
-    RoundRobin
-}
-
-#[derive(Debug, Clone)]
 pub struct LogicalEdge {
-    pub edge_type: EdgeType,
+    pub partition_type: PartitionType,
 }
 
 #[derive(Debug, Clone)]
@@ -84,9 +76,9 @@ impl LogicalGraph {
         node_index
     }
 
-    pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex, edge_type: EdgeType) -> petgraph::graph::EdgeIndex {
+    pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex, edge_type: PartitionType) -> petgraph::graph::EdgeIndex {
         let edge = LogicalEdge {
-            edge_type,
+            partition_type: edge_type,
         };
         
         self.graph.add_edge(source, target, edge)
@@ -146,14 +138,7 @@ impl LogicalGraph {
             let source_execution_vertices = &logical_to_execution_mapping[&source_logical_node_index];
             let target_execution_vertices = &logical_to_execution_mapping[&target_logical_node_index];
 
-            // Determine partition type based on logical edge type
-            // TODO introduce forward partition and use it if parallelism of sequential operators is equal
-            let partition_type = match logical_edge.edge_type {
-                EdgeType::Forward => PartitionType::Forward,
-                EdgeType::Shuffle => PartitionType::Hash,
-                EdgeType::Broadcast => PartitionType::Broadcast,
-                EdgeType::RoundRobin => PartitionType::RoundRobin,
-            };
+            let partition_type = logical_edge.partition_type.clone();
 
             // Connect each source execution vertex to each target execution vertex
             for source_execution_vertex_id in source_execution_vertices {
@@ -210,18 +195,10 @@ impl LogicalGraph {
             // Determine partition type based on operator types
             let partition_type = determine_partition_type(source_config, target_config);
             
-            // Convert partition type to edge type
-            let edge_type = match partition_type {
-                PartitionType::Forward => EdgeType::Forward,
-                PartitionType::RoundRobin => EdgeType::RoundRobin,
-                PartitionType::Broadcast => EdgeType::Broadcast,
-                PartitionType::Hash => EdgeType::Shuffle,
-            };
-            
             logical_graph.add_edge(
                 node_indices[i],
                 node_indices[i + 1],
-                edge_type,
+                partition_type,
             );
         }
 
@@ -241,13 +218,13 @@ impl LogicalGraph {
         for edge in self.graph.edge_references() {
             let source_id = self.graph[edge.source()].operator_id.clone();
             let target_id = self.graph[edge.target()].operator_id.clone();
-            let edge_type = match edge.weight().edge_type {
-                EdgeType::Forward => "Forward",
-                EdgeType::Shuffle => "Shuffle",
-                EdgeType::Broadcast => "Broadcast",
-                EdgeType::RoundRobin => "RoundRobin",
+            let partition_type = match edge.weight().partition_type {
+                PartitionType::Forward => "Forward",
+                PartitionType::Hash => "Hash",
+                PartitionType::Broadcast => "Broadcast",
+                PartitionType::RoundRobin => "RoundRobin",
             };
-            dot_string.push_str(&format!("  {} -> {} [label=\"{}\"];\n", source_id, target_id, edge_type));
+            dot_string.push_str(&format!("  {} -> {} [label=\"{}\"];\n", source_id, target_id, partition_type));
         }
         
         dot_string.push_str("}\n");
@@ -388,9 +365,9 @@ mod tests {
         let sink_index = logical_graph.add_node(sink_node);
 
         // Add edges
-        logical_graph.add_edge(source_index, filter_index, EdgeType::RoundRobin);
-        logical_graph.add_edge(filter_index, projection_index, EdgeType::RoundRobin);
-        logical_graph.add_edge(projection_index, sink_index, EdgeType::RoundRobin);
+        logical_graph.add_edge(source_index, filter_index, PartitionType::RoundRobin);
+        logical_graph.add_edge(filter_index, projection_index, PartitionType::RoundRobin);
+        logical_graph.add_edge(projection_index, sink_index, PartitionType::RoundRobin);
 
         // Convert to execution graph
         let execution_graph = logical_graph.to_execution_graph();
@@ -442,7 +419,7 @@ mod tests {
         );
         let filter_index = logical_graph.add_node(filter_node);
 
-        logical_graph.add_edge(source_index, filter_index, EdgeType::Forward);
+        logical_graph.add_edge(source_index, filter_index, PartitionType::Forward);
 
         let num_operators = logical_graph.get_nodes().count();
 

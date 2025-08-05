@@ -5,7 +5,7 @@ pub mod streaming_context;
 
 pub use logical_graph::{
     LogicalGraph, LogicalNode, LogicalEdge,
-    EdgeType, JoinType, ConnectorConfig
+    JoinType, ConnectorConfig
 };
 
 pub use planner::{Planner, PlanningContext};
