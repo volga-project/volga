@@ -1,27 +1,24 @@
-use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
-        key_by::KeyByFunction,
-        reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
-        source::word_count_source::{BatchingMode, WordCountSourceFunction},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, partition::PartitionType, worker::{Worker, WorkerConfig}
-}, transport::transport_backend_actor::TransportBackendType, storage::{InMemoryStorageClient, InMemoryStorageServer}};
-use crate::common::message::{Message, KeyedMessage};
-use crate::common::Key;
-use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
-use crate::runtime::worker::WorkerState;
+use crate::{
+    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
+    common::{test_utils::{gen_unique_grpc_port, print_worker_metrics}, message::Message},
+    executor::local_executor::LocalExecutor,
+    runtime::{
+        functions::{
+            key_by::KeyByFunction,
+            reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
+            source::word_count_source::BatchingMode,
+        },
+        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
+        worker::WorkerState,
+    },
+    storage::{InMemoryStorageClient, InMemoryStorageServer}
+};
 use anyhow::Result;
-use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::HashMap};
-use tokio::runtime::Runtime;
-use kameo::{Actor, spawn};
-use crate::transport::channel::Channel;
-use async_trait::async_trait;
-use arrow::array::{Array, Float64Array, Int64Array, StringArray};
-use arrow::record_batch::RecordBatch;
-use arrow::datatypes::{Schema, Field, DataType};
+use arrow::array::{Float64Array, StringArray};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::time::sleep;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use crate::runtime::stream_task::LATENCY_BUCKET_BOUNDARIES;
@@ -224,24 +221,12 @@ pub async fn run_word_count_benchmark(
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
-    let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
-        operators,
-        parallelism,
-        chained: true,
-        is_remote: false,
-        num_workers_per_operator: None,
-    }).await;
+    // Create streaming context with the logical graph and executor
+    let context = StreamingContext::new()
+        .with_parallelism(parallelism)
+        .with_logical_graph(LogicalGraph::from_linear_operators(operators, parallelism, true)) // chained = true
+        .with_executor(Box::new(LocalExecutor::new()));
 
-    let vertex_ids = graph.get_vertices().keys().cloned().collect();
-    
-    // Create and start worker
-    let worker_config = WorkerConfig::new(
-        graph,
-        vertex_ids,
-        1,
-        TransportBackendType::InMemory,
-    );
-    let mut worker = Worker::new(worker_config);
     let (metrics_sender, mut metrics_receiver) = mpsc::channel(100);
     let running = Arc::new(AtomicBool::new(true));
 
@@ -263,7 +248,6 @@ pub async fn run_word_count_benchmark(
             interval.tick().await;
             
             {
-                // let worker_guard = worker_clone.lock().await;
                 let mut metrics_guard = benchmark_metrics_clone.lock().await;
                 
                 let worker_state = poll_worker_metrics(
@@ -283,15 +267,12 @@ pub async fn run_word_count_benchmark(
         }
     });
     
-    // Execute the worker lifecycle (similar to word count test)
-    worker.execute_worker_lifecycle_for_testing_with_metrics(metrics_sender).await;
+    // Execute using StreamingContext with metrics
+    context.execute_with_state_updates(Some(metrics_sender)).await.unwrap();
     running.store(false, Ordering::Relaxed);
 
     // Wait for metrics task to complete
     let _ = metrics_task.await;
-    
-    // Explicitly close the worker to clean up its internal runtimes
-    worker.close().await;
     
     // Get final metrics
     let benchmark_metrics = benchmark_metrics.lock().await.clone();

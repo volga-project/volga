@@ -1,17 +1,15 @@
-use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
-        key_by::KeyByFunction,
-        map::{MapFunction, MapFunctionTrait},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, partition::PartitionType, worker::{Worker, WorkerConfig}
-}, transport::transport_backend_actor::TransportBackendType, storage::{InMemoryStorageClient, InMemoryStorageServer}};
-use crate::common::message::{Message, WatermarkMessage, KeyedMessage};
-use crate::common::{test_utils::create_test_string_batch, MAX_WATERMARK_VALUE};
-use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
+use crate::{
+    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
+    common::{test_utils::{gen_unique_grpc_port, print_worker_metrics}, message::{Message, WatermarkMessage}, MAX_WATERMARK_VALUE, test_utils::create_test_string_batch},
+    executor::local_executor::LocalExecutor,
+    runtime::{
+        functions::{key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}},
+        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
+    },
+    storage::{InMemoryStorageClient, InMemoryStorageServer}
+};
 use anyhow::Result;
-use std::collections::{HashMap, HashSet};
 use tokio::runtime::Runtime;
-use kameo::spawn;
-use crate::transport::channel::Channel;
 use arrow::array::StringArray;
 use async_trait::async_trait;
 
@@ -22,7 +20,6 @@ struct KeyedToRegularMapFunction;
 impl MapFunctionTrait for KeyedToRegularMapFunction {
     fn map(&self, message: Message) -> Result<Message> {
         let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-        println!("map rcvd, value {:?}", value);
         let upstream_vertex_id = message.upstream_vertex_id();
         let ingest_ts = message.ingest_timestamp();
         match message {
@@ -71,30 +68,21 @@ fn test_worker_shutdown_with_watermarks() -> Result<()> {
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
-    let (graph, _) = runtime.block_on(create_linear_test_execution_graph(TestLinearGraphConfig {
-        operators,
-        parallelism,
-        chained: false,
-        is_remote: false,
-        num_workers_per_operator: None,
-    }));
-
-    let vertex_ids = graph.get_vertices().keys().cloned().collect();
-    // Create and start worker
-    let worker_config = WorkerConfig::new(
-        graph,
-        vertex_ids,
-        1,
-        TransportBackendType::InMemory,
-    );
-    let mut worker = Worker::new(worker_config);
+    // Create streaming context with the logical graph and executor
+    let context = StreamingContext::new()
+        .with_parallelism(parallelism)
+        .with_logical_graph(LogicalGraph::from_linear_operators(operators, parallelism, false))
+        .with_executor(Box::new(LocalExecutor::new()));
 
     println!("Starting worker...");
     let (worker_state, result_messages) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
-        worker.execute_worker_lifecycle_for_testing().await;
-        let worker_state = worker.get_state().await;
+        
+        let execution_state = context.execute().await.unwrap();
+        // single worker
+        let worker_state = execution_state.worker_states.into_iter().next().unwrap();
+        
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let result_messages = client.get_vector().await.unwrap();
         storage_server.stop().await;

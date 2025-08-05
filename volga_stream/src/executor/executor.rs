@@ -22,9 +22,17 @@ impl ExecutionState {
 /// Trait for executing a stream processing job
 #[async_trait(?Send)]
 pub trait Executor: Send {
-    /// Execute the given execution graph and return a channel receiver for worker states
-    async fn execute(&mut self, execution_graph: ExecutionGraph) -> Result<mpsc::Receiver<WorkerState>>;
-
-    /// Get the final execution state after completion
-    async fn get_final_execution_state(&self) -> Result<ExecutionState>;
+    /// Execute the given execution graph
+    /// 
+    /// # Parameters
+    /// - `execution_graph`: The graph to execute
+    /// - `state_sender`: Optional sender for broadcasting worker states during execution
+    /// 
+    /// # Returns
+    /// The final execution state after completion
+    async fn execute(
+        &mut self, 
+        execution_graph: ExecutionGraph, 
+        state_sender: Option<mpsc::Sender<WorkerState>>
+    ) -> Result<ExecutionState>;
 }

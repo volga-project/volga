@@ -1,3 +1,4 @@
+use crate::api::LogicalGraph;
 use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
@@ -6,7 +7,7 @@ use crate::runtime::stream_task::StreamTask;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::common::message::Message;
-use crate::common::test_utils::create_test_string_batch;
+use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::channel::{gen_channel_id, Channel};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
@@ -15,7 +16,6 @@ use crate::runtime::functions::{
     map::MapFunctionTrait,
 };
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
-use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use tokio::runtime::Runtime;
@@ -23,16 +23,6 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Duration;
 use async_trait::async_trait;
-
-#[derive(Debug, Clone)]
-struct IdentityMapFunction;
-
-#[async_trait]
-impl MapFunctionTrait for IdentityMapFunction {
-    fn map(&self, message: Message) -> Result<Message> {
-        Ok(message)
-    }
-}
 
 #[test]
 fn test_stream_task_actor() -> Result<()> {
@@ -60,13 +50,10 @@ fn test_stream_task_actor() -> Result<()> {
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
         ];
 
-        let (graph, _) = create_linear_test_execution_graph(TestLinearGraphConfig {
-            operators,
-            parallelism: 1,
-            chained: false,
-            is_remote: false,
-            num_workers_per_operator: None,
-        }).await;
+        let logical_graph = LogicalGraph::from_linear_operators(operators, 1, false);
+        let mut graph = logical_graph.to_execution_graph();
+        graph.update_channels_with_node_mapping(None);
+
         let mut vertex_ids = graph.get_vertices().keys().cloned().collect::<Vec<String>>();
         vertex_ids.sort();
 

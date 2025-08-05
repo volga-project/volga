@@ -81,7 +81,11 @@ impl FakeDistributedExecutor {
 
 #[async_trait(?Send)]
 impl Executor for FakeDistributedExecutor {
-    async fn execute(&mut self, mut execution_graph: ExecutionGraph) -> Result<mpsc::Receiver<WorkerState>> {
+    async fn execute(
+        &mut self, 
+        mut execution_graph: ExecutionGraph, 
+        state_sender: Option<mpsc::Sender<WorkerState>>
+    ) -> Result<ExecutionState> {
         // Create test cluster nodes
         let num_operators = execution_graph.get_vertices().len();
         let num_workers = num_operators * self.num_workers_per_operator;
@@ -100,21 +104,13 @@ impl Executor for FakeDistributedExecutor {
         // Wait a bit for servers to start
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-        // Create channel for worker state updates
-        let (sender, receiver) = mpsc::channel(100);
-
         // Create and execute master
         let mut master = Master::new();
         master.execute(worker_addresses).await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // For now, we don't have a way to get worker states from distributed execution
         // This would need to be implemented in the master/worker communication
-        drop(sender); // Close the channel since we don't send anything
-
-        Ok(receiver)
-    }
-
-    async fn get_final_execution_state(&self) -> Result<ExecutionState> {
-        panic!("Not implemented")
+        // Return empty execution state as placeholder
+        Ok(ExecutionState::new(vec![]))
     }
 }

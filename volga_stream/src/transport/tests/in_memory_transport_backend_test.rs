@@ -8,22 +8,13 @@ use crate::runtime::functions::{
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::channel::Channel;
 use crate::common::message::Message;
-use crate::common::test_utils::create_test_string_batch;
+use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
 use arrow::array::StringArray;
 use anyhow::Result;
 use kameo::{Actor, spawn};
 use std::collections::HashMap;
-
-#[derive(Debug, Clone)]
-struct IdentityMapFunction;
-
-impl MapFunctionTrait for IdentityMapFunction {
-    fn map(&self, message: Message) -> Result<Message> {
-        Ok(message)
-    }
-}
 
 // TODO test ordered delivery
 #[tokio::test]

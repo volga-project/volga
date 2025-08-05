@@ -11,7 +11,7 @@ use crate::runtime::operators::sink::sink_operator::SinkConfig;
 
 use crate::api::planner::{Planner, PlanningContext};
 use crate::api::logical_graph::LogicalGraph;
-use crate::executor::executor::Executor;
+use crate::executor::executor::{ExecutionState, Executor};
 use crate::runtime::worker::WorkerState;
 use tokio::sync::mpsc;
 use anyhow::Result;
@@ -28,7 +28,7 @@ pub struct StreamingContext {
     /// Parallelism level for each operator
     parallelism: usize,
     /// Current SQL query (set by sql() method)
-    current_sql: Option<String>,
+    sql: Option<String>,
     /// Logical graph (set by with_logical_graph() method)
     logical_graph: Option<LogicalGraph>,
     /// Executor for running the job
@@ -41,7 +41,7 @@ impl fmt::Debug for StreamingContext {
             .field("sources", &self.sources)
             .field("sink_config", &self.sink_config)
             .field("parallelism", &self.parallelism)
-            .field("current_sql", &self.current_sql)
+            .field("sql", &self.sql)
             .field("df_session_context", &"<SessionContext>")
             .field("logical_graph", &self.logical_graph)
             .field("executor", &"<Executor>")
@@ -56,7 +56,7 @@ impl StreamingContext {
             sources: HashMap::new(),
             sink_config: None,
             parallelism: 1,
-            current_sql: None,
+            sql: None,
             logical_graph: None,
             executor: Arc::new(None),
         }
@@ -79,14 +79,14 @@ impl StreamingContext {
 
     /// Set SQL query for execution (returns self for chaining)
     pub fn sql(mut self, sql: &str) -> Self {
-        self.current_sql = Some(sql.to_string());
+        self.sql = Some(sql.to_string());
         self
     }
 
     /// Set logical graph directly (returns self for chaining)
     pub fn with_logical_graph(mut self, logical_graph: LogicalGraph) -> Self {
         // Clear SQL since we're setting the graph directly
-        self.current_sql = None;
+        self.sql = None;
         self.logical_graph = Some(logical_graph);
         self
     }
@@ -103,7 +103,7 @@ impl StreamingContext {
             return graph.clone();
         }
 
-        let sql = self.current_sql.as_ref().expect("No SQL query or logical graph set. Call sql() or with_logical_graph() first.");
+        let sql = self.sql.as_ref().expect("No SQL query or logical graph set. Call sql() or with_logical_graph() first.");
         
         let mut planner = Planner::new(PlanningContext::new(self.df_session_context.clone()).with_parallelism(self.parallelism));
 
@@ -121,47 +121,9 @@ impl StreamingContext {
         planner.sql_to_graph(sql).await.expect("Failed to create logical graph from SQL")
     }
 
-    pub async fn build_execution_graph(
-        &self,
-        cluster_nodes: Option<&[ClusterNode]>,
-        node_assignment_strategy: Option<&dyn NodeAssignStrategy>,
-    ) -> (ExecutionGraph, Option<ExecutionVertexNodeMapping>) {
-        // Build logical graph first
-        let logical_graph = self.build_logical_graph().await;
-
-        // Convert to execution graph
-        let mut execution_graph = logical_graph.to_execution_graph();
-
-        // Handle clustering and channel configuration
-        let node_mapping = if let Some(nodes) = cluster_nodes {
-            if nodes.len() > 1 {
-                // Remote execution - use provided strategy or default
-                let strategy = node_assignment_strategy.unwrap_or(&OperatorPerNodeStrategy);
-                let mapping = strategy.assign_nodes(&execution_graph, nodes);
-                // let node_to_vertex_ids = node_to_vertex_ids(&mapping);
-                
-                // println!("mapping: {:?}", mapping);
-                // println!("node_to_vertex_ids: {:?}", node_to_vertex_ids);
-                // Configure channels with node mapping
-                execution_graph.update_channels_with_node_mapping(Some(&mapping));
-
-                Some(mapping)
-            } else {
-                // Single node - local execution
-                execution_graph.update_channels_with_node_mapping(None);
-                None
-            }
-        } else {
-            // No cluster nodes provided - local execution
-            execution_graph.update_channels_with_node_mapping(None);
-            None
-        };
-
-        (execution_graph, node_mapping)
-    }
-
-    /// Execute the streaming job using the configured executor
-    pub async fn execute(self) -> Result<mpsc::Receiver<WorkerState>> {
+    /// Execute the streaming job with optional state updates broadcasting
+    /// Returns the final execution state
+    pub async fn execute_with_state_updates(self, state_sender: Option<mpsc::Sender<WorkerState>>) -> Result<ExecutionState> {
         // Build logical graph first
         let logical_graph = self.build_logical_graph().await;
 
@@ -174,8 +136,15 @@ impl StreamingContext {
         let mut executor = executor_option.expect("No executor set. Call with_executor() first.");
 
         // Execute using the configured executor
-        executor.execute(execution_graph).await
+        executor.execute(execution_graph, state_sender).await
     }
+
+    /// Execute the streaming job and return only the final execution state
+    pub async fn execute(self) -> Result<ExecutionState> {
+        self.execute_with_state_updates(None).await
+    }
+
+
 }
 
 impl Default for StreamingContext {

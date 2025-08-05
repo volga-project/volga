@@ -1,23 +1,21 @@
-use crate::{common::test_utils::{gen_unique_grpc_port, print_worker_metrics}, runtime::{
-    execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex}, functions::{
-        key_by::KeyByFunction,
-        reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
-        source::word_count_source::{BatchingMode, WordCountSourceFunction},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, partition::PartitionType, worker::{Worker, WorkerConfig}
-}, transport::transport_backend_actor::TransportBackendType, storage::{InMemoryStorageClient, InMemoryStorageServer}};
-use crate::common::message::{Message, KeyedMessage};
-use crate::common::Key;
-use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
+use crate::{
+    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
+    common::{test_utils::{gen_unique_grpc_port, print_worker_metrics}, message::Message},
+    executor::local_executor::LocalExecutor,
+    runtime::{
+        functions::{
+            key_by::KeyByFunction,
+            reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
+            source::word_count_source::BatchingMode,
+        },
+        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
+    },
+    storage::{InMemoryStorageClient, InMemoryStorageServer}
+};
 use anyhow::Result;
 use std::collections::HashMap;
 use tokio::runtime::Runtime;
-use kameo::{Actor, spawn};
-use crate::transport::channel::Channel;
-use async_trait::async_trait;
-use arrow::array::{Array, Float64Array, Int64Array, StringArray};
-use arrow::record_batch::RecordBatch;
-use arrow::datatypes::{Schema, Field, DataType};
-use std::sync::Arc;
+use arrow::array::{Float64Array, StringArray};
 
 // TODO: we may have colliding words since each source worker generates it's own
 #[test]
@@ -53,29 +51,20 @@ fn test_word_count() -> Result<()> {
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
-    let (graph, _) = runtime.block_on(create_linear_test_execution_graph(TestLinearGraphConfig {
-        operators,
-        parallelism,
-        chained: true,
-        is_remote: false,
-        num_workers_per_operator: None,
-    }));
-
-    let vertex_ids = graph.get_vertices().keys().cloned().collect();
-    // Create and start worker
-    let worker_config = WorkerConfig::new(
-        graph,
-        vertex_ids,
-        1,
-        TransportBackendType::InMemory,
-    );
-    let mut worker = Worker::new(worker_config);
+    // Create streaming context with the logical graph and executor
+    let context = StreamingContext::new()
+        .with_parallelism(parallelism)
+        .with_logical_graph(LogicalGraph::from_linear_operators(operators, parallelism, true)) // chained = true
+        .with_executor(Box::new(LocalExecutor::new()));
 
     let (result_map, worker_state) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
-        worker.execute_worker_lifecycle_for_testing().await;
-        let worker_state = worker.get_state().await;
+        
+        let execution_state = context.execute().await.unwrap();
+        // single worker
+        let worker_state = execution_state.worker_states.into_iter().next().unwrap();
+        
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let result_map = client.get_map().await.unwrap();
         storage_server.stop().await;

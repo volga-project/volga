@@ -1,26 +1,16 @@
-use crate::{common::test_utils::{create_test_string_batch, gen_unique_grpc_port}, runtime::{
-    functions::{
-        key_by::KeyByFunction,
-        map::{MapFunction, MapFunctionTrait},
-    }, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, worker::{Worker, WorkerConfig}
-}, transport::transport_backend_actor::TransportBackendType, storage::{InMemoryStorageClient, InMemoryStorageServer}};
-use crate::common::message::{Message, WatermarkMessage};
-use crate::common::MAX_WATERMARK_VALUE;
-use crate::runtime::tests::graph_test_utils::{create_linear_test_execution_graph, TestLinearGraphConfig};
+use crate::{
+    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
+    common::{message::{Message, WatermarkMessage}, test_utils::{create_test_string_batch, gen_unique_grpc_port, IdentityMapFunction}, MAX_WATERMARK_VALUE},
+    executor::local_executor::LocalExecutor,
+    runtime::{
+        functions::{key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}},
+        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
+    },
+    storage::{InMemoryStorageClient, InMemoryStorageServer}
+};
 use anyhow::Result;
 use tokio::runtime::Runtime;
 use arrow::array::StringArray;
-use async_trait::async_trait;
-
-#[derive(Debug, Clone)]
-struct IdentityMapFunction;
-
-#[async_trait]
-impl MapFunctionTrait for IdentityMapFunction {
-    fn map(&self, _message: Message) -> Result<Message> {
-        Ok(_message)
-    }
-}
 
 /// Runs a test with the given configuration and returns the result messages
 async fn run_test_with_config(
@@ -50,39 +40,22 @@ async fn run_test_with_config(
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
 
-    let config = TestLinearGraphConfig {
-        operators,
-        parallelism: 4,
-        chained,
-        is_remote: false,
-        num_workers_per_operator: None,
-    };
-
-    let (graph, _) = create_linear_test_execution_graph(config).await;
-
-    // Create worker config - use all vertices from the graph
-    let vertex_ids: Vec<String> = graph.get_vertices().keys().cloned().collect();
-    let worker_config = WorkerConfig::new(
-        graph,
-        vertex_ids,
-        1,
-        TransportBackendType::InMemory,
-    );
-    let mut worker = Worker::new(worker_config);
+    // Create streaming context with LocalExecutor
+    let parallelism = 4;
+    let context = StreamingContext::new()
+        .with_parallelism(parallelism)
+        .with_logical_graph(LogicalGraph::from_linear_operators(operators, parallelism, chained))
+        .with_executor(Box::new(LocalExecutor::new()));
 
     // Run the test
-    let result_messages = tokio::task::spawn_blocking(move || {
-        let runtime = Runtime::new().unwrap();
-        runtime.block_on(async {
-            let mut storage_server = InMemoryStorageServer::new();
-            storage_server.start(&storage_server_addr).await.unwrap();
-            worker.execute_worker_lifecycle_for_testing().await;
-            let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
-            let result_messages = client.get_vector().await.unwrap();
-            storage_server.stop().await;
-            result_messages
-        })
-    }).await.unwrap();
+    let mut storage_server = InMemoryStorageServer::new();
+    storage_server.start(&storage_server_addr).await.unwrap();
+    
+    context.execute().await.unwrap();
+    
+    let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
+    let result_messages = client.get_vector().await.unwrap();
+    storage_server.stop().await;
 
     Ok(result_messages)
 }

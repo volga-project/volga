@@ -174,9 +174,9 @@ impl LogicalGraph {
         execution_graph
     }
 
-    pub fn from_operator_list(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
+    pub fn from_linear_operators(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
         // Validate configuration
-        validate_config_list(&operator_list);
+        validate_linear_operator_list(&operator_list);
 
         // Group operators based on chaining configuration
         let grouped_operators = if chained {
@@ -255,7 +255,7 @@ impl LogicalGraph {
     }
 }
 
-fn validate_config_list(operators: &[OperatorConfig]) {
+fn validate_linear_operator_list(operators: &[OperatorConfig]) {
     for (i, op_config) in operators.iter().enumerate() {
         match op_config {
             OperatorConfig::ReduceConfig(_, _) => {
@@ -318,6 +318,9 @@ mod tests {
     use super::*;
     use crate::cluster::cluster_provider::create_test_cluster_nodes;
     use crate::cluster::node_assignment::{NodeAssignStrategy, OperatorPerNodeStrategy};
+    use crate::common::test_utils::IdentityMapFunction;
+    use crate::runtime::functions::key_by::KeyByFunction;
+    use crate::runtime::operators::sink::sink_operator::SinkConfig;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::functions::map::{MapFunction, ProjectionFunction};
     use crate::runtime::functions::map::filter_function::FilterFunction;
@@ -489,6 +492,112 @@ mod tests {
                 }
             } else {
                panic!("Expected different nodes for edge {}", edge.edge_id);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_linear_logical_to_execution_graph_chained() {
+        // Define operator list: source -> map1 -> keyby -> map2 -> sink
+        let operators = vec![
+            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
+        ];
+
+        let logical_graph = LogicalGraph::from_linear_operators(operators, 2, true);
+        let graph = logical_graph.to_execution_graph();
+
+        // Verify vertices - KeyBy should break the chain
+        // source -> map1 -> keyby -> map2 -> sink becomes: chain_source->map1->keyby -> chain_map2->sink
+        assert_eq!(graph.get_vertices().len(), 4); // 2 groups * 2 parallelism
+        // Verify chained configs in vertices
+        let vertices = graph.get_vertices().values();
+        
+        // Count vertices with source->map->keyby chain
+        let source_chains = vertices.clone()
+            .filter(|v| {
+                if let OperatorConfig::ChainedConfig(chain) = &v.operator_config {
+                    chain.len() == 3 && 
+                    matches!(chain[0], OperatorConfig::SourceConfig(_)) &&
+                    matches!(chain[1], OperatorConfig::MapConfig(_)) &&
+                    matches!(chain[2], OperatorConfig::KeyByConfig(_))
+                } else {
+                    false
+                }
+            })
+            .count();
+        assert_eq!(source_chains, 2, "Should have 2 source->map->keyby chains");
+
+        // Count vertices with map->sink chain
+        let sink_chains = vertices
+            .filter(|v| {
+                if let OperatorConfig::ChainedConfig(chain) = &v.operator_config {
+                    chain.len() == 2 &&
+                    matches!(chain[0], OperatorConfig::MapConfig(_)) &&
+                    matches!(chain[1], OperatorConfig::SinkConfig(_))
+                } else {
+                    false
+                }
+            })
+            .count();
+        assert_eq!(sink_chains, 2, "Should have 2 map->sink chains");
+
+        // Verify edges between groups
+        assert_eq!(graph.get_edges().len(), 4); // 1 connection * 4 edges
+
+        // Verify partition types for edges
+        for edge in graph.get_edges().values() {
+            // chain_source->map1->keyby -> chain_map2->sink should use Hash partitioning
+            // because keyby is the last operator in the source chain
+            assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
+                "Edge {} -> {} should use Hash partitioning (keyby -> map2)", edge.source_vertex_id, edge.target_vertex_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_linear_logical_to_execution_graph() {
+        // Define operator chain: source -> keyby -> map -> sink
+        let operators = vec![
+            OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
+            OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string())),
+        ];
+
+        let logical_graph = LogicalGraph::from_linear_operators(operators, 2, false);
+        let graph = logical_graph.to_execution_graph();
+
+        // Verify vertices
+        assert_eq!(graph.get_vertices().len(), 8); // 4 operators * 2 parallelism
+
+        // Verify edges - keyby should use hash partitioning
+        assert_eq!(graph.get_edges().len(), 12); // 2 source -> 2 keyby + 2 keyby -> 2 map + 2 map -> 2 sink
+
+        // Check partition types for all edges
+        for edge in graph.get_edges().values() {
+            let source_vertex = graph.get_vertex(&edge.source_vertex_id).unwrap();
+            let target_vertex = graph.get_vertex(&edge.target_vertex_id).unwrap();
+
+            match (&source_vertex.operator_config, &target_vertex.operator_config) {
+                (OperatorConfig::SourceConfig(_), OperatorConfig::KeyByConfig(_)) => {
+                    // source -> keyby should use RoundRobin
+                    assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+                        "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+                }
+                (OperatorConfig::KeyByConfig(_), OperatorConfig::MapConfig(_)) => {
+                    // keyby -> map should use Hash partitioning
+                    assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
+                        "Edge {} -> {} should use Hash partitioning", edge.source_vertex_id, edge.target_vertex_id);
+                }
+                (OperatorConfig::MapConfig(_), OperatorConfig::SinkConfig(_)) => {
+                    // map -> sink should use RoundRobin
+                    assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
+                        "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+                }
+                _ => panic!("Unexpected edge: {} -> {}", edge.source_vertex_id, edge.target_vertex_id)
             }
         }
     }

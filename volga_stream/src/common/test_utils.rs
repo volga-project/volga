@@ -6,7 +6,10 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
+use async_trait::async_trait;
 
+use crate::common::Message;
+use crate::runtime::functions::map::MapFunctionTrait;
 use crate::runtime::worker::WorkerState;
 
 pub fn create_test_string_batch(data: Vec<String>) -> RecordBatch {
@@ -57,4 +60,15 @@ pub fn print_worker_metrics(worker_state: &WorkerState) {
     println!("  Total Records: {}", worker_state.aggregated_metrics.total_records);
     println!("  Latency Histogram: {:?}", worker_state.aggregated_metrics.latency_histogram);
     println!("===================\n");
+}
+
+
+#[derive(Debug, Clone)]
+pub struct IdentityMapFunction;
+
+#[async_trait]
+impl MapFunctionTrait for IdentityMapFunction {
+    fn map(&self, message: Message) -> anyhow::Result<Message> {
+        Ok(message)
+    }
 }
