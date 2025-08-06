@@ -265,7 +265,8 @@ impl Planner {
         );
         let sink_node_index = self.logical_graph.add_node(sink_node);
         
-        self.logical_graph.add_edge(sink_node_index, root_node_index, PartitionType::Forward);
+        // Data flows from root_node to sink_node
+        self.logical_graph.add_edge(root_node_index, sink_node_index, PartitionType::Forward);
         Ok(())
     }
 
@@ -372,8 +373,6 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
 
     // Add edges from temp stack to graph, going bottom-to-top
     fn f_up(&mut self, node: &'a Self::Node) -> Result<TreeNodeRecursion> {
-        if self.node_stack.is_empty() {
-        }
         
         // TODO use determine_partition_type when generating edges
 
@@ -391,12 +390,12 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             let key_by_node_index = self.node_stack.pop().unwrap();
             let aggregate_node_index = self.node_stack.pop().unwrap();
 
-            // add edge between key by and sggregate
+            // add edge between key by and aggregate
             self.logical_graph.add_edge(key_by_node_index, aggregate_node_index, PartitionType::Hash);
 
-            // add edge between prev node and key by
+            // add edge between prev node and aggregate
             let prev_node_index = self.node_stack.last().expect("key by should have a node before it");
-            self.logical_graph.add_edge(*prev_node_index, key_by_node_index, PartitionType::Forward);
+            self.logical_graph.add_edge(aggregate_node_index, *prev_node_index, PartitionType::Forward);
 
             return Ok(TreeNodeRecursion::Continue);
         }
@@ -405,7 +404,8 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
         if let Some(prev_node_index) = self.node_stack.last() {
             // TODO use determine_partition_type when generating edges
             // All nodes are using forward edges for now
-            self.logical_graph.add_edge(*prev_node_index, node_index, PartitionType::Forward);
+            // Data flows from current node to previous node (since we're going bottom-to-top)
+            self.logical_graph.add_edge(node_index, *prev_node_index, PartitionType::Forward);
         } else {
             // no prev node - this is the root of the plan
             // if sink is configured add here
@@ -426,6 +426,7 @@ mod tests {
     use arrow::datatypes::{Schema, Field, DataType};
     use std::sync::Arc;
     use crate::runtime::operators::sink::sink_operator::SinkConfig;
+    use crate::api::logical_graph::NodeType;
 
     fn create_planner() -> Planner {
         let ctx = SessionContext::new();
@@ -444,6 +445,38 @@ mod tests {
         planner
     }
 
+    /// Helper function to verify edge connectivity between specific node types
+    fn verify_edge_connectivity(
+        graph: &LogicalGraph, 
+        expected_edges: &[(NodeType, NodeType, PartitionType, usize)]
+    ) {
+        let edges: Vec<_> = graph.get_edges().collect();
+        
+        for (expected_from, expected_to, expected_partition_type, expected_count) in expected_edges {
+            let from_nodes = graph.find_nodes_by_type(*expected_from);
+            let to_nodes = graph.find_nodes_by_type(*expected_to);
+            
+            assert!(!from_nodes.is_empty(), "Could not find {:?} node", expected_from);
+            assert!(!to_nodes.is_empty(), "Could not find {:?} node", expected_to);
+            
+            // Count actual edges of this type
+            let mut actual_count = 0;
+            for &from_idx in &from_nodes {
+                for &to_idx in &to_nodes {
+                    let edge_count = edges.iter().filter(|(from, to, edge)| {
+                        from.index() == from_idx && 
+                        to.index() == to_idx && 
+                        edge.partition_type == *expected_partition_type
+                    }).count();
+                    actual_count += edge_count;
+                }
+            }
+            
+            assert_eq!(actual_count, *expected_count, 
+                "Expected {} edges from {:?} to {:?} with partition type {:?}, found {}", 
+                expected_count, expected_from, expected_to, expected_partition_type, actual_count);
+        }
+    }
     #[tokio::test]
     async fn test_simple_select() {
         let mut planner = create_planner();
@@ -464,6 +497,11 @@ mod tests {
         assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
         // Second node should be source
         assert!(matches!(nodes[1].operator_config, OperatorConfig::SourceConfig(_)));
+
+        // Verify edge connectivity: source -> projection
+        verify_edge_connectivity(&graph, &[
+            (NodeType::Source, NodeType::Projection, PartitionType::Forward, 1),
+        ]);
     }
 
     #[tokio::test]
@@ -475,8 +513,6 @@ mod tests {
         
         let sql = "SELECT id, name FROM test_table";
         let graph = planner.sql_to_graph(sql).await.unwrap();
-
-        // println!("{}", graph);
         
         // Should have 3 nodes: source, projection, and sink
         let nodes: Vec<_> = graph.get_nodes().collect();
@@ -491,6 +527,12 @@ mod tests {
 
         // sink should be last
         assert!(matches!(nodes[2].operator_config, OperatorConfig::SinkConfig(_)));
+
+        // Verify edge connectivity: source -> projection -> sink
+        verify_edge_connectivity(&graph, &[
+            (NodeType::Source, NodeType::Projection, PartitionType::Forward, 1),
+            (NodeType::Projection, NodeType::Sink, PartitionType::Forward, 1),
+        ]);
     }
 
     #[tokio::test]
@@ -513,24 +555,14 @@ mod tests {
         assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))));
         assert!(matches!(nodes[1].operator_config, OperatorConfig::MapConfig(MapFunction::Filter(_))));
         assert!(matches!(nodes[2].operator_config, OperatorConfig::SourceConfig(_)));
+
+        // Verify edge connectivity: source -> filter -> projection
+        verify_edge_connectivity(&graph, &[
+            (NodeType::Source, NodeType::Filter, PartitionType::Forward, 1),
+            (NodeType::Filter, NodeType::Projection, PartitionType::Forward, 1),
+        ]);
     }
 
-    #[tokio::test]
-    async fn test_forward_edges_connectivity() {
-        let mut planner = create_planner();
-        
-        let sql = "SELECT id, name FROM test_table WHERE value > 3.0";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
-        
-        // Check edges
-        let edges: Vec<_> = graph.get_edges().collect();
-        assert_eq!(edges.len(), 2); // source->filter, filter->projection
-        
-        // Verify edge types are Forward
-        for (_, _, edge) in edges {
-            assert!(matches!(edge.partition_type, PartitionType::Forward));
-        }
-    }
 
     #[tokio::test]
     async fn test_join_tables() {
@@ -579,20 +611,17 @@ mod tests {
         
         // Check edges - should have 3 edges
         let edges: Vec<_> = graph.get_edges().collect();
+
+        print!("{:?}", edges);
         assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
         
-        // Verify edge types - key_by -> aggregate should be Shuffle, others Forward
-        let mut found_shuffle = false;
-        for (from, to, edge) in edges {
-            if matches!(nodes[from.index()].operator_config, OperatorConfig::KeyByConfig(_)) 
-               && matches!(nodes[to.index()].operator_config, OperatorConfig::AggregateConfig(_)) {
-                assert!(matches!(edge.partition_type, PartitionType::Hash), "Edge between key_by and aggregate should be Hash");
-                found_shuffle = true;
-            } else {
-                assert!(matches!(edge.partition_type, PartitionType::Forward), "Non key_by->aggregate edges should be Forward");
-            }
-        }
-        assert!(found_shuffle, "Should have found a Shuffle edge between key_by and aggregate");
+        // Verify edge connectivity: source -> keyby -> aggregate -> projection
+        // keyby -> aggregate should be Hash, others Forward
+        verify_edge_connectivity(&graph, &[
+            (NodeType::Source, NodeType::KeyBy, PartitionType::Forward, 1),
+            (NodeType::KeyBy, NodeType::Aggregate, PartitionType::Hash, 1),
+            (NodeType::Aggregate, NodeType::Projection, PartitionType::Forward, 1),
+        ]);
     }
     
     #[tokio::test]
@@ -665,19 +694,17 @@ mod tests {
         
         // Check edges - should have 6 edges (connecting 7 nodes)
         let edges: Vec<_> = graph.get_edges().collect();
+        println!("edges {:?}", edges);
         assert_eq!(edges.len(), 6, "Expected 6 edges, found {}", edges.len());
-        
-        // Verify shuffle edges exist between key_by and aggregate nodes
-        let mut shuffle_count = 0;
-        for (from, to, edge) in edges {
-            if matches!(nodes[from.index()].operator_config, OperatorConfig::KeyByConfig(_)) 
-               && matches!(nodes[to.index()].operator_config, OperatorConfig::AggregateConfig(_)) {
-                assert!(matches!(edge.partition_type, PartitionType::Hash), "Edge between key_by and aggregate should be Hash");
-                shuffle_count += 1;
-            } else {
-                assert!(matches!(edge.partition_type, PartitionType::Forward), "Non key_by->aggregate edges should be Forward");
-            }
-        }
-        assert_eq!(shuffle_count, 2, "Should have found 2 Shuffle edges between key_by and aggregate nodes");
+
+        // Verify edge connectivity for complex multi-GROUP BY query
+        // Structure: source -> keyby1 -> aggregate1 -> projection1 -> keyby2 -> aggregate2 -> projection2
+        // 2 Hash edges (keyby->aggregate), 4 Forward edges (all others)
+        verify_edge_connectivity(&graph, &[
+            (NodeType::Source, NodeType::KeyBy, PartitionType::Forward, 1),
+            (NodeType::KeyBy, NodeType::Aggregate, PartitionType::Hash, 2),
+            (NodeType::Aggregate, NodeType::Projection, PartitionType::Forward, 2),
+            (NodeType::Projection, NodeType::KeyBy, PartitionType::Forward, 1),
+        ]);
     }
 } 

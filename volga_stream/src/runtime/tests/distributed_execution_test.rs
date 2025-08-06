@@ -33,7 +33,7 @@ impl MapFunctionTrait for KeyedToRegularMapFunction {
 }
 
 #[test]
-fn test_master_worker_execution() -> Result<()> {
+fn test_distributed_execution() -> Result<()> {
     let num_workers_per_operator = 2;
     let parallelism_per_worker = 2;
     let num_messages_per_source = 10;

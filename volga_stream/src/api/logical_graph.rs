@@ -10,11 +10,39 @@ use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, Execution
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use crate::cluster::cluster_provider::ClusterNode;
+use crate::runtime::functions::map::MapFunction;
+
+/// Node type enum for logical graph nodes
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum NodeType {
+    Source,
+    Sink,
+    Projection,
+    Filter,
+    KeyBy,
+    Aggregate,
+    Join,
+}
+
+/// Helper function to get node type from operator config
+pub fn get_node_type(operator_config: &OperatorConfig) -> NodeType {
+    match operator_config {
+        OperatorConfig::SourceConfig(_) => NodeType::Source,
+        OperatorConfig::SinkConfig(_) => NodeType::Sink,
+        OperatorConfig::MapConfig(MapFunction::Projection(_)) => NodeType::Projection,
+        OperatorConfig::MapConfig(MapFunction::Filter(_)) => NodeType::Filter,
+        OperatorConfig::KeyByConfig(_) => NodeType::KeyBy,
+        OperatorConfig::AggregateConfig(_) => NodeType::Aggregate,
+        OperatorConfig::JoinConfig(_) => NodeType::Join,
+        _ => panic!("Unsupported operator config: {:?}", operator_config),
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
-    pub operator_id: String,
+    pub node_id: String,
     pub operator_config: OperatorConfig,
+    pub node_type: NodeType,
     pub parallelism: usize,
     pub in_schema: Option<Arc<ArrowSchema>>,
     pub out_schema: Option<Arc<ArrowSchema>>,
@@ -22,9 +50,11 @@ pub struct LogicalNode {
 
 impl LogicalNode {
     pub fn new(operator_config: OperatorConfig, parallelism: usize, in_schema: Option<Arc<ArrowSchema>>, out_schema: Option<Arc<ArrowSchema>>) -> Self {
+        let node_type = get_node_type(&operator_config);
         Self {
-            operator_id: String::new(), // Will be set by add_node
+            node_id: String::new(), // Will be set by add_node
             operator_config,
+            node_type,
             parallelism,
             in_schema,
             out_schema,
@@ -48,12 +78,15 @@ pub struct ConnectorConfig {
 
 #[derive(Debug, Clone)]
 pub struct LogicalEdge {
+    pub source_node_id: String,
+    pub target_node_id: String,
     pub partition_type: PartitionType,
 }
 
 #[derive(Debug, Clone)]
 pub struct LogicalGraph {
     graph: DiGraph<LogicalNode, LogicalEdge>,
+    // TODO use node_type
     operator_type_counters: HashMap<String, u32>,
 }
 
@@ -70,14 +103,18 @@ impl LogicalGraph {
         let operator_type_name = format!("{}", node.operator_config);
         let counter = self.operator_type_counters.entry(operator_type_name.clone()).or_insert(0);
         *counter += 1;
-        node.operator_id = format!("{}_{}", operator_type_name, counter);
+        node.node_id = format!("{}_{}", operator_type_name, counter);
         
         let node_index = self.graph.add_node(node);
         node_index
     }
 
     pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex, edge_type: PartitionType) -> petgraph::graph::EdgeIndex {
+        let source_node = &self.graph[source];
+        let target_node = &self.graph[target];
         let edge = LogicalEdge {
+            source_node_id: source_node.node_id.clone(),
+            target_node_id: target_node.node_id.clone(),
             partition_type: edge_type,
         };
         
@@ -85,7 +122,7 @@ impl LogicalGraph {
     }
 
     pub fn get_node(&self, operator_id: String) -> Option<&LogicalNode> {
-        self.graph.node_weights().find(|node| node.operator_id == operator_id)
+        self.graph.node_weights().find(|node| node.node_id == operator_id)
     }
 
     pub fn get_nodes(&self) -> impl Iterator<Item = &LogicalNode> {
@@ -96,6 +133,17 @@ impl LogicalGraph {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
     }
 
+    /// Find all node indices by node type
+    pub fn find_nodes_by_type(&self, node_type: NodeType) -> Vec<usize> {
+        self.get_nodes().enumerate().filter_map(|(idx, node)| {
+            if node.node_type == node_type {
+                Some(idx)
+            } else {
+                None
+            }
+        }).collect()
+    }
+
     /// Convert logical graph to execution graph using parallelism from each logical node
     pub fn to_execution_graph(&self) -> ExecutionGraph {
         let mut execution_graph = ExecutionGraph::new();
@@ -104,7 +152,7 @@ impl LogicalGraph {
         // Create execution vertices for each logical node
         for logical_node in self.graph.node_weights() {
             let logical_node_index = self.graph.node_indices()
-                .find(|&idx| self.graph[idx].operator_id == logical_node.operator_id)
+                .find(|&idx| self.graph[idx].node_id == logical_node.node_id)
                 .unwrap();
 
             let mut execution_vertex_ids = Vec::new();
@@ -112,11 +160,11 @@ impl LogicalGraph {
 
             // Create parallel execution vertices for this logical node
             for i in 0..parallelism {
-                let execution_vertex_id = format!("{}_{}", logical_node.operator_id, i);
+                let execution_vertex_id = format!("{}_{}", logical_node.node_id, i);
 
                 let execution_vertex = ExecutionVertex::new(
                     execution_vertex_id.clone(),
-                    logical_node.operator_id.clone(),
+                    logical_node.node_id.clone(),
                     logical_node.operator_config.clone(),
                     parallelism as i32,
                     i as i32,
@@ -146,7 +194,7 @@ impl LogicalGraph {
                     let execution_edge = ExecutionEdge::new(
                         source_execution_vertex_id.clone(),
                         target_execution_vertex_id.clone(),
-                        self.graph[target_logical_node_index].operator_id.clone(),
+                        self.graph[target_logical_node_index].node_id.clone(),
                         partition_type.clone(),
                         None, // No channel initially
                     );
@@ -211,13 +259,13 @@ impl LogicalGraph {
         
         // Add nodes with labels
         for node in self.graph.node_weights() {
-            dot_string.push_str(&format!("  {} [label=\"{}: {}\"];\n", node.operator_id, node.operator_id, node.operator_config));
+            dot_string.push_str(&format!("  {} [label=\"{}: {}\"];\n", node.node_id, node.node_id, node.operator_config));
         }
         
         // Add edges with labels
         for edge in self.graph.edge_references() {
-            let source_id = self.graph[edge.source()].operator_id.clone();
-            let target_id = self.graph[edge.target()].operator_id.clone();
+            let source_id = self.graph[edge.source()].node_id.clone();
+            let target_id = self.graph[edge.target()].node_id.clone();
             let partition_type = match edge.weight().partition_type {
                 PartitionType::Forward => "Forward",
                 PartitionType::Hash => "Hash",

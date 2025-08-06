@@ -1,31 +1,27 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
-    common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, IdentityMapFunction}, WatermarkMessage, MAX_WATERMARK_VALUE},
-    executor::{executor::Executor, local_executor::LocalExecutor},
-    runtime::{
-        functions::map::{MapFunction, MapFunctionTrait},
-        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
-    },
+    api::streaming_context::StreamingContext,
+    common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
+    executor::local_executor::LocalExecutor,
+    runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use tokio::runtime::Runtime;
-use async_trait::async_trait;
-use arrow::array::StringArray;
+use arrow::datatypes::{Schema, Field, DataType};
+use std::sync::Arc;
 
 // TODO test early worker interruption/shutdown via setting state to finished from outside
 #[test]
 fn test_worker_execution() -> Result<()> {
     let runtime = Runtime::new()?;
 
-    let mut test_messages = vec![
+    let expected_messages = vec![
         Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
         Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
         Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None),
     ];
 
-    let num_messages = test_messages.len();
-
+    let mut test_messages = expected_messages.clone();
     test_messages.push(Message::Watermark(WatermarkMessage::new(
         "source".to_string(),
         MAX_WATERMARK_VALUE,
@@ -34,19 +30,24 @@ fn test_worker_execution() -> Result<()> {
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     
-    // Create streaming context with the logical graph and executor
+    // Create schema for the test table
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("value", DataType::Utf8, false),
+    ]));
+    
+    // Create streaming context using SQL
     let context = StreamingContext::new()
         .with_parallelism(1)
-        .with_logical_graph(
-            // Define operator chain: source -> map -> sink
-            LogicalGraph::from_linear_operators(vec![
-                OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages.clone()))),
-                OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-                OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
-            ], 1, false))
+        .with_source(
+            "test_table".to_string(),
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)),
+            schema
+        )
+        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        .sql("SELECT value FROM test_table")
         .with_executor(Box::new(LocalExecutor::new()));
 
-    let (vector_messages, map_messages) = runtime.block_on(async {
+    let vector_messages = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
         
@@ -54,16 +55,17 @@ fn test_worker_execution() -> Result<()> {
         
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let vector_messages = client.get_vector().await.unwrap();
-        let map_messages = client.get_map().await.unwrap();
         storage_server.stop().await;
-        (vector_messages, map_messages)
+        vector_messages
     });
 
-    assert_eq!(vector_messages.len(), num_messages);
-    assert_eq!(map_messages.len(), 0);
-    for (expected, actual) in test_messages.iter().zip(vector_messages.iter()) {
-        assert_eq!(actual.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), expected.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0));
-    }
+    println!("vector_messages: {:?}", vector_messages);
+    
+    // Use the new utility function to verify all records match
+    verify_message_records_match(&expected_messages, &vector_messages, "worker_execution_test");
+    
+    println!("Worker execution test passed: {} expected messages produced {} result messages with matching records", 
+             expected_messages.len(), vector_messages.len());
 
     Ok(())
 } 

@@ -1,7 +1,8 @@
 use std::sync::Arc;
-use arrow::array::{StringArray, Int64Array};
+use arrow::array::StringArray;
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
+use arrow::compute::concat_batches;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -70,5 +71,81 @@ pub struct IdentityMapFunction;
 impl MapFunctionTrait for IdentityMapFunction {
     fn map(&self, message: Message) -> anyhow::Result<Message> {
         Ok(message)
+    }
+}
+
+/// Verifies that all records from expected_messages match the records in actual_messages
+/// by concatenating all record batches from each list and comparing the resulting batches.
+/// This handles cases where batching may change the number of messages but preserves all records.
+/// Watermark messages are filtered out before comparison.
+pub fn verify_message_records_match(expected_messages: &[Message], actual_messages: &[Message], test_name: &str) {
+    // Filter out watermark messages from both lists
+    let expected_data_messages: Vec<&Message> = expected_messages
+        .iter()
+        .filter(|msg| !matches!(msg, Message::Watermark(_)))
+        .collect();
+    
+    let actual_data_messages: Vec<&Message> = actual_messages
+        .iter()
+        .filter(|msg| !matches!(msg, Message::Watermark(_)))
+        .collect();
+
+    if expected_data_messages.is_empty() && actual_data_messages.is_empty() {
+        return; // Both empty, nothing to compare
+    }
+    
+    assert!(!expected_data_messages.is_empty(), "{}: Expected data messages cannot be empty", test_name);
+    assert!(!actual_data_messages.is_empty(), "{}: Actual data messages cannot be empty", test_name);
+
+    // Get schema from the first data message (assuming all messages have the same schema)
+    let expected_schema = expected_data_messages[0].record_batch().schema();
+    let actual_schema = actual_data_messages[0].record_batch().schema();
+    
+    assert_eq!(expected_schema, actual_schema, 
+        "{}: Schema mismatch between expected and actual messages", test_name);
+
+    // Collect all record batches from expected data messages
+    let expected_batches: Vec<RecordBatch> = expected_data_messages
+        .iter()
+        .map(|msg| msg.record_batch().clone())
+        .collect();
+
+    // Collect all record batches from actual data messages
+    let actual_batches: Vec<RecordBatch> = actual_data_messages
+        .iter()
+        .map(|msg| msg.record_batch().clone())
+        .collect();
+
+    // Concatenate all expected batches into a single batch
+    let expected_concat = concat_batches(&expected_schema, &expected_batches)
+        .expect(&format!("{}: Failed to concatenate expected batches", test_name));
+
+    // Concatenate all actual batches into a single batch
+    let actual_concat = concat_batches(&actual_schema, &actual_batches)
+        .expect(&format!("{}: Failed to concatenate actual batches", test_name));
+
+    // Compare the concatenated batches
+    assert_eq!(expected_concat.num_rows(), actual_concat.num_rows(),
+        "{}: Expected {} total rows, got {} total rows", 
+        test_name, expected_concat.num_rows(), actual_concat.num_rows());
+
+    assert_eq!(expected_concat.num_columns(), actual_concat.num_columns(),
+        "{}: Expected {} columns, got {} columns", 
+        test_name, expected_concat.num_columns(), actual_concat.num_columns());
+
+    // Compare each column
+    for col_idx in 0..expected_concat.num_columns() {
+        let expected_column = expected_concat.column(col_idx);
+        let actual_column = actual_concat.column(col_idx);
+        
+        assert_eq!(expected_column.data_type(), actual_column.data_type(),
+            "{}: Column {} data type mismatch", test_name, col_idx);
+        
+        assert_eq!(expected_column.len(), actual_column.len(),
+            "{}: Column {} length mismatch", test_name, col_idx);
+
+        // Compare column data - this will compare the underlying array data
+        assert_eq!(expected_column.to_data(), actual_column.to_data(),
+            "{}: Column {} data mismatch", test_name, col_idx);
     }
 }

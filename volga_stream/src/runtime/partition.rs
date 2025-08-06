@@ -13,6 +13,17 @@ pub enum PartitionType {
     Forward,
 }
 
+impl fmt::Display for PartitionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PartitionType::Broadcast => write!(f, "Broadcast"),
+            PartitionType::Hash => write!(f, "Hash"),
+            PartitionType::RoundRobin => write!(f, "RoundRobin"),
+            PartitionType::Forward => write!(f, "Forward"),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Partition {
     Broadcast(BroadcastPartition),

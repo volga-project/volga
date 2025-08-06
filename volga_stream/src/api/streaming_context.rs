@@ -127,6 +127,8 @@ impl StreamingContext {
         // Build logical graph first
         let logical_graph = self.build_logical_graph().await;
 
+        println!("logical_graph: {:?}", logical_graph.to_dot());
+
         // Convert to execution graph
         let execution_graph = logical_graph.to_execution_graph();
 
