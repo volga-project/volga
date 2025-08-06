@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use async_trait::async_trait;
 use datafusion::common::{DFSchemaRef, Result as DFResult};
+use datafusion::physical_plan::projection::ProjectionExec;
 use datafusion::physical_plan::PhysicalExpr;
 use crate::common::message::Message;
 use anyhow::Result;
@@ -39,13 +40,12 @@ impl ProjectionFunction {
         exprs: Vec<Expr>, 
         session_context: SessionContext
     ) -> Self {
-        // let df_schema = datafusion::common::DFSchema::try_from(in_schema.as_ref().clone()).unwrap();
         let physical_exprs = exprs
             .iter()
             .map(|e| {
-                session_context.create_physical_expr(e.clone(), &in_schema)
+                session_context.create_physical_expr(e.clone(), &in_schema).expect("unable to create physical expr")
             })
-            .collect::<DFResult<Vec<_>>>().unwrap();
+            .collect::<Vec<_>>();
         
         Self { 
             in_schema,
@@ -66,24 +66,22 @@ impl MapFunctionTrait for ProjectionFunction {
     fn map(&self, message: Message) -> Result<Message> {
         let record_batch = message.record_batch();
         
-        // Convert logical expressions to physical expressions
-        let df_schema = datafusion::common::DFSchema::try_from(record_batch.schema().clone())?;
-        
-        let projected_arrays = self.exprs.iter()
-            .map(|expr| {
-                let physical_expr = self.session_context.create_physical_expr(expr.clone(), &df_schema)?;
-                let result = physical_expr
+        // Use pre-computed physical expressions (created with qualified schema in constructor)
+        let projected_arrays = self.physical_exprs.iter()
+            .map(|physical_expr| {
+                physical_expr
                     .evaluate(record_batch)
-                    .and_then(|v| v.into_array(record_batch.num_rows()))?;
-                Ok(result)
+                    .expect("Failed to evaluate physical expression")
+                    .into_array(record_batch.num_rows())
+                    .expect("Failed to convert to array")
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Vec<_>>();
         
         // Create new record batch with projected columns
         let projected_batch = RecordBatch::try_new(
             self.out_schema.inner().clone(),
             projected_arrays
-        )?;
+        ).expect("Failed to create new record batch");
         
         let new_message = Message::new(
             message.upstream_vertex_id(),

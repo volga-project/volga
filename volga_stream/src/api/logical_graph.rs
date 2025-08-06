@@ -12,37 +12,12 @@ use crate::transport::channel::Channel;
 use crate::cluster::cluster_provider::ClusterNode;
 use crate::runtime::functions::map::MapFunction;
 
-/// Node type enum for logical graph nodes
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum NodeType {
-    Source,
-    Sink,
-    Projection,
-    Filter,
-    KeyBy,
-    Aggregate,
-    Join,
-}
 
-/// Helper function to get node type from operator config
-pub fn get_node_type(operator_config: &OperatorConfig) -> NodeType {
-    match operator_config {
-        OperatorConfig::SourceConfig(_) => NodeType::Source,
-        OperatorConfig::SinkConfig(_) => NodeType::Sink,
-        OperatorConfig::MapConfig(MapFunction::Projection(_)) => NodeType::Projection,
-        OperatorConfig::MapConfig(MapFunction::Filter(_)) => NodeType::Filter,
-        OperatorConfig::KeyByConfig(_) => NodeType::KeyBy,
-        OperatorConfig::AggregateConfig(_) => NodeType::Aggregate,
-        OperatorConfig::JoinConfig(_) => NodeType::Join,
-        _ => panic!("Unsupported operator config: {:?}", operator_config),
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
     pub node_id: String,
     pub operator_config: OperatorConfig,
-    pub node_type: NodeType,
     pub parallelism: usize,
     pub in_schema: Option<Arc<ArrowSchema>>,
     pub out_schema: Option<Arc<ArrowSchema>>,
@@ -50,11 +25,9 @@ pub struct LogicalNode {
 
 impl LogicalNode {
     pub fn new(operator_config: OperatorConfig, parallelism: usize, in_schema: Option<Arc<ArrowSchema>>, out_schema: Option<Arc<ArrowSchema>>) -> Self {
-        let node_type = get_node_type(&operator_config);
         Self {
             node_id: String::new(), // Will be set by add_node
             operator_config,
-            node_type,
             parallelism,
             in_schema,
             out_schema,
@@ -133,16 +106,7 @@ impl LogicalGraph {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
     }
 
-    /// Find all node indices by node type
-    pub fn find_nodes_by_type(&self, node_type: NodeType) -> Vec<usize> {
-        self.get_nodes().enumerate().filter_map(|(idx, node)| {
-            if node.node_type == node_type {
-                Some(idx)
-            } else {
-                None
-            }
-        }).collect()
-    }
+
 
     /// Convert logical graph to execution graph using parallelism from each logical node
     pub fn to_execution_graph(&self) -> ExecutionGraph {

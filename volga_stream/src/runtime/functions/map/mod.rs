@@ -4,4 +4,4 @@ pub mod projection_function;
  
 pub use map_function::{MapFunction, MapFunctionTrait};
 pub use filter_function::FilterFunction;
-pub use projection_function::ProjectionFunction; 
+pub use projection_function::ProjectionFunction;

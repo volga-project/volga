@@ -40,7 +40,7 @@ impl MapFunctionTrait for CustomMapFunction {
 pub enum MapFunction {
     Custom(CustomMapFunction),
     Filter(FilterFunction),
-    Projection(ProjectionFunction)
+    Projection(ProjectionFunction),
 }
 
 impl fmt::Display for MapFunction {
@@ -65,7 +65,7 @@ impl MapFunction {
         match self {
             MapFunction::Custom(function) => function.map(message),
             MapFunction::Filter(function) => function.map(message),
-            MapFunction::Projection(function) => function.map(message)
+            MapFunction::Projection(function) => function.map(message),
         }
     }
 }

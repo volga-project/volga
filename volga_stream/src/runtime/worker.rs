@@ -200,6 +200,8 @@ impl Worker {
         println!("[WORKER] Waiting for all tasks to be {:?}", target_status);
         
         let start_time = std::time::Instant::now();
+
+        // TODO this throws for long running jobs/pipeline
         let timeout_duration = Duration::from_secs(30);
         
         while running.load(Ordering::SeqCst) {

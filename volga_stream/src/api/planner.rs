@@ -31,7 +31,7 @@ use super::logical_graph::{LogicalNode, LogicalGraph};
 use crate::runtime::functions::key_by::key_by_function::DataFusionKeyFunction;
 use crate::runtime::functions::key_by::KeyByFunction;
 use crate::runtime::operators::operator::OperatorConfig;
-use crate::runtime::functions::map::{FilterFunction, ProjectionFunction, MapFunction};
+use crate::runtime::functions::map::{FilterFunction, MapFunction, ProjectionFunction};
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
@@ -114,6 +114,7 @@ pub struct PlanningContext {
     pub df_session_context: SessionContext,
     pub connector_configs: HashMap<String, SourceConfig>,
     pub sink_config: Option<SinkConfig>,
+    pub df_planner: Arc<DefaultPhysicalPlanner>,
 
     // TODO figure out how to set parallelism per node
     pub parallelism: usize,
@@ -125,6 +126,7 @@ impl PlanningContext {
             df_session_context,
             connector_configs: HashMap::new(),
             sink_config: None,
+            df_planner: Arc::new(DefaultPhysicalPlanner::default()),
             parallelism: 1, // Default parallelism
         }
     }
@@ -183,6 +185,19 @@ impl Planner {
             .ok_or_else(|| DataFusionError::Plan(format!("No source configuration found for table '{}'", table_name)))?
             .clone();
 
+
+        let table_scan_plan = LogicalPlan::TableScan(table_scan.clone());
+        let planner = DefaultPhysicalPlanner::default();
+        // Use scoped thread to avoid runtime conflicts
+        let physical_plan = std::thread::scope(|s| {
+            let handle = s.spawn(|| {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                rt.block_on(planner.create_physical_plan(&table_scan_plan, &self.context.df_session_context.state()))
+            });
+            handle.join().unwrap()
+        })?;
+
         if table_scan.projection.is_some() {
             let projection = table_scan.projection.as_ref().unwrap().clone();
             let schema = table_scan.projected_schema.inner().clone();
@@ -208,8 +223,8 @@ impl Planner {
             projection.expr.clone(), 
             self.context.df_session_context.clone()
         );
-        
         let node = LogicalNode::new(
+            // OperatorConfig::MapConfig(MapFunction::DataFusionProjection(DataFusionProjectionFunction::new(Arc::new(projection_exec)))),
             OperatorConfig::MapConfig(MapFunction::Projection(projection_function)),
             parallelism,
             None, // TODO set schemas
@@ -272,16 +287,13 @@ impl Planner {
 
     fn handle_aggregate(&mut self, aggregate: &Aggregate, parallelism: usize) -> Result<()> {
        let aggregate_plan = LogicalPlan::Aggregate(aggregate.clone());
-
-        let planner = DefaultPhysicalPlanner::default();
-        let session_state = self.context.df_session_context.state();
         
         // Use scoped thread to avoid runtime conflicts
         let physical_plan = std::thread::scope(|s| {
             let handle = s.spawn(|| {
                 let rt = tokio::runtime::Runtime::new()
                     .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                rt.block_on(planner.create_physical_plan(&aggregate_plan, &session_state))
+                rt.block_on(self.context.df_planner.create_physical_plan(&aggregate_plan, &self.context.df_session_context.state()))
             });
             handle.join().unwrap()
         })?;
@@ -426,7 +438,32 @@ mod tests {
     use arrow::datatypes::{Schema, Field, DataType};
     use std::sync::Arc;
     use crate::runtime::operators::sink::sink_operator::SinkConfig;
-    use crate::api::logical_graph::NodeType;
+    /// Node type enum for logical graph nodes (used in planner tests)
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    pub enum NodeType {
+        Source,
+        Sink,
+        Projection,
+        Filter,
+        KeyBy,
+        Aggregate,
+        Join,
+    }
+
+    /// Helper function to get node type from operator config (used in planner tests)
+    pub fn get_node_type(operator_config: &OperatorConfig) -> NodeType {
+        use crate::runtime::functions::map::MapFunction;
+        match operator_config {
+            OperatorConfig::SourceConfig(_) => NodeType::Source,
+            OperatorConfig::SinkConfig(_) => NodeType::Sink,
+            OperatorConfig::MapConfig(MapFunction::Projection(_)) => NodeType::Projection,
+            OperatorConfig::MapConfig(MapFunction::Filter(_)) => NodeType::Filter,
+            OperatorConfig::KeyByConfig(_) => NodeType::KeyBy,
+            OperatorConfig::AggregateConfig(_) => NodeType::Aggregate,
+            OperatorConfig::JoinConfig(_) => NodeType::Join,
+            _ => panic!("Unsupported operator config: {:?}", operator_config),
+        }
+    }
 
     fn create_planner() -> Planner {
         let ctx = SessionContext::new();
@@ -445,6 +482,20 @@ mod tests {
         planner
     }
 
+    /// Find nodes by type using local get_node_type function
+    fn find_nodes_by_type(graph: &LogicalGraph, node_type: NodeType) -> Vec<usize> {
+        graph.get_nodes()
+            .enumerate()
+            .filter_map(|(idx, node)| {
+                if get_node_type(&node.operator_config) == node_type {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
     /// Helper function to verify edge connectivity between specific node types
     fn verify_edge_connectivity(
         graph: &LogicalGraph, 
@@ -453,8 +504,8 @@ mod tests {
         let edges: Vec<_> = graph.get_edges().collect();
         
         for (expected_from, expected_to, expected_partition_type, expected_count) in expected_edges {
-            let from_nodes = graph.find_nodes_by_type(*expected_from);
-            let to_nodes = graph.find_nodes_by_type(*expected_to);
+            let from_nodes = find_nodes_by_type(graph, *expected_from);
+            let to_nodes = find_nodes_by_type(graph, *expected_to);
             
             assert!(!from_nodes.is_empty(), "Could not find {:?} node", expected_from);
             assert!(!to_nodes.is_empty(), "Could not find {:?} node", expected_to);
@@ -612,7 +663,7 @@ mod tests {
         // Check edges - should have 3 edges
         let edges: Vec<_> = graph.get_edges().collect();
 
-        print!("{:?}", edges);
+        // print!("{:?}", edges);
         assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
         
         // Verify edge connectivity: source -> keyby -> aggregate -> projection
@@ -694,7 +745,7 @@ mod tests {
         
         // Check edges - should have 6 edges (connecting 7 nodes)
         let edges: Vec<_> = graph.get_edges().collect();
-        println!("edges {:?}", edges);
+        // println!("edges {:?}", edges);
         assert_eq!(edges.len(), 6, "Expected 6 edges, found {}", edges.len());
 
         // Verify edge connectivity for complex multi-GROUP BY query
