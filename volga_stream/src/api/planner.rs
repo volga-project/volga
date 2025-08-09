@@ -298,25 +298,46 @@ impl Planner {
             handle.join().unwrap()
         })?;
 
-        // Does not matter if it's final or partial, we only need the expressions
-        let aggregate_exec = physical_plan
-            .as_any()
-            .downcast_ref::<AggregateExec>()
-            .ok_or_else(|| DataFusionError::Internal("Could not find AggregateExec in physical plan".to_string()))?
-            .clone();
-
+        fn find_partial_aggregate(exec: &Arc<dyn ExecutionPlan>) -> Option<AggregateExec> {
+            if let Some(agg) = exec.as_any().downcast_ref::<AggregateExec>() {
+                use datafusion::physical_plan::aggregates::AggregateMode;
+                if agg.mode() != &AggregateMode::Final && agg.mode() != &AggregateMode::FinalPartitioned {
+                    // found a partial aggregate exec
+                    return Some(agg.clone());
+                }
+            }
+            let children = exec.children();
+            for child in children {
+                if let Some(found) = find_partial_aggregate(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        
+        // Datafusion splits physical aggregate into 2 nodes: partial and final
+        // We need the partial node to get the group by expression since it uses proper input schema
+        // This groupby will be used by key by function
+        let partial_aggregate_exec = find_partial_aggregate(&physical_plan).expect("should have found an aggregate exec");
         // create 2 nodes - key by + aggregate node 
         let key_by_node = LogicalNode::new(
-            OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(DataFusionKeyFunction::new(Arc::new(aggregate_exec.clone())))),
+            OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(DataFusionKeyFunction::new(Arc::new(partial_aggregate_exec.clone())))),
             parallelism,
             None,
             None,
         );
         
+        // Aggregate operator should use final aggregate exec
         // TODO detect aggregate type (e.g. windowed or regular) once we have windowing enabled
+        let final_aggregate_exec = physical_plan
+            .as_any()
+            .downcast_ref::<AggregateExec>()
+            .expect("should have found an aggregate exec");
+
         let aggreagte_node = LogicalNode::new(
             OperatorConfig::AggregateConfig(AggregateConfig {
-                aggregate_exec,
+                aggregate_exec: final_aggregate_exec.clone(),
+                group_input_exprs: partial_aggregate_exec.group_expr().input_exprs(),
             }),
             parallelism,
             None,

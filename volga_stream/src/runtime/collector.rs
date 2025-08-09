@@ -47,6 +47,7 @@ impl Collector {
 
     // generate which channels the message goes to
     // Note: calling this updates partition state - do not call for the same message twice
+    // TODO what if it is a retried message?
     pub fn gen_partitioned_channel_ids(&mut self, message: &Message) -> Vec<String> {
         let num_partitions = self.output_channel_ids.len();
         

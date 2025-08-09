@@ -37,7 +37,6 @@ impl Key {
         
         // we know there is only one row
         let hash = hashes[0];
-        
         Ok(Self { key_record_batch, hash })
     }
     

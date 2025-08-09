@@ -15,7 +15,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use datafusion::physical_plan::aggregates::AggregateExec;
-use datafusion::physical_plan::{ColumnarValue, ExecutionPlan};
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::common::hash_utils::create_hashes;
 use ahash::RandomState;
 
@@ -182,41 +182,38 @@ impl DataFusionKeyFunction {
             runtime_context: None 
         }
     }
+    
+
 }
 
 impl KeyByFunctionTrait for DataFusionKeyFunction {
+
+    // TODO use evaluate_group_by from DataFusion
     fn key_by(&self, message: Message) -> Vec<KeyedMessage> {
         let record_batch = message.record_batch();
-        
         // If batch is empty, return empty result
         if record_batch.num_rows() == 0 {
             panic!("Can not key empty batch")
         }
 
-        // Step 1: Extract and evaluate group by expressions
-        let group_exprs = self.aggregate_exec.group_expr().output_exprs();
+        // Step 1: Use PhysicalGroupBy.input_exprs() which work with input schema (not output schema)
+        // These expressions are built to work with the actual runtime data schema
+        let group_exprs = self.aggregate_exec.group_expr().input_exprs();
         
         if group_exprs.is_empty() {
-            panic!("No group by exprs")
+            panic!("No group by expressions")
         }
         
-        // Evaluate group expressions to get group values
-        let group_values: Vec<_> = group_exprs
+        // Evaluate the input expressions directly against the runtime batch
+        let group_arrays: Vec<ArrayRef> = group_exprs
             .iter()
-            .map(|expr| expr.evaluate(record_batch).expect("should be able to evaluate group by expr"))
+            .map(|expr| {
+                let value = expr.evaluate(record_batch)
+                    .expect("Failed to evaluate group by expression");
+                value.into_array(record_batch.num_rows())
+                    .expect("Failed to convert to array")
+            })
             .collect();
-            
-        let group_arrays = 
-            // Convert ColumnarValue to ArrayRef
-            group_values
-                .into_iter()
-                .filter_map(|v| match v {
-                    ColumnarValue::Array(a) => Some(a),
-                    ColumnarValue::Scalar(s) => {
-                        s.to_array_of_size(record_batch.num_rows()).ok()
-                    }
-                })
-                .collect::<Vec<ArrayRef>>();
         
         // Step 2: Create hashes for each row based on group values
         let random_state = RandomState::with_seeds(0, 0, 0, 0);
@@ -231,7 +228,7 @@ impl KeyByFunctionTrait for DataFusionKeyFunction {
         for (i, &hash) in hashes_buffer.iter().enumerate() {
             hash_to_indices.entry(hash).or_insert_with(Vec::new).push(i);
         }
-        
+
         // Step 4: Create keyed messages for each group
         let mut keyed_messages = Vec::new();
         
@@ -249,17 +246,18 @@ impl KeyByFunctionTrait for DataFusionKeyFunction {
             
             // Construct key object
             let aggregate_schema = self.aggregate_exec.schema();
-            let first_index = UInt32Array::from(vec![indices[0] as u32]);
             
-            let (key_arrays, key_fields): (Vec<ArrayRef>, Vec<_>) = group_exprs
+            // Extract key values from the group_arrays using the first index of this group
+            let group_first_index = UInt32Array::from(vec![indices[0] as u32]);
+            
+            let (key_arrays, key_fields): (Vec<ArrayRef>, Vec<_>) = group_arrays
                 .iter()
-                .zip(group_arrays.iter())
                 .enumerate()
-                .map(|(i, (_expr, array))| {
-                    // Create key array - take first row for this group
-                    let key_array = compute::take(array.as_ref(), &first_index, None).unwrap();
+                .map(|(i, array)| {
+                    // Create key array - take the first row of this specific group from the global arrays
+                    let key_array = compute::take(array.as_ref(), &group_first_index, None).unwrap();
                     
-                    // Create key field - get name from AggregateExec schema
+                    // Create key field - get name from AggregateExec schema (group by fields come first)
                     if i >= aggregate_schema.fields().len() {
                         panic!(
                             "AggregateExec schema has {} fields but trying to access group field at index {}",
@@ -528,9 +526,9 @@ mod tests {
         
         // Create schema with employee data
         let schema = Arc::new(Schema::new(vec![
+            Field::new("salary", DataType::Int32, false),
             Field::new("name", DataType::Utf8, false),
             Field::new("department", DataType::Utf8, false),
-            Field::new("salary", DataType::Int32, false),
         ]));
         
         // Register source table
@@ -548,9 +546,11 @@ mod tests {
         let mut aggregate_exec: Option<Arc<AggregateExec>> = None;
         let nodes: Vec<_> = logical_graph.get_nodes().collect();
         for node in &nodes {
-            if let crate::runtime::operators::operator::OperatorConfig::AggregateConfig(config) = &node.operator_config {
-                aggregate_exec = Some(Arc::new(config.aggregate_exec.clone()));
-                break;
+            if let crate::runtime::operators::operator::OperatorConfig::KeyByConfig(key_by_function) = &node.operator_config {
+                if let KeyByFunction::DataFusion(key_by) = key_by_function {
+                    aggregate_exec = Some(key_by.aggregate_exec.clone());
+                    break;
+                }
             }
         }
         
@@ -570,9 +570,9 @@ mod tests {
         let record_batch = RecordBatch::try_new(
             schema,
             vec![
+                Arc::new(salary_array),
                 Arc::new(name_array), 
-                Arc::new(dept_array), 
-                Arc::new(salary_array)
+                Arc::new(dept_array),
             ]
         ).unwrap();
         
@@ -592,9 +592,9 @@ mod tests {
         
         for keyed_message in &keyed_messages {
             let batch = &keyed_message.base.record_batch;
-            let name_col = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            let dept_col = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
-            let salary_col = batch.column(2).as_any().downcast_ref::<Int32Array>().unwrap();
+            let name_col = batch.column(1).as_any().downcast_ref::<StringArray>().unwrap();
+            let dept_col = batch.column(2).as_any().downcast_ref::<StringArray>().unwrap();
+            let salary_col = batch.column(0).as_any().downcast_ref::<Int32Array>().unwrap();
             
             // All rows in this batch should have the same name and department
             let name = name_col.value(0).to_string();

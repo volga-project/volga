@@ -78,7 +78,7 @@ impl MapFunctionTrait for IdentityMapFunction {
 /// by concatenating all record batches from each list and comparing the resulting batches.
 /// This handles cases where batching may change the number of messages but preserves all records.
 /// Watermark messages are filtered out before comparison.
-pub fn verify_message_records_match(expected_messages: &[Message], actual_messages: &[Message], test_name: &str) {
+pub fn verify_message_records_match(expected_messages: &[Message], actual_messages: &[Message], test_name: &str, preserve_order: bool) {
     // Filter out watermark messages from both lists
     let expected_data_messages: Vec<&Message> = expected_messages
         .iter()
@@ -133,10 +133,33 @@ pub fn verify_message_records_match(expected_messages: &[Message], actual_messag
         "{}: Expected {} columns, got {} columns", 
         test_name, expected_concat.num_columns(), actual_concat.num_columns());
 
-    // Compare each column
-    for col_idx in 0..expected_concat.num_columns() {
-        let expected_column = expected_concat.column(col_idx);
-        let actual_column = actual_concat.column(col_idx);
+    // Sort batches if order doesn't need to be preserved
+    let (expected_final, actual_final) = if preserve_order {
+        (expected_concat, actual_concat)
+    } else {
+        use arrow::compute::kernels::sort::{sort_to_indices, SortOptions};
+        
+        let expected_indices = sort_to_indices(expected_concat.column(0), Some(SortOptions::default()), None).unwrap();
+        let actual_indices = sort_to_indices(actual_concat.column(0), Some(SortOptions::default()), None).unwrap();
+        
+        // Create sorted batches
+        let expected_sorted_columns: Vec<_> = (0..expected_concat.num_columns())
+            .map(|col_idx| arrow::compute::take(expected_concat.column(col_idx), &expected_indices, None).unwrap())
+            .collect();
+        let actual_sorted_columns: Vec<_> = (0..actual_concat.num_columns())
+            .map(|col_idx| arrow::compute::take(actual_concat.column(col_idx), &actual_indices, None).unwrap())
+            .collect();
+            
+        let expected_sorted = RecordBatch::try_new(expected_concat.schema(), expected_sorted_columns).unwrap();
+        let actual_sorted = RecordBatch::try_new(actual_concat.schema(), actual_sorted_columns).unwrap();
+        
+        (expected_sorted, actual_sorted)
+    };
+
+    // Compare columns
+    for col_idx in 0..expected_final.num_columns() {
+        let expected_column = expected_final.column(col_idx);
+        let actual_column = actual_final.column(col_idx);
         
         assert_eq!(expected_column.data_type(), actual_column.data_type(),
             "{}: Column {} data type mismatch", test_name, col_idx);
@@ -144,8 +167,8 @@ pub fn verify_message_records_match(expected_messages: &[Message], actual_messag
         assert_eq!(expected_column.len(), actual_column.len(),
             "{}: Column {} length mismatch", test_name, col_idx);
 
-        // Compare column data - this will compare the underlying array data
         assert_eq!(expected_column.to_data(), actual_column.to_data(),
-            "{}: Column {} data mismatch", test_name, col_idx);
+            "{}: Column {} data mismatch{}", test_name, col_idx, 
+            if preserve_order { "" } else { " after sorting" });
     }
 }

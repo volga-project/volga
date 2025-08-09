@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crate::common::WatermarkMessage;
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
 use crate::runtime::operators::chained::chained_operator::ChainedOperator;
@@ -38,6 +39,10 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     fn operator_type(&self) -> OperatorType;
     async fn fetch(&mut self) -> Option<Vec<Message>> {
         panic!("fetch not implemented for this operator")
+    }
+    async fn process_watermark(&mut self, watermark: WatermarkMessage) -> Option<Vec<Message>> {
+        // panic!("process_watermark not implemented for this operator")
+        None
     }
 }
 
@@ -111,21 +116,34 @@ impl OperatorTrait for Operator {
     async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         match &message {
             Message::Watermark(watermark) => {
-                panic!("Watermark should not be processed for operator");
+                panic!("Watermark should not be processed by process_message");
             }
             _ => {
                 // Process regular messages as before
-                        match self {
-            Operator::Map(op) => op.process_message(message).await,
-            Operator::Join(op) => op.process_message(message).await,
-            Operator::Sink(op) => op.process_message(message).await,
-            Operator::Source(op) => op.process_message(message).await,
-            Operator::KeyBy(op) => op.process_message(message).await,
-            Operator::Reduce(op) => op.process_message(message).await,
-            Operator::Aggregate(op) => op.process_message(message).await,
-            Operator::Chained(op) => op.process_message(message).await,
-        }
+                match self {
+                    Operator::Map(op) => op.process_message(message).await,
+                    Operator::Join(op) => op.process_message(message).await,
+                    Operator::Sink(op) => op.process_message(message).await,
+                    Operator::Source(op) => op.process_message(message).await,
+                    Operator::KeyBy(op) => op.process_message(message).await,
+                    Operator::Reduce(op) => op.process_message(message).await,
+                    Operator::Aggregate(op) => op.process_message(message).await,
+                    Operator::Chained(op) => op.process_message(message).await,
+                }
             }
+        }
+    }
+
+    async fn process_watermark(&mut self, watermark: WatermarkMessage) -> Option<Vec<Message>> {
+        match self {
+            Operator::Map(op) => op.process_watermark(watermark).await,
+            Operator::Join(op) => op.process_watermark(watermark).await,
+            Operator::Sink(op) => op.process_watermark(watermark).await,
+            Operator::Source(op) => op.process_watermark(watermark).await,
+            Operator::KeyBy(op) => op.process_watermark(watermark).await,
+            Operator::Reduce(op) => op.process_watermark(watermark).await,
+            Operator::Aggregate(op) => op.process_watermark(watermark).await,
+            Operator::Chained(op) => op.process_watermark(watermark).await,
         }
     }
 

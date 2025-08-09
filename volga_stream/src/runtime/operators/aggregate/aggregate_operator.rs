@@ -1,27 +1,31 @@
 use std::collections::HashMap;
 use arrow::record_batch::RecordBatch;
 use arrow::array::ArrayRef;
-use datafusion::common::Result;
+use arrow::util::pretty::pretty_format_batches;
+// use datafusion::common::Result;
 use datafusion::physical_plan::ColumnarValue;
 use datafusion::physical_plan::{Accumulator, ExecutionPlan};
 use datafusion::physical_plan::aggregates::AggregateExec;
+use datafusion::physical_plan::PhysicalExpr;
 use async_trait::async_trait;
 use anyhow::Result as AnyhowResult;
 use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::{Message, Key};
+use crate::common::{Message, WatermarkMessage, BaseMessage};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct AggregateConfig {
     pub aggregate_exec: AggregateExec,
+    pub group_input_exprs: Vec<Arc<dyn PhysicalExpr>>, // from Partial AggregateExec
 }
 
 #[derive(Debug)]
 pub struct AggregateOperator {
     base: OperatorBase,
-    aggregate_exec: Arc<AggregateExec>,  // DataFusion's AggregateExec
-    accumulators: HashMap<Key, (Vec<ArrayRef>, Vec<Box<dyn Accumulator>>)>, // (group_values, accumulators)
+    aggregate_exec: Arc<AggregateExec>,  // DataFusion's AggregateExec - Final
+    group_input_exprs: Vec<Arc<dyn PhysicalExpr>>, // evaluated on input batches
+    accumulators: HashMap<u64, (BaseMessage, Vec<Box<dyn Accumulator>>)>, // (first message for key, accumulators)
 }
 
 impl AggregateOperator {
@@ -34,6 +38,7 @@ impl AggregateOperator {
         Self {
             base: OperatorBase::new(OperatorConfig::AggregateConfig(aggregate_confg.clone())),
             aggregate_exec: Arc::new(aggregate_confg.aggregate_exec),
+            group_input_exprs: aggregate_confg.group_input_exprs,
             accumulators: HashMap::new(),
         }
     }
@@ -51,38 +56,59 @@ impl AggregateOperator {
         let mut messages = Vec::new();
         let accumulators: Vec<_> = self.accumulators.drain().collect();
         
-        for (key, (group_values, accumulators)) in accumulators {
-            let batch_result = {
-                let mut columns = Vec::new();
-                
-                // 1. Add group by columns (use stored values)
-                for group_array in group_values {
-                    columns.push(group_array);
-                }
-                
-                // 2. Add aggregate result columns
-                let mut accs = accumulators;
-                for accumulator in &mut accs {
-                    if let Ok(result) = accumulator.evaluate() {
-                        if let Ok(result_array) = result.to_array_of_size(1) {
-                            columns.push(result_array);
-                        }
+        // println!("emit accumulators {:?}", accumulators);
+
+        for (_key, (first_message, accumulators)) in accumulators {
+            // Build columns in the exact order of the final output schema:
+            // 1) group-by output columns
+            // 2) aggregate result columns
+            let mut columns = Vec::new();
+
+            // Get non-aggregate group-by output columns (which align with input_exprs order) from the first stored message for this key
+            let group_arrays: Vec<ArrayRef> = self.group_input_exprs
+                .iter()
+                .map(|expr| {
+                    let v = expr
+                        .evaluate(&first_message.record_batch)
+                        .expect("should be able to evaluate group expr");
+                    match v {
+                        ColumnarValue::Array(a) => a.slice(0, 1),
+                        ColumnarValue::Scalar(s) => s
+                            .to_array_of_size(1)
+                            .expect("should convert scalar to array"),
                     }
-                }
-                
-                // TODO output schema should come from aggregateexec
-                let output_physical_schema = self.aggregate_exec.schema();
-                RecordBatch::try_new(output_physical_schema.clone(), columns)
-            };
-            
-            if let Ok(batch) = batch_result {
-                messages.push(Message::new_keyed(
-                    None,
-                    batch,
-                    key,
-                    None
-                ));
+                })
+                .collect();
+
+            let base_len = group_arrays.len();
+
+            // Push base group columns first
+            for i in 0..base_len {
+                columns.push(group_arrays[i].clone());
             }
+
+            // Append aggregate result columns
+            let mut accs = accumulators;
+            for accumulator in &mut accs {
+                let result = accumulator
+                    .evaluate()
+                    .expect("should be able to evaluate accumulator");
+                let result_array = result
+                    .to_array_of_size(1)
+                    .expect("should be able to convert to array");
+                columns.push(result_array);
+            }
+
+            let output_physical_schema = self.aggregate_exec.schema();
+            let batch_result = RecordBatch::try_new(output_physical_schema.clone(), columns)
+                .expect("should be able to create output batch");
+
+            // Preserve upstream_vertex_id and ingest_timestamp from the first message for this key
+            messages.push(Message::new(
+                first_message.metadata.upstream_vertex_id.clone(),
+                batch_result,
+                first_message.metadata.ingest_timestamp
+            ));
         }
         
         messages
@@ -104,43 +130,22 @@ impl OperatorTrait for AggregateOperator {
             Message::Keyed(keyed_message) => {
                 let key = keyed_message.key().clone();
                 
-                // Extract group by values from the batch using output_exprs
-                let group_by_result = self.aggregate_exec.group_expr()
-                    .output_exprs()
-                    .iter()
-                    .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expr"))
-                    .collect::<Vec<_>>();
-                
-                let group_by_values =
-                    // Convert ColumnarValue to ArrayRef
-                    group_by_result
-                        .into_iter()
-                        .filter_map(|v| match v {
-                            ColumnarValue::Array(a) => Some(a),
-                            ColumnarValue::Scalar(s) => {
-                                let batch_size = keyed_message.base.record_batch.num_rows();
-                                s.to_array_of_size(batch_size).ok()
-                            }
-                        })
-                        .collect::<Vec<ArrayRef>>();
-                
                 // Get or create accumulators for this key
-                let key_clone = key.clone();
-                if !self.accumulators.contains_key(&key_clone) {
+                if !self.accumulators.contains_key(&key.hash()) {
                     let accs = self.create_accumulators();
-                    self.accumulators.insert(key_clone.clone(), (group_by_values.clone(), accs));
+                    self.accumulators.insert(key.hash(), (keyed_message.base.clone(), accs));
                 }
-                let (_stored_group_values, accumulators) = self.accumulators
-                    .get_mut(&key_clone)
+                let (_first_message, accumulators) = self.accumulators
+                    .get_mut(&key.hash())
                     .expect("Accumulators should exist after insert");
                 
                 // Update accumulators
                 for (i, accumulator) in accumulators.iter_mut().enumerate() {
                     if let Some(aggr_expr) = self.aggregate_exec.aggr_expr().get(i) {
                         let values = aggr_expr
-                        .expressions()
-                        .iter()
-                        .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expression"))
+                            .expressions()
+                            .iter()
+                            .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expression"))
                             .collect::<Vec<_>>();
                         
                         // Convert ColumnarValue to ArrayRef
@@ -156,26 +161,28 @@ impl OperatorTrait for AggregateOperator {
                             })
                             .collect();
                         
-                        if !arrays.is_empty() {
-                            let _ = accumulator.update_batch(&arrays);
+                        if arrays.is_empty() {
+                            panic!("No arrays to update accumulator");
                         }
+
+                        let _ = accumulator.update_batch(&arrays);
                         
                     }
                 }
-                
                 // No immediate emission - wait for watermark
                 None
             }
-            Message::Watermark(_) => {
-                // Emit final results when receiving watermark
-                if !self.accumulators.is_empty() {
-                    let messages = self.emit_all_accumulators();
-                    Some(messages)
-                } else {
-                    None
-                }
-            }
-            _ => panic!("Aggregate operator expects keyed messages or watermarks"),
+            _ => panic!("Aggregate operator expects keyed messages"),
+        }
+    }
+
+    async fn process_watermark(&mut self, watermark: WatermarkMessage) -> Option<Vec<Message>> {
+        // Emit final results when receiving watermark
+        if !self.accumulators.is_empty() {
+            let messages = self.emit_all_accumulators();
+            Some(messages)
+        } else {
+            None
         }
     }
     
@@ -193,7 +200,7 @@ mod tests {
         use crate::api::planner::{Planner, PlanningContext};
         use datafusion::prelude::SessionContext;
         use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-        use crate::common::{KeyedMessage, BaseMessage, WatermarkMessage, MAX_WATERMARK_VALUE};
+        use crate::common::{Key, KeyedMessage, BaseMessage, WatermarkMessage, MAX_WATERMARK_VALUE};
         use arrow::array::{StringArray, Int64Array, Float64Array};
         use arrow::record_batch::RecordBatch;
         
@@ -268,7 +275,7 @@ mod tests {
         
         // Send max watermark to finalize aggregation
         let watermark = WatermarkMessage::new("test_operator".to_string(), MAX_WATERMARK_VALUE, None);
-        let final_result = operator.process_message(Message::Watermark(watermark)).await;
+        let final_result = operator.process_watermark(watermark).await;
         
         // Verify results
         if let Some(messages) = final_result {
@@ -279,16 +286,14 @@ mod tests {
             
             // Verify schema matches for all produced messages
             for message in &messages {
-                if let Message::Keyed(keyed_msg) = message {
-                    let actual_schema = keyed_msg.base.record_batch.schema();
-                    assert_eq!(
-                        expected_schema.as_ref(), 
-                        actual_schema.as_ref(),
-                        "Output schema should match AggregateExec schema.\nExpected: {:?}\nActual: {:?}", 
-                        expected_schema.fields(),
-                        actual_schema.fields()
-                    );
-                }
+                let actual_schema = message.record_batch().schema();
+                assert_eq!(
+                    expected_schema.as_ref(), 
+                    actual_schema.as_ref(),
+                    "Output schema should match AggregateExec schema.\nExpected: {:?}\nActual: {:?}", 
+                    expected_schema.fields(),
+                    actual_schema.fields()
+                );
             }
             
             // Check that we have results for each group
@@ -297,34 +302,32 @@ mod tests {
             let mut charlie_results = (0i64, 0i64, 0.0f64, 0i64, 0i64);
             
             for message in messages {
-                if let Message::Keyed(keyed_msg) = message {
-                    let batch = &keyed_msg.base.record_batch;
+                let batch = message.record_batch();
+                
+                // Verify we have the expected number of columns
+                assert_eq!(batch.num_columns(), 6, "Should have 6 columns: name, count, sum_value, avg_value, max_value, min_value");
+                
+                // Extract all columns from the batch
+                let name_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+                let count_column = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+                let sum_column = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+                let avg_column = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+                let max_column = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+                let min_column = batch.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
+                
+                for i in 0..batch.num_rows() {
+                    let name = name_column.value(i);
+                    let count = count_column.value(i);
+                    let sum_value = sum_column.value(i);
+                    let avg_value = avg_column.value(i);
+                    let max_value = max_column.value(i);
+                    let min_value = min_column.value(i);
                     
-                    // Verify we have the expected number of columns
-                    assert_eq!(batch.num_columns(), 6, "Should have 6 columns: name, count, sum_value, avg_value, max_value, min_value");
-                    
-                    // Extract all columns from the batch
-                    let name_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                    let count_column = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-                    let sum_column = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
-                    let avg_column = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
-                    let max_column = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
-                    let min_column = batch.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
-                    
-                    for i in 0..batch.num_rows() {
-                        let name = name_column.value(i);
-                        let count = count_column.value(i);
-                        let sum_value = sum_column.value(i);
-                        let avg_value = avg_column.value(i);
-                        let max_value = max_column.value(i);
-                        let min_value = min_column.value(i);
-                        
-                        match name {
-                            "alice" => alice_results = (count, sum_value, avg_value, max_value, min_value),
-                            "bob" => bob_results = (count, sum_value, avg_value, max_value, min_value),
-                            "charlie" => charlie_results = (count, sum_value, avg_value, max_value, min_value),
-                            other => panic!("Unexpected name in results: {}", other),
-                        }
+                    match name {
+                        "alice" => alice_results = (count, sum_value, avg_value, max_value, min_value),
+                        "bob" => bob_results = (count, sum_value, avg_value, max_value, min_value),
+                        "charlie" => charlie_results = (count, sum_value, avg_value, max_value, min_value),
+                        other => panic!("Unexpected name in results: {}", other),
                     }
                 }
             }

@@ -164,6 +164,7 @@ impl StreamTask {
                 return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.metadata.ingest_timestamp));
             }
         }
+        // Some(watermark)
         None
     }
 
@@ -270,7 +271,7 @@ impl StreamTask {
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 let operator_type = operator.operator_type();
                 let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
-                let mut processed_messages: Option<Vec<Message>> = None;
+                let mut produced_messages: Option<Vec<Message>> = None;
                 
                 if is_source {
                     if let Some(fetched_msgs) = operator.fetch().await {
@@ -304,7 +305,7 @@ impl StreamTask {
                             }
                         }
                         if filtered.len() != 0 {
-                            processed_messages = Some(filtered)
+                            produced_messages = Some(filtered)
                         }
                     }
                 } else { 
@@ -312,12 +313,13 @@ impl StreamTask {
                         .expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(message) = reader.read_message().await? {
 
-                        // println!("msg rcvd by {:?}: {:?}", vertex_id.clone(), message);
+                        println!("msg rcvd by {:?}: {:?}", vertex_id.clone(), message);
                         Self::update_metrics(metrics.clone(), &message).await;
-
+                        // let msgs = operator.process_message(message.clone()).await;
                         match message {
                             Message::Watermark(watermark) => {
                                 println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.metadata.upstream_vertex_id);
+                                let msgs = operator.process_watermark(watermark.clone()).await;
                                 let wm = Self::handle_watermark(
                                     is_source,
                                     watermark.clone(),
@@ -327,17 +329,25 @@ impl StreamTask {
                                     vertex_id.clone()
                                 ).await;
                                 if let Some(wm) = wm {
-                                    processed_messages = Some(vec![Message::Watermark(wm)])
+                                    if msgs.is_some() {
+                                        let mut msgs_vec = msgs.unwrap();
+                                        msgs_vec.push(Message::Watermark(wm));
+                                        produced_messages = Some(msgs_vec);
+                                    } else {
+                                        produced_messages = Some(vec![Message::Watermark(wm)])
+                                    }
+                                } else {
+                                    produced_messages = msgs;
                                 }
                             }
                             _ => {
-                                processed_messages = operator.process_message(message).await;
+                                produced_messages = operator.process_message(message.clone()).await;
                             }
                         }
                     } 
                 }
 
-                if processed_messages.is_none() {
+                if produced_messages.is_none() {
                     continue;
                 }
 
@@ -346,28 +356,29 @@ impl StreamTask {
                     continue;
                 }
                 
-                let messages = processed_messages.unwrap();
+                let messages = produced_messages.unwrap();
                 
-                let mut retries_before_close = 3; // shared between all messages
                 for mut message in messages {
                     // set upstream vertex id for all messages before sending downstream
                     message.set_upstream_vertex_id(vertex_id.clone());
 
-                    // println!("msg sent by {:?}: {:?}", vertex_id.clone(), message);
                     let mut channels_to_send_per_operator = HashMap::new();
                     for (target_operator_id, collector) in &mut collectors_per_target_operator {
                         let partitioned_channel_ids = collector.gen_partitioned_channel_ids(&message);
                         channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channel_ids);
                     }
-                    
+
+                    // TODO should retires be inside transport?
+                    let mut retries_before_close = 3; // per - messages
+                
                     // send message to all destinations until no backpressure
                     // TODO track backpreessure stats
                     while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
                         status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
-
+                        
                         if status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
                             if retries_before_close == 0 {
-                                break;
+                                panic!("StreamTask {:?} gave up on writing message {:?}", vertex_id, message);
                             }
                             retries_before_close -= 1;
                         }
