@@ -1,14 +1,10 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
-    common::{test_utils::{gen_unique_grpc_port, print_worker_metrics}, message::Message},
+    api::streaming_context::StreamingContext,
+    common::test_utils::{gen_unique_grpc_port, print_worker_metrics},
     executor::local_executor::LocalExecutor,
     runtime::{
-        functions::{
-            key_by::KeyByFunction,
-            reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
-            source::word_count_source::BatchingMode,
-        },
-        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
+        functions::source::word_count_source::BatchingMode,
+        operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
         worker::WorkerState,
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -16,12 +12,16 @@ use crate::{
 use anyhow::Result;
 use core::sync::atomic::{AtomicBool, Ordering};
 use std::{collections::HashMap};
-use arrow::array::{Float64Array, StringArray};
+use arrow::{array::StringArray, datatypes::{Field, Schema}};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use crate::runtime::stream_task::LATENCY_BUCKET_BOUNDARIES;
+
+// TODO we need to rewrite the way we measure latency and throughput - 
+// aggregate operator buffers messages adding latency
+// and also emits only once (or at regular intervals)
 
 #[derive(Debug, Clone)]
 pub struct BenchmarkMetrics {
@@ -131,9 +131,12 @@ async fn poll_worker_metrics(
     benchmark_metrics: &mut BenchmarkMetrics,
     last_metrics: &mut Option<(u64, u64)>, // (messages, records)
     last_timestamp: &mut Instant,
-) -> WorkerState {
+) -> Option<WorkerState> {
     let current_time = Instant::now();
-    let worker_state = metrics_receiver.recv().await.unwrap();
+    let worker_state = match metrics_receiver.recv().await {
+        Some(state) => state,
+        None => return None, // Channel closed, execution finished
+    };
     
     let current_messages = worker_state.aggregated_metrics.total_messages;
     let current_records = worker_state.aggregated_metrics.total_records;
@@ -156,7 +159,7 @@ async fn poll_worker_metrics(
     
     *last_metrics = Some((current_messages, current_records));
     *last_timestamp = current_time;
-    worker_state
+    Some(worker_state)
 }
 
 
@@ -200,31 +203,26 @@ pub async fn run_word_count_benchmark(
 ) -> Result<(HashMap<String, f64>, BenchmarkMetrics)> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
-    // Define operator chain: source -> keyby -> reduce -> sink
-    let operators = vec![
-        OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
-            word_length,
-            dictionary_size_per_source,
-            None, // Use time-based instead
-            Some(run_for_s),
-            batch_size,
-            batching_mode,
-        ))),
-        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()])),
-        OperatorConfig::ReduceConfig(
-            ReduceFunction::new_arrow_reduce("word".to_string()),
-            Some(AggregationResultExtractor::single_aggregation(
-                AggregationType::Count,
-                "count".to_string(),
-            )),
-        ),
-        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
-    ];
-
-    // Create streaming context with the logical graph and executor
+    // Create streaming context using SQL instead of manual operator configuration
     let context = StreamingContext::new()
         .with_parallelism(parallelism)
-        .with_logical_graph(LogicalGraph::from_linear_operators(operators, parallelism, true)) // chained = true
+        .with_source(
+            "word_count_source".to_string(), 
+            SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
+                word_length,
+                dictionary_size_per_source,
+                None, // Use time-based instead
+                Some(run_for_s),
+                batch_size,
+                batching_mode,
+            )), 
+            Arc::new(Schema::new(vec![
+                Field::new("word", arrow::datatypes::DataType::Utf8, false),
+                Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
+            ]))
+        )
+        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_executor(Box::new(LocalExecutor::new()));
 
     let (metrics_sender, mut metrics_receiver) = mpsc::channel(100);
@@ -250,12 +248,15 @@ pub async fn run_word_count_benchmark(
             {
                 let mut metrics_guard = benchmark_metrics_clone.lock().await;
                 
-                let worker_state = poll_worker_metrics(
+                let worker_state = match poll_worker_metrics(
                     &mut metrics_receiver,
                     &mut *metrics_guard,
                     &mut last_metrics,
                     &mut last_timestamp,
-                ).await;
+                ).await {
+                    Some(state) => state,
+                    None => break, // Channel closed, execution finished
+                };
 
                 let now = Instant::now();
                 if now.duration_since(last_print_timestamp).as_secs() >= 1 {
@@ -277,28 +278,41 @@ pub async fn run_word_count_benchmark(
     // Get final metrics
     let benchmark_metrics = benchmark_metrics.lock().await.clone();
     
-    // Get results
+    // Get results using the same approach as word_count_test
     let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
-    let result_map = client.get_map().await.unwrap();
+    let result_vec = client.get_vector().await.unwrap();
     storage_server.stop().await;
 
-    // Process results
+    // Process results the same way as word_count_test
     let mut word_counts = HashMap::new();
-    for (_, batch) in result_map {
-        let keyed_batch = match batch {
-            Message::Keyed(kb) => kb,
-            _ => panic!("Expected KeyedBatch"),
-        };
+    
+    for (batch_idx, message) in result_vec.iter().enumerate() {
+        let batch = message.record_batch();
         
-        let key_batch = keyed_batch.key().record_batch();
-        let word_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let word = word_array.value(0).to_string();
+        // Verify we have the expected number of columns
+        if batch.num_columns() != 2 {
+            println!("Warning: Batch {} has {} columns instead of 2", batch_idx, batch.num_columns());
+            continue;
+        }
         
-        let count_array = keyed_batch.base.record_batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
-        let count = count_array.value(0);
+        // Extract columns from the batch
+        let word_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let count_column = batch.column(1).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
         
-        word_counts.insert(word, count);
+        // Process each row in this batch
+        for i in 0..batch.num_rows() {
+            let word = word_column.value(i).to_string();
+            let count = count_column.value(i);
+            
+            // Accumulate counts (in case the same word appears in multiple batches)
+            *word_counts.entry(word).or_insert(0) += count;
+        }
+        
+        println!("Batch {}: {} rows", batch_idx, batch.num_rows());
     }
+    
+    // Convert i64 counts to f64 for compatibility with existing benchmark code
+    let word_counts: HashMap<String, f64> = word_counts.into_iter().map(|(k, v)| (k, v as f64)).collect();
 
     Ok((word_counts, benchmark_metrics))
 }
