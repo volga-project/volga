@@ -281,7 +281,7 @@ impl Planner {
         let sink_node_index = self.logical_graph.add_node(sink_node);
         
         // Data flows from root_node to sink_node
-        self.logical_graph.add_edge(root_node_index, sink_node_index, PartitionType::Forward);
+        self.logical_graph.add_edge(root_node_index, sink_node_index);
         Ok(())
     }
 
@@ -424,21 +424,19 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             let aggregate_node_index = self.node_stack.pop().unwrap();
 
             // add edge between key by and aggregate
-            self.logical_graph.add_edge(key_by_node_index, aggregate_node_index, PartitionType::Hash);
+            self.logical_graph.add_edge(key_by_node_index, aggregate_node_index);
 
             // add edge between prev node and aggregate
             let prev_node_index = self.node_stack.last().expect("key by should have a node before it");
-            self.logical_graph.add_edge(aggregate_node_index, *prev_node_index, PartitionType::Forward);
+            self.logical_graph.add_edge(aggregate_node_index, *prev_node_index);
 
             return Ok(TreeNodeRecursion::Continue);
         }
 
         let node_index = self.node_stack.pop().unwrap();
         if let Some(prev_node_index) = self.node_stack.last() {
-            // TODO use determine_partition_type when generating edges
-            // All nodes are using forward edges for now
             // Data flows from current node to previous node (since we're going bottom-to-top)
-            self.logical_graph.add_edge(node_index, *prev_node_index, PartitionType::Forward);
+            self.logical_graph.add_edge(node_index, *prev_node_index);
         } else {
             // no prev node - this is the root of the plan
             // if sink is configured add here
@@ -572,7 +570,7 @@ mod tests {
 
         // Verify edge connectivity: source -> projection
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::Projection, PartitionType::Forward, 1),
+            (NodeType::Source, NodeType::Projection, PartitionType::RoundRobin, 1),
         ]);
     }
 
@@ -602,8 +600,8 @@ mod tests {
 
         // Verify edge connectivity: source -> projection -> sink
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::Projection, PartitionType::Forward, 1),
-            (NodeType::Projection, NodeType::Sink, PartitionType::Forward, 1),
+            (NodeType::Source, NodeType::Projection, PartitionType::RoundRobin, 1),
+            (NodeType::Projection, NodeType::Sink, PartitionType::RoundRobin, 1),
         ]);
     }
 
@@ -630,8 +628,8 @@ mod tests {
 
         // Verify edge connectivity: source -> filter -> projection
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::Filter, PartitionType::Forward, 1),
-            (NodeType::Filter, NodeType::Projection, PartitionType::Forward, 1),
+            (NodeType::Source, NodeType::Filter, PartitionType::RoundRobin, 1),
+            (NodeType::Filter, NodeType::Projection, PartitionType::RoundRobin, 1),
         ]);
     }
 
@@ -688,11 +686,11 @@ mod tests {
         assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
         
         // Verify edge connectivity: source -> keyby -> aggregate -> projection
-        // keyby -> aggregate should be Hash, others Forward
+        // keyby -> aggregate should be Hash, others RoundRobin
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::KeyBy, PartitionType::Forward, 1),
+            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 1),
             (NodeType::KeyBy, NodeType::Aggregate, PartitionType::Hash, 1),
-            (NodeType::Aggregate, NodeType::Projection, PartitionType::Forward, 1),
+            (NodeType::Aggregate, NodeType::Projection, PartitionType::RoundRobin, 1),
         ]);
     }
     
@@ -771,12 +769,12 @@ mod tests {
 
         // Verify edge connectivity for complex multi-GROUP BY query
         // Structure: source -> keyby1 -> aggregate1 -> projection1 -> keyby2 -> aggregate2 -> projection2
-        // 2 Hash edges (keyby->aggregate), 4 Forward edges (all others)
+        // 2 Hash edges (keyby->aggregate), 4 RoundRobin edges (all others)
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::KeyBy, PartitionType::Forward, 1),
+            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 1),
             (NodeType::KeyBy, NodeType::Aggregate, PartitionType::Hash, 2),
-            (NodeType::Aggregate, NodeType::Projection, PartitionType::Forward, 2),
-            (NodeType::Projection, NodeType::KeyBy, PartitionType::Forward, 1),
+            (NodeType::Aggregate, NodeType::Projection, PartitionType::RoundRobin, 2),
+            (NodeType::Projection, NodeType::KeyBy, PartitionType::RoundRobin, 1),
         ]);
     }
 } 

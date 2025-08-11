@@ -82,13 +82,14 @@ impl LogicalGraph {
         node_index
     }
 
-    pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex, edge_type: PartitionType) -> petgraph::graph::EdgeIndex {
+    pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex) -> petgraph::graph::EdgeIndex {
         let source_node = &self.graph[source];
         let target_node = &self.graph[target];
+        let partition_type = determine_partition_type(&source_node.operator_config, &target_node.operator_config);
         let edge = LogicalEdge {
             source_node_id: source_node.node_id.clone(),
             target_node_id: target_node.node_id.clone(),
-            partition_type: edge_type,
+            partition_type,
         };
         
         self.graph.add_edge(source, target, edge)
@@ -204,13 +205,9 @@ impl LogicalGraph {
             let source_config = &grouped_operators[i];
             let target_config = &grouped_operators[i + 1];
             
-            // Determine partition type based on operator types
-            let partition_type = determine_partition_type(source_config, target_config);
-            
             logical_graph.add_edge(
                 node_indices[i],
                 node_indices[i + 1],
-                partition_type,
             );
         }
 
@@ -377,9 +374,9 @@ mod tests {
         let sink_index = logical_graph.add_node(sink_node);
 
         // Add edges
-        logical_graph.add_edge(source_index, filter_index, PartitionType::RoundRobin);
-        logical_graph.add_edge(filter_index, projection_index, PartitionType::RoundRobin);
-        logical_graph.add_edge(projection_index, sink_index, PartitionType::RoundRobin);
+        logical_graph.add_edge(source_index, filter_index);
+        logical_graph.add_edge(filter_index, projection_index);
+        logical_graph.add_edge(projection_index, sink_index);
 
         // Convert to execution graph
         let execution_graph = logical_graph.to_execution_graph();
@@ -431,7 +428,7 @@ mod tests {
         );
         let filter_index = logical_graph.add_node(filter_node);
 
-        logical_graph.add_edge(source_index, filter_index, PartitionType::Forward);
+        logical_graph.add_edge(source_index, filter_index);
 
         let num_operators = logical_graph.get_nodes().count();
 

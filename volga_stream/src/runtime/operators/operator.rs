@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use crate::common::WatermarkMessage;
+
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
 use crate::runtime::operators::chained::chained_operator::ChainedOperator;
@@ -40,7 +40,7 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn fetch(&mut self) -> Option<Vec<Message>> {
         panic!("fetch not implemented for this operator")
     }
-    async fn process_watermark(&mut self, watermark: WatermarkMessage) -> Option<Vec<Message>> {
+    async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
         // panic!("process_watermark not implemented for this operator")
         None
     }
@@ -134,16 +134,16 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn process_watermark(&mut self, watermark: WatermarkMessage) -> Option<Vec<Message>> {
+    async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
         match self {
-            Operator::Map(op) => op.process_watermark(watermark).await,
-            Operator::Join(op) => op.process_watermark(watermark).await,
-            Operator::Sink(op) => op.process_watermark(watermark).await,
-            Operator::Source(op) => op.process_watermark(watermark).await,
-            Operator::KeyBy(op) => op.process_watermark(watermark).await,
-            Operator::Reduce(op) => op.process_watermark(watermark).await,
-            Operator::Aggregate(op) => op.process_watermark(watermark).await,
-            Operator::Chained(op) => op.process_watermark(watermark).await,
+            Operator::Map(op) => op.process_watermark(watermark_value).await,
+            Operator::Join(op) => op.process_watermark(watermark_value).await,
+            Operator::Sink(op) => op.process_watermark(watermark_value).await,
+            Operator::Source(op) => op.process_watermark(watermark_value).await,
+            Operator::KeyBy(op) => op.process_watermark(watermark_value).await,
+            Operator::Reduce(op) => op.process_watermark(watermark_value).await,
+            Operator::Aggregate(op) => op.process_watermark(watermark_value).await,
+            Operator::Chained(op) => op.process_watermark(watermark_value).await,
         }
     }
 

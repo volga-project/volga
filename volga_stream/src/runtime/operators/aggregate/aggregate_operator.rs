@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use arrow::record_batch::RecordBatch;
 use arrow::array::ArrayRef;
-use arrow::util::pretty::pretty_format_batches;
+
 // use datafusion::common::Result;
 use datafusion::physical_plan::ColumnarValue;
 use datafusion::physical_plan::{Accumulator, ExecutionPlan};
@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use anyhow::Result as AnyhowResult;
 use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::{Message, WatermarkMessage, BaseMessage};
+use crate::common::{BaseMessage, Message, MAX_WATERMARK_VALUE};
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -53,10 +53,26 @@ impl AggregateOperator {
     }
     
     fn emit_all_accumulators(&mut self) -> Vec<Message> {
-        let mut messages = Vec::new();
+        let mut batches = Vec::new();
         let accumulators: Vec<_> = self.accumulators.drain().collect();
         
-        // println!("emit accumulators {:?}", accumulators);
+        if accumulators.is_empty() {
+            return vec![];
+        }
+
+        // Debug: Print vertex_id and emission info
+        let vertex_id = if let Some(ctx) = &self.base.runtime_context {
+            ctx.vertex_id()
+        } else {
+            "unknown_vertex"
+        };
+        
+        let mut words_being_emitted = Vec::new();
+
+        // Get the first message to preserve metadata
+        let (_, (first_message, _)) = &accumulators[0];
+        let upstream_vertex_id = first_message.metadata.upstream_vertex_id.clone();
+        let ingest_timestamp = first_message.metadata.ingest_timestamp;
 
         for (_key, (first_message, accumulators)) in accumulators {
             // Build columns in the exact order of the final output schema:
@@ -79,6 +95,12 @@ impl AggregateOperator {
                     }
                 })
                 .collect();
+
+            // Debug: Extract word for logging
+            if let Some(word_array) = group_arrays[0].as_any().downcast_ref::<arrow::array::StringArray>() {
+                let word = word_array.value(0);
+                words_being_emitted.push(word.to_string());
+            }
 
             let base_len = group_arrays.len();
 
@@ -103,15 +125,36 @@ impl AggregateOperator {
             let batch_result = RecordBatch::try_new(output_physical_schema.clone(), columns)
                 .expect("should be able to create output batch");
 
-            // Preserve upstream_vertex_id and ingest_timestamp from the first message for this key
-            messages.push(Message::new(
-                first_message.metadata.upstream_vertex_id.clone(),
-                batch_result,
-                first_message.metadata.ingest_timestamp
-            ));
+            batches.push(batch_result);
         }
         
-        messages
+        // Concatenate all batches into a single batch
+        if batches.is_empty() {
+            return vec![];
+        }
+        
+        let output_physical_schema = self.aggregate_exec.schema();
+        let concatenated_batch = if batches.len() == 1 {
+            batches.into_iter().next().unwrap()
+        } else {
+            arrow::compute::concat_batches(&output_physical_schema, &batches)
+                .expect("should be able to concatenate batches")
+        };
+        
+        // Debug: Print emission info
+        println!("EMIT: vertex_id={} emitting {} words: {:?}", vertex_id, words_being_emitted.len(), words_being_emitted);
+        
+        // Check if we've already emitted (this shouldn't happen with proper watermark handling)
+        if words_being_emitted.is_empty() {
+            println!("WARNING: {} tried to emit but no words found!", vertex_id);
+        }
+        
+        // Return single message with concatenated batch
+        vec![Message::new(
+            upstream_vertex_id,
+            concatenated_batch,
+            ingest_timestamp
+        )]
     }
 }
 
@@ -176,8 +219,12 @@ impl OperatorTrait for AggregateOperator {
         }
     }
 
-    async fn process_watermark(&mut self, watermark: WatermarkMessage) -> Option<Vec<Message>> {
-        // Emit final results when receiving watermark
+    async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
+        // Emit final results when receiving MAX watermark
+        if watermark_value != MAX_WATERMARK_VALUE {
+            return None;
+        }
+
         if !self.accumulators.is_empty() {
             let messages = self.emit_all_accumulators();
             Some(messages)
@@ -200,7 +247,7 @@ mod tests {
         use crate::api::planner::{Planner, PlanningContext};
         use datafusion::prelude::SessionContext;
         use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-        use crate::common::{Key, KeyedMessage, BaseMessage, WatermarkMessage, MAX_WATERMARK_VALUE};
+        use crate::common::{Key, KeyedMessage, BaseMessage, MAX_WATERMARK_VALUE};
         use arrow::array::{StringArray, Int64Array, Float64Array};
         use arrow::record_batch::RecordBatch;
         
@@ -274,61 +321,56 @@ mod tests {
         }
         
         // Send max watermark to finalize aggregation
-        let watermark = WatermarkMessage::new("test_operator".to_string(), MAX_WATERMARK_VALUE, None);
-        let final_result = operator.process_watermark(watermark).await;
+        let final_result = operator.process_watermark(MAX_WATERMARK_VALUE).await;
         
         // Verify results
         if let Some(messages) = final_result {
-            assert!(!messages.is_empty(), "Should produce final aggregate results");
+            assert_eq!(messages.len(), 1, "Should produce exactly one message with concatenated results");
+            
+            let message = &messages[0];
+            let batch = message.record_batch();
             
             // Get expected schema from AggregateExec
             let expected_schema = operator.aggregate_exec.schema();
+            let actual_schema = batch.schema();
+            assert_eq!(
+                expected_schema.as_ref(), 
+                actual_schema.as_ref(),
+                "Output schema should match AggregateExec schema.\nExpected: {:?}\nActual: {:?}", 
+                expected_schema.fields(),
+                actual_schema.fields()
+            );
             
-            // Verify schema matches for all produced messages
-            for message in &messages {
-                let actual_schema = message.record_batch().schema();
-                assert_eq!(
-                    expected_schema.as_ref(), 
-                    actual_schema.as_ref(),
-                    "Output schema should match AggregateExec schema.\nExpected: {:?}\nActual: {:?}", 
-                    expected_schema.fields(),
-                    actual_schema.fields()
-                );
-            }
+            // Verify we have the expected number of columns and rows
+            assert_eq!(batch.num_columns(), 6, "Should have 6 columns: name, count, sum_value, avg_value, max_value, min_value");
+            assert_eq!(batch.num_rows(), 3, "Should have 3 rows (one for each group: alice, bob, charlie)");
+            
+            // Extract all columns from the batch
+            let name_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+            let count_column = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+            let sum_column = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+            let avg_column = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+            let max_column = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+            let min_column = batch.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
             
             // Check that we have results for each group
             let mut alice_results = (0i64, 0i64, 0.0f64, 0i64, 0i64); // (count, sum, avg, max, min)
             let mut bob_results = (0i64, 0i64, 0.0f64, 0i64, 0i64);
             let mut charlie_results = (0i64, 0i64, 0.0f64, 0i64, 0i64);
             
-            for message in messages {
-                let batch = message.record_batch();
+            for i in 0..batch.num_rows() {
+                let name = name_column.value(i);
+                let count = count_column.value(i);
+                let sum_value = sum_column.value(i);
+                let avg_value = avg_column.value(i);
+                let max_value = max_column.value(i);
+                let min_value = min_column.value(i);
                 
-                // Verify we have the expected number of columns
-                assert_eq!(batch.num_columns(), 6, "Should have 6 columns: name, count, sum_value, avg_value, max_value, min_value");
-                
-                // Extract all columns from the batch
-                let name_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-                let count_column = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-                let sum_column = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
-                let avg_column = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
-                let max_column = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
-                let min_column = batch.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
-                
-                for i in 0..batch.num_rows() {
-                    let name = name_column.value(i);
-                    let count = count_column.value(i);
-                    let sum_value = sum_column.value(i);
-                    let avg_value = avg_column.value(i);
-                    let max_value = max_column.value(i);
-                    let min_value = min_column.value(i);
-                    
-                    match name {
-                        "alice" => alice_results = (count, sum_value, avg_value, max_value, min_value),
-                        "bob" => bob_results = (count, sum_value, avg_value, max_value, min_value),
-                        "charlie" => charlie_results = (count, sum_value, avg_value, max_value, min_value),
-                        other => panic!("Unexpected name in results: {}", other),
-                    }
+                match name {
+                    "alice" => alice_results = (count, sum_value, avg_value, max_value, min_value),
+                    "bob" => bob_results = (count, sum_value, avg_value, max_value, min_value),
+                    "charlie" => charlie_results = (count, sum_value, avg_value, max_value, min_value),
+                    other => panic!("Unexpected name in results: {}", other),
                 }
             }
             

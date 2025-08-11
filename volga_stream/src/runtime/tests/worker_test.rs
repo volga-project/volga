@@ -58,14 +58,9 @@ fn test_worker_execution() -> Result<()> {
         storage_server.stop().await;
         vector_messages
     });
-
-    // println!("vector_messages: {:?}", vector_messages);
     
     // Use the new utility function to verify all records match
     verify_message_records_match(&expected_messages, &vector_messages, "worker_execution_test", true);
-    
-    // println!("Worker execution test passed: {} expected messages produced {} result messages with matching records", 
-    //          expected_messages.len(), vector_messages.len());
 
     Ok(())
 } 

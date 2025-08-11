@@ -118,6 +118,11 @@ fn test_stream_task_actor() -> Result<()> {
             }
         }
 
+        println!("received_messages {:?}", received_messages);
+
+        // Filter out watermarks from received messages
+        received_messages.retain(|msg| !matches!(msg, Message::Watermark(_)));
+
         // Verify received data
         assert_eq!(received_messages.len(), num_messages);
         for (expected, actual) in test_messages.iter().zip(received_messages.iter()) {

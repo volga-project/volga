@@ -6,7 +6,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use tokio::time::{timeout, Duration, Instant};
-use rand::{thread_rng, Rng, distributions::Alphanumeric};
+use rand::{thread_rng, Rng, distributions::Alphanumeric, SeedableRng, rngs::StdRng};
 use std::time::SystemTime;
 use arrow::array::{StringArray, Int64Array};
 use arrow::datatypes::{Field, Schema};
@@ -62,8 +62,23 @@ impl WordCountSourceFunction {
         }
     }
 
-    fn generate_random_word(&self) -> String {
-        let mut rng = thread_rng();
+    fn generate_random_word(&self, seed_offset: usize) -> String {
+        // Use vertex_id as base seed, add offset for different words
+        let base_seed = if let Some(ctx) = &self.runtime_context {
+            // Hash the full vertex_id to get a unique seed per worker
+            let vertex_id = ctx.vertex_id();
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut hasher = DefaultHasher::new();
+            vertex_id.hash(&mut hasher);
+            hasher.finish()
+        } else {
+            0
+        };
+        
+        let seed = base_seed.wrapping_add(seed_offset as u64);
+        let mut rng = StdRng::seed_from_u64(seed);
+        
         std::iter::repeat(())
             .map(|_| rng.sample(Alphanumeric) as char)
             .filter(|c| c.is_alphabetic())
@@ -230,9 +245,9 @@ impl WordCountSourceFunction {
 impl FunctionTrait for WordCountSourceFunction {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
-        // Generate the pool of words
+        // Generate the pool of words using deterministic seeds
         self.dictionary = (0..self.dictionary_size)
-            .map(|_| self.generate_random_word())
+            .map(|i| self.generate_random_word(i))
             .collect();
         Ok(())
     }

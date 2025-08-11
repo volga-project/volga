@@ -71,10 +71,6 @@ impl InMemoryStorageSinkFunction {
 #[async_trait]
 impl SinkFunctionTrait for InMemoryStorageSinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
-        // let r = message.record_batch();
-        // let v = r.column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
-        // let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id()).unwrap();
-        // println!("{:?} sink rcvd, value {:?}", vertex_id, v);
 
         match &message {
             Message::Keyed(keyed_message) => {

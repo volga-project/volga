@@ -13,9 +13,9 @@ use crate::{
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use tokio::runtime::Runtime;
-use arrow::array::{Float64Array, StringArray};
+use arrow::{array::{Float64Array, StringArray}, datatypes::{Field, Schema}};
 
 // TODO: we may have colliding words since each source worker generates it's own
 #[test]
@@ -30,34 +30,29 @@ fn test_word_count() -> Result<()> {
     let num_to_send_per_word = 1000; // Number of copies of each word to send
     let batch_size = 10;
 
-    // Define operator chain: source -> keyby -> reduce -> sink
-    let operators = vec![
-        OperatorConfig::SourceConfig(SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
-            word_length,
-            dictionary_size_per_source,
-            Some(num_to_send_per_word),
-            None, // No time limit
-            batch_size,
-            BatchingMode::SameWord,
-        ))),
-        OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["word".to_string()])),
-        OperatorConfig::ReduceConfig(
-            ReduceFunction::new_arrow_reduce("word".to_string()),
-            Some(AggregationResultExtractor::single_aggregation(
-                AggregationType::Count,
-                "count".to_string(),
-            )),
-        ),
-        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
-    ];
-
     // Create streaming context with the logical graph and executor
     let context = StreamingContext::new()
         .with_parallelism(parallelism)
-        .with_logical_graph(LogicalGraph::from_linear_operators(operators, parallelism, true)) // chained = true
+        .with_source(
+            "word_count_source".to_string(), 
+            SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
+                word_length,
+                dictionary_size_per_source,
+                Some(num_to_send_per_word),
+                None, // No time limit
+                batch_size,
+                BatchingMode::SameWord,
+            )), 
+            Arc::new(Schema::new(vec![
+                Field::new("word", arrow::datatypes::DataType::Utf8, false),
+                Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
+            ]))
+        )
+        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_executor(Box::new(LocalExecutor::new()));
 
-    let (result_map, worker_state) = runtime.block_on(async {
+    let (result_vec, worker_state) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
         
@@ -66,39 +61,49 @@ fn test_word_count() -> Result<()> {
         let worker_state = execution_state.worker_states.into_iter().next().unwrap();
         
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
-        let result_map = client.get_map().await.unwrap();
+        let result_vec = client.get_vector().await.unwrap();
         storage_server.stop().await;
-        (result_map, worker_state)
+        (result_vec, worker_state)
     });
 
+    println!("{:?}", result_vec);
     print_worker_metrics(&worker_state);
 
-    println!("Result map len: {:?}", result_map.len());
-    // Count occurrences of each word
+    assert_eq!(result_vec.len(), parallelism, "Should have exactly one message per parallelism instance");
+
+    // Collect word counts from all batches
     let mut word_counts = HashMap::new();
-    for (_, batch) in result_map {
-        // Get the keyed batch and extract the word from its key
-        let keyed_batch = match batch {
-            Message::Keyed(kb) => kb,
-            _ => panic!("Expected KeyedBatch"),
-        };
+    
+    for (batch_idx, message) in result_vec.iter().enumerate() {
+        let batch = message.record_batch();
         
-        // Extract word from the key's record batch
-        let key_batch = keyed_batch.key().record_batch();
-        let word_array = key_batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let word = word_array.value(0).to_string();
-        // Get count from the single column in the batch
-        let count_array = keyed_batch.base.record_batch.column(0).as_any().downcast_ref::<Float64Array>().unwrap();
-        let count = count_array.value(0);
+        // Verify we have the expected number of columns
+        assert_eq!(batch.num_columns(), 2, "Batch {} should have 2 columns: word and count", batch_idx);
         
-        word_counts.insert(word, count);
+        // Extract columns from the batch
+        let word_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let count_column = batch.column(1).as_any().downcast_ref::<arrow::array::Int64Array>().unwrap();
+        
+        // Process each row in this batch
+        for i in 0..batch.num_rows() {
+            let word = word_column.value(i).to_string();
+            let count = count_column.value(i);
+            
+            // Accumulate counts (in case the same word appears in multiple batches)
+            *word_counts.entry(word).or_insert(0) += count;
+        }
+        
+        println!("Batch {}: {} rows", batch_idx, batch.num_rows());
     }
     
-    assert_eq!(word_counts.len(), dictionary_size_per_source * parallelism as usize, "Should have exactly num_words * parallelism unique words");
+    // Verify total unique words
+    assert_eq!(word_counts.len(), dictionary_size_per_source * parallelism, 
+               "Should have exactly {} unique words (dictionary_size_per_source * parallelism)", 
+               dictionary_size_per_source * parallelism);
     
     let mut failed_words = Vec::new();
     for (word, count) in &word_counts {
-        if (*count - num_to_send_per_word as f64).abs() > f64::EPSILON {
+        if *count != num_to_send_per_word as i64 {
             failed_words.push((word.clone(), *count));
         }
     }
@@ -110,6 +115,8 @@ fn test_word_count() -> Result<()> {
         }
         panic!("Found {} words with incorrect counts", failed_words.len());
     }
+    
+    println!("Successfully verified {} unique words, each with count {}", word_counts.len(), num_to_send_per_word);
 
     Ok(())
 } 

@@ -1,6 +1,6 @@
 use crate::common::message::{Message};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, AtomicBool, AtomicU64};
+use std::sync::atomic::{AtomicUsize, AtomicU64};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use std::time::{Duration, Instant};

@@ -146,18 +146,11 @@ impl DataWriter {
     }
 
     pub async fn write_message(&mut self, channel_id: &String, message: &Message) -> (bool, u32) {
-        // TODO use batching layer
-        // match self.batcher.write_message(channel_id, message.clone()).await {
-        //     Ok(()) => (true, 0), // Success, no latency for batching
-        //     Err(e) => {
-        //         // println!("Error writing message {:?} to channel {:?}: {:?}", message, channel_id, e);
-        //         (false, 0)
-        //     },
-        // }
-        if let Message::Watermark(_) = message {
-            println!("Watermark message for channel {}", channel_id);
+        match self.batcher.write_message(channel_id, message.clone()).await {
+            Ok(()) => (true, 0), // Success, no latency for batching
+            Err(_) => (false, 0)
         }
-        self.write_message_with_params(channel_id, message, self.default_timeout, self.default_retries).await
+        // self.write_message_with_params(channel_id, message, self.default_timeout, self.default_retries).await
     }
 
     async fn write_message_with_params(

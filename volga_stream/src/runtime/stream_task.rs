@@ -1,11 +1,11 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::{self, Collector}, execution_graph::ExecutionGraph, operators::operator::{create_operator_from_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
+    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{create_operator_from_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
 }, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicU8, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH, Instant}};
+use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
@@ -103,10 +103,12 @@ pub struct StreamTask {
     operator_config: OperatorConfig,
     transport_client_config: Option<TransportClientConfig>,
     execution_graph: ExecutionGraph,
-    finished_upstream_ids: Arc<Mutex<HashSet<String>>>, // tracks which upstream vertices have finished
     metrics: Arc<Mutex<StreamTaskMetrics>>,
     run_signal_sender: Option<watch::Sender<bool>>,
     close_signal_sender: Option<watch::Sender<bool>>,
+    // Watermark tracking
+    upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>, // upstream_vertex_id -> watermark_value
+    current_watermark: Arc<AtomicU64>,
 }
 
 impl StreamTask {
@@ -125,47 +127,72 @@ impl StreamTask {
             operator_config,
             transport_client_config: Some(transport_client_config),
             execution_graph,
-            finished_upstream_ids: Arc::new(Mutex::new(HashSet::new())),
             metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id.clone()))),
             run_signal_sender: None,
             close_signal_sender: None,
+            upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
+            current_watermark: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    async fn handle_watermark(
-        is_source: bool,
+    async fn advance_watermark(
         watermark: WatermarkMessage,
+        upstream_vertices: &[String],
+        upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+        current_watermark: Arc<AtomicU64>,
         status: Arc<AtomicU8>,
-        finished_upstream_ids: Arc<Mutex<HashSet<String>>>,
-        upstream_vertices: Vec<String>,
-        vertex_id: String
-    ) -> Option<WatermarkMessage> {
-        if watermark.watermark_value == MAX_WATERMARK_VALUE {
-            if is_source {
-                // println!("source vertex_id {:?} received max watermark, initiating shutdown", 
-                //     vertex_id);
-                status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.metadata.ingest_timestamp));
+        vertex_id: String,
+    ) -> Option<u64> { // Returns new_watermark if advanced
+        // For sources (no incoming edges), always advance
+        if upstream_vertices.is_empty() {
+            let current_wm = current_watermark.load(Ordering::SeqCst);
+            if watermark.watermark_value > current_wm {
+                current_watermark.store(watermark.watermark_value, Ordering::SeqCst);
+                if watermark.watermark_value == MAX_WATERMARK_VALUE {
+                    status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+                }
+                return Some(watermark.watermark_value);
             }
-
-            let upstream_vertex_id = watermark.metadata.upstream_vertex_id.clone().unwrap();
-            
-            let mut finished_upstreams = finished_upstream_ids.lock().await;
-            finished_upstreams.insert(upstream_vertex_id);
-            // println!("vertex_id {:?}, finished upstreams {:?}", vertex_id, finished_upstreams);
-            
-            // If we've received max watermarks from all upstreams, initiate shutdown
-            let upstream_vertices_set: HashSet<String> = upstream_vertices.iter().cloned().collect();
-            if finished_upstreams.len() == upstream_vertices_set.len() && 
-               upstream_vertices_set.iter().all(|id| finished_upstreams.contains(id)) {
-                // println!("vertex_id {:?} Received max watermarks from all upstreams {:?}, initiating shutdown", 
-                //     vertex_id, finished_upstreams);
-                status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                return Some(WatermarkMessage::new(vertex_id, MAX_WATERMARK_VALUE, watermark.metadata.ingest_timestamp));
-            }
+            return None;
         }
-        // Some(watermark)
-        None
+        
+        // For non-sources, handle upstream watermark tracking
+        let upstream_vertex_id = watermark.metadata.upstream_vertex_id.clone()
+            .expect("Non-source tasks must have upstream_vertex_id in watermark metadata");
+        
+        let mut upstream_wms = upstream_watermarks.lock().await;
+        
+        // Assert that watermark increases for given upstream
+        if let Some(&previous_watermark) = upstream_wms.get(&upstream_vertex_id) {
+            assert!(
+                watermark.watermark_value >= previous_watermark,
+                "Watermark must not decrease: received {} but previous was {} from upstream {}",
+                watermark.watermark_value, previous_watermark, upstream_vertex_id
+            );
+        }
+        
+        // Update watermark for this upstream
+        upstream_wms.insert(upstream_vertex_id, watermark.watermark_value);
+        
+        // Only advance when we have watermarks from ALL upstreams
+        if upstream_wms.len() < upstream_vertices.len() {
+            return None; // Haven't received watermarks from all upstreams yet
+        }
+        
+        // Calculate minimum watermark across all upstreams
+        let min_watermark = upstream_wms.values().min().copied().unwrap_or(0);
+        drop(upstream_wms); // Release lock
+        
+        let current_wm = current_watermark.load(Ordering::SeqCst);
+        if min_watermark > current_wm {
+            current_watermark.store(min_watermark, Ordering::SeqCst);
+            if min_watermark == MAX_WATERMARK_VALUE {
+                status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+            }
+            Some(min_watermark)
+        } else {
+            None // Watermark didn't advance
+        }
     }
 
     async fn update_metrics(
@@ -197,8 +224,9 @@ impl StreamTask {
         let status = self.status.clone();
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
-        let finished_upstream_ids = self.finished_upstream_ids.clone();
         let metrics = self.metrics.clone();
+        let upstream_watermarks = self.upstream_watermarks.clone();
+        let current_watermark = self.current_watermark.clone();
         
         let upstream_vertices: Vec<String> = execution_graph.get_edges_for_vertex(&vertex_id)
             .map(|(input_edges, _)| input_edges.iter().map(|e| e.source_vertex_id.clone()).collect())
@@ -275,7 +303,7 @@ impl StreamTask {
                 
                 if is_source {
                     if let Some(fetched_msgs) = operator.fetch().await {
-                        let mut filtered = vec![]; // remove watermarks if needed, etc.
+                        let mut msgs = vec![]; // remove watermarks if needed, etc.
                         for mut message in fetched_msgs {
                             // source should set ingest timestamp
                             message.set_ingest_timestamp(SystemTime::now()
@@ -287,57 +315,62 @@ impl StreamTask {
                             match message {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.metadata.upstream_vertex_id);
-                                    let wm = Self::handle_watermark(
-                                        is_source,
+                                    let new_wm = Self::advance_watermark(
                                         watermark.clone(),
+                                        &upstream_vertices,
+                                        upstream_watermarks.clone(),
+                                        current_watermark.clone(),
                                         status.clone(),
-                                        finished_upstream_ids.clone(),
-                                        upstream_vertices.clone(),
-                                        vertex_id.clone()
+                                        vertex_id.clone(),
                                     ).await;
-                                    if let Some(wm) = wm {
-                                        filtered.push(Message::Watermark(wm));
+                                    if let Some(wm_value) = new_wm {
+                                        let mut wm = watermark.clone();
+                                        wm.watermark_value = wm_value;
+                                        wm.metadata.upstream_vertex_id = Some(vertex_id.clone());
+                                        msgs.push(Message::Watermark(wm));
                                     }
                                 }
                                 _ => {
-                                    filtered.push(message)
+                                    msgs.push(message)
                                 }
                             }
                         }
-                        if filtered.len() != 0 {
-                            produced_messages = Some(filtered)
+                        if msgs.len() != 0 {
+                            produced_messages = Some(msgs)
                         }
                     }
                 } else { 
                     let reader = transport_client.reader.as_mut()
                         .expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(message) = reader.read_message().await? {
-
-                        println!("msg rcvd by {:?}: {:?}", vertex_id.clone(), message);
                         Self::update_metrics(metrics.clone(), &message).await;
                         // let msgs = operator.process_message(message.clone()).await;
                         match message {
                             Message::Watermark(watermark) => {
                                 println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.metadata.upstream_vertex_id);
-                                let msgs = operator.process_watermark(watermark.clone()).await;
-                                let wm = Self::handle_watermark(
-                                    is_source,
+                                if let Some(new_watermark) = Self::advance_watermark(
                                     watermark.clone(),
+                                    &upstream_vertices,
+                                    upstream_watermarks.clone(),
+                                    current_watermark.clone(),
                                     status.clone(),
-                                    finished_upstream_ids.clone(),
-                                    upstream_vertices.clone(),
-                                    vertex_id.clone()
-                                ).await;
-                                if let Some(wm) = wm {
-                                    if msgs.is_some() {
-                                        let mut msgs_vec = msgs.unwrap();
+                                    vertex_id.clone(),
+                                ).await {
+                                    // Watermark advanced, notify operator
+                                    let msgs = operator.process_watermark(new_watermark).await;
+                                    
+                                    let wm = WatermarkMessage::new(
+                                        vertex_id.clone(), 
+                                        new_watermark, 
+                                        watermark.metadata.ingest_timestamp
+                                    );
+                                    
+                                    if let Some(mut msgs_vec) = msgs {
                                         msgs_vec.push(Message::Watermark(wm));
                                         produced_messages = Some(msgs_vec);
                                     } else {
-                                        produced_messages = Some(vec![Message::Watermark(wm)])
+                                        produced_messages = Some(vec![Message::Watermark(wm)]);
                                     }
-                                } else {
-                                    produced_messages = msgs;
                                 }
                             }
                             _ => {
