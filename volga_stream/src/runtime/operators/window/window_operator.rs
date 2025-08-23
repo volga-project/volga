@@ -1,13 +1,25 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
+use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use crate::common::message::Message;
 use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
+use crate::runtime::operators::window::state::KeyedWindowsState;
+use crate::runtime::operators::window::InputBuffer;
 use crate::runtime::runtime_context::RuntimeContext;
-use super::{InputBuffer, KeyedWindowsState};
 
 #[derive(Debug, Clone)]
 pub struct WindowConfig {
-    // TODO: Add window configuration fields
+    pub window_exec: Arc<BoundedWindowAggExec> 
+}
+
+impl WindowConfig {
+    pub fn new(window_exec: Arc<BoundedWindowAggExec>) -> Self {    
+        Self {
+            window_exec
+        }
+    }
 }
 
 #[derive(Debug)]

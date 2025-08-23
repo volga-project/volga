@@ -10,7 +10,7 @@ use arrow::record_batch::RecordBatch;
 use parking_lot::RwLock;
 use std::sync::Arc as StdArc;
 use std::fmt;
-use datafusion::logical_expr::TableType;
+use datafusion::logical_expr::{TableType, Window};
 use datafusion::catalog::Session;
 use async_trait::async_trait;
 use std::any::Any;
@@ -37,6 +37,7 @@ use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
+use crate::runtime::operators::window::window_operator::WindowConfig;
 use crate::runtime::partition::PartitionType;
 
 /// Custom table provider creating dummy tables with no execution logic
@@ -185,19 +186,6 @@ impl Planner {
         let mut source_config = self.context.connector_configs.get(table_name)
             .ok_or_else(|| DataFusionError::Plan(format!("No source configuration found for table '{}'", table_name)))?
             .clone();
-
-
-        let table_scan_plan = LogicalPlan::TableScan(table_scan.clone());
-        let planner = DefaultPhysicalPlanner::default();
-        // Use scoped thread to avoid runtime conflicts
-        let physical_plan = std::thread::scope(|s| {
-            let handle = s.spawn(|| {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                rt.block_on(planner.create_physical_plan(&table_scan_plan, &self.context.df_session_context.state()))
-            });
-            handle.join().unwrap()
-        })?;
 
         if table_scan.projection.is_some() {
             let projection = table_scan.projection.as_ref().unwrap().clone();
@@ -352,6 +340,50 @@ impl Planner {
         self.node_stack.push(key_by_node_index);
         Ok(())
     }
+
+    fn handle_window(&mut self, window: &Window, parallelism: usize) -> Result<()> {
+        // Build physical plan for this window node
+        let window_plan = LogicalPlan::Window(window.clone());
+        let physical_plan = std::thread::scope(|s| {
+            let handle = s.spawn(|| {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                rt.block_on(self.context.df_planner.create_physical_plan(&window_plan, &self.context.df_session_context.state()))
+            });
+            handle.join().unwrap()
+        })?;
+
+        // TODO we should also handle regular WindowAggExec
+        let name = physical_plan.name();
+        let window_exec = physical_plan
+            .as_any()
+            .downcast_ref::<BoundedWindowAggExec>()
+            .expect(&format!("should have found a window exec, found: {:?}", name));
+
+        // KeyBy by PARTITION BY
+        let key_by_node = LogicalNode::new(
+            OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(DataFusionKeyFunction::new_window(Arc::new(window_exec.clone())))),
+            parallelism,
+            None,
+            None,
+        );
+
+        // Window operator node using the physical exec
+        let window_node = LogicalNode::new(
+            OperatorConfig::WindowConfig(WindowConfig::new(Arc::new(window_exec.clone()))),
+            parallelism,
+            None,
+            None,
+        );
+
+        let window_node_index = self.logical_graph.add_node(window_node);
+        self.node_stack.push(window_node_index);
+
+        let key_by_node_index = self.logical_graph.add_node(key_by_node);
+        self.node_stack.push(key_by_node_index);
+
+        Ok(())
+    }
     
     fn optimize_plan(&self, plan: LogicalPlan) -> Result<LogicalPlan> {
         let session_state = self.context.df_session_context.state();
@@ -394,45 +426,7 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
                 self.handle_aggregate(aggregate, self.context.parallelism)?;
             }
             LogicalPlan::Window(window) => {
-                // Build physical plan for this window node
-                let window_plan = LogicalPlan::Window(window.clone());
-                let physical_plan = std::thread::scope(|s| {
-                    let handle = s.spawn(|| {
-                        let rt = tokio::runtime::Runtime::new()
-                            .map_err(|e| DataFusionError::External(Box::new(e)))?;
-                        rt.block_on(self.context.df_planner.create_physical_plan(&window_plan, &self.context.df_session_context.state()))
-                    });
-                    handle.join().unwrap()
-                })?;
-
-                // Expect a WindowAggExec at root
-                let name = physical_plan.name();
-                let window_exec = physical_plan
-                    .as_any()
-                    .downcast_ref::<BoundedWindowAggExec>()
-                    .expect(&format!("should have found a window exec, found: {:?}", name));
-
-                // KeyBy by PARTITION BY
-                let key_by_node = LogicalNode::new(
-                    OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(DataFusionKeyFunction::new_window(Arc::new(window_exec.clone())))),
-                    self.context.parallelism,
-                    None,
-                    None,
-                );
-
-                // Window operator node using the physical exec
-                // let window_node = LogicalNode::new(
-                //     OperatorConfig::WindowConfig(RuntimeWindowConfig { window_exec: window_exec.clone() }),
-                //     self.context.parallelism,
-                //     None,
-                //     None,
-                // );
-
-                // let window_node_index = self.logical_graph.add_node(window_node);
-                // self.node_stack.push(window_node_index);
-
-                let key_by_node_index = self.logical_graph.add_node(key_by_node);
-                self.node_stack.push(key_by_node_index);
+                self.handle_window(window, self.context.parallelism)?;
             }
             
             // skip subqueries as they simply wrap other plans
@@ -448,10 +442,7 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
 
     // Add edges from temp stack to graph, going bottom-to-top
     fn f_up(&mut self, node: &'a Self::Node) -> Result<TreeNodeRecursion> {
-        
-        // TODO use determine_partition_type when generating edges
-
-        // skip subqueries as they simply wrap other plans
+        // skip subqueries
         if matches!(node, LogicalPlan::Subquery(_) | LogicalPlan::SubqueryAlias(_)) {
             return Ok(TreeNodeRecursion::Continue);
         }
@@ -476,19 +467,19 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
         }
 
         // handle window separately
-        // if matches!(node, LogicalPlan::Window(_)) {
-        //     let key_by_node_index = self.node_stack.pop().unwrap();
-        //     let window_node_index = self.node_stack.pop().unwrap();
+        if matches!(node, LogicalPlan::Window(_)) {
+            let key_by_node_index = self.node_stack.pop().unwrap();
+            let window_node_index = self.node_stack.pop().unwrap();
 
-        //     // key_by -> window
-        //     self.logical_graph.add_edge(key_by_node_index, window_node_index);
+            // key_by -> window
+            self.logical_graph.add_edge(key_by_node_index, window_node_index);
 
-        //     // prev -> key_by
-        //     let prev_node_index = self.node_stack.last().expect("key by should have a node before it");
-        //     self.logical_graph.add_edge(*prev_node_index, key_by_node_index);
+            // prev -> key_by
+            let prev_node_index = self.node_stack.last().expect("key by should have a node before it");
+            self.logical_graph.add_edge(*prev_node_index, key_by_node_index);
 
-        //     return Ok(TreeNodeRecursion::Continue);
-        // }
+            return Ok(TreeNodeRecursion::Continue);
+        }
 
         let node_index = self.node_stack.pop().unwrap();
         if let Some(prev_node_index) = self.node_stack.last() {
@@ -834,4 +825,6 @@ mod tests {
             (NodeType::Projection, NodeType::KeyBy, PartitionType::RoundRobin, 1),
         ]);
     }
+
+    // TODO test over window
 } 
