@@ -15,6 +15,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use datafusion::physical_plan::aggregates::AggregateExec;
+use datafusion::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::common::hash_utils::create_hashes;
 use ahash::RandomState;
@@ -168,22 +169,35 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
     }
 }
 
-/// DataFusion-based key-by function using AggregateExec group expressions
+/// Source of key expressions from DataFusion physical plans
+#[derive(Debug, Clone)]
+pub enum DFKeyExprSource {
+    Aggregate(Arc<AggregateExec>),
+    Window(Arc<BoundedWindowAggExec>),
+}
+
+/// DataFusion-based key-by function using physical plan expressions
 #[derive(Debug, Clone)]
 pub struct DataFusionKeyFunction {
-    aggregate_exec: Arc<AggregateExec>,
+    key_expr_source: DFKeyExprSource,
     runtime_context: Option<RuntimeContext>,
 }
+
 
 impl DataFusionKeyFunction {
     pub fn new(aggregate_exec: Arc<AggregateExec>) -> Self {
         Self { 
-            aggregate_exec, 
+            key_expr_source: DFKeyExprSource::Aggregate(aggregate_exec),
             runtime_context: None 
         }
     }
-    
 
+    pub fn new_window(window_exec: Arc<BoundedWindowAggExec>) -> Self {
+        Self {
+            key_expr_source: DFKeyExprSource::Window(window_exec),
+            runtime_context: None
+        }
+    }
 }
 
 impl KeyByFunctionTrait for DataFusionKeyFunction {
@@ -196,9 +210,11 @@ impl KeyByFunctionTrait for DataFusionKeyFunction {
             panic!("Can not key empty batch")
         }
 
-        // Step 1: Use PhysicalGroupBy.input_exprs() which work with input schema (not output schema)
-        // These expressions are built to work with the actual runtime data schema
-        let group_exprs = self.aggregate_exec.group_expr().input_exprs();
+        // Step 1: Get key expressions based on the source type
+        let group_exprs = match &self.key_expr_source {
+            DFKeyExprSource::Aggregate(agg_exec) => agg_exec.group_expr().input_exprs(),
+            DFKeyExprSource::Window(window_exec) => window_exec.window_expr()[0].partition_by().to_vec(),
+        };
         
         if group_exprs.is_empty() {
             panic!("No group by expressions")
@@ -244,8 +260,10 @@ impl KeyByFunctionTrait for DataFusionKeyFunction {
                 
             let group_batch = RecordBatch::try_new(record_batch.schema(), group_columns).expect("should be able to create batch for group");
             
-            // Construct key object
-            let aggregate_schema = self.aggregate_exec.schema();
+            let schema = match &self.key_expr_source {
+                DFKeyExprSource::Aggregate(agg_exec) => agg_exec.schema(),
+                DFKeyExprSource::Window(window_exec) => window_exec.schema(),
+            };
             
             // Extract key values from the group_arrays using the first index of this group
             let group_first_index = UInt32Array::from(vec![indices[0] as u32]);
@@ -258,14 +276,14 @@ impl KeyByFunctionTrait for DataFusionKeyFunction {
                     let key_array = compute::take(array.as_ref(), &group_first_index, None).unwrap();
                     
                     // Create key field - get name from AggregateExec schema (group by fields come first)
-                    if i >= aggregate_schema.fields().len() {
+                    if i >= schema.fields().len() {
                         panic!(
                             "AggregateExec schema has {} fields but trying to access group field at index {}",
-                            aggregate_schema.fields().len(), i
+                            schema.fields().len(), i
                         );
                     }
                     
-                    let field_name = aggregate_schema.fields()[i].name().clone();
+                    let field_name = schema.fields()[i].name().clone();
                     let key_field = arrow::datatypes::Field::new(
                         field_name,
                         array.data_type().clone(),
@@ -518,9 +536,8 @@ mod tests {
         assert_eq!(*values_3_1, vec![60.0]);
     }
 
-    #[tokio::test]
-    async fn test_datafusion_key_by_multiple_columns() {
-        // Create a planner to generate AggregateExec
+    // Helper function to create test setup
+    async fn create_test_setup() -> (Planner, Arc<Schema>, Message) {
         let ctx = SessionContext::new();
         let mut planner = Planner::new(PlanningContext::new(ctx));
         
@@ -537,25 +554,7 @@ mod tests {
             SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
             schema.clone()
         );
-        
-        // Create SQL query with multiple GROUP BY columns
-        let sql = "SELECT name, department, COUNT(*) as count FROM employees GROUP BY name, department";
-        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
-        
-        // Extract AggregateExec from the graph
-        let mut aggregate_exec: Option<Arc<AggregateExec>> = None;
-        let nodes: Vec<_> = logical_graph.get_nodes().collect();
-        for node in &nodes {
-            if let crate::runtime::operators::operator::OperatorConfig::KeyByConfig(key_by_function) = &node.operator_config {
-                if let KeyByFunction::DataFusion(key_by) = key_by_function {
-                    aggregate_exec = Some(key_by.aggregate_exec.clone());
-                    break;
-                }
-            }
-        }
-        
-        let aggregate_exec = aggregate_exec.expect("Should have found an aggregate operator");
-        
+
         // Create test data - same employee can be in different departments
         let name_array = StringArray::from(vec![
             "alice", "bob", "alice", "charlie", "alice", "bob"
@@ -568,7 +567,7 @@ mod tests {
         ]);
         
         let record_batch = RecordBatch::try_new(
-            schema,
+            schema.clone(),
             vec![
                 Arc::new(salary_array),
                 Arc::new(name_array), 
@@ -578,13 +577,12 @@ mod tests {
         
         let message = Message::new(None, record_batch, None);
         
-        // Create DataFusionKeyFunction
-        let key_by_function = DataFusionKeyFunction::new(aggregate_exec);
-        
-        // Execute key-by
-        let keyed_messages = key_by_function.key_by(message);
-        
-        // We should have 4 distinct groups: (alice,eng), (bob,sales), (alice,sales), (charlie,eng), (bob,eng)
+        (planner, schema, message)
+    }
+
+    // Helper function to verify keyed message results
+    fn verify_keyed_messages(keyed_messages: Vec<KeyedMessage>) {
+        // We should have 5 distinct groups
         assert_eq!(keyed_messages.len(), 5);
         
         // Map to store (name, department) -> salaries
@@ -645,5 +643,67 @@ mod tests {
         let bob_eng = key_to_salaries.get(&("bob".to_string(), "eng".to_string())).unwrap();
         assert_eq!(bob_eng.len(), 1);
         assert_eq!(*bob_eng, vec![75000]);
+    }
+
+    #[tokio::test]
+    async fn test_datafusion_key_by_aggregate_source() {
+        let (mut planner, _schema, message) = create_test_setup().await;
+        
+        // Create SQL query with multiple GROUP BY columns
+        let sql = "SELECT name, department, COUNT(*) as count FROM employees GROUP BY name, department";
+        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+        
+        // Extract AggregateExec from the graph
+        let mut aggregate_exec: Option<Arc<AggregateExec>> = None;
+        let nodes: Vec<_> = logical_graph.get_nodes().collect();
+        for node in &nodes {
+            if let crate::runtime::operators::operator::OperatorConfig::KeyByConfig(key_by_function) = &node.operator_config {
+                if let KeyByFunction::DataFusion(key_by) = key_by_function {
+                    if let DFKeyExprSource::Aggregate(agg_exec) = &key_by.key_expr_source {
+                        aggregate_exec = Some(agg_exec.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        
+        let aggregate_exec = aggregate_exec.expect("Should have found an aggregate operator");
+        
+        // Create DataFusionKeyFunction and test
+        let key_by_function = DataFusionKeyFunction::new(aggregate_exec);
+        let keyed_messages = key_by_function.key_by(message);
+        
+        verify_keyed_messages(keyed_messages);
+    }
+
+    #[tokio::test]
+    async fn test_datafusion_key_by_window_source() {
+        let (mut planner, _schema, message) = create_test_setup().await;
+        
+        // Create SQL query with window function partitioned by multiple columns
+        let sql = "SELECT name, department, salary, ROW_NUMBER() OVER (PARTITION BY name, department ORDER BY salary) as rn FROM employees";
+        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+        
+        // Extract WindowAggExec from the graph
+        let mut window_exec: Option<Arc<BoundedWindowAggExec>> = None;
+        let nodes: Vec<_> = logical_graph.get_nodes().collect();
+        for node in &nodes {
+            if let crate::runtime::operators::operator::OperatorConfig::KeyByConfig(key_by_function) = &node.operator_config {
+                if let KeyByFunction::DataFusion(key_by) = key_by_function {
+                    if let DFKeyExprSource::Window(win_exec) = &key_by.key_expr_source {
+                        window_exec = Some(win_exec.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        
+        let window_exec = window_exec.expect("Should have found a window operator");
+        
+        // Create DataFusionKeyFunction with window source and test
+        let key_by_function = DataFusionKeyFunction::new_window(window_exec);
+        let keyed_messages = key_by_function.key_by(message);
+        
+        verify_keyed_messages(keyed_messages);
     }
 } 

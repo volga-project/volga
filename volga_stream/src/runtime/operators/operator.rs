@@ -9,6 +9,7 @@ use crate::runtime::operators::map::map_operator::MapOperator;
 use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
+use crate::runtime::operators::window::window_operator::{WindowConfig, WindowOperator};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
 use anyhow::Result;
@@ -55,6 +56,7 @@ pub enum Operator {
     KeyBy(KeyByOperator),
     Reduce(ReduceOperator),
     Aggregate(AggregateOperator),
+    Window(WindowOperator),
     Chained(ChainedOperator),
 }
 
@@ -67,6 +69,7 @@ pub enum OperatorConfig {
     KeyByConfig(KeyByFunction),
     ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
     AggregateConfig(AggregateConfig),
+    WindowConfig(WindowConfig),
     ChainedConfig(Vec<OperatorConfig>),
 }
 
@@ -80,6 +83,7 @@ impl fmt::Display for OperatorConfig {
             OperatorConfig::KeyByConfig(key_by_func) => write!(f, "KeyBy({})", key_by_func),
             OperatorConfig::ReduceConfig(reduce_func, _) => write!(f, "Reduce({})", reduce_func),
             OperatorConfig::AggregateConfig(_) => write!(f, "Aggregate"),
+            OperatorConfig::WindowConfig(_) => write!(f, "Window"),
             OperatorConfig::ChainedConfig(configs) => write!(f, "Chained({} ops)", configs.len()),
         }
     }
@@ -96,6 +100,7 @@ impl OperatorTrait for Operator {
             Operator::KeyBy(op) => op.open(context).await,
             Operator::Reduce(op) => op.open(context).await,
             Operator::Aggregate(op) => op.open(context).await,
+            Operator::Window(op) => op.open(context).await,
             Operator::Chained(op) => op.open(context).await
         }
     }
@@ -109,6 +114,7 @@ impl OperatorTrait for Operator {
             Operator::KeyBy(op) => op.close().await,
             Operator::Reduce(op) => op.close().await,
             Operator::Aggregate(op) => op.close().await,
+            Operator::Window(op) => op.close().await,
             Operator::Chained(op) => op.close().await
         }
     }
@@ -128,6 +134,7 @@ impl OperatorTrait for Operator {
                     Operator::KeyBy(op) => op.process_message(message).await,
                     Operator::Reduce(op) => op.process_message(message).await,
                     Operator::Aggregate(op) => op.process_message(message).await,
+                    Operator::Window(op) => op.process_message(message).await,
                     Operator::Chained(op) => op.process_message(message).await,
                 }
             }
@@ -143,6 +150,7 @@ impl OperatorTrait for Operator {
             Operator::KeyBy(op) => op.process_watermark(watermark_value).await,
             Operator::Reduce(op) => op.process_watermark(watermark_value).await,
             Operator::Aggregate(op) => op.process_watermark(watermark_value).await,
+            Operator::Window(op) => op.process_watermark(watermark_value).await,
             Operator::Chained(op) => op.process_watermark(watermark_value).await,
         }
     }
@@ -156,6 +164,7 @@ impl OperatorTrait for Operator {
             Operator::KeyBy(op) => op.operator_type(),
             Operator::Reduce(op) => op.operator_type(),
             Operator::Aggregate(op) => op.operator_type(),
+            Operator::Window(op) => op.operator_type(),
             Operator::Chained(op) => op.operator_type(),
         }
     }
@@ -169,6 +178,7 @@ impl OperatorTrait for Operator {
             Operator::KeyBy(op) => op.fetch().await,
             Operator::Reduce(op) => op.fetch().await,
             Operator::Aggregate(op) => op.fetch().await,
+            Operator::Window(op) => op.fetch().await,
             Operator::Chained(op) => op.fetch().await,
         }
     }
@@ -257,6 +267,7 @@ pub fn create_operator_from_config(operator_config: OperatorConfig) -> Operator 
         OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
         OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config)),
         OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
+        OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config)),
         OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config)),
     };
     operator
@@ -295,7 +306,8 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
         OperatorConfig::JoinConfig(_) | 
         OperatorConfig::KeyByConfig(_) | 
         OperatorConfig::ReduceConfig(_, _) |
-        OperatorConfig::AggregateConfig(_) => {
+        OperatorConfig::AggregateConfig(_) |
+        OperatorConfig::WindowConfig(_) => {
             OperatorType::Processor
         }
     }

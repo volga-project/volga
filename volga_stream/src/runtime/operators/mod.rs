@@ -7,3 +7,4 @@ pub mod reduce;
 pub mod operator;
 pub mod chained;
 pub mod aggregate;
+pub mod window;

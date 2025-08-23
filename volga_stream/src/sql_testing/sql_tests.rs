@@ -675,6 +675,4 @@ mod tests {
         let test_case = test_cases.iter().find(|tc| tc.name == "aliases").unwrap();
         run_sql_test_case(test_case).await
     }
-
-
 }
