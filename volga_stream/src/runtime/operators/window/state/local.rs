@@ -7,9 +7,9 @@ use arrow::compute::SortOptions;
 use datafusion::common::{ScalarValue, utils::compare_rows};
 use datafusion::physical_plan::{WindowExpr, expressions::Column};
 use datafusion::physical_expr::window::SlidingAggregateWindowExpr;
-use datafusion::logical_expr::{WindowFrame, WindowFrameBound};
+use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 
-use crate::runtime::operators::window::state::keyed_state::WindowState;
+use crate::runtime::operators::window::state::keyed_state::{validate_window_expr, WindowState};
 
 #[derive(Debug)]
 pub struct LocalWindowsState {
@@ -17,14 +17,19 @@ pub struct LocalWindowsState {
     data: RecordBatch,
 }
 
+// TODO null handling
+// TODO DESC order by
+// TODO Plain and Standard Datafusion aggregates
 impl LocalWindowsState {
     pub fn create(window_exprs: Vec<Arc<dyn WindowExpr>>, schema: SchemaRef) -> Self {
         let mut states = Vec::new();
 
         // TODO assert all windows have same orderbys
-
         for window_expr in window_exprs {
-            // Cast to AggregateWindowExpr to get accumulator
+            validate_window_expr(&window_expr);
+
+            // Cast to SlidingAggregateWindowExpr to get accumulator
+            // TODO handle Plain and Standard
             let aggregate_expr = window_expr.as_any()
                 .downcast_ref::<SlidingAggregateWindowExpr>()
                 .expect("Only SlidingAggregateWindowExpr is supported");
@@ -49,12 +54,12 @@ impl LocalWindowsState {
     }
 
     pub fn update_batch(&mut self, batch: &RecordBatch) -> Vec<Vec<ScalarValue>> {
+        // TODO is this sorted? Where do we sort?
         self.data = arrow::compute::concat_batches(&self.data.schema(), [&self.data, &batch])
             .expect("Should be able to concat batches");
         
         let mut all_results = Vec::new();
         
-        // Process each state individually to avoid borrow checker issues
         for i in 0..self.states.len() {
             let to_update: Vec<Arc<dyn Array>> = self.states[i].expr.evaluate_args(batch)
                 .expect("Should be able to evaluate window args");
@@ -71,7 +76,7 @@ impl LocalWindowsState {
         let num_rows = to_update.first().expect("Expected at least one value").len();
         let mut results = Vec::new();
 
-        let mut last_retract_end = self.states[state_index].start;
+        let mut last_retract_end = self.states[state_index].start_row_idx;
         for row_idx in 0..num_rows {
             // Extract single element from each array using slice
             let row_arrays: Vec<ArrayRef> = to_update
@@ -79,7 +84,6 @@ impl LocalWindowsState {
                 .map(|array| array.slice(row_idx, 1))
                 .collect();
             
-            println!("Updating accumulator with row_arrays: {:?}", row_arrays);
             self.states[state_index].accumulator.update_batch(&row_arrays)
                 .expect("Should be able to update accumulator");
 
@@ -88,32 +92,29 @@ impl LocalWindowsState {
             // find values to retract in self.data using window frame logic
             let current_row_idx = self.data.num_rows() - num_rows + row_idx;
             let retract_range = self.find_retract_range(&self.states[state_index].expr, current_row_idx, last_retract_end);
-            println!("Retract range: {:?}", retract_range);
             last_retract_end = retract_range.end;
 
-            // extract values to retract by slicing self.data
             let retract_batch = self.data.slice(retract_range.start, retract_range.end - retract_range.start);
 
-            // retract from accumulator
             let retract_values = self.states[state_index].expr.evaluate_args(&retract_batch)
                 .expect("Should be able to evaluate retract args");
 
-            println!("Retracting from accumulator with retract_values: {:?}", retract_values);
             self.states[state_index].accumulator.retract_batch(&retract_values)
                 .expect("Should be able to retract from accumulator");
+
             let result = self.states[state_index].accumulator.evaluate()
                 .expect("Should be able to evaluate accumulator");
-            println!("Result: {:?}", result);
+
             results.push(result);
         }
 
-        self.states[state_index].start = last_retract_end;
+        self.states[state_index].start_row_idx = last_retract_end;
         results
     }
 
     fn prune(&mut self) {
         // Find minimum start position across all window states
-        let min_start = self.states.iter().map(|state| state.start).min().unwrap_or(0);
+        let min_start = self.states.iter().map(|state| state.start_row_idx).min().unwrap_or(0);
         
         if min_start > 0 && min_start < self.data.num_rows() {
             // Prune the data by removing rows before min_start
@@ -121,22 +122,30 @@ impl LocalWindowsState {
             
             // Update all window state start positions after pruning
             for state in &mut self.states {
-                state.start = state.start.saturating_sub(min_start);
+                state.start_row_idx = state.start_row_idx.saturating_sub(min_start);
             }
         }
     }
 
     fn find_retract_range(&self, window_expr: &Arc<dyn WindowExpr>, current_row_idx: usize, last_retract_end: usize) -> Range<usize> {
-        // Get window frame and ORDER BY information from the window expression
-        // let window_expr = &self.states[state_index].expr;
         let window_frame = window_expr.get_window_frame();
+        if window_frame.units == WindowFrameUnits::Groups {
+            panic!("Groups WindowFrameUnits are not supported");
+        }
+        if window_frame.units == WindowFrameUnits::Rows {
+            // ROWS are simple
+            match window_frame.start_bound {
+                WindowFrameBound::Preceding(ScalarValue::UInt64(Some(n))) => {
+                    return Range { start: last_retract_end, end: current_row_idx.saturating_sub(n as usize) };
+                }
+                _ => panic!("Only Preceding start bound is supported for ROWS WindowFrameUnits"),
+            }
+        }
+        
+        // Handle RANGE
         let sort_options: Vec<SortOptions> = window_expr.order_by().iter().map(|o| o.options).collect();
-        
-        // Get current row's ORDER BY values efficiently
         let current_row_values = self.get_order_by_values_at_row(window_expr, current_row_idx);
-        
-        // Calculate target values for window start boundary
-        let target_values = self.calculate_window_start_target(&current_row_values, window_frame);
+        let window_start_row_values = self.calculate_window_start_row_values(&current_row_values, window_frame);
         
         let start = last_retract_end;
         let mut end = start;
@@ -148,13 +157,13 @@ impl LocalWindowsState {
             
             // Compare current row with window start boundary
             // If current row < window_start, it should be retracted
-            let comparison = compare_rows(&row_values, &target_values, &sort_options)
+            let comparison = compare_rows(&row_values, &window_start_row_values, &sort_options)
                 .expect("Should be able to compare rows");
             
             if comparison.is_lt() {
-                end += 1;  // This row should be retracted
+                end += 1;
             } else {
-                break;     // We've reached the window boundary
+                break;
             }
         }
         
@@ -177,14 +186,15 @@ impl LocalWindowsState {
             .collect()
     }
     
-    /// Calculate target values for window start boundary using DataFusion's interval arithmetic
-    fn calculate_window_start_target(&self, current_values: &[ScalarValue], window_frame: &WindowFrame) -> Vec<ScalarValue> {
+    /// Calculate row values for window start boundary using DataFusion's interval arithmetic
+    fn calculate_window_start_row_values(&self, current_values: &[ScalarValue], window_frame: &WindowFrame) -> Vec<ScalarValue> {
         match &window_frame.start_bound {
             WindowFrameBound::Preceding(delta) => {
                 if window_frame.start_bound.is_unbounded() || delta.is_null() {
                     panic!("Can not retract UNBOUNDED PRECEDING");
                 }
                 // Calculate current_value - delta for PRECEDING
+                // TODO what if ORDER BY DESC?
                 current_values.iter().map(|value| {
                     if value.is_null() {
                         value.clone()
@@ -463,12 +473,12 @@ mod tests {
         assert_eq!(state.data.num_rows(), 4, "Should have 4 total rows");
         // Start positions should remain 0 since no retraction
         for window_state in &state.states {
-            assert_eq!(window_state.start, 0, "Start should remain 0 with large window");
+            assert_eq!(window_state.start_row_idx, 0, "Start should remain 0 with large window");
         }
     }
 
     #[tokio::test]
-    async fn test_multiple_windows() {
+    async fn test_multiple_sliding_windows() {
         // Test query with multiple different aggregation functions over different window sizes
         let sql = "SELECT timestamp, 
                    SUM(value) OVER (ORDER BY timestamp RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_1s,
@@ -499,25 +509,22 @@ mod tests {
         }
         
         // Verify SUM results (1000ms window)
-        // t=1000: sum=100, t=1500: sum=150 (100+50), t=2000: sum=250 (50+200), t=2500: sum=225 (200+25), t=3000: sum=175 (25+150)
-        assert_eq!(results[0][0], ScalarValue::Int64(Some(100)), "SUM at t=1000 should be 100");
-        assert_eq!(results[0][1], ScalarValue::Int64(Some(150)), "SUM at t=1500 should be 150");
-        assert_eq!(results[0][2], ScalarValue::Int64(Some(250)), "SUM at t=2000 should be 250");
-        assert_eq!(results[0][3], ScalarValue::Int64(Some(225)), "SUM at t=2500 should be 225");
-        assert_eq!(results[0][4], ScalarValue::Int64(Some(175)), "SUM at t=3000 should be 175");
+        assert_eq!(results[0][0], ScalarValue::Int64(Some(100)), "SUM at t=1000 should be 100 (only t=1000)");
+        assert_eq!(results[0][1], ScalarValue::Int64(Some(150)), "SUM at t=1500 should be 150 (t=1000+1500)");
+        assert_eq!(results[0][2], ScalarValue::Int64(Some(350)), "SUM at t=2000 should be 350 (t=1000+1500+2000)");
+        assert_eq!(results[0][3], ScalarValue::Int64(Some(275)), "SUM at t=2500 should be 275 (t=1500+2000+2500)");
+        assert_eq!(results[0][4], ScalarValue::Int64(Some(375)), "SUM at t=3000 should be 375 (t=2000+2500+3000)");
         
         // Verify COUNT results (1500ms window)
-        // t=1000: count=1, t=1500: count=2, t=2000: count=2 (1500,2000), t=2500: count=2 (2000,2500), t=3000: count=2 (2500,3000)
         assert_eq!(results[1][0], ScalarValue::Int64(Some(1)), "COUNT at t=1000 should be 1");
-        assert_eq!(results[1][1], ScalarValue::Int64(Some(2)), "COUNT at t=1500 should be 2");
-        assert_eq!(results[1][2], ScalarValue::Int64(Some(2)), "COUNT at t=2000 should be 2");
-        assert_eq!(results[1][3], ScalarValue::Int64(Some(2)), "COUNT at t=2500 should be 2");
-        assert_eq!(results[1][4], ScalarValue::Int64(Some(2)), "COUNT at t=3000 should be 2");
+        assert_eq!(results[1][1], ScalarValue::Int64(Some(2)), "COUNT at t=1500 should be 2 (t=1000,1500)");
+        assert_eq!(results[1][2], ScalarValue::Int64(Some(3)), "COUNT at t=2000 should be 3 (t=1000,1500,2000)");
+        assert_eq!(results[1][3], ScalarValue::Int64(Some(4)), "COUNT at t=2500 should be 4 (t=1000,1500,2000,2500)");
+        assert_eq!(results[1][4], ScalarValue::Int64(Some(4)), "COUNT at t=3000 should be 4 (t=1500,2000,2500,3000)");
         
         // Verify data state
         assert_eq!(state.data.num_rows(), 5, "Should have 5 total rows");
         
-        // Test with additional batch to verify sliding behavior across all windows
         let batch2 = create_test_batch(vec![4000], vec![300]);
         let results2 = state.update_batch(&batch2);
         
@@ -526,11 +533,97 @@ mod tests {
             assert_eq!(window_result.len(), 1, "Window {} should have 1 result for single input row", i);
         }
         
-        // Verify that different windows have different retraction behavior
-        // SUM (1000ms): should only include value 300 = 300
-        assert_eq!(results2[0][0], ScalarValue::Int64(Some(300)), "SUM at t=4000 should be 300 (only current)");
+        assert_eq!(results2[0][0], ScalarValue::Int64(Some(450)), "SUM at t=4000 should be 450 (3000, 4000)");
+        assert_eq!(results2[1][0], ScalarValue::Int64(Some(3)), "COUNT at t=4000 should be 3 (2500, 3000, 4000)");
+
+        // Verify data state
+        // MAX has longest window, includes all so far
+        assert_eq!(state.data.num_rows(), 6, "Should have 6 total rows");
+
+        // Far away, should retract all
+        let batch3 = create_test_batch(vec![40000], vec![300]);
+        let results3 = state.update_batch(&batch3);
         
-        // COUNT (1500ms): should only count current row = 1
-        assert_eq!(results2[1][0], ScalarValue::Int64(Some(1)), "COUNT at t=4000 should be 1");
+        assert_eq!(results3[0][0], ScalarValue::Int64(Some(300)), "SUM at t=40000 should be 300 (40000)");
+        assert_eq!(results3[1][0], ScalarValue::Int64(Some(1)), "COUNT at t=40000 should be 1 (40000)");
+        
+        assert_eq!(state.data.num_rows(), 1, "Should have 1 total rows");
+    }
+
+    #[tokio::test]
+    async fn test_non_timestamp_range_sliding_window() {
+        // Test RANGE window based on a non-timestamp numeric column (value instead of timestamp)
+        let sql = "SELECT value, SUM(value) OVER (ORDER BY value RANGE BETWEEN 10 PRECEDING AND CURRENT ROW) as sum_in_range FROM test_table";
+        let window_exprs = extract_window_expr_from_sql(sql).await;
+        let schema = create_test_schema();
+        
+        let mut state = LocalWindowsState::create(window_exprs, schema);
+        
+        // Test data: timestamps are irrelevant, we're ordering by value
+        // Values: 5, 12, 18, 20, 25, 35
+        let batch = create_test_batch(
+            vec![1000, 2000, 3000, 4000, 5000, 6000], // timestamps (irrelevant for this test)
+            vec![5, 12, 18, 20, 25, 35]              // values (what we order by)
+        );
+        let results = state.update_batch(&batch);
+        
+        assert_eq!(results.len(), 1, "Should have 1 window result");
+        assert_eq!(results[0].len(), 6, "Should have 6 results for 6 input rows");
+        
+        // Window calculations based on value ranges (RANGE BETWEEN 10 PRECEDING):
+        // value=5:  range=[0,5]   -> includes: 5                    -> sum=5
+        // value=12: range=[2,12]  -> includes: 5,12                 -> sum=17  
+        // value=18: range=[8,18]  -> includes: 12,18                -> sum=30
+        // value=20: range=[10,20] -> includes: 12,18,20             -> sum=50
+        // value=25: range=[15,25] -> includes: 18,20,25             -> sum=63
+        // value=35: range=[25,35] -> includes: 25,35                -> sum=60
+        
+        assert_eq!(results[0][0], ScalarValue::Int64(Some(5)), "SUM at value=5 should be 5");
+        assert_eq!(results[0][1], ScalarValue::Int64(Some(17)), "SUM at value=12 should be 17 (5+12)");
+        assert_eq!(results[0][2], ScalarValue::Int64(Some(30)), "SUM at value=18 should be 30 (12+18)");
+        assert_eq!(results[0][3], ScalarValue::Int64(Some(50)), "SUM at value=20 should be 50 (12+18+20)");
+        assert_eq!(results[0][4], ScalarValue::Int64(Some(63)), "SUM at value=25 should be 63 (18+20+25)");
+        assert_eq!(results[0][5], ScalarValue::Int64(Some(60)), "SUM at value=35 should be 60 (25+35)");
+        
+        assert_eq!(state.data.num_rows(), 2, "Should have 2 total rows after retraction");
+        assert_eq!(state.states.len(), 1, "Should have 1 window state");
+    }
+
+    #[tokio::test]
+    async fn test_rows_sliding_window() {
+        // Test ROWS window - counts physical rows, not values
+        let sql = "SELECT timestamp, SUM(value) OVER (ORDER BY timestamp ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) as sum_3_rows FROM test_table";
+        let window_exprs = extract_window_expr_from_sql(sql).await;
+        let schema = create_test_schema();
+        
+        let mut state = LocalWindowsState::create(window_exprs, schema);
+        
+        // Test data: values and timestamps, but window is based on row positions
+        let batch = create_test_batch(
+            vec![1000, 2000, 3000, 4000, 5000], // timestamps (for ordering)
+            vec![10, 20, 30, 40, 50]            // values
+        );
+        let results = state.update_batch(&batch);
+        
+        assert_eq!(results.len(), 1, "Should have 1 window result");
+        assert_eq!(results[0].len(), 5, "Should have 5 results for 5 input rows");
+        
+        // ROWS window calculations (always exactly 3 rows: 2 PRECEDING + CURRENT):
+        // Row 1: window=[row1]           -> includes: 10                -> sum=10
+        // Row 2: window=[row1,row2]      -> includes: 10,20             -> sum=30  
+        // Row 3: window=[row1,row2,row3] -> includes: 10,20,30          -> sum=60
+        // Row 4: window=[row2,row3,row4] -> includes: 20,30,40          -> sum=90
+        // Row 5: window=[row3,row4,row5] -> includes: 30,40,50          -> sum=120
+        
+        assert_eq!(results[0][0], ScalarValue::Int64(Some(10)), "SUM at row1 should be 10");
+        assert_eq!(results[0][1], ScalarValue::Int64(Some(30)), "SUM at row2 should be 30 (10+20)");
+        assert_eq!(results[0][2], ScalarValue::Int64(Some(60)), "SUM at row3 should be 60 (10+20+30)");
+        assert_eq!(results[0][3], ScalarValue::Int64(Some(90)), "SUM at row4 should be 90 (20+30+40)");
+        assert_eq!(results[0][4], ScalarValue::Int64(Some(120)), "SUM at row5 should be 120 (30+40+50)");
+        
+        // With ROWS windows, we should retain exactly the number of rows needed for the window
+        // Since we have "2 PRECEDING", we need at most 3 rows at any time
+        assert_eq!(state.data.num_rows(), 3, "Should have 3 total rows (window size)");
+        assert_eq!(state.states.len(), 1, "Should have 1 window state");
     }
 }

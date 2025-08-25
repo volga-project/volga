@@ -79,3 +79,4 @@ volga_stream/target
 volga_stream/Cargo.lock
 volga_stream/arroyo/
 volga_stream/datafusion/
+volga_stream/slatedb/

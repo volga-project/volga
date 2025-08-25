@@ -7,7 +7,7 @@ use arrow::array::{Array, ArrayRef};
 use arrow::row::Row;
 use arrow::datatypes::SchemaRef;
 use datafusion::common::ScalarValue;
-use datafusion::logical_expr::Accumulator;
+use datafusion::logical_expr::{Accumulator, WindowFrameBound, WindowFrameUnits};
 use datafusion::physical_plan::{WindowExpr, expressions::Column};
 use datafusion::physical_expr::window::SlidingAggregateWindowExpr;
 
@@ -30,7 +30,7 @@ impl KeyedWindowsState {
 pub struct WindowState {
     pub accumulator: Box<dyn Accumulator>,
     pub expr: Arc<dyn WindowExpr>,
-    pub start: usize // all windows end with current, so not tracking it
+    pub start_row_idx: usize // all windows end with current, so not tracking it
 }
 
 impl WindowState {
@@ -38,7 +38,7 @@ impl WindowState {
         Self {
             accumulator,
             expr,
-            start,
+            start_row_idx: start,
         }
     }
 }
@@ -47,4 +47,24 @@ impl WindowState {
 pub enum WindowsState {
     Local(LocalWindowsState),
     Remote(RemoteWindowsState),
+}
+
+pub fn validate_window_expr(expr: &Arc<dyn WindowExpr>) {
+    let window_frame = expr.get_window_frame();
+
+    // Support only ROWS and RANGE
+    if window_frame.units == WindowFrameUnits::Groups {
+        panic!("Groups WindowFrameUnits are not supported");
+    }
+
+    // start bound should be only preceeding, end should always be current row
+    match window_frame.start_bound {
+        WindowFrameBound::Preceding(_) => {}
+        _ => panic!("Only Preceding start bound is supported"),
+    }
+
+    match window_frame.end_bound {
+        WindowFrameBound::CurrentRow => {}
+        _ => panic!("Only CurrentRow end bound is supported"),
+    }
 }
