@@ -5,7 +5,7 @@ use anyhow::Result;
 use arrow::record_batch::RecordBatch;
 use arrow::array::{Array, ArrayRef};
 use arrow::row::Row;
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Schema, SchemaRef};
 use datafusion::common::ScalarValue;
 use datafusion::logical_expr::{Accumulator, WindowFrameBound, WindowFrameUnits};
 use datafusion::physical_plan::{WindowExpr, expressions::Column};
@@ -49,7 +49,7 @@ pub enum WindowsState {
     Remote(RemoteWindowsState),
 }
 
-pub fn validate_window_expr(expr: &Arc<dyn WindowExpr>) {
+pub fn validate_window_expr(expr: &Arc<dyn WindowExpr>, input_schema: &Schema) {
     let window_frame = expr.get_window_frame();
 
     // Support only ROWS and RANGE
@@ -66,5 +66,17 @@ pub fn validate_window_expr(expr: &Arc<dyn WindowExpr>) {
     match window_frame.end_bound {
         WindowFrameBound::CurrentRow => {}
         _ => panic!("Only CurrentRow end bound is supported"),
+    }
+
+    // Following Flink's approach: validate ORDER BY columns for streaming
+    for sort_expr in expr.order_by() {
+        if sort_expr.expr.nullable(input_schema).unwrap() {
+            panic!("ORDER BY should not contain nullable exprs")
+        }
+        
+        // We don't support ORDER BY DESC yet - requires different window boundary logic
+        if sort_expr.options.descending {
+            panic!("ORDER BY DESC is not supported yet")
+        }
     }
 }

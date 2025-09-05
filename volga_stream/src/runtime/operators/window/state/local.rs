@@ -17,8 +17,7 @@ pub struct LocalWindowsState {
     data: RecordBatch,
 }
 
-// TODO null handling
-// TODO DESC order by
+// TODO allow NULLs and ORDERBY DESC for non-event time columns
 // TODO Plain and Standard Datafusion aggregates
 impl LocalWindowsState {
     pub fn create(window_exprs: Vec<Arc<dyn WindowExpr>>, schema: SchemaRef) -> Self {
@@ -26,7 +25,7 @@ impl LocalWindowsState {
 
         // TODO assert all windows have same orderbys
         for window_expr in window_exprs {
-            validate_window_expr(&window_expr);
+            validate_window_expr(&window_expr, schema.as_ref());
 
             // Cast to SlidingAggregateWindowExpr to get accumulator
             // TODO handle Plain and Standard
@@ -161,10 +160,10 @@ impl LocalWindowsState {
                 .expect("Should be able to compare rows");
             
             if comparison.is_lt() {
-                end += 1;
-            } else {
-                break;
-            }
+                    end += 1;
+                } else {
+                    break;
+                }
         }
         
         Range { start, end }
@@ -177,8 +176,19 @@ impl LocalWindowsState {
             .map(|sort_expr| {
                 if let Some(column) = sort_expr.expr.as_any().downcast_ref::<Column>() {
                     let column_array = self.data.column(column.index());
-                    ScalarValue::try_from_array(column_array, row_idx)
-                        .expect("Should be able to extract scalar value from array")
+                    let scalar_value = ScalarValue::try_from_array(column_array, row_idx)
+                        .expect("Should be able to extract scalar value from array");
+                    
+                    if scalar_value.is_null() {
+                        panic!(
+                            "NULL value found in ORDER BY column '{}' at row {}. \
+                             Streaming windows require non-null ORDER BY values for correct \
+                             temporal semantics (watermarks, window assignment).",
+                            column.name(), row_idx
+                        );
+                    }
+                    
+                    scalar_value
                 } else {
                     panic!("Expected Column expression in ORDER BY");
                 }
@@ -198,18 +208,14 @@ impl LocalWindowsState {
                 current_values.iter().map(|value| {
                     if value.is_null() {
                         value.clone()
+                    } else if value.is_unsigned() && value < delta {
+                        value.sub(value).expect("Should be able to subtract value from itself")
                     } else {
                         value.sub(delta).expect("Should be able to subtract delta from value")
                     }
                 }).collect()
             },
-            WindowFrameBound::CurrentRow => {
-                // Window starts at current row
-                current_values.to_vec()
-            },
-            WindowFrameBound::Following(_) => {
-                panic!("Following bound is not supported");
-            }
+            _ => panic!("Only Preceding start bound is supported"),
         }
     }
 
