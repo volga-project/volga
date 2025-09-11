@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 
 
 #[derive(Debug, Clone)]
@@ -113,14 +115,14 @@ pub struct SourceOperator {
 }
 
 impl SourceOperator {
-    pub fn new(config: OperatorConfig) -> Self {
+    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
         let source_config = match config.clone() {
             OperatorConfig::SourceConfig(source_config) => source_config,
             _ => panic!("Expected SourceConfig, got {:?}", config),
         };
         let source_function = create_source_function(source_config);
         Self {
-            base: OperatorBase::new_with_function(source_function, config),
+            base: OperatorBase::new_with_function(source_function, config, storage),
             projection: None,
             projected_schema: None,
         }

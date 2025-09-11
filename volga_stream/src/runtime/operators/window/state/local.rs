@@ -160,10 +160,10 @@ impl LocalWindowsState {
                 .expect("Should be able to compare rows");
             
             if comparison.is_lt() {
-                    end += 1;
-                } else {
-                    break;
-                }
+                end += 1;
+            } else {
+                break;
+            }
         }
         
         Range { start, end }

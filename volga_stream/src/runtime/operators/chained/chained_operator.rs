@@ -1,4 +1,6 @@
-use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{functions::map::MapFunction, operators::operator::{create_operator_from_config, Operator, OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}};
+use std::sync::Arc;
+
+use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{functions::map::MapFunction, operators::operator::{create_operator, Operator, OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}, storage::storage::Storage};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_rayon::AsyncThreadPool;
@@ -11,14 +13,14 @@ pub struct ChainedOperator {
 }
 
 impl ChainedOperator {
-    pub fn new(config: OperatorConfig) -> Self {
+    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
         let configs = match config.clone() {
             OperatorConfig::ChainedConfig(configs) => configs,
             _ => panic!("Expected ChainedConfig, got {:?}", config),
         };
         Self { 
-            base: OperatorBase::new(config),
-            operators: configs.iter().map(|config| create_operator_from_config(config.clone())).collect(),
+            base: OperatorBase::new(config, storage.clone()),
+            operators: configs.iter().map(|config| create_operator(config.clone(), storage.clone())).collect(),
         }
     }
 

@@ -1,4 +1,6 @@
-use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
+use std::sync::Arc;
+
+use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio_rayon::AsyncThreadPool;
@@ -9,13 +11,13 @@ pub struct MapOperator {
 }
 
 impl MapOperator {
-    pub fn new(config: OperatorConfig) -> Self {
+    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
         let map_function = match config.clone() {
             OperatorConfig::MapConfig(map_function) => map_function,
             _ => panic!("Expected MapConfig, got {:?}", config),
         };
         Self { 
-            base: OperatorBase::new_with_function(map_function, config),
+            base: OperatorBase::new_with_function(map_function, config, storage),
         }
     }
 }

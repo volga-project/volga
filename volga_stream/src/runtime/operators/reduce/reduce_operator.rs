@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use tokio_rayon::AsyncThreadPool;
 
-use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
+use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 
 
 #[derive(Debug)]
@@ -16,13 +16,13 @@ pub struct ReduceOperator {
 }
 
 impl ReduceOperator {
-    pub fn new(config: OperatorConfig) -> Self {
+    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
         let (reduce_function, extractor) = match config.clone() {
             OperatorConfig::ReduceConfig(reduce_function, extractor) => (reduce_function, extractor),
             _ => panic!("Expected ReduceConfig, got {:?}", config),
         };
         Self {
-            base: OperatorBase::new_with_function(reduce_function, config),
+            base: OperatorBase::new_with_function(reduce_function, config, storage),
             accumulators: HashMap::new(),
             result_extractor: extractor.unwrap_or_else(AggregationResultExtractor::all_aggregations),
         }

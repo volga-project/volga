@@ -1,8 +1,10 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use anyhow::Result;
 use tokio_rayon::AsyncThreadPool;
 
-use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 
 #[derive(Debug)]
 pub struct KeyByOperator {
@@ -10,13 +12,13 @@ pub struct KeyByOperator {
 }
 
 impl KeyByOperator {
-    pub fn new(config: OperatorConfig) -> Self {
+    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
         let key_by_function = match config.clone() {
             OperatorConfig::KeyByConfig(key_by_function) => key_by_function,
             _ => panic!("Expected KeyByConfig, got {:?}", config),
         };
         Self { 
-            base: OperatorBase::new_with_function(key_by_function, config),
+            base: OperatorBase::new_with_function(key_by_function, config, storage),
         }
     }
 }

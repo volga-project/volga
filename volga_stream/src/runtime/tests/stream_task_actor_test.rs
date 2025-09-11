@@ -8,6 +8,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::common::message::Message;
 use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
+use crate::storage::storage::Storage;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::channel::{gen_channel_id, Channel};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
@@ -76,6 +77,7 @@ fn test_stream_task_actor() -> Result<()> {
                 None,
             ),
             graph.clone(),
+            Arc::new(Storage::default()),
         );
 
         // Create transport backend actor

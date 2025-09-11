@@ -1,4 +1,6 @@
-use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{OperatorBase, OperatorTrait, OperatorType, OperatorConfig}, runtime_context::RuntimeContext}};
+use std::sync::Arc;
+
+use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -22,14 +24,14 @@ pub struct SinkOperator {
 }
 
 impl SinkOperator {
-    pub fn new(config: OperatorConfig) -> Self {
+    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
         let sink_config = match config.clone() {
             OperatorConfig::SinkConfig(sink_config) => sink_config,
             _ => panic!("Expected SinkConfig, got {:?}", config),
         };
         let sink_function = create_sink_function(sink_config);
         Self {
-            base: OperatorBase::new_with_function(sink_function, config),
+            base: OperatorBase::new_with_function(sink_function, config, storage),
         }
     }
 }

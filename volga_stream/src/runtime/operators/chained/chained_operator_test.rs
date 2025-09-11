@@ -6,7 +6,7 @@ use crate::{
         }, operators::{
             chained::chained_operator::ChainedOperator, operator::{OperatorConfig, OperatorTrait, OperatorType}, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}
         }, runtime_context::RuntimeContext},
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    storage::{storage::Storage, InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -74,8 +74,7 @@ async fn test_chained_operator_map_map() {
         OperatorConfig::MapConfig(MapFunction::new_custom(AddPrefixMapFunction { prefix: "PREFIX_".to_string() })),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
-    
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs), Arc::new(Storage::default()));
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -114,8 +113,10 @@ async fn test_chained_operator_source_map() {
         OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
+
+    let storage = Arc::new(Storage::default());
     
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs), storage);
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -167,7 +168,7 @@ async fn test_chained_operator_source_keyby() {
         OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["key".to_string()])),
     ];
     
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs), Arc::new(Storage::default()));
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -230,7 +231,7 @@ async fn test_chained_operator_source_map_keyby() {
         OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
     ];
     
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs), Arc::new(Storage::default()));
     let context = RuntimeContext::new("test_vertex".to_string(), 0, 1, None);
     
     // Test open
@@ -282,7 +283,7 @@ async fn test_chained_operator_type() {
         OperatorConfig::MapConfig(MapFunction::new_custom(AddPrefixMapFunction { prefix: "PREFIX_".to_string() })),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
-    let map_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(map_configs));
+    let map_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(map_configs), Arc::new(Storage::default()));
     assert_eq!(map_chained.operator_type(), OperatorType::Processor);
     
     // Test with source operator (Source)
@@ -290,7 +291,7 @@ async fn test_chained_operator_type() {
         OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
-    let source_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_configs));
+    let source_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_configs), Arc::new(Storage::default()));
     assert_eq!(source_chained.operator_type(), OperatorType::Source);
     
     // Test with sink operator (Sink)
@@ -298,7 +299,7 @@ async fn test_chained_operator_type() {
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("test".to_string())),
     ];
-    let sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(sink_configs));
+    let sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(sink_configs), Arc::new(Storage::default()));
     assert_eq!(sink_chained.operator_type(), OperatorType::Sink);
     
     // Test with both source and sink operators (ChainedSourceSink)
@@ -307,7 +308,7 @@ async fn test_chained_operator_type() {
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("test".to_string())),
     ];
-    let source_sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_sink_configs));
+    let source_sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_sink_configs), Arc::new(Storage::default()));
     assert_eq!(source_sink_chained.operator_type(), OperatorType::ChainedSourceSink);
 }
 
@@ -332,7 +333,7 @@ async fn test_chained_operator_source_map_sink() {
         OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
     ];
     
-    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
+    let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs), Arc::new(Storage::default()));
     
     // Verify operator type is ChainedSourceSink
     assert_eq!(chained_operator.operator_type(), OperatorType::ChainedSourceSink);

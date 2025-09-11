@@ -1,6 +1,6 @@
 use crate::{common::test_utils::print_worker_metrics, runtime::{
     execution_graph::ExecutionGraph, operators::operator::OperatorType, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskMetrics, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
-}, transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend}};
+}, storage::storage::Storage, transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend}};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -106,7 +106,8 @@ pub struct Worker {
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<String, Runtime>,
     transport_backend_runtime: Option<Runtime>,
-    state: Arc<tokio::sync::Mutex<WorkerState>>,
+    worker_state: Arc<tokio::sync::Mutex<WorkerState>>,
+    storage: Arc<Storage>,
     running: Arc<AtomicBool>,
     tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
 }
@@ -137,7 +138,8 @@ impl Worker {
                 .enable_all()
                 .thread_name("transport-backend-runtime")
                 .build().unwrap()),
-            state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
+            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
+            storage: Arc::new(Storage::default()), // TODO config
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None,
         }
@@ -275,6 +277,7 @@ impl Worker {
                 transport_client_configs.remove(&vertex_id.clone()).unwrap(),
                 runtime_context,
                 self.graph.clone(),
+                self.storage.clone(),
             );
             let task_actor = StreamTaskActor::new(task);
             let task_ref = task_runtime.spawn(async{
@@ -316,7 +319,7 @@ impl Worker {
         let running = self.running.clone();
         let task_actors = self.task_actors.clone();
         let graph = self.graph.clone();
-        let state = self.state.clone();
+        let state = self.worker_state.clone();
         
         let task_runtime_handles: HashMap<String, Handle> = self.task_runtimes.iter()
             .map(|(k, v)| (k.clone(), v.handle().clone()))
@@ -369,10 +372,10 @@ impl Worker {
                 .collect();
             let task_actors = self.task_actors.clone();
             let graph = self.graph.clone();
-            let state = self.state.clone();
+            let state = self.worker_state.clone();
             Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state, None).await;
         }
-        self.state.lock().await.clone()
+        self.worker_state.lock().await.clone()
     }
 
     async fn cleanup(&mut self) {
@@ -451,7 +454,7 @@ impl Worker {
         println!("[WORKER] Worker started, waiting for all tasks to be opened");
 
         Self::wait_for_all_tasks_status(
-            self.state.clone(),
+            self.worker_state.clone(),
             self.running.clone(),
             StreamTaskStatus::Opened
         ).await;
@@ -464,7 +467,7 @@ impl Worker {
 
         // Wait for tasks to finish
         Self::wait_for_all_tasks_status(
-            self.state.clone(),
+            self.worker_state.clone(),
             self.running.clone(),
             StreamTaskStatus::Finished
         ).await;
@@ -477,7 +480,7 @@ impl Worker {
 
         // Wait for tasks to be closed
         Self::wait_for_all_tasks_status(
-            self.state.clone(),
+            self.worker_state.clone(),
             self.running.clone(),
             StreamTaskStatus::Closed
         ).await;

@@ -12,9 +12,11 @@ use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOpe
 use crate::runtime::operators::window::window_operator::{WindowConfig, WindowOperator};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
+use crate::storage::storage::Storage;
 use anyhow::Result;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use std::fmt;
+use std::sync::Arc;
 use crate::runtime::functions::{
     function_trait::FunctionTrait,
     map::MapFunction,
@@ -188,12 +190,13 @@ impl OperatorTrait for Operator {
 pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
     pub function: Option<Box<dyn FunctionTrait>>,
-    pub thread_pool: ThreadPool,
-    pub operator_config: OperatorConfig
+    pub thread_pool: ThreadPool, // TODO is this needed?
+    pub operator_config: OperatorConfig,
+    pub storage: Arc<Storage>,
 }
 
 impl OperatorBase {
-    pub fn new(operator_config: OperatorConfig) -> Self {
+    pub fn new(operator_config: OperatorConfig, storage: Arc<Storage>) -> Self {
         // TODO config thread pool size
         let thread_pool = ThreadPoolBuilder::new()
             .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
@@ -203,12 +206,12 @@ impl OperatorBase {
             runtime_context: None,
             function: None,
             thread_pool,
-            operator_config
+            operator_config,
+            storage,
         }
     }
     
-    pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig) -> Self {
-        
+    pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig, storage: Arc<Storage>) -> Self {
         // TODO config thread pool size
         let thread_pool = ThreadPoolBuilder::new()
             .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
@@ -219,7 +222,8 @@ impl OperatorBase {
             runtime_context: None,
             function: Some(Box::new(function)),
             thread_pool,
-            operator_config
+            operator_config,
+            storage,
         }
     }
     
@@ -258,17 +262,20 @@ impl OperatorTrait for OperatorBase {
     }
 }
 
-pub fn create_operator_from_config(operator_config: OperatorConfig) -> Operator {
+pub fn create_operator(
+    operator_config: OperatorConfig,
+    storage: Arc<Storage>,
+) -> Operator {
     let operator = match operator_config {
-        OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config)),
-        OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config)),
-        OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config)),
-        OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config)),
-        OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
-        OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config)),
-        OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
-        OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config)),
-        OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config)),
+        OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config, storage)),
+        OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config, storage)),
+        OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config, storage)),
+        OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config, storage)),
+        OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config, storage)),
+        OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config, storage)),
+        OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config, storage)),
+        OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config, storage)),
+        OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config, storage)),
     };
     operator
 }

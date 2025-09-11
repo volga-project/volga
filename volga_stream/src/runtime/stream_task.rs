@@ -1,6 +1,6 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{create_operator_from_config, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
-}, transport::transport_client::TransportClientConfig};
+    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{create_operator, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
+}, storage::storage::Storage, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
@@ -109,6 +109,7 @@ pub struct StreamTask {
     // Watermark tracking
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>, // upstream_vertex_id -> watermark_value
     current_watermark: Arc<AtomicU64>,
+    storage: Arc<Storage>,
 }
 
 impl StreamTask {
@@ -118,6 +119,7 @@ impl StreamTask {
         transport_client_config: TransportClientConfig,
         runtime_context: RuntimeContext,
         execution_graph: ExecutionGraph,
+        storage: Arc<Storage>,
     ) -> Self {
         Self {
             vertex_id: vertex_id.clone(),
@@ -132,6 +134,7 @@ impl StreamTask {
             close_signal_sender: None,
             upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
             current_watermark: Arc::new(AtomicU64::new(0)),
+            storage,
         }
     }
 
@@ -227,6 +230,7 @@ impl StreamTask {
         let metrics = self.metrics.clone();
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
+        let storage = self.storage.clone();
         
         let upstream_vertices: Vec<String> = execution_graph.get_edges_for_vertex(&vertex_id)
             .map(|(input_edges, _)| input_edges.iter().map(|e| e.source_vertex_id.clone()).collect())
@@ -242,7 +246,7 @@ impl StreamTask {
         
         // Main stream task lifecycle loop
         let run_loop_handle = tokio::spawn(async move {
-            let mut operator = create_operator_from_config(operator_config);
+            let mut operator = create_operator(operator_config, storage.clone());
             
             let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
             
