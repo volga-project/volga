@@ -57,7 +57,7 @@ impl LocalWindowsState {
         self.data = arrow::compute::concat_batches(&self.data.schema(), [&self.data, &batch])
             .expect("Should be able to concat batches");
         
-        let mut all_results = Vec::new();
+        let mut all_results: Vec<Vec<ScalarValue>> = Vec::new();
         
         for i in 0..self.states.len() {
             let to_update: Vec<Arc<dyn Array>> = self.states[i].expr.evaluate_args(batch)

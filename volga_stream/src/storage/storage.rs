@@ -70,7 +70,6 @@ impl Storage {
             lock_pool_size,
             batch_store: Arc::new(DashMap::new()),
             batch_id_to_key: Arc::new(DashMap::new()),
-            // partitioned_batch_ids: Arc::new(DashMap::new()),
             time_granularity,
             max_batch_size,
         }
@@ -89,17 +88,15 @@ impl Storage {
         self.global_lock.write().await
     }
 
-    pub async fn append_records(&self, batch: RecordBatch, partition_key: &Key, ts_column_index: usize) -> Vec<BatchId> {
+    pub async fn append_records(&self, batch: RecordBatch, partition_key: &Key, ts_column_index: usize) -> Vec<(BatchId, RecordBatch)> {
         // Partition batch by time granularity and get batch ids and keys
         let time_partitioned_batches = Self::time_partition_batch(&batch, &self.batch_id_to_key, &partition_key, ts_column_index, self.time_granularity, self.max_batch_size);
         
-        let mut batch_ids = Vec::new();
-        for (batch_id, batch_key, sub_batch) in time_partitioned_batches {
-            self.store_batch(batch_key.clone(), sub_batch, partition_key.clone()).await;
-            batch_ids.push(batch_id);
+        for (_, batch_key, sub_batch) in &time_partitioned_batches {
+            self.store_batch(batch_key.clone(), sub_batch.clone(), partition_key.clone()).await;
         }
         
-        batch_ids
+        time_partitioned_batches.into_iter().map(|(batch_id, _, sub_batch)| (batch_id, sub_batch)).collect()
     }
 
     pub fn time_partition_batch(
@@ -118,7 +115,7 @@ impl Storage {
         let mut time_groups: HashMap<String, Vec<usize>> = HashMap::new();
         
         for row_idx in 0..batch.num_rows() {
-            let timestamp = Self::extract_timestamp(batch.column(ts_column_index), row_idx);
+            let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
             let time_partition = Self::timestamp_to_time_partition(timestamp, time_granularity);
             
             time_groups.entry(time_partition)
@@ -217,7 +214,7 @@ impl Storage {
         let mut max_ts = 0;
         
         for row_idx in 0..batch.num_rows() {
-            let ts = Self::extract_timestamp(timestamp_column, row_idx);
+            let ts = extract_timestamp(timestamp_column, row_idx);
             min_ts = min_ts.min(ts);
             max_ts = max_ts.max(ts);
         }
@@ -247,14 +244,6 @@ impl Storage {
         }
     }
 
-    pub fn extract_timestamp(array: &dyn Array, index: usize) -> u64 {
-        let scalar_value = ScalarValue::try_from_array(array, index)
-            .expect("Should be able to extract scalar timestamp value from array");
-        
-        u64::try_from(scalar_value)
-            .expect("Should be able to convert scalar timestamp value to u64")
-    }
-
     // Store a batch with per-partition locking
     async fn store_batch(&self, batch_key: BatchKey, batch: RecordBatch, partition_key: Key) {
         // Acquire global read lock (allows concurrent operations unless global exclusive is held)
@@ -272,9 +261,9 @@ impl Storage {
     }
 
 
-    // Get multiple batches from in-memory storage
+    // Get multiple batches from storage
     // TODO should this be an iterator?
-    async fn get_batches(&self, batch_ids: Vec<BatchId>, partition_key: &Key) -> HashMap<BatchId, RecordBatch> {
+    pub async fn load_batches(&self, batch_ids: Vec<BatchId>, partition_key: &Key) -> HashMap<BatchId, RecordBatch> {
         // Acquire global read lock
         let _global_guard = self.global_lock.read().await;
         
@@ -295,65 +284,65 @@ impl Storage {
     }
 
     // TODO should this be an iterator?
-    pub async fn load_events(&self, indices_list: Vec<Vec<(BatchId, RowIdx)>>, partition_key: &Key) -> Vec<RecordBatch> {
-        // Pre-load all required batches from all indices lists
-        let mut all_batch_ids = std::collections::HashSet::new();
-        for indices in &indices_list {
-            for (batch_id, _) in indices {
-                all_batch_ids.insert(batch_id.clone());
-            }
-        }
+    // pub async fn load_events(&self, indices_list: Vec<Vec<(BatchId, RowIdx)>>, partition_key: &Key) -> Vec<RecordBatch> {
+    //     // Pre-load all required batches from all indices lists
+    //     let mut all_batch_ids = std::collections::HashSet::new();
+    //     for indices in &indices_list {
+    //         for (batch_id, _) in indices {
+    //             all_batch_ids.insert(batch_id.clone());
+    //         }
+    //     }
         
-        let batch_ids: Vec<BatchId> = all_batch_ids.into_iter().collect();
-        let batches = self.get_batches(batch_ids, partition_key).await;
+    //     let batch_ids: Vec<BatchId> = all_batch_ids.into_iter().collect();
+    //     let batches = self.get_batches(batch_ids, partition_key).await;
         
-        let mut result_batches = Vec::new();
+    //     let mut result_batches = Vec::new();
         
-        for indices in indices_list {
+    //     for indices in indices_list {
             
-            // Group indices by batch_id to minimize batch lookups
-            let mut batch_indices: HashMap<BatchId, Vec<RowIdx>> = HashMap::new();
-            for (batch_id, row_idx) in indices {
-                batch_indices.entry(batch_id.clone())
-                    .or_insert_with(Vec::new)
-                    .push(row_idx);
-            }
+    //         // Group indices by batch_id to minimize batch lookups
+    //         let mut batch_indices: HashMap<BatchId, Vec<RowIdx>> = HashMap::new();
+    //         for (batch_id, row_idx) in indices {
+    //             batch_indices.entry(batch_id.clone())
+    //                 .or_insert_with(Vec::new)
+    //                 .push(row_idx);
+    //         }
             
-            // Collect all rows from different batches using take_record_batch
-            let mut taken_batches = Vec::new();
+    //         // Collect all rows from different batches using take_record_batch
+    //         let mut taken_batches = Vec::new();
             
-            for (batch_id, row_indices) in batch_indices {
-                let batch = batches.get(&batch_id)
-                    .expect("Batch should exist in pre-loaded batches");
+    //         for (batch_id, row_indices) in batch_indices {
+    //             let batch = batches.get(&batch_id)
+    //                 .expect("Batch should exist in pre-loaded batches");
                 
-                // Convert row indices to Arrow UInt64Array for take operation
-                let indices_array = UInt64Array::from(
-                    row_indices.into_iter().map(|idx| idx as u64).collect::<Vec<_>>()
-                );
+    //             // Convert row indices to Arrow UInt64Array for take operation
+    //             let indices_array = UInt64Array::from(
+    //                 row_indices.into_iter().map(|idx| idx as u64).collect::<Vec<_>>()
+    //             );
                 
-                // Use Arrow's take_record_batch to extract rows
-                let taken_batch = take_record_batch(batch, &indices_array)
-                    .expect("Take record batch operation should succeed");
+    //             // Use Arrow's take_record_batch to extract rows
+    //             let taken_batch = take_record_batch(batch, &indices_array)
+    //                 .expect("Take record batch operation should succeed");
                 
-                taken_batches.push(taken_batch);
-            }
+    //             taken_batches.push(taken_batch);
+    //         }
             
-            // Concatenate all taken batches if there are multiple
-            let result_batch = if taken_batches.len() == 1 {
-                taken_batches.into_iter().next().unwrap()
-            } else if taken_batches.len() > 1 {
-                let schema = taken_batches[0].schema();
-                arrow::compute::concat_batches(&schema, &taken_batches)
-                    .expect("Concatenation should succeed")
-            } else {
-                RecordBatch::new_empty(std::sync::Arc::new(arrow::datatypes::Schema::empty()))
-            };
+    //         // Concatenate all taken batches if there are multiple
+    //         let result_batch = if taken_batches.len() == 1 {
+    //             taken_batches.into_iter().next().unwrap()
+    //         } else if taken_batches.len() > 1 {
+    //             let schema = taken_batches[0].schema();
+    //             arrow::compute::concat_batches(&schema, &taken_batches)
+    //                 .expect("Concatenation should succeed")
+    //         } else {
+    //             RecordBatch::new_empty(std::sync::Arc::new(arrow::datatypes::Schema::empty()))
+    //         };
             
-            result_batches.push(result_batch);
-        }
+    //         result_batches.push(result_batch);
+    //     }
         
-        result_batches
-    }
+    //     result_batches
+    // }
 
     // Get storage statistics with global exclusive lock
     pub async fn get_stats(&self) -> StorageStats {
@@ -388,4 +377,12 @@ impl Storage {
             memory_usage_bytes,
         }
     }
+}
+
+pub fn extract_timestamp(array: &dyn Array, index: usize) -> u64 {
+    let scalar_value = ScalarValue::try_from_array(array, index)
+        .expect("Should be able to extract scalar timestamp value from array");
+    
+    u64::try_from(scalar_value)
+        .expect("Should be able to convert scalar timestamp value to u64")
 }
