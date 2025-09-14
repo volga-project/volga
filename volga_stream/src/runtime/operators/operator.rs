@@ -190,38 +190,36 @@ impl OperatorTrait for Operator {
 pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
     pub function: Option<Box<dyn FunctionTrait>>,
-    pub thread_pool: ThreadPool, // TODO is this needed?
+    // pub thread_pool: ThreadPool, // TODO is this needed?
     pub operator_config: OperatorConfig,
     pub storage: Arc<Storage>,
 }
 
 impl OperatorBase {
     pub fn new(operator_config: OperatorConfig, storage: Arc<Storage>) -> Self {
-        // TODO config thread pool size
-        let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
-            .build()
-            .expect("Failed to create thread pool");
+        // let thread_pool = ThreadPoolBuilder::new()
+        //     .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+        //     .build()
+        //     .expect("Failed to create thread pool");
         Self {
             runtime_context: None,
             function: None,
-            thread_pool,
+            // thread_pool,
             operator_config,
             storage,
         }
     }
     
     pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig, storage: Arc<Storage>) -> Self {
-        // TODO config thread pool size
-        let thread_pool = ThreadPoolBuilder::new()
-            .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
-            .build()
-            .expect("Failed to create thread pool");
+        // let thread_pool = ThreadPoolBuilder::new()
+        //     .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+        //     .build()
+        //     .expect("Failed to create thread pool");
         
         Self {
             runtime_context: None,
             function: Some(Box::new(function)),
-            thread_pool,
+            // thread_pool,
             operator_config,
             storage,
         }

@@ -33,12 +33,14 @@ impl OperatorTrait for MapOperator {
         let function = function.clone();
         let message = message.clone();
 
-        // TODO this slow perf - remove?
+        // TODO this using thread pool is slow perf - benchmark?
         // make sure we use fifo to maintain order
-        self.base.thread_pool.spawn_fifo_async(move || {
-            let processed = function.map(message).unwrap();
-            Some(vec![processed])
-        }).await
+        // self.base.thread_pool.spawn_fifo_async(move || {
+        //     let processed = function.map(message).unwrap();
+        //     Some(vec![processed])
+        // }).await
+        let processed = function.map(message).unwrap();
+        Some(vec![processed])
     }
 
     fn operator_type(&self) -> OperatorType {
