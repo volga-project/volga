@@ -12,7 +12,7 @@ use chrono::{Utc, TimeZone};
 
 use crate::common::Key;
 
-pub type Timestamp = u64;
+pub type Timestamp = i64;
 pub type BatchId = Uuid; // light-weight batch id used for in-memory index
 pub type BatchKey = String; // batch key including extra metadata for storage, maps 1:1 to batch id
 pub type RowIdx = usize; // row index within a batch
@@ -204,14 +204,14 @@ impl Storage {
         (uuid, batch_key)
     }
 
-    fn get_time_range_from_batch(batch: &RecordBatch, ts_column_index: usize) -> (u64, u64) {
+    fn get_time_range_from_batch(batch: &RecordBatch, ts_column_index: usize) -> (Timestamp, Timestamp) {
         if batch.num_rows() == 0 {
             panic!("Batch has no rows");
         }
 
         let timestamp_column = batch.column(ts_column_index);
-        let mut min_ts = u64::MAX;
-        let mut max_ts = 0;
+        let mut min_ts = i64::MAX;
+        let mut max_ts = i64::MIN;
         
         for row_idx in 0..batch.num_rows() {
             let ts = extract_timestamp(timestamp_column, row_idx);
@@ -222,9 +222,9 @@ impl Storage {
         (min_ts, max_ts)
     }
 
-    pub fn timestamp_to_time_partition(timestamp_ms: u64, time_granularity: TimeGranularity) -> String {
+    pub fn timestamp_to_time_partition(timestamp_ms: i64, time_granularity: TimeGranularity) -> String {
         // Convert milliseconds to UTC DateTime
-        let datetime = Utc.timestamp_millis_opt(timestamp_ms as i64)
+        let datetime = Utc.timestamp_millis_opt(timestamp_ms)
             .single()
             .expect("Timestamp should be valid");
         
@@ -379,10 +379,10 @@ impl Storage {
     }
 }
 
-pub fn extract_timestamp(array: &dyn Array, index: usize) -> u64 {
+pub fn extract_timestamp(array: &dyn Array, index: usize) -> i64 {
     let scalar_value = ScalarValue::try_from_array(array, index)
         .expect("Should be able to extract scalar timestamp value from array");
     
-    u64::try_from(scalar_value)
-        .expect("Should be able to convert scalar timestamp value to u64")
+    i64::try_from(scalar_value.clone())
+        .expect("Should be able to convert scalar timestamp value to i64")
 }

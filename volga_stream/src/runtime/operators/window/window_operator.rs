@@ -15,6 +15,7 @@ use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
+use uuid::Uuid;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
@@ -129,8 +130,8 @@ impl WindowOperator {
             Some(state) => state,
             None => WindowState {
                 accumulator_state: None,
-                start_idx: (0, BatchId::nil(), 0),
-                end_idx: (0, BatchId::nil(), 0),
+                start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
+                end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
             }
         };
     
@@ -138,7 +139,7 @@ impl WindowOperator {
         let window_frame = window_expr.get_window_frame();
         let time_entries = self.time_index.get_time_index(key).expect("Time entries should exist");
         
-        let updates_and_retracts = advance_window_position(window_frame, &mut window_state, time_entries);
+        let updates_and_retracts = advance_window_position(window_frame, &mut window_state, &time_entries);
 
         // TODO this should be an incremental iterator
         let batches = self.load_bacthes(key, &updates_and_retracts).await;
@@ -177,9 +178,9 @@ impl WindowOperator {
     ) -> HashMap<BatchId, RecordBatch> {
         let mut batches_to_load = std::collections::BTreeSet::new();
         for (update_idx, retracts) in updates_and_retracts {
-            batches_to_load.insert(update_idx.1.clone());
+            batches_to_load.insert(update_idx.batch_id.clone());
             for retract_idx in retracts {
-                batches_to_load.insert(retract_idx.1.clone());
+                batches_to_load.insert(retract_idx.batch_id.clone());
             }
         }
 
@@ -204,6 +205,8 @@ impl OperatorTrait for WindowOperator {
         // TODO based one execution mode (event vs watermark based) we may need to drop late events
 
         // TODO calculate pre-aggregates
+
+        // TODO pruning
         
         let batches = storage.append_records(message.record_batch().clone(), partition_key, self.ts_column_index).await;
         for (batch_id, batch) in batches {
@@ -294,10 +297,10 @@ fn run_accumulator(
     let mut results = Vec::new();
 
     for (update_idx, retract_idxs) in updates_and_retracts {
-        let update_batch = batches.get(&update_idx.1).expect("Update batch should exist");
+        let update_batch = batches.get(&update_idx.batch_id).expect("Update batch should exist");
         // Extract single row from update batch using the row index
         let update_row_batch = {
-            let indices = UInt64Array::from(vec![update_idx.2 as u64]);
+            let indices = UInt64Array::from(vec![update_idx.row_idx as u64]);
             arrow::compute::take_record_batch(update_batch, &indices)
                 .expect("Should be able to take row from batch")
         };
@@ -312,8 +315,8 @@ fn run_accumulator(
             // Extract retract rows in original order
             let mut retract_batches = Vec::new();
             for retract_idx in retract_idxs {
-                let batch = batches.get(&retract_idx.1).expect("Retract batch should exist");
-                let indices_array = UInt64Array::from(vec![retract_idx.2 as u64]);
+                let batch = batches.get(&retract_idx.batch_id).expect("Retract batch should exist");
+                let indices_array = UInt64Array::from(vec![retract_idx.row_idx as u64]);
                 let retract_batch = arrow::compute::take_record_batch(batch, &indices_array)
                     .expect("Should be able to take row from batch");
                 retract_batches.push(retract_batch);
