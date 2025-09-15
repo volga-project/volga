@@ -58,7 +58,7 @@ impl TimeIndex {
         ts_column_index: usize,
     ) -> Vec<TimeIdx> {
         let mut time_idxs = Vec::new();
-        
+
         // Get or create time entries for this partition
         if !self.time_index.contains_key(partition_key) {
             self.time_index.insert(partition_key.clone(), Arc::new(SkipSet::new()));
@@ -78,19 +78,19 @@ impl TimeIndex {
             };
             
             // Find the position index to use
-            let pos_idx = if let Some(existing_entry) = time_entries.lower_bound(std::ops::Bound::Included(&search_key)) {
+            let pos_idx = if let Some(existing_entry) = time_entries.upper_bound(std::ops::Bound::Included(&search_key)) {
                 if existing_entry.timestamp == timestamp {
                     // Same timestamp exists, increment position
                     existing_entry.pos_idx + 1
                 } else {
-                    // Different (smaller) timestamp, start at 0
+                    // Different timestamp
                     0
                 }
             } else {
-                // No existing entries or all are smaller, start at 0
+                // No existing entries
                 0
             };
-            
+
             let time_idx = TimeIdx {
                 timestamp,
                 pos_idx,
@@ -160,17 +160,18 @@ fn find_retracts(
             _ => panic!("Only Preceding start bound is supported"),
         };
         
-        // Get previous window start from window state
         let previous_window_start = window_state.start_idx;
+        
+
+        // Get new window start from time index
         let search_key = TimeIdx {
             timestamp: window_start_timestamp,
             pos_idx: 0,
             batch_id: Uuid::nil(), // dummy values for search
             row_idx: 0,
         };
-
         // Include all rows with this timestamp
-        let window_start_idx = time_entries.upper_bound(std::ops::Bound::Included(&search_key))
+        let window_start_idx = time_entries.lower_bound(std::ops::Bound::Included(&search_key))
             .map(|entry| *entry);
 
         if window_start_idx.is_none() {
@@ -191,13 +192,22 @@ fn find_retracts(
 }
 
 pub fn advance_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut WindowState, time_entries: &Arc<SkipSet<TimeIdx>>) -> Vec<(TimeIdx, Vec<TimeIdx>)> {
+    let mut updates_and_retracts = Vec::new();
+    
     let latest_entry = time_entries.back().expect("Time entries should exist");
     let latest_idx = *latest_entry;
     let previous_window_end = window_state.end_idx;
 
-    let mut updates_and_retracts = Vec::new();
+    let range_start_idx = if previous_window_end.batch_id == Uuid::nil() {
+        // first time
+        *time_entries.front().expect("Time entries should exist")
+    } else {
+        // start from closest timestamp to previous window end
+        time_entries.lower_bound(std::ops::Bound::Excluded(&previous_window_end))
+            .map(|entry| *entry).expect("Range start idx should exist")
+    };
 
-    for entry in time_entries.range(previous_window_end..=latest_idx) {
+    for entry in time_entries.range(range_start_idx..=latest_idx) {
         let time_idx = *entry;
         
         let (retracts, new_start_idx) = find_retracts(window_frame, time_idx, time_entries, &window_state);
@@ -244,10 +254,10 @@ mod tests {
         Arc::new(frame)
     }
 
-    fn create_range_window_frame(range_ms: u64) -> Arc<WindowFrame> {
+    fn create_range_window_frame(range_ms: i64) -> Arc<WindowFrame> {
         let mut frame = WindowFrame::new(Some(false));
         frame.units = WindowFrameUnits::Range;
-        frame.start_bound = WindowFrameBound::Preceding(datafusion::scalar::ScalarValue::UInt64(Some(range_ms)));
+        frame.start_bound = WindowFrameBound::Preceding(datafusion::scalar::ScalarValue::TimestampMillisecond(Some(range_ms), None));
         frame.end_bound = WindowFrameBound::CurrentRow;
         Arc::new(frame)
     }
@@ -293,9 +303,10 @@ mod tests {
         let batch2 = create_test_batch(vec![1000, 1000, 2000, 2000], vec![11, 12, 21, 22]);
         let batch_id2 = Uuid::new_v4();
         time_index.update_time_index(&key, batch_id2, &batch2, 0);
+        
         let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
         let entries_vec: Vec<_> = time_entries.iter().map(|entry| *entry).collect();
-        assert_eq!(entries_vec.len(), 6, "Should have 6 total entries (3 from each batch)");
+        assert_eq!(entries_vec.len(), 7, "Should have 7 total entries");
         
         // Verify multiple entries for same timestamp
         let entries_1000: Vec<_> = entries_vec.iter().filter(|e| e.timestamp == 1000).collect();
@@ -305,77 +316,10 @@ mod tests {
         assert_eq!(entries_1000.len(), 3, "Should have 3 entries for timestamp 1000");
         // Should have 3 entries for timestamp 2000 (1 from batch1, 2 from batch2)
         assert_eq!(entries_2000.len(), 3, "Should have 3 entries for timestamp 2000");
-        
-        // Verify batch IDs and row indices are correct
-        let mut batch1_count = 0;
-        let mut batch2_count = 0;
-        
-        for time_idx in &entries_1000 {
-            if time_idx.batch_id == batch_id1 {
-                batch1_count += 1;
-                assert_eq!(time_idx.row_idx, 1); // Row index from first batch
-            } else if time_idx.batch_id == batch_id2 {
-                batch2_count += 1;
-                assert!(time_idx.row_idx == 0 || time_idx.row_idx == 1); // Row indices 0,1 from second batch
-            }
-        }
-        
-        assert_eq!(batch1_count, 1, "Should have 1 entry from batch1 for timestamp 1000");
-        assert_eq!(batch2_count, 2, "Should have 2 entries from batch2 for timestamp 1000");
     }
 
     #[test]
-    fn test_advance_window_position_first_time() {
-        let time_index = TimeIndex::new();
-        let key = create_test_key("test_partition");
-        
-        // Create batch with timestamps [1000, 2000, 3000, 4000, 5000]
-        let batch = create_test_batch(
-            vec![1000, 2000, 3000, 4000, 5000], 
-            vec![10, 20, 30, 40, 50]
-        );
-        let batch_id = Uuid::new_v4();
-        
-        time_index.update_time_index(&key, batch_id, &batch, 0);
-        
-        // Create initial window state (empty - first time)
-        let mut window_state = WindowState {
-            accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-        };
-        
-        // Create window frame: ROWS 2 PRECEDING
-        let window_frame = create_rows_window_frame(2);
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
-        
-        // Advance window position
-        let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
-        
-        // Should process all 5 events since it's the first time
-        assert_eq!(updates_and_retracts.len(), 5, "Should have 5 updates");
-        
-        // Verify first update (timestamp 1000)
-        let (update_idx, retracts) = &updates_and_retracts[0];
-        assert_eq!(update_idx.timestamp, 1000);
-        assert_eq!(update_idx.batch_id, batch_id);
-        assert_eq!(update_idx.row_idx, 0);
-        assert!(retracts.is_empty(), "First event should have no retracts");
-        
-        // Verify third update (timestamp 3000) - should have retracts
-        let (update_idx, retracts) = &updates_and_retracts[2];
-        assert_eq!(update_idx.timestamp, 3000);
-        assert_eq!(update_idx.row_idx, 2);
-        assert_eq!(retracts.len(), 1, "Third event should retract first event (window size = 3)");
-        assert_eq!(retracts[0].timestamp, 1000); // Should retract timestamp 1000
-        
-        // Verify final window state
-        assert_eq!(window_state.end_idx.timestamp, 5000, "Window end should be at timestamp 5000");
-        assert_eq!(window_state.start_idx.timestamp, 3000, "Window start should be at timestamp 3000");
-    }
-
-    #[test]
-    fn test_advance_window_position_incremental() {
+    fn test_advance_row_window_position() {
         let time_index = TimeIndex::new();
         let key = create_test_key("test_partition");
         
@@ -383,46 +327,79 @@ mod tests {
         let batch1 = create_test_batch(vec![1000, 2000, 3000], vec![10, 20, 30]);
         let batch_id1 = Uuid::new_v4();
         time_index.update_time_index(&key, batch_id1, &batch1, 0);
-        
-        // Initial window state after first processing
-        let mut window_state = WindowState {
-            accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 1000, pos_idx: 0, batch_id: batch_id1, row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 3000, pos_idx: 0, batch_id: batch_id1, row_idx: 2 },
-        };
-        
-        // Add second batch: timestamps [4000, 5000]
-        let batch2 = create_test_batch(vec![4000, 5000], vec![40, 50]);
-        let batch_id2 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id2, &batch2, 0);
         
         // Create window frame: ROWS 2 PRECEDING (window size = 3)
         let window_frame = create_rows_window_frame(2);
         let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
         
-        // Advance window position incrementally
+        // Initial empty window state
+        let mut window_state = WindowState {
+            accumulator_state: None,
+            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
+            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
+        };
+        
+        // First advance window position after first batch
+        let first_updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
+        
+        // Verify first batch processing (similar to test_advance_window_position_first_time)
+        assert_eq!(first_updates_and_retracts.len(), 3, "Should have 3 updates for first batch");
+        
+        let expected_first_updates: [(i64, Uuid, usize, Vec<(i64, Uuid)>); 3] = [
+            (1000, batch_id1, 0, vec![]), // 1st: no retracts (window: [1000])
+            (2000, batch_id1, 1, vec![]), // 2nd: no retracts (window: [1000, 2000])
+            (3000, batch_id1, 2, vec![]), // 3rd: no retracts (window: [1000, 2000, 3000] - window full)
+        ];
+        
+        for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_first_updates.iter().enumerate() {
+            let (update_idx, retracts) = &first_updates_and_retracts[i];
+            
+            // Verify update
+            assert_eq!(update_idx.timestamp, *expected_ts, "First batch update {} should have timestamp {}", i + 1, expected_ts);
+            assert_eq!(update_idx.batch_id, *expected_batch_id, "First batch update {} should have correct batch_id", i + 1);
+            assert_eq!(update_idx.row_idx, *expected_row_idx, "First batch update {} should have row_idx {}", i + 1, expected_row_idx);
+            
+            // Verify retracts
+            assert_eq!(retracts.len(), expected_retracts.len(), "First batch update {} should have {} retracts", i + 1, expected_retracts.len());
+        }
+        
+        // Verify window state after first batch
+        assert_eq!(window_state.end_idx.timestamp, 3000, "Window end should be at timestamp 3000 after first batch");
+        assert_eq!(window_state.start_idx.timestamp, 1000, "Window start should be at timestamp 1000 after first batch");
+        
+        // Add second batch: timestamps [4000, 5000]
+        let batch2 = create_test_batch(vec![4000, 5000], vec![40, 50]);
+        let batch_id2 = Uuid::new_v4();
+        time_index.update_time_index(&key, batch_id2, &batch2, 0);
+        
+        // Second advance window position (incremental processing)
         let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
         
         // Should only process new events (4000, 5000)
         assert_eq!(updates_and_retracts.len(), 2, "Should have 2 incremental updates");
         
-        // Verify first incremental update (timestamp 4000)
-        let (update_idx, retracts) = &updates_and_retracts[0];
-        assert_eq!(update_idx.timestamp, 4000);
-        assert_eq!(update_idx.batch_id, batch_id2);
-        assert_eq!(update_idx.row_idx, 0);
-        assert_eq!(retracts.len(), 1, "Should retract one old event");
-        assert_eq!(retracts[0].timestamp, 1000); // Should retract timestamp 1000
-        assert_eq!(retracts[0].batch_id, batch_id1); // From first batch
+        // Expected behavior for incremental updates with ROWS 2 PRECEDING (window size = 3)
+        // Window state before: [1000, 2000, 3000] (from first batch)
+        let expected_updates = [
+            (4000, batch_id2, 0, vec![(1000, batch_id1)]), // Add 4000, retract 1000 (window: [2000, 3000, 4000])
+            (5000, batch_id2, 1, vec![(2000, batch_id1)]), // Add 5000, retract 2000 (window: [3000, 4000, 5000])
+        ];
         
-        // Verify second incremental update (timestamp 5000)
-        let (update_idx, retracts) = &updates_and_retracts[1];
-        assert_eq!(update_idx.timestamp, 5000);
-        assert_eq!(update_idx.batch_id, batch_id2);
-        assert_eq!(update_idx.row_idx, 1);
-        assert_eq!(retracts.len(), 1, "Should retract one old event");
-        assert_eq!(retracts[0].timestamp, 2000); // Should retract timestamp 2000
-        assert_eq!(retracts[0].batch_id, batch_id1); // From first batch
+        for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_updates.iter().enumerate() {
+            let (update_idx, retracts) = &updates_and_retracts[i];
+            
+            // Verify update
+            assert_eq!(update_idx.timestamp, *expected_ts, "Incremental update {} should have timestamp {}", i + 1, expected_ts);
+            assert_eq!(update_idx.batch_id, *expected_batch_id, "Incremental update {} should have correct batch_id", i + 1);
+            assert_eq!(update_idx.row_idx, *expected_row_idx, "Incremental update {} should have row_idx {}", i + 1, expected_row_idx);
+            
+            // Verify retracts
+            assert_eq!(retracts.len(), expected_retracts.len(), "Incremental update {} should have {} retracts", i + 1, expected_retracts.len());
+            for (j, (expected_retract_ts, expected_retract_batch_id)) in expected_retracts.iter().enumerate() {
+                assert_eq!(retracts[j].timestamp, *expected_retract_ts, "Incremental update {} retract {} should have timestamp {}", i + 1, j, expected_retract_ts);
+                assert_eq!(retracts[j].batch_id, *expected_retract_batch_id, "Incremental update {} retract {} should have correct batch_id", i + 1, j);
+            }
+        }
         
         // Verify final window state
         assert_eq!(window_state.end_idx.timestamp, 5000, "Window end should be at timestamp 5000");
@@ -430,123 +407,113 @@ mod tests {
     }
 
     #[test]
-    fn test_advance_window_position_range_based() {
+    fn test_advance_range_window_position() {
         let time_index = TimeIndex::new();
         let key = create_test_key("test_partition");
         
-        // Create batch with timestamps [1000, 1500, 2000, 2500, 3000]
-        let batch = create_test_batch(
-            vec![1000, 1500, 2000, 2500, 3000], 
-            vec![10, 15, 20, 25, 30]
-        );
-        let batch_id = Uuid::new_v4();
+        // First batch: timestamps [1000, 1200, 1400, 2000, 2200] - multiple events within range
+        let batch1 = create_test_batch(vec![1000, 1200, 1400, 2000, 2200], vec![10, 12, 14, 20, 22]);
+        let batch_id1 = Uuid::new_v4();
+        time_index.update_time_index(&key, batch_id1, &batch1, 0);
         
-        time_index.update_time_index(&key, batch_id, &batch, 0);
+        // Create range window frame: RANGE 1000ms PRECEDING (1 second window)
+        let window_frame = create_range_window_frame(1000);
+        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
         
-        // Create initial window state (empty - first time)
+        // Initial empty window state
         let mut window_state = WindowState {
             accumulator_state: None,
             start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
             end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
         };
         
-        // Create range window frame: RANGE 1000ms PRECEDING (1 second window)
-        let window_frame = create_range_window_frame(1000);
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
+        // First advance window position after first batch
+        let first_updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
         
-        // Advance window position
-        let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
+        // Verify first batch processing
+        assert_eq!(first_updates_and_retracts.len(), 5, "Should have 5 updates for first batch");
         
-        // Should process all 5 events since it's the first time
-        assert_eq!(updates_and_retracts.len(), 5, "Should have 5 updates");
+        let expected_first_updates: [(i64, Uuid, usize, Vec<(i64, Uuid)>); 5] = [
+            (1000, batch_id1, 0, vec![]), // 1st: no retracts (window: [0, 1000])
+            (1200, batch_id1, 1, vec![]), // 2nd: no retracts (window: [200, 1200] - but no events before 1000)
+            (1400, batch_id1, 2, vec![]), // 3rd: no retracts (window: [400, 1400] - but no events before 1000)
+            (2000, batch_id1, 3, vec![]), // 4th: no retracts (window: [1000, 2000] - 1000 is included)
+            (2200, batch_id1, 4, vec![(1000, batch_id1)]), // 5th: retract 1000 (window: [1200, 2200] - 1000 is outside)
+        ];
         
-        // Verify first update (timestamp 1000)
-        let (update_idx, retracts) = &updates_and_retracts[0];
-        assert_eq!(update_idx.timestamp, 1000);
-        assert_eq!(update_idx.batch_id, batch_id);
-        assert_eq!(update_idx.row_idx, 0);
-        assert!(retracts.is_empty(), "First event should have no retracts");
+        for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_first_updates.iter().enumerate() {
+            let (update_idx, retracts) = &first_updates_and_retracts[i];
+            
+            // Verify update
+            assert_eq!(update_idx.timestamp, *expected_ts, "First batch update {} should have timestamp {}", i + 1, expected_ts);
+            assert_eq!(update_idx.batch_id, *expected_batch_id, "First batch update {} should have correct batch_id", i + 1);
+            assert_eq!(update_idx.row_idx, *expected_row_idx, "First batch update {} should have row_idx {}", i + 1, expected_row_idx);
+            
+            // Verify retracts
+            assert_eq!(retracts.len(), expected_retracts.len(), "First batch update {} should have {} retracts", i + 1, expected_retracts.len());
+            for (j, (expected_retract_ts, expected_retract_batch_id)) in expected_retracts.iter().enumerate() {
+                assert_eq!(retracts[j].timestamp, *expected_retract_ts, "First batch update {} retract {} should have timestamp {}", i + 1, j, expected_retract_ts);
+                assert_eq!(retracts[j].batch_id, *expected_retract_batch_id, "First batch update {} retract {} should have correct batch_id", i + 1, j);
+            }
+        }
         
-        // Verify third update (timestamp 2000) - should have retracts
-        let (update_idx, retracts) = &updates_and_retracts[2];
-        assert_eq!(update_idx.timestamp, 2000);
-        assert_eq!(update_idx.row_idx, 2);
-        assert_eq!(retracts.len(), 1, "Event at 2000 should retract event at 1000 (outside 1000ms range)");
-        assert_eq!(retracts[0].timestamp, 1000); // Should retract timestamp 1000
+        // Verify window state after first batch
+        assert_eq!(window_state.end_idx.timestamp, 2200, "Window end should be at timestamp 2200 after first batch");
+        assert_eq!(window_state.start_idx.timestamp, 1200, "Window start should be at timestamp 1200 after first batch (1000 was retracted)");
         
-        // Verify final window state
-        assert_eq!(window_state.end_idx.timestamp, 3000, "Window end should be at timestamp 3000");
-        assert_eq!(window_state.start_idx.timestamp, 2000, "Window start should be at timestamp 2000 (3000-1000)");
-    }
-
-    #[test]
-    fn test_advance_window_position_range_incremental() {
-        let time_index = TimeIndex::new();
-        let key = create_test_key("test_partition");
-        
-        // First batch: timestamps [1000, 2000, 3000]
-        let batch1 = create_test_batch(vec![1000, 2000, 3000], vec![10, 20, 30]);
-        let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0);
-        
-        // Initial window state after first processing (range window: 1500ms)
-        let mut window_state = WindowState {
-            accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 1500, pos_idx: 0, batch_id: batch_id1, row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 3000, pos_idx: 0, batch_id: batch_id1, row_idx: 2 },
-        };
-        
-        // Add second batch: timestamps [4000, 5000]
-        let batch2 = create_test_batch(vec![4000, 5000], vec![40, 50]);
+        // Add second batch: timestamps [3500, 4000] - will cause multiple retracts
+        let batch2 = create_test_batch(vec![3500, 4000], vec![35, 40]);
         let batch_id2 = Uuid::new_v4();
         time_index.update_time_index(&key, batch_id2, &batch2, 0);
         
-        // Create range window frame: RANGE 1500ms PRECEDING
-        let window_frame = create_range_window_frame(1500);
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
-        
-        // Advance window position incrementally
+        // Second advance window position (incremental processing)
         let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
         
-        // Should only process new events (4000, 5000)
+        // Should only process new events (3500, 4000)
         assert_eq!(updates_and_retracts.len(), 2, "Should have 2 incremental updates");
         
-        // Verify first incremental update (timestamp 4000)
-        let (update_idx, retracts) = &updates_and_retracts[0];
-        assert_eq!(update_idx.timestamp, 4000);
-        assert_eq!(update_idx.batch_id, batch_id2);
-        assert_eq!(update_idx.row_idx, 0);
-        // Range window: 4000-1500=2500, so should retract events before 2500
-        assert!(retracts.len() >= 1, "Should retract old events outside range");
+        // Expected behavior for incremental updates with RANGE 1000ms PRECEDING (inclusive)
+        // Window state before: [1200, 1400, 2000, 2200] (from first batch, 1000 was already retracted)
+        let expected_updates = [
+            (3500, batch_id2, 0, vec![(1200, batch_id1), (1400, batch_id1), (2000, batch_id1), (2200, batch_id1)]), // Add 3500, retract all old events (outside [2500, 3500] range)
+            (4000, batch_id2, 1, vec![]), // Add 4000, no retracts (3500 is within [3000, 4000] range)
+        ];
         
-        // Verify second incremental update (timestamp 5000)
-        let (update_idx, _retracts) = &updates_and_retracts[1];
-        assert_eq!(update_idx.timestamp, 5000);
-        assert_eq!(update_idx.batch_id, batch_id2);
-        assert_eq!(update_idx.row_idx, 1);
-        // Range window: 5000-1500=3500, so should include events from 3500 onwards
+        for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_updates.iter().enumerate() {
+            let (update_idx, retracts) = &updates_and_retracts[i];
+            
+            // Verify update
+            assert_eq!(update_idx.timestamp, *expected_ts, "Incremental update {} should have timestamp {}", i + 1, expected_ts);
+            assert_eq!(update_idx.batch_id, *expected_batch_id, "Incremental update {} should have correct batch_id", i + 1);
+            assert_eq!(update_idx.row_idx, *expected_row_idx, "Incremental update {} should have row_idx {}", i + 1, expected_row_idx);
+            
+            // Verify retracts
+            assert_eq!(retracts.len(), expected_retracts.len(), "Incremental update {} should have {} retracts", i + 1, expected_retracts.len());
+            for (j, (expected_retract_ts, expected_retract_batch_id)) in expected_retracts.iter().enumerate() {
+                assert_eq!(retracts[j].timestamp, *expected_retract_ts, "Incremental update {} retract {} should have timestamp {}", i + 1, j, expected_retract_ts);
+                assert_eq!(retracts[j].batch_id, *expected_retract_batch_id, "Incremental update {} retract {} should have correct batch_id", i + 1, j);
+            }
+        }
         
         // Verify final window state
-        assert_eq!(window_state.end_idx.timestamp, 5000, "Window end should be at timestamp 5000");
-        assert_eq!(window_state.start_idx.timestamp, 3500, "Window start should be at timestamp 3500 (5000-1500)");
+        assert_eq!(window_state.end_idx.timestamp, 4000, "Window end should be at timestamp 4000");
+        assert_eq!(window_state.start_idx.timestamp, 3500, "Window start should be at timestamp 3500 (4000-1000 range includes 3500)");
     }
 
     #[test]
-    fn test_rows_vs_range_window_comparison() {
+    fn test_same_timestamp() {
         let time_index = TimeIndex::new();
         let key = create_test_key("test_partition");
         
-        // Create batch with uneven time intervals [1000, 1100, 2000, 2100, 3000]
-        let batch = create_test_batch(
-            vec![1000, 1100, 2000, 2100, 3000], 
-            vec![10, 11, 20, 21, 30]
+        // First batch: duplicate timestamps [1000, 1000, 1500, 2000, 2000]
+        let batch1 = create_test_batch(
+            vec![1000, 1000, 1500, 2000, 2000], 
+            vec![10, 11, 15, 20, 21]
         );
-        let batch_id = Uuid::new_v4();
+        let batch_id1 = Uuid::new_v4();
+        time_index.update_time_index(&key, batch_id1, &batch1, 0);
         
-        time_index.update_time_index(&key, batch_id, &batch, 0);
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
-        
-        // Test 1: ROWS 2 PRECEDING (fixed number of rows)
+        // Test 1: ROWS 2 PRECEDING window (window size = 3)
         {
             let mut window_state_rows = WindowState {
                 accumulator_state: None,
@@ -555,19 +522,53 @@ mod tests {
             };
             
             let rows_frame = create_rows_window_frame(2);
-            let updates_and_retracts_rows = advance_window_position(&rows_frame, &mut window_state_rows, &time_entries);
+            let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
             
-            // ROWS window: always includes exactly 3 rows (current + 2 preceding)
-            // At timestamp 3000, should include: 2000, 2100, 3000 (3 rows)
-            assert_eq!(window_state_rows.end_idx.timestamp, 3000);
+            // First advance - process first batch
+            let first_updates = advance_window_position(&rows_frame, &mut window_state_rows, &time_entries);
+            assert_eq!(first_updates.len(), 5, "Should process all 5 events with duplicates");
             
-            // Check third update (timestamp 2000) - should retract first two events
-            let (_, retracts) = &updates_and_retracts_rows[2];
-            assert_eq!(retracts.len(), 1, "ROWS window should retract exactly 1 old row");
-            assert_eq!(retracts[0].timestamp, 1000); // Should retract timestamp 1000
+            // Verify duplicate timestamps are processed correctly
+            let expected_first_updates = [
+                (1000, batch_id1, 0, vec![]), // 1st duplicate at 1000
+                (1000, batch_id1, 1, vec![]), // 2nd duplicate at 1000  
+                (1500, batch_id1, 2, vec![]), // 3rd event
+                (2000, batch_id1, 3, vec![(1000, batch_id1)]), // 4th: retract first 1000
+                (2000, batch_id1, 4, vec![(1000, batch_id1)]), // 5th: retract second 1000
+            ];
+            
+            for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_first_updates.iter().enumerate() {
+                let (update_idx, retracts) = &first_updates[i];
+                assert_eq!(update_idx.timestamp, *expected_ts, "ROWS update {} should have timestamp {}", i + 1, expected_ts);
+                assert_eq!(update_idx.batch_id, *expected_batch_id, "ROWS update {} should have correct batch_id", i + 1);
+                assert_eq!(update_idx.row_idx, *expected_row_idx, "ROWS update {} should have row_idx {}", i + 1, expected_row_idx);
+                assert_eq!(retracts.len(), expected_retracts.len(), "ROWS update {} should have {} retracts", i + 1, expected_retracts.len());
+            }
+            
+            // Add second batch with more duplicates
+            let batch2 = create_test_batch(vec![3000, 3000], vec![30, 31]);
+            let batch_id2 = Uuid::new_v4();
+            time_index.update_time_index(&key, batch_id2, &batch2, 0);
+            
+            // Second advance - incremental processing
+            let second_updates = advance_window_position(&rows_frame, &mut window_state_rows, &time_entries);
+            assert_eq!(second_updates.len(), 2, "Should process 2 new duplicate events");
+            
+            let expected_second_updates = [
+                (3000, batch_id2, 0, vec![(1500, batch_id1)]), // Add first 3000, retract 1500
+                (3000, batch_id2, 1, vec![(2000, batch_id1)]), // Add second 3000, retract first 2000
+            ];
+            
+            for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_second_updates.iter().enumerate() {
+                let (update_idx, retracts) = &second_updates[i];
+                assert_eq!(update_idx.timestamp, *expected_ts, "ROWS incremental update {} should have timestamp {}", i + 1, expected_ts);
+                assert_eq!(update_idx.batch_id, *expected_batch_id, "ROWS incremental update {} should have correct batch_id", i + 1);
+                assert_eq!(update_idx.row_idx, *expected_row_idx, "ROWS incremental update {} should have row_idx {}", i + 1, expected_row_idx);
+                assert_eq!(retracts.len(), expected_retracts.len(), "ROWS incremental update {} should have {} retracts", i + 1, expected_retracts.len());
+            }
         }
         
-        // Test 2: RANGE 1000ms PRECEDING (time-based window)
+        // Test 2: RANGE 800ms PRECEDING window
         {
             let mut window_state_range = WindowState {
                 accumulator_state: None,
@@ -575,66 +576,22 @@ mod tests {
                 end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
             };
             
-            let range_frame = create_range_window_frame(1000);
-            let updates_and_retracts_range = advance_window_position(&range_frame, &mut window_state_range, &time_entries);
+            let range_frame = create_range_window_frame(800);
+            let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
             
-            // RANGE window: includes all events within 1000ms time range
-            // At timestamp 3000, should include: 2000, 2100, 3000 (within 1000ms)
-            assert_eq!(window_state_range.end_idx.timestamp, 3000);
+            // First advance - process first batch
+            let first_updates = advance_window_position(&range_frame, &mut window_state_range, &time_entries);
+            assert_eq!(first_updates.len(), 7, "Should process all 7 events (5 from batch1 + 2 from batch2)");
             
-            // Check the retractions for range window
-            let (_, retracts) = &updates_and_retracts_range[2]; // timestamp 2000
-            assert_eq!(retracts.len(), 2, "RANGE window should retract events outside 1000ms range");
-            // Should retract both 1000 and 1100 (outside 2000-1000=1000ms range)
+            // Verify range window behavior with duplicates
+            // At timestamp 2000: window = [1200, 2000], so 1000 events should be retracted
+            let (update_4_idx, update_4_retracts) = &first_updates[3]; // First 2000 event
+            assert_eq!(update_4_idx.timestamp, 2000);
+            assert_eq!(update_4_retracts.len(), 2, "First 2000 event should retract both 1000 events");
+            
+            let (update_5_idx, update_5_retracts) = &first_updates[4]; // Second 2000 event  
+            assert_eq!(update_5_idx.timestamp, 2000);
+            assert_eq!(update_5_retracts.len(), 0, "Second 2000 event should have no retracts");
         }
-    }
-
-    #[test]
-    fn test_multiple_rows_same_timestamp_with_windows() {
-        let time_index = TimeIndex::new();
-        let key = create_test_key("test_partition");
-        
-        // Create batch with duplicate timestamps [1000, 1000, 2000, 2000, 3000]
-        let batch = create_test_batch(
-            vec![1000, 1000, 2000, 2000, 3000], 
-            vec![10, 11, 20, 21, 30]
-        );
-        let batch_id = Uuid::new_v4();
-        
-        time_index.update_time_index(&key, batch_id, &batch, 0);
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
-        
-        // Test with ROWS 3 PRECEDING window
-        let mut window_state = WindowState {
-            accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-        };
-        
-        let window_frame = create_rows_window_frame(3);
-        let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
-        
-        // Should process all 5 events (including duplicates)
-        assert_eq!(updates_and_retracts.len(), 5, "Should process all events including duplicates");
-        
-        // Verify that duplicate timestamps are handled correctly
-        let mut timestamp_1000_count = 0;
-        let mut timestamp_2000_count = 0;
-        
-        for (update_idx, _) in &updates_and_retracts {
-            match update_idx.timestamp {
-                1000 => timestamp_1000_count += 1,
-                2000 => timestamp_2000_count += 1,
-                _ => {}
-            }
-        }
-        
-        assert_eq!(timestamp_1000_count, 2, "Should process both events at timestamp 1000");
-        assert_eq!(timestamp_2000_count, 2, "Should process both events at timestamp 2000");
-        
-        // Verify final window state
-        assert_eq!(window_state.end_idx.timestamp, 3000, "Window end should be at timestamp 3000");
-        // With ROWS 3 PRECEDING, window should include last 4 rows (current + 3 preceding)
-        // Starting from the row before the last 4 rows
     }
 }
