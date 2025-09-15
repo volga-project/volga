@@ -152,8 +152,7 @@ fn find_retracts(
                     panic!("Can not retract UNBOUNDED PRECEDING");
                 }
                 
-                let delta_i64 = i64::try_from(delta.clone())
-                    .expect("Should be able to convert delta to i64");
+                let delta_i64 = convert_interval_to_milliseconds(delta);
                     
                 window_end_timestamp.saturating_sub(delta_i64)
             },
@@ -219,6 +218,31 @@ pub fn advance_window_position(window_frame: &Arc<WindowFrame>, window_state: &m
     }
     
     updates_and_retracts
+}
+
+/// Convert various interval types to milliseconds for timestamp arithmetic
+fn convert_interval_to_milliseconds(delta: &ScalarValue) -> i64 {
+    match delta {
+        ScalarValue::IntervalMonthDayNano(Some(interval)) => {
+            // Based on DataFusion's interval_mdn_to_duration_ns logic
+            if interval.months == 0 && interval.days == 0 {
+                // Convert nanoseconds to milliseconds
+                interval.nanoseconds / 1_000_000
+            } else {
+                panic!("Cannot convert interval with non-zero months or days to milliseconds");
+            }
+        },
+        ScalarValue::IntervalDayTime(Some(interval)) => {
+            // Based on DataFusion's interval_dt_to_duration_ms logic  
+            if interval.days == 0 {
+                interval.milliseconds as i64
+            } else {
+                panic!("Cannot convert interval with non-zero days to milliseconds");
+            }
+        },
+        _ => i64::try_from(delta.clone())
+            .expect("Should be able to convert delta to i64")
+    }
 }
 
 #[cfg(test)]
