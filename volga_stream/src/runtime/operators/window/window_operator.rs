@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -50,7 +50,7 @@ impl WindowConfig {
 #[derive(Debug)]
 pub struct WindowOperator {
     base: OperatorBase,
-    windows: HashMap<WindowId, Arc<dyn WindowExpr>>,
+    windows: BTreeMap<WindowId, Arc<dyn WindowExpr>>,
     windows_state: State,
     time_index: TimeIndex,
     ts_column_index: usize,
@@ -71,7 +71,7 @@ impl WindowOperator {
 
         let ts_column_index = window_config.window_exec.window_expr()[0].order_by()[0].expr.as_any().downcast_ref::<Column>().expect("Expected Column expression in ORDER BY").index();
 
-        let mut windows = HashMap::new();
+        let mut windows = BTreeMap::new();
         for (window_id, window_expr) in window_config.window_exec.window_expr().iter().enumerate() {
             windows.insert(window_id, window_expr.clone());
         }
@@ -408,33 +408,14 @@ fn concat_results(
     output_schema: &SchemaRef,
     input_schema: &SchemaRef
 ) -> RecordBatch {
-    if results.is_empty() {
-        return RecordBatch::new_empty(output_schema.clone());
-    }
-
-    // Each Vec<ScalarValue> represents results for one window across multiple time points
-    let num_windows = results.len();
-    let num_rows = if num_windows > 0 { results[0].len() } else { 0 };
-
-    if num_rows == 0 {
-        return RecordBatch::new_empty(output_schema.clone());
-    }
-
     let mut columns: Vec<ArrayRef> = Vec::new();
-    let schema_fields = output_schema.fields();
-    let input_column_count = input_schema.fields().len();
     
     // Create input columns (first N columns in output schema)
-    for col_idx in 0..input_column_count {
-        if input_values.len() != num_rows {
-            panic!("Input values length ({}) does not match number of rows ({})", input_values.len(), num_rows);
-        }
+    for col_idx in 0..input_schema.fields().len() {
+        
         // Extract values for this column from all rows
         let column_values: Vec<ScalarValue> = input_values.iter()
             .map(|row| {
-                if col_idx >= row.len() {
-                    panic!("Column index ({}) is out of bounds for row ({})", col_idx, row.len());
-                }
                 row[col_idx].clone()
             })
             .collect();
@@ -452,9 +433,9 @@ fn concat_results(
     }
 
     // Ensure we have the right number of columns for the schema
-    if columns.len() != schema_fields.len() {
+    if columns.len() != output_schema.fields().len() {
         panic!("Mismatch between number of result columns ({}) and schema fields ({})", 
-               columns.len(), schema_fields.len());
+               columns.len(), output_schema.fields().len());
     }
 
     RecordBatch::try_new(output_schema.clone(), columns)
@@ -465,7 +446,7 @@ fn concat_results(
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use arrow::array::{Float64Array, TimestampMillisecondArray, StringArray};
+    use arrow::array::{Float64Array, Int64Array, TimestampMillisecondArray, StringArray};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use datafusion::prelude::SessionContext;
@@ -545,10 +526,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_aggregates_single_window() {
+    async fn test_range_window_event_based_exec() {
         // Single window definition with alias and multiple aggregates
         let sql = "SELECT 
             timestamp,
+            value,
             partition_key,
             SUM(value) OVER w as sum_val,
             COUNT(value) OVER w as count_val,
@@ -582,15 +564,15 @@ mod tests {
         
         let result_batch1 = result_messages1[0].record_batch();
         assert_eq!(result_batch1.num_rows(), 1, "Should have 1 result row");
-        assert_eq!(result_batch1.num_columns(), 7, "Should have 7 columns (timestamp, partition_key, + 5 aggregates)");
+        assert_eq!(result_batch1.num_columns(), 8, "Should have 8 columns (timestamp, value, partition_key, + 5 aggregates)");
         
-        // Verify first row results: SUM=10.0, COUNT=1.0, AVG=10.0, MIN=10.0, MAX=10.0
-        let sum_column = result_batch1.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
-        let count_column = result_batch1.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
-        // Note: All aggregates return Float64
+        // Verify first row results: SUM=10.0, COUNT=1, AVG=10.0, MIN=10.0, MAX=10.0
+        // Columns: [0=timestamp, 1=value, 2=partition_key, 3=sum_val, 4=count_val, 5=avg_val, 6=min_val, 7=max_val]
+        let sum_column = result_batch1.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column = result_batch1.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
         
         assert_eq!(sum_column.value(0), 10.0, "SUM should be 10.0");
-        assert_eq!(count_column.value(0), 1.0, "COUNT should be 1.0");
+        assert_eq!(count_column.value(0), 1, "COUNT should be 1");
         
         // Batch 2: Multi-row batch within window
         let batch2 = create_test_batch(vec![1500, 2000], vec![30.0, 20.0], vec!["A", "A"]);
@@ -603,16 +585,16 @@ mod tests {
         let result_batch2 = result_messages2[0].record_batch();
         assert_eq!(result_batch2.num_rows(), 2, "Should have 2 result rows");
         
-        let sum_column2 = result_batch2.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
-        let count_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let sum_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column2 = result_batch2.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
         
-        // Row 1 (t=1500): includes t=1000,1500 -> SUM=40.0, COUNT=2.0
+        // Row 1 (t=1500): includes t=1000,1500 -> SUM=40.0, COUNT=2
         assert_eq!(sum_column2.value(0), 40.0, "SUM at t=1500 should be 40.0 (10.0+30.0)");
-        assert_eq!(count_column2.value(0), 2.0, "COUNT at t=1500 should be 2.0");
+        assert_eq!(count_column2.value(0), 2, "COUNT at t=1500 should be 2");
         
-        // Row 2 (t=2000): includes t=1000,1500,2000 -> SUM=60.0, COUNT=3.0
+        // Row 2 (t=2000): includes t=1000,1500,2000 -> SUM=60.0, COUNT=3  
         assert_eq!(sum_column2.value(1), 60.0, "SUM at t=2000 should be 60.0 (10.0+30.0+20.0)");
-        assert_eq!(count_column2.value(1), 3.0, "COUNT at t=2000 should be 3.0");
+        assert_eq!(count_column2.value(1), 3, "COUNT at t=2000 should be 3");
         
         // Batch 3: Partial retraction (t=3200 causes t=1000 to be excluded)
         let batch3 = create_test_batch(vec![3200], vec![5.0], vec!["A"]);
@@ -625,12 +607,12 @@ mod tests {
         let result_batch3 = result_messages3[0].record_batch();
         assert_eq!(result_batch3.num_rows(), 1, "Should have 1 result row");
         
-        let sum_column3 = result_batch3.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
-        let count_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column3 = result_batch3.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
         
-        // Window now includes t=1500,2000,3200 (t=1000 excluded) -> SUM=55.0, COUNT=3.0
+        // Window now includes t=1500,2000,3200 (t=1000 excluded) -> SUM=55.0, COUNT=3
         assert_eq!(sum_column3.value(0), 55.0, "SUM at t=3200 should be 55.0 (30.0+20.0+5.0)");
-        assert_eq!(count_column3.value(0), 3.0, "COUNT at t=3200 should be 3.0");
+        assert_eq!(count_column3.value(0), 3, "COUNT at t=3200 should be 3");
         
         // Test different partition
         let batch4 = create_test_batch(vec![1000, 2000], vec![100.0, 200.0], vec!["B", "B"]);
@@ -643,7 +625,7 @@ mod tests {
         let result_batch4 = result_messages4[0].record_batch();
         assert_eq!(result_batch4.num_rows(), 2, "Should have 2 result rows for partition B");
         
-        let sum_column4 = result_batch4.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let sum_column4 = result_batch4.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         
         // Partition B should have independent window state
         assert_eq!(sum_column4.value(0), 100.0, "SUM for partition B at t=1000 should be 100.0");
@@ -653,17 +635,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rows_based_window() {
+    async fn test_rows_window_event_based_exec() {
         // Test ROWS-based window function with alias
         let sql = "SELECT 
             timestamp,
+            value,
             partition_key,
             SUM(value) OVER w as sum_3_rows
         FROM test_table
         WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)";
         
         let window_exec = extract_window_exec_from_sql(sql).await;
-        let window_config = WindowConfig::new(window_exec);
+        let mut window_config = WindowConfig::new(window_exec);
+        window_config.execution_mode = ExecutionMode::EventBased;
+        window_config.parallelize = true;
+
         let storage = Arc::new(Storage::default());
         let operator_config = OperatorConfig::WindowConfig(window_config);
         
@@ -686,7 +672,7 @@ mod tests {
         let result_batch = result_messages[0].record_batch();
         assert_eq!(result_batch.num_rows(), 5, "Should have 5 result rows");
         
-        let sum_column = result_batch.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let sum_column = result_batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         
         // ROWS window calculations (always exactly 3 rows: 2 PRECEDING + CURRENT):
         // Row 1: window=[row1]           -> includes: 10.0                -> sum=10.0
@@ -705,10 +691,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_watermark_based_execution() {
+    async fn test_range_window_watermark_exec() {
         // Test watermark-based execution mode with alias
         let sql = "SELECT 
             timestamp,
+            value,
             partition_key,
             SUM(value) OVER w as sum_val
         FROM test_table
@@ -717,6 +704,7 @@ mod tests {
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowConfig::new(window_exec);
         window_config.execution_mode = ExecutionMode::WatermarkBased;
+        window_config.parallelize = true;
         
         let storage = Arc::new(Storage::default());
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -748,7 +736,7 @@ mod tests {
         let result_batch = watermark_messages[0].record_batch();
         assert_eq!(result_batch.num_rows(), 2, "Should have 2 result rows");
         
-        let sum_column = result_batch.column(2).as_any().downcast_ref::<Float64Array>().unwrap();
+        let sum_column = result_batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(sum_column.value(0), 10.0, "First SUM should be 10.0");
         assert_eq!(sum_column.value(1), 30.0, "Second SUM should be 30.0 (10.0+20.0)");
         
