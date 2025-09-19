@@ -9,7 +9,7 @@ use futures::future;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use tokio_rayon::AsyncThreadPool;
 
-use datafusion::logical_expr::Accumulator;
+use datafusion::logical_expr::{window_state, Accumulator};
 use datafusion::physical_expr::window::SlidingAggregateWindowExpr;
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
@@ -230,6 +230,10 @@ impl WindowOperator {
         
         concat_results(results, input_values, &self.output_schema, &self.input_schema)
     }
+
+    // async fn update_accum_with_late_events(window_state: &mut WindowState, sorted_late_tsx: Vec<TimeIdx>, batches: &HashMap<BatchId, RecordBatch>) {
+    //     let accum
+    // }
 }
 
 #[async_trait]

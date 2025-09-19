@@ -110,42 +110,41 @@ impl TimeIndex {
     }
 }
 
-fn find_retracts(
+fn get_window_entries(
     window_frame: &Arc<WindowFrame>,
-    new_window_end: TimeIdx,
-    time_entries: &SkipSet<TimeIdx>,
-    window_state: &WindowState,
-) -> (Vec<TimeIdx>, Option<TimeIdx>) {
+    window_end_idx: TimeIdx,
+    time_entries: &SkipSet<TimeIdx>
+) -> Vec<TimeIdx> {
+    let window_start_idx = get_window_start_idx(window_frame, window_end_idx, time_entries);
+    if window_start_idx.is_none() {
+        return time_entries.range(..=window_end_idx).map(|entry| *entry).collect();
+    } else {
+        return time_entries.range(window_start_idx.unwrap()..=window_end_idx).map(|entry| *entry).collect();
+    }
+}
 
+fn get_window_start_idx(
+    window_frame: &Arc<WindowFrame>,
+    window_end_idx: TimeIdx,
+    time_entries: &SkipSet<TimeIdx>,
+) -> Option<TimeIdx> {
+     // Handle ROWS
     if window_frame.units == WindowFrameUnits::Rows {
-        // Handle ROWS
         match window_frame.start_bound {
             WindowFrameBound::Preceding(ScalarValue::UInt64(Some(delta))) => {
                 // Jump backwards delta elements from new_window_end
-                let new_window_start_idx = time_entries.range(..=new_window_end)
+                let window_start_idx = time_entries.range(..=window_end_idx)
                     .rev()
                     .nth(delta as usize)
                     .map(|entry| *entry);
 
-                if new_window_start_idx.is_none() {
-                    // window does not have enough rows to retract
-                    return (Vec::new(), None);
-                }
-                
-                // Collect all TimeIdxs between previous window start and new_window_start for retraction
-                let new_start_idx = new_window_start_idx.unwrap();
-                let retract_idxs: Vec<TimeIdx> = time_entries
-                    .range(window_state.start_idx..new_start_idx)
-                    .map(|entry| *entry)
-                    .collect();
-
-                return (retract_idxs, Some(new_start_idx));
+                return window_start_idx;
             }
             _ => panic!("Only Preceding start bound is supported for ROWS WindowFrameUnits"),
         }
     } else if window_frame.units == WindowFrameUnits::Range {
         // Handle RANGE
-        let window_end_timestamp = new_window_end.timestamp;
+        let window_end_timestamp = window_end_idx.timestamp;
         let window_start_timestamp = match &window_frame.start_bound {
             WindowFrameBound::Preceding(delta) => {
                 if window_frame.start_bound.is_unbounded() || delta.is_null() {
@@ -159,9 +158,6 @@ fn find_retracts(
             _ => panic!("Only Preceding start bound is supported"),
         };
         
-        let previous_window_start = window_state.start_idx;
-        
-
         // Get new window start from time index
         let search_key = TimeIdx {
             timestamp: window_start_timestamp,
@@ -173,18 +169,47 @@ fn find_retracts(
         let window_start_idx = time_entries.lower_bound(std::ops::Bound::Included(&search_key))
             .map(|entry| *entry);
 
-        if window_start_idx.is_none() {
+        return window_start_idx;
+    } else {
+        panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
+    }
+}
+
+fn find_retracts(
+    window_frame: &Arc<WindowFrame>,
+    new_window_end: TimeIdx,
+    time_entries: &SkipSet<TimeIdx>,
+    window_state: &WindowState,
+) -> (Vec<TimeIdx>, Option<TimeIdx>) {
+
+    let new_window_start_idx = get_window_start_idx(window_frame, new_window_end, time_entries);
+
+    if window_frame.units == WindowFrameUnits::Rows {
+        // Handle ROWS
+        if new_window_start_idx.is_none() {
             // window does not have enough rows to retract
             return (Vec::new(), None);
-        }   
+        }
+        
+        // Collect all TimeIdxs between previous window start and new_window_start for retraction
+        let new_start_idx = new_window_start_idx.unwrap();
+        let retract_idxs: Vec<TimeIdx> = time_entries
+            .range(window_state.start_idx..new_start_idx)
+            .map(|entry| *entry)
+            .collect();
 
+        return (retract_idxs, Some(new_start_idx));
+    } else if window_frame.units == WindowFrameUnits::Range {
+        // Handle RANGE
+
+        let previous_window_start_idx = window_state.start_idx;
         let retract_idxs: Vec<TimeIdx> = time_entries
             // Exclude window_start_idx
-            .range(previous_window_start..window_start_idx.unwrap())
+            .range(previous_window_start_idx..new_window_start_idx.unwrap())
             .map(|entry| *entry)
             .collect();
         
-        return (retract_idxs, window_start_idx)
+        return (retract_idxs, new_window_start_idx)
     } else {
         panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
     }
