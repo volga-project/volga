@@ -7,16 +7,20 @@ use crate::runtime::operators::window::time_index::TimeIdx;
 
 pub type WindowId = usize;
 
+pub type AccumulatorState = Vec<ScalarValue>;
+
 #[derive(Debug, Clone)]
 pub struct WindowState {
-    pub accumulator_state: Option<Vec<ScalarValue>>,
+    pub accumulator_state: Option<AccumulatorState>,
     pub start_idx: TimeIdx,
     pub end_idx: TimeIdx,
 }
 
+pub type WindowsState = HashMap<WindowId, WindowState>;
+
 #[derive(Debug)]
 pub struct State {
-    window_states: DashMap<Key, HashMap<WindowId, WindowState>>,
+    window_states: DashMap<Key, WindowsState>,
 }
 
 impl State {
@@ -26,12 +30,12 @@ impl State {
         }
     }
 
-    pub async fn get_window_state(&self, key: &Key, window_id: WindowId) -> Option<WindowState> {
+    pub async fn get_windows_state(&self, key: &Key) -> Option<WindowsState> {
         self.window_states.get(key)
-            .and_then(|window_states| window_states.get(&window_id).cloned())
+            .map(|window_states| window_states.clone())
     }
 
-    pub async fn insert_window_state(&self, key: &Key, window_id: WindowId, window_state: WindowState) {
-        self.window_states.entry(key.clone()).or_insert(HashMap::new()).insert(window_id, window_state);
+    pub async fn insert_windows_state(&self, key: &Key, windows_state: WindowsState) {
+        self.window_states.insert(key.clone(), windows_state);
     }
 }

@@ -108,14 +108,18 @@ impl TimeIndex {
     pub fn get_time_index(&self, partition_key: &Key) -> Option<Arc<SkipSet<TimeIdx>>> {
         self.time_index.get(partition_key).map(|entry| entry.value().clone())
     }
+
+    pub fn insert_time_index(&self, partition_key: &Key, time_entries: Arc<SkipSet<TimeIdx>>) {
+        self.time_index.insert(partition_key.clone(), time_entries);
+    }
 }
 
-fn get_window_entries(
+pub fn get_window_entries(
     window_frame: &Arc<WindowFrame>,
     window_end_idx: TimeIdx,
-    time_entries: &SkipSet<TimeIdx>
+    time_entries: Arc<SkipSet<TimeIdx>>,
 ) -> Vec<TimeIdx> {
-    let window_start_idx = get_window_start_idx(window_frame, window_end_idx, time_entries);
+    let window_start_idx = get_window_start_idx(window_frame, window_end_idx, &time_entries);
     if window_start_idx.is_none() {
         return time_entries.range(..=window_end_idx).map(|entry| *entry).collect();
     } else {
