@@ -50,7 +50,7 @@ impl TimeIndex {
         }
     }
 
-    pub fn update_time_index(
+    pub async fn update_time_index(
         &self,
         partition_key: &Key,
         batch_id: BatchId,
@@ -58,13 +58,7 @@ impl TimeIndex {
         ts_column_index: usize,
     ) -> Vec<TimeIdx> {
         let mut time_idxs = Vec::new();
-
-        // Get or create time entries for this partition
-        if !self.time_index.contains_key(partition_key) {
-            self.time_index.insert(partition_key.clone(), Arc::new(SkipSet::new()));
-        }
-        
-        let time_entries = self.get_time_index(partition_key).expect("Time entries should exist");
+        let time_entries = self.get_or_create_time_index(partition_key).await;
         
         for row_idx in 0..batch.num_rows() {
             let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
@@ -105,11 +99,14 @@ impl TimeIndex {
         time_idxs
     }
 
-    pub fn get_time_index(&self, partition_key: &Key) -> Option<Arc<SkipSet<TimeIdx>>> {
-        self.time_index.get(partition_key).map(|entry| entry.value().clone())
+    pub async fn get_or_create_time_index(&self, partition_key: &Key) -> Arc<SkipSet<TimeIdx>> {
+        if !self.time_index.contains_key(partition_key) {
+            self.time_index.insert(partition_key.clone(), Arc::new(SkipSet::new()));
+        }
+        self.time_index.get(partition_key).expect("Time entries should exist").value().clone()
     }
 
-    pub fn insert_time_index(&self, partition_key: &Key, time_entries: Arc<SkipSet<TimeIdx>>) {
+    pub async fn insert_time_index(&self, partition_key: &Key, time_entries: Arc<SkipSet<TimeIdx>>) {
         self.time_index.insert(partition_key.clone(), time_entries);
     }
 }
@@ -327,17 +324,17 @@ mod tests {
         crate::common::Key::new(key_batch).expect("Failed to create key")
     }
 
-    #[test]
-    fn test_time_index_insertion() {
+    #[tokio::test]
+    async fn test_time_index_insertion() {
         let time_index = TimeIndex::new();
         let key = create_test_key("test_partition");
         
         // Test 1: Insert batch in random order [3000, 1000, 2000]
         let batch1 = create_test_batch(vec![3000, 1000, 2000], vec![30, 10, 20]);
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0);
+        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
         
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
+        let time_entries = time_index.get_or_create_time_index(&key).await;
         assert_eq!(time_entries.len(), 3, "Should have 3 timestamp entries");
         
         // Verify entries are sorted by timestamp
@@ -355,9 +352,9 @@ mod tests {
         // Test 2: Insert batch with same timestamps [1000, 1000, 2000, 2000]
         let batch2 = create_test_batch(vec![1000, 1000, 2000, 2000], vec![11, 12, 21, 22]);
         let batch_id2 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id2, &batch2, 0);
+        time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
         
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
+        let time_entries = time_index.get_or_create_time_index(&key).await;
         let entries_vec: Vec<_> = time_entries.iter().map(|entry| *entry).collect();
         assert_eq!(entries_vec.len(), 7, "Should have 7 total entries");
         
@@ -371,19 +368,19 @@ mod tests {
         assert_eq!(entries_2000.len(), 3, "Should have 3 entries for timestamp 2000");
     }
 
-    #[test]
-    fn test_advance_row_window_position() {
+    #[tokio::test]
+    async fn test_advance_row_window_position() {
         let time_index = TimeIndex::new();
         let key = create_test_key("test_partition");
         
         // First batch: timestamps [1000, 2000, 3000]
         let batch1 = create_test_batch(vec![1000, 2000, 3000], vec![10, 20, 30]);
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0);
+        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
         
         // Create window frame: ROWS 2 PRECEDING (window size = 3)
         let window_frame = create_rows_window_frame(2);
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
+        let time_entries = time_index.get_or_create_time_index(&key).await;
         
         // Initial empty window state
         let mut window_state = WindowState {
@@ -423,7 +420,7 @@ mod tests {
         // Add second batch: timestamps [4000, 5000]
         let batch2 = create_test_batch(vec![4000, 5000], vec![40, 50]);
         let batch_id2 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id2, &batch2, 0);
+        time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
         
         // Second advance window position (incremental processing)
         let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
@@ -459,19 +456,19 @@ mod tests {
         assert_eq!(window_state.start_idx.timestamp, 3000, "Window start should be at timestamp 3000");
     }
 
-    #[test]
-    fn test_advance_range_window_position() {
+    #[tokio::test]
+    async fn test_advance_range_window_position() {
         let time_index = TimeIndex::new();
         let key = create_test_key("test_partition");
         
         // First batch: timestamps [1000, 1200, 1400, 2000, 2200] - multiple events within range
         let batch1 = create_test_batch(vec![1000, 1200, 1400, 2000, 2200], vec![10, 12, 14, 20, 22]);
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0);
+        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
         
         // Create range window frame: RANGE 1000ms PRECEDING (1 second window)
         let window_frame = create_range_window_frame(1000);
-        let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
+        let time_entries = time_index.get_or_create_time_index(&key).await;
         
         // Initial empty window state
         let mut window_state = WindowState {
@@ -517,7 +514,7 @@ mod tests {
         // Add second batch: timestamps [3500, 4000] - will cause multiple retracts
         let batch2 = create_test_batch(vec![3500, 4000], vec![35, 40]);
         let batch_id2 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id2, &batch2, 0);
+        time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
         
         // Second advance window position (incremental processing)
         let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
@@ -553,8 +550,8 @@ mod tests {
         assert_eq!(window_state.start_idx.timestamp, 3500, "Window start should be at timestamp 3500 (4000-1000 range includes 3500)");
     }
 
-    #[test]
-    fn test_same_timestamp() {
+    #[tokio::test]
+    async fn test_same_timestamp() {
         let time_index = TimeIndex::new();
         let key = create_test_key("test_partition");
         
@@ -564,7 +561,7 @@ mod tests {
             vec![10, 11, 15, 20, 21]
         );
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0);
+        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
         
         // Test 1: ROWS 2 PRECEDING window (window size = 3)
         {
@@ -575,7 +572,7 @@ mod tests {
             };
             
             let rows_frame = create_rows_window_frame(2);
-            let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
+            let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
             let first_updates = advance_window_position(&rows_frame, &mut window_state_rows, &time_entries);
@@ -601,7 +598,7 @@ mod tests {
             // Add second batch with more duplicates
             let batch2 = create_test_batch(vec![3000, 3000], vec![30, 31]);
             let batch_id2 = Uuid::new_v4();
-            time_index.update_time_index(&key, batch_id2, &batch2, 0);
+            time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
             
             // Second advance - incremental processing
             let second_updates = advance_window_position(&rows_frame, &mut window_state_rows, &time_entries);
@@ -630,7 +627,7 @@ mod tests {
             };
             
             let range_frame = create_range_window_frame(800);
-            let time_entries = time_index.get_time_index(&key).expect("Time entries should exist");
+            let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
             let first_updates = advance_window_position(&range_frame, &mut window_state_range, &time_entries);

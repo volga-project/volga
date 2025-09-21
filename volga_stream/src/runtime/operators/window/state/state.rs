@@ -30,9 +30,26 @@ impl State {
         }
     }
 
-    pub async fn get_windows_state(&self, key: &Key) -> Option<WindowsState> {
-        self.window_states.get(key)
-            .map(|window_states| window_states.clone())
+    pub async fn get_or_create_windows_state(&self, key: &Key, window_ids: &[WindowId]) -> WindowsState {
+        self.window_states.get(key).map(|windows_state| windows_state.clone()).unwrap_or_else(|| {
+            window_ids.iter().map(|&window_id| {
+                (window_id, WindowState {
+                    accumulator_state: None,
+                    start_idx: TimeIdx { 
+                        batch_id: uuid::Uuid::new_v4(),
+                        timestamp: 0,
+                        pos_idx: 0,
+                        row_idx: 0,
+                    },
+                    end_idx: TimeIdx { 
+                        batch_id: uuid::Uuid::new_v4(),
+                        timestamp: 0,
+                        pos_idx: 0,
+                        row_idx: 0,
+                    },
+                })
+            }).collect()
+        })
     }
 
     pub async fn insert_windows_state(&self, key: &Key, windows_state: WindowsState) {

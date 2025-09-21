@@ -19,7 +19,7 @@ use datafusion::scalar::ScalarValue;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::state::state::{AccumulatorState, State, WindowId, WindowState};
+use crate::runtime::operators::window::state::state::{AccumulatorState, State, WindowId, WindowsState};
 use crate::runtime::operators::window::time_index::{advance_window_position, get_window_entries, TimeIdx, TimeIndex};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::storage::{BatchId, Storage};
@@ -54,7 +54,7 @@ pub struct WindowOperator {
     state: State,
     time_index: TimeIndex,
     ts_column_index: usize,
-    keys_to_process: HashSet<Key>,
+    buffered_keys: HashSet<Key>,
     execution_mode: ExecutionMode,
     parallelize: bool,
     thread_pool: Option<ThreadPool>,
@@ -94,7 +94,7 @@ impl WindowOperator {
             state: State::new(),
             time_index: TimeIndex::new(),
             ts_column_index,
-            keys_to_process: HashSet::new(),
+            buffered_keys: HashSet::new(),
             execution_mode: window_config.execution_mode,
             parallelize: window_config.parallelize,
             thread_pool,
@@ -103,13 +103,24 @@ impl WindowOperator {
         }
     }
 
-    async fn process_keys(&self, keys: &HashSet<Key>) -> RecordBatch {
-        let futures: Vec<_> = keys.iter()
-            .map(|key| self.advance_windows(key, None))
+    async fn process_key(&self, key: &Key, late_entries: Option<Vec<TimeIdx>>) -> RecordBatch {
+        let window_ids: Vec<_> = self.windows.keys().cloned().collect();
+        let windows_state = self.state.get_or_create_windows_state(key, &window_ids).await;
+        let time_entries = self.time_index.get_or_create_time_index(key).await;
+        let (result, updated_windows_state) = self.advance_windows(key, &windows_state, &time_entries, late_entries).await;
+        self.state.insert_windows_state(key, updated_windows_state).await;
+        result
+    }
+
+    async fn process_buffered(&self) -> RecordBatch {
+        let futures: Vec<_> = self.buffered_keys.iter()
+            .map(|key| async move {
+                self.process_key(key, None).await
+            })
             .collect();
         
         let results = future::join_all(futures).await;
-        
+
         if results.is_empty() {
             return RecordBatch::new_empty(self.output_schema.clone());
         }
@@ -118,48 +129,27 @@ impl WindowOperator {
             .expect("Should be able to concat result batches")
     }
 
-    async fn advance_windows(&self, key: &Key, late_entries: Option<Vec<TimeIdx>>) -> RecordBatch {
-        let window_ids: Vec<_> = self.windows.keys().cloned().collect();
-        
-        // Step 1: Load window states
-        let windows_state = self.state.get_windows_state(key).await.unwrap_or_else(|| {
-            window_ids.iter().map(|&window_id| {
-                (window_id, WindowState {
-                    accumulator_state: None,
-                    start_idx: TimeIdx { 
-                        batch_id: uuid::Uuid::new_v4(),
-                        timestamp: 0,
-                        pos_idx: 0,
-                        row_idx: 0,
-                    },
-                    end_idx: TimeIdx { 
-                        batch_id: uuid::Uuid::new_v4(),
-                        timestamp: 0,
-                        pos_idx: 0,
-                        row_idx: 0,
-                    },
-                })
-            }).collect()
-        });
-        
-        let time_entries = self.time_index.get_time_index(key).expect("Time entries should exist");
-
-        // Step 2: Process window positions 
+    async fn advance_windows(
+        &self, 
+        key: &Key, 
+        windows_state: &WindowsState,
+        time_entries: &Arc<SkipSet<TimeIdx>>,
+        late_entries: Option<Vec<TimeIdx>>
+    ) -> (RecordBatch, WindowsState) {
+        // Step 1: Process window positions 
         let mut window_data = Vec::new();
         
-        for (window_id, window_state) in &windows_state {
-            let window_expr = &self.windows[window_id];
+        for (window_id, window_expr) in &self.windows {
             let window_frame = window_expr.get_window_frame();
-            
+            let window_state = windows_state.get(window_id).expect("Window state should exist");
             let mut window_state_copy = window_state.clone();
             let updates_and_retracts = advance_window_position(window_frame, &mut window_state_copy, &time_entries);
             
             window_data.push((*window_id, window_state_copy, updates_and_retracts));
         }
         
-        // Step 3: Compose batches_to_load from all updates_and_retracts
-        // TODO these do not contain late entries, add them
-        let mut batches_to_load = std::collections::BTreeSet::new(); // btree to keep window order
+        // Step 2: Compose batches_to_load from all updates_and_retracts and late entries
+        let mut batches_to_load = std::collections::BTreeSet::new();
         for (_, _, updates_and_retracts) in window_data.iter() {
             for (update_idx, retract_idxs) in updates_and_retracts {
                 batches_to_load.insert(update_idx.batch_id);
@@ -168,27 +158,45 @@ impl WindowOperator {
                 }
             }
         }
-        
-        // Step 4: Get relevant data from storage
-        let batches = self.base.storage.load_batches(batches_to_load.into_iter().collect(), key).await;
-
-        // Step 4: Calculate late results if needed
-        let mut late_results = Vec::new();
         if let Some(ref late_entries_ref) = late_entries {
-            for (window_id, _) in &windows_state {
-                let window_expr = &self.windows[window_id];
-                let late_results_for_window = Self::produce_late_aggregates(
-                    &window_expr, 
-                    late_entries_ref,
-                    time_entries.clone(), 
-                    &batches, 
-                    self.thread_pool.as_ref().expect("ThreadPool should exist"), 
-                    self.parallelize
-                ).await;
-                assert_eq!(late_results_for_window.len(), late_entries_ref.len());
-                late_results.push(late_results_for_window);
+            for late_entry in late_entries_ref {
+                batches_to_load.insert(late_entry.batch_id);
             }
         }
+        
+        // Step 3: Get relevant data from storage
+        let batches = self.base.storage.load_batches(batches_to_load.into_iter().collect(), key).await;
+
+        // Step 4: Calculate late results if needed (parallel per window)
+        let late_results = if let Some(ref late_entries_ref) = late_entries {
+            let late_futures: Vec<_> = self.windows.iter()
+                .map(|(_, window_expr)| {
+                    let window_expr_clone = window_expr.clone();
+                    let late_entries_clone = late_entries_ref.clone();
+                    let time_entries_clone = time_entries.clone();
+                    let batches_clone = batches.clone();
+                    let thread_pool = self.thread_pool.as_ref().expect("ThreadPool should exist");
+                    let parallelize = self.parallelize;
+                    
+                    async move {
+                        let late_results_for_window = Self::produce_late_aggregates(
+                            &window_expr_clone, 
+                            &late_entries_clone,
+                            time_entries_clone, 
+                            &batches_clone, 
+                            thread_pool, 
+                            parallelize
+                        ).await;
+                        assert_eq!(late_results_for_window.len(), late_entries_clone.len());
+                        late_results_for_window
+                    }
+                })
+                .collect();
+            
+            future::join_all(late_futures).await
+        } else {
+            Vec::new()
+        };
 
         // Step 5: Concurrently run_accumulator for all windows
         let batches = Arc::new(batches);
@@ -254,7 +262,7 @@ impl WindowOperator {
         
         let accumulator_results = future::join_all(accumulator_futures).await;
         
-        // Update window states
+        // Step 6: Update window states
         let mut updated_windows_state = HashMap::new();
         for result in &accumulator_results {
             let (window_id, _, accumulator_state, window_state) = result;
@@ -262,9 +270,8 @@ impl WindowOperator {
             updated_window_state.accumulator_state = Some(accumulator_state.clone());
             updated_windows_state.insert(*window_id, updated_window_state);
         }
-        self.state.insert_windows_state(key, updated_windows_state).await;
         
-        // Step 6: Extract input column values from all update rows
+        // Step 7: Extract input column values from all update rows
         let mut update_idxs = if let Some(ref late_entries) = late_entries {
             // prepend late entries
             late_entries.iter().cloned().collect::<Vec<_>>()
@@ -294,9 +301,6 @@ impl WindowOperator {
             input_values.push(row_input_values);
         }
         
-        // let results: Vec<Vec<ScalarValue>> = accumulator_results.into_iter()
-        //     .map(|(_, results, _, _)| results)
-        //     .collect();
         let mut results = Vec::new();
         for i in 0..accumulator_results.len() {
             // prepend late results if needed
@@ -309,8 +313,8 @@ impl WindowOperator {
             results.push(results_for_window);
         }
 
-        // Step 7: Concat results and create a batch
-        concat_results(results, input_values, &self.output_schema, &self.input_schema)
+        // Step 8: Concat results and create a batch
+        (concat_results(results, input_values, &self.output_schema, &self.input_schema), updated_windows_state)
     }
 
     #[allow(dead_code)]
@@ -377,7 +381,9 @@ impl OperatorTrait for WindowOperator {
     async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         let storage = self.base.storage.clone();
         let partition_key = message.key().expect("Window Operator expects KeyedMessage");
-
+        let time_entries = self.time_index.get_or_create_time_index(partition_key).await;
+        let last_entry_before_update = time_entries.back();
+        
         // TODO based one execution mode (event vs watermark based) we may need to drop late events
 
         // TODO calculate pre-aggregates
@@ -385,19 +391,22 @@ impl OperatorTrait for WindowOperator {
         // TODO pruning
         
         let batches = storage.append_records(message.record_batch().clone(), partition_key, self.ts_column_index).await;
+        let mut inserted_idxs = Vec::new();
         for (batch_id, batch) in batches {
-            self.time_index.update_time_index(partition_key, batch_id, &batch, self.ts_column_index);
+            inserted_idxs.extend(self.time_index.update_time_index(partition_key, batch_id, &batch, self.ts_column_index).await);
         }
         
         if self.execution_mode == ExecutionMode::WatermarkBased {
             // buffer for processing on watermark
-            self.keys_to_process.insert(partition_key.clone());
+            self.buffered_keys.insert(partition_key.clone());
             None
         } else {
-            // immidiate processing for event based mode
-            let mut keys = HashSet::new();
-            keys.insert(partition_key.clone());
-            let result = self.process_keys(&keys).await;
+            let late_entries = if let Some(last_entry) = last_entry_before_update {
+                Some(inserted_idxs.into_iter().filter(|idx| idx < last_entry.value()).collect::<Vec<_>>())
+            } else {
+                None
+            };
+            let result = self.process_key(&partition_key, late_entries).await;
             // vertex_id will be set by stream task
             // TODO ingest timestamp?
             Some(vec![Message::new(None, result, None)])
@@ -408,8 +417,8 @@ impl OperatorTrait for WindowOperator {
         if self.execution_mode == ExecutionMode::EventBased {
             panic!("EventBased execution mode does not support watermark processing");
         }
-        let result = self.process_keys(&self.keys_to_process).await;
-        self.keys_to_process.clear();
+        let result = self.process_buffered().await;
+        self.buffered_keys.clear();
         // vertex_id will be set by stream task
         // TODO ingest timestamp?
         Some(vec![Message::new(None, result, None)])
@@ -871,6 +880,151 @@ mod tests {
         let sum_column = result_batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(sum_column.value(0), 10.0, "First SUM should be 10.0");
         assert_eq!(sum_column.value(1), 30.0, "Second SUM should be 30.0 (10.0+20.0)");
+        
+        window_operator.close().await.expect("Should be able to close operator");
+    }
+
+    #[tokio::test]
+    async fn test_late_entries_handling() {
+        // Test late entries handling with RANGE window
+        let sql = "SELECT 
+            timestamp,
+            value,
+            partition_key,
+            SUM(value) OVER w as sum_val,
+            COUNT(value) OVER w as count_val
+        FROM test_table
+        WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW)";
+        
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut window_config = WindowConfig::new(window_exec);
+        window_config.execution_mode = ExecutionMode::EventBased;
+        window_config.parallelize = true;
+        
+        let storage = Arc::new(Storage::default());
+        let operator_config = OperatorConfig::WindowConfig(window_config);
+        let runtime_context = create_test_runtime_context();
+        
+        let mut window_operator = WindowOperator::new(operator_config, storage.clone());
+        window_operator.open(&runtime_context).await.expect("Should be able to open operator");
+        
+        // Step 1: Process initial batch with timestamps [1000, 3000, 5000]
+        let batch1 = create_test_batch(vec![1000, 3000, 5000], vec![10.0, 30.0, 50.0], vec!["A", "A", "A"]);
+        let message1 = create_keyed_message(batch1, "A");
+        
+        let results1 = window_operator.process_message(message1).await;
+        assert!(results1.is_some(), "Should have results for initial batch");
+        
+        let result_messages1 = results1.unwrap();
+        let result_batch1 = result_messages1[0].record_batch();
+        assert_eq!(result_batch1.num_rows(), 3, "Should have 3 result rows");
+        
+        // Verify initial results
+        let sum_column1 = result_batch1.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column1 = result_batch1.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+        
+        // Expected: [10.0], [10.0+30.0=40.0], [30.0+50.0=80.0] (1000 is outside 2000ms range of 5000)
+        assert_eq!(sum_column1.value(0), 10.0, "First SUM should be 10.0");
+        assert_eq!(count_column1.value(0), 1, "First COUNT should be 1");
+        assert_eq!(sum_column1.value(1), 40.0, "Second SUM should be 40.0 (10.0+30.0)");
+        assert_eq!(count_column1.value(1), 2, "Second COUNT should be 2");
+        assert_eq!(sum_column1.value(2), 80.0, "Third SUM should be 80.0 (30.0+50.0, 1000 outside window)");
+        assert_eq!(count_column1.value(2), 2, "Third COUNT should be 2");
+        
+        // Step 2: Process late entry with timestamp 2000 (between 1000 and 3000)
+        // This should affect the windows that include timestamp 2000
+        let batch2 = create_test_batch(vec![2000], vec![20.0], vec!["A"]);
+        let message2 = create_keyed_message(batch2, "A");
+        
+        let results2 = window_operator.process_message(message2).await;
+        assert!(results2.is_some(), "Should have results for late entry");
+        
+        let result_messages2 = results2.unwrap();
+        let result_batch2 = result_messages2[0].record_batch();
+        // Should include results for the late entry and potentially updated results for affected windows
+        assert!(result_batch2.num_rows() >= 1, "Should have at least 1 result row for late entry");
+        
+        let sum_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column2 = result_batch2.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+        
+        // The late entry at t=2000 should create a window result
+        // Window at t=2000 should include [1000, 2000] -> SUM=30.0, COUNT=2
+        assert_eq!(sum_column2.value(0), 30.0, "Late entry SUM should be 30.0 (10.0+20.0)");
+        assert_eq!(count_column2.value(0), 2, "Late entry COUNT should be 2");
+        
+        // Step 3: Process another batch to verify the late entry is properly integrated
+        let batch3 = create_test_batch(vec![6000], vec![60.0], vec!["A"]);
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let results3 = window_operator.process_message(message3).await;
+        assert!(results3.is_some(), "Should have results for final batch");
+        
+        let result_messages3 = results3.unwrap();
+        let result_batch3 = result_messages3[0].record_batch();
+        let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column3 = result_batch3.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+        
+        // Window at t=6000 should include [4000, 6000] range
+        // Should include t=5000 (50.0) and t=6000 (60.0) -> SUM=110.0, COUNT=2
+        assert_eq!(sum_column3.value(0), 110.0, "Final SUM should be 110.0 (50.0+60.0)");
+        assert_eq!(count_column3.value(0), 2, "Final COUNT should be 2");
+        
+        window_operator.close().await.expect("Should be able to close operator");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_late_entries() {
+        // Test handling multiple late entries in a single batch
+        let sql = "SELECT 
+            timestamp,
+            value,
+            partition_key,
+            SUM(value) OVER w as sum_val
+        FROM test_table
+        WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)";
+        
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut window_config = WindowConfig::new(window_exec);
+        window_config.execution_mode = ExecutionMode::EventBased;
+        window_config.parallelize = false;
+        
+        let storage = Arc::new(Storage::default());
+        let operator_config = OperatorConfig::WindowConfig(window_config);
+        let runtime_context = create_test_runtime_context();
+        
+        let mut window_operator = WindowOperator::new(operator_config, storage.clone());
+        window_operator.open(&runtime_context).await.expect("Should be able to open operator");
+        
+        // Step 1: Process initial ordered batch [1000, 4000, 7000]
+        let batch1 = create_test_batch(vec![1000, 4000, 7000], vec![10.0, 40.0, 70.0], vec!["A", "A", "A"]);
+        let message1 = create_keyed_message(batch1, "A");
+        
+        let results1 = window_operator.process_message(message1).await;
+        assert!(results1.is_some(), "Should have results for initial batch");
+        
+        // Step 2: Process batch with multiple late entries [2000, 3000, 5000, 6000]
+        // These are all late relative to the last processed timestamp (7000)
+        let batch2 = create_test_batch(vec![2000, 3000, 5000, 6000], vec![20.0, 30.0, 50.0, 60.0], vec!["A", "A", "A", "A"]);
+        let message2 = create_keyed_message(batch2, "A");
+        
+        let results2 = window_operator.process_message(message2).await;
+        assert!(results2.is_some(), "Should have results for late entries batch");
+        
+        let result_messages2 = results2.unwrap();
+        let result_batch2 = result_messages2[0].record_batch();
+        assert_eq!(result_batch2.num_rows(), 4, "Should have 4 result rows for late entries");
+        
+        let sum_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // Verify late entries are processed in timestamp order:
+        // t=2000: window=[1000,2000] -> SUM=30.0 (10.0+20.0)
+        // t=3000: window=[1000,2000,3000] -> SUM=60.0 (10.0+20.0+30.0)
+        // t=5000: window=[3000,4000,5000] -> SUM=120.0 (30.0+40.0+50.0)  
+        // t=6000: window=[4000,5000,6000] -> SUM=150.0 (40.0+50.0+60.0)
+        assert_eq!(sum_column2.value(0), 30.0, "First late entry SUM should be 30.0");
+        assert_eq!(sum_column2.value(1), 60.0, "Second late entry SUM should be 60.0");
+        assert_eq!(sum_column2.value(2), 120.0, "Third late entry SUM should be 120.0");
+        assert_eq!(sum_column2.value(3), 150.0, "Fourth late entry SUM should be 150.0");
         
         window_operator.close().await.expect("Should be able to close operator");
     }
