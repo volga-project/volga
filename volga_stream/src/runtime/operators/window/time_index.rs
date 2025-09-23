@@ -219,9 +219,13 @@ fn find_retracts(
 pub fn advance_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut WindowState, time_entries: &Arc<SkipSet<TimeIdx>>) -> Vec<(TimeIdx, Vec<TimeIdx>)> {
     let mut updates_and_retracts = Vec::new();
     
-    let latest_entry = time_entries.back().expect("Time entries should exist");
-    let latest_idx = *latest_entry;
+    let latest_idx = *time_entries.back().expect("Time entries should exist");
     let previous_window_end = window_state.end_idx;
+
+    if previous_window_end == latest_idx {
+        // nothing changed
+        return updates_and_retracts;
+    }
 
     let range_start_idx = if previous_window_end.batch_id == Uuid::nil() {
         // first time
@@ -229,7 +233,7 @@ pub fn advance_window_position(window_frame: &Arc<WindowFrame>, window_state: &m
     } else {
         // start from closest timestamp to previous window end
         time_entries.lower_bound(std::ops::Bound::Excluded(&previous_window_end))
-            .map(|entry| *entry).expect("Range start idx should exist")
+            .map(|entry| *entry).expect(&format!("Range start idx should exist for {:?}, {:?}", previous_window_end, time_entries.iter().collect::<Vec<_>>()))
     };
 
     for entry in time_entries.range(range_start_idx..=latest_idx) {

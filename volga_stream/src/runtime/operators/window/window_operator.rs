@@ -136,12 +136,89 @@ impl WindowOperator {
         time_entries: &Arc<SkipSet<TimeIdx>>,
         late_entries: Option<Vec<TimeIdx>>
     ) -> (RecordBatch, WindowsState) {
-        // Step 1: Process window positions 
+        // Step 0: Update accumulator states for all windows with late entries if needed
+        let mut updated_windows_state = windows_state.clone();
+        if let Some(ref late_entries_ref) = late_entries {
+            // Create late_entries_per_window map for reuse
+            let late_entries_per_window: std::collections::BTreeMap<WindowId, Vec<TimeIdx>> = self.windows.iter()
+                .map(|(window_id, _)| {
+                    // Only process late entries for retractable windows
+                    if Self::is_window_retractable(*window_id) {
+                        let window_state = updated_windows_state.get(window_id).expect("Window state should exist");
+                        let window_start = window_state.start_idx;
+                        let window_end = window_state.end_idx;
+                        
+                        let late_entries_in_window: Vec<_> = late_entries_ref.iter()
+                            .filter(|entry| **entry >= window_start && **entry < window_end)
+                            .cloned()
+                            .collect();
+                        
+                        (*window_id, late_entries_in_window)
+                    } else {
+                        (*window_id, Vec::new())
+                    }
+                })
+                .collect();
+            
+            // Compose batches_to_load from late entries
+            let mut batches_to_load = std::collections::BTreeSet::new();
+            for late_entries_in_window in late_entries_per_window.values() {
+                for late_entry in late_entries_in_window {
+                    batches_to_load.insert(late_entry.batch_id);
+                }
+            }
+            
+            // Get relevant data from storage
+            let batches = self.base.storage.load_batches(batches_to_load.into_iter().collect(), key).await;
+            
+            let updated_accumulator_states_futs: Vec<_> = self.windows.iter()
+                .map(|(window_id, window_expr)| {
+                    let window_expr_clone = window_expr.clone();
+                    let batches_clone = batches.clone();
+                    let thread_pool = self.thread_pool.as_ref().clone();
+                    let parallelize = self.parallelize;
+                    let window_id_copy = *window_id;
+                    let window_state = updated_windows_state.get(window_id).expect("Window state should exist").clone();
+                    let late_entries_in_window = late_entries_per_window.get(window_id).cloned().unwrap_or_default();
+                    
+                    async move {
+                        // late_entries_in_window is already filtered by is_window_retractable
+                        if !late_entries_in_window.is_empty() {
+                            let updated_accumulator_state = Self::update_accumulator_state_with_late_entries(
+                                &window_expr_clone, 
+                                window_state.accumulator_state.expect("Accumulator state should exist"), 
+                                &late_entries_in_window, 
+                                &batches_clone, 
+                                thread_pool, 
+                                parallelize
+                            ).await;
+                            
+                            Some((window_id_copy, updated_accumulator_state))
+                        } else {
+                            None
+                        }
+                    }
+                })
+                .collect();
+            
+            let updated_accumulator_states = future::join_all(updated_accumulator_states_futs).await;
+            
+            // Update windows_state with late entry results
+            for result in updated_accumulator_states {
+                if let Some((window_id, updated_accumulator_state)) = result {
+                    if let Some(window_state) = updated_windows_state.get_mut(&window_id) {
+                        window_state.accumulator_state = Some(updated_accumulator_state);
+                    }
+                }
+            }
+        }
+
+        // Step 1: Advance window positions to latest timestamp
         let mut window_data = Vec::new();
         
         for (window_id, window_expr) in &self.windows {
             let window_frame = window_expr.get_window_frame();
-            let window_state = windows_state.get(window_id).expect("Window state should exist");
+            let window_state = updated_windows_state.get(window_id).expect("Window state should exist");
             let mut window_state_copy = window_state.clone();
             let updates_and_retracts = advance_window_position(window_frame, &mut window_state_copy, &time_entries);
             
@@ -150,17 +227,24 @@ impl WindowOperator {
         
         // Step 2: Compose batches_to_load from all updates_and_retracts and late entries
         let mut batches_to_load = std::collections::BTreeSet::new();
-        for (_, _, updates_and_retracts) in window_data.iter() {
+        for (window_id, _, updates_and_retracts) in window_data.iter() {
             for (update_idx, retract_idxs) in updates_and_retracts {
                 batches_to_load.insert(update_idx.batch_id);
                 for retract_idx in retract_idxs {
                     batches_to_load.insert(retract_idx.batch_id);
                 }
             }
-        }
-        if let Some(ref late_entries_ref) = late_entries {
-            for late_entry in late_entries_ref {
-                batches_to_load.insert(late_entry.batch_id);
+
+            // for late entries we also need to include all events falling into the window since we do full rebuild
+            if let Some(ref late_entries_ref) = late_entries {
+                let window_expr = self.windows[window_id].clone();
+                for late_entry in late_entries_ref {
+                    batches_to_load.insert(late_entry.batch_id);
+                    let window_entries = get_window_entries(window_expr.get_window_frame(), *late_entry, time_entries.clone());
+                    for window_entry in window_entries {
+                        batches_to_load.insert(window_entry.batch_id);
+                    }
+                }
             }
         }
         
@@ -175,7 +259,7 @@ impl WindowOperator {
                     let late_entries_clone = late_entries_ref.clone();
                     let time_entries_clone = time_entries.clone();
                     let batches_clone = batches.clone();
-                    let thread_pool = self.thread_pool.as_ref().expect("ThreadPool should exist");
+                    let thread_pool = self.thread_pool.as_ref().clone();
                     let parallelize = self.parallelize;
                     
                     async move {
@@ -207,36 +291,9 @@ impl WindowOperator {
                 let accumulator_state_clone = window_state.accumulator_state.clone();
                 let window_id_copy = *window_id;
                 let window_state_clone = window_state.clone();
-                let late_entries_in_window = if let Some(ref late_entries) = late_entries {
-                    let window_start = window_state_clone.start_idx;
-                    let window_end = window_state_clone.end_idx;
-                    
-                    Some(late_entries.iter()
-                        .filter(|entry| **entry >= window_start && **entry < window_end)
-                        .cloned()
-                        .collect::<Vec<_>>())
-                } else {
-                    None
-                };
-                
                 async move {
-                    // update accumulator state with late entries if needed
-                    let acummulator_state = if accumulator_state_clone.is_some() {
-                        if let Some(late_entries_in_window) = late_entries_in_window {
-                            Some(Self::update_accumulator_state_with_late_entries(
-                                &window_expr, 
-                                accumulator_state_clone.unwrap(), 
-                                &late_entries_in_window, 
-                                &batches_clone, 
-                                self.thread_pool.as_ref().expect("ThreadPool should exist"), 
-                                self.parallelize
-                            ).await)
-                        } else {
-                            accumulator_state_clone
-                        }
-                    } else {
-                        None
-                    };
+                    // Accumulator state is already updated in Step 0 if there were late entries
+                    let acummulator_state = accumulator_state_clone;
 
                     let (results, accumulator_state) = if self.parallelize {
                         run_accumulator_parallel(
@@ -328,13 +385,14 @@ impl WindowOperator {
         accumulator_state: AccumulatorState,
         late_entries_in_window: &Vec<TimeIdx>, 
         batches: &HashMap<BatchId, RecordBatch>,
-        thread_pool: &ThreadPool,
+        thread_pool: Option<&ThreadPool>,
         parallelize: bool
     ) -> AccumulatorState {
         // TODO is it ok not to sort late entries?
+        println!("Update accumulator state with late entries: {:?}, accumulator_state: {:?}", late_entries_in_window, accumulator_state);
         let updates_and_no_retracts = late_entries_in_window.iter().map(|entry| (*entry, Vec::new())).collect::<Vec<(TimeIdx, Vec<TimeIdx>)>>();
         let (_, updated_accumulator_state) = if parallelize {
-            run_accumulator_parallel(thread_pool, window_expr.clone(), updates_and_no_retracts, batches.clone(), Some(accumulator_state)).await
+            run_accumulator_parallel(thread_pool.expect("ThreadPool should exist"), window_expr.clone(), updates_and_no_retracts, batches.clone(), Some(accumulator_state)).await
         } else {
             run_accumulator(window_expr, &updates_and_no_retracts, batches, Some(accumulator_state))
         };
@@ -347,7 +405,7 @@ impl WindowOperator {
         late_entries: &Vec<TimeIdx>, 
         time_entries: Arc<SkipSet<TimeIdx>>,
         batches: &HashMap<BatchId, RecordBatch>,
-        thread_pool: &ThreadPool,
+        thread_pool: Option<&ThreadPool>,
         parallelize: bool
     ) -> Vec<ScalarValue> {
         let mut results = Vec::new();
@@ -355,8 +413,9 @@ impl WindowOperator {
         for late_entry in late_entries {
             let window_entries = get_window_entries(window_expr.get_window_frame(), *late_entry, time_entries.clone());
             let updates_and_no_retracts = window_entries.iter().map(|entry| (*entry, Vec::new())).collect::<Vec<(TimeIdx, Vec<TimeIdx>)>>();
+            println!("Late run accum for {:?}", late_entry);
             let (results_for_entry, _) = if parallelize {
-                run_accumulator_parallel(thread_pool, window_expr.clone(), updates_and_no_retracts, batches.clone(), None).await
+                run_accumulator_parallel(thread_pool.expect("ThreadPool should exist"), window_expr.clone(), updates_and_no_retracts, batches.clone(), None).await
             } else {
                 run_accumulator(window_expr, &updates_and_no_retracts, batches, None)
             };
@@ -383,7 +442,7 @@ impl OperatorTrait for WindowOperator {
         let partition_key = message.key().expect("Window Operator expects KeyedMessage");
         let time_entries = self.time_index.get_or_create_time_index(partition_key).await;
         let last_entry_before_update = time_entries.back();
-        
+
         // TODO based one execution mode (event vs watermark based) we may need to drop late events
 
         // TODO calculate pre-aggregates
@@ -468,6 +527,8 @@ fn run_accumulator(
     batches: &HashMap<BatchId, RecordBatch>,
     previous_accumulator_state: Option<AccumulatorState>
 ) -> (Vec<ScalarValue>, AccumulatorState) {
+    println!("Run accum: {:?}, previous_accumulator_state: {:?}", updates_and_retracts, previous_accumulator_state);
+
     let mut accumulator = create_sliding_accumulator(&window_expr);
     if let Some(accumulator_state) = previous_accumulator_state {
         let state_arrays: Vec<ArrayRef> = accumulator_state
@@ -482,7 +543,7 @@ fn run_accumulator(
     let mut results = Vec::new();
 
     for (update_idx, retract_idxs) in updates_and_retracts {
-        let update_batch = batches.get(&update_idx.batch_id).expect("Update batch should exist");
+        let update_batch = batches.get(&update_idx.batch_id).expect(&format!("Update batch should exist for {:?}", update_idx));
         // Extract single row from update batch using the row index
         let update_row_batch = {
             let indices = UInt64Array::from(vec![update_idx.row_idx as u64]);
@@ -986,7 +1047,7 @@ mod tests {
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowConfig::new(window_exec);
         window_config.execution_mode = ExecutionMode::EventBased;
-        window_config.parallelize = false;
+        window_config.parallelize = true;
         
         let storage = Arc::new(Storage::default());
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -1002,9 +1063,9 @@ mod tests {
         let results1 = window_operator.process_message(message1).await;
         assert!(results1.is_some(), "Should have results for initial batch");
         
-        // Step 2: Process batch with multiple late entries [2000, 3000, 5000, 6000]
-        // These are all late relative to the last processed timestamp (7000)
-        let batch2 = create_test_batch(vec![2000, 3000, 5000, 6000], vec![20.0, 30.0, 50.0, 60.0], vec!["A", "A", "A", "A"]);
+        // Step 2: Process batch with multiple late entries [2000, 3000, 5000, 6000] + one non-late entry [8000]
+        // Late entries are relative to the last processed timestamp (7000)
+        let batch2 = create_test_batch(vec![2000, 3000, 5000, 6000, 8000], vec![20.0, 30.0, 50.0, 60.0, 80.0], vec!["A", "A", "A", "A", "A"]);
         let message2 = create_keyed_message(batch2, "A");
         
         let results2 = window_operator.process_message(message2).await;
@@ -1012,7 +1073,7 @@ mod tests {
         
         let result_messages2 = results2.unwrap();
         let result_batch2 = result_messages2[0].record_batch();
-        assert_eq!(result_batch2.num_rows(), 4, "Should have 4 result rows for late entries");
+        assert_eq!(result_batch2.num_rows(), 5, "Should have 5 result rows (4 late entries + 1 non-late)");
         
         let sum_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         
@@ -1021,11 +1082,160 @@ mod tests {
         // t=3000: window=[1000,2000,3000] -> SUM=60.0 (10.0+20.0+30.0)
         // t=5000: window=[3000,4000,5000] -> SUM=120.0 (30.0+40.0+50.0)  
         // t=6000: window=[4000,5000,6000] -> SUM=150.0 (40.0+50.0+60.0)
+        // t=8000: window=[6000,7000,8000] -> SUM=210.0 (60.0+70.0+80.0)
         assert_eq!(sum_column2.value(0), 30.0, "First late entry SUM should be 30.0");
         assert_eq!(sum_column2.value(1), 60.0, "Second late entry SUM should be 60.0");
         assert_eq!(sum_column2.value(2), 120.0, "Third late entry SUM should be 120.0");
         assert_eq!(sum_column2.value(3), 150.0, "Fourth late entry SUM should be 150.0");
+        assert_eq!(sum_column2.value(4), 210.0, "Non-late entry SUM should be 210.0");
+        
+        // Step 3: Process more non-late entries to verify late entries have updated accumulators
+        let batch3 = create_test_batch(vec![9000, 10000], vec![90.0, 100.0], vec!["A", "A"]);
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let results3 = window_operator.process_message(message3).await;
+        assert!(results3.is_some(), "Should have results for final batch");
+        
+        let result_messages3 = results3.unwrap();
+        let result_batch3 = result_messages3[0].record_batch();
+        assert_eq!(result_batch3.num_rows(), 2, "Should have 2 result rows for final batch");
+        
+        let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // Verify that late entries have been properly integrated into accumulator state:
+        // t=9000: window=[7000,8000,9000] -> SUM=240.0 (70.0+80.0+90.0)
+        // t=10000: window=[8000,9000,10000] -> SUM=270.0 (80.0+90.0+100.0)
+        // These results should reflect that all previous events (including late ones) are part of the time index
+        assert_eq!(sum_column3.value(0), 240.0, "t=9000 SUM should be 240.0 (includes late entry effects)");
+        assert_eq!(sum_column3.value(1), 270.0, "t=10000 SUM should be 270.0 (includes late entry effects)");
         
         window_operator.close().await.expect("Should be able to close operator");
     }
+
+    #[tokio::test]
+    async fn test_different_window_sizes() {
+        // Test with different RANGE window sizes: SUM for small window, AVG for large window
+        let sql = "SELECT 
+            timestamp,
+            value,
+            partition_key,
+            SUM(value) OVER w1 as sum_small,
+            AVG(value) OVER w2 as avg_large
+        FROM test_table 
+        WINDOW 
+            w1 AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW),
+            w2 AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '3000' MILLISECOND PRECEDING AND CURRENT ROW)";
+        
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut window_config = WindowConfig::new(window_exec);
+        window_config.execution_mode = ExecutionMode::EventBased;
+        window_config.parallelize = true;
+        
+        let storage = Arc::new(Storage::default());
+        let operator_config = OperatorConfig::WindowConfig(window_config);
+        
+        let mut window_operator = WindowOperator::new(operator_config, storage);
+        let runtime_context = create_test_runtime_context();
+        window_operator.open(&runtime_context).await.expect("Should be able to open operator");
+
+        // Test 1: All ordered events
+        println!("\n=== Test 1: All Ordered Events ===");
+        
+        // Process batch with ordered timestamps [1000, 2000, 3000, 4000, 5000]
+        let batch1 = create_test_batch(vec![1000, 2000, 3000, 4000, 5000], vec![10.0, 20.0, 30.0, 40.0, 50.0], vec!["A", "A", "A", "A", "A"]);
+        let message1 = create_keyed_message(batch1, "A");
+        
+        let results1 = window_operator.process_message(message1).await;
+        assert!(results1.is_some(), "Should have results for ordered batch");
+        
+        let result_messages1 = results1.unwrap();
+        let result_batch1 = result_messages1[0].record_batch();
+        assert_eq!(result_batch1.num_rows(), 5, "Should have 5 result rows");
+        
+        let sum_small_col = result_batch1.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let avg_large_col = result_batch1.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // Verify small window (RANGE 1000ms PRECEDING - SUM aggregate)
+        // t=1000: window=[1000] -> SUM=10.0
+        // t=2000: window=[1000,2000] -> SUM=30.0 (both within 1000ms range)
+        // t=3000: window=[2000,3000] -> SUM=50.0 (1000 outside range)
+        // t=4000: window=[3000,4000] -> SUM=70.0 (2000 outside range)
+        // t=5000: window=[4000,5000] -> SUM=90.0 (3000 outside range)
+        assert_eq!(sum_small_col.value(0), 10.0, "t=1000 small window SUM should be 10.0");
+        assert_eq!(sum_small_col.value(1), 30.0, "t=2000 small window SUM should be 30.0");
+        assert_eq!(sum_small_col.value(2), 50.0, "t=3000 small window SUM should be 50.0");
+        assert_eq!(sum_small_col.value(3), 70.0, "t=4000 small window SUM should be 70.0");
+        assert_eq!(sum_small_col.value(4), 90.0, "t=5000 small window SUM should be 90.0");
+        
+        // Verify large window (RANGE 3000ms PRECEDING - AVG aggregate)
+        // t=1000: window=[1000] -> AVG=10.0
+        // t=2000: window=[1000,2000] -> AVG=15.0 (30.0/2)
+        // t=3000: window=[1000,2000,3000] -> AVG=20.0 (60.0/3)
+        // t=4000: window=[1000,2000,3000,4000] -> AVG=25.0 (100.0/4)
+        // t=5000: window=[2000,3000,4000,5000] -> AVG=35.0 (140.0/4, 1000 outside range)
+        assert_eq!(avg_large_col.value(0), 10.0, "t=1000 large window AVG should be 10.0");
+        assert_eq!(avg_large_col.value(1), 15.0, "t=2000 large window AVG should be 15.0");
+        assert_eq!(avg_large_col.value(2), 20.0, "t=3000 large window AVG should be 20.0");
+        assert_eq!(avg_large_col.value(3), 25.0, "t=4000 large window AVG should be 25.0");
+        assert_eq!(avg_large_col.value(4), 35.0, "t=5000 large window AVG should be 35.0");
+
+        // Test 2: Mixed batch with late entries
+        println!("\n=== Test 2: Mixed Batch with Late Entries ===");
+        
+        // Process batch with late entries [1500, 6000, 2500] - 1500 and 2500 are late relative to 5000
+        let batch2 = create_test_batch(vec![1500, 6000, 2500], vec![15.0, 60.0, 25.0], vec!["A", "A", "A"]);
+        let message2 = create_keyed_message(batch2, "A");
+        
+        let results2 = window_operator.process_message(message2).await;
+        assert!(results2.is_some(), "Should have results for mixed batch");
+        
+        let result_messages2 = results2.unwrap();
+        let result_batch2 = result_messages2[0].record_batch();
+        assert_eq!(result_batch2.num_rows(), 3, "Should have 3 result rows");
+        
+        let sum_small_col2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let avg_large_col2 = result_batch2.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // Verify late entries are processed correctly in timestamp order, late first, non-late after
+        // Late entry t=1500: small window=[1000,1500] -> SUM=25.0, large window=[1000,1500] -> AVG=12.5
+        // Late entry t=2500: small window=[1500,2000,2500] -> SUM=60.0, large window=[1000,1500,2000,2500] -> AVG=17.5
+        // Non-late t=6000: small window=[5000,6000] -> SUM=110.0, large window=[3000,4000,5000,6000] -> AVG=45.0
+        
+        assert_eq!(sum_small_col2.value(0), 25.0, "Late t=1500 small window SUM should be 25.0");
+        assert_eq!(sum_small_col2.value(1), 60.0, "Late t=2500 small window SUM should be 60.0");
+        assert_eq!(sum_small_col2.value(2), 110.0, "t=6000 small window SUM should be 110.0");
+        
+        assert_eq!(avg_large_col2.value(0), 12.5, "Late t=1500 large window AVG should be 12.5");
+        assert_eq!(avg_large_col2.value(1), 17.5, "Late t=2500 large window AVG should be 17.5");
+        assert_eq!(avg_large_col2.value(2), 45.0, "t=6000 large window AVG should be 45.0");
+
+        // Test 3: Verify accumulator integration with subsequent events
+        println!("\n=== Test 3: Verify Accumulator Integration ===");
+        
+        // Process more events to verify late entries have been integrated into accumulator state
+        let batch3 = create_test_batch(vec![7000, 8000], vec![70.0, 80.0], vec!["A", "A"]);
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let results3 = window_operator.process_message(message3).await;
+        assert!(results3.is_some(), "Should have results for final batch");
+        
+        let result_messages3 = results3.unwrap();
+        let result_batch3 = result_messages3[0].record_batch();
+        assert_eq!(result_batch3.num_rows(), 2, "Should have 2 result rows");
+        
+        let sum_small_col3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let avg_large_col3 = result_batch3.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // Verify that late entries are reflected in subsequent calculations
+        // t=7000: small window=[6000,7000] -> SUM=130.0, large window=[4000,5000,6000,7000] -> AVG=55.0 (220.0/4)
+        // t=8000: small window=[7000,8000] -> SUM=150.0, large window=[5000,6000,7000,8000] -> AVG=65.0 (260.0/4)
+        assert_eq!(sum_small_col3.value(0), 130.0, "t=7000 small window SUM should be 130.0");
+        assert_eq!(sum_small_col3.value(1), 150.0, "t=8000 small window SUM should be 150.0");
+        
+        assert_eq!(avg_large_col3.value(0), 55.0, "t=7000 large window AVG should be 55.0 (includes late entry effects)");
+        assert_eq!(avg_large_col3.value(1), 65.0, "t=8000 large window AVG should be 65.0 (includes late entry effects)");
+
+        window_operator.close().await.expect("Should be able to close operator");
+    }
+
 }
