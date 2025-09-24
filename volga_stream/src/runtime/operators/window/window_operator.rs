@@ -488,16 +488,26 @@ impl OperatorTrait for WindowOperator {
     }
 }
 
-fn create_sliding_accumulator(window_expr: &Arc<dyn WindowExpr>) -> Box<dyn Accumulator> {
+pub fn create_sliding_accumulator(window_expr: &Arc<dyn WindowExpr>, accumulator_state: Option<AccumulatorState> ) -> Box<dyn Accumulator> {
     let aggregate_expr = window_expr.as_any()
         .downcast_ref::<SlidingAggregateWindowExpr>()
         .expect("Only SlidingAggregateWindowExpr is supported");
     
-    let accumulator = aggregate_expr.get_aggregate_expr().create_sliding_accumulator()
+    let mut accumulator = aggregate_expr.get_aggregate_expr().create_sliding_accumulator()
         .expect("Should be able to create accumulator");
 
     if !accumulator.supports_retract_batch() {
         panic!("Accumulator {:?} does not support retract batch", accumulator);
+    }
+
+    if let Some(accumulator_state) = accumulator_state {
+        let state_arrays: Vec<ArrayRef> = accumulator_state
+            .iter()
+            .map(|sv| sv.to_array_of_size(1))
+            .collect::<Result<Vec<_>, _>>()
+            .expect("Should be able to convert scalar values to arrays");
+        
+        accumulator.merge_batch(&state_arrays).expect("Should be able to merge accumulator state");
     }
 
     accumulator
@@ -529,17 +539,8 @@ fn run_accumulator(
 ) -> (Vec<ScalarValue>, AccumulatorState) {
     println!("Run accum: {:?}, previous_accumulator_state: {:?}", updates_and_retracts, previous_accumulator_state);
 
-    let mut accumulator = create_sliding_accumulator(&window_expr);
-    if let Some(accumulator_state) = previous_accumulator_state {
-        let state_arrays: Vec<ArrayRef> = accumulator_state
-            .iter()
-            .map(|sv| sv.to_array_of_size(1))
-            .collect::<Result<Vec<_>, _>>()
-            .expect("Should be able to convert scalar values to arrays");
-        
-        accumulator.merge_batch(&state_arrays).expect("Should be able to merge accumulator state");
-    }
-
+    let mut accumulator = create_sliding_accumulator(&window_expr, previous_accumulator_state);
+    
     let mut results = Vec::new();
 
     for (update_idx, retract_idxs) in updates_and_retracts {
