@@ -216,15 +216,16 @@ fn find_retracts(
     }
 }
 
-pub fn advance_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut WindowState, time_entries: &Arc<SkipSet<TimeIdx>>) -> Vec<(TimeIdx, Vec<TimeIdx>)> {
-    let mut updates_and_retracts = Vec::new();
+pub fn slide_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut WindowState, time_entries: &Arc<SkipSet<TimeIdx>>) -> (Vec<TimeIdx>, Vec<Vec<TimeIdx>>) {
+    let mut updates = Vec::new();
+    let mut retracts = Vec::new();
     
     let latest_idx = *time_entries.back().expect("Time entries should exist");
     let previous_window_end = window_state.end_idx;
 
     if previous_window_end == latest_idx {
         // nothing changed
-        return updates_and_retracts;
+        return (updates, retracts);
     }
 
     let range_start_idx = if previous_window_end.batch_id == Uuid::nil() {
@@ -239,15 +240,16 @@ pub fn advance_window_position(window_frame: &Arc<WindowFrame>, window_state: &m
     for entry in time_entries.range(range_start_idx..=latest_idx) {
         let time_idx = *entry;
         
-        let (retracts, new_start_idx) = find_retracts(window_frame, time_idx, time_entries, &window_state);
-        updates_and_retracts.push((time_idx, retracts));
+        let (rets, new_start_idx) = find_retracts(window_frame, time_idx, time_entries, &window_state);
+        updates.push(time_idx);
+        retracts.push(rets);
         if let Some(new_start_idx) = new_start_idx {
             window_state.start_idx = new_start_idx;
         }
         window_state.end_idx = time_idx;
     }
     
-    updates_and_retracts
+    (updates, retracts)
 }
 
 /// Convert various interval types to milliseconds for timestamp arithmetic
@@ -394,10 +396,10 @@ mod tests {
         };
         
         // First advance window position after first batch
-        let first_updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
+        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
         
         // Verify first batch processing (similar to test_advance_window_position_first_time)
-        assert_eq!(first_updates_and_retracts.len(), 3, "Should have 3 updates for first batch");
+        assert_eq!(first_updates.len(), 3, "Should have 3 updates for first batch");
         
         let expected_first_updates: [(i64, Uuid, usize, Vec<(i64, Uuid)>); 3] = [
             (1000, batch_id1, 0, vec![]), // 1st: no retracts (window: [1000])
@@ -406,8 +408,9 @@ mod tests {
         ];
         
         for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_first_updates.iter().enumerate() {
-            let (update_idx, retracts) = &first_updates_and_retracts[i];
-            
+            let update_idx = &first_updates[i];
+            let retracts = &first_retracts[i];
+
             // Verify update
             assert_eq!(update_idx.timestamp, *expected_ts, "First batch update {} should have timestamp {}", i + 1, expected_ts);
             assert_eq!(update_idx.batch_id, *expected_batch_id, "First batch update {} should have correct batch_id", i + 1);
@@ -427,10 +430,10 @@ mod tests {
         time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
         
         // Second advance window position (incremental processing)
-        let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
+        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
         
         // Should only process new events (4000, 5000)
-        assert_eq!(updates_and_retracts.len(), 2, "Should have 2 incremental updates");
+        assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
         
         // Expected behavior for incremental updates with ROWS 2 PRECEDING (window size = 3)
         // Window state before: [1000, 2000, 3000] (from first batch)
@@ -440,7 +443,8 @@ mod tests {
         ];
         
         for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_updates.iter().enumerate() {
-            let (update_idx, retracts) = &updates_and_retracts[i];
+            let update_idx = &updates[i];
+            let retracts = &retracts[i];
             
             // Verify update
             assert_eq!(update_idx.timestamp, *expected_ts, "Incremental update {} should have timestamp {}", i + 1, expected_ts);
@@ -482,10 +486,10 @@ mod tests {
         };
         
         // First advance window position after first batch
-        let first_updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
+        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
         
         // Verify first batch processing
-        assert_eq!(first_updates_and_retracts.len(), 5, "Should have 5 updates for first batch");
+        assert_eq!(first_updates.len(), 5, "Should have 5 updates for first batch");
         
         let expected_first_updates: [(i64, Uuid, usize, Vec<(i64, Uuid)>); 5] = [
             (1000, batch_id1, 0, vec![]), // 1st: no retracts (window: [0, 1000])
@@ -496,7 +500,8 @@ mod tests {
         ];
         
         for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_first_updates.iter().enumerate() {
-            let (update_idx, retracts) = &first_updates_and_retracts[i];
+            let update_idx = &first_updates[i];
+            let retracts = &first_retracts[i];
             
             // Verify update
             assert_eq!(update_idx.timestamp, *expected_ts, "First batch update {} should have timestamp {}", i + 1, expected_ts);
@@ -521,10 +526,10 @@ mod tests {
         time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
         
         // Second advance window position (incremental processing)
-        let updates_and_retracts = advance_window_position(&window_frame, &mut window_state, &time_entries);
+        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
         
         // Should only process new events (3500, 4000)
-        assert_eq!(updates_and_retracts.len(), 2, "Should have 2 incremental updates");
+        assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
         
         // Expected behavior for incremental updates with RANGE 1000ms PRECEDING (inclusive)
         // Window state before: [1200, 1400, 2000, 2200] (from first batch, 1000 was already retracted)
@@ -534,7 +539,8 @@ mod tests {
         ];
         
         for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_updates.iter().enumerate() {
-            let (update_idx, retracts) = &updates_and_retracts[i];
+            let update_idx = &updates[i];
+            let retracts = &retracts[i];
             
             // Verify update
             assert_eq!(update_idx.timestamp, *expected_ts, "Incremental update {} should have timestamp {}", i + 1, expected_ts);
@@ -579,7 +585,7 @@ mod tests {
             let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
-            let first_updates = advance_window_position(&rows_frame, &mut window_state_rows, &time_entries);
+            let (first_updates, first_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries);
             assert_eq!(first_updates.len(), 5, "Should process all 5 events with duplicates");
             
             // Verify duplicate timestamps are processed correctly
@@ -592,7 +598,8 @@ mod tests {
             ];
             
             for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_first_updates.iter().enumerate() {
-                let (update_idx, retracts) = &first_updates[i];
+                let update_idx = &first_updates[i];
+                let retracts = &first_retracts[i];
                 assert_eq!(update_idx.timestamp, *expected_ts, "ROWS update {} should have timestamp {}", i + 1, expected_ts);
                 assert_eq!(update_idx.batch_id, *expected_batch_id, "ROWS update {} should have correct batch_id", i + 1);
                 assert_eq!(update_idx.row_idx, *expected_row_idx, "ROWS update {} should have row_idx {}", i + 1, expected_row_idx);
@@ -605,7 +612,7 @@ mod tests {
             time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
             
             // Second advance - incremental processing
-            let second_updates = advance_window_position(&rows_frame, &mut window_state_rows, &time_entries);
+            let (second_updates, second_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries);
             assert_eq!(second_updates.len(), 2, "Should process 2 new duplicate events");
             
             let expected_second_updates = [
@@ -614,7 +621,8 @@ mod tests {
             ];
             
             for (i, (expected_ts, expected_batch_id, expected_row_idx, expected_retracts)) in expected_second_updates.iter().enumerate() {
-                let (update_idx, retracts) = &second_updates[i];
+                let update_idx = &second_updates[i];
+                let retracts = &second_retracts[i];
                 assert_eq!(update_idx.timestamp, *expected_ts, "ROWS incremental update {} should have timestamp {}", i + 1, expected_ts);
                 assert_eq!(update_idx.batch_id, *expected_batch_id, "ROWS incremental update {} should have correct batch_id", i + 1);
                 assert_eq!(update_idx.row_idx, *expected_row_idx, "ROWS incremental update {} should have row_idx {}", i + 1, expected_row_idx);
@@ -634,16 +642,18 @@ mod tests {
             let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
-            let first_updates = advance_window_position(&range_frame, &mut window_state_range, &time_entries);
+            let (first_updates, first_retracts) = slide_window_position(&range_frame, &mut window_state_range, &time_entries);
             assert_eq!(first_updates.len(), 7, "Should process all 7 events (5 from batch1 + 2 from batch2)");
             
             // Verify range window behavior with duplicates
             // At timestamp 2000: window = [1200, 2000], so 1000 events should be retracted
-            let (update_4_idx, update_4_retracts) = &first_updates[3]; // First 2000 event
+            let update_4_idx = &first_updates[3]; // First 2000 event
+            let update_4_retracts = &first_retracts[3];
             assert_eq!(update_4_idx.timestamp, 2000);
             assert_eq!(update_4_retracts.len(), 2, "First 2000 event should retract both 1000 events");
             
-            let (update_5_idx, update_5_retracts) = &first_updates[4]; // Second 2000 event  
+            let update_5_idx = &first_updates[4]; // Second 2000 event  
+            let update_5_retracts = &first_retracts[4];
             assert_eq!(update_5_idx.timestamp, 2000);
             assert_eq!(update_5_retracts.len(), 0, "Second 2000 event should have no retracts");
         }

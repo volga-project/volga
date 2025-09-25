@@ -8,17 +8,16 @@ use crate::runtime::operators::window::state::state::AccumulatorState;
 use crate::runtime::operators::window::window_operator::create_sliding_accumulator;
 use crate::storage::storage::{Timestamp, extract_timestamp};
 
-/// Time granularity for tiles
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeGranularity {
-    Minutes(u32),  // e.g., 1 minute, 5 minutes, 15 minutes
-    Hours(u32),    // e.g., 1 hour, 6 hours, 12 hours
-    Days(u32),     // e.g., 1 day, 7 days
-    Months(u32),   // e.g., 1 month, 3 months, 12 months
+    Minutes(u32),
+    Hours(u32),
+    Days(u32),
+    Months(u32),
 }
 
 impl TimeGranularity {
-    /// Get the duration in milliseconds
+
     pub fn to_millis(&self) -> i64 {
         match self {
             TimeGranularity::Minutes(m) => *m as i64 * 60 * 1000,
@@ -28,22 +27,18 @@ impl TimeGranularity {
         }
     }
 
-    /// Check if this granularity is a multiple of another
     pub fn is_multiple_of(&self, other: &TimeGranularity) -> bool {
         let self_millis = self.to_millis();
         let other_millis = other.to_millis();
         
-        // Must be larger and evenly divisible
         self_millis > other_millis && self_millis % other_millis == 0
     }
 
-    /// Get the time bucket start for a given timestamp
     pub fn tile_start(&self, timestamp: Timestamp) -> Timestamp {
         let duration_millis = self.to_millis();
         (timestamp / duration_millis) * duration_millis
     }
 
-    /// Get the next bucket start after a given timestamp
     pub fn next_tile_start(&self, timestamp: Timestamp) -> Timestamp {
         self.tile_start(timestamp) + self.to_millis()
     }
@@ -71,7 +66,6 @@ impl Tile {
     }
 }
 
-/// Configuration for tile granularities
 #[derive(Debug, Clone)]
 pub struct TileConfig {
     pub granularities: Vec<TimeGranularity>,
@@ -79,10 +73,8 @@ pub struct TileConfig {
 
 impl TileConfig {
     pub fn new(mut granularities: Vec<TimeGranularity>) -> Result<Self, String> {
-        // Sort granularities from finest to coarsest
         granularities.sort();
         
-        // Validate that each granularity is a multiple of the previous one
         for i in 1..granularities.len() {
             if !granularities[i].is_multiple_of(&granularities[i-1]) {
                 return Err(format!(
@@ -95,7 +87,6 @@ impl TileConfig {
         Ok(Self { granularities })
     }
     
-    /// Create a default configuration with common granularities
     pub fn default_config() -> Self {
         Self::new(vec![
             TimeGranularity::Minutes(1),
@@ -106,7 +97,6 @@ impl TileConfig {
     }
 }
 
-/// Tiles struct manages pre-aggregated values at different time granularities
 #[derive(Debug)]
 pub struct Tiles {
     config: TileConfig,
@@ -119,7 +109,6 @@ impl Tiles {
     pub fn new(config: TileConfig, window_expr: Arc<dyn WindowExpr>) -> Self {
         let mut tiles = BTreeMap::new();
         
-        // Initialize empty tile maps for each granularity
         for granularity in &config.granularities {
             tiles.insert(*granularity, BTreeMap::new());
         }
@@ -131,7 +120,6 @@ impl Tiles {
         }
     }
 
-    /// Add a batch of data and update tiles incrementally
     pub fn add_batch(&mut self, batch: &RecordBatch, ts_column_index: usize) {
         // Extract timestamps and sort entries by time for ordered processing
         let mut entries = Vec::new();
@@ -141,27 +129,19 @@ impl Tiles {
             entries.push((timestamp, row_idx));
         }
         
-        // Sort by timestamp to ensure ordered processing
-        entries.sort_by_key(|(timestamp, _)| *timestamp);
-        
-        // Process each entry and update tiles
         for (timestamp, row_idx) in entries {
             self.add_entry(batch, row_idx, timestamp);
         }
     }
 
-    /// Add a single entry to tiles at all granularities
     fn add_entry(&mut self, batch: &RecordBatch, row_idx: usize, timestamp: Timestamp) {
-        // Clone granularities to avoid borrowing issues
         let granularities = self.config.granularities.clone();
         
-        // Update tiles at all granularities
         for granularity in granularities {
             self.add_entry_to_granularity(batch, row_idx, timestamp, granularity);
         }
     }
 
-    /// Add an entry to tiles of a specific granularity
     fn add_entry_to_granularity(
         &mut self, 
         batch: &RecordBatch, 
@@ -171,44 +151,35 @@ impl Tiles {
     ) {
         let tile_start = granularity.tile_start(timestamp);
         
-        // Get or create the tile for this bucket
         let tiles_for_granularity = self.tiles.get_mut(&granularity)
             .expect(&format!("No tiles found for granularity {:?}", granularity));
         
         let tile = tiles_for_granularity.entry(tile_start)
             .or_insert_with(|| Tile::new(tile_start, granularity));
         
-        // Update the tile with this entry
         Self::update_tile_with_entry(&self.window_expr, tile, batch, row_idx);
     }
 
-    /// Update a tile's accumulator state with a single entry
     fn update_tile_with_entry(window_expr: &Arc<dyn WindowExpr>, tile: &mut Tile, batch: &RecordBatch, row_idx: usize) {
         
-        // Create a single-row batch for this entry
         let indices = UInt64Array::from(vec![row_idx as u64]);
         let entry_batch = arrow::compute::take_record_batch(batch, &indices)
             .expect("Failed to extract entry row");
         
-        // Create or update accumulator
         let mut accumulator = create_sliding_accumulator(window_expr, tile.accumulator_state.clone());
         
-        // Evaluate window expression arguments for this entry
         let args = window_expr.evaluate_args(&entry_batch)
             .expect("Failed to evaluate window args");
         
-        // Update accumulator with this entry
         accumulator.update_batch(&args)
             .expect("Failed to update accumulator");
         
-        // Store updated accumulator state
         tile.accumulator_state = Some(accumulator.state()
             .expect("Failed to get accumulator state"));
         
         tile.entry_count += 1;
     }
 
-    /// Get tiles for a specific time range using greedy selection from largest to smallest granularity
     pub fn get_tiles_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<&Tile> {
         let mut selected_tiles = Vec::new();
         let mut remaining_ranges = vec![(start_time, end_time)];
@@ -227,35 +198,27 @@ impl Tiles {
                 let tiles_in_range: Vec<_> = tiles_for_granularity
                     .range(range_start..range_end)
                     .filter(|(&tile_start, tile)| {
-                        // Tile must be fully contained in the range
                         tile_start >= range_start && tile.tile_end <= range_end
                     })
                     .collect();
                 
-                // Add fully contained tiles to selection
                 for (_, tile) in &tiles_in_range {
                     selected_tiles.push(*tile);
                 }
                 
-                // Calculate remainder ranges
                 if tiles_in_range.is_empty() {
-                    // No tiles found, entire range remains uncovered
                     new_remaining_ranges.push((range_start, range_end));
                 } else {
-                    // Tile are be already sorted
                     let mut current_pos = range_start;
                     
                     for (&tile_start, tile) in &tiles_in_range {
-                        // Add gap before this tile if any
                         if current_pos < tile_start {
                             new_remaining_ranges.push((current_pos, tile_start));
                         }
                         
-                        // Move past this tile
                         current_pos = tile.tile_end;
                     }
                     
-                    // Add final gap if any
                     if current_pos < range_end {
                         new_remaining_ranges.push((current_pos, range_end));
                     }
@@ -264,7 +227,6 @@ impl Tiles {
             
             remaining_ranges = new_remaining_ranges;
             
-            // If everything is covered, we can stop
             if remaining_ranges.is_empty() {
                 break;
             }
@@ -274,7 +236,6 @@ impl Tiles {
     }
 
 
-    /// Compute aggregate value for a time range using tiles
     pub fn compute_aggregate_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> ScalarValue {
         let tiles = self.get_tiles_for_range(start_time, end_time);
         
@@ -282,11 +243,9 @@ impl Tiles {
             return ScalarValue::Null;
         }
         
-        // Merge accumulator states from all relevant tiles
         let mut final_accumulator = create_sliding_accumulator(&self.window_expr, None);
         
         for tile in tiles {
-            // Tiles from get_tiles_for_range are already filtered to be within range
             if let Some(tile_state) = &tile.accumulator_state {
                 let state_arrays: Vec<arrow::array::ArrayRef> = tile_state
                     .iter()
@@ -302,7 +261,6 @@ impl Tiles {
             .expect("Failed to evaluate final accumulator")
     }
 
-    /// Get statistics about tiles
     pub fn get_stats(&self) -> TileStats {
         let mut total_tiles = 0;
         let mut total_entries = 0;
@@ -328,7 +286,6 @@ impl Tiles {
         }
     }
 
-    /// Clean up tiles older than a specified timestamp
     pub fn cleanup_old_tiles(&mut self, cutoff_time: Timestamp) {
         for tiles_map in self.tiles.values_mut() {
             tiles_map.retain(|_, tile| {
@@ -338,7 +295,6 @@ impl Tiles {
     }
 }
 
-/// Statistics about tiles
 #[derive(Debug)]
 pub struct TileStats {
     pub total_tiles: usize,
@@ -651,7 +607,9 @@ mod tests {
             partition_key,
             SUM(value) OVER (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_val,
             COUNT(value) OVER (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW) as count_val,
-            AVG(value) OVER (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW) as avg_val
+            AVG(value) OVER (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW) as avg_val,
+            MIN(value) OVER (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW) as min_val,
+            MAX(value) OVER (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW) as max_val
         FROM test_table";
         
         let window_exec = extract_window_exec_from_sql(sql).await;
@@ -661,6 +619,8 @@ mod tests {
         let sum_expr = window_exprs[0].clone();
         let count_expr = window_exprs[1].clone(); 
         let avg_expr = window_exprs[2].clone();
+        let min_expr = window_exprs[3].clone();
+        let max_expr = window_exprs[4].clone();
         
         // Create tiles with explicit config for each aggregate
         let config = TileConfig::new(vec![
@@ -671,7 +631,9 @@ mod tests {
         
         let mut sum_tiles = Tiles::new(config.clone(), sum_expr);
         let mut count_tiles = Tiles::new(config.clone(), count_expr);
-        let mut avg_tiles = Tiles::new(config, avg_expr);
+        let mut avg_tiles = Tiles::new(config.clone(), avg_expr);
+        let mut min_tiles = Tiles::new(config.clone(), min_expr);
+        let mut max_tiles = Tiles::new(config, max_expr);
         
         // Create test data with corner cases: gaps, duplicates, unsorted
         // Use realistic time scale: minutes instead of seconds, with hour-long gaps
@@ -716,6 +678,8 @@ mod tests {
         sum_tiles.add_batch(&batch, 0);
         count_tiles.add_batch(&batch, 0);
         avg_tiles.add_batch(&batch, 0);
+        min_tiles.add_batch(&batch, 0);
+        max_tiles.add_batch(&batch, 0);
         
         // Test multiple time ranges with different characteristics
         let test_ranges = vec![
@@ -738,6 +702,8 @@ mod tests {
             let sum_result = sum_tiles.compute_aggregate_for_range(range_start, range_end);
             let count_result = count_tiles.compute_aggregate_for_range(range_start, range_end);
             let avg_result = avg_tiles.compute_aggregate_for_range(range_start, range_end);
+            let min_result = min_tiles.compute_aggregate_for_range(range_start, range_end);
+            let max_result = max_tiles.compute_aggregate_for_range(range_start, range_end);
             
             // Calculate expected values manually
             // Window: 10 seconds preceding + current row
@@ -749,6 +715,16 @@ mod tests {
             let expected_sum: f64 = data_in_range.iter().sum();
             let expected_count = data_in_range.len() as i64;
             let expected_avg = if expected_count > 0 { expected_sum / (expected_count as f64) } else { 0.0 };
+            let expected_min = if !data_in_range.is_empty() { 
+                data_in_range.iter().fold(f64::INFINITY, |a, &b| a.min(b))
+            } else { 
+                0.0 
+            };
+            let expected_max = if !data_in_range.is_empty() { 
+                data_in_range.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            } else { 
+                0.0 
+            };
             
             // Verify SUM
             match sum_result {
@@ -779,17 +755,22 @@ mod tests {
                 _ => panic!("AVG result should be Float64 for range {}, got: {:?}", range_name, avg_result),
             }
             
-            // Verify consistency: AVG should equal SUM / COUNT (when COUNT > 0)
-            if expected_count > 0 {
-                let sum_val = if let ScalarValue::Float64(Some(s)) = sum_result { s } else { panic!("Invalid SUM") };
-                let count_val = if let ScalarValue::Int64(Some(c)) = count_result { c } else { panic!("Invalid COUNT") };
-                let avg_val = if let ScalarValue::Float64(Some(a)) = avg_result { a } else { panic!("Invalid AVG") };
-                
-                let calculated_avg = sum_val / (count_val as f64);
-                let tolerance = 1e-10;
-                assert!((avg_val - calculated_avg).abs() < tolerance,
-                    "AVG consistency check failed for range {}: AVG={}, SUM/COUNT={}, diff={}", 
-                    range_name, avg_val, calculated_avg, (avg_val - calculated_avg).abs());
+            // Verify MIN
+            match min_result {
+                ScalarValue::Float64(Some(actual_min)) => {
+                    assert_eq!(actual_min, expected_min,
+                        "MIN mismatch for range {}: expected {}, got {}", range_name, expected_min, actual_min);
+                }
+                _ => panic!("MIN result should be Float64 for range {}, got: {:?}", range_name, min_result),
+            }
+            
+            // Verify MAX
+            match max_result {
+                ScalarValue::Float64(Some(actual_max)) => {
+                    assert_eq!(actual_max, expected_max,
+                        "MAX mismatch for range {}: expected {}, got {}", range_name, expected_max, actual_max);
+                }
+                _ => panic!("MAX result should be Float64 for range {}, got: {:?}", range_name, max_result),
             }
         }
         
@@ -800,6 +781,8 @@ mod tests {
         let empty_sum = sum_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
         let empty_count = count_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
         let empty_avg = avg_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
+        let empty_min = min_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
+        let empty_max = max_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
         
         // Verify empty range results
         match empty_sum {
@@ -814,6 +797,27 @@ mod tests {
                 // Both are acceptable for empty ranges
             }
             _ => panic!("Empty range COUNT should be 0 or Null, got: {:?}", empty_count),
+        }
+        
+        match empty_avg {
+            ScalarValue::Float64(Some(_)) | ScalarValue::Null => {
+                // Both are acceptable for empty ranges (AVG could be null or some default value)
+            }
+            _ => panic!("Empty range AVG should be Float64 or Null, got: {:?}", empty_avg),
+        }
+        
+        match empty_min {
+            ScalarValue::Float64(Some(_)) | ScalarValue::Null => {
+                // Both are acceptable for empty ranges (MIN could be null or some default value)
+            }
+            _ => panic!("Empty range MIN should be Float64 or Null, got: {:?}", empty_min),
+        }
+        
+        match empty_max {
+            ScalarValue::Float64(Some(_)) | ScalarValue::Null => {
+                // Both are acceptable for empty ranges (MAX could be null or some default value)
+            }
+            _ => panic!("Empty range MAX should be Float64 or Null, got: {:?}", empty_max),
         }
     }
 
