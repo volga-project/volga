@@ -4,7 +4,7 @@ use arrow::array::{RecordBatch, UInt64Array};
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::state::state::AccumulatorState;
+use crate::runtime::operators::window::state::AccumulatorState;
 use crate::runtime::operators::window::window_operator::create_sliding_accumulator;
 use crate::storage::storage::{Timestamp, extract_timestamp};
 
@@ -97,7 +97,7 @@ impl TileConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tiles {
     config: TileConfig,
     window_expr: Arc<dyn WindowExpr>,
@@ -180,8 +180,8 @@ impl Tiles {
         tile.entry_count += 1;
     }
 
-    pub fn get_tiles_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<&Tile> {
-        let mut selected_tiles = Vec::new();
+    pub fn get_tiles_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<Tile> {
+        let mut selected_tiles: Vec<Tile> = Vec::new();
         let mut remaining_ranges = vec![(start_time, end_time)];
         
         // Try granularities from largest to smallest (reverse order)
@@ -203,7 +203,7 @@ impl Tiles {
                     .collect();
                 
                 for (_, tile) in &tiles_in_range {
-                    selected_tiles.push(*tile);
+                    selected_tiles.push((*tile).clone());
                 }
                 
                 if tiles_in_range.is_empty() {

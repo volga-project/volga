@@ -8,7 +8,7 @@ use datafusion::scalar::ScalarValue;
 use uuid::Uuid;
 
 use crate::common::Key;
-use crate::runtime::operators::window::state::state::WindowState;
+use crate::runtime::operators::window::state::WindowState;
 use crate::storage::storage::{BatchId, RowIdx, Timestamp, extract_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -390,6 +390,7 @@ mod tests {
         
         // Initial empty window state
         let mut window_state = WindowState {
+            tiles: None,
             accumulator_state: None,
             start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
             end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
@@ -480,6 +481,7 @@ mod tests {
         
         // Initial empty window state
         let mut window_state = WindowState {
+            tiles: None,
             accumulator_state: None,
             start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
             end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
@@ -576,6 +578,7 @@ mod tests {
         // Test 1: ROWS 2 PRECEDING window (window size = 3)
         {
             let mut window_state_rows = WindowState {
+                tiles: None,
                 accumulator_state: None,
                 start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
                 end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
@@ -633,6 +636,7 @@ mod tests {
         // Test 2: RANGE 800ms PRECEDING window
         {
             let mut window_state_range = WindowState {
+                tiles: None,
                 accumulator_state: None,
                 start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
                 end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },

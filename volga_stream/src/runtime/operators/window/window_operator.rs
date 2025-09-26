@@ -10,17 +10,20 @@ use futures::future;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use tokio_rayon::AsyncThreadPool;
 
-use datafusion::logical_expr::Accumulator;
+use datafusion::logical_expr::{window_state, Accumulator};
 use datafusion::physical_expr::window::SlidingAggregateWindowExpr;
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
+use uuid::Uuid;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::state::state::{AccumulatorState, State, WindowId, WindowsState};
+use crate::runtime::operators::window::state::{AccumulatorState, State, WindowId, WindowsState};
+use crate::runtime::operators::window::tiles::Tile;
 use crate::runtime::operators::window::time_index::{slide_window_position, get_window_entries, TimeIdx, TimeIndex};
+use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::storage::{BatchId, Storage};
 
@@ -35,14 +38,17 @@ pub struct WindowConfig {
     pub window_exec: Arc<BoundedWindowAggExec>,
     pub execution_mode: ExecutionMode,
     pub parallelize: bool,
+    pub tiling: Vec<Option<TileConfig>>,
 }
 
 impl WindowConfig {
+    // TODO pass all the fileds from upstream/parse window_exprs
     pub fn new(window_exec: Arc<BoundedWindowAggExec>) -> Self {    
         Self {
             window_exec,
             execution_mode: ExecutionMode::WatermarkBased,
             parallelize: false,
+            tiling: Vec::new(),
         }
     }
 }
@@ -60,6 +66,7 @@ pub struct WindowOperator {
     thread_pool: Option<ThreadPool>,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
+    tiling: Vec<Option<TileConfig>>,
 }
 
 impl WindowOperator {
@@ -100,12 +107,14 @@ impl WindowOperator {
             thread_pool,
             output_schema,
             input_schema,
+            tiling: window_config.tiling,
         }
     }
 
     async fn process_key(&self, key: &Key, late_entries: Option<Vec<TimeIdx>>) -> RecordBatch {
         let window_ids: Vec<_> = self.windows.keys().cloned().collect();
-        let windows_state = self.state.get_or_create_windows_state(key, &window_ids).await;
+        let window_exprs: Vec<_> = self.windows.values().cloned().collect();
+        let windows_state = self.state.get_or_create_windows_state(key, &window_ids, &self.tiling, &window_exprs).await;
         let time_entries = self.time_index.get_or_create_time_index(key).await;
         let (result, updated_windows_state) = self.slide_windows(key, &windows_state, &time_entries, late_entries).await;
         self.state.insert_windows_state(key, updated_windows_state).await;
@@ -129,6 +138,86 @@ impl WindowOperator {
             .expect("Should be able to concat result batches")
     }
 
+    async fn update_retractable_windows_state_with_late_entries(
+        &self, 
+        key: &Key,
+        windows_state: &WindowsState,
+        late_entries: &Vec<TimeIdx>
+    ) -> WindowsState {
+        let mut updated_windows_state = windows_state.clone();
+        // Create late_entries_per_window map for reuse
+        let late_entries_per_window: std::collections::BTreeMap<WindowId, Vec<TimeIdx>> = self.windows.iter()
+            .map(|(window_id, _)| {
+                // Only process late entries for retractable windows
+                if Self::is_window_retractable(*window_id) {
+                    let window_state = updated_windows_state.get(window_id).expect("Window state should exist");
+                    let window_start = window_state.start_idx;
+                    let window_end = window_state.end_idx;
+                    
+                    let late_entries_in_window: Vec<_> = late_entries.iter()
+                        .filter(|entry| **entry >= window_start && **entry < window_end)
+                        .cloned()
+                        .collect();
+                    
+                    (*window_id, late_entries_in_window)
+                } else {
+                    (*window_id, Vec::new())
+                }
+            })
+            .collect();
+        
+        // Compose batches_to_load from late entries
+        let mut batches_to_load = std::collections::BTreeSet::new();
+        for late_entries_in_window in late_entries_per_window.values() {
+            for late_entry in late_entries_in_window {
+                batches_to_load.insert(late_entry.batch_id);
+            }
+        }
+        
+        // Get relevant data from storage
+        let batches = self.base.storage.load_batches(batches_to_load.into_iter().collect(), key).await;
+        
+        let updated_accumulator_states_futs: Vec<_> = self.windows.iter()
+            .map(|(window_id, window_expr)| {
+                let window_expr_clone = window_expr.clone();
+                let batches_clone = batches.clone();
+                let thread_pool = self.thread_pool.as_ref().clone();
+                let parallelize = self.parallelize;
+                let window_id_copy = *window_id;
+                let window_state = updated_windows_state.get(window_id).expect("Window state should exist").clone();
+                let late_entries_in_window = late_entries_per_window.get(window_id).cloned().unwrap_or_default();
+                
+                async move {
+                    // late_entries_in_window is already filtered by is_window_retractable
+                    if !late_entries_in_window.is_empty() {
+                        let (_, updated_accumulator_state) = if parallelize {
+                            run_accumulator_parallel(thread_pool.expect("ThreadPool should exist"), window_expr_clone, late_entries_in_window, None, batches_clone, Some(window_state.accumulator_state.expect("Accumulator state should exist"))).await
+                        } else {
+                            run_accumulator(&window_expr_clone, late_entries_in_window, None, &batches_clone, Some(window_state.accumulator_state.expect("Accumulator state should exist")))
+                        };
+                        
+                        Some((window_id_copy, updated_accumulator_state))
+                    } else {
+                        None
+                    }
+                }
+            })
+            .collect();
+        
+        let updated_accumulator_states = future::join_all(updated_accumulator_states_futs).await;
+        
+        // Update windows_state with late entry results
+        for result in updated_accumulator_states {
+            if let Some((window_id, updated_accumulator_state)) = result {
+                if let Some(window_state) = updated_windows_state.get_mut(&window_id) {
+                    window_state.accumulator_state = Some(updated_accumulator_state);
+                }
+            }
+        }
+
+        updated_windows_state
+    }
+
     async fn slide_windows(
         &self, 
         key: &Key, 
@@ -136,89 +225,19 @@ impl WindowOperator {
         time_entries: &Arc<SkipSet<TimeIdx>>,
         late_entries: Option<Vec<TimeIdx>>
     ) -> (RecordBatch, WindowsState) {
-        // Step 0: Update accumulator states for all windows with late entries if needed
-        let mut updated_windows_state = windows_state.clone();
-        if let Some(ref late_entries_ref) = late_entries {
-            // Create late_entries_per_window map for reuse
-            let late_entries_per_window: std::collections::BTreeMap<WindowId, Vec<TimeIdx>> = self.windows.iter()
-                .map(|(window_id, _)| {
-                    // Only process late entries for retractable windows
-                    if Self::is_window_retractable(*window_id) {
-                        let window_state = updated_windows_state.get(window_id).expect("Window state should exist");
-                        let window_start = window_state.start_idx;
-                        let window_end = window_state.end_idx;
-                        
-                        let late_entries_in_window: Vec<_> = late_entries_ref.iter()
-                            .filter(|entry| **entry >= window_start && **entry < window_end)
-                            .cloned()
-                            .collect();
-                        
-                        (*window_id, late_entries_in_window)
-                    } else {
-                        (*window_id, Vec::new())
-                    }
-                })
-                .collect();
-            
-            // Compose batches_to_load from late entries
-            let mut batches_to_load = std::collections::BTreeSet::new();
-            for late_entries_in_window in late_entries_per_window.values() {
-                for late_entry in late_entries_in_window {
-                    batches_to_load.insert(late_entry.batch_id);
-                }
-            }
-            
-            // Get relevant data from storage
-            let batches = self.base.storage.load_batches(batches_to_load.into_iter().collect(), key).await;
-            
-            let updated_accumulator_states_futs: Vec<_> = self.windows.iter()
-                .map(|(window_id, window_expr)| {
-                    let window_expr_clone = window_expr.clone();
-                    let batches_clone = batches.clone();
-                    let thread_pool = self.thread_pool.as_ref().clone();
-                    let parallelize = self.parallelize;
-                    let window_id_copy = *window_id;
-                    let window_state = updated_windows_state.get(window_id).expect("Window state should exist").clone();
-                    let late_entries_in_window = late_entries_per_window.get(window_id).cloned().unwrap_or_default();
-                    
-                    async move {
-                        // late_entries_in_window is already filtered by is_window_retractable
-                        if !late_entries_in_window.is_empty() {
-                            let updated_accumulator_state = Self::update_accumulator_state_with_late_entries(
-                                &window_expr_clone, 
-                                window_state.accumulator_state.expect("Accumulator state should exist"), 
-                                &late_entries_in_window, 
-                                &batches_clone, 
-                                thread_pool, 
-                                parallelize
-                            ).await;
-                            
-                            Some((window_id_copy, updated_accumulator_state))
-                        } else {
-                            None
-                        }
-                    }
-                })
-                .collect();
-            
-            let updated_accumulator_states = future::join_all(updated_accumulator_states_futs).await;
-            
-            // Update windows_state with late entry results
-            for result in updated_accumulator_states {
-                if let Some((window_id, updated_accumulator_state)) = result {
-                    if let Some(window_state) = updated_windows_state.get_mut(&window_id) {
-                        window_state.accumulator_state = Some(updated_accumulator_state);
-                    }
-                }
-            }
-        }
+        // Step 0: Update accumulator states for all retractable windows with late entries if needed
+        let windows_state = if let Some(ref late_entries_ref) = late_entries {
+            self.update_retractable_windows_state_with_late_entries(key, windows_state, late_entries_ref).await
+        } else {
+            windows_state.clone()
+        };
 
         // Step 1: Advance window positions to latest timestamp
         let mut window_data = Vec::new();
         
         for (window_id, window_expr) in &self.windows {
             let window_frame = window_expr.get_window_frame();
-            let window_state = updated_windows_state.get(window_id).expect("Window state should exist");
+            let window_state = windows_state.get(window_id).expect("Window state should exist");
             let mut window_state_copy = window_state.clone();
             let (updates, retracts) = slide_window_position(window_frame, &mut window_state_copy, &time_entries);
             
@@ -228,7 +247,6 @@ impl WindowOperator {
         // Step 2: Compose batches_to_load from all updates_and_retracts and late entries
         let mut batches_to_load = std::collections::BTreeSet::new();
         for (window_id, _, updates, retracts) in window_data.iter() {
-            // for (update_idx, retract_idxs) in updates_and_retracts {
             for i in 0..updates.len() {
                 let update_idx = &updates[i];
                 let retract_idxs = &retracts[i];
@@ -239,6 +257,7 @@ impl WindowOperator {
             }
 
             // for late entries we also need to include all events falling into the window since we do full rebuild
+            // TODO exclude those covered by tiles
             if let Some(ref late_entries_ref) = late_entries {
                 let window_expr = self.windows[window_id].clone();
                 for late_entry in late_entries_ref {
@@ -385,25 +404,6 @@ impl WindowOperator {
         true
     }
 
-    async fn update_accumulator_state_with_late_entries(
-        window_expr: &Arc<dyn WindowExpr>, 
-        accumulator_state: AccumulatorState,
-        late_entries_in_window: &Vec<TimeIdx>, 
-        batches: &HashMap<BatchId, RecordBatch>,
-        thread_pool: Option<&ThreadPool>,
-        parallelize: bool
-    ) -> AccumulatorState {
-        // TODO is it ok not to sort late entries?
-        let updates = late_entries_in_window.iter().map(|entry| *entry).collect::<Vec<_>>();
-        let (_, updated_accumulator_state) = if parallelize {
-            run_accumulator_parallel(thread_pool.expect("ThreadPool should exist"), window_expr.clone(), updates, None, batches.clone(), Some(accumulator_state)).await
-        } else {
-            run_accumulator(window_expr, updates, None, batches, Some(accumulator_state))
-        };
-
-        updated_accumulator_state
-    }
-
     async fn produce_late_aggregates(
         window_expr: &Arc<dyn WindowExpr>,
         late_entries: &Vec<TimeIdx>, 
@@ -427,6 +427,51 @@ impl WindowOperator {
         }
 
         results
+    }
+
+    // returns a mix of raw events and tiles for range
+    async fn get_padded_tiled_range(
+        window_id: WindowId,
+        windows_state: &WindowsState,
+        time_entries: &Arc<SkipSet<TimeIdx>>,
+        start_idx: TimeIdx,
+        end_idx: TimeIdx
+    ) -> (Vec<TimeIdx>, Vec<Tile>, Vec<TimeIdx>) {
+        let window_state = windows_state.get(&window_id).expect("Window state should exist");
+        let tiles_in_range = if let Some(ref tiles) = window_state.tiles {
+            tiles.get_tiles_for_range(start_idx.timestamp, end_idx.timestamp)
+        } else {
+            Vec::new()
+        };
+        
+        // we assume that tiles range has no gaps that can be filled by raw events 
+        // i.e. if a tile does not exist (gap) then events do not exist (due to write consistency)
+        // hence check for raw events only between range start and first tile start and between last tile end and range end
+        if tiles_in_range.is_empty() {
+            // no tiles, use all entries in range
+            (time_entries.range(start_idx..=end_idx).map(|entry| *entry).collect(), Vec::new(), Vec::new())
+        } else {
+            // get front padding
+            let front_boundry = TimeIdx {
+                timestamp: tiles_in_range[0].tile_start,
+                pos_idx: 0,
+                batch_id: Uuid::nil(), // dummy values for search
+                row_idx: 0,
+            };
+            let front_padding: Vec<TimeIdx> = time_entries.range(start_idx..front_boundry).map(|entry| *entry).collect();
+            // get back padding
+            let back_boundry = TimeIdx {
+                timestamp: tiles_in_range[tiles_in_range.len() - 1].tile_end,
+                pos_idx: 0,
+                batch_id: Uuid::nil(), // dummy values for search
+                row_idx: 0,
+            };
+            let back_padding: Vec<TimeIdx> = time_entries.range(back_boundry..=end_idx).map(|entry| *entry).collect();
+            // front_padding.extend(back_padding);
+            // front_padding
+
+            (front_padding, tiles_in_range, back_padding)
+        }
     }
 }
 
