@@ -34,11 +34,11 @@ impl State {
         }
     }
 
-    pub async fn get_or_create_windows_state(&self, key: &Key, window_ids: &[WindowId], tiling: &[Option<TileConfig>], window_exprs: &[Arc<dyn WindowExpr>]) -> WindowsState {
+    pub async fn get_or_create_windows_state(&self, key: &Key, window_ids: &[WindowId], tiling_configs: &[Option<TileConfig>], window_exprs: &[Arc<dyn WindowExpr>]) -> WindowsState {
         self.window_states.get(key).map(|windows_state| windows_state.clone()).unwrap_or_else(|| {
             window_ids.iter().map(|&window_id| {
                 (window_id, WindowState {
-                    tiles: tiling.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone(), window_exprs[window_id].clone()))),
+                    tiles: tiling_configs.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone(), window_exprs[window_id].clone()))),
                     accumulator_state: None,
                     start_idx: TimeIdx { 
                         batch_id: uuid::Uuid::new_v4(),

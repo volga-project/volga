@@ -37,7 +37,7 @@ use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
-use crate::runtime::operators::window::window_operator::WindowConfig;
+use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::partition::PartitionType;
 
 /// Custom table provider creating dummy tables with no execution logic
@@ -370,7 +370,7 @@ impl Planner {
 
         // Window operator node using the physical exec
         let window_node = LogicalNode::new(
-            OperatorConfig::WindowConfig(WindowConfig::new(Arc::new(window_exec.clone()))),
+            OperatorConfig::WindowConfig(WindowOperatorConfig::new(Arc::new(window_exec.clone()))),
             parallelism,
             None,
             None,

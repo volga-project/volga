@@ -4,8 +4,10 @@ use arrow::array::{RecordBatch, UInt64Array};
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
+use crate::runtime::operators::window::aggregates::merge_accumulator_state;
+use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
 use crate::runtime::operators::window::state::AccumulatorState;
-use crate::runtime::operators::window::window_operator::create_sliding_accumulator;
+// use crate::runtime::operators::window::window_operator::create_sliding_accumulator;
 use crate::storage::storage::{Timestamp, extract_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -121,7 +123,7 @@ impl Tiles {
     }
 
     pub fn add_batch(&mut self, batch: &RecordBatch, ts_column_index: usize) {
-        // Extract timestamps and sort entries by time for ordered processing
+        // Extract timestamps
         let mut entries = Vec::new();
         
         for row_idx in 0..batch.num_rows() {
@@ -166,8 +168,17 @@ impl Tiles {
         let entry_batch = arrow::compute::take_record_batch(batch, &indices)
             .expect("Failed to extract entry row");
         
-        let mut accumulator = create_sliding_accumulator(window_expr, tile.accumulator_state.clone());
+        // let mut accumulator = create_sliding_accumulator(window_expr, tile.accumulator_state.clone());
         
+        let mut accumulator = match create_window_aggregator(&window_expr) {
+            WindowAggregator::Accumulator(accumulator) => accumulator,
+            WindowAggregator::Evaluator(evaluator) => panic!("Evaluator is not supported for retractable accumulator"),
+        };
+
+        if let Some(tile_state) = &tile.accumulator_state {
+            merge_accumulator_state(accumulator.as_mut(), tile_state.clone());
+        }
+
         let args = window_expr.evaluate_args(&entry_batch)
             .expect("Failed to evaluate window args");
         
@@ -243,17 +254,14 @@ impl Tiles {
             return ScalarValue::Null;
         }
         
-        let mut final_accumulator = create_sliding_accumulator(&self.window_expr, None);
+        let mut final_accumulator = match create_window_aggregator(&self.window_expr) {
+            WindowAggregator::Accumulator(accumulator) => accumulator,
+            WindowAggregator::Evaluator(_) => panic!("Evaluator is not supported for retractable accumulator"),
+        };
         
         for tile in tiles {
             if let Some(tile_state) = &tile.accumulator_state {
-                let state_arrays: Vec<arrow::array::ArrayRef> = tile_state
-                    .iter()
-                    .map(|scalar| scalar.to_array_of_size(1).expect("Failed to convert scalar to array"))
-                    .collect();
-                
-                final_accumulator.merge_batch(&state_arrays)
-                    .expect("Failed to merge tile state");
+                merge_accumulator_state(final_accumulator.as_mut(), tile_state.clone());
             }
         }
         

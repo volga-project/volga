@@ -17,11 +17,21 @@ pub type BatchId = Uuid; // light-weight batch id used for in-memory index
 pub type BatchKey = String; // batch key including extra metadata for storage, maps 1:1 to batch id
 pub type RowIdx = usize; // row index within a batch
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeGranularity {
-    Day,
-    Hour,
-    Minute,
+    Minutes(u32),
+    Hours(u32),
+    Days(u32),
+}
+
+impl TimeGranularity {
+    pub fn to_millis(&self) -> i64 {
+        match self {
+            TimeGranularity::Minutes(m) => *m as i64 * 60 * 1000,
+            TimeGranularity::Hours(h) => *h as i64 * 60 * 60 * 1000,
+            TimeGranularity::Days(d) => *d as i64 * 24 * 60 * 60 * 1000,
+        }
+    }
 }
 
 
@@ -53,7 +63,7 @@ pub struct Storage {
 
 impl Default for Storage {
     fn default() -> Self {
-        Self::new(4096, TimeGranularity::Minute, 1024)
+        Self::new(4096, TimeGranularity::Minutes(5), 1024)
     }
 }
 
@@ -223,23 +233,27 @@ impl Storage {
     }
 
     pub fn timestamp_to_time_partition(timestamp_ms: i64, time_granularity: TimeGranularity) -> String {
-        // Convert milliseconds to UTC DateTime
-        let datetime = Utc.timestamp_millis_opt(timestamp_ms)
+        // Calculate the time bucket based on granularity duration
+        let granularity_ms = time_granularity.to_millis();
+        let time_bucket = (timestamp_ms / granularity_ms) * granularity_ms;
+        
+        // Convert the time bucket start to UTC DateTime
+        let datetime = Utc.timestamp_millis_opt(time_bucket)
             .single()
             .expect("Timestamp should be valid");
         
         match time_granularity {
-            TimeGranularity::Day => {
-                // Format: YYYY-MM-DD
-                datetime.format("%Y-%m-%d").to_string()
+            TimeGranularity::Minutes(minutes) => {
+                // Format: YYYY-MM-DD-HH-MM-{minutes}min
+                format!("{}-{}min", datetime.format("%Y-%m-%d-%H-%M"), minutes)
             },
-            TimeGranularity::Hour => {
-                // Format: YYYY-MM-DD-HH
-                datetime.format("%Y-%m-%d-%H").to_string()
+            TimeGranularity::Hours(hours) => {
+                // Format: YYYY-MM-DD-HH-{hours}h
+                format!("{}-{}h", datetime.format("%Y-%m-%d-%H"), hours)
             },
-            TimeGranularity::Minute => {
-                // Format: YYYY-MM-DD-HH-MM
-                datetime.format("%Y-%m-%d-%H-%M").to_string()
+            TimeGranularity::Days(days) => {
+                // Format: YYYY-MM-DD-{days}d
+                format!("{}-{}d", datetime.format("%Y-%m-%d"), days)
             },
         }
     }

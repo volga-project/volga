@@ -9,7 +9,7 @@ use crate::runtime::operators::map::map_operator::MapOperator;
 use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
-use crate::runtime::operators::window::window_operator::{WindowConfig, WindowOperator};
+use crate::runtime::operators::window::window_operator::{WindowOperatorConfig, WindowOperator};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
 use crate::storage::storage::Storage;
@@ -71,7 +71,7 @@ pub enum OperatorConfig {
     KeyByConfig(KeyByFunction),
     ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
     AggregateConfig(AggregateConfig),
-    WindowConfig(WindowConfig),
+    WindowConfig(WindowOperatorConfig),
     ChainedConfig(Vec<OperatorConfig>),
 }
 

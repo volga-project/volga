@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::cmp::Ordering;
 use arrow::array::RecordBatch;
@@ -9,6 +10,7 @@ use uuid::Uuid;
 
 use crate::common::Key;
 use crate::runtime::operators::window::state::WindowState;
+use crate::runtime::operators::window::tiles::Tile;
 use crate::storage::storage::{BatchId, RowIdx, Timestamp, extract_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,13 +126,13 @@ pub fn get_window_entries(
     }
 }
 
-fn get_window_start_idx(
+pub fn get_window_start_idx(
     window_frame: &Arc<WindowFrame>,
     window_end_idx: TimeIdx,
     time_entries: &SkipSet<TimeIdx>,
 ) -> Option<TimeIdx> {
-     // Handle ROWS
     if window_frame.units == WindowFrameUnits::Rows {
+        // Handle ROWS
         match window_frame.start_bound {
             WindowFrameBound::Preceding(ScalarValue::UInt64(Some(delta))) => {
                 // Jump backwards delta elements from new_window_end
@@ -193,7 +195,7 @@ fn find_retracts(
         }
         
         // Collect all TimeIdxs between previous window start and new_window_start for retraction
-        let new_start_idx = new_window_start_idx.unwrap();
+        let new_start_idx = new_window_start_idx.expect("Window start idx should exist");
         let retract_idxs: Vec<TimeIdx> = time_entries
             .range(window_state.start_idx..new_start_idx)
             .map(|entry| *entry)
@@ -206,7 +208,7 @@ fn find_retracts(
         let previous_window_start_idx = window_state.start_idx;
         let retract_idxs: Vec<TimeIdx> = time_entries
             // Exclude window_start_idx
-            .range(previous_window_start_idx..new_window_start_idx.unwrap())
+            .range(previous_window_start_idx..new_window_start_idx.expect("Window start idx should exist"))
             .map(|entry| *entry)
             .collect();
         
@@ -216,7 +218,8 @@ fn find_retracts(
     }
 }
 
-pub fn slide_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut WindowState, time_entries: &Arc<SkipSet<TimeIdx>>) -> (Vec<TimeIdx>, Vec<Vec<TimeIdx>>) {
+
+pub fn slide_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut WindowState, time_entries: &Arc<SkipSet<TimeIdx>>, with_retracts: bool) -> (Vec<TimeIdx>, Vec<Vec<TimeIdx>>) {
     let mut updates = Vec::new();
     let mut retracts = Vec::new();
     
@@ -242,7 +245,9 @@ pub fn slide_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut
         
         let (rets, new_start_idx) = find_retracts(window_frame, time_idx, time_entries, &window_state);
         updates.push(time_idx);
-        retracts.push(rets);
+        if with_retracts {
+            retracts.push(rets);
+        }
         if let Some(new_start_idx) = new_start_idx {
             window_state.start_idx = new_start_idx;
         }
@@ -250,6 +255,77 @@ pub fn slide_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut
     }
     
     (updates, retracts)
+}
+
+// returns a mix of raw events and tiles for range
+pub fn get_tiled_range(
+    window_state: Option<&WindowState>,
+    time_entries: &Arc<SkipSet<TimeIdx>>,
+    start_idx: TimeIdx,
+    end_idx: TimeIdx
+) -> (Vec<TimeIdx>, Vec<Tile>, Vec<TimeIdx>) {
+    let tiles_in_range = if let Some(window_state) = window_state {
+        if let Some(ref tiles) = window_state.tiles {
+            tiles.get_tiles_for_range(start_idx.timestamp, end_idx.timestamp)
+        } else {
+            Vec::new()
+        }
+    } else {
+        Vec::new()
+    };
+    
+    // we assume that tiles range has no gaps that can be filled by raw events 
+    // i.e. if a tile does not exist (gap) then events do not exist (due to write consistency)
+    // hence check for raw events only between range start and first tile start and between last tile end and range end
+    if tiles_in_range.is_empty() {
+        // no tiles, use all entries in range
+        (time_entries.range(start_idx..=end_idx).map(|entry| *entry).collect(), Vec::new(), Vec::new())
+    } else {
+        // get front padding
+        let front_boundry = TimeIdx {
+            timestamp: tiles_in_range[0].tile_start,
+            pos_idx: 0,
+            batch_id: Uuid::nil(), // dummy values for search
+            row_idx: 0,
+        };
+        let front_padding: Vec<TimeIdx> = time_entries.range(start_idx..front_boundry).map(|entry| *entry).collect();
+        // get back padding
+        let back_boundry = TimeIdx {
+            timestamp: tiles_in_range[tiles_in_range.len() - 1].tile_end,
+            pos_idx: 0,
+            batch_id: Uuid::nil(), // dummy values for search
+            row_idx: 0,
+        };
+        let back_padding: Vec<TimeIdx> = time_entries.range(back_boundry..=end_idx).map(|entry| *entry).collect();
+        // front_padding.extend(back_padding);
+        // front_padding
+
+        (front_padding, tiles_in_range, back_padding)
+    }
+}
+
+// return batch_id's needed to produce window aggregates for given entries, 
+// excluding ranges covered by tiles
+pub fn get_batches_for_entries(
+    entries: &Vec<TimeIdx>,
+    time_entries: &Arc<SkipSet<TimeIdx>>,
+    window_frame: &Arc<WindowFrame>,
+    window_state: Option<&WindowState>,
+) -> BTreeSet<BatchId> {
+    let mut res = BTreeSet::new();
+    for entry in entries {
+        res.insert(entry.batch_id);
+        let window_start = get_window_start_idx(window_frame, *entry, &time_entries).unwrap_or(time_entries.front().expect("Time entries should exist").value().clone());
+        let tiled_range = get_tiled_range(window_state, &time_entries, window_start, *entry);
+        // skip tiles, only front and back padding
+        for entry in tiled_range.0 {
+            res.insert(entry.batch_id);
+        }
+        for entry in tiled_range.2 {
+            res.insert(entry.batch_id);
+        }
+    }
+    res
 }
 
 /// Convert various interval types to milliseconds for timestamp arithmetic
@@ -397,7 +473,7 @@ mod tests {
         };
         
         // First advance window position after first batch
-        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
+        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
         
         // Verify first batch processing (similar to test_advance_window_position_first_time)
         assert_eq!(first_updates.len(), 3, "Should have 3 updates for first batch");
@@ -431,7 +507,7 @@ mod tests {
         time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
         
         // Second advance window position (incremental processing)
-        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
+        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
         
         // Should only process new events (4000, 5000)
         assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
@@ -488,7 +564,7 @@ mod tests {
         };
         
         // First advance window position after first batch
-        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
+        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
         
         // Verify first batch processing
         assert_eq!(first_updates.len(), 5, "Should have 5 updates for first batch");
@@ -528,7 +604,7 @@ mod tests {
         time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
         
         // Second advance window position (incremental processing)
-        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries);
+        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
         
         // Should only process new events (3500, 4000)
         assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
@@ -588,7 +664,7 @@ mod tests {
             let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
-            let (first_updates, first_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries);
+            let (first_updates, first_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries, true);
             assert_eq!(first_updates.len(), 5, "Should process all 5 events with duplicates");
             
             // Verify duplicate timestamps are processed correctly
@@ -615,7 +691,7 @@ mod tests {
             time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
             
             // Second advance - incremental processing
-            let (second_updates, second_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries);
+            let (second_updates, second_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries, true);
             assert_eq!(second_updates.len(), 2, "Should process 2 new duplicate events");
             
             let expected_second_updates = [
@@ -646,7 +722,7 @@ mod tests {
             let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
-            let (first_updates, first_retracts) = slide_window_position(&range_frame, &mut window_state_range, &time_entries);
+            let (first_updates, first_retracts) = slide_window_position(&range_frame, &mut window_state_range, &time_entries, true);
             assert_eq!(first_updates.len(), 7, "Should process all 7 events (5 from batch1 + 2 from batch2)");
             
             // Verify range window behavior with duplicates
