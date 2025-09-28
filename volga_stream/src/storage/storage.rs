@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use arrow::compute::take_record_batch;
@@ -121,8 +121,8 @@ impl Storage {
             panic!("Batch has no rows");
         }
 
-        // Group row indices by time partition
-        let mut time_groups: HashMap<String, Vec<usize>> = HashMap::new();
+        // Group row indices by time partition, keep the order of the rows
+        let mut time_groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         
         for row_idx in 0..batch.num_rows() {
             let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
@@ -296,67 +296,6 @@ impl Storage {
         
         result
     }
-
-    // TODO should this be an iterator?
-    // pub async fn load_events(&self, indices_list: Vec<Vec<(BatchId, RowIdx)>>, partition_key: &Key) -> Vec<RecordBatch> {
-    //     // Pre-load all required batches from all indices lists
-    //     let mut all_batch_ids = std::collections::HashSet::new();
-    //     for indices in &indices_list {
-    //         for (batch_id, _) in indices {
-    //             all_batch_ids.insert(batch_id.clone());
-    //         }
-    //     }
-        
-    //     let batch_ids: Vec<BatchId> = all_batch_ids.into_iter().collect();
-    //     let batches = self.get_batches(batch_ids, partition_key).await;
-        
-    //     let mut result_batches = Vec::new();
-        
-    //     for indices in indices_list {
-            
-    //         // Group indices by batch_id to minimize batch lookups
-    //         let mut batch_indices: HashMap<BatchId, Vec<RowIdx>> = HashMap::new();
-    //         for (batch_id, row_idx) in indices {
-    //             batch_indices.entry(batch_id.clone())
-    //                 .or_insert_with(Vec::new)
-    //                 .push(row_idx);
-    //         }
-            
-    //         // Collect all rows from different batches using take_record_batch
-    //         let mut taken_batches = Vec::new();
-            
-    //         for (batch_id, row_indices) in batch_indices {
-    //             let batch = batches.get(&batch_id)
-    //                 .expect("Batch should exist in pre-loaded batches");
-                
-    //             // Convert row indices to Arrow UInt64Array for take operation
-    //             let indices_array = UInt64Array::from(
-    //                 row_indices.into_iter().map(|idx| idx as u64).collect::<Vec<_>>()
-    //             );
-                
-    //             // Use Arrow's take_record_batch to extract rows
-    //             let taken_batch = take_record_batch(batch, &indices_array)
-    //                 .expect("Take record batch operation should succeed");
-                
-    //             taken_batches.push(taken_batch);
-    //         }
-            
-    //         // Concatenate all taken batches if there are multiple
-    //         let result_batch = if taken_batches.len() == 1 {
-    //             taken_batches.into_iter().next().unwrap()
-    //         } else if taken_batches.len() > 1 {
-    //             let schema = taken_batches[0].schema();
-    //             arrow::compute::concat_batches(&schema, &taken_batches)
-    //                 .expect("Concatenation should succeed")
-    //         } else {
-    //             RecordBatch::new_empty(std::sync::Arc::new(arrow::datatypes::Schema::empty()))
-    //         };
-            
-    //         result_batches.push(result_batch);
-    //     }
-        
-    //     result_batches
-    // }
 
     // Get storage statistics with global exclusive lock
     pub async fn get_stats(&self) -> StorageStats {

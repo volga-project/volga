@@ -483,7 +483,7 @@ impl OperatorTrait for WindowOperator {
         }
 
         // TODO pruning
-        
+
         let batches = storage.append_records(message.record_batch().clone(), partition_key, self.ts_column_index).await;
         let mut inserted_idxs = Vec::new();
         for (batch_id, batch) in batches {
@@ -883,8 +883,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_late_entries_handling() {
-        // Test late entries handling with RANGE window
+    async fn test_late_entries_handling_retractable_window() {
+        // Test late entries handling with RANGE window, only retractable aggregates (sum, count)
         let sql = "SELECT 
             timestamp,
             value,
@@ -971,8 +971,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_multiple_late_entries() {
-        // Test handling multiple late entries in a single batch
+    async fn test_multiple_late_entries_handling_retractable_window() {
+        // Test handling multiple late entries in a single batch, only retractable aggregates (sum)
         let sql = "SELECT 
             timestamp,
             value,
@@ -1076,8 +1076,6 @@ mod tests {
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
 
         // Test 1: All ordered events
-        println!("\n=== Test 1: All Ordered Events ===");
-        
         // Process batch with ordered timestamps [1000, 2000, 3000, 4000, 5000]
         let batch1 = create_test_batch(vec![1000, 2000, 3000, 4000, 5000], vec![10.0, 20.0, 30.0, 40.0, 50.0], vec!["A", "A", "A", "A", "A"]);
         let message1 = create_keyed_message(batch1, "A");
@@ -1117,8 +1115,6 @@ mod tests {
         assert_eq!(avg_large_col.value(4), 35.0, "t=5000 large window AVG should be 35.0");
 
         // Test 2: Mixed batch with late entries
-        println!("\n=== Test 2: Mixed Batch with Late Entries ===");
-        
         // Process batch with late entries [1500, 6000, 2500] - 1500 and 2500 are late relative to 5000
         let batch2 = create_test_batch(vec![1500, 6000, 2500], vec![15.0, 60.0, 25.0], vec!["A", "A", "A"]);
         let message2 = create_keyed_message(batch2, "A");
@@ -1147,8 +1143,6 @@ mod tests {
         assert_eq!(avg_large_col2.value(2), 45.0, "t=6000 large window AVG should be 45.0");
 
         // Test 3: Verify accumulator integration with subsequent events
-        println!("\n=== Test 3: Verify Accumulator Integration ===");
-        
         // Process more events to verify late entries have been integrated into accumulator state
         let batch3 = create_test_batch(vec![7000, 8000], vec![70.0, 80.0], vec!["A", "A"]);
         let message3 = create_keyed_message(batch3, "A");
@@ -1177,7 +1171,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tiled_aggregates() {
-        // Test tiled aggregates (MIN, MAX, AVG) with late entries
+        // Test tiled aggregates (MIN, MAX), with late entries
         let sql = "SELECT 
             timestamp,
             value,
@@ -1284,7 +1278,7 @@ mod tests {
         // t=240000: window=[240000] -> MIN=40.0, MAX=40.0, AVG=40.0 (all others outside 5s window)
         // t=360000: window=[360000] -> MIN=60.0, MAX=60.0, AVG=60.0 (all others outside 5s window)
         // t=480000: window=[480000] -> MIN=80.0, MAX=80.0, AVG=80.0 (all others outside 5s window)
-        
+
         assert_eq!(min_column2.value(0), 20.0, "Late t=120000 MIN should be 20.0");
         assert_eq!(max_column2.value(0), 20.0, "Late t=120000 MAX should be 20.0");
         assert_eq!(avg_column2.value(0), 20.0, "Late t=120000 AVG should be 20.0");
