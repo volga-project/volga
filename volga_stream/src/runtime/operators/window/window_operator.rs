@@ -18,10 +18,10 @@ use crate::common::Key;
 use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
 use crate::runtime::operators::window::aggregates::{get_aggregate_type, produce_aggregates, run_retractable_accumulator, run_retractable_accumulator_parallel};
 use crate::runtime::operators::window::state::{State, WindowId, WindowsState};
-use crate::runtime::operators::window::time_index::{get_batches_for_entries, slide_window_position, TimeIdx, TimeIndex};
+use crate::runtime::operators::window::time_index::{get_batches_for_entries, prune_time_entries, slide_window_position, TimeIdx, TimeIndex};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::storage::storage::{Storage};
+use crate::storage::storage::{Storage, extract_timestamp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -43,6 +43,7 @@ pub struct WindowOperatorConfig {
     pub execution_mode: ExecutionMode,
     pub parallelize: bool,
     pub tiling_configs: Vec<Option<TileConfig>>,
+    pub lateness: Option<i64>,
 }
 
 impl WindowOperatorConfig {
@@ -53,6 +54,7 @@ impl WindowOperatorConfig {
             execution_mode: ExecutionMode::WatermarkBased,
             parallelize: false,
             tiling_configs: Vec::new(),
+            lateness: None
         }
     }
 }
@@ -71,6 +73,7 @@ pub struct WindowOperator {
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     tiling_configs: Vec<Option<TileConfig>>,
+    lateness: Option<i64>
 }
 
 impl WindowOperator {
@@ -117,6 +120,7 @@ impl WindowOperator {
             output_schema,
             input_schema,
             tiling_configs: window_operator_config.tiling_configs,
+            lateness: window_operator_config.lateness
         }
     }
 
@@ -125,9 +129,57 @@ impl WindowOperator {
         let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
         let windows_state = self.state.get_or_create_windows_state(key, &window_ids, &self.tiling_configs, &window_exprs).await;
         let time_entries = self.time_index.get_or_create_time_index(key).await;
-        let (result, updated_windows_state) = self.advance_windows(key, &windows_state, &time_entries, late_entries).await;
+        let (result, mut updated_windows_state) = self.advance_windows(key, &windows_state, &time_entries, late_entries).await;
+
+        if self.lateness.is_some() {
+            // prune if lateness is configured
+            updated_windows_state = self.prune(key, &updated_windows_state, &time_entries).await;
+        }
         self.state.insert_windows_state(key, updated_windows_state).await;
         result
+    }
+
+    pub fn get_state_and_time_index(&self) -> (&State, &TimeIndex) {
+        (&self.state, &self.time_index)
+    }
+
+    async fn prune(&self, key: &Key, windows_state: &WindowsState, time_entries: &Arc<SkipSet<TimeIdx>>) -> WindowsState {
+        // Calculate cutoff time based on longest window and lateness
+        let mut longest_window_length = 0i64;
+        let end_time = windows_state.values().next().expect("Window state should exist").end_idx.timestamp;
+        
+        for (_, window_state) in windows_state.iter() {
+            let window_length = window_state.end_idx.timestamp.saturating_sub(window_state.start_idx.timestamp);
+            longest_window_length = longest_window_length.max(window_length);
+        }
+        
+        // Cutoff = end_time - (longest_window_length + lateness)
+        let lateness = self.lateness.unwrap();
+        
+        let cutoff_time = end_time - (longest_window_length + lateness);
+        
+        if cutoff_time <= 0 {
+            return windows_state.clone(); // Nothing to prune yet
+        }
+        
+        let mut pruned_windows_state = windows_state.clone();
+        
+        // Prune tiles for each window that has them
+        for (_, window_state) in pruned_windows_state.iter_mut() {
+            if let Some(ref mut tiles) = window_state.tiles {
+                tiles.prune(cutoff_time);
+            }
+        }
+        
+        // Prune time index and get list of pruned batch IDs
+        let pruned_batch_ids = prune_time_entries(time_entries, cutoff_time).await;
+        
+        // Prune storage - remove batches that are no longer needed
+        if !pruned_batch_ids.is_empty() {
+            self.base.storage.remove_batches(&pruned_batch_ids, key).await;
+        }
+        
+        pruned_windows_state
     }
 
     async fn process_buffered(&self) -> RecordBatch {
@@ -268,11 +320,9 @@ impl WindowOperator {
                 for i in 0..updates.len() {
                     let update_idx = &updates[i];
                     batches_to_load.insert(update_idx.batch_id);
-                    if retractable {
-                        let retract_idxs = &retracts[i];
-                        for retract_idx in retract_idxs {
-                            batches_to_load.insert(retract_idx.batch_id);
-                        }
+                    let retract_idxs = &retracts[i];
+                    for retract_idx in retract_idxs {
+                        batches_to_load.insert(retract_idx.batch_id);
                     }
                 }
             } else {
@@ -462,7 +512,32 @@ impl OperatorTrait for WindowOperator {
         let time_entries = self.time_index.get_or_create_time_index(partition_key).await;
         let last_entry_before_update = time_entries.back();
 
-        // TODO based one execution mode (event vs watermark based) we may need to drop late events
+        let record_batch = message.record_batch();
+
+        // Filter out events that are too late based on lateness configuration
+        let record_batch = if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry_before_update.clone()) {
+            let cutoff_timestamp = last_entry.timestamp - lateness_ms as i64;
+            
+            let mut keep_indices = Vec::new();
+            for row_idx in 0..record_batch.num_rows() {
+                let timestamp = extract_timestamp(record_batch.column(self.ts_column_index), row_idx);
+                if timestamp >= cutoff_timestamp {
+                    keep_indices.push(row_idx as u32);
+                }
+            }
+            
+            if keep_indices.len() == record_batch.num_rows() {
+                record_batch.clone()
+            } else if keep_indices.is_empty() {
+                return None; // All events are too late, skip processing
+            } else {
+                let indices = arrow::array::UInt32Array::from(keep_indices);
+                arrow::compute::take_record_batch(&record_batch, &indices)
+                    .expect("Should be able to filter record batch")
+            }
+        } else {
+            record_batch.clone()
+        };
 
         // calculate pre-aggregated tiles if needed
         let has_tiled_windows = self.tiling_configs.iter().any(|config| config.is_some());
@@ -477,14 +552,12 @@ impl OperatorTrait for WindowOperator {
             ).await;
             for (_, window_state) in windows_state.iter_mut() {
                 if let Some(ref mut tiles) = window_state.tiles {
-                    tiles.add_batch(message.record_batch(), self.ts_column_index);
+                    tiles.add_batch(&record_batch, self.ts_column_index);
                 }
             }
         }
 
-        // TODO pruning
-
-        let batches = storage.append_records(message.record_batch().clone(), partition_key, self.ts_column_index).await;
+        let batches = storage.append_records(record_batch.clone(), partition_key, self.ts_column_index).await;
         let mut inserted_idxs = Vec::new();
         for (batch_id, batch) in batches {
             inserted_idxs.extend(self.time_index.update_time_index(partition_key, batch_id, &batch, self.ts_column_index).await);
@@ -495,7 +568,7 @@ impl OperatorTrait for WindowOperator {
             self.buffered_keys.insert(partition_key.clone());
             None
         } else {
-            let late_entries = if let Some(last_entry) = last_entry_before_update {
+            let late_entries = if let Some(last_entry) = last_entry_before_update.clone() {
                 Some(inserted_idxs.into_iter().filter(|idx| idx < last_entry.value()).collect::<Vec<_>>())
             } else {
                 None
@@ -1369,6 +1442,146 @@ mod tests {
         assert_eq!(min_column4.value(2), 25.0, "Partition B t=180000 MIN should be 25.0");
         assert_eq!(max_column4.value(2), 25.0, "Partition B t=180000 MAX should be 25.0");
         assert_eq!(avg_column4.value(2), 25.0, "Partition B t=180000 AVG should be 25.0");
+        
+        window_operator.close().await.expect("Should be able to close operator");
+    }
+
+    #[tokio::test]
+    async fn test_pruning_with_lateness() {
+        // Test pruning functionality with lateness configuration
+        let sql = "SELECT 
+            timestamp,
+            value,
+            partition_key,
+            SUM(value) OVER w as sum_val
+        FROM test_table
+        WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW)";
+        
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut window_config = WindowOperatorConfig::new(window_exec);
+        window_config.execution_mode = ExecutionMode::EventBased;
+        window_config.parallelize = false;
+        window_config.lateness = Some(5000); // 12000 seconds lateness
+        
+        let storage = Arc::new(Storage::default());
+        let operator_config = OperatorConfig::WindowConfig(window_config);
+        let runtime_context = create_test_runtime_context();
+        
+        let mut window_operator = WindowOperator::new(operator_config, storage.clone());
+        window_operator.open(&runtime_context).await.expect("Should be able to open operator");
+        
+        // Step 1: Process initial batch with more data points
+        let batch1 = create_test_batch(
+            vec![10000, 15000, 20000, 25000, 30000], // 10s, 15s, 20s, 25s, 30s
+            vec![100.0, 150.0, 200.0, 250.0, 300.0], 
+            vec!["A", "A", "A", "A", "A"]
+        );
+        let message1 = create_keyed_message(batch1, "A");
+        
+        let results1 = window_operator.process_message(message1).await;
+        assert!(results1.is_some(), "Should have results for initial batch");
+        
+        let result_messages1 = results1.unwrap();
+        let result_batch1 = result_messages1[0].record_batch();
+        assert_eq!(result_batch1.num_rows(), 5, "Should have 5 result rows");
+        
+        // Step 2: Test late event filtering
+        // Latest time is 30000ms, lateness is 5000ms, so cutoff is 25000ms
+        let batch2 = create_test_batch(
+            vec![22000, 24000, 35000], // 22s (late but OK), 24s (too late), 35s (on time)
+            vec![220.0, 240.0, 350.0], 
+            vec!["A", "A", "A"]
+        );
+        let message2 = create_keyed_message(batch2, "A");
+        
+        let results2 = window_operator.process_message(message2).await;
+        assert!(results2.is_some(), "Should have results for mixed batch");
+        
+        let result_messages2 = results2.unwrap();
+        let result_batch2 = result_messages2[0].record_batch();
+        // Should only process 2 events: 22000 and 35000 (24000 dropped as too late)
+        assert_eq!(result_batch2.num_rows(), 2, "Should have 2 result rows (1 event dropped)");
+        
+        // Step 3: Trigger partial pruning with moderately future events
+        // Current window has data from 10000-35000ms
+        // Window length is 2000ms, lateness is 5000ms
+        // New event at 45000ms will create cutoff at: 45000 - (2000 + 5000) = 38000ms
+        // This should prune events before 38000ms, keeping some recent data
+        let batch3 = create_test_batch(
+            vec![45000], // 45s - triggers partial pruning
+            vec![450.0], 
+            vec!["A"]
+        );
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let results3 = window_operator.process_message(message3).await;
+        assert!(results3.is_some(), "Should have results after partial pruning");
+        
+        let result_messages3 = results3.unwrap();
+        let result_batch3 = result_messages3[0].record_batch();
+        assert_eq!(result_batch3.num_rows(), 1, "Should have 1 result row");
+        
+        let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        assert_eq!(sum_column3.value(0), 450.0, "Should be isolated event");
+        
+        // Step 4: Add another event to verify partial pruning worked
+        // Events before 38000ms should be pruned, but events after should remain
+        let batch4 = create_test_batch(
+            vec![47000], // 47s - close to previous event
+            vec![470.0], 
+            vec!["A"]
+        );
+        let message4 = create_keyed_message(batch4, "A");
+        
+        let results4 = window_operator.process_message(message4).await;
+        assert!(results4.is_some(), "Should have results after second event");
+        
+        let result_messages4 = results4.unwrap();
+        let result_batch4 = result_messages4[0].record_batch();
+        assert_eq!(result_batch4.num_rows(), 1, "Should have 1 result row");
+        
+        let sum_column4 = result_batch4.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        // Window is 2000ms, so should include events from 45000ms to 47000ms
+        assert_eq!(sum_column4.value(0), 920.0, "Should include both recent events (450+470)");
+        
+        // Step 5: Verify pruning worked by checking state and time index
+        let partition_key = create_test_key("A");
+        let (state, time_index) = window_operator.get_state_and_time_index();
+        
+        // Check time index has been pruned
+        if let Some(time_entries) = time_index.get_time_entries(&partition_key) {
+            let remaining_entries: Vec<_> = time_entries.iter().map(|entry| entry.timestamp).collect();
+            println!("Remaining time entries after pruning: {:?}", remaining_entries);
+            
+            // Should only have entries after cutoff time (38000ms)
+            // Expected entries: 45000ms, 47000ms (and possibly 35000ms if it's >= 38000ms)
+            assert!(remaining_entries.iter().all(|&ts| ts >= 38000), 
+                   "All remaining time entries should be >= 38000ms (cutoff), found: {:?}", remaining_entries);
+            assert!(remaining_entries.contains(&45000), "Should contain 45000ms entry");
+            assert!(remaining_entries.contains(&47000), "Should contain 47000ms entry");
+        } else {
+            panic!("Time entries should exist for partition A");
+        }
+        
+        // Check tiles have been pruned (if they exist)
+        if let Some(windows_state) = state.get_windows_state(&partition_key) {
+            for (window_id, window_state) in windows_state.iter() {
+                if let Some(ref tiles) = window_state.tiles {
+                    let tile_stats = tiles.get_stats();
+                    println!("Window {} tile stats after pruning: {:?}", window_id, tile_stats);
+                    
+                    // Verify tiles only contain recent data (after cutoff)
+                    for (granularity, granularity_stats) in tile_stats.granularity_stats.iter() {
+                        println!("Granularity {:?}: {} tiles, {} entries", 
+                                granularity, granularity_stats.tile_count, granularity_stats.entry_count);
+                    }
+                }
+            }
+        } else {
+            println!("No windows state found for partition A (may have been completely pruned)");
+        }
+
+        // TODO storage pruning
         
         window_operator.close().await.expect("Should be able to close operator");
     }

@@ -294,7 +294,7 @@ impl Tiles {
         }
     }
 
-    pub fn cleanup_old_tiles(&mut self, cutoff_time: Timestamp) {
+    pub fn prune(&mut self, cutoff_time: Timestamp) {
         for tiles_map in self.tiles.values_mut() {
             tiles_map.retain(|_, tile| {
                 tile.tile_end > cutoff_time

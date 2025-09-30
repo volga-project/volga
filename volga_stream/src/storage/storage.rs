@@ -288,13 +288,30 @@ impl Storage {
         let mut result = HashMap::new();
         for batch_id in batch_ids {
             let batch_key = self.batch_id_to_key.get(&batch_id)
-                .expect("Batch ID should have a corresponding batch key");
+                .expect("Batch ID should have a corresponding batch key for");
             if let Some(batch) = self.batch_store.get(batch_key.value()) {
                 result.insert(batch_id, batch.clone());
             }
         }
         
         result
+    }
+
+    // Remove multiple batches from storage
+    pub async fn remove_batches(&self, batch_ids: &[BatchId], partition_key: &Key) {
+        // Acquire global read lock
+        let _global_guard = self.global_lock.read().await;
+        
+        // Acquire per-partition write lock
+        let partition_lock = self.get_partition_lock(partition_key);
+        let _partition_guard = partition_lock.write().await;
+
+        for batch_id in batch_ids {
+            // Get batch key and remove from both maps
+            if let Some((_, batch_key)) = self.batch_id_to_key.remove(batch_id) {
+                self.batch_store.remove(&batch_key);
+            }
+        }
     }
 
     // Get storage statistics with global exclusive lock

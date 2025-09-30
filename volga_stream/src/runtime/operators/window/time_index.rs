@@ -111,6 +111,39 @@ impl TimeIndex {
     pub async fn insert_time_index(&self, partition_key: &Key, time_entries: Arc<SkipSet<TimeIdx>>) {
         self.time_index.insert(partition_key.clone(), time_entries);
     }
+
+    pub fn get_time_entries(&self, partition_key: &Key) -> Option<Arc<SkipSet<TimeIdx>>> {
+        self.time_index.get(partition_key).map(|entry| entry.value().clone())
+    }
+}
+
+
+pub async fn prune_time_entries(time_entries: &Arc<SkipSet<TimeIdx>>, cutoff_timestamp: Timestamp) -> Vec<BatchId> {
+    let mut pruned_batch_ids = BTreeSet::new();
+    
+    // Find all entries before cutoff timestamp
+    let cutoff_key = TimeIdx {
+        timestamp: cutoff_timestamp,
+        pos_idx: 0,
+        batch_id: Uuid::nil(),
+        row_idx: 0,
+    };
+    
+    // Collect entries to remove and their batch IDs
+    let entries_to_remove: Vec<TimeIdx> = time_entries
+        .range(..cutoff_key)
+        .map(|entry| {
+            pruned_batch_ids.insert(entry.batch_id);
+            *entry
+        })
+        .collect();
+    
+    // Remove the entries
+    for entry in entries_to_remove {
+        time_entries.remove(&entry);
+    }
+    
+    pruned_batch_ids.into_iter().collect()
 }
 
 pub fn get_window_entries(

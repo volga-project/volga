@@ -60,4 +60,8 @@ impl State {
     pub async fn insert_windows_state(&self, key: &Key, windows_state: WindowsState) {
         self.window_states.insert(key.clone(), windows_state);
     }
+
+    pub fn get_windows_state(&self, key: &Key) -> Option<WindowsState> {
+        self.window_states.get(key).map(|entry| entry.clone())
+    }
 }
