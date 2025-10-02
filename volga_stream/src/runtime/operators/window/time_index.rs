@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::cmp::Ordering;
 use arrow::array::RecordBatch;
-use crossbeam_skiplist::SkipSet;
+use crossbeam_skiplist::{SkipSet, SkipMap};
 use dashmap::DashMap;
 use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 use datafusion::scalar::ScalarValue;
@@ -43,12 +43,14 @@ impl Ord for TimeIdx {
 #[derive(Debug)]
 pub struct TimeIndex {
     time_index: DashMap<Key, Arc<SkipSet<TimeIdx>>>,
+    batch_ids: DashMap<Key, Arc<SkipMap<Timestamp, Vec<BatchId>>>>,
 }
 
 impl TimeIndex {
     pub fn new() -> Self {
         Self {
             time_index: DashMap::new(),
+            batch_ids: DashMap::new(),
         }
     }
 
@@ -61,9 +63,13 @@ impl TimeIndex {
     ) -> Vec<TimeIdx> {
         let mut time_idxs = Vec::new();
         let time_entries = self.get_or_create_time_index(partition_key).await;
+        let timestamp_to_batch = self.get_or_create_timestamp_to_batch(partition_key);
+        
+        let mut max_timestamp = i64::MIN;
         
         for row_idx in 0..batch.num_rows() {
             let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
+            max_timestamp = max_timestamp.max(timestamp);
             
             // Search for lower bound with (timestamp, usize::MAX)
             let search_key = TimeIdx {
@@ -98,6 +104,15 @@ impl TimeIndex {
             time_idxs.push(time_idx);
         }
         
+        // Insert batch mapping once with max timestamp
+        if let Some(existing_batches) = timestamp_to_batch.get(&max_timestamp) {
+            let mut batches = existing_batches.value().clone();
+            batches.push(batch_id);
+            timestamp_to_batch.insert(max_timestamp, batches);
+        } else {
+            timestamp_to_batch.insert(max_timestamp, vec![batch_id]);
+        }
+        
         time_idxs
     }
 
@@ -108,43 +123,69 @@ impl TimeIndex {
         self.time_index.get(partition_key).expect("Time entries should exist").value().clone()
     }
 
+    fn get_or_create_timestamp_to_batch(&self, partition_key: &Key) -> Arc<SkipMap<Timestamp, Vec<BatchId>>> {
+        if !self.batch_ids.contains_key(partition_key) {
+            self.batch_ids.insert(partition_key.clone(), Arc::new(SkipMap::new()));
+        }
+        self.batch_ids.get(partition_key).expect("Timestamp to batch mapping should exist").value().clone()
+    }
+
     pub async fn insert_time_index(&self, partition_key: &Key, time_entries: Arc<SkipSet<TimeIdx>>) {
         self.time_index.insert(partition_key.clone(), time_entries);
     }
 
-    pub fn get_time_entries(&self, partition_key: &Key) -> Option<Arc<SkipSet<TimeIdx>>> {
-        self.time_index.get(partition_key).map(|entry| entry.value().clone())
+    pub fn get_batch_ids(&self, partition_key: &Key) -> Option<Arc<SkipMap<Timestamp, Vec<BatchId>>>> {
+        self.batch_ids.get(partition_key).map(|entry| entry.value().clone())
+    }
+
+    pub async fn prune(&self, partition_key: &Key, cutoff_timestamp: Timestamp) -> Vec<BatchId> {
+        let mut batches_to_delete = BTreeSet::new();
+        
+        // Collect batches to delete and prune timestamp_to_batch mapping
+        if let Some(timestamp_to_batch) = self.batch_ids.get(partition_key) {
+            let timestamps_to_remove: Vec<Timestamp> = timestamp_to_batch
+                .range(..cutoff_timestamp)
+                .map(|entry| {
+                    // Add all batch IDs for this timestamp
+                    for batch_id in entry.value() {
+                        batches_to_delete.insert(*batch_id);
+                    }
+                    *entry.key()
+                })
+                .collect();
+            
+            // Remove timestamps from mapping
+            for timestamp in timestamps_to_remove {
+                timestamp_to_batch.remove(&timestamp);
+            }
+        }
+        
+        // Prune time entries
+        if let Some(time_entries) = self.time_index.get(partition_key) {
+            let cutoff_key = TimeIdx {
+                timestamp: cutoff_timestamp,
+                pos_idx: 0,
+                batch_id: Uuid::nil(),
+                row_idx: 0,
+            };
+            
+            // Collect entries to remove
+            let entries_to_remove: Vec<TimeIdx> = time_entries
+                .range(..cutoff_key)
+                .map(|entry| *entry)
+                .collect();
+            
+            // Remove the entries
+            for entry in entries_to_remove {
+                time_entries.remove(&entry);
+            }
+        }
+        
+        batches_to_delete.into_iter().collect()
     }
 }
 
 
-pub async fn prune_time_entries(time_entries: &Arc<SkipSet<TimeIdx>>, cutoff_timestamp: Timestamp) -> Vec<BatchId> {
-    let mut pruned_batch_ids = BTreeSet::new();
-    
-    // Find all entries before cutoff timestamp
-    let cutoff_key = TimeIdx {
-        timestamp: cutoff_timestamp,
-        pos_idx: 0,
-        batch_id: Uuid::nil(),
-        row_idx: 0,
-    };
-    
-    // Collect entries to remove and their batch IDs
-    let entries_to_remove: Vec<TimeIdx> = time_entries
-        .range(..cutoff_key)
-        .map(|entry| {
-            pruned_batch_ids.insert(entry.batch_id);
-            *entry
-        })
-        .collect();
-    
-    // Remove the entries
-    for entry in entries_to_remove {
-        time_entries.remove(&entry);
-    }
-    
-    pruned_batch_ids.into_iter().collect()
-}
 
 pub fn get_window_entries(
     window_frame: &Arc<WindowFrame>,
@@ -362,7 +403,7 @@ pub fn get_batches_for_entries(
 }
 
 /// Convert various interval types to milliseconds for timestamp arithmetic
-fn convert_interval_to_milliseconds(delta: &ScalarValue) -> i64 {
+pub fn convert_interval_to_milliseconds(delta: &ScalarValue) -> i64 {
     match delta {
         ScalarValue::IntervalMonthDayNano(Some(interval)) => {
             // Based on DataFusion's interval_mdn_to_duration_ns logic

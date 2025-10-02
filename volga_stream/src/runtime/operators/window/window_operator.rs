@@ -8,7 +8,9 @@ use async_trait::async_trait;
 use crossbeam_skiplist::SkipSet;
 use futures::future;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
+use uuid::Uuid;
 
+use datafusion::logical_expr::{WindowFrameBound, WindowFrameUnits};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::WindowExpr;
@@ -18,7 +20,7 @@ use crate::common::Key;
 use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
 use crate::runtime::operators::window::aggregates::{get_aggregate_type, produce_aggregates, run_retractable_accumulator, run_retractable_accumulator_parallel};
 use crate::runtime::operators::window::state::{State, WindowId, WindowsState};
-use crate::runtime::operators::window::time_index::{get_batches_for_entries, prune_time_entries, slide_window_position, TimeIdx, TimeIndex};
+use crate::runtime::operators::window::time_index::{convert_interval_to_milliseconds, get_batches_for_entries, get_window_start_idx, slide_window_position, TimeIdx, TimeIndex};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::storage::{Storage, extract_timestamp};
@@ -144,39 +146,78 @@ impl WindowOperator {
     }
 
     async fn prune(&self, key: &Key, windows_state: &WindowsState, time_entries: &Arc<SkipSet<TimeIdx>>) -> WindowsState {
-        // Calculate cutoff time based on longest window and lateness
-        let mut longest_window_length = 0i64;
-        let end_time = windows_state.values().next().expect("Window state should exist").end_idx.timestamp;
-        
-        for (_, window_state) in windows_state.iter() {
-            let window_length = window_state.end_idx.timestamp.saturating_sub(window_state.start_idx.timestamp);
-            longest_window_length = longest_window_length.max(window_length);
-        }
-        
-        // Cutoff = end_time - (longest_window_length + lateness)
         let lateness = self.lateness.unwrap();
         
-        let cutoff_time = end_time - (longest_window_length + lateness);
-        
-        if cutoff_time <= 0 {
-            return windows_state.clone(); // Nothing to prune yet
-        }
-        
         let mut pruned_windows_state = windows_state.clone();
+        let mut min_cutoff_timestamp = i64::MAX;
         
-        // Prune tiles for each window that has them
-        for (_, window_state) in pruned_windows_state.iter_mut() {
-            if let Some(ref mut tiles) = window_state.tiles {
-                tiles.prune(cutoff_time);
+        // For each window state, calculate its specific cutoff and prune tiles
+        for (window_id, window_state) in pruned_windows_state.iter_mut() {
+        let window_config = self.windows.get(window_id).expect("Window config should exist");
+            let window_frame = window_config.window_expr.get_window_frame();
+            let window_cutoff = match window_frame.units {
+                WindowFrameUnits::Range => {
+                    // For range windows: simple logic
+                    // cutoff = end_timestamp - (lateness + window_length_ms)
+                    if let WindowFrameBound::Preceding(window_length) = &window_frame.start_bound {
+                        let window_length_ms = convert_interval_to_milliseconds(window_length);
+                        let cutoff = window_state.end_idx.timestamp - (lateness + window_length_ms);
+                        if cutoff > 0 {
+                            cutoff
+                        } else {
+                            0
+                        }
+                    } else {
+                        panic!("Expected Preceding bound for range windows");
+                    }
+                },
+                WindowFrameUnits::Rows => {
+                    // For row windows: use lookup key and get_window_start_idx;
+                    
+                    let search_key = TimeIdx {
+                        timestamp: window_state.end_idx.timestamp - lateness,
+                        pos_idx: usize::MAX,
+                        batch_id: Uuid::nil(),
+                        row_idx: 0,
+                    };
+                    
+                    if let Some(last_valid_entry) = time_entries.upper_bound(std::ops::Bound::Included(&search_key)) {
+                        if let Some(window_start_idx) = get_window_start_idx(&window_frame, *last_valid_entry, &time_entries) {
+                            window_start_idx.timestamp
+                        } else {
+                            // If we can't find window start, no cutoff
+                            0
+                        }
+                    } else {
+                        // No entries found, no cutoff
+                        0
+                    }
+                },
+                _ => {
+                    panic!("Unsupported WindowFrameUnits: only ROWS and RANGE are supported");
+                }
+            };
+
+            min_cutoff_timestamp = min_cutoff_timestamp.min(window_cutoff);
+            
+            if window_cutoff > 0 {
+                // Prune tiles for this window with its specific cutoff
+                if let Some(ref mut tiles) = window_state.tiles {
+                    tiles.prune(window_cutoff);
+                }
             }
         }
-        
-        // Prune time index and get list of pruned batch IDs
-        let pruned_batch_ids = prune_time_entries(time_entries, cutoff_time).await;
-        
-        // Prune storage - remove batches that are no longer needed
-        if !pruned_batch_ids.is_empty() {
-            self.base.storage.remove_batches(&pruned_batch_ids, key).await;
+
+        // Since data in storage is shared between windows,
+        // use minimal cutoff (earliest) timestamp to prune time_index and storage
+        if min_cutoff_timestamp != i64::MAX && min_cutoff_timestamp > 0 {
+            // Prune time index and get list of pruned batch IDs
+            let pruned_batch_ids = self.time_index.prune(key, min_cutoff_timestamp).await;
+            
+            // Prune storage - remove batches that are no longer needed
+            if !pruned_batch_ids.is_empty() {
+                self.base.storage.remove_batches(&pruned_batch_ids, key).await;
+            }
         }
         
         pruned_windows_state
@@ -569,7 +610,12 @@ impl OperatorTrait for WindowOperator {
             None
         } else {
             let late_entries = if let Some(last_entry) = last_entry_before_update.clone() {
-                Some(inserted_idxs.into_iter().filter(|idx| idx < last_entry.value()).collect::<Vec<_>>())
+                let lates = inserted_idxs.into_iter().filter(|idx| idx < last_entry.value()).collect::<Vec<_>>();
+                if lates.len() > 0 {
+                    Some(lates)
+                } else{
+                    None
+                }
             } else {
                 None
             };
@@ -735,6 +781,50 @@ mod tests {
             1,
             None
         )
+    }
+
+    async fn verify_pruning(
+        window_operator: &WindowOperator,
+        partition_key: &Key,
+        expected_min_timestamp: Option<i64>
+    ) {
+        let (state, time_index) = window_operator.get_state_and_time_index();
+        
+        // Check time index entries
+        let time_entries = time_index.get_or_create_time_index(partition_key).await;
+        let remaining_entries: Vec<_> = time_entries.iter().map(|entry| entry.timestamp).collect();
+        
+        if let Some(min_ts) = expected_min_timestamp {
+            assert!(remaining_entries.iter().all(|&ts| ts >= min_ts), 
+                    "All time entries should be >= {}ms, found: {:?}", min_ts, remaining_entries);
+        }
+        
+        // Check batch_ids mapping is correctly pruned
+        if let Some(batch_ids) = time_index.get_batch_ids(partition_key) {
+            let remaining_batch_timestamps: Vec<_> = batch_ids.iter().map(|entry| *entry.key()).collect();
+            
+            if let Some(min_ts) = expected_min_timestamp {
+                assert!(remaining_batch_timestamps.iter().all(|&ts| ts >= min_ts),
+                       "All batch timestamps should be >= {}ms, found: {:?}", min_ts, remaining_batch_timestamps);
+            }
+        }
+        
+        // Check window state and tiles
+        if let Some(windows_state) = state.get_windows_state(partition_key) {
+            for (_, window_state) in windows_state.iter() {
+                if let Some(ref tiles) = window_state.tiles {
+                    // Assert tile boundaries respect the cutoff timestamp
+                    if let Some(min_ts) = expected_min_timestamp {
+                        let tile_ranges = tiles.get_tiles_for_range(0, i64::MAX);
+                        for tile in tile_ranges {
+                            assert!(tile.tile_end > min_ts, 
+                                   "Tile should end after cutoff {}ms, but tile ends at {}ms", 
+                                   min_ts, tile.tile_end);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -1448,20 +1538,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_pruning_with_lateness() {
-        // Test pruning functionality with lateness configuration
+        // Test pruning with 5 different aggregates over 3 window types and lateness configuration
         let sql = "SELECT 
             timestamp,
             value,
             partition_key,
-            SUM(value) OVER w as sum_val
+            SUM(value) OVER w1 as sum_2s,
+            AVG(value) OVER w2 as avg_5s,
+            MIN(value) OVER w2 as min_5s,
+            COUNT(value) OVER w3 as count_3rows,
+            MAX(value) OVER w3 as max_3rows
         FROM test_table
-        WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW)";
+        WINDOW 
+            w1 AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW),
+            w2 AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW),
+            w3 AS (PARTITION BY partition_key ORDER BY timestamp ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)";
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
         window_config.execution_mode = ExecutionMode::EventBased;
         window_config.parallelize = false;
-        window_config.lateness = Some(5000); // 12000 seconds lateness
+        window_config.lateness = Some(3000); // 3 seconds lateness
         
         let storage = Arc::new(Storage::default());
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -1470,11 +1567,13 @@ mod tests {
         let mut window_operator = WindowOperator::new(operator_config, storage.clone());
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
         
-        // Step 1: Process initial batch with more data points
+        let partition_key = create_test_key("A");
+        
+        // Step 1: Process initial batch
         let batch1 = create_test_batch(
-            vec![10000, 15000, 20000, 25000, 30000], // 10s, 15s, 20s, 25s, 30s
-            vec![100.0, 150.0, 200.0, 250.0, 300.0], 
-            vec!["A", "A", "A", "A", "A"]
+            vec![10000, 15000, 20000], // 10s, 15s, 20s
+            vec![100.0, 150.0, 200.0], 
+            vec!["A", "A", "A"]
         );
         let message1 = create_keyed_message(batch1, "A");
         
@@ -1483,13 +1582,40 @@ mod tests {
         
         let result_messages1 = results1.unwrap();
         let result_batch1 = result_messages1[0].record_batch();
-        assert_eq!(result_batch1.num_rows(), 5, "Should have 5 result rows");
+        assert_eq!(result_batch1.num_rows(), 3, "Should have 3 result rows");
         
-        // Step 2: Test late event filtering
-        // Latest time is 30000ms, lateness is 5000ms, so cutoff is 25000ms
+        // Verify aggregate calculations for the last event (20000ms)
+        let sum_column1 = result_batch1.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let avg_column1 = result_batch1.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
+        let min_column1 = result_batch1.column(5).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column1 = result_batch1.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
+        let max_column1 = result_batch1.column(7).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // For event at 20000ms:
+        // w1 (2s range): includes 20000ms only -> sum = 200.0
+        // w2 (5s range): includes 15000ms, 20000ms -> avg = (150.0 + 200.0) / 2 = 175.0, min = 150.0
+        // w3 (3 rows): includes all 3 events: 10000ms, 15000ms, 20000ms -> count = 3, max = 200.0
+        assert_eq!(sum_column1.value(2), 200.0, "2s window should include only current event");
+        assert_eq!(avg_column1.value(2), 175.0, "5s window should include 15000ms and 20000ms");
+        assert_eq!(min_column1.value(2), 150.0, "5s window min should be 150.0");
+        assert_eq!(count_column1.value(2), 3, "3-row window should include all 3 events");
+        assert_eq!(max_column1.value(2), 200.0, "3-row window max should be 200.0");
+        
+        // Verify state after step 1 - pruning should occur
+        // w1 (2s range): cutoff = 20000 - (3000 + 2000) = 15000ms
+        // w2 (5s range): cutoff = 20000 - (3000 + 5000) = 12000ms  
+        // w3 (3 rows): Search timestamp = 20000 - 3000 = 17000ms
+        //              Last entry <= 17000ms is 15000ms
+        //              For 3-row window ending at 15000ms, window start is 10000ms (last 3: [10000, 15000] - only 2 entries, so cutoff is 0)
+        //              So w3 cutoff = 10ms
+        // Minimal cutoff = min(15000, 12000, 0) = 0 - no actual pruning
+        verify_pruning(&window_operator, &partition_key, Some(0)).await;
+
+        // Step 2: Test late event filtering and partial pruning
+        // Latest time is 20000ms, lateness is 3000ms, so late event cutoff is 17000ms
         let batch2 = create_test_batch(
-            vec![22000, 24000, 35000], // 22s (late but OK), 24s (too late), 35s (on time)
-            vec![220.0, 240.0, 350.0], 
+            vec![16000, 18000, 25000], // 16s (too late, dropped), 18s (late, but processed), 25s (on time)
+            vec![160.0, 180.0, 250.0], 
             vec!["A", "A", "A"]
         );
         let message2 = create_keyed_message(batch2, "A");
@@ -1499,89 +1625,80 @@ mod tests {
         
         let result_messages2 = results2.unwrap();
         let result_batch2 = result_messages2[0].record_batch();
-        // Should only process 2 events: 22000 and 35000 (24000 dropped as too late)
+        // Should process 2 events: 18000, 25000 (16000 dropped as too late)
         assert_eq!(result_batch2.num_rows(), 2, "Should have 2 result rows (1 event dropped)");
         
-        // Step 3: Trigger partial pruning with moderately future events
-        // Current window has data from 10000-35000ms
-        // Window length is 2000ms, lateness is 5000ms
-        // New event at 45000ms will create cutoff at: 45000 - (2000 + 5000) = 38000ms
-        // This should prune events before 38000ms, keeping some recent data
+        // Verify the window calculations for the last event (25000ms)
+        let sum_column = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let avg_column = result_batch2.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
+        let min_column = result_batch2.column(5).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column = result_batch2.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
+        let max_column = result_batch2.column(7).as_any().downcast_ref::<Float64Array>().unwrap();
+        
+        // For event at 25000ms:
+        // w1 (2s range): includes 25000ms only -> sum = 250.0
+        // w2 (5s range): includes 20000ms, 25000ms -> avg = (200.0 + 250.0) / 2 = 225.0, min = 200.0
+        // w3 (3 rows): includes last 3 events: 18000ms, 20000ms, 25000ms -> count = 3, max = 250.0
+        assert_eq!(sum_column.value(1), 250.0, "2s window should include only current event");
+        assert_eq!(avg_column.value(1), 225.0, "5s window should include 20000ms and 25000ms");
+        assert_eq!(min_column.value(1), 200.0, "5s window min should be 200.0");
+        assert_eq!(count_column.value(1), 3, "3-row window should include last 3 events");
+        assert_eq!(max_column.value(1), 250.0, "3-row window max should be 250.0");
+        
+        // Verify state after step 2 - additional pruning should occur
+        // After step 2, we have entries: [10000, 15000, 18000, 20000, 25000] (16000 was dropped as late)
+        // w1 (2s range): cutoff = 25000 - (3000 + 2000) = 20000ms
+        // w2 (5s range): cutoff = 25000 - (3000 + 5000) = 17000ms
+        // w3 (3 rows): Search timestamp = 25000 - 3000 = 22000ms
+        //              Last entry <= 22000ms is 20000ms
+        //              For 3-row window ending at 20000ms, window start is 15000ms (last 3: [15000, 18000, 20000])
+        //              So w3 cutoff = 15000ms  
+        // Minimal cutoff = min(20000, 17000, 15000) = 15000ms
+        verify_pruning(&window_operator, &partition_key, Some(15000)).await;
+
+        // Step 3: Add many events close together to make range window the limiting factor
+        // Strategy: Add events close to the latest time so row window has plenty of recent rows
         let batch3 = create_test_batch(
-            vec![45000], // 45s - triggers partial pruning
-            vec![450.0], 
-            vec!["A"]
+            vec![26000, 27000, 28000, 29000, 30000], // Close to 25000ms - clustered events
+            vec![260.0, 270.0, 280.0, 290.0, 300.0], 
+            vec!["A", "A", "A", "A", "A"]
         );
         let message3 = create_keyed_message(batch3, "A");
         
         let results3 = window_operator.process_message(message3).await;
-        assert!(results3.is_some(), "Should have results after partial pruning");
+        assert!(results3.is_some(), "Should have results for step 3");
         
         let result_messages3 = results3.unwrap();
         let result_batch3 = result_messages3[0].record_batch();
-        assert_eq!(result_batch3.num_rows(), 1, "Should have 1 result row");
+        assert_eq!(result_batch3.num_rows(), 5, "Should have 5 result rows");
         
+        // Verify aggregate calculations for the last event (30000ms)
         let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
-        assert_eq!(sum_column3.value(0), 450.0, "Should be isolated event");
+        let avg_column3 = result_batch3.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
+        let min_column3 = result_batch3.column(5).as_any().downcast_ref::<Float64Array>().unwrap();
+        let count_column3 = result_batch3.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
+        let max_column3 = result_batch3.column(7).as_any().downcast_ref::<Float64Array>().unwrap();
         
-        // Step 4: Add another event to verify partial pruning worked
-        // Events before 38000ms should be pruned, but events after should remain
-        let batch4 = create_test_batch(
-            vec![47000], // 47s - close to previous event
-            vec![470.0], 
-            vec!["A"]
-        );
-        let message4 = create_keyed_message(batch4, "A");
+        // For event at 30000ms:
+        // w1 (2s range): window [28000, 30000] includes 28000ms, 29000ms, 30000ms -> sum = 280.0 + 290.0 + 300.0 = 870.0
+        // w2 (5s range): window [25000, 30000] includes 25000ms, 26000ms, 27000ms, 28000ms, 29000ms, 30000ms -> avg = (250+260+270+280+290+300)/6 = 275.0, min = 250.0
+        // w3 (3 rows): includes last 3 events: 28000ms, 29000ms, 30000ms -> count = 3, max = 300.0
+        assert_eq!(sum_column3.value(4), 870.0, "2s window should include 28000ms, 29000ms and 30000ms (exact window boundary)");
+        assert_eq!(avg_column3.value(4), 275.0, "5s window should include events from 25000ms to 30000ms (exact window boundary)");
+        assert_eq!(min_column3.value(4), 250.0, "5s window min should be 250.0 (from 25000ms at exact boundary)");
+        assert_eq!(count_column3.value(4), 3, "3-row window should include last 3 events");
+        assert_eq!(max_column3.value(4), 300.0, "3-row window max should be 300.0");
         
-        let results4 = window_operator.process_message(message4).await;
-        assert!(results4.is_some(), "Should have results after second event");
-        
-        let result_messages4 = results4.unwrap();
-        let result_batch4 = result_messages4[0].record_batch();
-        assert_eq!(result_batch4.num_rows(), 1, "Should have 1 result row");
-        
-        let sum_column4 = result_batch4.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
-        // Window is 2000ms, so should include events from 45000ms to 47000ms
-        assert_eq!(sum_column4.value(0), 920.0, "Should include both recent events (450+470)");
-        
-        // Step 5: Verify pruning worked by checking state and time index
-        let partition_key = create_test_key("A");
-        let (state, time_index) = window_operator.get_state_and_time_index();
-        
-        // Check time index has been pruned
-        if let Some(time_entries) = time_index.get_time_entries(&partition_key) {
-            let remaining_entries: Vec<_> = time_entries.iter().map(|entry| entry.timestamp).collect();
-            println!("Remaining time entries after pruning: {:?}", remaining_entries);
-            
-            // Should only have entries after cutoff time (38000ms)
-            // Expected entries: 45000ms, 47000ms (and possibly 35000ms if it's >= 38000ms)
-            assert!(remaining_entries.iter().all(|&ts| ts >= 38000), 
-                   "All remaining time entries should be >= 38000ms (cutoff), found: {:?}", remaining_entries);
-            assert!(remaining_entries.contains(&45000), "Should contain 45000ms entry");
-            assert!(remaining_entries.contains(&47000), "Should contain 47000ms entry");
-        } else {
-            panic!("Time entries should exist for partition A");
-        }
-        
-        // Check tiles have been pruned (if they exist)
-        if let Some(windows_state) = state.get_windows_state(&partition_key) {
-            for (window_id, window_state) in windows_state.iter() {
-                if let Some(ref tiles) = window_state.tiles {
-                    let tile_stats = tiles.get_stats();
-                    println!("Window {} tile stats after pruning: {:?}", window_id, tile_stats);
-                    
-                    // Verify tiles only contain recent data (after cutoff)
-                    for (granularity, granularity_stats) in tile_stats.granularity_stats.iter() {
-                        println!("Granularity {:?}: {} tiles, {} entries", 
-                                granularity, granularity_stats.tile_count, granularity_stats.entry_count);
-                    }
-                }
-            }
-        } else {
-            println!("No windows state found for partition A (may have been completely pruned)");
-        }
-
-        // TODO storage pruning
+        // Verify state after step 3 - range window should now be the limiting factor
+        // After step 3, we have entries: [15000, 18000, 20000, 25000, 26000, 27000, 28000, 29000, 30000]
+        // w1 (2s range): cutoff = 30000 - (3000 + 2000) = 25000ms
+        // w2 (5s range): cutoff = 30000 - (3000 + 5000) = 22000ms
+        // w3 (3 rows): Search timestamp = 30000 - 3000 = 27000ms
+        //              Last entry <= 27000ms is 27000ms
+        //              For 3-row window ending at 27000ms, window start is 25000ms (last 3: [25000, 26000, 27000])
+        //              So w3 cutoff = 25000ms
+        // Minimal cutoff = min(25000, 22000, 25000) = 22000ms
+        verify_pruning(&window_operator, &partition_key, Some(22000)).await;
         
         window_operator.close().await.expect("Should be able to close operator");
     }

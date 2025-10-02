@@ -8,7 +8,7 @@ use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggrega
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
-use tokio_rayon::rayon::ThreadPool;
+use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use tokio_rayon::AsyncThreadPool;
 
 use crate::runtime::operators::window::state::{AccumulatorState, WindowState};
