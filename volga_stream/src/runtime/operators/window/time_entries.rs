@@ -41,30 +41,26 @@ impl Ord for TimeIdx {
 }
 
 #[derive(Debug)]
-pub struct TimeIndex {
-    time_index: DashMap<Key, Arc<SkipSet<TimeIdx>>>,
-    batch_ids: DashMap<Key, Arc<SkipMap<Timestamp, Vec<BatchId>>>>,
+pub struct TimeEntries {
+    pub entries: SkipSet<TimeIdx>,
+    pub batch_ids: SkipMap<Timestamp, Vec<BatchId>>,
 }
 
-impl TimeIndex {
+impl TimeEntries {
     pub fn new() -> Self {
         Self {
-            time_index: DashMap::new(),
-            batch_ids: DashMap::new(),
+            entries: SkipSet::new(),
+            batch_ids: SkipMap::new(),
         }
     }
 
-    pub async fn update_time_index(
+    pub fn insert_batch(
         &self,
-        partition_key: &Key,
         batch_id: BatchId,
         batch: &RecordBatch,
-        ts_column_index: usize,
+        ts_column_index: usize
     ) -> Vec<TimeIdx> {
         let mut time_idxs = Vec::new();
-        let time_entries = self.get_or_create_time_index(partition_key).await;
-        let timestamp_to_batch = self.get_or_create_timestamp_to_batch(partition_key);
-        
         let mut max_timestamp = i64::MIN;
         
         for row_idx in 0..batch.num_rows() {
@@ -80,7 +76,7 @@ impl TimeIndex {
             };
             
             // Find the position index to use
-            let pos_idx = if let Some(existing_entry) = time_entries.upper_bound(std::ops::Bound::Included(&search_key)) {
+            let pos_idx = if let Some(existing_entry) = self.entries.upper_bound(std::ops::Bound::Included(&search_key)) {
                 if existing_entry.timestamp == timestamp {
                     // Same timestamp exists, increment position
                     existing_entry.pos_idx + 1
@@ -100,307 +96,342 @@ impl TimeIndex {
                 row_idx,
             };
             
-            time_entries.insert(time_idx);
+            self.entries.insert(time_idx);
             time_idxs.push(time_idx);
         }
         
         // Insert batch mapping once with max timestamp
-        if let Some(existing_batches) = timestamp_to_batch.get(&max_timestamp) {
+        if let Some(existing_batches) = self.batch_ids.get(&max_timestamp) {
             let mut batches = existing_batches.value().clone();
             batches.push(batch_id);
-            timestamp_to_batch.insert(max_timestamp, batches);
+            self.batch_ids.insert(max_timestamp, batches);
         } else {
-            timestamp_to_batch.insert(max_timestamp, vec![batch_id]);
+            self.batch_ids.insert(max_timestamp, vec![batch_id]);
         }
         
         time_idxs
     }
 
-    pub async fn get_or_create_time_index(&self, partition_key: &Key) -> Arc<SkipSet<TimeIdx>> {
-        if !self.time_index.contains_key(partition_key) {
-            self.time_index.insert(partition_key.clone(), Arc::new(SkipSet::new()));
+    pub fn get_window_entries(
+        &self,
+        window_frame: &Arc<WindowFrame>,
+        window_end_idx: TimeIdx,
+    ) -> Vec<TimeIdx> {
+        let window_start_idx = self.get_window_start_idx(window_frame, window_end_idx, false);
+        if window_start_idx.is_none() {
+            return self.entries.range(..=window_end_idx).map(|entry| *entry).collect();
+        } else {
+            return self.entries.range(window_start_idx.unwrap()..=window_end_idx).map(|entry| *entry).collect();
         }
-        self.time_index.get(partition_key).expect("Time entries should exist").value().clone()
     }
+    
+    pub fn get_window_start_idx(
+        &self,
+        window_frame: &Arc<WindowFrame>,
+        window_end_idx: TimeIdx,
+        use_front_as_start: bool,
+    ) -> Option<TimeIdx> {
+        let res = 
+            if window_frame.units == WindowFrameUnits::Rows {
+                // Handle ROWS
+                match window_frame.start_bound {
+                    WindowFrameBound::Preceding(ScalarValue::UInt64(Some(delta))) => {
+                        // Jump backwards delta elements from new_window_end
+                        let window_start_idx = self.entries.range(..=window_end_idx)
+                            .rev()
+                            .nth(delta as usize)
+                            .map(|entry| *entry);
 
-    fn get_or_create_timestamp_to_batch(&self, partition_key: &Key) -> Arc<SkipMap<Timestamp, Vec<BatchId>>> {
-        if !self.batch_ids.contains_key(partition_key) {
-            self.batch_ids.insert(partition_key.clone(), Arc::new(SkipMap::new()));
-        }
-        self.batch_ids.get(partition_key).expect("Timestamp to batch mapping should exist").value().clone()
-    }
-
-    pub async fn insert_time_index(&self, partition_key: &Key, time_entries: Arc<SkipSet<TimeIdx>>) {
-        self.time_index.insert(partition_key.clone(), time_entries);
-    }
-
-    pub fn get_batch_ids(&self, partition_key: &Key) -> Option<Arc<SkipMap<Timestamp, Vec<BatchId>>>> {
-        self.batch_ids.get(partition_key).map(|entry| entry.value().clone())
-    }
-
-    pub async fn prune(&self, partition_key: &Key, cutoff_timestamp: Timestamp) -> Vec<BatchId> {
-        let mut batches_to_delete = BTreeSet::new();
-        
-        // Collect batches to delete and prune timestamp_to_batch mapping
-        if let Some(timestamp_to_batch) = self.batch_ids.get(partition_key) {
-            let timestamps_to_remove: Vec<Timestamp> = timestamp_to_batch
-                .range(..cutoff_timestamp)
-                .map(|entry| {
-                    // Add all batch IDs for this timestamp
-                    for batch_id in entry.value() {
-                        batches_to_delete.insert(*batch_id);
+                        window_start_idx
                     }
-                    *entry.key()
-                })
-                .collect();
-            
-            // Remove timestamps from mapping
-            for timestamp in timestamps_to_remove {
-                timestamp_to_batch.remove(&timestamp);
-            }
-        }
-        
-        // Prune time entries
-        if let Some(time_entries) = self.time_index.get(partition_key) {
-            let cutoff_key = TimeIdx {
-                timestamp: cutoff_timestamp,
-                pos_idx: 0,
-                batch_id: Uuid::nil(),
-                row_idx: 0,
+                    _ => panic!("Only Preceding start bound is supported for ROWS WindowFrameUnits"),
+                }
+            } else if window_frame.units == WindowFrameUnits::Range {
+                // Handle RANGE
+                let window_end_timestamp = window_end_idx.timestamp;
+                let window_start_timestamp = match &window_frame.start_bound {
+                    WindowFrameBound::Preceding(delta) => {
+                        if window_frame.start_bound.is_unbounded() || delta.is_null() {
+                            panic!("Can not retract UNBOUNDED PRECEDING");
+                        }
+                        
+                        let delta_i64 = convert_interval_to_milliseconds(delta);
+                            
+                        window_end_timestamp.saturating_sub(delta_i64)
+                    },
+                    _ => panic!("Only Preceding start bound is supported"),
+                };
+                
+                // Get new window start from time index
+                let search_key = TimeIdx {
+                    timestamp: window_start_timestamp,
+                    pos_idx: 0,
+                    batch_id: Uuid::nil(), // dummy values for search
+                    row_idx: 0,
+                };
+                // Include all rows with this timestamp
+                let window_start_idx = self.entries.lower_bound(std::ops::Bound::Included(&search_key))
+                    .map(|entry| *entry);
+
+                window_start_idx
+            } else {
+                panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
             };
+
+        if res.is_none() && use_front_as_start {
+            return self.entries.front().map(|entry| *entry)
+        }
+        res
+    }
+    
+    fn find_retracts(
+        &self,
+        window_frame: &Arc<WindowFrame>,
+        new_window_end: TimeIdx,
+        window_state: &WindowState,
+    ) -> (Vec<TimeIdx>, Option<TimeIdx>) {
+    
+        let new_window_start_idx = self.get_window_start_idx(window_frame, new_window_end, false);
+    
+        if window_frame.units == WindowFrameUnits::Rows {
+            // Handle ROWS
+            if new_window_start_idx.is_none() {
+                // window does not have enough rows to retract
+                return (Vec::new(), None);
+            }
             
-            // Collect entries to remove
-            let entries_to_remove: Vec<TimeIdx> = time_entries
-                .range(..cutoff_key)
+            // Collect all TimeIdxs between previous window start and new_window_start for retraction
+            let new_start_idx = new_window_start_idx.expect("Window start idx should exist");
+            let retract_idxs: Vec<TimeIdx> = self.entries
+                .range(window_state.start_idx..new_start_idx)
+                .map(|entry| *entry)
+                .collect();
+    
+            return (retract_idxs, Some(new_start_idx));
+        } else if window_frame.units == WindowFrameUnits::Range {
+            // Handle RANGE
+    
+            let previous_window_start_idx = window_state.start_idx;
+            let retract_idxs: Vec<TimeIdx> = self.entries
+                // Exclude window_start_idx
+                .range(previous_window_start_idx..new_window_start_idx.expect("Window start idx should exist"))
                 .map(|entry| *entry)
                 .collect();
             
-            // Remove the entries
-            for entry in entries_to_remove {
-                time_entries.remove(&entry);
+            return (retract_idxs, new_window_start_idx)
+        } else {
+            panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
+        }
+    }
+    
+    
+    pub fn slide_window_position(
+        &self,
+        window_frame: &Arc<WindowFrame>, 
+        window_state: &mut WindowState, 
+        with_retracts: bool) -> (Vec<TimeIdx>, Vec<Vec<TimeIdx>>) {
+        let mut updates = Vec::new();
+        let mut retracts = Vec::new();
+        
+        let latest_idx = *self.entries.back().expect("Time entries should exist");
+        let previous_window_end = window_state.end_idx;
+    
+        if previous_window_end == latest_idx {
+            // nothing changed
+            return (updates, retracts);
+        }
+    
+        let range_start_idx = if previous_window_end.batch_id == Uuid::nil() {
+            // first time
+            *self.entries.front().expect("Time entries should exist")
+        } else {
+            // start from closest timestamp to previous window end
+            self.entries.lower_bound(std::ops::Bound::Excluded(&previous_window_end))
+                .map(|entry| *entry).expect(&format!("Range start idx should exist for {:?}, {:?}", previous_window_end, self.entries.iter().collect::<Vec<_>>()))
+        };
+    
+        for entry in self.entries.range(range_start_idx..=latest_idx) {
+            let time_idx = *entry;
+            
+            let (rets, new_start_idx) = self.find_retracts(window_frame, time_idx, &window_state);
+            updates.push(time_idx);
+            if with_retracts {
+                retracts.push(rets);
             }
+            if let Some(new_start_idx) = new_start_idx {
+                window_state.start_idx = new_start_idx;
+            }
+            window_state.end_idx = time_idx;
+        }
+        
+        (updates, retracts)
+    }
+    
+    // returns a mix of raw events and tiles for range
+    pub fn get_tiled_range(
+        &self,
+        window_state: Option<&WindowState>,
+        start_idx: TimeIdx,
+        end_idx: TimeIdx
+    ) -> (Vec<TimeIdx>, Vec<Tile>, Vec<TimeIdx>) {
+        let tiles_in_range = if let Some(window_state) = window_state {
+            if let Some(ref tiles) = window_state.tiles {
+                tiles.get_tiles_for_range(start_idx.timestamp, end_idx.timestamp)
+            } else {
+                Vec::new()
+            }
+        } else {
+            Vec::new()
+        };
+        
+        // we assume that tiles range has no gaps that can be filled by raw events 
+        // i.e. if a tile does not exist (gap) then events do not exist (due to write consistency)
+        // hence check for raw events only between range start and first tile start and between last tile end and range end
+        if tiles_in_range.is_empty() {
+            // no tiles, use all entries in range
+            (self.entries.range(start_idx..=end_idx).map(|entry| *entry).collect(), Vec::new(), Vec::new())
+        } else {
+            // get front padding
+            let front_boundry = TimeIdx {
+                timestamp: tiles_in_range[0].tile_start,
+                pos_idx: 0,
+                batch_id: Uuid::nil(), // dummy values for search
+                row_idx: 0,
+            };
+            let front_padding: Vec<TimeIdx> = self.entries.range(start_idx..front_boundry).map(|entry| *entry).collect();
+            // get back padding
+            let back_boundry = TimeIdx {
+                timestamp: tiles_in_range[tiles_in_range.len() - 1].tile_end,
+                pos_idx: 0,
+                batch_id: Uuid::nil(), // dummy values for search
+                row_idx: 0,
+            };
+            let back_padding: Vec<TimeIdx> = self.entries.range(back_boundry..=end_idx).map(|entry| *entry).collect();
+            // front_padding.extend(back_padding);
+            // front_padding
+    
+            (front_padding, tiles_in_range, back_padding)
+        }
+    }
+    
+    // return batch_id's needed to produce window aggregates for given entries, 
+    // excluding ranges covered by tiles
+    pub fn get_batches_for_entries(
+        &self,
+        entries: &Vec<TimeIdx>,
+        window_frame: &Arc<WindowFrame>,
+        window_state: Option<&WindowState>,
+    ) -> BTreeSet<BatchId> {
+        let mut res = BTreeSet::new();
+        for entry in entries {
+            res.insert(entry.batch_id);
+            let window_start = self.get_window_start_idx(window_frame, *entry, true).expect("Time entries should exist");
+            let tiled_range = self.get_tiled_range(window_state, window_start, *entry);
+            // skip tiles, only front and back padding
+            for entry in tiled_range.0 {
+                res.insert(entry.batch_id);
+            }
+            for entry in tiled_range.2 {
+                res.insert(entry.batch_id);
+            }
+        }
+        res
+    }
+
+    pub fn get_cutoff_timestamp(
+        &self,
+        window_frame: &Arc<WindowFrame>,
+        window_state: &WindowState,
+        lateness: i64
+    ) -> Timestamp {
+        match window_frame.units {
+            WindowFrameUnits::Range => {
+                // For range windows: simple logic
+                // cutoff = end_timestamp - (lateness + window_length_ms)
+                if let WindowFrameBound::Preceding(window_length) = &window_frame.start_bound {
+                    let window_length_ms = convert_interval_to_milliseconds(window_length);
+                    let cutoff = window_state.end_idx.timestamp - (lateness + window_length_ms);
+                    if cutoff > 0 {
+                        cutoff
+                    } else {
+                        0
+                    }
+                } else {
+                    panic!("Expected Preceding bound for range windows");
+                }
+            },
+            WindowFrameUnits::Rows => {
+                // For row windows: use lookup key and get_window_start_idx;
+                let search_key = TimeIdx {
+                    timestamp: window_state.end_idx.timestamp - lateness,
+                    pos_idx: usize::MAX,
+                    batch_id: Uuid::nil(),
+                    row_idx: 0,
+                };
+                if let Some(last_valid_entry) = self.entries.upper_bound(std::ops::Bound::Included(&search_key)) {
+                    if let Some(window_start_idx) = self.get_window_start_idx(&window_frame, *last_valid_entry, false) {
+                        window_start_idx.timestamp
+                    } else {
+                        // If we can't find window start, no cutoff
+                        0
+                    }
+                } else {
+                    // No entries found, no cutoff
+                    0
+                }
+            },
+            _ => {
+                panic!("Unsupported WindowFrameUnits: only ROWS and RANGE are supported");
+            }
+        }
+    }
+
+    pub fn prune(
+        &self, 
+        cutoff_timestamp: Timestamp
+    ) -> Vec<BatchId> {
+        let mut batches_to_delete = BTreeSet::new();
+        
+        // Collect batches to delete and prune timestamp_to_batch mapping
+        let timestamps_to_remove: Vec<Timestamp> = self.batch_ids
+            .range(..cutoff_timestamp)
+            .map(|entry| {
+                // Add all batch IDs for this timestamp
+                for batch_id in entry.value() {
+                    batches_to_delete.insert(*batch_id);
+                }
+                *entry.key()
+            })
+            .collect();
+        
+        // Remove timestamps from mapping
+        for timestamp in timestamps_to_remove {
+            self.batch_ids.remove(&timestamp);
+        }
+        
+        // Prune time entries
+        let cutoff_key = TimeIdx {
+            timestamp: cutoff_timestamp,
+            pos_idx: 0,
+            batch_id: Uuid::nil(),
+            row_idx: 0,
+        };
+        
+        // Collect entries to remove
+        let entries_to_remove: Vec<TimeIdx> = self.entries
+            .range(..cutoff_key)
+            .map(|entry| *entry)
+            .collect();
+        
+        // Remove the entries
+        for entry in entries_to_remove {
+            self.entries.remove(&entry);
         }
         
         batches_to_delete.into_iter().collect()
     }
 }
 
-
-
-pub fn get_window_entries(
-    window_frame: &Arc<WindowFrame>,
-    window_end_idx: TimeIdx,
-    time_entries: Arc<SkipSet<TimeIdx>>,
-) -> Vec<TimeIdx> {
-    let window_start_idx = get_window_start_idx(window_frame, window_end_idx, &time_entries);
-    if window_start_idx.is_none() {
-        return time_entries.range(..=window_end_idx).map(|entry| *entry).collect();
-    } else {
-        return time_entries.range(window_start_idx.unwrap()..=window_end_idx).map(|entry| *entry).collect();
-    }
-}
-
-pub fn get_window_start_idx(
-    window_frame: &Arc<WindowFrame>,
-    window_end_idx: TimeIdx,
-    time_entries: &SkipSet<TimeIdx>,
-) -> Option<TimeIdx> {
-    if window_frame.units == WindowFrameUnits::Rows {
-        // Handle ROWS
-        match window_frame.start_bound {
-            WindowFrameBound::Preceding(ScalarValue::UInt64(Some(delta))) => {
-                // Jump backwards delta elements from new_window_end
-                let window_start_idx = time_entries.range(..=window_end_idx)
-                    .rev()
-                    .nth(delta as usize)
-                    .map(|entry| *entry);
-
-                return window_start_idx;
-            }
-            _ => panic!("Only Preceding start bound is supported for ROWS WindowFrameUnits"),
-        }
-    } else if window_frame.units == WindowFrameUnits::Range {
-        // Handle RANGE
-        let window_end_timestamp = window_end_idx.timestamp;
-        let window_start_timestamp = match &window_frame.start_bound {
-            WindowFrameBound::Preceding(delta) => {
-                if window_frame.start_bound.is_unbounded() || delta.is_null() {
-                    panic!("Can not retract UNBOUNDED PRECEDING");
-                }
-                
-                let delta_i64 = convert_interval_to_milliseconds(delta);
-                    
-                window_end_timestamp.saturating_sub(delta_i64)
-            },
-            _ => panic!("Only Preceding start bound is supported"),
-        };
-        
-        // Get new window start from time index
-        let search_key = TimeIdx {
-            timestamp: window_start_timestamp,
-            pos_idx: 0,
-            batch_id: Uuid::nil(), // dummy values for search
-            row_idx: 0,
-        };
-        // Include all rows with this timestamp
-        let window_start_idx = time_entries.lower_bound(std::ops::Bound::Included(&search_key))
-            .map(|entry| *entry);
-
-        return window_start_idx;
-    } else {
-        panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
-    }
-}
-
-fn find_retracts(
-    window_frame: &Arc<WindowFrame>,
-    new_window_end: TimeIdx,
-    time_entries: &SkipSet<TimeIdx>,
-    window_state: &WindowState,
-) -> (Vec<TimeIdx>, Option<TimeIdx>) {
-
-    let new_window_start_idx = get_window_start_idx(window_frame, new_window_end, time_entries);
-
-    if window_frame.units == WindowFrameUnits::Rows {
-        // Handle ROWS
-        if new_window_start_idx.is_none() {
-            // window does not have enough rows to retract
-            return (Vec::new(), None);
-        }
-        
-        // Collect all TimeIdxs between previous window start and new_window_start for retraction
-        let new_start_idx = new_window_start_idx.expect("Window start idx should exist");
-        let retract_idxs: Vec<TimeIdx> = time_entries
-            .range(window_state.start_idx..new_start_idx)
-            .map(|entry| *entry)
-            .collect();
-
-        return (retract_idxs, Some(new_start_idx));
-    } else if window_frame.units == WindowFrameUnits::Range {
-        // Handle RANGE
-
-        let previous_window_start_idx = window_state.start_idx;
-        let retract_idxs: Vec<TimeIdx> = time_entries
-            // Exclude window_start_idx
-            .range(previous_window_start_idx..new_window_start_idx.expect("Window start idx should exist"))
-            .map(|entry| *entry)
-            .collect();
-        
-        return (retract_idxs, new_window_start_idx)
-    } else {
-        panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
-    }
-}
-
-
-pub fn slide_window_position(window_frame: &Arc<WindowFrame>, window_state: &mut WindowState, time_entries: &Arc<SkipSet<TimeIdx>>, with_retracts: bool) -> (Vec<TimeIdx>, Vec<Vec<TimeIdx>>) {
-    let mut updates = Vec::new();
-    let mut retracts = Vec::new();
-    
-    let latest_idx = *time_entries.back().expect("Time entries should exist");
-    let previous_window_end = window_state.end_idx;
-
-    if previous_window_end == latest_idx {
-        // nothing changed
-        return (updates, retracts);
-    }
-
-    let range_start_idx = if previous_window_end.batch_id == Uuid::nil() {
-        // first time
-        *time_entries.front().expect("Time entries should exist")
-    } else {
-        // start from closest timestamp to previous window end
-        time_entries.lower_bound(std::ops::Bound::Excluded(&previous_window_end))
-            .map(|entry| *entry).expect(&format!("Range start idx should exist for {:?}, {:?}", previous_window_end, time_entries.iter().collect::<Vec<_>>()))
-    };
-
-    for entry in time_entries.range(range_start_idx..=latest_idx) {
-        let time_idx = *entry;
-        
-        let (rets, new_start_idx) = find_retracts(window_frame, time_idx, time_entries, &window_state);
-        updates.push(time_idx);
-        if with_retracts {
-            retracts.push(rets);
-        }
-        if let Some(new_start_idx) = new_start_idx {
-            window_state.start_idx = new_start_idx;
-        }
-        window_state.end_idx = time_idx;
-    }
-    
-    (updates, retracts)
-}
-
-// returns a mix of raw events and tiles for range
-pub fn get_tiled_range(
-    window_state: Option<&WindowState>,
-    time_entries: &Arc<SkipSet<TimeIdx>>,
-    start_idx: TimeIdx,
-    end_idx: TimeIdx
-) -> (Vec<TimeIdx>, Vec<Tile>, Vec<TimeIdx>) {
-    let tiles_in_range = if let Some(window_state) = window_state {
-        if let Some(ref tiles) = window_state.tiles {
-            tiles.get_tiles_for_range(start_idx.timestamp, end_idx.timestamp)
-        } else {
-            Vec::new()
-        }
-    } else {
-        Vec::new()
-    };
-    
-    // we assume that tiles range has no gaps that can be filled by raw events 
-    // i.e. if a tile does not exist (gap) then events do not exist (due to write consistency)
-    // hence check for raw events only between range start and first tile start and between last tile end and range end
-    if tiles_in_range.is_empty() {
-        // no tiles, use all entries in range
-        (time_entries.range(start_idx..=end_idx).map(|entry| *entry).collect(), Vec::new(), Vec::new())
-    } else {
-        // get front padding
-        let front_boundry = TimeIdx {
-            timestamp: tiles_in_range[0].tile_start,
-            pos_idx: 0,
-            batch_id: Uuid::nil(), // dummy values for search
-            row_idx: 0,
-        };
-        let front_padding: Vec<TimeIdx> = time_entries.range(start_idx..front_boundry).map(|entry| *entry).collect();
-        // get back padding
-        let back_boundry = TimeIdx {
-            timestamp: tiles_in_range[tiles_in_range.len() - 1].tile_end,
-            pos_idx: 0,
-            batch_id: Uuid::nil(), // dummy values for search
-            row_idx: 0,
-        };
-        let back_padding: Vec<TimeIdx> = time_entries.range(back_boundry..=end_idx).map(|entry| *entry).collect();
-        // front_padding.extend(back_padding);
-        // front_padding
-
-        (front_padding, tiles_in_range, back_padding)
-    }
-}
-
-// return batch_id's needed to produce window aggregates for given entries, 
-// excluding ranges covered by tiles
-pub fn get_batches_for_entries(
-    entries: &Vec<TimeIdx>,
-    time_entries: &Arc<SkipSet<TimeIdx>>,
-    window_frame: &Arc<WindowFrame>,
-    window_state: Option<&WindowState>,
-) -> BTreeSet<BatchId> {
-    let mut res = BTreeSet::new();
-    for entry in entries {
-        res.insert(entry.batch_id);
-        let window_start = get_window_start_idx(window_frame, *entry, &time_entries).unwrap_or(time_entries.front().expect("Time entries should exist").value().clone());
-        let tiled_range = get_tiled_range(window_state, &time_entries, window_start, *entry);
-        // skip tiles, only front and back padding
-        for entry in tiled_range.0 {
-            res.insert(entry.batch_id);
-        }
-        for entry in tiled_range.2 {
-            res.insert(entry.batch_id);
-        }
-    }
-    res
-}
 
 /// Convert various interval types to milliseconds for timestamp arithmetic
 pub fn convert_interval_to_milliseconds(delta: &ScalarValue) -> i64 {
@@ -468,50 +499,37 @@ mod tests {
         Arc::new(frame)
     }
 
-    fn create_test_key(partition_name: &str) -> crate::common::Key {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("partition", DataType::Utf8, false),
-        ]));
-        
-        let partition_array = arrow::array::StringArray::from(vec![partition_name]);
-        let key_batch = RecordBatch::try_new(schema, vec![Arc::new(partition_array)])
-            .expect("Failed to create key batch");
-        
-        crate::common::Key::new(key_batch).expect("Failed to create key")
-    }
-
     #[tokio::test]
     async fn test_time_index_insertion() {
-        let time_index = TimeIndex::new();
-        let key = create_test_key("test_partition");
+        let time_entries = TimeEntries::new();
         
         // Test 1: Insert batch in random order [3000, 1000, 2000]
         let batch1 = create_test_batch(vec![3000, 1000, 2000], vec![30, 10, 20]);
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
+        time_entries.insert_batch(batch_id1, &batch1, 0);
         
-        let time_entries = time_index.get_or_create_time_index(&key).await;
-        assert_eq!(time_entries.len(), 3, "Should have 3 timestamp entries");
+        // let time_entries = time_index.get_or_create_time_index(&key).await;
+        assert_eq!(time_entries.entries.len(), 3, "Should have 3 timestamp entries");
         
         // Verify entries are sorted by timestamp
-        let entries_vec: Vec<_> = time_entries.iter().map(|entry| *entry).collect();
+        let entries_vec: Vec<_> = time_entries.entries.iter().map(|entry| *entry).collect();
         assert_eq!(entries_vec[0].timestamp, 1000, "First entry should be timestamp 1000");
         assert_eq!(entries_vec[1].timestamp, 2000, "Second entry should be timestamp 2000");
         assert_eq!(entries_vec[2].timestamp, 3000, "Third entry should be timestamp 3000");
         
         // Verify front and back
-        let front = time_entries.front().expect("Should have front entry");
-        let back = time_entries.back().expect("Should have back entry");
+        let front = time_entries.entries.front().expect("Should have front entry");
+        let back = time_entries.entries.back().expect("Should have back entry");
         assert_eq!(front.timestamp, 1000, "Front should be earliest timestamp");
         assert_eq!(back.timestamp, 3000, "Back should be latest timestamp");
         
         // Test 2: Insert batch with same timestamps [1000, 1000, 2000, 2000]
         let batch2 = create_test_batch(vec![1000, 1000, 2000, 2000], vec![11, 12, 21, 22]);
         let batch_id2 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
+        time_entries.insert_batch(batch_id2, &batch2, 0);
         
-        let time_entries = time_index.get_or_create_time_index(&key).await;
-        let entries_vec: Vec<_> = time_entries.iter().map(|entry| *entry).collect();
+        // let time_entries = time_index.get_or_create_time_index(&key).await;
+        let entries_vec: Vec<_> = time_entries.entries.iter().map(|entry| *entry).collect();
         assert_eq!(entries_vec.len(), 7, "Should have 7 total entries");
         
         // Verify multiple entries for same timestamp
@@ -526,17 +544,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_advance_row_window_position() {
-        let time_index = TimeIndex::new();
-        let key = create_test_key("test_partition");
+        let time_entries = TimeEntries::new();
         
         // First batch: timestamps [1000, 2000, 3000]
         let batch1 = create_test_batch(vec![1000, 2000, 3000], vec![10, 20, 30]);
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
+        time_entries.insert_batch(batch_id1, &batch1, 0);
         
         // Create window frame: ROWS 2 PRECEDING (window size = 3)
         let window_frame = create_rows_window_frame(2);
-        let time_entries = time_index.get_or_create_time_index(&key).await;
         
         // Initial empty window state
         let mut window_state = WindowState {
@@ -547,7 +563,7 @@ mod tests {
         };
         
         // First advance window position after first batch
-        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
+        let (first_updates, first_retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
         
         // Verify first batch processing (similar to test_advance_window_position_first_time)
         assert_eq!(first_updates.len(), 3, "Should have 3 updates for first batch");
@@ -578,10 +594,10 @@ mod tests {
         // Add second batch: timestamps [4000, 5000]
         let batch2 = create_test_batch(vec![4000, 5000], vec![40, 50]);
         let batch_id2 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
+        time_entries.insert_batch(batch_id2, &batch2, 0);
         
         // Second advance window position (incremental processing)
-        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
+        let (updates, retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
         
         // Should only process new events (4000, 5000)
         assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
@@ -617,17 +633,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_advance_range_window_position() {
-        let time_index = TimeIndex::new();
-        let key = create_test_key("test_partition");
+        let time_entries = TimeEntries::new();
         
         // First batch: timestamps [1000, 1200, 1400, 2000, 2200] - multiple events within range
         let batch1 = create_test_batch(vec![1000, 1200, 1400, 2000, 2200], vec![10, 12, 14, 20, 22]);
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
+        time_entries.insert_batch(batch_id1, &batch1, 0);
         
         // Create range window frame: RANGE 1000ms PRECEDING (1 second window)
         let window_frame = create_range_window_frame(1000);
-        let time_entries = time_index.get_or_create_time_index(&key).await;
         
         // Initial empty window state
         let mut window_state = WindowState {
@@ -638,7 +652,7 @@ mod tests {
         };
         
         // First advance window position after first batch
-        let (first_updates, first_retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
+        let (first_updates, first_retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
         
         // Verify first batch processing
         assert_eq!(first_updates.len(), 5, "Should have 5 updates for first batch");
@@ -675,10 +689,10 @@ mod tests {
         // Add second batch: timestamps [3500, 4000] - will cause multiple retracts
         let batch2 = create_test_batch(vec![3500, 4000], vec![35, 40]);
         let batch_id2 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
+        time_entries.insert_batch(batch_id2, &batch2, 0);
         
         // Second advance window position (incremental processing)
-        let (updates, retracts) = slide_window_position(&window_frame, &mut window_state, &time_entries, true);
+        let (updates, retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
         
         // Should only process new events (3500, 4000)
         assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
@@ -714,8 +728,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_same_timestamp() {
-        let time_index = TimeIndex::new();
-        let key = create_test_key("test_partition");
+        let time_entries = TimeEntries::new();
         
         // First batch: duplicate timestamps [1000, 1000, 1500, 2000, 2000]
         let batch1 = create_test_batch(
@@ -723,7 +736,7 @@ mod tests {
             vec![10, 11, 15, 20, 21]
         );
         let batch_id1 = Uuid::new_v4();
-        time_index.update_time_index(&key, batch_id1, &batch1, 0).await;
+        time_entries.insert_batch(batch_id1, &batch1, 0);
         
         // Test 1: ROWS 2 PRECEDING window (window size = 3)
         {
@@ -735,10 +748,10 @@ mod tests {
             };
             
             let rows_frame = create_rows_window_frame(2);
-            let time_entries = time_index.get_or_create_time_index(&key).await;
+            // let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
-            let (first_updates, first_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries, true);
+            let (first_updates, first_retracts) = time_entries.slide_window_position(&rows_frame, &mut window_state_rows, true);
             assert_eq!(first_updates.len(), 5, "Should process all 5 events with duplicates");
             
             // Verify duplicate timestamps are processed correctly
@@ -762,10 +775,10 @@ mod tests {
             // Add second batch with more duplicates
             let batch2 = create_test_batch(vec![3000, 3000], vec![30, 31]);
             let batch_id2 = Uuid::new_v4();
-            time_index.update_time_index(&key, batch_id2, &batch2, 0).await;
+            time_entries.insert_batch(batch_id2, &batch2, 0);
             
             // Second advance - incremental processing
-            let (second_updates, second_retracts) = slide_window_position(&rows_frame, &mut window_state_rows, &time_entries, true);
+            let (second_updates, second_retracts) = time_entries.slide_window_position(&rows_frame, &mut window_state_rows, true);
             assert_eq!(second_updates.len(), 2, "Should process 2 new duplicate events");
             
             let expected_second_updates = [
@@ -793,10 +806,10 @@ mod tests {
             };
             
             let range_frame = create_range_window_frame(800);
-            let time_entries = time_index.get_or_create_time_index(&key).await;
+            // let time_entries = time_index.get_or_create_time_index(&key).await;
             
             // First advance - process first batch
-            let (first_updates, first_retracts) = slide_window_position(&range_frame, &mut window_state_range, &time_entries, true);
+            let (first_updates, first_retracts) = time_entries.slide_window_position(&range_frame, &mut window_state_range, true);
             assert_eq!(first_updates.len(), 7, "Should process all 7 events (5 from batch1 + 2 from batch2)");
             
             // Verify range window behavior with duplicates

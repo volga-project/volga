@@ -1,11 +1,10 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::Result;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
-use crossbeam_skiplist::SkipSet;
 use futures::future;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use uuid::Uuid;
@@ -19,8 +18,8 @@ use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
 use crate::runtime::operators::window::aggregates::{get_aggregate_type, produce_aggregates, run_retractable_accumulator, run_retractable_accumulator_parallel};
-use crate::runtime::operators::window::state::{State, WindowId, WindowsState};
-use crate::runtime::operators::window::time_index::{convert_interval_to_milliseconds, get_batches_for_entries, get_window_start_idx, slide_window_position, TimeIdx, TimeIndex};
+use crate::runtime::operators::window::state::{create_empty_windows_state, State, WindowId, WindowsState};
+use crate::runtime::operators::window::time_entries::{self, convert_interval_to_milliseconds, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::storage::{Storage, extract_timestamp};
@@ -66,7 +65,7 @@ pub struct WindowOperator {
     base: OperatorBase,
     windows: BTreeMap<WindowId, WindowConfig>,
     state: State,
-    time_index: TimeIndex,
+    // time_index: TimeIndex,
     ts_column_index: usize,
     buffered_keys: HashSet<Key>,
     execution_mode: ExecutionMode,
@@ -113,7 +112,7 @@ impl WindowOperator {
             base: OperatorBase::new(config, storage),
             windows,
             state: State::new(),
-            time_index: TimeIndex::new(),
+            // time_index: TimeIndex::new(),
             ts_column_index,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
@@ -126,77 +125,40 @@ impl WindowOperator {
         }
     }
 
-    async fn process_key(&self, key: &Key, late_entries: Option<Vec<TimeIdx>>) -> RecordBatch {
-        let window_ids: Vec<_> = self.windows.keys().cloned().collect();
-        let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
-        let windows_state = self.state.get_or_create_windows_state(key, &window_ids, &self.tiling_configs, &window_exprs).await;
-        let time_entries = self.time_index.get_or_create_time_index(key).await;
-        let (result, mut updated_windows_state) = self.advance_windows(key, &windows_state, &time_entries, late_entries).await;
+    async fn process_key(&self, key: &Key, windows_state: Option<WindowsState>, late_entries: Option<Vec<TimeIdx>>) -> RecordBatch {
+        // let window_ids: Vec<_> = self.windows.keys().cloned().collect();
+        // let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
+        let mut windows_state = if let Some(windows_state) = windows_state {
+            windows_state
+        } else {
+            self.state.take_windows_state(key).await.expect("Windows state should exist")
+            // create_empty_windows_state(&window_ids, &self.tiling_configs, &window_exprs)
+            // panic!("Windows state should exist");
+        };
+        
+        let result = self.advance_windows(key, &mut windows_state, late_entries).await;
 
         if self.lateness.is_some() {
             // prune if lateness is configured
-            updated_windows_state = self.prune(key, &updated_windows_state, &time_entries).await;
+            self.prune(key, &mut windows_state).await;
         }
-        self.state.insert_windows_state(key, updated_windows_state).await;
+        self.state.insert_windows_state(key, windows_state).await;
         result
     }
 
-    pub fn get_state_and_time_index(&self) -> (&State, &TimeIndex) {
-        (&self.state, &self.time_index)
+    pub fn get_state(&self) -> &State {
+        &self.state
     }
 
-    async fn prune(&self, key: &Key, windows_state: &WindowsState, time_entries: &Arc<SkipSet<TimeIdx>>) -> WindowsState {
+    async fn prune(&self, key: &Key, windows_state: &mut WindowsState) {
         let lateness = self.lateness.unwrap();
-        
-        let mut pruned_windows_state = windows_state.clone();
         let mut min_cutoff_timestamp = i64::MAX;
         
         // For each window state, calculate its specific cutoff and prune tiles
-        for (window_id, window_state) in pruned_windows_state.iter_mut() {
-        let window_config = self.windows.get(window_id).expect("Window config should exist");
+        for (window_id, window_state) in windows_state.window_states.iter_mut() {
+            let window_config = self.windows.get(window_id).expect("Window config should exist");
             let window_frame = window_config.window_expr.get_window_frame();
-            let window_cutoff = match window_frame.units {
-                WindowFrameUnits::Range => {
-                    // For range windows: simple logic
-                    // cutoff = end_timestamp - (lateness + window_length_ms)
-                    if let WindowFrameBound::Preceding(window_length) = &window_frame.start_bound {
-                        let window_length_ms = convert_interval_to_milliseconds(window_length);
-                        let cutoff = window_state.end_idx.timestamp - (lateness + window_length_ms);
-                        if cutoff > 0 {
-                            cutoff
-                        } else {
-                            0
-                        }
-                    } else {
-                        panic!("Expected Preceding bound for range windows");
-                    }
-                },
-                WindowFrameUnits::Rows => {
-                    // For row windows: use lookup key and get_window_start_idx;
-                    
-                    let search_key = TimeIdx {
-                        timestamp: window_state.end_idx.timestamp - lateness,
-                        pos_idx: usize::MAX,
-                        batch_id: Uuid::nil(),
-                        row_idx: 0,
-                    };
-                    
-                    if let Some(last_valid_entry) = time_entries.upper_bound(std::ops::Bound::Included(&search_key)) {
-                        if let Some(window_start_idx) = get_window_start_idx(&window_frame, *last_valid_entry, &time_entries) {
-                            window_start_idx.timestamp
-                        } else {
-                            // If we can't find window start, no cutoff
-                            0
-                        }
-                    } else {
-                        // No entries found, no cutoff
-                        0
-                    }
-                },
-                _ => {
-                    panic!("Unsupported WindowFrameUnits: only ROWS and RANGE are supported");
-                }
-            };
+            let window_cutoff = windows_state.time_entries.get_cutoff_timestamp(window_frame, window_state, lateness);
 
             min_cutoff_timestamp = min_cutoff_timestamp.min(window_cutoff);
             
@@ -212,21 +174,19 @@ impl WindowOperator {
         // use minimal cutoff (earliest) timestamp to prune time_index and storage
         if min_cutoff_timestamp != i64::MAX && min_cutoff_timestamp > 0 {
             // Prune time index and get list of pruned batch IDs
-            let pruned_batch_ids = self.time_index.prune(key, min_cutoff_timestamp).await;
-            
+            let pruned_batch_ids = windows_state.time_entries.prune(min_cutoff_timestamp);
+
             // Prune storage - remove batches that are no longer needed
             if !pruned_batch_ids.is_empty() {
                 self.base.storage.remove_batches(&pruned_batch_ids, key).await;
             }
         }
-        
-        pruned_windows_state
     }
 
     async fn process_buffered(&self) -> RecordBatch {
         let futures: Vec<_> = self.buffered_keys.iter()
             .map(|key| async move {
-                self.process_key(key, None).await
+                self.process_key(key, None, None).await
             })
             .collect();
         
@@ -243,17 +203,16 @@ impl WindowOperator {
     async fn update_retractable_windows_state_with_late_entries(
         &self, 
         key: &Key,
-        windows_state: &WindowsState,
+        windows_state: &mut WindowsState,
         late_entries: &Vec<TimeIdx>
-    ) -> WindowsState {
-        let mut updated_windows_state = windows_state.clone();
+    ) {
         // Create late_entries_per_window map for reuse
-        let late_entries_per_window: std::collections::BTreeMap<WindowId, Vec<TimeIdx>> = self.windows.iter()
+        let late_entries_per_window: BTreeMap<WindowId, Vec<TimeIdx>> = self.windows.iter()
             .map(|(window_id, _)| {
                 // Only process late entries for retractable windows
                 let aggregator_type = self.windows.get(window_id).expect("Window config should exist").aggregator_type;
                 if aggregator_type == AggregatorType::RetractableAccumulator {
-                    let window_state = updated_windows_state.get(window_id).expect("Window state should exist");
+                    let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
                     let window_start = window_state.start_idx;
                     let window_end = window_state.end_idx;
                     
@@ -281,80 +240,75 @@ impl WindowOperator {
         let batches = self.base.storage.load_batches(batches_to_load.into_iter().collect(), key).await;
         
         let updated_accumulator_states_futs: Vec<_> = self.windows.iter()
-            .map(|(window_id, window_config)| {
+            .filter_map(|(window_id, window_config)| {
+                let late_entries_in_window = late_entries_per_window.get(window_id).unwrap().clone();
+                
+                // Only include windows that have non-empty late entries
+                if late_entries_in_window.is_empty() {
+                    return None;
+                }
+                
                 let window_expr_clone = window_config.window_expr.clone();
                 let batches_clone = batches.clone();
                 let thread_pool = self.thread_pool.as_ref().clone();
                 let parallelize = self.parallelize;
                 let window_id_copy = *window_id;
-                let window_state = updated_windows_state.get(window_id).expect("Window state should exist").clone();
-                let late_entries_in_window = late_entries_per_window.get(window_id).cloned().unwrap_or_default();
                 
-                async move {
-                    // late_entries_in_window is already filtered by aggregator_type == RetractableAccumulator
-                    if !late_entries_in_window.is_empty() {
-                        let (_, updated_accumulator_state) = if parallelize {
-                            run_retractable_accumulator_parallel(thread_pool.expect("ThreadPool should exist"), window_expr_clone, late_entries_in_window, None, batches_clone, Some(window_state.accumulator_state.expect("Accumulator state should exist"))).await
-                        } else {
-                            run_retractable_accumulator(&window_expr_clone, late_entries_in_window, None, &batches_clone, Some(window_state.accumulator_state.expect("Accumulator state should exist")))
-                        };
-                        
-                        Some((window_id_copy, updated_accumulator_state))
+                let accumulator_state_clone = windows_state.window_states.get(window_id).expect("Window state should exist").accumulator_state.clone().expect(&format!("Accumulator state should exist for window_id {}", window_id));
+                
+                Some(async move {
+                    let (_, updated_accumulator_state) = if parallelize {
+                        run_retractable_accumulator_parallel(thread_pool.expect("ThreadPool should exist"), window_expr_clone, late_entries_in_window, None, batches_clone, Some(accumulator_state_clone)).await
                     } else {
-                        None
-                    }
-                }
+                        run_retractable_accumulator(&window_expr_clone, late_entries_in_window, None, &batches_clone, Some(accumulator_state_clone))
+                    };
+                    
+                    (window_id_copy, updated_accumulator_state)
+                })
             })
             .collect();
         
         let updated_accumulator_states = future::join_all(updated_accumulator_states_futs).await;
         
         // Update windows_state with late entry results
-        for result in updated_accumulator_states {
-            if let Some((window_id, updated_accumulator_state)) = result {
-                if let Some(window_state) = updated_windows_state.get_mut(&window_id) {
-                    window_state.accumulator_state = Some(updated_accumulator_state);
-                }
+        for (window_id, updated_accumulator_state) in updated_accumulator_states {
+            if let Some(window_state) = windows_state.window_states.get_mut(&window_id) {
+                window_state.accumulator_state = Some(updated_accumulator_state);
             }
         }
-
-        updated_windows_state
     }
 
     async fn advance_windows(
         &self, 
         key: &Key, 
-        windows_state: &WindowsState,
-        time_entries: &Arc<SkipSet<TimeIdx>>,
+        windows_state: &mut WindowsState,
         late_entries: Option<Vec<TimeIdx>>
-    ) -> (RecordBatch, WindowsState) {
+    ) -> RecordBatch {
         // Step 0: Update accumulator states for all retractable windows with late entries if needed
-        let windows_state = if let Some(ref late_entries_ref) = late_entries {
+        if let Some(ref late_entries_ref) = late_entries {
             self.update_retractable_windows_state_with_late_entries(key, windows_state, late_entries_ref).await
-        } else {
-            windows_state.clone()
-        };
+        }
+
+        let time_entries = &windows_state.time_entries;
 
         // Step 1: Advance window positions to latest timestamp
         let mut window_data = Vec::new();
         
         for (window_id, window_config) in &self.windows {
             let window_frame = window_config.window_expr.get_window_frame();
-            let window_state = windows_state.get(window_id).expect("Window state should exist");
-            let mut window_state_copy = window_state.clone();
+            let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
             let retractable = self.windows[window_id].aggregator_type == AggregatorType::RetractableAccumulator;
+            let (updates, retracts) = time_entries.slide_window_position(window_frame, window_state, retractable);
             
-            let (updates, retracts) = slide_window_position(window_frame, &mut window_state_copy, &time_entries, retractable);
-            
-            window_data.push((*window_id, window_state_copy, updates, retracts));
+            window_data.push((*window_id, updates, retracts));
         }
         
         // Step 2: Compose batches_to_load from all updates, retracts and late entries
         let mut batches_to_load = std::collections::BTreeSet::new();
-        for (window_id, _, updates, retracts) in window_data.iter() {
+        for (window_id, updates, retracts) in window_data.iter() {
             let retractable = self.windows[window_id].aggregator_type == AggregatorType::RetractableAccumulator;
             let window_frame = self.windows[window_id].window_expr.get_window_frame();
-            let window_state = windows_state.get(window_id).expect("Window state should exist");
+            let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
                 
             if retractable {
                 // for retarctables, we do not need to scan whole window on each update
@@ -368,7 +322,7 @@ impl WindowOperator {
                 }
             } else {
                 // non-rets (plain and evaluators) need whole window data (excluding tiles) for each update/entry
-                let batch_ids = get_batches_for_entries(updates, time_entries, window_frame, Some(window_state));
+                let batch_ids = time_entries.get_batches_for_entries(updates, window_frame, Some(window_state));
                 for batch_id in batch_ids {
                     batches_to_load.insert(batch_id);
                 }
@@ -377,7 +331,7 @@ impl WindowOperator {
             // for late entries we also need to include all events (excluding tiled ranges) 
             // falling into the window since we do full rebuild
             if let Some(ref late_entries_ref) = late_entries {
-                let late_entries_batches = get_batches_for_entries(late_entries_ref, time_entries, window_frame, Some(window_state));
+                let late_entries_batches = time_entries.get_batches_for_entries(late_entries_ref, window_frame, Some(window_state));
                 for batch_id in late_entries_batches {
                     batches_to_load.insert(batch_id);
                 }
@@ -387,6 +341,7 @@ impl WindowOperator {
         // Step 3: Get relevant data from storage
         let batches = self.base.storage.load_batches(batches_to_load.into_iter().collect(), key).await;
 
+        let time_entries = Arc::new(time_entries);
         // Step 4: Calculate late results if needed (parallel per window)
         let late_results = if let Some(ref late_entries_ref) = late_entries {
             let late_futures: Vec<_> = self.windows.iter()
@@ -397,13 +352,14 @@ impl WindowOperator {
                     let batches_clone = batches.clone();
                     let thread_pool = self.thread_pool.as_ref().clone();
                     let parallelize = self.parallelize;
+                    // let entries_clone = entries.clone();
                     
                     async move {
                         let late_results_for_window = produce_aggregates(
                             &window_expr_clone, 
                             None,
                             &late_entries_clone,
-                            time_entries_clone, 
+                            &time_entries_clone, 
                             &batches_clone, 
                             thread_pool, 
                             parallelize
@@ -422,14 +378,14 @@ impl WindowOperator {
         // Step 5: Concurrently produce aggregates for all windows
         let batches = Arc::new(batches);
         let accumulator_futures: Vec<_> = window_data.iter()
-            .map(|(window_id, window_state, updates, retracts)| {
+            .map(|(window_id, updates, retracts)| {
                 let window_expr = self.windows[window_id].window_expr.clone();
                 let aggregator_type = self.windows[window_id].aggregator_type.clone();
                 let batches_clone = batches.clone();
-                let accumulator_state_clone = window_state.accumulator_state.clone();
+                let accumulator_state_clone = windows_state.window_states.get(window_id).expect("Window state should exist").accumulator_state.clone();
                 let window_id_copy = *window_id;
-                let window_state_clone = window_state.clone();
                 let time_entries_clone = time_entries.clone();
+                
                 async move {
                     // Accumulator state is already updated in Step 0 if there were late entries
                     let acummulator_state = accumulator_state_clone;
@@ -463,7 +419,7 @@ impl WindowOperator {
                                     &window_expr, 
                                     None,
                                     &updates, 
-                                    time_entries_clone, 
+                                    &time_entries_clone, 
                                     &batches_clone, 
                                     self.thread_pool.as_ref(), 
                                     self.parallelize
@@ -474,7 +430,7 @@ impl WindowOperator {
                             }
                         };
                     
-                    (window_id_copy, aggregates, accumulator_state, window_state_clone)
+                    (window_id_copy, aggregates, accumulator_state)
                 }
             })
             .collect();
@@ -482,12 +438,13 @@ impl WindowOperator {
         let accumulator_results = future::join_all(accumulator_futures).await;
         
         // Step 6: Update window states
-        let mut updated_windows_state = HashMap::new();
+        // let mut updated_windows_state = HashMap::new();
         for result in &accumulator_results {
-            let (window_id, _, accumulator_state, window_state) = result;
-            let mut updated_window_state = window_state.clone();
-            updated_window_state.accumulator_state = accumulator_state.clone();
-            updated_windows_state.insert(*window_id, updated_window_state);
+            let (window_id, _, accumulator_state) = result;
+            // let mut updated_window_state = window_state.clone();
+            // updated_window_state.accumulator_state = accumulator_state.clone();
+            // updated_windows_state.insert(*window_id, updated_window_state);
+            windows_state.window_states.get_mut(window_id).expect("Window state should exist").accumulator_state = accumulator_state.clone();
         }
         
         // Step 7: Extract input column values from all update rows
@@ -498,7 +455,7 @@ impl WindowOperator {
             Vec::new()
         };
         // use first update idxs (they should be all same for all windows)
-        update_idxs.extend(window_data.first().expect("Window data should exist").2.clone());
+        update_idxs.extend(window_data.first().expect("Window data should exist").1.clone());
         
         let mut input_values = Vec::new();
         
@@ -533,7 +490,7 @@ impl WindowOperator {
         }
 
         // Step 8: Concat results and create a batch
-        (concat_results(results, input_values, &self.output_schema, &self.input_schema), updated_windows_state)
+        concat_results(results, input_values, &self.output_schema, &self.input_schema)
     }
 }
 
@@ -550,8 +507,19 @@ impl OperatorTrait for WindowOperator {
     async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
         let storage = self.base.storage.clone();
         let partition_key = message.key().expect("Window Operator expects KeyedMessage");
-        let time_entries = self.time_index.get_or_create_time_index(partition_key).await;
-        let last_entry_before_update = time_entries.back();
+        
+        let window_ids: Vec<_> = self.windows.keys().cloned().collect();
+        let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
+        let mut windows_state = if let Some(windows_state) = self.state.take_windows_state(partition_key).await {
+            windows_state
+        } else {
+            create_empty_windows_state(&window_ids, &self.tiling_configs, &window_exprs)
+        };
+        let last_entry_before_update = if let Some(last_entry) = windows_state.time_entries.entries.back() {
+            Some(last_entry.value().clone())
+        } else {
+            None
+        };
 
         let record_batch = message.record_batch();
 
@@ -569,8 +537,6 @@ impl OperatorTrait for WindowOperator {
             
             if keep_indices.len() == record_batch.num_rows() {
                 record_batch.clone()
-            } else if keep_indices.is_empty() {
-                return None; // All events are too late, skip processing
             } else {
                 let indices = arrow::array::UInt32Array::from(keep_indices);
                 arrow::compute::take_record_batch(&record_batch, &indices)
@@ -580,37 +546,31 @@ impl OperatorTrait for WindowOperator {
             record_batch.clone()
         };
 
+        if record_batch.num_rows() == 0 {
+            return None
+        } 
         // calculate pre-aggregated tiles if needed
-        let has_tiled_windows = self.tiling_configs.iter().any(|config| config.is_some());
-        if has_tiled_windows {
-            let window_ids: Vec<_> = self.windows.keys().cloned().collect();
-            let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
-            let mut windows_state = self.state.get_or_create_windows_state(
-                partition_key, 
-                &window_ids, 
-                &self.tiling_configs, 
-                &window_exprs
-            ).await;
-            for (_, window_state) in windows_state.iter_mut() {
-                if let Some(ref mut tiles) = window_state.tiles {
-                    tiles.add_batch(&record_batch, self.ts_column_index);
-                }
+        for (_, window_state) in windows_state.window_states.iter_mut() {
+            if let Some(ref mut tiles) = window_state.tiles {
+                tiles.add_batch(&record_batch, self.ts_column_index);
             }
         }
 
         let batches = storage.append_records(record_batch.clone(), partition_key, self.ts_column_index).await;
         let mut inserted_idxs = Vec::new();
         for (batch_id, batch) in batches {
-            inserted_idxs.extend(self.time_index.update_time_index(partition_key, batch_id, &batch, self.ts_column_index).await);
+            inserted_idxs.extend(&windows_state.time_entries.insert_batch(batch_id, &batch, self.ts_column_index));
         }
         
         if self.execution_mode == ExecutionMode::WatermarkBased {
             // buffer for processing on watermark
             self.buffered_keys.insert(partition_key.clone());
+
+            self.state.insert_windows_state(partition_key, windows_state).await;
             None
         } else {
-            let late_entries = if let Some(last_entry) = last_entry_before_update.clone() {
-                let lates = inserted_idxs.into_iter().filter(|idx| idx < last_entry.value()).collect::<Vec<_>>();
+            let late_entries = if let Some(last_entry) = last_entry_before_update {
+                let lates = inserted_idxs.into_iter().filter(|idx| *idx < last_entry).collect::<Vec<_>>();
                 if lates.len() > 0 {
                     Some(lates)
                 } else{
@@ -619,7 +579,9 @@ impl OperatorTrait for WindowOperator {
             } else {
                 None
             };
-            let result = self.process_key(&partition_key, late_entries).await;
+
+            // self.state.insert_windows_state(partition_key, windows_state).await;
+            let result = self.process_key(&partition_key, Some(windows_state), late_entries).await;
             // vertex_id will be set by stream task
             // TODO ingest timestamp?
             Some(vec![Message::new(None, result, None)])
@@ -781,50 +743,6 @@ mod tests {
             1,
             None
         )
-    }
-
-    async fn verify_pruning(
-        window_operator: &WindowOperator,
-        partition_key: &Key,
-        expected_min_timestamp: Option<i64>
-    ) {
-        let (state, time_index) = window_operator.get_state_and_time_index();
-        
-        // Check time index entries
-        let time_entries = time_index.get_or_create_time_index(partition_key).await;
-        let remaining_entries: Vec<_> = time_entries.iter().map(|entry| entry.timestamp).collect();
-        
-        if let Some(min_ts) = expected_min_timestamp {
-            assert!(remaining_entries.iter().all(|&ts| ts >= min_ts), 
-                    "All time entries should be >= {}ms, found: {:?}", min_ts, remaining_entries);
-        }
-        
-        // Check batch_ids mapping is correctly pruned
-        if let Some(batch_ids) = time_index.get_batch_ids(partition_key) {
-            let remaining_batch_timestamps: Vec<_> = batch_ids.iter().map(|entry| *entry.key()).collect();
-            
-            if let Some(min_ts) = expected_min_timestamp {
-                assert!(remaining_batch_timestamps.iter().all(|&ts| ts >= min_ts),
-                       "All batch timestamps should be >= {}ms, found: {:?}", min_ts, remaining_batch_timestamps);
-            }
-        }
-        
-        // Check window state and tiles
-        if let Some(windows_state) = state.get_windows_state(partition_key) {
-            for (_, window_state) in windows_state.iter() {
-                if let Some(ref tiles) = window_state.tiles {
-                    // Assert tile boundaries respect the cutoff timestamp
-                    if let Some(min_ts) = expected_min_timestamp {
-                        let tile_ranges = tiles.get_tiles_for_range(0, i64::MAX);
-                        for tile in tile_ranges {
-                            assert!(tile.tile_end > min_ts, 
-                                   "Tile should end after cutoff {}ms, but tile ends at {}ms", 
-                                   min_ts, tile.tile_end);
-                        }
-                    }
-                }
-            }
-        }
     }
 
     #[tokio::test]
@@ -1557,7 +1475,7 @@ mod tests {
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
         window_config.execution_mode = ExecutionMode::EventBased;
-        window_config.parallelize = false;
+        window_config.parallelize = true;
         window_config.lateness = Some(3000); // 3 seconds lateness
         
         let storage = Arc::new(Storage::default());
@@ -1567,6 +1485,8 @@ mod tests {
         let mut window_operator = WindowOperator::new(operator_config, storage.clone());
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
         
+        // let state = window_operator.get_state();
+
         let partition_key = create_test_key("A");
         
         // Step 1: Process initial batch
@@ -1609,7 +1529,7 @@ mod tests {
         //              For 3-row window ending at 15000ms, window start is 10000ms (last 3: [10000, 15000] - only 2 entries, so cutoff is 0)
         //              So w3 cutoff = 10ms
         // Minimal cutoff = min(15000, 12000, 0) = 0 - no actual pruning
-        verify_pruning(&window_operator, &partition_key, Some(0)).await;
+        window_operator.get_state().verify_pruning_for_testing(&partition_key, 0);
 
         // Step 2: Test late event filtering and partial pruning
         // Latest time is 20000ms, lateness is 3000ms, so late event cutoff is 17000ms
@@ -1654,7 +1574,7 @@ mod tests {
         //              For 3-row window ending at 20000ms, window start is 15000ms (last 3: [15000, 18000, 20000])
         //              So w3 cutoff = 15000ms  
         // Minimal cutoff = min(20000, 17000, 15000) = 15000ms
-        verify_pruning(&window_operator, &partition_key, Some(15000)).await;
+        window_operator.get_state().verify_pruning_for_testing(&partition_key, 15000);
 
         // Step 3: Add many events close together to make range window the limiting factor
         // Strategy: Add events close to the latest time so row window has plenty of recent rows
@@ -1698,7 +1618,7 @@ mod tests {
         //              For 3-row window ending at 27000ms, window start is 25000ms (last 3: [25000, 26000, 27000])
         //              So w3 cutoff = 25000ms
         // Minimal cutoff = min(25000, 22000, 25000) = 22000ms
-        verify_pruning(&window_operator, &partition_key, Some(22000)).await;
+        window_operator.get_state().verify_pruning_for_testing(&partition_key, 22000);
         
         window_operator.close().await.expect("Should be able to close operator");
     }

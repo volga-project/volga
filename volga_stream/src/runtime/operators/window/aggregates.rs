@@ -13,7 +13,7 @@ use tokio_rayon::AsyncThreadPool;
 
 use crate::runtime::operators::window::state::{AccumulatorState, WindowState};
 use crate::runtime::operators::window::tiles::Tile;
-use crate::runtime::operators::window::time_index::{get_tiled_range, get_window_start_idx, TimeIdx};
+use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::storage::storage::BatchId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -327,7 +327,7 @@ pub async fn produce_aggregates(
     window_expr: &Arc<dyn WindowExpr>,
     window_state: Option<&WindowState>,
     entries: &Vec<TimeIdx>, 
-    time_entries: Arc<SkipSet<TimeIdx>>,
+    time_entries: &TimeEntries,
     batches: &HashMap<BatchId, RecordBatch>,
     thread_pool: Option<&ThreadPool>,
     parallelize: bool
@@ -335,8 +335,8 @@ pub async fn produce_aggregates(
     let mut aggregates = Vec::new();
     // rebuild events, use tiles if possible
     for entry in entries {
-        let window_start = get_window_start_idx(window_expr.get_window_frame(), *entry, &time_entries).unwrap_or(time_entries.front().expect("Time entries should exist").value().clone());
-        let tiled_range = get_tiled_range(window_state, &time_entries, window_start, *entry);
+        let window_start = time_entries.get_window_start_idx(window_expr.get_window_frame(), *entry, true).expect("Time entries should exist");
+        let tiled_range = time_entries.get_tiled_range(window_state, window_start, *entry);
         let (aggregate_for_entry, _) = if parallelize {
             run_plain_accumulator_parallel(thread_pool.expect("ThreadPool should exist"), window_expr.clone(), tiled_range.0, tiled_range.1, tiled_range.2, batches.clone()).await
         } else {

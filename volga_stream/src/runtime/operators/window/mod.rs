@@ -1,5 +1,5 @@
 pub mod window_operator;
-pub mod time_index;
+pub mod time_entries;
 pub mod tiles;
 pub mod aggregates;
 pub mod state;
