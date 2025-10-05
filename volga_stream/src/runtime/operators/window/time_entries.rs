@@ -224,7 +224,6 @@ impl TimeEntries {
         }
     }
     
-    
     pub fn slide_window_position(
         &self,
         window_frame: &Arc<WindowFrame>, 
@@ -307,9 +306,7 @@ impl TimeEntries {
                 row_idx: 0,
             };
             let back_padding: Vec<TimeIdx> = self.entries.range(back_boundry..=end_idx).map(|entry| *entry).collect();
-            // front_padding.extend(back_padding);
-            // front_padding
-    
+            
             (front_padding, tiles_in_range, back_padding)
         }
     }

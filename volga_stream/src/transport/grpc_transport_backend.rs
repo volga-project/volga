@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
 use crate::transport::grpc::grpc_streaming_service::{
     MessageStreamClient, MessageStreamServiceImpl,
@@ -24,8 +25,8 @@ pub struct GrpcTransportBackend {
     reader_task: Option<tokio::task::JoinHandle<()>>,
     writer_task: Option<tokio::task::JoinHandle<()>>,
 
-    reader_senders: Option<HashMap<String, mpsc::Sender<Message>>>,
-    writer_receivers: Option<HashMap<String, mpsc::Receiver<Message>>>,
+    reader_senders: Option<HashMap<String, BatchSender>>,
+    writer_receivers: Option<HashMap<String, BatchReceiver>>,
 
     nodes: Option<Vec<(String, String, i32)>>,
     channel_to_node: Option<HashMap<String, String>>,
@@ -37,7 +38,9 @@ pub struct GrpcTransportBackend {
 }
 
 impl GrpcTransportBackend {
-    const CHANNEL_BUFFER_SIZE: usize = 100;
+    const CHANNEL_QUEUE_SIZE: u32 = 8192; // transport client queue
+    const GRPC_SERVER_QUEUE_SIZE: usize = 10; // single mpsc channel reading from grpc server and forwarding to local clients (readers)
+    const GRPC_CLIENT_QUEUE_SIZE: usize = 10; // mpsc channel per peer node, reading local client (writers) and forwarding to remote grpc clients
 
     pub fn new() -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -123,10 +126,11 @@ impl TransportBackend for GrpcTransportBackend {
         let reader_senders = self.reader_senders.take().unwrap();
         
         // Start reading side if needed
-        if reader_senders.len() != 0{
+        if reader_senders.len() != 0 {
             // Start server
             let port = self.port.expect("Port should be found");
-            let (server_tx, mut server_rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
+            let (server_tx, mut server_rx) = mpsc::channel(Self::GRPC_SERVER_QUEUE_SIZE);
+            // let (server_tx, mut server_rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
             let shutdown_rx = self.shutdown_rx.take().unwrap();
             let server_handle = tokio::spawn(async move {
                 let addr = format!("127.0.0.1:{}", port).parse().unwrap();
@@ -200,7 +204,7 @@ impl TransportBackend for GrpcTransportBackend {
             
             for (peer_node_id, peer_node_ip, target_port) in nodes {
                 let server_addr = format!("http://{}:{}", peer_node_ip, target_port);
-                let (client_tx, client_rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
+                let (client_tx, client_rx) = mpsc::channel(Self::GRPC_CLIENT_QUEUE_SIZE);
                 client_txs.insert(peer_node_id.clone(), client_tx);
                 // println!("[GRPC_BACKEND] Created client for node_id: {} at {}", node_id, server_addr);
                 let client_stream_task = tokio::spawn(async move {
@@ -329,7 +333,8 @@ impl TransportBackend for GrpcTransportBackend {
         for edge in &all_input_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
-            let (tx, rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
+            // let (tx, rx) = mpsc::channel(Self::CHANNEL_QUEUE_SIZE);
+            let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
             reader_senders.insert(channel_id.clone(), tx);
             reader_receivers.insert(channel_id.clone(), rx);
         }
@@ -340,7 +345,8 @@ impl TransportBackend for GrpcTransportBackend {
         for edge in &all_output_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
-            let (tx, rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
+            // let (tx, rx) = mpsc::channel(Self::CHANNEL_QUEUE_SIZE);
+            let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
             writer_senders.insert(channel_id.clone(), tx);
             writer_receivers.insert(channel_id.clone(), rx);
         }

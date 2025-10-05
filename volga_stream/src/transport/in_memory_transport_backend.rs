@@ -1,7 +1,6 @@
 use std::collections::HashMap;
-use tokio::sync::mpsc;
-use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
 use crate::transport::TransportBackend;
 use async_trait::async_trait;
@@ -9,12 +8,12 @@ use async_trait::async_trait;
 use super::transport_client::TransportClientConfig;
 
 pub struct InMemoryTransportBackend {
-    senders: HashMap<String, mpsc::Sender<Message>>, // keep references so channels are not closed
-    receivers: HashMap<String, mpsc::Receiver<Message>>,
+    senders: HashMap<String, BatchSender>, // keep references so channels are not closed
+    receivers: HashMap<String, BatchReceiver>,
 }
 
 impl InMemoryTransportBackend {
-    const CHANNEL_BUFFER_SIZE: usize = 100;
+    const CHANNEL_QUEUE_SIZE: u32 = 8192; // num records queued in channel
 
     pub fn new() -> Self {
         Self {
@@ -38,7 +37,8 @@ impl InMemoryTransportBackend {
 
         // Create a new channel if it doesn't exist
         if !self.senders.contains_key(&channel_id) {
-            let (tx, rx) = mpsc::channel(Self::CHANNEL_BUFFER_SIZE);
+            // let (tx, rx) = mpsc::channel(Self::CHANNEL_QUEUE_SIZE);
+            let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
             self.senders.insert(channel_id.clone(), tx);
             self.receivers.insert(channel_id.clone(), rx);
         }

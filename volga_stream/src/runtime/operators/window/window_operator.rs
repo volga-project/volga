@@ -126,14 +126,10 @@ impl WindowOperator {
     }
 
     async fn process_key(&self, key: &Key, windows_state: Option<WindowsState>, late_entries: Option<Vec<TimeIdx>>) -> RecordBatch {
-        // let window_ids: Vec<_> = self.windows.keys().cloned().collect();
-        // let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
         let mut windows_state = if let Some(windows_state) = windows_state {
             windows_state
         } else {
             self.state.take_windows_state(key).await.expect("Windows state should exist")
-            // create_empty_windows_state(&window_ids, &self.tiling_configs, &window_exprs)
-            // panic!("Windows state should exist");
         };
         
         let result = self.advance_windows(key, &mut windows_state, late_entries).await;
@@ -242,7 +238,6 @@ impl WindowOperator {
         let updated_accumulator_states_futs: Vec<_> = self.windows.iter()
             .filter_map(|(window_id, window_config)| {
                 let late_entries_in_window = late_entries_per_window.get(window_id).unwrap().clone();
-                
                 // Only include windows that have non-empty late entries
                 if late_entries_in_window.is_empty() {
                     return None;
@@ -352,7 +347,6 @@ impl WindowOperator {
                     let batches_clone = batches.clone();
                     let thread_pool = self.thread_pool.as_ref().clone();
                     let parallelize = self.parallelize;
-                    // let entries_clone = entries.clone();
                     
                     async move {
                         let late_results_for_window = produce_aggregates(
@@ -438,12 +432,8 @@ impl WindowOperator {
         let accumulator_results = future::join_all(accumulator_futures).await;
         
         // Step 6: Update window states
-        // let mut updated_windows_state = HashMap::new();
         for result in &accumulator_results {
             let (window_id, _, accumulator_state) = result;
-            // let mut updated_window_state = window_state.clone();
-            // updated_window_state.accumulator_state = accumulator_state.clone();
-            // updated_windows_state.insert(*window_id, updated_window_state);
             windows_state.window_states.get_mut(window_id).expect("Window state should exist").accumulator_state = accumulator_state.clone();
         }
         
@@ -579,8 +569,6 @@ impl OperatorTrait for WindowOperator {
             } else {
                 None
             };
-
-            // self.state.insert_windows_state(partition_key, windows_state).await;
             let result = self.process_key(&partition_key, Some(windows_state), late_entries).await;
             // vertex_id will be set by stream task
             // TODO ingest timestamp?
@@ -1484,8 +1472,6 @@ mod tests {
         
         let mut window_operator = WindowOperator::new(operator_config, storage.clone());
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
-        
-        // let state = window_operator.get_state();
 
         let partition_key = create_test_key("A");
         

@@ -298,6 +298,14 @@ impl Message {
         }
     }
 
+    pub fn num_records(&self) -> usize {
+        match self {
+            Message::Regular(msg) => msg.record_batch.num_rows(),
+            Message::Keyed(msg) => msg.base.record_batch.num_rows(),
+            Message::Watermark(msg) => 1
+        }
+    }
+
     /// Serialize the Message to bytes
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut buffer = Vec::new();

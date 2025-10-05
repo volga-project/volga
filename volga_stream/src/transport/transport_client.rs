@@ -2,17 +2,17 @@ use anyhow::{Result, anyhow};
 use arrow::array::StringArray;
 use ordered_float::Float;
 use std::{collections::HashMap, rc::Rc};
-use tokio::sync::mpsc;
-use crate::common::message::Message;
+// use tokio::sync::mpsc;
+use crate::{common::message::Message, transport::batch_channel::{BatchReceiver, BatchSender}};
 use std::time::Duration;
-use tokio::time;
+use tokio::{sync::mpsc::error::SendError, time};
 use crate::transport::batcher::{Batcher, BatcherConfig};
 
 #[derive(Debug)]
 pub struct TransportClientConfig {
     pub vertex_id: String,
-    pub reader_receivers: Option<HashMap<String, mpsc::Receiver<Message>>>,
-    pub writer_senders: Option<HashMap<String, mpsc::Sender<Message>>>,
+    pub reader_receivers: Option<HashMap<String, BatchReceiver>>,
+    pub writer_senders: Option<HashMap<String, BatchSender>>,
 }
 
 impl TransportClientConfig {
@@ -24,14 +24,14 @@ impl TransportClientConfig {
         }
     }
 
-    pub fn add_reader_receiver(&mut self, channel_id: String, receiver: mpsc::Receiver<Message>) {
+    pub fn add_reader_receiver(&mut self, channel_id: String, receiver: BatchReceiver) {
         if self.reader_receivers.is_none() {
             self.reader_receivers = Some(HashMap::new());
         }
         self.reader_receivers.as_mut().unwrap().insert(channel_id, receiver);
     }
 
-    pub fn add_writer_sender(&mut self, channel_id: String, sender: mpsc::Sender<Message>) {
+    pub fn add_writer_sender(&mut self, channel_id: String, sender: BatchSender) {
         if self.writer_senders.is_none() {
             self.writer_senders = Some(HashMap::new());
         }
@@ -42,13 +42,13 @@ impl TransportClientConfig {
 #[derive(Debug)]
 pub struct DataReader {
     vertex_id: String,
-    receivers: HashMap<String, mpsc::Receiver<Message>>,
+    receivers: HashMap<String, BatchReceiver>,
     default_timeout: Duration,
     default_retries: usize,
 }
 
 impl DataReader {
-    pub fn new(vertex_id: String, receivers: HashMap<String, mpsc::Receiver<Message>>) -> Self {
+    pub fn new(vertex_id: String, receivers: HashMap<String, BatchReceiver>) -> Self {
         Self {
             vertex_id,
             receivers,
@@ -115,22 +115,22 @@ impl DataReader {
 #[derive(Debug, Clone)]
 pub struct DataWriter {
     pub vertex_id: String,
-    pub senders: HashMap<String, mpsc::Sender<Message>>,
-    batcher: Batcher,
+    pub senders: HashMap<String, BatchSender>,
+    // batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
     batching_config: BatcherConfig,
 }
 
 impl DataWriter {
-    pub fn new(vertex_id: String, senders: HashMap<String, mpsc::Sender<Message>>) -> Self {
+    pub fn new(vertex_id: String, senders: HashMap<String, BatchSender>) -> Self {
         let batching_config = BatcherConfig::default();
-        let batcher = Batcher::new(batching_config.clone(), senders.clone());
+        // let batcher = Batcher::new(batching_config.clone(), senders.clone());
         
         Self {
             vertex_id,
             senders,
-            batcher,
+            // batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
             batching_config,
@@ -138,19 +138,20 @@ impl DataWriter {
     }
 
     pub async fn start(&mut self) {
-        self.batcher.start().await
+        // self.batcher.start().await
     }
 
-    pub async fn flush_and_close(&mut self) -> Result<(), mpsc::error::SendError<Message>> {
-        self.batcher.flush_and_close().await
+    pub async fn flush_and_close(&mut self) -> Result<(), SendError<Message>> {
+        // self.batcher.flush_and_close().await
+        Ok(())
     }
 
     pub async fn write_message(&mut self, channel_id: &String, message: &Message) -> (bool, u32) {
-        match self.batcher.write_message(channel_id, message.clone()).await {
-            Ok(()) => (true, 0), // Success, no latency for batching
-            Err(_) => (false, 0)
-        }
-        // self.write_message_with_params(channel_id, message, self.default_timeout, self.default_retries).await
+        // match self.batcher.write_message(channel_id, message.clone()).await {
+        //     Ok(()) => (true, 0), // Success, no latency for batching
+        //     Err(_) => (false, 0)
+        // }
+        self.write_message_with_params(channel_id, message, self.default_timeout, self.default_retries).await
     }
 
     async fn write_message_with_params(
