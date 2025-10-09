@@ -10,7 +10,7 @@ use crate::common::message::Message;
 use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
 use crate::storage::storage::Storage;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
-use crate::transport::channel::{gen_channel_id, Channel};
+use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::runtime::functions::{
     map::MapFunction,
@@ -104,9 +104,10 @@ fn test_stream_task_actor() -> Result<()> {
 
         // Write test data using external writer
         for message in &test_messages {
-            let channel_id = gen_channel_id(&input_vertex_id, &task_vertex_id);
+            // let channel_id = gen_channel_id(&input_vertex_id, &task_vertex_id);
+            let channel = Channel::new_local(input_vertex_id.clone(), task_vertex_id.clone());
             input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
-                channel_id,
+                channel,
                 message: message.clone(),
             }).await?;
         }

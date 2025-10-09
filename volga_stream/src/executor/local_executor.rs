@@ -32,9 +32,10 @@ impl Executor for LocalExecutor {
 
         // Create worker config
         let worker_config = WorkerConfig::new(
+            "local_worker".to_string(),
             execution_graph,
             vertex_ids,
-            1, // Single worker ID
+            1,
             TransportBackendType::InMemory,
         );
 

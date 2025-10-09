@@ -2,6 +2,7 @@ use anyhow::{Ok, Result};
 use kameo::Actor;
 use kameo::message::Context;
 use crate::common::message::Message;
+use crate::transport::channel::Channel;
 use crate::transport::transport_client::{DataReader, DataWriter};
 
 use super::transport_client::TransportClientConfig;
@@ -39,7 +40,7 @@ impl kameo::message::Message<TestDataReaderMessage> for TestDataReaderActor {
 #[derive(Debug)]
 pub enum TestDataWriterMessage {
     WriteMessage {
-        channel_id: String,
+        channel: Channel,
         message: Message,
     },
     Start,
@@ -64,8 +65,8 @@ impl kameo::message::Message<TestDataWriterMessage> for TestDataWriterActor {
 
     async fn handle(&mut self, msg: TestDataWriterMessage, _ctx: &mut Context<TestDataWriterActor, Result<()>>) -> Self::Reply {
         match msg {
-            TestDataWriterMessage::WriteMessage { channel_id, message } => {
-                let (success, _) = self.writer.write_message(&channel_id, &message).await;
+            TestDataWriterMessage::WriteMessage { channel, message } => {
+                let (success, _) = self.writer.write_message(&channel, &message).await;
                 if success {
                     Ok(())
                 } else {

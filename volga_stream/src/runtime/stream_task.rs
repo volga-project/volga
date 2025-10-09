@@ -1,16 +1,16 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::Collector, execution_graph::ExecutionGraph, operators::operator::{create_operator, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
+    collector::Collector, execution_graph::ExecutionGraph, metrics::{get_stream_task_metrics, init_metrics, StreamTaskMetrics, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT}, operators::operator::{create_operator, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext
 }, storage::storage::Storage, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
+use metrics::{counter, histogram};
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch};
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
-use std::collections::HashSet;
 use serde::{Serialize, Deserialize};
 
 // Latency histogram bucket configuration
-pub const LATENCY_BUCKET_BOUNDARIES: [u64; 5] = [1, 10, 100, 1000, u64::MAX];
+// pub const LATENCY_BUCKET_BOUNDARIES: [u64; 5] = [1, 10, 100, 1000, u64::MAX];
 
 // Helper function to get current timestamp
 fn timestamp() -> String {
@@ -28,50 +28,6 @@ pub enum StreamTaskStatus {
     Running = 2,
     Finished = 3,
     Closed = 4,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StreamTaskMetrics {
-    pub vertex_id: String,
-    pub latency_histogram: Vec<u64>, // Simple histogram: [0-1ms, 1-10ms, 10-100ms, 100ms-1s, >1s]
-    pub num_messages: u64,
-    pub num_records: u64,
-}
-
-impl StreamTaskMetrics {
-    pub fn new(vertex_id: String) -> Self {
-        Self {
-            vertex_id,
-            latency_histogram: vec![0, 0, 0, 0, 0], // 5 buckets
-            num_messages: 0,
-            num_records: 0,
-        }
-    }
-
-    pub fn update_latency(&mut self, latency_ms: u64) {
-        // Bucket boundaries: [0-1ms, 2-10ms, 11-100ms, 101-1000ms, >1000ms]
-        // Must match LATENCY_BUCKET_BOUNDARIES and LATENCY_BUCKET_CENTERS constants
-        let bucket = if latency_ms <= LATENCY_BUCKET_BOUNDARIES[0] {
-            0
-        } else if latency_ms <= LATENCY_BUCKET_BOUNDARIES[1] {
-            1
-        } else if latency_ms <= LATENCY_BUCKET_BOUNDARIES[2] {
-            2
-        } else if latency_ms <= LATENCY_BUCKET_BOUNDARIES[3] {
-            3
-        } else {
-            4
-        };
-        self.latency_histogram[bucket] += 1;
-    }
-
-    pub fn increment_messages(&mut self) {
-        self.num_messages += 1;
-    }
-
-    pub fn add_records(&mut self, count: usize) {
-        self.num_records += count as u64;
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -103,10 +59,8 @@ pub struct StreamTask {
     operator_config: OperatorConfig,
     transport_client_config: Option<TransportClientConfig>,
     execution_graph: ExecutionGraph,
-    metrics: Arc<Mutex<StreamTaskMetrics>>,
     run_signal_sender: Option<watch::Sender<bool>>,
     close_signal_sender: Option<watch::Sender<bool>>,
-    // Watermark tracking
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>, // upstream_vertex_id -> watermark_value
     current_watermark: Arc<AtomicU64>,
     storage: Arc<Storage>,
@@ -121,6 +75,7 @@ impl StreamTask {
         execution_graph: ExecutionGraph,
         storage: Arc<Storage>,
     ) -> Self {
+        init_metrics();
         Self {
             vertex_id: vertex_id.clone(),
             runtime_context,
@@ -129,7 +84,7 @@ impl StreamTask {
             operator_config,
             transport_client_config: Some(transport_client_config),
             execution_graph,
-            metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id.clone()))),
+            // metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id.clone()))),
             run_signal_sender: None,
             close_signal_sender: None,
             upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
@@ -144,7 +99,7 @@ impl StreamTask {
         upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
         current_watermark: Arc<AtomicU64>,
         status: Arc<AtomicU8>,
-        vertex_id: String,
+        _vertex_id: String,
     ) -> Option<u64> { // Returns new_watermark if advanced
         // For sources (no incoming edges), always advance
         if upstream_vertices.is_empty() {
@@ -198,26 +153,35 @@ impl StreamTask {
         }
     }
 
-    async fn update_metrics(
-        metrics: Arc<Mutex<StreamTaskMetrics>>,
+    fn record_metrics(
+        vertex_id: String,
         message: &Message,
+        recv_or_send: bool,
+        is_sink: bool
     ) {
         let is_watermark = matches!(message, Message::Watermark(_));
         
         if !is_watermark {
-            let mut metrics_guard = metrics.lock().await;
-            metrics_guard.increment_messages();
-            metrics_guard.add_records(message.record_batch().num_rows());
-        
-            
-            // Update latency if available
-            let ingest_timestamp= message.ingest_timestamp().unwrap();
-            let current_time = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            let latency = current_time.saturating_sub(ingest_timestamp);
-            metrics_guard.update_latency(latency);
+            if recv_or_send {
+                counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
+                counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
+                counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
+                if is_sink {
+                    // record latency for sink only
+                    let ingest_timestamp= message.ingest_timestamp().unwrap();
+                    let current_time = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let latency = current_time.saturating_sub(ingest_timestamp);
+                    histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone()).record(latency as f64);
+                }
+
+            } else {
+                counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
+                counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
+                counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
+            }
         }
     }
 
@@ -227,7 +191,7 @@ impl StreamTask {
         let status = self.status.clone();
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
-        let metrics = self.metrics.clone();
+        // let metrics = self.metrics.clone();
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
         let storage = self.storage.clone();
@@ -256,7 +220,7 @@ impl StreamTask {
 
             for edge in output_edges {
                 let channel = edge.get_channel();
-                let channel_id = channel.get_channel_id();
+                // let channel_id = channel.get_channel_id();
                 let partition_type = edge.partition_type.clone();
                 let target_operator_id = edge.target_operator_id.clone();
 
@@ -272,7 +236,7 @@ impl StreamTask {
                     )
                 });
                 
-                collector.add_output_channel_id(channel_id.clone());
+                collector.add_output_channel(channel);
             }
 
             // start collectors
@@ -303,6 +267,7 @@ impl StreamTask {
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 let operator_type = operator.operator_type();
                 let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
+                let is_sink = operator_type == OperatorType::Sink || operator_type == OperatorType::ChainedSourceSink;
                 let mut produced_messages: Option<Vec<Message>> = None;
                 
                 if is_source {
@@ -314,8 +279,7 @@ impl StreamTask {
                                 .duration_since(UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_millis() as u64);
-                            // println!("msg fetched by {:?}: {:?}", vertex_id.clone(), message);
-                            Self::update_metrics(metrics.clone(), &message).await;
+                            Self::record_metrics(vertex_id.clone(), &message, true, false);
                             match message {
                                 Message::Watermark(watermark) => {
                                     println!("StreamTask {:?} received watermark {:?}", vertex_id, watermark.metadata.upstream_vertex_id);
@@ -347,8 +311,7 @@ impl StreamTask {
                     let reader = transport_client.reader.as_mut()
                         .expect("Reader should be initialized for non-SOURCE operator");
                     if let Some(message) = reader.read_message().await? {
-                        Self::update_metrics(metrics.clone(), &message).await;
-                        // let msgs = operator.process_message(message.clone()).await;
+                        Self::record_metrics(vertex_id.clone(), &message, true, false);  
                         match message {
                             Message::Watermark(watermark) => {
                                 println!("StreamTask {:?} received watermark from {:?}", vertex_id, watermark.metadata.upstream_vertex_id);
@@ -398,11 +361,13 @@ impl StreamTask {
                 for mut message in messages {
                     // set upstream vertex id for all messages before sending downstream
                     message.set_upstream_vertex_id(vertex_id.clone());
+                    Self::record_metrics(vertex_id.clone(), &message, false, is_sink);
 
                     let mut channels_to_send_per_operator = HashMap::new();
                     for (target_operator_id, collector) in &mut collectors_per_target_operator {
-                        let partitioned_channel_ids = collector.gen_partitioned_channel_ids(&message);
-                        channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channel_ids);
+                        let partitioned_channels = collector.gen_partitioned_channels(&message);
+
+                        channels_to_send_per_operator.insert(target_operator_id.clone(), partitioned_channels);
                     }
 
                     // TODO should retires be inside transport?
@@ -429,10 +394,10 @@ impl StreamTask {
                         channels_to_send_per_operator.clear();
                         for (target_operator_id, write_res) in write_results {
                             let mut resend_channels = vec![];
-                            for channel_id in write_res.keys() {
-                                let (success, backpressure_time_ms) = write_res.get(channel_id).unwrap();
+                            for channel in write_res.keys() {
+                                let (success, _backpressure_time_ms) = write_res.get(channel).unwrap();
                                 if !success {
-                                    resend_channels.push(channel_id.clone());
+                                    resend_channels.push(channel.clone());
                                 }
                             }
                             if !resend_channels.is_empty() {
@@ -471,7 +436,7 @@ impl StreamTask {
         StreamTaskState {
             vertex_id: self.vertex_id.clone(),
             status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),
-            metrics: self.metrics.lock().await.clone(),
+            metrics: get_stream_task_metrics(self.vertex_id.clone()),
         }
     }
 

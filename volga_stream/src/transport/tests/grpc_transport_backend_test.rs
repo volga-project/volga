@@ -1,4 +1,4 @@
-use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
+use crate::runtime::execution_graph::{gen_edge_id, ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::runtime::functions::{
@@ -89,14 +89,23 @@ async fn test_grpc_transport_backend() {
                 reader_vertex_id.clone(),
                 reader_vertex_id.clone(),
                 PartitionType::Forward,
-                Some(Channel::Remote { 
-                    channel_id: format!("writer_{}_to_reader_{}", writer_idx, reader_idx),
-                    source_node_ip: "127.0.0.1".to_string(),
-                    source_node_id: format!("writer_node_{}", source_node_id),
-                    target_node_ip: "127.0.0.1".to_string(),
-                    target_node_id: format!("reader_node_{}", target_node_id),
-                    target_port,
-                })
+                // Some(Channel::Remote { 
+                //     channel_id: format!("writer_{}_to_reader_{}", writer_idx, reader_idx),
+                //     source_node_ip: "127.0.0.1".to_string(),
+                //     source_node_id: format!("writer_node_{}", source_node_id),
+                //     target_node_ip: "127.0.0.1".to_string(),
+                //     target_node_id: format!("reader_node_{}", target_node_id),
+                //     target_port,
+                // }
+                Some(Channel::new_remote(
+                    writer_vertex_id.clone(),
+                    reader_vertex_id.clone(),
+                    "127.0.0.1".to_string(),
+                    format!("writer_node_{}", source_node_id),
+                    "127.0.0.1".to_string(),
+                    format!("reader_node_{}", target_node_id),
+                    target_port
+                ))
             );
             
             graph.add_edge(edge);
@@ -187,9 +196,10 @@ async fn test_grpc_transport_backend() {
             );
 
             for reader_idx in 0..reader_vertex_ids.len() {
-                let channel_id = format!("writer_{}_to_reader_{}", writer_idx, reader_idx);
+                let edge_id = gen_edge_id(&writer_vertex_id, &reader_vertex_ids[reader_idx]);
+                let channel = graph.get_edge(&edge_id).unwrap().get_channel();
                 writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
-                    channel_id,
+                    channel,
                     message: message.clone(),
                 }).await.unwrap();
             }

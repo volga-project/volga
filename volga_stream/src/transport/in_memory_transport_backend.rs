@@ -31,7 +31,7 @@ impl InMemoryTransportBackend {
     ) {
         // Only handle local channels
         let channel_id = match &channel {
-            Channel::Local { channel_id } => channel_id.clone(),
+            Channel::Local { channel_id, ..} => channel_id.clone(),
             _ => panic!("Only local channels are supported"),
         };
 

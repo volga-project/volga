@@ -1,9 +1,10 @@
 use anyhow::{Result, anyhow};
 use arrow::array::StringArray;
+use metrics::{counter, gauge};
 use ordered_float::Float;
 use std::{collections::HashMap, rc::Rc};
 // use tokio::sync::mpsc;
-use crate::{common::message::Message, transport::batch_channel::{BatchReceiver, BatchSender}};
+use crate::{common::message::Message, runtime::metrics::{LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use crate::transport::batcher::{Batcher, BatcherConfig};
@@ -78,7 +79,7 @@ impl DataReader {
             // Create a future that completes when any channel has data
             let mut futures = Vec::new();
             for (channel_id, receiver) in self.receivers.iter_mut() {
-                let vertex_id = self.vertex_id.clone();
+                // let vertex_id = self.vertex_id.clone();
                 futures.push(Box::pin(async move {
                     match time::timeout(timeout_duration, receiver.recv()).await {
                         Ok(Some(message)) => Some((channel_id.clone(), message)),
@@ -146,17 +147,17 @@ impl DataWriter {
         Ok(())
     }
 
-    pub async fn write_message(&mut self, channel_id: &String, message: &Message) -> (bool, u32) {
+    pub async fn write_message(&mut self, channel: &Channel, message: &Message) -> (bool, u32) {
         // match self.batcher.write_message(channel_id, message.clone()).await {
         //     Ok(()) => (true, 0), // Success, no latency for batching
         //     Err(_) => (false, 0)
         // }
-        self.write_message_with_params(channel_id, message, self.default_timeout, self.default_retries).await
+        self.write_message_with_params(channel, message, self.default_timeout, self.default_retries).await
     }
 
     async fn write_message_with_params(
         &mut self,
-        channel_id: &str,
+        channel: &Channel,
         message: &Message,
         timeout_duration: Duration,
         retries: usize
@@ -168,8 +169,15 @@ impl DataWriter {
             if self.senders.is_empty() {
                 panic!("DataWriter {:?} no channels registered", self.vertex_id);
             }
-            
-            if let Some(sender) = self.senders.get(channel_id) {
+            let channel_id = channel.get_channel_id();
+            if let Some(sender) = self.senders.get(&channel_id) {
+                let queue_size = sender.size();
+                let queue_remaining = sender.capacity();
+                gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => self.vertex_id.clone()).set(queue_size);
+                gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => self.vertex_id.clone()).set(queue_remaining);
+                let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
+                let target_vertex_id = channel.get_target_vertex_id();
+                gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id).set(backpressure);
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {
                         return (true, start_time.elapsed().as_millis() as u32)
@@ -189,6 +197,10 @@ impl DataWriter {
         }
     
         (false, start_time.elapsed().as_millis() as u32)
+    }
+
+    pub fn get_queue_size_and_capacity(&self, channel_id: &str) -> Option<(u32, u32)> {
+        self.senders.get(channel_id).map(|sender| (sender.size(), sender.capacity()))
     }
 }
 

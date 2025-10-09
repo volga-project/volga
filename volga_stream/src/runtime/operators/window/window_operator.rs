@@ -191,7 +191,8 @@ impl WindowOperator {
         if results.is_empty() {
             return RecordBatch::new_empty(self.output_schema.clone());
         }
-        
+
+        // TOOO we should return vec instead of concating - separate batch per key
         arrow::compute::concat_batches(&self.output_schema, &results)
             .expect("Should be able to concat result batches")
     }

@@ -57,6 +57,7 @@ impl FakeDistributedExecutor {
 
             // Create and start worker server
             let worker_config = WorkerConfig::new(
+                node_id.clone(),
                 execution_graph.clone(),
                 vertex_ids,
                 1,

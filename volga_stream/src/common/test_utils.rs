@@ -48,18 +48,20 @@ pub fn print_worker_metrics(worker_state: &WorkerState) {
         println!("  {}: {:?}", vertex_id, status);
     }
     
+    let worker_metrics = worker_state.worker_metrics.as_ref().unwrap();
+
     println!("\nTask Metrics:");
-    for (vertex_id, metrics) in &worker_state.task_metrics {
+    for (vertex_id, metrics) in worker_metrics.tasks_metrics.iter() {
         println!("  {}:", vertex_id);
-        println!("    Messages: {}", metrics.num_messages);
-        println!("    Records: {}", metrics.num_records);
+        println!("    Messages: {}", metrics.messages_sent);
+        println!("    Records: {}", metrics.records_sent);
         println!("    Latency Histogram: {:?}", metrics.latency_histogram);
     }
-    
-    println!("\nAggregated Metrics:");
-    println!("  Total Messages: {}", worker_state.aggregated_metrics.total_messages);
-    println!("  Total Records: {}", worker_state.aggregated_metrics.total_records);
-    println!("  Latency Histogram: {:?}", worker_state.aggregated_metrics.latency_histogram);
+
+    println!("\nWorker Metrics:");
+    println!("  Total Messages: {}", worker_metrics.source_messages_recv);
+    println!("  Total Records: {}", worker_metrics.source_records_recv);
+    println!("  Latency Histogram: {:?}", worker_metrics.latency_histogram);
     println!("===================\n");
 }
 

@@ -1,5 +1,5 @@
-use crate::{common::test_utils::print_worker_metrics, runtime::{
-    execution_graph::ExecutionGraph, operators::operator::OperatorType, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskMetrics, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+use crate::{runtime::{
+    execution_graph::ExecutionGraph, metrics::{StreamTaskMetrics, WorkerMetrics}, operators::operator::OperatorType, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
 }, storage::storage::Storage, transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend}};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
@@ -15,6 +15,7 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
+    pub worker_id: String,
     pub graph: ExecutionGraph,
     pub vertex_ids: Vec<String>,
     pub num_io_threads: usize,
@@ -23,12 +24,14 @@ pub struct WorkerConfig {
 
 impl WorkerConfig {
     pub fn new(
+        worker_id: String,
         graph: ExecutionGraph,
         vertex_ids: Vec<String>,
         num_io_threads: usize,
         transport_backend_type: TransportBackendType,
     ) -> Self {
         Self {
+            worker_id,
             graph,
             vertex_ids,
             num_io_threads,
@@ -40,48 +43,14 @@ impl WorkerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerState {
     pub task_statuses: HashMap<String, StreamTaskStatus>,
-    pub task_metrics: HashMap<String, StreamTaskMetrics>,
-    pub aggregated_metrics: AggregatedMetrics,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AggregatedMetrics {
-    pub total_messages: u64,
-    pub total_records: u64,
-    pub latency_histogram: Vec<u64>, // Combined histogram from all tasks
-}
-
-impl AggregatedMetrics {
-    pub fn new() -> Self {
-        Self {
-            total_messages: 0,
-            total_records: 0,
-            latency_histogram: vec![0, 0, 0, 0, 0],
-        }
-    }
-
-    pub fn aggregate_from_sink_metrics(&mut self, sink_metrics: &[StreamTaskMetrics]) {
-        self.total_messages = 0;
-        self.total_records = 0;
-        self.latency_histogram = vec![0, 0, 0, 0, 0];
-
-        for metrics in sink_metrics {
-            self.total_messages += metrics.num_messages;
-            self.total_records += metrics.num_records;
-            
-            for (i, &count) in metrics.latency_histogram.iter().enumerate() {
-                self.latency_histogram[i] += count;
-            }
-        }
-    }
+    pub worker_metrics: Option<WorkerMetrics>,
 }
 
 impl WorkerState {
     pub fn new() -> Self {
         Self {
             task_statuses: HashMap::new(),
-            task_metrics: HashMap::new(),
-            aggregated_metrics: AggregatedMetrics::new(),
+            worker_metrics: None,
         }
     }
 
@@ -96,9 +65,14 @@ impl WorkerState {
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         Ok(bincode::deserialize(bytes)?)
     }
+
+    pub fn set_metrics(&mut self, worker_metrics: WorkerMetrics) {
+        self.worker_metrics = Some(worker_metrics);
+    }
 }
 
 pub struct Worker {
+    worker_id: String,
     graph: ExecutionGraph,
     vertex_ids: Vec<String>,
     transport_backend_type: TransportBackendType,
@@ -126,6 +100,7 @@ impl Worker {
         }
 
         Self {
+            worker_id: config.worker_id,
             graph: config.graph,
             vertex_ids: config.vertex_ids.clone(),
             task_actors: HashMap::new(),
@@ -146,6 +121,7 @@ impl Worker {
     }
 
     async fn poll_and_update_tasks_state(
+        worker_id: String,
         task_runtimes: HashMap<String, Handle>,
         task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
@@ -167,27 +143,23 @@ impl Worker {
 
         let mut task_statuses = HashMap::new();
         let mut task_metrics = HashMap::new();
-        let mut sink_metrics = Vec::new();
 
         for result in task_results {
             if let Ok((vertex_id, state)) = result {
                 task_statuses.insert(vertex_id.clone(), state.status.clone());
                 task_metrics.insert(vertex_id.clone(), state.metrics.clone());
-                
-                // Check if this is a sink vertex
-                let operator_type = graph.get_vertex_type(&vertex_id);
-                if operator_type == OperatorType::Sink || operator_type == OperatorType::ChainedSourceSink {
-                    sink_metrics.push(state.metrics);
-                }
             }
         }
+
+        let worker_metrics = WorkerMetrics::new(worker_id, task_metrics, &graph);
+        worker_metrics.record_operator_and_worker_metrics();
 
         // Update shared WorkerState
         {
             let mut state_guard = state.lock().await;
             state_guard.task_statuses = task_statuses;
-            state_guard.task_metrics = task_metrics;
-            state_guard.aggregated_metrics.aggregate_from_sink_metrics(&sink_metrics);
+            state_guard.set_metrics(worker_metrics);
+            // state_guard.worker_metrics.set_tasks_metrics(task_metrics.clone());
             if metrics_sender.is_some() {
                 metrics_sender.unwrap().send(state_guard.clone()).await.unwrap();
             }
@@ -290,7 +262,8 @@ impl Worker {
         println!("[WORKER] Actors spawned");
     }
 
-    async fn start_tasks(&mut self, 
+    async fn start_tasks(
+        &mut self, 
         metrics_sender: Option<mpsc::Sender<WorkerState>>
     ) {
         println!("[WORKER] Starting tasks");
@@ -320,6 +293,7 @@ impl Worker {
         let task_actors = self.task_actors.clone();
         let graph = self.graph.clone();
         let state = self.worker_state.clone();
+        let worker_id = self.worker_id.clone();
         
         let task_runtime_handles: HashMap<String, Handle> = self.task_runtimes.iter()
             .map(|(k, v)| (k.clone(), v.handle().clone()))
@@ -327,11 +301,11 @@ impl Worker {
         
         let polling_handle = tokio::spawn(async move { 
             while running.load(Ordering::SeqCst) {
-                Self::poll_and_update_tasks_state(task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone(), metrics_sender.clone()).await;
+                Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone(), metrics_sender.clone()).await;
                 sleep(Duration::from_millis(100)).await;
             }
             // final poll
-            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state, metrics_sender.clone()).await;
+            Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles, task_actors, graph, state, metrics_sender.clone()).await;
         });
 
         self.tasks_state_polling_handle = Some(polling_handle);
@@ -373,7 +347,7 @@ impl Worker {
             let task_actors = self.task_actors.clone();
             let graph = self.graph.clone();
             let state = self.worker_state.clone();
-            Self::poll_and_update_tasks_state(task_runtime_handles, task_actors, graph, state, None).await;
+            Self::poll_and_update_tasks_state(self.worker_id.clone(), task_runtime_handles, task_actors, graph, state, None).await;
         }
         self.worker_state.lock().await.clone()
     }
@@ -491,62 +465,5 @@ impl Worker {
         self.close().await;
 
         println!("[WORKER] Worker execution completed");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::runtime::stream_task::{StreamTaskStatus, StreamTaskMetrics};
-
-    #[test]
-    fn test_worker_state_serialization() {
-        // Create a test WorkerState
-        let mut worker_state = WorkerState::new();
-        
-        // Add some task statuses
-        worker_state.task_statuses.insert("task1".to_string(), StreamTaskStatus::Running);
-        worker_state.task_statuses.insert("task2".to_string(), StreamTaskStatus::Opened);
-        
-        // Add some task metrics
-        let mut metrics1 = StreamTaskMetrics::new("task1".to_string());
-        metrics1.num_messages = 100;
-        metrics1.num_records = 500;
-        metrics1.latency_histogram = vec![10, 20, 30, 40, 50];
-        
-        let mut metrics2 = StreamTaskMetrics::new("task2".to_string());
-        metrics2.num_messages = 200;
-        metrics2.num_records = 1000;
-        metrics2.latency_histogram = vec![15, 25, 35, 45, 55];
-        
-        worker_state.task_metrics.insert("task1".to_string(), metrics1);
-        worker_state.task_metrics.insert("task2".to_string(), metrics2);
-        
-        // Update aggregated metrics
-        worker_state.aggregated_metrics.total_messages = 300;
-        worker_state.aggregated_metrics.total_records = 1500;
-        worker_state.aggregated_metrics.latency_histogram = vec![25, 45, 65, 85, 105];
-
-        // Test serialization and deserialization
-        let bytes = worker_state.to_bytes().unwrap();
-        let deserialized_state = WorkerState::from_bytes(&bytes).unwrap();
-
-        // Verify the state was correctly deserialized
-        assert_eq!(worker_state.task_statuses, deserialized_state.task_statuses);
-        assert_eq!(worker_state.task_metrics.len(), deserialized_state.task_metrics.len());
-        
-        // Compare task metrics
-        for (key, original_metrics) in &worker_state.task_metrics {
-            let deserialized_metrics = deserialized_state.task_metrics.get(key).unwrap();
-            assert_eq!(original_metrics.vertex_id, deserialized_metrics.vertex_id);
-            assert_eq!(original_metrics.num_messages, deserialized_metrics.num_messages);
-            assert_eq!(original_metrics.num_records, deserialized_metrics.num_records);
-            assert_eq!(original_metrics.latency_histogram, deserialized_metrics.latency_histogram);
-        }
-        
-        // Compare aggregated metrics
-        assert_eq!(worker_state.aggregated_metrics.total_messages, deserialized_state.aggregated_metrics.total_messages);
-        assert_eq!(worker_state.aggregated_metrics.total_records, deserialized_state.aggregated_metrics.total_records);
-        assert_eq!(worker_state.aggregated_metrics.latency_histogram, deserialized_state.aggregated_metrics.latency_histogram);
     }
 }

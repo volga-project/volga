@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
-use crate::transport::channel::{gen_channel_id, Channel};
+use crate::transport::channel::Channel;
 use crate::common::message::Message;
 use crate::runtime::functions::{
     map::MapFunction,
@@ -200,25 +200,28 @@ impl ExecutionGraph {
                 
                 if source_node.node_id != target_node.node_id {
                     // Vertices are on different nodes, create remote channel
-                    crate::transport::channel::Channel::Remote {
-                        channel_id: gen_channel_id(&edge.source_vertex_id, &edge.target_vertex_id),
-                        source_node_ip: source_node.node_ip.clone(),
-                        source_node_id: source_node.node_id.clone(),
-                        target_node_ip: target_node.node_ip.clone(),
-                        target_node_id: target_node.node_id.clone(),
-                        target_port: target_node.node_port as i32,
-                    }
+                    Channel::new_remote(
+                        edge.source_vertex_id.clone(), 
+                        edge.target_vertex_id.clone(), 
+                        source_node.node_ip.clone(), 
+                        source_node.node_id.clone(), 
+                        target_node.node_ip.clone(), 
+                        target_node.node_id.clone(), 
+                        target_node.node_port as i32
+                    )
                 } else {
                     // Vertices are on same node, use local channel
-                    crate::transport::channel::Channel::Local {
-                        channel_id: gen_channel_id(&edge.source_vertex_id, &edge.target_vertex_id),
-                    }
+                    Channel::new_local(
+                        edge.source_vertex_id.clone(), 
+                        edge.target_vertex_id.clone()
+                    )
                 }
             } else {
                 // No cluster mapping provided, use local channels
-                crate::transport::channel::Channel::Local {
-                    channel_id: gen_channel_id(&edge.source_vertex_id, &edge.target_vertex_id),
-                }
+                Channel::new_local(
+                    edge.source_vertex_id.clone(), 
+                    edge.target_vertex_id.clone()
+                )
             };
 
             edge.channel = Some(channel);

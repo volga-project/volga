@@ -3,9 +3,7 @@ use crate::{
     common::test_utils::{gen_unique_grpc_port, print_worker_metrics},
     executor::local_executor::LocalExecutor,
     runtime::{
-        functions::source::word_count_source::BatchingMode,
-        operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
-        worker::WorkerState,
+        functions::source::word_count_source::BatchingMode, metrics::calculate_latency_stats, operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
@@ -17,7 +15,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-use crate::runtime::stream_task::LATENCY_BUCKET_BOUNDARIES;
+// use crate::runtime::metrics::LATENCY_BUCKET_BOUNDARIES;
 
 // TODO we need to rewrite the way we measure latency and throughput - 
 // aggregate operator buffers messages adding latency
@@ -27,7 +25,7 @@ use crate::runtime::stream_task::LATENCY_BUCKET_BOUNDARIES;
 pub struct BenchmarkMetrics {
     pub messages_per_second: Vec<f64>,
     pub records_per_second: Vec<f64>,
-    pub latency_samples: Vec<u64>, // in milliseconds
+    pub latency_histogram: Option<Vec<u64>>, // in milliseconds
     pub timestamps: Vec<u64>, // Unix timestamp in seconds
 }
 
@@ -36,15 +34,15 @@ impl BenchmarkMetrics {
         Self {
             messages_per_second: Vec::new(),
             records_per_second: Vec::new(),
-            latency_samples: Vec::new(),
+            latency_histogram: None,
             timestamps: Vec::new(),
         }
     }
 
-    pub fn add_sample(&mut self, messages_per_sec: f64, records_per_sec: f64, latency_ms: u64) {
+    pub fn add_sample(&mut self, messages_per_sec: f64, records_per_sec: f64, latency_ms: f64) {
         self.messages_per_second.push(messages_per_sec);
         self.records_per_second.push(records_per_sec);
-        self.latency_samples.push(latency_ms);
+        // self.latency_samples.push(latency_ms);
         self.timestamps.push(SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -71,25 +69,12 @@ impl BenchmarkMetrics {
         }
     }
 
-    pub fn calculate_latency_stats(&self) -> LatencyStats {
-        if self.latency_samples.is_empty() {
-            return LatencyStats::default();
+    pub fn calculate_latency_stats(&self) -> (f64, f64, f64, f64) {
+        if self.latency_histogram.is_none() {
+            return (0.0, 0.0, 0.0, 0.0)
         }
 
-        let mut sorted_latencies = self.latency_samples.clone();
-        sorted_latencies.sort_unstable();
-
-        let len = sorted_latencies.len();
-        let p50_idx = (len as f64 * 0.5) as usize;
-        let p95_idx = (len as f64 * 0.95) as usize;
-        let p99_idx = (len as f64 * 0.99) as usize;
-
-        LatencyStats {
-            p50: sorted_latencies[p50_idx.min(len - 1)],
-            p95: sorted_latencies[p95_idx.min(len - 1)],
-            p99: sorted_latencies[p99_idx.min(len - 1)],
-            avg: sorted_latencies.iter().sum::<u64>() / len as u64,
-        }
+        return calculate_latency_stats(self.latency_histogram.as_ref().unwrap())
     }
 }
 
@@ -105,13 +90,13 @@ pub struct ThroughputStats {
     pub records_stddev: f64,
 }
 
-#[derive(Debug, Clone, Default)]
-pub struct LatencyStats {
-    pub p50: u64,
-    pub p95: u64,
-    pub p99: u64,
-    pub avg: u64,
-}
+// #[derive(Debug, Clone, Default)]
+// pub struct LatencyStats {
+//     pub p50: u64,
+//     pub p95: u64,
+//     pub p99: u64,
+//     pub avg: u64,
+// }
 
 fn calculate_stddev(values: &[f64]) -> f64 {
     if values.len() < 2 {
@@ -138,8 +123,9 @@ async fn poll_worker_metrics(
         None => return None, // Channel closed, execution finished
     };
     
-    let current_messages = worker_state.aggregated_metrics.total_messages;
-    let current_records = worker_state.aggregated_metrics.total_records;
+    let worker_metrics = worker_state.worker_metrics.as_ref().unwrap();
+    let current_messages = worker_metrics.source_messages_recv;
+    let current_records = worker_metrics.source_records_recv;
     
     if let Some((last_messages, last_records)) = *last_metrics {
         let time_diff = current_time.duration_since(*last_timestamp).as_secs_f64();
@@ -151,46 +137,46 @@ async fn poll_worker_metrics(
             let records_per_sec = records_diff as f64 / time_diff;
             
             // Calculate average latency from histogram
-            let latency_ms = calculate_average_latency(&worker_state.aggregated_metrics.latency_histogram);
-            
+            let latency_ms = worker_metrics.latency_avg;
+
             benchmark_metrics.add_sample(messages_per_sec, records_per_sec, latency_ms);
         }
     }
     
     *last_metrics = Some((current_messages, current_records));
     *last_timestamp = current_time;
-    Some(worker_state)
+    Some(worker_state.clone())
 }
 
 
 /// Calculate the center of each latency bucket based on boundaries
-fn calculate_latency_bucket_centers() -> [u64; 5] {
-    [
-        0, // Center of 0-1ms bucket (0-1ms)
-        (2 + LATENCY_BUCKET_BOUNDARIES[1]) / 2, // Center of 2-10ms bucket
-        (LATENCY_BUCKET_BOUNDARIES[1] + 1 + LATENCY_BUCKET_BOUNDARIES[2]) / 2, // Center of 11-100ms bucket
-        (LATENCY_BUCKET_BOUNDARIES[2] + 1 + LATENCY_BUCKET_BOUNDARIES[3]) / 2, // Center of 101-1000ms bucket
-        LATENCY_BUCKET_BOUNDARIES[3] + 100, // Center of >1000ms bucket (assume 1100ms as representative)
-    ]
-}
+// fn calculate_latency_bucket_centers() -> [f64; 5] {
+//     [
+//         0.0, // Center of 0-1ms bucket (0-1ms)
+//         (2.0 + LATENCY_BUCKET_BOUNDARIES[1]) / 2.0, // Center of 2-10ms bucket
+//         (LATENCY_BUCKET_BOUNDARIES[1] + 1.0 + LATENCY_BUCKET_BOUNDARIES[2]) / 2.0, // Center of 11-100ms bucket
+//         (LATENCY_BUCKET_BOUNDARIES[2] + 1.0 + LATENCY_BUCKET_BOUNDARIES[3]) / 2.0, // Center of 101-1000ms bucket
+//         LATENCY_BUCKET_BOUNDARIES[3] + 100.0, // Center of >1000ms bucket (assume 1100ms as representative)
+//     ]
+// }
 
-fn calculate_average_latency(histogram: &[u64]) -> u64 {
-    if histogram.len() != 5 {
-        return 0;
-    }
+// fn calculate_average_latency(histogram: &[u64]) -> f64 {
+//     if histogram.len() != 5 {
+//         return 0.0;
+//     }
     
-    let total_samples: u64 = histogram.iter().sum();
-    if total_samples == 0 {
-        return 0;
-    }
-    let bucket_centers = calculate_latency_bucket_centers();
-    let weighted_sum: u64 = histogram.iter()
-        .zip(bucket_centers.iter())
-        .map(|(&count, &center)| count * center)
-        .sum();
+//     let total_samples: u64 = histogram.iter().sum();
+//     if total_samples == 0 {
+//         return 0.0;
+//     }
+//     let bucket_centers = calculate_latency_bucket_centers();
+//     let weighted_sum: f64 = histogram.iter()
+//         .zip(bucket_centers.iter())
+//         .map(|(&count, &center)| count as f64 * center)
+//         .sum();
     
-    weighted_sum / total_samples
-}
+//     weighted_sum / total_samples as f64
+// }
 
 pub async fn run_word_count_benchmark(
     parallelism: usize,
@@ -366,12 +352,12 @@ async fn test_word_count_benchmark() -> Result<()> {
     println!("    StdDev: {:.2}", throughput_stats.records_stddev);
     
     // Calculate and print latency statistics
-    let latency_stats = benchmark_metrics.calculate_latency_stats();
+    let (p99, p95, p50, avg) = benchmark_metrics.calculate_latency_stats();
     println!("\nLatency Statistics (ms):");
-    println!("  P50: {}", latency_stats.p50);
-    println!("  P95: {}", latency_stats.p95);
-    println!("  P99: {}", latency_stats.p99);
-    println!("  Avg: {}", latency_stats.avg);
+    println!("  P99: {}", p99);
+    println!("  P95: {}", p95);
+    println!("  P50: {}", p50);
+    println!("  Avg: {}", avg);
     
     println!("\nSample Count: {}", benchmark_metrics.messages_per_second.len());
     println!("=====================================\n");
@@ -383,7 +369,7 @@ async fn test_word_count_benchmark() -> Result<()> {
     // Verify we have some metrics
     assert!(!benchmark_metrics.messages_per_second.is_empty(), 
         "Should have collected some throughput metrics");
-    assert!(!benchmark_metrics.latency_samples.is_empty(), 
+    assert!(!benchmark_metrics.latency_histogram.is_some(), 
         "Should have collected some latency metrics");
 
     Ok(())

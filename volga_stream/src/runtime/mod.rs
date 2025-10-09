@@ -7,6 +7,7 @@ pub mod worker;
 pub mod worker_server;
 pub mod master;
 pub mod functions;
+pub mod metrics;
 
 pub mod partition;
 pub mod collector;

@@ -1,4 +1,5 @@
 use crate::common::message::Message;
+use crate::transport::channel::Channel;
 use std::collections::HashMap;
 use crate::transport::transport_client::DataWriter;
 use crate::runtime::partition::Partition;
@@ -10,7 +11,7 @@ use tokio::sync::mpsc;
 #[derive(Clone)]
 pub struct Collector {
     data_writer: DataWriter,
-    output_channel_ids: Vec<String>,
+    output_channels: Vec<Channel>,
     partition: Partition,
 }
 
@@ -21,7 +22,7 @@ impl Collector {
     ) -> Self {
         Self {
             data_writer,
-            output_channel_ids: Vec::new(),
+            output_channels: Vec::new(),
             partition,
         }
     }
@@ -34,22 +35,22 @@ impl Collector {
         self.data_writer.flush_and_close().await
     }
 
-    pub fn add_output_channel_id(&mut self, channel_id: String) {
-        if self.output_channel_ids.contains(&channel_id) {
-            panic!("Output channel id already exists");
+    pub fn add_output_channel(&mut self, channel: Channel) {
+        if self.output_channels.contains(&channel) {
+            panic!("Output channel already exists");
         }
-        self.output_channel_ids.push(channel_id);
+        self.output_channels.push(channel);
     }
 
-    pub fn output_channel_ids(&self) -> Vec<String> {
-        self.output_channel_ids.clone()
+    pub fn output_channels(&self) -> Vec<Channel> {
+        self.output_channels.clone()
     }
 
     // generate which channels the message goes to
     // Note: calling this updates partition state - do not call for the same message twice
     // TODO what if it is a retried message?
-    pub fn gen_partitioned_channel_ids(&mut self, message: &Message) -> Vec<String> {
-        let num_partitions = self.output_channel_ids.len();
+    pub fn gen_partitioned_channels(&mut self, message: &Message) -> Vec<Channel> {
+        let num_partitions = self.output_channels.len();
         
         // Use BroadcastPartition for watermark messages, otherwise use the configured partition strategy
         let partitions = if let Message::Watermark(_) = message {
@@ -58,25 +59,25 @@ impl Collector {
             self.partition.partition(message, num_partitions)
         };
 
-        partitions.iter().map(|partition_idx| self.output_channel_ids[*partition_idx].clone()).collect()
+        partitions.iter().map(|partition_idx| self.output_channels[*partition_idx].clone()).collect()
     }
 
-    async fn write_message_to_channels(&mut self, message: &Message, channel_ids_to_send: Vec<String>) -> HashMap<String, (bool, u32)> {
+    async fn write_message_to_channels(&mut self, message: &Message, channels_to_send: Vec<Channel>) -> HashMap<Channel, (bool, u32)> {
         // parallel write
         let mut write_futures = Vec::new();
-        for channel_id in channel_ids_to_send.clone() {
+        for channel in channels_to_send.clone() {
             
             let mut writer = self.data_writer.clone();
-            let channel_id_clone = channel_id.clone();
+            // let channel_id_clone = channel_id.clone();
             write_futures.push(async move {
-                return writer.write_message(&channel_id_clone, message).await;
+                return writer.write_message(&channel, message).await;
             });
         }
         let results = join_all(write_futures).await;
         
         let mut channel_results = HashMap::new();
         for (i, (success, backpressure_time_ms)) in results.into_iter().enumerate() {
-            channel_results.insert(channel_ids_to_send[i].clone(), (success, backpressure_time_ms));
+            channel_results.insert(channels_to_send[i].clone(), (success, backpressure_time_ms));
         }
         channel_results
     }
@@ -84,8 +85,8 @@ impl Collector {
     pub async fn write_message_to_operators(
         collectors: &mut HashMap<String, Collector>,
         message: &Message,
-        channels_per_operator: HashMap<String, Vec<String>>
-    ) -> HashMap<String, HashMap<String, (bool, u32)>> {
+        channels_per_operator: HashMap<String, Vec<Channel>>
+    ) -> HashMap<String, HashMap<Channel, (bool, u32)>> {
         let mut futures = Vec::new();
         for (operator_id, collector) in collectors.iter_mut() {
             let operator_id = operator_id.clone();
