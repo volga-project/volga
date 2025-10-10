@@ -56,8 +56,8 @@ pub const LABEL_TARGET_VERTEX_ID: &str = "target_vertex_id";
 pub const LABEL_WORKER_ID: &str = "worker_id";
 pub const LABEL_OPERATOR_ID: &str = "operator_id";
 
-// Histogram bucket boundaries for Prometheus
-pub const LATENCY_BUCKET_BOUNDARIES: [f64; 5] = [1.0, 10.0, 100.0, 1000.0, f64::MAX];
+// Histogram bucket boundaries, milliseconds
+pub const LATENCY_BUCKET_BOUNDARIES: [f64; 12] = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StreamTaskMetrics {
@@ -168,7 +168,7 @@ impl WorkerMetrics {
             }
         }
 
-        let (latency_p99, latency_p95, latency_p50, latency_avg) = calculate_latency_stats(&latency_histogram);
+        let (latency_p99, latency_p95, latency_p50, latency_avg) = calculate_histogram_stats(&latency_histogram, &LATENCY_BUCKET_BOUNDARIES.to_vec());
 
         WorkerMetrics {
             worker_id,
@@ -211,19 +211,84 @@ impl WorkerMetrics {
     }
 }
 
-pub fn calculate_latency_stats(latency_histogram: &Vec<u64>) -> (f64, f64, f64, f64) {
-    (0.0, 0.0, 0.0, 0.0) // TODO
+pub fn calculate_histogram_stats(histogram: &Vec<u64>, boundaries: &Vec<f64>) -> (f64, f64, f64, f64) {
+    // Handle edge cases
+    if histogram.is_empty() || histogram.len() != boundaries.len() {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    
+    // Get total sample count from last bucket (cumulative histogram)
+    let total_samples = *histogram.last().unwrap();
+    if total_samples == 0 {
+        return (0.0, 0.0, 0.0, 0.0);
+    }
+    
+    // Calculate percentiles
+    let p99 = calculate_percentile(histogram, boundaries, total_samples, 99.0);
+    let p95 = calculate_percentile(histogram, boundaries, total_samples, 95.0);
+    let p50 = calculate_percentile(histogram, boundaries, total_samples, 50.0);
+    
+    // Calculate average using weighted sum of bucket midpoints
+    let avg = calculate_weighted_average(histogram, boundaries, total_samples);
+    
+    (p99, p95, p50, avg)
+}
+
+fn calculate_percentile(histogram: &Vec<u64>, boundaries: &Vec<f64>, total_samples: u64, percentile: f64) -> f64 {
+    let target_count = (total_samples as f64 * percentile / 100.0) as u64;
+    
+    // Find the bucket containing the target count
+    for (i, &bucket_count) in histogram.iter().enumerate() {
+        if bucket_count >= target_count {
+            let boundary = boundaries[i];
+            
+            // Linear interpolation within the bucket
+            let prev_count = if i == 0 { 0 } else { histogram[i-1] };
+            let bucket_samples = bucket_count - prev_count;
+            
+            if bucket_samples == 0 {
+                return boundary;
+            }
+            
+            let prev_boundary = if i == 0 { 0.0 } else { boundaries[i-1] };
+            let samples_into_bucket = target_count - prev_count;
+            let fraction = samples_into_bucket as f64 / bucket_samples as f64;
+            
+            return prev_boundary + (boundary - prev_boundary) * fraction;
+        }
+    }
+    
+    // Fallback: return the last boundary
+    *LATENCY_BUCKET_BOUNDARIES.last().unwrap()
+}
+
+fn calculate_weighted_average(histogram: &Vec<u64>, boundaries: &Vec<f64>, total_samples: u64) -> f64 {
+    let mut weighted_sum = 0.0;
+    
+    for (i, &bucket_count) in histogram.iter().enumerate() {
+        let boundary = boundaries[i];
+        
+        // Calculate bucket midpoint
+        let prev_boundary = if i == 0 { 0.0 } else { boundaries[i-1] };
+        let bucket_midpoint = (prev_boundary + boundary) / 2.0;
+        
+        // Get samples in this bucket (not cumulative)
+        let prev_count = if i == 0 { 0 } else { histogram[i-1] };
+        let bucket_samples = bucket_count - prev_count;
+        
+        weighted_sum += bucket_midpoint * bucket_samples as f64;
+    }
+    
+    weighted_sum / total_samples as f64
 }
 
 fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
-    // Filter out f64::MAX from buckets when passing to Prometheus
-    let prom_buckets: Vec<f64> = LATENCY_BUCKET_BOUNDARIES.iter()
-        .filter(|&&bucket| bucket != f64::MAX)
-        .copied()
-        .collect();
+    // Assert that we don't have f64::MAX in bucket boundaries
+    assert!(!LATENCY_BUCKET_BOUNDARIES.contains(&f64::MAX), 
+            "LATENCY_BUCKET_BOUNDARIES should not contain f64::MAX");
     
     let prometheus_builder = PrometheusBuilder::new()
-        .set_buckets(&prom_buckets)?;
+        .set_buckets(&LATENCY_BUCKET_BOUNDARIES)?;
     let prometheus_recorder = prometheus_builder.build_recorder();
     let prometheus_handle = prometheus_recorder.handle();
 
@@ -332,19 +397,11 @@ fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str) -> StreamTa
 
 /// Convert Prometheus histogram counts to simple bucket format
 fn convert_histogram_counts_to_buckets(histogram_counts: &[HistogramCount]) -> Vec<u64> {
-    // Check if our LATENCY_BUCKETS has u64::MAX as the last bucket
-    let has_max_bucket = LATENCY_BUCKET_BOUNDARIES.last() == Some(&(f64::MAX));
-    
-    if has_max_bucket {
-        // If we have u64::MAX bucket, keep the infinity bucket result
-        histogram_counts.iter().map(|hc| hc.count as u64).collect()
-    } else {
-        // Otherwise, filter out the infinity bucket that Prometheus adds automatically
-        histogram_counts.iter()
-            .filter(|hc| !hc.less_than.is_infinite())
-            .map(|hc| hc.count as u64)
-            .collect()
-    }
+    // Filter out the infinity bucket that Prometheus adds automatically
+    histogram_counts.iter()
+        .filter(|hc| !hc.less_than.is_infinite())
+        .map(|hc| hc.count as u64)
+        .collect()
 }
 
 #[cfg(test)]

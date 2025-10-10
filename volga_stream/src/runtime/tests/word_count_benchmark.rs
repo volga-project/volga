@@ -3,7 +3,7 @@ use crate::{
     common::test_utils::{gen_unique_grpc_port, print_worker_metrics},
     executor::local_executor::LocalExecutor,
     runtime::{
-        functions::source::word_count_source::BatchingMode, metrics::calculate_latency_stats, operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
+        functions::source::word_count_source::BatchingMode, metrics::{calculate_histogram_stats, LATENCY_BUCKET_BOUNDARIES}, operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
-// use crate::runtime::metrics::LATENCY_BUCKET_BOUNDARIES;
 
 // TODO we need to rewrite the way we measure latency and throughput - 
 // aggregate operator buffers messages adding latency
@@ -74,7 +73,7 @@ impl BenchmarkMetrics {
             return (0.0, 0.0, 0.0, 0.0)
         }
 
-        return calculate_latency_stats(self.latency_histogram.as_ref().unwrap())
+        return calculate_histogram_stats(self.latency_histogram.as_ref().unwrap(), &LATENCY_BUCKET_BOUNDARIES.to_vec())
     }
 }
 
@@ -89,14 +88,6 @@ pub struct ThroughputStats {
     pub records_mean: f64,
     pub records_stddev: f64,
 }
-
-// #[derive(Debug, Clone, Default)]
-// pub struct LatencyStats {
-//     pub p50: u64,
-//     pub p95: u64,
-//     pub p99: u64,
-//     pub avg: u64,
-// }
 
 fn calculate_stddev(values: &[f64]) -> f64 {
     if values.len() < 2 {
@@ -147,36 +138,6 @@ async fn poll_worker_metrics(
     *last_timestamp = current_time;
     Some(worker_state.clone())
 }
-
-
-/// Calculate the center of each latency bucket based on boundaries
-// fn calculate_latency_bucket_centers() -> [f64; 5] {
-//     [
-//         0.0, // Center of 0-1ms bucket (0-1ms)
-//         (2.0 + LATENCY_BUCKET_BOUNDARIES[1]) / 2.0, // Center of 2-10ms bucket
-//         (LATENCY_BUCKET_BOUNDARIES[1] + 1.0 + LATENCY_BUCKET_BOUNDARIES[2]) / 2.0, // Center of 11-100ms bucket
-//         (LATENCY_BUCKET_BOUNDARIES[2] + 1.0 + LATENCY_BUCKET_BOUNDARIES[3]) / 2.0, // Center of 101-1000ms bucket
-//         LATENCY_BUCKET_BOUNDARIES[3] + 100.0, // Center of >1000ms bucket (assume 1100ms as representative)
-//     ]
-// }
-
-// fn calculate_average_latency(histogram: &[u64]) -> f64 {
-//     if histogram.len() != 5 {
-//         return 0.0;
-//     }
-    
-//     let total_samples: u64 = histogram.iter().sum();
-//     if total_samples == 0 {
-//         return 0.0;
-//     }
-//     let bucket_centers = calculate_latency_bucket_centers();
-//     let weighted_sum: f64 = histogram.iter()
-//         .zip(bucket_centers.iter())
-//         .map(|(&count, &center)| count as f64 * center)
-//         .sum();
-    
-//     weighted_sum / total_samples as f64
-// }
 
 pub async fn run_word_count_benchmark(
     parallelism: usize,

@@ -89,14 +89,6 @@ async fn test_grpc_transport_backend() {
                 reader_vertex_id.clone(),
                 reader_vertex_id.clone(),
                 PartitionType::Forward,
-                // Some(Channel::Remote { 
-                //     channel_id: format!("writer_{}_to_reader_{}", writer_idx, reader_idx),
-                //     source_node_ip: "127.0.0.1".to_string(),
-                //     source_node_id: format!("writer_node_{}", source_node_id),
-                //     target_node_ip: "127.0.0.1".to_string(),
-                //     target_node_id: format!("reader_node_{}", target_node_id),
-                //     target_port,
-                // }
                 Some(Channel::new_remote(
                     writer_vertex_id.clone(),
                     reader_vertex_id.clone(),
