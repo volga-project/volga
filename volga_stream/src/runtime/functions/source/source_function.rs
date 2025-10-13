@@ -8,6 +8,7 @@ use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use super::vector_source::VectorSourceFunction;
 use super::word_count_source::WordCountSourceFunction;
+use super::datagen_source::DatagenSourceFunction;
 
 #[async_trait]
 pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
@@ -18,6 +19,7 @@ pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
 pub enum SourceFunction {
     Vector(VectorSourceFunction),
     WordCount(WordCountSourceFunction),
+    Datagen(DatagenSourceFunction),
 }
 
 impl fmt::Display for SourceFunction {
@@ -25,6 +27,7 @@ impl fmt::Display for SourceFunction {
         match self {
             SourceFunction::Vector(_) => write!(f, "Vector"),
             SourceFunction::WordCount(_) => write!(f, "WordCount"),
+            SourceFunction::Datagen(_) => write!(f, "Datagen"),
         }
     }
 }
@@ -35,6 +38,7 @@ impl SourceFunctionTrait for SourceFunction {
         match self {
             SourceFunction::Vector(f) => f.fetch().await,
             SourceFunction::WordCount(f) => f.fetch().await,
+            SourceFunction::Datagen(f) => f.fetch().await,
         }
     }
 }
@@ -45,6 +49,7 @@ impl FunctionTrait for SourceFunction {
         match self {
             SourceFunction::Vector(f) => f.open(context).await,
             SourceFunction::WordCount(f) => f.open(context).await,
+            SourceFunction::Datagen(f) => f.open(context).await,
         }
     }
     
@@ -52,6 +57,7 @@ impl FunctionTrait for SourceFunction {
         match self {
             SourceFunction::Vector(f) => f.close().await,
             SourceFunction::WordCount(f) => f.close().await,
+            SourceFunction::Datagen(f) => f.close().await,
         }
     }
     

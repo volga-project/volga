@@ -30,7 +30,8 @@ pub fn gen_unique_grpc_port() -> u16 {
     let mut used_ports = USED_PORTS.lock().unwrap();
     
     loop {
-        let port = rand::thread_rng().gen_range(50000, 60000);
+        
+        let port = rand::thread_rng().gen_range(50000..60000);
         
         // Check if port is already used
         if !used_ports.contains_key(&port) {

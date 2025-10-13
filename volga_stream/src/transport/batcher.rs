@@ -1066,7 +1066,7 @@ mod tests {
                     }
                     
                     if max_message_rate_delay_ms > 0 {
-                        let delay = rand::thread_rng().gen_range(0, max_message_rate_delay_ms + 1);
+                        let delay = rand::thread_rng().gen_range(0..max_message_rate_delay_ms + 1);
                         tokio::time::sleep(Duration::from_millis(delay)).await;
                     }
                 }

@@ -9,9 +9,6 @@ use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use serde::{Serialize, Deserialize};
 
-// Latency histogram bucket configuration
-// pub const LATENCY_BUCKET_BOUNDARIES: [u64; 5] = [1, 10, 100, 1000, u64::MAX];
-
 // Helper function to get current timestamp
 fn timestamp() -> String {
     SystemTime::now()
@@ -84,7 +81,6 @@ impl StreamTask {
             operator_config,
             transport_client_config: Some(transport_client_config),
             execution_graph,
-            // metrics: Arc::new(Mutex::new(StreamTaskMetrics::new(vertex_id.clone()))),
             run_signal_sender: None,
             close_signal_sender: None,
             upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
@@ -191,7 +187,7 @@ impl StreamTask {
         let status = self.status.clone();
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
-        // let metrics = self.metrics.clone();
+        
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
         let storage = self.storage.clone();
@@ -220,7 +216,6 @@ impl StreamTask {
 
             for edge in output_edges {
                 let channel = edge.get_channel();
-                // let channel_id = channel.get_channel_id();
                 let partition_type = edge.partition_type.clone();
                 let target_operator_id = edge.target_operator_id.clone();
 
@@ -257,7 +252,6 @@ impl StreamTask {
             Self::wait_for_signal(run_receiver, status.clone(), true).await;
             println!("{:?} Task {:?} received run signal, starting processing", timestamp(), vertex_id);
             
-
             // if task is not finished/closed early, mark as runnning
             if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
                 status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
