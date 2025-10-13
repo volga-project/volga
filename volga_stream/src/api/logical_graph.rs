@@ -9,8 +9,6 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
-use crate::cluster::cluster_provider::ClusterNode;
-use crate::runtime::functions::map::MapFunction;
 
 
 
@@ -34,13 +32,6 @@ impl LogicalNode {
         }
     }
 } 
-#[derive(Debug, Clone)]
-pub enum JoinType {
-    Inner,
-    Left,
-    Right,
-    Full,
-}
 
 /// Connector configuration for sources and sinks
 #[derive(Debug, Clone)]
@@ -59,7 +50,6 @@ pub struct LogicalEdge {
 #[derive(Debug, Clone)]
 pub struct LogicalGraph {
     graph: DiGraph<LogicalNode, LogicalEdge>,
-    // TODO use node_type
     operator_type_counters: HashMap<String, u32>,
 }
 
@@ -106,8 +96,6 @@ impl LogicalGraph {
     pub fn get_edges(&self) -> impl Iterator<Item = (NodeIndex, NodeIndex, &LogicalEdge)> {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
     }
-
-
 
     /// Convert logical graph to execution graph using parallelism from each logical node
     pub fn to_execution_graph(&self) -> ExecutionGraph {
@@ -202,8 +190,6 @@ impl LogicalGraph {
 
         // Add edges between operators
         for i in 0..grouped_operators.len() - 1 {
-            let source_config = &grouped_operators[i];
-            let target_config = &grouped_operators[i + 1];
             
             logical_graph.add_edge(
                 node_indices[i],

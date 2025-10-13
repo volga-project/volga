@@ -85,5 +85,8 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
                 word_config.batching_mode,
             ))
         }
+        SourceConfig::DatagenSourceConfig(datagen_config) => {
+            SourceFunction::Datagen(DatagenSourceFunction::new(datagen_config))
+        }
     }
 } 

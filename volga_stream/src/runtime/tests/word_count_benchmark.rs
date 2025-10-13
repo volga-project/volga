@@ -1,5 +1,5 @@
 use crate::{
-    api::streaming_context::StreamingContext,
+    api::pipeline_context::PipelineContext,
     common::test_utils::{gen_unique_grpc_port, print_worker_metrics},
     executor::local_executor::LocalExecutor,
     runtime::{
@@ -151,7 +151,7 @@ pub async fn run_word_count_benchmark(
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Create streaming context using SQL instead of manual operator configuration
-    let context = StreamingContext::new()
+    let context = PipelineContext::new()
         .with_parallelism(parallelism)
         .with_source(
             "word_count_source".to_string(), 

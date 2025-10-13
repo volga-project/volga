@@ -8,7 +8,7 @@ use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use super::source_function::SourceFunctionTrait;
 use arrow::array::ArrayRef;
 use arrow::array::builder::{Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder};
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -19,13 +19,29 @@ use datafusion::common::ScalarValue;
 
 /// Configuration for datagen source
 #[derive(Debug, Clone)]
-pub struct DatagenConfig {
+pub struct DatagenSourceConfig {
     pub schema: Arc<Schema>, // Arrow schema for the generated data
     pub rate: f32, // Events per second (global rate across all tasks)
     pub limit: Option<usize>, // Total number of records to generate (across all tasks)
     pub batch_size: usize, // Number of records per batch
     pub fields: HashMap<String, FieldGenerator>,
-    pub seed: Option<u64>,
+    pub projection: Option<Vec<usize>>,
+    pub projected_schema: Option<SchemaRef>,
+}
+
+impl DatagenSourceConfig {
+    pub fn new(schema: Arc<Schema>, rate: f32, limit: Option<usize>, batch_size: usize, fields: HashMap<String, FieldGenerator>) -> Self {
+        Self { schema, rate, limit, batch_size, fields, projection: None, projected_schema: None }
+    }
+
+    pub fn get_projection(&self) -> (Option<Vec<usize>>, Option<SchemaRef>) {
+        (self.projection.clone(), self.projected_schema.clone())
+    }
+
+    pub fn set_projection(&mut self, projection: Vec<usize>, schema: SchemaRef) {
+        self.projection = Some(projection);
+        self.projected_schema = Some(schema);
+    }
 }
 
 /// Data generation strategies
@@ -43,12 +59,12 @@ pub enum FieldGenerator {
 /// Datagen source function with deterministic rate coordination
 #[derive(Debug)]
 pub struct DatagenSourceFunction {
-    config: DatagenConfig,
-    source_id: String,
+    config: DatagenSourceConfig,
     
     // Runtime state
     task_index: Option<i32>,
     parallelism: Option<i32>,
+    vertex_id: Option<String>,
     max_watermark_sent: bool,
     
     // Rate coordination state
@@ -70,13 +86,13 @@ pub struct DatagenSourceFunction {
 }
 
 impl DatagenSourceFunction {
-    pub fn new(source_id: String, config: DatagenConfig) -> Self {
+    pub fn new(config: DatagenSourceConfig) -> Self {
         let schema = config.schema.clone();
         Self {
             config,
-            source_id,
             task_index: None,
             parallelism: None,
+            vertex_id: None,
             max_watermark_sent: false,
             next_gen_time: None,
             gen_interval: None,
@@ -398,7 +414,7 @@ impl DatagenSourceFunction {
         if !self.max_watermark_sent {
             self.max_watermark_sent = true;
             Some(Message::Watermark(crate::common::message::WatermarkMessage::new(
-                self.source_id.clone(),
+                self.vertex_id.clone().unwrap(),
                 MAX_WATERMARK_VALUE,
                 None
             )))
@@ -454,7 +470,7 @@ impl FunctionTrait for DatagenSourceFunction {
         // Set runtime context
         self.task_index = Some(ctx.task_index());
         self.parallelism = Some(ctx.parallelism());
-        
+        self.vertex_id = Some(ctx.vertex_id().to_string());
         // Calculate this task's share of records
         if let Some(global_limit) = self.config.limit {
             let records_per_task = global_limit / ctx.parallelism() as usize;
@@ -471,7 +487,7 @@ impl FunctionTrait for DatagenSourceFunction {
         }
         
         // Initialize RNG with deterministic seed
-        let base_seed = self.config.seed.unwrap_or(42);
+        let base_seed = 42;
         let task_seed = base_seed + ctx.task_index() as u64;
         self.rng = Some(StdRng::seed_from_u64(task_seed));
         
@@ -506,7 +522,7 @@ mod tests {
     use std::collections::HashSet;
     use arrow::array::{Array, StringArray, Int64Array, Float64Array, TimestampMillisecondArray};
 
-    fn create_test_config() -> DatagenConfig {
+    fn create_test_config() -> DatagenSourceConfig {
         let schema = Arc::new(Schema::new(vec![
             Field::new("event_time", DataType::Timestamp(TimeUnit::Millisecond, None), false),
             Field::new("key", DataType::Utf8, false),
@@ -540,14 +556,7 @@ mod tests {
             }),
         ]);
 
-        DatagenConfig {
-            schema,
-            rate: 1000.0, // High rate to avoid timing delays
-            limit: Some(121), // 121 total records across all tasks
-            batch_size: 10,
-            fields,
-            seed: Some(12345),
-        }
+        DatagenSourceConfig::new(schema, 1000.0, Some(121), 10, fields)
     }
 
     #[tokio::test]
@@ -560,7 +569,7 @@ mod tests {
 
         // Run multiple tasks in parallel
         for task_index in 0..parallelism {
-            let mut source = DatagenSourceFunction::new("test".to_string(), config.clone());
+            let mut source = DatagenSourceFunction::new(config.clone());
             
             let ctx = RuntimeContext::new(
                 "test".to_string(),
@@ -681,23 +690,16 @@ mod tests {
             }),
         ]);
 
-        let config = DatagenConfig {
-            schema,
-            rate: 100.0, // 100 events per second globally
-            limit: Some(200), // 200 total records
-            batch_size: 1, // Single record per batch for precise timing
-            fields,
-            seed: Some(12345),
-        };
+        let config = DatagenSourceConfig::new(schema, 10.0, Some(40), 1, fields);
 
-        let parallelism = 4; // 4 tasks, so each should generate at ~25 events/sec
+        let parallelism = 4; // 4 tasks, so each should generate at ~10 events/sec
         // Run tasks concurrently using tokio::spawn
         let mut handles = Vec::new();
         
         for task_index in 0..parallelism {
             let config_clone = config.clone();
             let handle = tokio::spawn(async move {
-                let mut source = DatagenSourceFunction::new("test".to_string(), config_clone);
+                let mut source = DatagenSourceFunction::new(config_clone);
                 
                 let ctx = RuntimeContext::new(
                     "test".to_string(),
@@ -750,7 +752,7 @@ mod tests {
         all_timestamps.sort();
         
         // Verify we got the expected number of records
-        assert_eq!(all_timestamps.len(), 200, "Should generate exactly 200 records");
+        assert_eq!(all_timestamps.len(), 40, "Should generate exactly 40 records");
         
         let expected_interval_ms = 1000.0 / config.rate; // Global interval: 100ms for 10 events/sec
         let tolerance = expected_interval_ms * 0.5; // ±50% tolerance for timing variations

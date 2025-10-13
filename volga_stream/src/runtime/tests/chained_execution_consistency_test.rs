@@ -1,5 +1,5 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
+    api::{logical_graph::LogicalGraph, pipeline_context::PipelineContext},
     common::{message::{Message, WatermarkMessage}, test_utils::{create_test_string_batch, gen_unique_grpc_port, IdentityMapFunction}, MAX_WATERMARK_VALUE},
     executor::local_executor::LocalExecutor,
     runtime::{
@@ -42,7 +42,7 @@ async fn run_test_with_config(
 
     // Create streaming context with LocalExecutor
     let parallelism = 4;
-    let context = StreamingContext::new()
+    let context = PipelineContext::new()
         .with_parallelism(parallelism)
         .with_logical_graph(LogicalGraph::from_linear_operators(operators, parallelism, chained))
         .with_executor(Box::new(LocalExecutor::new()));

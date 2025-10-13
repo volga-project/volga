@@ -4,7 +4,7 @@ use anyhow::Result;
 use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 
 
 #[derive(Debug, Clone)]
@@ -30,8 +30,10 @@ pub struct WordCountSourceConfig {
 pub enum SourceConfig {
     VectorSourceConfig(VectorSourceConfig),
     WordCountSourceConfig(WordCountSourceConfig),
+    DatagenSourceConfig(DatagenSourceConfig),
 }
 
+// TODO deprecate in favor of datagen
 impl VectorSourceConfig {
     pub fn new(messages: Vec<Message>) -> Self {
         Self {
@@ -51,6 +53,7 @@ impl VectorSourceConfig {
     }
 }
 
+// TODO deprecate in favor of datagen
 impl WordCountSourceConfig {
     pub fn new(
         word_length: usize,
@@ -87,6 +90,7 @@ impl SourceConfig {
         match self {
             SourceConfig::VectorSourceConfig(config) => config.get_projection(),
             SourceConfig::WordCountSourceConfig(config) => config.get_projection(),
+            SourceConfig::DatagenSourceConfig(config) => config.get_projection(),
         }
     }
 
@@ -94,6 +98,7 @@ impl SourceConfig {
         match self {
             SourceConfig::VectorSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::WordCountSourceConfig(config) => config.set_projection(projection, schema),
+            SourceConfig::DatagenSourceConfig(config) => config.set_projection(projection, schema),
         }
     }
 }
@@ -103,6 +108,7 @@ impl std::fmt::Display for SourceConfig {
         match self {
             SourceConfig::VectorSourceConfig(_) => write!(f, "Vector"),
             SourceConfig::WordCountSourceConfig(_) => write!(f, "WordCount"),
+            SourceConfig::DatagenSourceConfig(_) => write!(f, "Datagen"),
         }
     }
 }

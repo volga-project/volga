@@ -16,9 +16,9 @@ use crate::runtime::worker::WorkerState;
 use tokio::sync::mpsc;
 use anyhow::Result;
 
-/// Context for streaming query execution containing sources, sinks, and execution parameters
+/// Context for pipeline execution containing sources, sinks, and execution parameters
 #[derive(Clone)]
-pub struct StreamingContext {
+pub struct PipelineContext {
     /// DataFusion session context
     df_session_context: SessionContext,
     /// Source table configurations (table_name -> (source_config, schema))
@@ -35,9 +35,9 @@ pub struct StreamingContext {
     executor: Arc<Option<Box<dyn Executor>>>,
 }
 
-impl fmt::Debug for StreamingContext {
+impl fmt::Debug for PipelineContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("StreamingContext")
+        f.debug_struct("PipelineContext")
             .field("sources", &self.sources)
             .field("sink_config", &self.sink_config)
             .field("parallelism", &self.parallelism)
@@ -49,7 +49,7 @@ impl fmt::Debug for StreamingContext {
     }
 }
 
-impl StreamingContext {
+impl PipelineContext {
     pub fn new() -> Self {
         Self {
             df_session_context: SessionContext::new(),
@@ -121,7 +121,7 @@ impl StreamingContext {
         planner.sql_to_graph(sql).await.expect("Failed to create logical graph from SQL")
     }
 
-    /// Execute the streaming job with optional state updates broadcasting
+    /// Execute the job with optional state updates broadcasting
     /// Returns the final execution state
     pub async fn execute_with_state_updates(self, state_sender: Option<mpsc::Sender<WorkerState>>) -> Result<ExecutionState> {
         // Build logical graph first
@@ -134,14 +134,14 @@ impl StreamingContext {
 
         // Get executor or panic if not set
         let executor_option = Arc::try_unwrap(self.executor)
-            .map_err(|_| anyhow::anyhow!("StreamingContext is still being referenced elsewhere"))?;
+            .map_err(|_| anyhow::anyhow!("PipelineContext is still being referenced elsewhere"))?;
         let mut executor = executor_option.expect("No executor set. Call with_executor() first.");
 
         // Execute using the configured executor
         executor.execute(execution_graph, state_sender).await
     }
 
-    /// Execute the streaming job and return only the final execution state
+    /// Execute the job and return only the final execution state
     pub async fn execute(self) -> Result<ExecutionState> {
         self.execute_with_state_updates(None).await
     }
@@ -149,7 +149,7 @@ impl StreamingContext {
 
 }
 
-impl Default for StreamingContext {
+impl Default for PipelineContext {
     fn default() -> Self {
         Self::new()
     }

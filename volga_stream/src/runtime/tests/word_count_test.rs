@@ -1,5 +1,5 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, streaming_context::StreamingContext},
+    api::{logical_graph::LogicalGraph, pipeline_context::PipelineContext},
     common::{test_utils::{gen_unique_grpc_port, print_worker_metrics}, message::Message},
     executor::local_executor::LocalExecutor,
     runtime::{
@@ -31,7 +31,7 @@ fn test_word_count() -> Result<()> {
     let batch_size = 10;
 
     // Create streaming context with the logical graph and executor
-    let context = StreamingContext::new()
+    let context = PipelineContext::new()
         .with_parallelism(parallelism)
         .with_source(
             "word_count_source".to_string(), 

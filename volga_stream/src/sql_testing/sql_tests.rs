@@ -1,5 +1,5 @@
 use crate::{
-    api::streaming_context::StreamingContext,
+    api::pipeline_context::PipelineContext,
     common::{message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
     executor::local_executor::LocalExecutor,
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
@@ -495,7 +495,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     
     // Create streaming context
-    let context = StreamingContext::new()
+    let context = PipelineContext::new()
         .with_parallelism(1)
         .with_source(
             "test_table".to_string(),

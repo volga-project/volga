@@ -1,12 +1,11 @@
 pub mod logical_graph;
 pub mod planner;
 pub mod logical_optimizer_examples;
-pub mod streaming_context;
+pub mod pipeline_context;
 
 pub use logical_graph::{
-    LogicalGraph, LogicalNode, LogicalEdge,
-    JoinType, ConnectorConfig
+    LogicalGraph, LogicalNode, LogicalEdge, ConnectorConfig
 };
 
 pub use planner::{Planner, PlanningContext};
-pub use streaming_context::StreamingContext; 
+pub use pipeline_context::PipelineContext; 

@@ -1,5 +1,5 @@
 use crate::{
-    api::streaming_context::StreamingContext,
+    api::pipeline_context::PipelineContext,
     common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
     executor::local_executor::LocalExecutor,
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
@@ -36,7 +36,7 @@ fn test_worker_execution() -> Result<()> {
     ]));
     
     // Create streaming context using SQL
-    let context = StreamingContext::new()
+    let context = PipelineContext::new()
         .with_parallelism(1)
         .with_source(
             "test_table".to_string(),
