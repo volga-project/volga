@@ -4,7 +4,7 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use datafusion::datasource::TableProvider;
 use datafusion::physical_plan::{ExecutionPlan};
-use datafusion::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
+use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::memory::{LazyMemoryExec, LazyBatchGenerator};
 use arrow::record_batch::RecordBatch;
 use parking_lot::RwLock;
@@ -474,9 +474,9 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             // key_by -> window
             self.logical_graph.add_edge(key_by_node_index, window_node_index);
 
-            // prev -> key_by
+            // prev -> window
             let prev_node_index = self.node_stack.last().expect("key by should have a node before it");
-            self.logical_graph.add_edge(*prev_node_index, key_by_node_index);
+            self.logical_graph.add_edge(window_node_index, *prev_node_index);
 
             return Ok(TreeNodeRecursion::Continue);
         }
@@ -515,6 +515,7 @@ mod tests {
         KeyBy,
         Aggregate,
         Join,
+        Window,
     }
 
     /// Helper function to get node type from operator config (used in planner tests)
@@ -528,6 +529,7 @@ mod tests {
             OperatorConfig::KeyByConfig(_) => NodeType::KeyBy,
             OperatorConfig::AggregateConfig(_) => NodeType::Aggregate,
             OperatorConfig::JoinConfig(_) => NodeType::Join,
+            OperatorConfig::WindowConfig(_) => NodeType::Window,
             _ => panic!("Unsupported operator config: {:?}", operator_config),
         }
     }
@@ -826,5 +828,58 @@ mod tests {
         ]);
     }
 
-    // TODO test over window
+    #[tokio::test]
+    async fn test_window_query() {
+        let mut planner = create_planner();
+        
+        // Register additional test table with timestamp column for window functions
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("event_time", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        planner.register_source(
+            "events".to_string(), 
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
+            schema
+        );
+        
+        // Window query with SUM over a time-based window partitioned by key
+        let sql = "SELECT 
+                    event_time, 
+                    key, 
+                    value, 
+                    SUM(value) OVER (
+                        PARTITION BY key 
+                        ORDER BY event_time 
+                        RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW
+                    ) as sum_value
+                   FROM events";
+                   
+        let graph = planner.sql_to_graph(sql).await.unwrap();
+        
+        // Should have structure: source -> key_by -> window -> projection
+        // DataFusion adds a projection node after window expressions
+        let nodes: Vec<_> = graph.get_nodes().collect();
+        assert_eq!(nodes.len(), 4, "Expected 4 nodes (source, key_by, window, projection), found {}", nodes.len());
+        
+        // Check node types in reverse order (projection is first in stack)
+        assert!(matches!(nodes[0].operator_config, OperatorConfig::MapConfig(MapFunction::Projection(_))), "Expected final projection after window");
+        assert!(matches!(nodes[1].operator_config, OperatorConfig::WindowConfig(_)), "Expected window operator");
+        assert!(matches!(nodes[2].operator_config, OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(_))), "Expected key_by for PARTITION BY");
+        assert!(matches!(nodes[3].operator_config, OperatorConfig::SourceConfig(_)), "Expected source");
+        
+        // Check edges - should have 3 edges connecting 4 nodes
+        let edges: Vec<_> = graph.get_edges().collect();
+        println!("Edges: {:?}", edges);
+        assert_eq!(edges.len(), 3, "Expected 3 edges, found {}", edges.len());
+        
+        // Verify edge connectivity: source -> keyby -> window -> projection
+        // keyby -> window should be Hash (for partitioning), others RoundRobin
+        verify_edge_connectivity(&graph, &[
+            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 1),
+            (NodeType::KeyBy, NodeType::Window, PartitionType::Hash, 1),
+            (NodeType::Window, NodeType::Projection, PartitionType::RoundRobin, 1),
+        ]);
+    }
 } 
