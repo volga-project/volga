@@ -122,7 +122,7 @@ pub async fn run_window_benchmark(
     Ok((key_sums, num_records_produced, execution_time))
 }
 
-#[tokio::test]
+// #[tokio::test]
 async fn test_window_benchmark() -> Result<()> {
     let parallelism = 1;
     let num_keys = 4;

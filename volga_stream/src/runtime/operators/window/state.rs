@@ -7,6 +7,7 @@ use datafusion::physical_plan::WindowExpr;
 use crate::common::Key;
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{TileConfig, Tiles};
+use crate::storage::storage::BatchId;
 
 pub type WindowId = usize;
 
@@ -91,13 +92,13 @@ pub fn create_empty_windows_state(window_ids: &[WindowId], tiling_configs: &[Opt
                 tiles: tiling_configs.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone(), window_exprs[window_id].clone()))),
                 accumulator_state: None,
                 start_idx: TimeIdx { 
-                    batch_id: uuid::Uuid::new_v4(),
+                    batch_id: BatchId::random(),
                     timestamp: 0,
                     pos_idx: 0,
                     row_idx: 0,
                 },
                 end_idx: TimeIdx { 
-                    batch_id: uuid::Uuid::new_v4(),
+                    batch_id: BatchId::random(),
                     timestamp: 0,
                     pos_idx: 0,
                     row_idx: 0,

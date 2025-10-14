@@ -6,6 +6,7 @@ use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
 use futures::future;
+use indexmap::IndexSet;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use uuid::Uuid;
 
@@ -226,7 +227,7 @@ impl WindowOperator {
             .collect();
         
         // Compose batches_to_load from late entries
-        let mut batches_to_load = std::collections::BTreeSet::new();
+        let mut batches_to_load = IndexSet::new(); // preserve insertion order
         for late_entries_in_window in late_entries_per_window.values() {
             for late_entry in late_entries_in_window {
                 batches_to_load.insert(late_entry.batch_id);
@@ -300,7 +301,7 @@ impl WindowOperator {
         }
         
         // Step 2: Compose batches_to_load from all updates, retracts and late entries
-        let mut batches_to_load = std::collections::BTreeSet::new();
+        let mut batches_to_load = IndexSet::new(); // preserve insertion order
         for (window_id, updates, retracts) in window_data.iter() {
             let retractable = self.windows[window_id].aggregator_type == AggregatorType::RetractableAccumulator;
             let window_frame = self.windows[window_id].window_expr.get_window_frame();

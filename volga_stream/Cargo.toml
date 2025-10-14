@@ -54,6 +54,7 @@ metrics-exporter-prometheus = "0.17.2"
 metrics-exporter-tcp = "0.11.1"
 metrics-util = "0.20.0"
 prometheus-parse = "0.2.5"
+indexmap = "2.11.4"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

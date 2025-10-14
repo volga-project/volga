@@ -3,19 +3,58 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use arrow::compute::take_record_batch;
 use arrow::array::UInt64Array;
-use uuid::Uuid;
 use datafusion::common::ScalarValue;
 use arrow::array::Array;
 use tokio::sync::RwLock;
 use dashmap::DashMap;
-use chrono::{Utc, TimeZone};
+
+use std::hash::{Hash, Hasher};
 
 use crate::common::Key;
 
 pub type Timestamp = i64;
-pub type BatchId = Uuid; // light-weight batch id used for in-memory index
-pub type BatchKey = String; // batch key including extra metadata for storage, maps 1:1 to batch id
 pub type RowIdx = usize; // row index within a batch
+
+#[derive(Debug, Clone, Copy)]
+pub struct BatchId {
+    partition_key_hash: u64,
+    time_bucket: u64, // bucket start timestamp for this batch
+    uid: u64 // small unique id for this batch
+}
+
+impl BatchId {
+    pub fn new(partition_key_hash: u64, time_bucket: u64, uid: u64) -> Self {
+        Self { partition_key_hash, time_bucket, uid }
+    }
+
+    pub fn to_string(&self) -> String {
+        format!("{}-{}-{}", self.partition_key_hash, self.time_bucket, self.uid)
+    }
+
+    pub fn nil() -> Self {
+        Self {partition_key_hash: 0, time_bucket: 0, uid: 0}
+    }
+
+    pub fn random() -> Self {
+        Self {partition_key_hash: rand::random(), time_bucket: rand::random(), uid: rand::random()}
+    }
+}
+
+impl Eq for BatchId {}
+
+impl PartialEq for BatchId {
+    fn eq(&self, other: &Self) -> bool {
+        self.partition_key_hash == other.partition_key_hash && self.time_bucket == other.time_bucket && self.uid == other.uid
+    }
+}
+
+impl Hash for BatchId {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.partition_key_hash.hash(state);
+        self.time_bucket.hash(state);
+        self.uid.hash(state);
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeGranularity {
@@ -38,7 +77,6 @@ impl TimeGranularity {
 #[derive(Debug, Clone)]
 pub struct StorageStats {
     pub total_batches: usize,
-    // pub total_partitions: usize,
     pub total_rows: usize,
     pub memory_usage_bytes: usize,
 }
@@ -53,8 +91,7 @@ pub struct Storage {
     lock_pool_size: usize,
     
     // In-memory storage
-    batch_store: Arc<DashMap<BatchKey, RecordBatch>>, // TODO use foyer
-    batch_id_to_key: Arc<DashMap<BatchId, BatchKey>>,
+    batch_store: Arc<DashMap<BatchId, RecordBatch>>, // TODO use foyer
     
     // Time partitioning configuration
     time_granularity: TimeGranularity,
@@ -79,7 +116,6 @@ impl Storage {
             lock_pool,
             lock_pool_size,
             batch_store: Arc::new(DashMap::new()),
-            batch_id_to_key: Arc::new(DashMap::new()),
             time_granularity,
             max_batch_size,
         }
@@ -100,47 +136,45 @@ impl Storage {
 
     pub async fn append_records(&self, batch: RecordBatch, partition_key: &Key, ts_column_index: usize) -> Vec<(BatchId, RecordBatch)> {
         // Partition batch by time granularity and get batch ids and keys
-        let time_partitioned_batches = Self::time_partition_batch(&batch, &self.batch_id_to_key, &partition_key, ts_column_index, self.time_granularity, self.max_batch_size);
+        let time_partitioned_batches = Self::time_partition_batch(&batch,&partition_key, ts_column_index, self.time_granularity, self.max_batch_size);
         
-        for (_, batch_key, sub_batch) in &time_partitioned_batches {
-            self.store_batch(batch_key.clone(), sub_batch.clone(), partition_key.clone()).await;
+        for (batch_id, sub_batch) in &time_partitioned_batches {
+            self.store_batch(batch_id.clone(), sub_batch.clone(), partition_key.clone()).await;
         }
         
-        time_partitioned_batches.into_iter().map(|(batch_id, _, sub_batch)| (batch_id, sub_batch)).collect()
+        time_partitioned_batches
     }
 
     pub fn time_partition_batch(
         batch: &RecordBatch, 
-        batch_id_to_key: &Arc<DashMap<BatchId, BatchKey>>,
         partition_key: &Key, 
         ts_column_index: usize,
         time_granularity: TimeGranularity,
         max_batch_size: usize,
-    ) -> Vec<(BatchId, BatchKey, RecordBatch)> {
+    ) -> Vec<(BatchId, RecordBatch)> {
         if batch.num_rows() == 0 {
             panic!("Batch has no rows");
         }
 
-        // Group row indices by time partition, keep the order of the rows
-        let mut time_groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        // Group row indices by time buckets, keep the order of the rows
+        let mut time_buckets: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
         
         for row_idx in 0..batch.num_rows() {
             let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
-            let time_partition = Self::timestamp_to_time_partition(timestamp, time_granularity);
+            let time_bucket = Self::get_time_bucket_start(timestamp, time_granularity);
             
-            time_groups.entry(time_partition)
+            time_buckets.entry(time_bucket)
                 .or_insert_with(Vec::new)
                 .push(row_idx);
         }
 
         let mut result = Vec::new();
-        for (_, row_indices) in time_groups {
+        for (time_bucket, row_indices) in time_buckets {
             let sub_batches = Self::split_by_batch_size(
                 batch, 
-                batch_id_to_key,
                 partition_key, 
+                time_bucket,
                 row_indices, 
-                ts_column_index,
                 max_batch_size,
             );
             result.extend(sub_batches);
@@ -151,12 +185,11 @@ impl Storage {
 
     pub fn split_by_batch_size(
         batch: &RecordBatch,
-        batch_id_to_key: &Arc<DashMap<BatchId, BatchKey>>,
         partition_key: &Key,
+        time_bucket: u64,
         row_indices: Vec<usize>,
-        ts_column_index: usize,
         max_batch_size: usize,
-    ) -> Vec<(BatchId, BatchKey, RecordBatch)> {
+    ) -> Vec<(BatchId, RecordBatch)> {
         let mut result = Vec::new();
         
         if row_indices.len() <= max_batch_size {
@@ -168,8 +201,9 @@ impl Storage {
             let sub_batch = take_record_batch(batch, &indices_array)
                 .expect("Take record batch operation should succeed");
             
-            let (batch_id, batch_key) = Self::generate_batch_id_and_key(&sub_batch, batch_id_to_key, partition_key, ts_column_index);
-            result.push((batch_id, batch_key, sub_batch));
+            let uid = rand::random::<u64>(); // should be unique enough within same key and bucket
+            let batch_id = BatchId::new(partition_key.hash(), time_bucket, uid);
+            result.push((batch_id, sub_batch));
             return result;
         }
 
@@ -184,82 +218,89 @@ impl Storage {
             let sub_batch = take_record_batch(batch, &indices_array)
                 .expect("Take record batch operation should succeed");
             
-            let (batch_id, batch_key) = Self::generate_batch_id_and_key(&sub_batch, batch_id_to_key, partition_key, ts_column_index);
-            
-            result.push((batch_id, batch_key, sub_batch));
+            let uid = rand::random::<u64>(); // should be unique enough within same key and bucket
+            let batch_id= BatchId::new(partition_key.hash(), time_bucket, uid);
+
+            result.push((batch_id, sub_batch));
         }
 
         result
     }
 
     // TODO this should also be prefixed with operator-id
-    pub fn generate_batch_id_and_key(
-        batch: &RecordBatch,
-        batch_id_to_key: &Arc<DashMap<BatchId, BatchKey>>,
-        partition_key: &Key,
-        ts_column_index: usize,
-    ) -> (BatchId, BatchKey) {
-        let partition_hex = hex::encode(partition_key.to_bytes());
-        let (min_ts, _) = Self::get_time_range_from_batch(batch, ts_column_index);
-        let mut uuid = Uuid::new_v4();
+    // pub fn generate_batch_id(
+    //     batch: &RecordBatch,
+    //     partition_key: &Key,
+    //     ts_column_index: usize,
+    // ) -> BatchId {
+    //     let partition_hex = hex::encode(partition_key.to_bytes());
+    //     let (min_ts, _) = Self::get_time_range_from_batch(batch, ts_column_index);
+    //     let mut uuid = Uuid::new_v4();
 
-        // avoid collisions
-        while batch_id_to_key.contains_key(&uuid) {
-            uuid = Uuid::new_v4();
-        }
+    //     // avoid collisions
+    //     while batch_id_to_key.contains_key(&uuid) {
+    //         uuid = Uuid::new_v4();
+    //     }
         
-        let batch_key = format!("{}-{}-{}", partition_hex, min_ts, uuid.to_string());
-        batch_id_to_key.insert(uuid, batch_key.clone());
+    //     let batch_key = format!("{}-{}-{}", partition_hex, min_ts, uuid.to_string());
+    //     batch_id_to_key.insert(uuid, batch_key.clone());
 
-        (uuid, batch_key)
-    }
+    //     (uuid, batch_key)
+    // }
 
-    fn get_time_range_from_batch(batch: &RecordBatch, ts_column_index: usize) -> (Timestamp, Timestamp) {
-        if batch.num_rows() == 0 {
-            panic!("Batch has no rows");
-        }
+    // fn get_time_range_from_batch(batch: &RecordBatch, ts_column_index: usize) -> (Timestamp, Timestamp) {
+    //     if batch.num_rows() == 0 {
+    //         panic!("Batch has no rows");
+    //     }
 
-        let timestamp_column = batch.column(ts_column_index);
-        let mut min_ts = i64::MAX;
-        let mut max_ts = i64::MIN;
+    //     let timestamp_column = batch.column(ts_column_index);
+    //     let mut min_ts = i64::MAX;
+    //     let mut max_ts = i64::MIN;
         
-        for row_idx in 0..batch.num_rows() {
-            let ts = extract_timestamp(timestamp_column, row_idx);
-            min_ts = min_ts.min(ts);
-            max_ts = max_ts.max(ts);
-        }
+    //     for row_idx in 0..batch.num_rows() {
+    //         let ts = extract_timestamp(timestamp_column, row_idx);
+    //         min_ts = min_ts.min(ts);
+    //         max_ts = max_ts.max(ts);
+    //     }
         
-        (min_ts, max_ts)
-    }
+    //     (min_ts, max_ts)
+    // }
 
-    pub fn timestamp_to_time_partition(timestamp_ms: i64, time_granularity: TimeGranularity) -> String {
-        // Calculate the time bucket based on granularity duration
+    /// Returns the timestamp (in milliseconds) of the start of the time bucket that the given record's timestamp falls into.
+    /// `timestamp_ms` is the timestamp (in milliseconds) of the record.
+    /// `time_granularity` specifies the bucket size.
+    pub fn get_time_bucket_start(timestamp_ms: i64, time_granularity: TimeGranularity) -> u64 {
         let granularity_ms = time_granularity.to_millis();
-        let time_bucket = (timestamp_ms / granularity_ms) * granularity_ms;
-        
-        // Convert the time bucket start to UTC DateTime
-        let datetime = Utc.timestamp_millis_opt(time_bucket)
-            .single()
-            .expect("Timestamp should be valid");
-        
-        match time_granularity {
-            TimeGranularity::Minutes(minutes) => {
-                // Format: YYYY-MM-DD-HH-MM-{minutes}min
-                format!("{}-{}min", datetime.format("%Y-%m-%d-%H-%M"), minutes)
-            },
-            TimeGranularity::Hours(hours) => {
-                // Format: YYYY-MM-DD-HH-{hours}h
-                format!("{}-{}h", datetime.format("%Y-%m-%d-%H"), hours)
-            },
-            TimeGranularity::Days(days) => {
-                // Format: YYYY-MM-DD-{days}d
-                format!("{}-{}d", datetime.format("%Y-%m-%d"), days)
-            },
-        }
+        ((timestamp_ms / granularity_ms) * granularity_ms) as u64
     }
+    // pub fn timestamp_to_time_partition(timestamp_ms: i64, time_granularity: TimeGranularity) -> String {
+    //     // Calculate the time bucket based on granularity duration
+    //     let granularity_ms = time_granularity.to_millis();
+    //     let time_bucket = (timestamp_ms / granularity_ms) * granularity_ms;
+        
+    //     // Convert the time bucket start to UTC DateTime
+    //     let datetime = Utc.timestamp_millis_opt(time_bucket)
+    //         .single()
+    //         .expect("Timestamp should be valid");
+        
+    //     match time_granularity {
+    //         TimeGranularity::Minutes(minutes) => {
+    //             // Format: YYYY-MM-DD-HH-MM-{minutes}min
+    //             format!("{}-{}min", datetime.format("%Y-%m-%d-%H-%M"), minutes)
+    //         },
+    //         TimeGranularity::Hours(hours) => {
+    //             // Format: YYYY-MM-DD-HH-{hours}h
+    //             format!("{}-{}h", datetime.format("%Y-%m-%d-%H"), hours)
+    //         },
+    //         TimeGranularity::Days(days) => {
+    //             // Format: YYYY-MM-DD-{days}d
+    //             format!("{}-{}d", datetime.format("%Y-%m-%d"), days)
+    //         },
+    //     }
+    // }
 
     // Store a batch with per-partition locking
-    async fn store_batch(&self, batch_key: BatchKey, batch: RecordBatch, partition_key: Key) {
+    async fn store_batch(&self, batch_id: BatchId, batch: RecordBatch, partition_key: Key) {
         // Acquire global read lock (allows concurrent operations unless global exclusive is held)
         let _global_guard = self.global_lock.read().await;
         
@@ -269,7 +310,7 @@ impl Storage {
         
         // Atomic operations under partition lock:
         // 1. Store batch in memory
-        self.batch_store.insert(batch_key.clone(), batch);
+        self.batch_store.insert(batch_id, batch);
 
         // TODO put to slatedb and store write handle
     }
@@ -287,9 +328,7 @@ impl Storage {
 
         let mut result = HashMap::new();
         for batch_id in batch_ids {
-            let batch_key = self.batch_id_to_key.get(&batch_id)
-                .expect("Batch ID should have a corresponding batch key for");
-            if let Some(batch) = self.batch_store.get(batch_key.value()) {
+            if let Some(batch) = self.batch_store.get(&batch_id) {
                 result.insert(batch_id, batch.clone());
             }
         }
@@ -307,10 +346,7 @@ impl Storage {
         let _partition_guard = partition_lock.write().await;
 
         for batch_id in batch_ids {
-            // Get batch key and remove from both maps
-            if let Some((_, batch_key)) = self.batch_id_to_key.remove(batch_id) {
-                self.batch_store.remove(&batch_key);
-            }
+            self.batch_store.remove(batch_id);
         }
     }
 
@@ -319,7 +355,6 @@ impl Storage {
         // Acquire global exclusive lock to get consistent snapshot
         let _global_exclusive = self.global_lock.write().await;
         
-        // let total_partitions = self.partitioned_batch_ids.len();
         let total_batches = self.batch_store.len();
         
         // Calculate total rows and approximate memory usage
@@ -338,11 +373,9 @@ impl Storage {
         
         // Add overhead for metadata structures
         memory_usage_bytes += total_batches * 64; // BatchId keys
-        // memory_usage_bytes += total_partitions * 128; // PartitionKey overhead
         
         StorageStats {
             total_batches,
-            // total_partitions,
             total_rows,
             memory_usage_bytes,
         }

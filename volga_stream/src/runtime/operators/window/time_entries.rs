@@ -1,4 +1,3 @@
-use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::cmp::Ordering;
 use arrow::array::RecordBatch;
@@ -6,7 +5,7 @@ use crossbeam_skiplist::{SkipSet, SkipMap};
 use dashmap::DashMap;
 use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 use datafusion::scalar::ScalarValue;
-use uuid::Uuid;
+use indexmap::IndexSet;
 
 use crate::common::Key;
 use crate::runtime::operators::window::state::WindowState;
@@ -71,7 +70,7 @@ impl TimeEntries {
             let search_key = TimeIdx {
                 timestamp,
                 pos_idx: usize::MAX,
-                batch_id: Uuid::nil(), // dummy values for search
+                batch_id: BatchId::nil(), // dummy values for search
                 row_idx: 0,
             };
             
@@ -166,7 +165,7 @@ impl TimeEntries {
                 let search_key = TimeIdx {
                     timestamp: window_start_timestamp,
                     pos_idx: 0,
-                    batch_id: Uuid::nil(), // dummy values for search
+                    batch_id: BatchId::nil(), // dummy values for search
                     row_idx: 0,
                 };
                 // Include all rows with this timestamp
@@ -240,7 +239,7 @@ impl TimeEntries {
             return (updates, retracts);
         }
     
-        let range_start_idx = if previous_window_end.batch_id == Uuid::nil() {
+        let range_start_idx = if previous_window_end.batch_id == BatchId::nil() {
             // first time
             *self.entries.front().expect("Time entries should exist")
         } else {
@@ -294,7 +293,7 @@ impl TimeEntries {
             let front_boundry = TimeIdx {
                 timestamp: tiles_in_range[0].tile_start,
                 pos_idx: 0,
-                batch_id: Uuid::nil(), // dummy values for search
+                batch_id: BatchId::nil(), // dummy values for search
                 row_idx: 0,
             };
             let front_padding: Vec<TimeIdx> = self.entries.range(start_idx..front_boundry).map(|entry| *entry).collect();
@@ -302,7 +301,7 @@ impl TimeEntries {
             let back_boundry = TimeIdx {
                 timestamp: tiles_in_range[tiles_in_range.len() - 1].tile_end,
                 pos_idx: 0,
-                batch_id: Uuid::nil(), // dummy values for search
+                batch_id: BatchId::nil(), // dummy values for search
                 row_idx: 0,
             };
             let back_padding: Vec<TimeIdx> = self.entries.range(back_boundry..=end_idx).map(|entry| *entry).collect();
@@ -318,8 +317,8 @@ impl TimeEntries {
         entries: &Vec<TimeIdx>,
         window_frame: &Arc<WindowFrame>,
         window_state: Option<&WindowState>,
-    ) -> BTreeSet<BatchId> {
-        let mut res = BTreeSet::new();
+    ) -> IndexSet<BatchId> {
+        let mut res = IndexSet::new();
         for entry in entries {
             res.insert(entry.batch_id);
             let window_start = self.get_window_start_idx(window_frame, *entry, true).expect("Time entries should exist");
@@ -362,7 +361,7 @@ impl TimeEntries {
                 let search_key = TimeIdx {
                     timestamp: window_state.end_idx.timestamp - lateness,
                     pos_idx: usize::MAX,
-                    batch_id: Uuid::nil(),
+                    batch_id: BatchId::nil(),
                     row_idx: 0,
                 };
                 if let Some(last_valid_entry) = self.entries.upper_bound(std::ops::Bound::Included(&search_key)) {
@@ -387,7 +386,7 @@ impl TimeEntries {
         &self, 
         cutoff_timestamp: Timestamp
     ) -> Vec<BatchId> {
-        let mut batches_to_delete = BTreeSet::new();
+        let mut batches_to_delete = IndexSet::new();
         
         // Collect batches to delete and prune timestamp_to_batch mapping
         let timestamps_to_remove: Vec<Timestamp> = self.batch_ids
@@ -410,7 +409,7 @@ impl TimeEntries {
         let cutoff_key = TimeIdx {
             timestamp: cutoff_timestamp,
             pos_idx: 0,
-            batch_id: Uuid::nil(),
+            batch_id: BatchId::nil(),
             row_idx: 0,
         };
         
@@ -463,7 +462,6 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
     use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
-    use uuid::Uuid;
 
     fn create_test_batch(timestamps: Vec<i64>, values: Vec<i64>) -> RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -502,7 +500,7 @@ mod tests {
         
         // Test 1: Insert batch in random order [3000, 1000, 2000]
         let batch1 = create_test_batch(vec![3000, 1000, 2000], vec![30, 10, 20]);
-        let batch_id1 = Uuid::new_v4();
+        let batch_id1 = BatchId::random();
         time_entries.insert_batch(batch_id1, &batch1, 0);
         
         // let time_entries = time_index.get_or_create_time_index(&key).await;
@@ -522,7 +520,7 @@ mod tests {
         
         // Test 2: Insert batch with same timestamps [1000, 1000, 2000, 2000]
         let batch2 = create_test_batch(vec![1000, 1000, 2000, 2000], vec![11, 12, 21, 22]);
-        let batch_id2 = Uuid::new_v4();
+        let batch_id2 = BatchId::random();
         time_entries.insert_batch(batch_id2, &batch2, 0);
         
         // let time_entries = time_index.get_or_create_time_index(&key).await;
@@ -545,7 +543,7 @@ mod tests {
         
         // First batch: timestamps [1000, 2000, 3000]
         let batch1 = create_test_batch(vec![1000, 2000, 3000], vec![10, 20, 30]);
-        let batch_id1 = Uuid::new_v4();
+        let batch_id1 = BatchId::random();
         time_entries.insert_batch(batch_id1, &batch1, 0);
         
         // Create window frame: ROWS 2 PRECEDING (window size = 3)
@@ -555,8 +553,8 @@ mod tests {
         let mut window_state = WindowState {
             tiles: None,
             accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
+            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
+            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
         };
         
         // First advance window position after first batch
@@ -565,7 +563,7 @@ mod tests {
         // Verify first batch processing (similar to test_advance_window_position_first_time)
         assert_eq!(first_updates.len(), 3, "Should have 3 updates for first batch");
         
-        let expected_first_updates: [(i64, Uuid, usize, Vec<(i64, Uuid)>); 3] = [
+        let expected_first_updates: [(i64, BatchId, usize, Vec<(i64, BatchId)>); 3] = [
             (1000, batch_id1, 0, vec![]), // 1st: no retracts (window: [1000])
             (2000, batch_id1, 1, vec![]), // 2nd: no retracts (window: [1000, 2000])
             (3000, batch_id1, 2, vec![]), // 3rd: no retracts (window: [1000, 2000, 3000] - window full)
@@ -590,7 +588,7 @@ mod tests {
         
         // Add second batch: timestamps [4000, 5000]
         let batch2 = create_test_batch(vec![4000, 5000], vec![40, 50]);
-        let batch_id2 = Uuid::new_v4();
+        let batch_id2 = BatchId::random();
         time_entries.insert_batch(batch_id2, &batch2, 0);
         
         // Second advance window position (incremental processing)
@@ -634,7 +632,7 @@ mod tests {
         
         // First batch: timestamps [1000, 1200, 1400, 2000, 2200] - multiple events within range
         let batch1 = create_test_batch(vec![1000, 1200, 1400, 2000, 2200], vec![10, 12, 14, 20, 22]);
-        let batch_id1 = Uuid::new_v4();
+        let batch_id1 = BatchId::random();
         time_entries.insert_batch(batch_id1, &batch1, 0);
         
         // Create range window frame: RANGE 1000ms PRECEDING (1 second window)
@@ -644,8 +642,8 @@ mod tests {
         let mut window_state = WindowState {
             tiles: None,
             accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
+            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
+            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
         };
         
         // First advance window position after first batch
@@ -654,7 +652,7 @@ mod tests {
         // Verify first batch processing
         assert_eq!(first_updates.len(), 5, "Should have 5 updates for first batch");
         
-        let expected_first_updates: [(i64, Uuid, usize, Vec<(i64, Uuid)>); 5] = [
+        let expected_first_updates: [(i64, BatchId, usize, Vec<(i64, BatchId)>); 5] = [
             (1000, batch_id1, 0, vec![]), // 1st: no retracts (window: [0, 1000])
             (1200, batch_id1, 1, vec![]), // 2nd: no retracts (window: [200, 1200] - but no events before 1000)
             (1400, batch_id1, 2, vec![]), // 3rd: no retracts (window: [400, 1400] - but no events before 1000)
@@ -685,7 +683,7 @@ mod tests {
         
         // Add second batch: timestamps [3500, 4000] - will cause multiple retracts
         let batch2 = create_test_batch(vec![3500, 4000], vec![35, 40]);
-        let batch_id2 = Uuid::new_v4();
+        let batch_id2 = BatchId::random();
         time_entries.insert_batch(batch_id2, &batch2, 0);
         
         // Second advance window position (incremental processing)
@@ -732,7 +730,7 @@ mod tests {
             vec![1000, 1000, 1500, 2000, 2000], 
             vec![10, 11, 15, 20, 21]
         );
-        let batch_id1 = Uuid::new_v4();
+        let batch_id1 = BatchId::random();
         time_entries.insert_batch(batch_id1, &batch1, 0);
         
         // Test 1: ROWS 2 PRECEDING window (window size = 3)
@@ -740,8 +738,8 @@ mod tests {
             let mut window_state_rows = WindowState {
                 tiles: None,
                 accumulator_state: None,
-                start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-                end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
+                start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
+                end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
             };
             
             let rows_frame = create_rows_window_frame(2);
@@ -771,7 +769,7 @@ mod tests {
             
             // Add second batch with more duplicates
             let batch2 = create_test_batch(vec![3000, 3000], vec![30, 31]);
-            let batch_id2 = Uuid::new_v4();
+            let batch_id2 = BatchId::random();
             time_entries.insert_batch(batch_id2, &batch2, 0);
             
             // Second advance - incremental processing
@@ -798,8 +796,8 @@ mod tests {
             let mut window_state_range = WindowState {
                 tiles: None,
                 accumulator_state: None,
-                start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
-                end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: Uuid::nil(), row_idx: 0 },
+                start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
+                end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
             };
             
             let range_frame = create_range_window_frame(800);
