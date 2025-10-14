@@ -21,7 +21,7 @@ pub async fn run_window_benchmark(
     total_records: usize,
     batch_size: usize,
     rate: f32,
-) -> Result<(HashMap<String, i64>, std::time::Duration)> {
+) -> Result<(HashMap<String, i64>, usize, std::time::Duration)> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Create schema for datagen
@@ -92,9 +92,12 @@ pub async fn run_window_benchmark(
 
     // Process results
     let mut key_sums = HashMap::new();
+    let mut num_records_produced = 0;
     
     for (batch_idx, message) in result_vec.iter().enumerate() {
         let batch = message.record_batch();
+        // println!("produced batch: {:?}", batch);
+        num_records_produced += batch.num_rows();
         
         if batch.num_columns() != 4 {
             println!("Warning: Batch {} has {} columns instead of 4", batch_idx, batch.num_columns());
@@ -116,18 +119,18 @@ pub async fn run_window_benchmark(
         println!("Batch {}: {} rows", batch_idx, batch.num_rows());
     }
 
-    Ok((key_sums, execution_time))
+    Ok((key_sums, num_records_produced, execution_time))
 }
 
 #[tokio::test]
 async fn test_window_benchmark() -> Result<()> {
     let parallelism = 1;
     let num_keys = 4;
-    let total_records = 100;
-    let batch_size = 10;
-    let rate = 1000.0;
+    let total_records = 3000;
+    let batch_size = 1;
+    let rate = 10.0;
 
-    let (key_sums, execution_time) = run_window_benchmark(
+    let (key_sums, num_records_produced, execution_time) = run_window_benchmark(
         parallelism,
         num_keys,
         total_records,
@@ -142,9 +145,11 @@ async fn test_window_benchmark() -> Result<()> {
     println!("  Total Records: {}", total_records);
     println!("  Batch Size: {}", batch_size);
     println!("  Rate: {} events/sec", rate);
-    
+
     println!("\nResults:");
+    println!("  Records Produced: {}", num_records_produced);
     println!("  Execution Time: {:?}", execution_time);
+    println!("  Average Rate: {}", num_records_produced as f64 / execution_time.as_secs_f64());
     println!("  Unique Keys Processed: {}", key_sums.len());
     println!("  Expected Keys: {}", num_keys);
     

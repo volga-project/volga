@@ -314,6 +314,7 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn register_metric_descriptions() {
+    // TODO register all metrics
     metrics::describe_counter!(METRIC_STREAM_TASK_MESSAGES_SENT, "Number of messages sent by stream task");
     metrics::describe_counter!(METRIC_STREAM_TASK_MESSAGES_RECV, "Number of messages received by stream task");
     metrics::describe_counter!(METRIC_STREAM_TASK_RECORDS_SENT, "Number of records sent by stream task");

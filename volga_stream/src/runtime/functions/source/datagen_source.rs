@@ -433,17 +433,6 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             return self.send_max_watermark_if_needed();
         }
 
-        // Wait for next gen time if rate limiting is enabled
-        if let Some(next_time) = self.next_gen_time {
-            if let Ok(sleep_duration) = next_time.duration_since(SystemTime::now()) {
-                tokio::time::sleep(sleep_duration).await;
-            }
-            
-            // Calculate next event time
-            let interval = self.gen_interval.expect("Event interval not set");
-            self.next_gen_time = Some(next_time + interval);
-        }
-
         // Generate batch - adjust size if we're near the limit
         let batch_size = if let Some(limit) = self.task_records_limit {
             std::cmp::min(self.config.batch_size, limit - self.records_generated)
@@ -453,6 +442,17 @@ impl SourceFunctionTrait for DatagenSourceFunction {
 
         if batch_size == 0 {
             return self.send_max_watermark_if_needed();
+        }
+
+        // Wait for next gen time if rate limiting is enabled
+        if let Some(next_time) = self.next_gen_time {
+            if let Ok(sleep_duration) = next_time.duration_since(SystemTime::now()) {
+                tokio::time::sleep(sleep_duration).await;
+            }
+            
+            // Calculate next event time based on the number of events in this batch
+            let interval = self.gen_interval.expect("Event interval not set");
+            self.next_gen_time = Some(next_time + interval * batch_size as u32);
         }
 
         match self.generate_batch(batch_size) {

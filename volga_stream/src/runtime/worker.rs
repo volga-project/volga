@@ -169,18 +169,16 @@ impl Worker {
     pub async fn wait_for_all_tasks_status(
         state: Arc<tokio::sync::Mutex<WorkerState>>,
         running: Arc<AtomicBool>,
-        target_status: StreamTaskStatus
+        target_status: StreamTaskStatus,
+        timeout_s: Option<u64>
     ) {
         println!("[WORKER] Waiting for all tasks to be {:?}", target_status);
         
         let start_time = std::time::Instant::now();
-
-        // TODO this throws for long running jobs/pipeline
-        let timeout_duration = Duration::from_secs(30);
         
         while running.load(Ordering::SeqCst) {
-            // Check timeout
-            if start_time.elapsed() > timeout_duration {
+            // Check timeout if needed
+            if timeout_s.is_some() && start_time.elapsed() > Duration::from_secs(timeout_s.unwrap()) {
                 // Print statuses that are different from expected
                 let state_guard = state.lock().await;
                 let mut different_statuses = Vec::new();
@@ -197,7 +195,7 @@ impl Worker {
                     }
                 }
                 
-                panic!("Timeout waiting for all tasks to be {:?} after {:?}", target_status, timeout_duration);
+                panic!("Timeout waiting for all tasks to be {:?} after {:?}s", target_status, timeout_s.unwrap());
             }
             
             let all_ready = {
@@ -210,6 +208,7 @@ impl Worker {
                 break;
             }
             
+            // TODO configure this
             sleep(Duration::from_millis(50)).await;
         }
     }
@@ -430,7 +429,8 @@ impl Worker {
         Self::wait_for_all_tasks_status(
             self.worker_state.clone(),
             self.running.clone(),
-            StreamTaskStatus::Opened
+            StreamTaskStatus::Opened,
+            Some(10)
         ).await;
 
         println!("[WORKER] All tasks opened, running tasks");
@@ -443,7 +443,8 @@ impl Worker {
         Self::wait_for_all_tasks_status(
             self.worker_state.clone(),
             self.running.clone(),
-            StreamTaskStatus::Finished
+            StreamTaskStatus::Finished,
+            None
         ).await;
         
         println!("[WORKER] All tasks finished, sending close signal");
@@ -456,7 +457,8 @@ impl Worker {
         Self::wait_for_all_tasks_status(
             self.worker_state.clone(),
             self.running.clone(),
-            StreamTaskStatus::Closed
+            StreamTaskStatus::Closed,
+            Some(10)
         ).await;
 
         println!("[WORKER] All tasks closed, cleaning up");

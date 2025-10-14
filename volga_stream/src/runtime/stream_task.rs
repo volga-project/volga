@@ -341,6 +341,8 @@ impl StreamTask {
                     } 
                 }
 
+                // TODO sinks early return here (no produced messages) - we should record metrics here
+
                 if produced_messages.is_none() {
                     continue;
                 }
@@ -368,7 +370,6 @@ impl StreamTask {
                     let mut retries_before_close = 3; // per - messages
                 
                     // send message to all destinations until no backpressure
-                    // TODO track backpreessure stats
                     while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
                         status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
                         
