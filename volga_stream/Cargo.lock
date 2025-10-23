@@ -5234,6 +5234,7 @@ dependencies = [
  "anyhow",
  "arrow",
  "arrow-row",
+ "async-stream",
  "async-trait",
  "bincode",
  "chrono",

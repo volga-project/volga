@@ -254,10 +254,11 @@ impl Message {
         match self {
             Message::Regular(message) => &message.record_batch,
             Message::Keyed(message) => &message.base.record_batch,
-            Message::Watermark(_) => unreachable!("Watermark message does not have a record batch"),
+            Message::Watermark(_) => panic!("Watermark message does not have a record batch"),
         }
     }
 
+    // TODO no reason to return Result, just return &Key, panic otherwise
     pub fn key(&self) -> Result<&Key> {
         match self {
             Message::Regular(_) => Err(anyhow::anyhow!("Regular message does not have a key")),

@@ -1,10 +1,15 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::metrics::{LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{metrics::{LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
+use futures::stream::{Stream, StreamExt};
+use std::pin::Pin;
+use futures::stream;
 use crate::transport::batcher::{Batcher, BatcherConfig};
+
+// pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 
 #[derive(Debug)]
 pub struct TransportClientConfig {
@@ -41,8 +46,6 @@ impl TransportClientConfig {
 pub struct DataReader {
     vertex_id: String,
     receivers: HashMap<String, BatchReceiver>,
-    default_timeout: Duration,
-    default_retries: usize,
 }
 
 impl DataReader {
@@ -50,63 +53,25 @@ impl DataReader {
         Self {
             vertex_id,
             receivers,
-            default_timeout: Duration::from_millis(100),
-            default_retries: 0,
         }
     }
 
-    pub async fn read_message(&mut self) -> Result<Option<Message>> {
-        self.read_message_with_params(None, None).await
-    }
-
-    async fn read_message_with_params(
-        &mut self,
-        timeout_duration: Option<Duration>,
-        retries: Option<usize>
-    ) -> Result<Option<Message>> {
-        let timeout_duration = timeout_duration.unwrap_or(self.default_timeout);
-        let retries = retries.unwrap_or(self.default_retries);
-        let mut attempts = 0;
-
-        while attempts <= retries {
-            if self.receivers.is_empty() {
-                panic!("Attempted to read message from DataReader {} with no channels registered", self.vertex_id);
-            }
-
-            // Create a future that completes when any channel has data
-            let mut futures = Vec::new();
-            for (channel_id, receiver) in self.receivers.iter_mut() {
-                // let vertex_id = self.vertex_id.clone();
-                futures.push(Box::pin(async move {
-                    match time::timeout(timeout_duration, receiver.recv()).await {
-                        Ok(Some(message)) => Some((channel_id.clone(), message)),
-                        Ok(None) => {
-                            panic!("DataReader channel {} closed", channel_id);
-                        },
-                        Err(_) => {
-                            // println!("DataReader {:?} timeout", vertex_id);
-                            None
-                        },
+    pub fn message_stream(self) -> MessageStream {
+        // Convert each BatchReceiver into a boxed Stream using unfold
+        let receiver_streams: Vec<MessageStream> = self.receivers
+            .into_iter()
+            .map(|(_channel_id, receiver)| {
+                // Convert BatchReceiver to Stream using unfold and box it for Unpin
+                Box::pin(stream::unfold(receiver, |mut rx| async move {
+                    match rx.recv().await {
+                        Some(message) => Some((message, rx)),
+                        None => None, // Channel closed
                     }
-                }));
-            }
-
-            // Wait for the first channel to have data
-            let result = tokio::select! {
-                result = futures::future::select_all(futures) => {
-                    match result.0 {
-                        Some((channel_id, message)) => Some(message),
-                        None => None,
-                    }
-                }
-            };
-
-            if result.is_some() {
-                return Ok(result);
-            }
-            attempts += 1;
-        }
-        Ok(None)
+                })) as MessageStream
+            })
+            .collect();
+        
+        Box::pin(stream::select_all(receiver_streams))
     }
 }
 

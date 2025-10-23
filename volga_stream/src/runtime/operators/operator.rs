@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use futures::Stream;
 
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
@@ -14,8 +15,8 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
 use crate::storage::storage::Storage;
 use anyhow::Result;
-use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 use std::fmt;
+use std::pin::Pin;
 use std::sync::Arc;
 use crate::runtime::functions::{
     function_trait::FunctionTrait,
@@ -23,6 +24,25 @@ use crate::runtime::functions::{
     key_by::{KeyByFunction},
     reduce::{ReduceFunction, AggregationResultExtractor},
 };
+
+pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send + Sync>>;
+
+#[derive(Debug, Clone)]
+pub enum OperatorPollResult {
+    Ready(Message),
+    Continue,    
+    None
+}
+
+impl OperatorPollResult {
+    pub fn get_result_message(self) -> Message {
+        match self {
+            OperatorPollResult::Ready(msg) => msg,
+            OperatorPollResult::Continue => panic!("OperatorPollResult is Continue, expected Ready"),
+            OperatorPollResult::None => panic!("OperatorPollResult is None, expected Ready"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
@@ -36,15 +56,14 @@ pub enum OperatorType {
 pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
-    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-        panic!("process_message not implemented for this operator")
-    }
     fn operator_type(&self) -> OperatorType;
-    async fn fetch(&mut self) -> Option<Vec<Message>> {
-        panic!("fetch not implemented for this operator")
+
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        panic!("poll_next not implemented for this operator")
     }
-    async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
-        None
+
+    fn set_input(&mut self, _input: Option<MessageStream>) {
+        panic!("set_input not implemented for this operator")
     }
 }
 
@@ -120,41 +139,41 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-        match &message {
-            Message::Watermark(watermark) => {
-                panic!("Watermark should not be processed by process_message");
-            }
-            _ => {
-                // Process regular messages as before
-                match self {
-                    Operator::Map(op) => op.process_message(message).await,
-                    Operator::Join(op) => op.process_message(message).await,
-                    Operator::Sink(op) => op.process_message(message).await,
-                    Operator::Source(op) => op.process_message(message).await,
-                    Operator::KeyBy(op) => op.process_message(message).await,
-                    Operator::Reduce(op) => op.process_message(message).await,
-                    Operator::Aggregate(op) => op.process_message(message).await,
-                    Operator::Window(op) => op.process_message(message).await,
-                    Operator::Chained(op) => op.process_message(message).await,
-                }
-            }
-        }
-    }
+    // async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
+    //     match &message {
+    //         Message::Watermark(watermark) => {
+    //             panic!("Watermark should not be processed by process_message");
+    //         }
+    //         _ => {
+    //             // Process regular messages as before
+    //             match self {
+    //                 Operator::Map(op) => op.process_message(message).await,
+    //                 Operator::Join(op) => op.process_message(message).await,
+    //                 Operator::Sink(op) => op.process_message(message).await,
+    //                 Operator::Source(op) => op.process_message(message).await,
+    //                 Operator::KeyBy(op) => op.process_message(message).await,
+    //                 Operator::Reduce(op) => op.process_message(message).await,
+    //                 Operator::Aggregate(op) => op.process_message(message).await,
+    //                 Operator::Window(op) => op.process_message(message).await,
+    //                 Operator::Chained(op) => op.process_message(message).await,
+    //             }
+    //         }
+    //     }
+    // }
 
-    async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
-        match self {
-            Operator::Map(op) => op.process_watermark(watermark_value).await,
-            Operator::Join(op) => op.process_watermark(watermark_value).await,
-            Operator::Sink(op) => op.process_watermark(watermark_value).await,
-            Operator::Source(op) => op.process_watermark(watermark_value).await,
-            Operator::KeyBy(op) => op.process_watermark(watermark_value).await,
-            Operator::Reduce(op) => op.process_watermark(watermark_value).await,
-            Operator::Aggregate(op) => op.process_watermark(watermark_value).await,
-            Operator::Window(op) => op.process_watermark(watermark_value).await,
-            Operator::Chained(op) => op.process_watermark(watermark_value).await,
-        }
-    }
+    // async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
+    //     match self {
+    //         Operator::Map(op) => op.process_watermark(watermark_value).await,
+    //         Operator::Join(op) => op.process_watermark(watermark_value).await,
+    //         Operator::Sink(op) => op.process_watermark(watermark_value).await,
+    //         Operator::Source(op) => op.process_watermark(watermark_value).await,
+    //         Operator::KeyBy(op) => op.process_watermark(watermark_value).await,
+    //         Operator::Reduce(op) => op.process_watermark(watermark_value).await,
+    //         Operator::Aggregate(op) => op.process_watermark(watermark_value).await,
+    //         Operator::Window(op) => op.process_watermark(watermark_value).await,
+    //         Operator::Chained(op) => op.process_watermark(watermark_value).await,
+    //     }
+    // }
 
     fn operator_type(&self) -> OperatorType {
         match self {
@@ -169,28 +188,71 @@ impl OperatorTrait for Operator {
             Operator::Chained(op) => op.operator_type(),
         }
     }
-
-    async fn fetch(&mut self) -> Option<Vec<Message>> {
+    
+    fn set_input(&mut self, input: Option<MessageStream>) {
         match self {
-            Operator::Map(op) => op.fetch().await,
-            Operator::Join(op) => op.fetch().await,
-            Operator::Sink(op) => op.fetch().await,
-            Operator::Source(op) => op.fetch().await,
-            Operator::KeyBy(op) => op.fetch().await,
-            Operator::Reduce(op) => op.fetch().await,
-            Operator::Aggregate(op) => op.fetch().await,
-            Operator::Window(op) => op.fetch().await,
-            Operator::Chained(op) => op.fetch().await,
+            Operator::Map(op) => op.set_input(input),
+            Operator::Join(op) => op.set_input(input),
+            Operator::Sink(op) => op.set_input(input),
+            Operator::Source(op) => op.set_input(input),
+            Operator::KeyBy(op) => op.set_input(input),
+            Operator::Reduce(op) => op.set_input(input),
+            Operator::Aggregate(op) => op.set_input(input),
+            Operator::Window(op) => op.set_input(input),
+            Operator::Chained(op) => op.set_input(input),
+        }
+    }
+
+    // async fn fetch(&mut self) -> Option<Vec<Message>> {
+    //     match self {
+    //         Operator::Map(op) => op.fetch().await,
+    //         Operator::Join(op) => op.fetch().await,
+    //         Operator::Sink(op) => op.fetch().await,
+    //         Operator::Source(op) => op.fetch().await,
+    //         Operator::KeyBy(op) => op.fetch().await,
+    //         Operator::Reduce(op) => op.fetch().await,
+    //         Operator::Aggregate(op) => op.fetch().await,
+    //         Operator::Window(op) => op.fetch().await,
+    //         Operator::Chained(op) => op.fetch().await,
+    //     }
+    // }
+    
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        match self {
+            Operator::Map(op) => op.poll_next().await,
+            Operator::Join(op) => op.poll_next().await,
+            Operator::Sink(op) => op.poll_next().await,
+            Operator::Source(op) => op.poll_next().await,
+            Operator::KeyBy(op) => op.poll_next().await,
+            Operator::Reduce(op) => op.poll_next().await,
+            Operator::Aggregate(op) => op.poll_next().await,
+            Operator::Window(op) => op.poll_next().await,
+            Operator::Chained(op) => op.poll_next().await,
         }
     }
 }
 
-#[derive(Debug)]
+
 pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
     pub function: Option<Box<dyn FunctionTrait>>,
     pub operator_config: OperatorConfig,
     pub storage: Arc<Storage>,
+    pub input: Option<MessageStream>,
+    pub pending_messages: Vec<Message>,
+}
+
+impl fmt::Debug for OperatorBase {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OperatorBase")
+            .field("runtime_context", &self.runtime_context)
+            .field("function", &self.function)
+            .field("operator_config", &self.operator_config)
+            .field("storage", &self.storage)
+            .field("input", &"<MessageStream>")
+            .field("pending_messages", &self.pending_messages)
+            .finish()
+    }
 }
 
 impl OperatorBase {
@@ -200,6 +262,8 @@ impl OperatorBase {
             function: None,
             operator_config,
             storage,
+            input: None,
+            pending_messages: Vec::new(),
         }
     }
     
@@ -209,6 +273,8 @@ impl OperatorBase {
             function: Some(Box::new(function)),
             operator_config,
             storage,
+            input: None,
+            pending_messages: Vec::new(),
         }
     }
     
@@ -244,8 +310,18 @@ impl OperatorTrait for OperatorBase {
 
     fn operator_type(&self) -> OperatorType {
         get_operator_type_from_config(&self.operator_config)
+    }   
+    
+    fn set_input(&mut self, input: Option<MessageStream>) {
+        self.input = input;
+    }
+    
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        // OperatorBase is not a real stream operator, conform to OperatorTrait
+        panic!("poll_next not implemented for OperatorBase");
     }
 }
+
 
 pub fn create_operator(
     operator_config: OperatorConfig,

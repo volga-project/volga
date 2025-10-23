@@ -27,6 +27,7 @@ anyhow = "1.0"
 tokio = { version = "1.0", features = ["full"] }
 tokio-rayon = "2.1.0"
 futures = "0.3"
+async-stream = "0.3"
 ordered-float = { version = "3.7", features = ["serde"] }
 arrow = "55.0.0"
 tokio-util = "0.7"

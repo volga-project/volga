@@ -4,7 +4,7 @@ use anyhow::Result;
 use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 
 
 #[derive(Debug, Clone)]
@@ -149,13 +149,20 @@ impl OperatorTrait for SourceOperator {
         OperatorType::Source
     }
 
-    async fn fetch(&mut self) -> Option<Vec<Message>> {
+    fn set_input(&mut self, input: Option<MessageStream>) {
+        self.base.set_input(input);
+    }
+
+    async fn poll_next(&mut self) -> OperatorPollResult {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
         let msg = function.fetch().await;
 
         // TODO test
         // Apply projection if present
-        let msg = match msg {
+        match msg {
+            Some(Message::Watermark(watermark)) => {
+                return OperatorPollResult::Ready(Message::Watermark(watermark));
+            }
             Some(message) => {
                 if let Some(proj) = &self.projection {
                     let batch = message.record_batch();
@@ -170,17 +177,12 @@ impl OperatorTrait for SourceOperator {
                     ).unwrap();
                     
                     let projected_message = Message::new(message.upstream_vertex_id(), projected_batch, message.ingest_timestamp());
-                    Some(projected_message)
+                    OperatorPollResult::Ready(projected_message)
                 } else {
-                    Some(message)
+                    OperatorPollResult::Ready(message)
                 }
             }
-            None => None
-        };
-        if msg.is_none() {
-            None
-        } else {
-            Some(vec![msg.unwrap()])
+            None => OperatorPollResult::None,
         }
     }
 }

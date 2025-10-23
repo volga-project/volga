@@ -1,26 +1,25 @@
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
+use std::fmt;
 
 use anyhow::Result;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
-use futures::future;
+use futures::{future, StreamExt};
 use indexmap::IndexSet;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
-use uuid::Uuid;
 
-use datafusion::logical_expr::{WindowFrameBound, WindowFrameUnits};
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use crate::common::message::Message;
 use crate::common::Key;
-use crate::runtime::operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType};
+use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
 use crate::runtime::operators::window::aggregates::{get_aggregate_type, produce_aggregates, run_retractable_accumulator, run_retractable_accumulator_parallel};
 use crate::runtime::operators::window::state::{create_empty_windows_state, State, WindowId, WindowsState};
-use crate::runtime::operators::window::time_entries::{self, convert_interval_to_milliseconds, TimeIdx};
+use crate::runtime::operators::window::time_entries::TimeIdx;
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::storage::{Storage, extract_timestamp};
@@ -61,12 +60,10 @@ impl WindowOperatorConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct WindowOperator {
     base: OperatorBase,
     windows: BTreeMap<WindowId, WindowConfig>,
     state: State,
-    // time_index: TimeIndex,
     ts_column_index: usize,
     buffered_keys: HashSet<Key>,
     execution_mode: ExecutionMode,
@@ -75,7 +72,28 @@ pub struct WindowOperator {
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     tiling_configs: Vec<Option<TileConfig>>,
-    lateness: Option<i64>
+    lateness: Option<i64>,
+    // input_stream: Option<MessageStream>,
+    // pending_messages: Vec<Message>, // Buffer for messages waiting to be emitted
+}
+
+impl fmt::Debug for WindowOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WindowOperator")
+            .field("base", &self.base)
+            .field("windows", &self.windows)
+            .field("state", &self.state)
+            .field("ts_column_index", &self.ts_column_index)
+            .field("buffered_keys", &self.buffered_keys)
+            .field("execution_mode", &self.execution_mode)
+            .field("parallelize", &self.parallelize)
+            .field("thread_pool", &self.thread_pool)
+            .field("output_schema", &self.output_schema)
+            .field("input_schema", &self.input_schema)
+            .field("tiling_configs", &self.tiling_configs)
+            .field("lateness", &self.lateness)
+            .finish()
+    }
 }
 
 impl WindowOperator {
@@ -122,7 +140,7 @@ impl WindowOperator {
             output_schema,
             input_schema,
             tiling_configs: window_operator_config.tiling_configs,
-            lateness: window_operator_config.lateness
+            lateness: window_operator_config.lateness,
         }
     }
 
@@ -496,101 +514,130 @@ impl OperatorTrait for WindowOperator {
         self.base.close().await
     }
 
-    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-        let storage = self.base.storage.clone();
-        let partition_key = message.key().expect("Window Operator expects KeyedMessage");
-        
-        let window_ids: Vec<_> = self.windows.keys().cloned().collect();
-        let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
-        let mut windows_state = if let Some(windows_state) = self.state.take_windows_state(partition_key).await {
-            windows_state
-        } else {
-            create_empty_windows_state(&window_ids, &self.tiling_configs, &window_exprs)
-        };
-        let last_entry_before_update = if let Some(last_entry) = windows_state.time_entries.entries.back() {
-            Some(last_entry.value().clone())
-        } else {
-            None
-        };
-
-        let record_batch = message.record_batch();
-
-        // Filter out events that are too late based on lateness configuration
-        let record_batch = if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry_before_update.clone()) {
-            let cutoff_timestamp = last_entry.timestamp - lateness_ms as i64;
-            
-            let mut keep_indices = Vec::new();
-            for row_idx in 0..record_batch.num_rows() {
-                let timestamp = extract_timestamp(record_batch.column(self.ts_column_index), row_idx);
-                if timestamp >= cutoff_timestamp {
-                    keep_indices.push(row_idx as u32);
-                }
-            }
-            
-            if keep_indices.len() == record_batch.num_rows() {
-                record_batch.clone()
-            } else {
-                let indices = arrow::array::UInt32Array::from(keep_indices);
-                arrow::compute::take_record_batch(&record_batch, &indices)
-                    .expect("Should be able to filter record batch")
-            }
-        } else {
-            record_batch.clone()
-        };
-
-        if record_batch.num_rows() == 0 {
-            return None
-        } 
-        // calculate pre-aggregated tiles if needed
-        for (_, window_state) in windows_state.window_states.iter_mut() {
-            if let Some(ref mut tiles) = window_state.tiles {
-                tiles.add_batch(&record_batch, self.ts_column_index);
-            }
-        }
-
-        let batches = storage.append_records(record_batch.clone(), partition_key, self.ts_column_index).await;
-        let mut inserted_idxs = Vec::new();
-        for (batch_id, batch) in batches {
-            inserted_idxs.extend(&windows_state.time_entries.insert_batch(batch_id, &batch, self.ts_column_index));
-        }
-        
-        if self.execution_mode == ExecutionMode::WatermarkBased {
-            // buffer for processing on watermark
-            self.buffered_keys.insert(partition_key.clone());
-
-            self.state.insert_windows_state(partition_key, windows_state).await;
-            None
-        } else {
-            let late_entries = if let Some(last_entry) = last_entry_before_update {
-                let lates = inserted_idxs.into_iter().filter(|idx| *idx < last_entry).collect::<Vec<_>>();
-                if lates.len() > 0 {
-                    Some(lates)
-                } else{
-                    None
-                }
-            } else {
-                None
-            };
-            let result = self.process_key(&partition_key, Some(windows_state), late_entries).await;
-            // vertex_id will be set by stream task
-            // TODO ingest timestamp?
-            Some(vec![Message::new(None, result, None)])
-        }
-    }
-
-    async fn process_watermark(&mut self, _watermark: u64) -> Option<Vec<Message>> {
-        if self.execution_mode == ExecutionMode::EventBased {
-            panic!("EventBased execution mode does not support watermark processing");
-        }
-        let result = self.process_buffered().await;
-        self.buffered_keys.clear();
-        // vertex_id will be set by stream task
-        // TODO ingest timestamp?
-        Some(vec![Message::new(None, result, None)])
+    fn set_input(&mut self, input: Option<MessageStream>) {
+        self.base.set_input(input);
     }
 
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
+    }
+
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        // First, return any buffered messages
+        if let Some(msg) = self.base.pending_messages.pop() {
+            return OperatorPollResult::Ready(msg);
+        }
+
+        // Then process input stream
+        let input_stream = self.base.input.as_mut().expect("input stream not set");
+        
+        match input_stream.next().await {
+            Some(message) => {
+                match message {
+                    Message::Keyed(keyed_message) => {
+                        // Inline process_message logic
+                        let storage = self.base.storage.clone();
+                        let partition_key = keyed_message.key();
+                        
+                        let window_ids: Vec<_> = self.windows.keys().cloned().collect();
+                        let window_exprs: Vec<_> = self.windows.values().map(|window| window.window_expr.clone()).collect();
+                        let mut windows_state = if let Some(windows_state) = self.state.take_windows_state(partition_key).await {
+                            windows_state
+                        } else {
+                            create_empty_windows_state(&window_ids, &self.tiling_configs, &window_exprs)
+                        };
+                        let last_entry_before_update = if let Some(last_entry) = windows_state.time_entries.entries.back() {
+                            Some(last_entry.value().clone())
+                        } else {
+                            None
+                        };
+
+                        let record_batch = keyed_message.base.record_batch.clone();
+
+                        // Filter out events that are too late based on lateness configuration
+                        let record_batch = if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry_before_update.clone()) {
+                            let cutoff_timestamp = last_entry.timestamp - lateness_ms as i64;
+                            
+                            let mut keep_indices = Vec::new();
+                            for row_idx in 0..record_batch.num_rows() {
+                                let timestamp = extract_timestamp(record_batch.column(self.ts_column_index), row_idx);
+                                if timestamp >= cutoff_timestamp {
+                                    keep_indices.push(row_idx as u32);
+                                }
+                            }
+                            
+                            if keep_indices.len() == record_batch.num_rows() {
+                                record_batch.clone()
+                            } else {
+                                let indices = arrow::array::UInt32Array::from(keep_indices);
+                                arrow::compute::take_record_batch(&record_batch, &indices)
+                                    .expect("Should be able to filter record batch")
+                            }
+                        } else {
+                            record_batch.clone()
+                        };
+
+                        if record_batch.num_rows() == 0 {
+                            return OperatorPollResult::Continue;
+                        } 
+                        
+                        // calculate pre-aggregated tiles if needed
+                        for (_, window_state) in windows_state.window_states.iter_mut() {
+                            if let Some(ref mut tiles) = window_state.tiles {
+                                tiles.add_batch(&record_batch, self.ts_column_index);
+                            }
+                        }
+
+                        let batches = storage.append_records(record_batch.clone(), partition_key, self.ts_column_index).await;
+                        let mut inserted_idxs = Vec::new();
+                        for (batch_id, batch) in batches {
+                            inserted_idxs.extend(&windows_state.time_entries.insert_batch(batch_id, &batch, self.ts_column_index));
+                        }
+                        
+                        if self.execution_mode == ExecutionMode::WatermarkBased {
+                            // buffer for processing on watermark
+                            self.buffered_keys.insert(partition_key.clone());
+
+                            self.state.insert_windows_state(partition_key, windows_state).await;
+                            return OperatorPollResult::Continue;
+                        } else {
+                            let late_entries = if let Some(last_entry) = last_entry_before_update {
+                                let lates = inserted_idxs.into_iter().filter(|idx| *idx < last_entry).collect::<Vec<_>>();
+                                if lates.len() > 0 {
+                                    Some(lates)
+                                } else{
+                                    None
+                                }
+                            } else {
+                                None
+                            };
+                            let result = self.process_key(&partition_key, Some(windows_state), late_entries).await;
+                            // vertex_id will be set by stream task
+                            // TODO ingest timestamp?
+                            return OperatorPollResult::Ready(Message::new(None, result, None));
+                        }
+                    }
+                    Message::Watermark(watermark) => {
+                        // Inline process_watermark logic
+                        if self.execution_mode == ExecutionMode::EventBased {
+                            panic!("EventBased execution mode does not support watermark processing");
+                        }
+                        let result = self.process_buffered().await;
+                        self.buffered_keys.clear();
+                        // vertex_id will be set by stream task
+                        // TODO ingest timestamp?
+                        
+                        // Buffer the watermark to be returned on next call
+                        self.base.pending_messages.push(Message::Watermark(watermark));
+                        return OperatorPollResult::Ready(Message::new(None, result, None));
+                    }
+                    _ => {
+                        panic!("Window operator expects keyed messages or watermarks");
+                    }
+                }
+            }
+            None => return OperatorPollResult::None,
+        }
     }
 }
 
@@ -762,17 +809,27 @@ mod tests {
         let runtime_context = create_test_runtime_context();
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
         
-        // Batch 1: Single row for partition "A"
+        // Create all test messages
         let batch1 = create_test_batch(vec![1000], vec![10.0], vec!["A"]);
         let message1 = create_keyed_message(batch1, "A");
         
-        let results1 = window_operator.process_message(message1).await;
-        assert!(results1.is_some(), "Should have results for first batch");
+        let batch2 = create_test_batch(vec![1500, 2000], vec![30.0, 20.0], vec!["A", "A"]);
+        let message2 = create_keyed_message(batch2, "A");
         
-        let result_messages1 = results1.unwrap();
-        assert_eq!(result_messages1.len(), 1, "Should have 1 result message");
+        let batch3 = create_test_batch(vec![3200], vec![5.0], vec!["A"]);
+        let message3 = create_keyed_message(batch3, "A");
         
-        let result_batch1 = result_messages1[0].record_batch();
+        let batch4 = create_test_batch(vec![1000, 2000], vec![100.0, 200.0], vec!["B", "B"]);
+        let message4 = create_keyed_message(batch4, "B");
+        
+        let input_stream = Box::pin(futures::stream::iter(vec![message1, message2, message3, message4]));
+        window_operator.set_input(Some(input_stream));
+        
+        // Process first message
+        let result1 = window_operator.poll_next().await;
+        
+        let message1_result = result1.get_result_message();
+        let result_batch1 = message1_result.record_batch();
         assert_eq!(result_batch1.num_rows(), 1, "Should have 1 result row");
         assert_eq!(result_batch1.num_columns(), 8, "Should have 8 columns (timestamp, value, partition_key, + 5 aggregates)");
         
@@ -784,15 +841,11 @@ mod tests {
         assert_eq!(sum_column.value(0), 10.0, "SUM should be 10.0");
         assert_eq!(count_column.value(0), 1, "COUNT should be 1");
         
-        // Batch 2: Multi-row batch within window
-        let batch2 = create_test_batch(vec![1500, 2000], vec![30.0, 20.0], vec!["A", "A"]);
-        let message2 = create_keyed_message(batch2, "A");
+        // Process second message (multi-row batch)
+        let result2 = window_operator.poll_next().await;
         
-        let results2 = window_operator.process_message(message2).await;
-        assert!(results2.is_some(), "Should have results for second batch");
-        
-        let result_messages2 = results2.unwrap();
-        let result_batch2 = result_messages2[0].record_batch();
+        let message2_result = result2.get_result_message();
+        let result_batch2 = message2_result.record_batch();
         assert_eq!(result_batch2.num_rows(), 2, "Should have 2 result rows");
         
         let sum_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -806,15 +859,11 @@ mod tests {
         assert_eq!(sum_column2.value(1), 60.0, "SUM at t=2000 should be 60.0 (10.0+30.0+20.0)");
         assert_eq!(count_column2.value(1), 3, "COUNT at t=2000 should be 3");
         
-        // Batch 3: Partial retraction (t=3200 causes t=1000 to be excluded)
-        let batch3 = create_test_batch(vec![3200], vec![5.0], vec!["A"]);
-        let message3 = create_keyed_message(batch3, "A");
+        // Process third message
+        let result3 = window_operator.poll_next().await;
         
-        let results3 = window_operator.process_message(message3).await;
-        assert!(results3.is_some(), "Should have results for third batch");
-        
-        let result_messages3 = results3.unwrap();
-        let result_batch3 = result_messages3[0].record_batch();
+        let message3_result = result3.get_result_message();
+        let result_batch3 = message3_result.record_batch();
         assert_eq!(result_batch3.num_rows(), 1, "Should have 1 result row");
         
         let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -824,15 +873,11 @@ mod tests {
         assert_eq!(sum_column3.value(0), 55.0, "SUM at t=3200 should be 55.0 (30.0+20.0+5.0)");
         assert_eq!(count_column3.value(0), 3, "COUNT at t=3200 should be 3");
         
-        // Test different partition
-        let batch4 = create_test_batch(vec![1000, 2000], vec![100.0, 200.0], vec!["B", "B"]);
-        let message4 = create_keyed_message(batch4, "B");
+        // Process fourth message (different partition)
+        let result4 = window_operator.poll_next().await;
         
-        let results4 = window_operator.process_message(message4).await;
-        assert!(results4.is_some(), "Should have results for partition B");
-        
-        let result_messages4 = results4.unwrap();
-        let result_batch4 = result_messages4[0].record_batch();
+        let message4_result = result4.get_result_message();
+        let result_batch4 = message4_result.record_batch();
         assert_eq!(result_batch4.num_rows(), 2, "Should have 2 result rows for partition B");
         
         let sum_column4 = result_batch4.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -875,11 +920,13 @@ mod tests {
         );
         let message = create_keyed_message(batch, "test");
         
-        let results = window_operator.process_message(message).await;
-        assert!(results.is_some(), "Should have results");
+        let input_stream = Box::pin(futures::stream::iter(vec![message]));
+        window_operator.set_input(Some(input_stream));
         
-        let result_messages = results.unwrap();
-        let result_batch = result_messages[0].record_batch();
+        let result = window_operator.poll_next().await;
+        
+        let message_result = result.get_result_message();
+        let result_batch = message_result.record_batch();
         assert_eq!(result_batch.num_rows(), 5, "Should have 5 result rows");
         
         let sum_column = result_batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -927,28 +974,38 @@ mod tests {
         let batch1 = create_test_batch(vec![1000], vec![10.0], vec!["test"]);
         let message1 = create_keyed_message(batch1, "test");
         
-        let results1 = window_operator.process_message(message1).await;
-        assert!(results1.is_none(), "Should buffer message until watermark");
-        
         let batch2 = create_test_batch(vec![2000], vec![20.0], vec!["test"]);
         let message2 = create_keyed_message(batch2, "test");
         
-        let results2 = window_operator.process_message(message2).await;
-        assert!(results2.is_none(), "Should buffer message until watermark");
+        // Create watermark message
+        let watermark_message = Message::Watermark(crate::common::WatermarkMessage::new(
+            "test".to_string(),
+            3000,
+            Some(0)
+        ));
         
-        // Send watermark - should trigger processing
-        let watermark_results = window_operator.process_watermark(3000).await;
-        assert!(watermark_results.is_some(), "Should have results after watermark");
+        let input_stream = Box::pin(futures::stream::iter(vec![message1, message2, watermark_message]));
+        window_operator.set_input(Some(input_stream));
         
-        let watermark_messages = watermark_results.unwrap();
-        assert_eq!(watermark_messages.len(), 1, "Should have 1 result message");
+        // First two should be OperatorResult::Continue
+        window_operator.poll_next().await;
+        window_operator.poll_next().await;
         
-        let result_batch = watermark_messages[0].record_batch();
+        // Watermark should trigger processing and return aggregated result
+        let watermark_result = window_operator.poll_next().await;
+        assert!(matches!(watermark_result, OperatorPollResult::Ready(_)), "Should have results after watermark");
+        
+        let watermark_message_result = watermark_result.get_result_message();
+        let result_batch = watermark_message_result.record_batch();
         assert_eq!(result_batch.num_rows(), 2, "Should have 2 result rows");
         
         let sum_column = result_batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         assert_eq!(sum_column.value(0), 10.0, "First SUM should be 10.0");
         assert_eq!(sum_column.value(1), 30.0, "Second SUM should be 30.0 (10.0+20.0)");
+        
+        // Next call should return the watermark
+        let watermark_passthrough = window_operator.poll_next().await;
+        assert!(matches!(watermark_passthrough.get_result_message(), Message::Watermark(_)), "Should be a watermark message");
         
         window_operator.close().await.expect("Should be able to close operator");
     }
@@ -977,15 +1034,24 @@ mod tests {
         let mut window_operator = WindowOperator::new(operator_config, storage.clone());
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
         
-        // Step 1: Process initial batch with timestamps [1000, 3000, 5000]
+        // Create all test messages
         let batch1 = create_test_batch(vec![1000, 3000, 5000], vec![10.0, 30.0, 50.0], vec!["A", "A", "A"]);
         let message1 = create_keyed_message(batch1, "A");
         
-        let results1 = window_operator.process_message(message1).await;
-        assert!(results1.is_some(), "Should have results for initial batch");
+        let batch2 = create_test_batch(vec![2000], vec![20.0], vec!["A"]);
+        let message2 = create_keyed_message(batch2, "A");
         
-        let result_messages1 = results1.unwrap();
-        let result_batch1 = result_messages1[0].record_batch();
+        let batch3 = create_test_batch(vec![6000], vec![60.0], vec!["A"]);
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let input_stream = Box::pin(futures::stream::iter(vec![message1, message2, message3]));
+        window_operator.set_input(Some(input_stream));
+        
+        // Step 1: Process initial batch with timestamps [1000, 3000, 5000]
+        let result1 = window_operator.poll_next().await;
+        
+        let message1_result = result1.get_result_message();
+        let result_batch1 = message1_result.record_batch();
         assert_eq!(result_batch1.num_rows(), 3, "Should have 3 result rows");
         
         // Verify initial results
@@ -1001,15 +1067,9 @@ mod tests {
         assert_eq!(count_column1.value(2), 2, "Third COUNT should be 2");
         
         // Step 2: Process late entry with timestamp 2000 (between 1000 and 3000)
-        // This should affect the windows that include timestamp 2000
-        let batch2 = create_test_batch(vec![2000], vec![20.0], vec!["A"]);
-        let message2 = create_keyed_message(batch2, "A");
-        
-        let results2 = window_operator.process_message(message2).await;
-        assert!(results2.is_some(), "Should have results for late entry");
-        
-        let result_messages2 = results2.unwrap();
-        let result_batch2 = result_messages2[0].record_batch();
+        let result2 = window_operator.poll_next().await;
+        let message2_result = result2.get_result_message();
+        let result_batch2 = message2_result.record_batch();
         // Should include results for the late entry and potentially updated results for affected windows
         assert!(result_batch2.num_rows() >= 1, "Should have at least 1 result row for late entry");
         
@@ -1022,14 +1082,9 @@ mod tests {
         assert_eq!(count_column2.value(0), 2, "Late entry COUNT should be 2");
         
         // Step 3: Process another batch to verify the late entry is properly integrated
-        let batch3 = create_test_batch(vec![6000], vec![60.0], vec!["A"]);
-        let message3 = create_keyed_message(batch3, "A");
-        
-        let results3 = window_operator.process_message(message3).await;
-        assert!(results3.is_some(), "Should have results for final batch");
-        
-        let result_messages3 = results3.unwrap();
-        let result_batch3 = result_messages3[0].record_batch();
+        let result3 = window_operator.poll_next().await;
+        let message3_result = result3.get_result_message();
+        let result_batch3 = message3_result.record_batch();
         let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         let count_column3 = result_batch3.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
         
@@ -1064,23 +1119,27 @@ mod tests {
         let mut window_operator = WindowOperator::new(operator_config, storage.clone());
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
         
-        // Step 1: Process initial ordered batch [1000, 4000, 7000]
+        // Create all test messages
         let batch1 = create_test_batch(vec![1000, 4000, 7000], vec![10.0, 40.0, 70.0], vec!["A", "A", "A"]);
         let message1 = create_keyed_message(batch1, "A");
         
-        let results1 = window_operator.process_message(message1).await;
-        assert!(results1.is_some(), "Should have results for initial batch");
-        
-        // Step 2: Process batch with multiple late entries [2000, 3000, 5000, 6000] + one non-late entry [8000]
-        // Late entries are relative to the last processed timestamp (7000)
         let batch2 = create_test_batch(vec![2000, 3000, 5000, 6000, 8000], vec![20.0, 30.0, 50.0, 60.0, 80.0], vec!["A", "A", "A", "A", "A"]);
         let message2 = create_keyed_message(batch2, "A");
         
-        let results2 = window_operator.process_message(message2).await;
-        assert!(results2.is_some(), "Should have results for late entries batch");
+        let batch3 = create_test_batch(vec![9000, 10000], vec![90.0, 100.0], vec!["A", "A"]);
+        let message3 = create_keyed_message(batch3, "A");
         
-        let result_messages2 = results2.unwrap();
-        let result_batch2 = result_messages2[0].record_batch();
+        let input_stream = Box::pin(futures::stream::iter(vec![message1, message2, message3]));
+        window_operator.set_input(Some(input_stream));
+        
+        // Step 1: Process initial ordered batch [1000, 4000, 7000]
+        let result1 = window_operator.poll_next().await;
+        let message1_result = result1.get_result_message();
+        
+        // Step 2: Process batch with multiple late entries [2000, 3000, 5000, 6000] + one non-late entry [8000]
+        let result2 = window_operator.poll_next().await;
+        let message2_result = result2.get_result_message();
+        let result_batch2 = message2_result.record_batch();
         assert_eq!(result_batch2.num_rows(), 5, "Should have 5 result rows (4 late entries + 1 non-late)");
         
         let sum_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1098,14 +1157,9 @@ mod tests {
         assert_eq!(sum_column2.value(4), 210.0, "Non-late entry SUM should be 210.0");
         
         // Step 3: Process more non-late entries to verify late entries have updated accumulators
-        let batch3 = create_test_batch(vec![9000, 10000], vec![90.0, 100.0], vec!["A", "A"]);
-        let message3 = create_keyed_message(batch3, "A");
-        
-        let results3 = window_operator.process_message(message3).await;
-        assert!(results3.is_some(), "Should have results for final batch");
-        
-        let result_messages3 = results3.unwrap();
-        let result_batch3 = result_messages3[0].record_batch();
+        let result3 = window_operator.poll_next().await;
+        let message3_result = result3.get_result_message();
+        let result_batch3 = message3_result.record_batch();
         assert_eq!(result_batch3.num_rows(), 2, "Should have 2 result rows for final batch");
         
         let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1146,16 +1200,23 @@ mod tests {
         let runtime_context = create_test_runtime_context();
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
 
-        // Test 1: All ordered events
-        // Process batch with ordered timestamps [1000, 2000, 3000, 4000, 5000]
+        // Create all test messages
         let batch1 = create_test_batch(vec![1000, 2000, 3000, 4000, 5000], vec![10.0, 20.0, 30.0, 40.0, 50.0], vec!["A", "A", "A", "A", "A"]);
         let message1 = create_keyed_message(batch1, "A");
         
-        let results1 = window_operator.process_message(message1).await;
-        assert!(results1.is_some(), "Should have results for ordered batch");
+        let batch2 = create_test_batch(vec![1500, 6000, 2500], vec![15.0, 60.0, 25.0], vec!["A", "A", "A"]);
+        let message2 = create_keyed_message(batch2, "A");
         
-        let result_messages1 = results1.unwrap();
-        let result_batch1 = result_messages1[0].record_batch();
+        let batch3 = create_test_batch(vec![7000, 8000], vec![70.0, 80.0], vec!["A", "A"]);
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let input_stream = Box::pin(futures::stream::iter(vec![message1, message2, message3]));
+        window_operator.set_input(Some(input_stream));
+
+        // Test 1: All ordered events
+        let result1 = window_operator.poll_next().await;
+        let message1_result = result1.get_result_message();
+        let result_batch1 = message1_result.record_batch();
         assert_eq!(result_batch1.num_rows(), 5, "Should have 5 result rows");
         
         let sum_small_col = result_batch1.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1186,15 +1247,9 @@ mod tests {
         assert_eq!(avg_large_col.value(4), 35.0, "t=5000 large window AVG should be 35.0");
 
         // Test 2: Mixed batch with late entries
-        // Process batch with late entries [1500, 6000, 2500] - 1500 and 2500 are late relative to 5000
-        let batch2 = create_test_batch(vec![1500, 6000, 2500], vec![15.0, 60.0, 25.0], vec!["A", "A", "A"]);
-        let message2 = create_keyed_message(batch2, "A");
-        
-        let results2 = window_operator.process_message(message2).await;
-        assert!(results2.is_some(), "Should have results for mixed batch");
-        
-        let result_messages2 = results2.unwrap();
-        let result_batch2 = result_messages2[0].record_batch();
+        let result2 = window_operator.poll_next().await;
+        let message2_result = result2.get_result_message();
+        let result_batch2 = message2_result.record_batch();
         assert_eq!(result_batch2.num_rows(), 3, "Should have 3 result rows");
         
         let sum_small_col2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1214,15 +1269,9 @@ mod tests {
         assert_eq!(avg_large_col2.value(2), 45.0, "t=6000 large window AVG should be 45.0");
 
         // Test 3: Verify accumulator integration with subsequent events
-        // Process more events to verify late entries have been integrated into accumulator state
-        let batch3 = create_test_batch(vec![7000, 8000], vec![70.0, 80.0], vec!["A", "A"]);
-        let message3 = create_keyed_message(batch3, "A");
-        
-        let results3 = window_operator.process_message(message3).await;
-        assert!(results3.is_some(), "Should have results for final batch");
-        
-        let result_messages3 = results3.unwrap();
-        let result_batch3 = result_messages3[0].record_batch();
+        let result3 = window_operator.poll_next().await;
+        let message3_result = result3.get_result_message();
+        let result_batch3 = message3_result.record_batch();
         assert_eq!(result_batch3.num_rows(), 2, "Should have 2 result rows");
         
         let sum_small_col3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1279,9 +1328,7 @@ mod tests {
         let mut window_operator = WindowOperator::new(operator_config, storage.clone());
         window_operator.open(&runtime_context).await.expect("Should be able to open operator");
         
-        // Step 1: Process initial ordered batch to establish baseline
-        // Timestamps spread across multiple tile buckets (minutes apart) with some close entries
-        // [60000, 180000, 300000, 420000] = [1min, 3min, 5min, 7min] with values [10.0, 30.0, 50.0, 70.0]
+        // Create all test messages
         let batch1 = create_test_batch(
             vec![60000, 180000, 300000, 420000], 
             vec![10.0, 30.0, 50.0, 70.0], 
@@ -1289,11 +1336,34 @@ mod tests {
         );
         let message1 = create_keyed_message(batch1, "A");
         
-        let results1 = window_operator.process_message(message1).await;
-        assert!(results1.is_some(), "Should have results for initial batch");
+        let batch2 = create_test_batch(
+            vec![120000, 240000, 360000, 480000], 
+            vec![20.0, 40.0, 60.0, 80.0], 
+            vec!["A", "A", "A", "A"]
+        );
+        let message2 = create_keyed_message(batch2, "A");
         
-        let result_messages1 = results1.unwrap();
-        let result_batch1 = result_messages1[0].record_batch();
+        let batch3 = create_test_batch(
+            vec![540000, 541000, 542000], 
+            vec![90.0, 100.0, 110.0], 
+            vec!["A", "A", "A"]
+        );
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let batch4 = create_test_batch(
+            vec![60000, 120000, 180000], 
+            vec![5.0, 15.0, 25.0], 
+            vec!["B", "B", "B"]
+        );
+        let message4 = create_keyed_message(batch4, "B");
+        
+        let input_stream = Box::pin(futures::stream::iter(vec![message1, message2, message3, message4]));
+        window_operator.set_input(Some(input_stream));
+
+        // Step 1: Process initial ordered batch to establish baseline
+        let result1 = window_operator.poll_next().await;
+        let message1_result = result1.get_result_message();
+        let result_batch1 = message1_result.record_batch();
         assert_eq!(result_batch1.num_rows(), 4, "Should have 4 result rows");
         
         // Verify initial results (5000ms window)
@@ -1324,20 +1394,9 @@ mod tests {
         assert_eq!(avg_column1.value(3), 70.0, "t=420000 AVG should be 70.0");
         
         // Step 2: Process batch with late entries and out-of-order data
-        // Late entries: [120000, 240000, 360000] + new entry [480000] = [2min, 4min, 6min, 8min]
-        // This creates entries in different tile buckets while having some close entries within 5s window
-        let batch2 = create_test_batch(
-            vec![120000, 240000, 360000, 480000], 
-            vec![20.0, 40.0, 60.0, 80.0], 
-            vec!["A", "A", "A", "A"]
-        );
-        let message2 = create_keyed_message(batch2, "A");
-        
-        let results2 = window_operator.process_message(message2).await;
-        assert!(results2.is_some(), "Should have results for late entries batch");
-        
-        let result_messages2 = results2.unwrap();
-        let result_batch2 = result_messages2[0].record_batch();
+        let result2 = window_operator.poll_next().await;
+        let message2_result = result2.get_result_message();
+        let result_batch2 = message2_result.record_batch();
         assert_eq!(result_batch2.num_rows(), 4, "Should have 4 result rows (3 late + 1 new)");
         
         let min_column2 = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1367,20 +1426,9 @@ mod tests {
         assert_eq!(avg_column2.value(3), 80.0, "t=480000 AVG should be 80.0");
         
         // Step 3: Process more data to verify tiles are working correctly
-        // Add data with some close entries that should create overlapping windows and benefit from tiles
-        // [540000, 541000, 542000] = [9min, 9min+1s, 9min+2s] - close entries within 5s window
-        let batch3 = create_test_batch(
-            vec![540000, 541000, 542000], 
-            vec![90.0, 100.0, 110.0], 
-            vec!["A", "A", "A"]
-        );
-        let message3 = create_keyed_message(batch3, "A");
-        
-        let results3 = window_operator.process_message(message3).await;
-        assert!(results3.is_some(), "Should have results for final batch");
-        
-        let result_messages3 = results3.unwrap();
-        let result_batch3 = result_messages3[0].record_batch();
+        let result3 = window_operator.poll_next().await;
+        let message3_result = result3.get_result_message();
+        let result_batch3 = message3_result.record_batch();
         assert_eq!(result_batch3.num_rows(), 3, "Should have 3 result rows");
         
         let min_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1405,19 +1453,9 @@ mod tests {
         assert_eq!(avg_column3.value(2), 100.0, "t=542000 AVG should be 100.0");
         
         // Step 4: Test different partition to ensure tiles are partition-aware
-        // Use different tile buckets for partition B: [60000, 120000, 180000] = [1min, 2min, 3min]
-        let batch4 = create_test_batch(
-            vec![60000, 120000, 180000], 
-            vec![5.0, 15.0, 25.0], 
-            vec!["B", "B", "B"]
-        );
-        let message4 = create_keyed_message(batch4, "B");
-        
-        let results4 = window_operator.process_message(message4).await;
-        assert!(results4.is_some(), "Should have results for partition B");
-        
-        let result_messages4 = results4.unwrap();
-        let result_batch4 = result_messages4[0].record_batch();
+        let result4 = window_operator.poll_next().await;
+        let message4_result = result4.get_result_message();
+        let result_batch4 = message4_result.record_batch();
         assert_eq!(result_batch4.num_rows(), 3, "Should have 3 result rows for partition B");
         
         let min_column4 = result_batch4.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
@@ -1477,7 +1515,7 @@ mod tests {
 
         let partition_key = create_test_key("A");
         
-        // Step 1: Process initial batch
+        // Create all test messages
         let batch1 = create_test_batch(
             vec![10000, 15000, 20000], // 10s, 15s, 20s
             vec![100.0, 150.0, 200.0], 
@@ -1485,11 +1523,27 @@ mod tests {
         );
         let message1 = create_keyed_message(batch1, "A");
         
-        let results1 = window_operator.process_message(message1).await;
-        assert!(results1.is_some(), "Should have results for initial batch");
+        let batch2 = create_test_batch(
+            vec![16000, 18000, 25000], // 16s (too late, dropped), 18s (late, but processed), 25s (on time)
+            vec![160.0, 180.0, 250.0], 
+            vec!["A", "A", "A"]
+        );
+        let message2 = create_keyed_message(batch2, "A");
         
-        let result_messages1 = results1.unwrap();
-        let result_batch1 = result_messages1[0].record_batch();
+        let batch3 = create_test_batch(
+            vec![26000, 27000, 28000, 29000, 30000], // Close to 25000ms - clustered events
+            vec![260.0, 270.0, 280.0, 290.0, 300.0], 
+            vec!["A", "A", "A", "A", "A"]
+        );
+        let message3 = create_keyed_message(batch3, "A");
+        
+        let input_stream = Box::pin(futures::stream::iter(vec![message1, message2, message3]));
+        window_operator.set_input(Some(input_stream));
+
+        // Step 1: Process initial batch
+        let result1 = window_operator.poll_next().await;
+        let message1_result = result1.get_result_message();
+        let result_batch1 = message1_result.record_batch();
         assert_eq!(result_batch1.num_rows(), 3, "Should have 3 result rows");
         
         // Verify aggregate calculations for the last event (20000ms)
@@ -1520,19 +1574,9 @@ mod tests {
         window_operator.get_state().verify_pruning_for_testing(&partition_key, 0);
 
         // Step 2: Test late event filtering and partial pruning
-        // Latest time is 20000ms, lateness is 3000ms, so late event cutoff is 17000ms
-        let batch2 = create_test_batch(
-            vec![16000, 18000, 25000], // 16s (too late, dropped), 18s (late, but processed), 25s (on time)
-            vec![160.0, 180.0, 250.0], 
-            vec!["A", "A", "A"]
-        );
-        let message2 = create_keyed_message(batch2, "A");
-        
-        let results2 = window_operator.process_message(message2).await;
-        assert!(results2.is_some(), "Should have results for mixed batch");
-        
-        let result_messages2 = results2.unwrap();
-        let result_batch2 = result_messages2[0].record_batch();
+        let result2 = window_operator.poll_next().await;
+        let message2_result = result2.get_result_message();
+        let result_batch2 = message2_result.record_batch();
         // Should process 2 events: 18000, 25000 (16000 dropped as too late)
         assert_eq!(result_batch2.num_rows(), 2, "Should have 2 result rows (1 event dropped)");
         
@@ -1565,19 +1609,9 @@ mod tests {
         window_operator.get_state().verify_pruning_for_testing(&partition_key, 15000);
 
         // Step 3: Add many events close together to make range window the limiting factor
-        // Strategy: Add events close to the latest time so row window has plenty of recent rows
-        let batch3 = create_test_batch(
-            vec![26000, 27000, 28000, 29000, 30000], // Close to 25000ms - clustered events
-            vec![260.0, 270.0, 280.0, 290.0, 300.0], 
-            vec!["A", "A", "A", "A", "A"]
-        );
-        let message3 = create_keyed_message(batch3, "A");
-        
-        let results3 = window_operator.process_message(message3).await;
-        assert!(results3.is_some(), "Should have results for step 3");
-        
-        let result_messages3 = results3.unwrap();
-        let result_batch3 = result_messages3[0].record_batch();
+        let result3 = window_operator.poll_next().await;
+        let message3_result = result3.get_result_message();
+        let result_batch3 = message3_result.record_batch();
         assert_eq!(result_batch3.num_rows(), 5, "Should have 5 result rows");
         
         // Verify aggregate calculations for the last event (30000ms)

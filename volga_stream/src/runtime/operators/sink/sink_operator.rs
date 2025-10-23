@@ -1,8 +1,9 @@
-use std::sync::Arc;
+use std::{sync::Arc, fmt};
 
-use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::StreamExt;
 
 
 #[derive(Clone, Debug)]
@@ -18,9 +19,16 @@ impl std::fmt::Display for SinkConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct SinkOperator {
     base: OperatorBase,
+}
+
+impl fmt::Debug for SinkOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SinkOperator")
+            .field("base", &self.base)
+            .finish()
+    }
 }
 
 impl SinkOperator {
@@ -46,13 +54,26 @@ impl OperatorTrait for SinkOperator {
         self.base.close().await
     }
 
-    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-        let function = self.base.get_function_mut::<SinkFunction>().unwrap();
-        function.sink(message.clone()).await.unwrap();
-        Some(vec![message])
-    }
-
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
+    }
+
+    fn set_input(&mut self, input: Option<MessageStream>) {
+        self.base.set_input(input);
+    }
+
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        let input_stream = self.base.input.as_mut().expect("input stream not set");
+        match input_stream.next().await {
+            Some(Message::Watermark(watermark)) => {
+                OperatorPollResult::Ready(Message::Watermark(watermark))
+            }
+            Some(message) => {
+                let function = self.base.get_function_mut::<SinkFunction>().unwrap();
+                function.sink(message.clone()).await.unwrap();
+                OperatorPollResult::Ready(message)
+            }
+            None => OperatorPollResult::None,
+        }
     }
 }

@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
-use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{functions::map::MapFunction, operators::operator::{create_operator, Operator, OperatorBase, OperatorConfig, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{operators::operator::{create_operator, MessageStream, Operator, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}, storage::storage::Storage};
 use anyhow::Result;
 use async_trait::async_trait;
-use tokio_rayon::AsyncThreadPool;
 use futures::future::try_join_all;
+use tokio::sync::mpsc::{self, Sender};
+use tokio_stream::wrappers::ReceiverStream;
 
 #[derive(Debug)]
 pub struct ChainedOperator {
     base: OperatorBase,
+    chain_senders: Vec<Option<Sender<Message>>>,
     operators: Vec<Operator>,
 }
 
@@ -18,32 +20,40 @@ impl ChainedOperator {
             OperatorConfig::ChainedConfig(configs) => configs,
             _ => panic!("Expected ChainedConfig, got {:?}", config),
         };
-        Self { 
-            base: OperatorBase::new(config, storage.clone()),
-            operators: configs.iter().map(|config| create_operator(config.clone(), storage.clone())).collect(),
-        }
-    }
 
-    async fn process_message_with_operator_chain(message: Message, operators: &mut [Operator]) -> Option<Vec<Message>> {
-        let mut cur_messages = vec![message];
-        for operator in operators.iter_mut() {
-            let mut res = vec![];
-            for message in cur_messages {
-                let operator_messages = operator.process_message(message).await;
-                if operator_messages.is_none() {
-                    return None
-                }
-                res.extend(operator_messages.unwrap());
-            }
-            cur_messages = res;
+        if configs.is_empty() {
+            panic!("ChainedOperator cannot be empty");
         }
-        Some(cur_messages)
+
+        let mut operators = Vec::new();
+        let mut chain_senders = Vec::new();
+        for i in 0..configs.len() {
+            let mut operator = create_operator(configs[i].clone(), storage.clone());
+            if i > 0 {
+                let (tx, rx) = mpsc::channel(10);
+                chain_senders.push(Some(tx));
+                operator.set_input(Some(Box::pin(ReceiverStream::new(rx))));
+                operators.push(operator);
+            } else {
+                chain_senders.push(None);
+                operators.push(operator);
+            }
+        }
+        
+        Self { 
+            base: OperatorBase::new(config, storage.clone()), 
+            chain_senders,
+            operators,
+        }
     }
 }
 
 #[async_trait]
 impl OperatorTrait for ChainedOperator {
+
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        // TODO open base?
+
         let open_futures: Vec<_> = self.operators
             .iter_mut()
             .map(|operator| operator.open(context))
@@ -53,59 +63,13 @@ impl OperatorTrait for ChainedOperator {
         Ok(())
     }
 
-    // when we have no source
-    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-        match message {
-            Message::Watermark(watermark) => {
-                Some(vec![Message::Watermark(watermark)])
-            }
-            _ => {
-                Self::process_message_with_operator_chain(message, &mut self.operators).await
-            }
-        }
-    }
-
-    // when chained operator starts with source
-    async fn fetch(&mut self) -> Option<Vec<Message>> {
-        let first_op = self.operators.get_mut(0).expect("chained operator can not be empty");
-        if first_op.operator_type() != OperatorType::Source {
-            panic!("Can not fetch chained operator without source operator being first");
-        }
-
-        let messages = first_op.fetch().await;
-        if messages.is_none() {
-            return None;
-        }
-        let mut res = vec![];
-
-        for message in messages.unwrap() {
-            // skip processing watermark
-            match message {
-                Message::Watermark(watermark) => {
-                    res.push(Message::Watermark(watermark));
-                }
-                _ => {
-                    // process by all operators except the first one
-                    let processed = Self::process_message_with_operator_chain(message, &mut self.operators[1..]).await;
-                    if processed.is_some() {
-                        res.extend(processed.unwrap());
-                    }
-                }
-            }
-
-        }
-        if res.len() != 0 {
-            Some(res)
-        } else {
-            None
-        }
-    }
-
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
     }
 
     async fn close(&mut self) -> Result<()> {
+
+        // TODO close base?
         let close_futures: Vec<_> = self.operators
             .iter_mut()
             .map(|operator| operator.close())
@@ -114,8 +78,19 @@ impl OperatorTrait for ChainedOperator {
         try_join_all(close_futures).await?;
         Ok(())
     }
-}
 
+    fn set_input(&mut self, input: Option<MessageStream>) {
+        if !self.operators.is_empty() {
+            let first_op = &mut self.operators[0];
+            first_op.set_input(input);
+        }
+    }
+
+    // TODO implement
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        panic!("Chaining not implemented")
+    }
+}
 
 /// Groups operators into chains based on partition types
 pub fn group_operators_for_chaining(operators: &[OperatorConfig]) -> Vec<OperatorConfig> {

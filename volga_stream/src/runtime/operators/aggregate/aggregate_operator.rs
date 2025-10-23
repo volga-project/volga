@@ -8,12 +8,14 @@ use datafusion::physical_plan::{Accumulator, ExecutionPlan};
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::PhysicalExpr;
 use async_trait::async_trait;
+use futures::StreamExt;
 use anyhow::Result as AnyhowResult;
-use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig};
+use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, OperatorPollResult, MessageStream};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::{BaseMessage, Message, MAX_WATERMARK_VALUE};
 use crate::storage::storage::Storage;
 use std::sync::Arc;
+use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct AggregateConfig {
@@ -21,12 +23,24 @@ pub struct AggregateConfig {
     pub group_input_exprs: Vec<Arc<dyn PhysicalExpr>>, // from Partial AggregateExec
 }
 
-#[derive(Debug)]
 pub struct AggregateOperator {
     base: OperatorBase,
     aggregate_exec: Arc<AggregateExec>,  // DataFusion's AggregateExec - Final
     group_input_exprs: Vec<Arc<dyn PhysicalExpr>>, // evaluated on input batches
     accumulators: HashMap<u64, (BaseMessage, Vec<Box<dyn Accumulator>>)>, // (first message for key, accumulators)
+}
+
+impl fmt::Debug for AggregateOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AggregateOperator")
+            .field("base", &self.base)
+            .field("aggregate_exec", &self.aggregate_exec)
+            .field("group_input_exprs", &self.group_input_exprs)
+            .field("accumulators", &self.accumulators)
+            // .field("input_stream", &"<MessageStream>")
+            // .field("pending_messages", &self.pending_messages)
+            .finish()
+    }
 }
 
 impl AggregateOperator {
@@ -44,8 +58,8 @@ impl AggregateOperator {
         }
     }
     
-    fn create_accumulators(&self) -> Vec<Box<dyn Accumulator>> {
-        self.aggregate_exec.aggr_expr()
+    fn create_accumulators(aggregate_exec: &AggregateExec) -> Vec<Box<dyn Accumulator>> {
+        aggregate_exec.aggr_expr()
             .iter()
             .map(|expr| {
                 expr.create_accumulator().expect("should be able to create accumulator")
@@ -53,12 +67,12 @@ impl AggregateOperator {
             .collect()
     }
     
-    fn emit_all_accumulators(&mut self) -> Vec<Message> {
+    fn emit_all_accumulators(&mut self) -> Option<Message> {
         let mut batches = Vec::new();
         let accumulators: Vec<_> = self.accumulators.drain().collect();
         
         if accumulators.is_empty() {
-            return vec![];
+            return None;
         }
 
         // Debug: Print vertex_id and emission info
@@ -131,7 +145,7 @@ impl AggregateOperator {
         
         // Concatenate all batches into a single batch
         if batches.is_empty() {
-            return vec![];
+            return None;
         }
         
         let output_physical_schema = self.aggregate_exec.schema();
@@ -151,12 +165,13 @@ impl AggregateOperator {
         }
         
         // Return single message with concatenated batch
-        vec![Message::new(
+        Some(Message::new(
             upstream_vertex_id,
             concatenated_batch,
             ingest_timestamp
-        )]
+        ))
     }
+
 }
 
 #[async_trait]
@@ -169,79 +184,102 @@ impl OperatorTrait for AggregateOperator {
         self.base.close().await
     }
 
-    async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-        match message {
-            Message::Keyed(keyed_message) => {
-                let key = keyed_message.key().clone();
-                
-                // Get or create accumulators for this key
-                if !self.accumulators.contains_key(&key.hash()) {
-                    let accs = self.create_accumulators();
-                    self.accumulators.insert(key.hash(), (keyed_message.base.clone(), accs));
-                }
-                let (_first_message, accumulators) = self.accumulators
-                    .get_mut(&key.hash())
-                    .expect("Accumulators should exist after insert");
-                
-                // Update accumulators
-                for (i, accumulator) in accumulators.iter_mut().enumerate() {
-                    if let Some(aggr_expr) = self.aggregate_exec.aggr_expr().get(i) {
-                        let values = aggr_expr
-                            .expressions()
-                            .iter()
-                            .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expression"))
-                            .collect::<Vec<_>>();
-                        
-                        // Convert ColumnarValue to ArrayRef
-                        let arrays: Vec<ArrayRef> = values
-                            .into_iter()
-                            .filter_map(|v| match v {
-                                ColumnarValue::Array(a) => Some(a),
-                                ColumnarValue::Scalar(s) => {
-                                    // Convert scalar to array with batch size
-                                    let batch_size = keyed_message.base.record_batch.num_rows();
-                                    s.to_array_of_size(batch_size).ok()
-                                }
-                            })
-                            .collect();
-                        
-                        if arrays.is_empty() {
-                            panic!("No arrays to update accumulator");
-                        }
-
-                        let _ = accumulator.update_batch(&arrays);
-                        
-                    }
-                }
-                // No immediate emission - wait for watermark
-                None
-            }
-            _ => panic!("Aggregate operator expects keyed messages"),
-        }
-    }
-
-    async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
-        // Emit final results when receiving MAX watermark
-        if watermark_value != MAX_WATERMARK_VALUE {
-            return None;
-        }
-
-        if !self.accumulators.is_empty() {
-            let messages = self.emit_all_accumulators();
-            Some(messages)
-        } else {
-            None
-        }
+    fn set_input(&mut self, input: Option<MessageStream>) {
+        self.base.set_input(input);
     }
     
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
+    }
+
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        // First, return any buffered messages
+        if let Some(msg) = self.base.pending_messages.pop() {
+            return OperatorPollResult::Ready(msg);
+        }
+        
+        // Then process input stream
+        let input_stream = self.base.input.as_mut().expect("input should exist");
+            
+        match input_stream.next().await {
+            Some(message) => {
+                match message {
+                    Message::Keyed(keyed_message) => {
+                        // Inline process_message logic
+                        let key = keyed_message.key().clone();
+                        let aggregate_exec = self.aggregate_exec.clone(); // Clone before mutable borrow
+                        
+                        // Get or create accumulators for this key
+                        if !self.accumulators.contains_key(&key.hash()) {
+                            let accs = Self::create_accumulators(&aggregate_exec);
+                            self.accumulators.insert(key.hash(), (keyed_message.base.clone(), accs));
+                        }
+                        let (_first_message, accumulators) = self.accumulators
+                            .get_mut(&key.hash())
+                            .expect("Accumulators should exist after insert");
+                        
+                        // Update accumulators
+                        for (i, accumulator) in accumulators.iter_mut().enumerate() {
+                            if let Some(aggr_expr) = aggregate_exec.aggr_expr().get(i) {
+                                let values = aggr_expr
+                                    .expressions()
+                                    .iter()
+                                    .map(|expr| expr.evaluate(&keyed_message.base.record_batch).expect("should be able to evaluate expression"))
+                                    .collect::<Vec<_>>();
+                                
+                                // Convert ColumnarValue to ArrayRef
+                                let arrays: Vec<ArrayRef> = values
+                                    .into_iter()
+                                    .filter_map(|v| match v {
+                                        ColumnarValue::Array(a) => Some(a),
+                                        ColumnarValue::Scalar(s) => {
+                                            // Convert scalar to array with batch size
+                                            let batch_size = keyed_message.base.record_batch.num_rows();
+                                            s.to_array_of_size(batch_size).ok()
+                                        }
+                                    })
+                                    .collect();
+                                
+                                if arrays.is_empty() {
+                                    panic!("No arrays to update accumulator");
+                                }
+
+                                let _ = accumulator.update_batch(&arrays);
+                            }
+                        }
+                        // No immediate emission - return Continue
+                        OperatorPollResult::Continue
+                    }
+                    Message::Watermark(watermark) => {
+                        // Inline process_watermark logic
+                        // TODO why do we emit only on max watermark?
+                        if watermark.watermark_value == MAX_WATERMARK_VALUE {
+                            if !self.accumulators.is_empty() {
+                                // Emit aggregated result first
+                                if let Some(result_msg) = self.emit_all_accumulators() {
+                                    // Buffer the watermark to be returned on next poll
+                                    self.base.pending_messages.push(Message::Watermark(watermark));
+                                    return OperatorPollResult::Ready(result_msg);
+                                }
+                            }
+                        }
+                        // Always pass through watermarks (if no result was emitted)
+                        OperatorPollResult::Ready(Message::Watermark(watermark))
+                    }
+                    _ => {
+                        panic!("Aggregate operator expects keyed messages or watermarks");
+                    }
+                }
+            }
+            None => OperatorPollResult::None,
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::StreamExt;
 
     #[tokio::test]
     async fn test_aggregate_operator() {
@@ -289,6 +327,8 @@ mod tests {
             ("charlie", vec![60i64]),
         ];
         
+        let mut messages_to_process = Vec::new();
+        
         for (name, values) in test_data {
             for value in values {
                 // Create RecordBatch with single row
@@ -315,88 +355,112 @@ mod tests {
                     key
                 );
                 
-                // Process the message
-                let _result = operator.process_message(Message::Keyed(keyed_message)).await;
-                // Intermediate results may or may not be produced depending on implementation
+                // Collect messages for stream processing
+                messages_to_process.push(Message::Keyed(keyed_message));
             }
         }
         
-        // Send max watermark to finalize aggregation
-        let final_result = operator.process_watermark(MAX_WATERMARK_VALUE).await;
+        // Add max watermark to finalize aggregation
+        messages_to_process.push(Message::Watermark(crate::common::WatermarkMessage::new(
+            "test".to_string(),
+            MAX_WATERMARK_VALUE,
+            Some(0)
+        )));
         
-        // Verify results
-        if let Some(messages) = final_result {
-            assert_eq!(messages.len(), 1, "Should produce exactly one message with concatenated results");
-            
-            let message = &messages[0];
-            let batch = message.record_batch();
-            
-            // Get expected schema from AggregateExec
-            let expected_schema = operator.aggregate_exec.schema();
-            let actual_schema = batch.schema();
-            assert_eq!(
-                expected_schema.as_ref(), 
-                actual_schema.as_ref(),
-                "Output schema should match AggregateExec schema.\nExpected: {:?}\nActual: {:?}", 
-                expected_schema.fields(),
-                actual_schema.fields()
-            );
-            
-            // Verify we have the expected number of columns and rows
-            assert_eq!(batch.num_columns(), 6, "Should have 6 columns: name, count, sum_value, avg_value, max_value, min_value");
-            assert_eq!(batch.num_rows(), 3, "Should have 3 rows (one for each group: alice, bob, charlie)");
-            
-            // Extract all columns from the batch
-            let name_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-            let count_column = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
-            let sum_column = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
-            let avg_column = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
-            let max_column = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
-            let min_column = batch.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
-            
-            // Check that we have results for each group
-            let mut alice_results = (0i64, 0i64, 0.0f64, 0i64, 0i64); // (count, sum, avg, max, min)
-            let mut bob_results = (0i64, 0i64, 0.0f64, 0i64, 0i64);
-            let mut charlie_results = (0i64, 0i64, 0.0f64, 0i64, 0i64);
-            
-            for i in 0..batch.num_rows() {
-                let name = name_column.value(i);
-                let count = count_column.value(i);
-                let sum_value = sum_column.value(i);
-                let avg_value = avg_column.value(i);
-                let max_value = max_column.value(i);
-                let min_value = min_column.value(i);
-                
-                match name {
-                    "alice" => alice_results = (count, sum_value, avg_value, max_value, min_value),
-                    "bob" => bob_results = (count, sum_value, avg_value, max_value, min_value),
-                    "charlie" => charlie_results = (count, sum_value, avg_value, max_value, min_value),
-                    other => panic!("Unexpected name in results: {}", other),
+        // Get expected schema from AggregateExec before moving operator
+        let expected_schema = operator.aggregate_exec.schema();
+        
+        // Create input stream from collected messages
+        let input_stream = Box::pin(futures::stream::iter(messages_to_process));
+        
+        // Process through message stream
+        operator.set_input(Some(input_stream));
+        let mut final_result = Vec::new();
+        
+        while let result = operator.poll_next().await {
+            match result {
+                OperatorPollResult::None => {
+                    break;
+                }
+                OperatorPollResult::Continue => {
+                    continue;
+                }
+                OperatorPollResult::Ready(message) => {
+                    if !matches!(message, Message::Watermark(_)) {
+                        final_result.push(message);
+                    }
                 }
             }
-            
-            // Verify expected results for Alice (values: 10, 20, 30)
-            assert_eq!(alice_results.0, 3, "Alice should have count of 3");
-            assert_eq!(alice_results.1, 60, "Alice should have sum of 60 (10+20+30)");
-            assert!((alice_results.2 - 20.0).abs() < 1e-10, "Alice should have avg of 20.0, got {}", alice_results.2);
-            assert_eq!(alice_results.3, 30, "Alice should have max of 30");
-            assert_eq!(alice_results.4, 10, "Alice should have min of 10");
-            
-            // Verify expected results for Bob (values: 40, 50)
-            assert_eq!(bob_results.0, 2, "Bob should have count of 2");
-            assert_eq!(bob_results.1, 90, "Bob should have sum of 90 (40+50)");
-            assert!((bob_results.2 - 45.0).abs() < 1e-10, "Bob should have avg of 45.0, got {}", bob_results.2);
-            assert_eq!(bob_results.3, 50, "Bob should have max of 50");
-            assert_eq!(bob_results.4, 40, "Bob should have min of 40");
-            
-            // Verify expected results for Charlie (values: 60)
-            assert_eq!(charlie_results.0, 1, "Charlie should have count of 1");
-            assert_eq!(charlie_results.1, 60, "Charlie should have sum of 60");
-            assert!((charlie_results.2 - 60.0).abs() < 1e-10, "Charlie should have avg of 60.0, got {}", charlie_results.2);
-            assert_eq!(charlie_results.3, 60, "Charlie should have max of 60");
-            assert_eq!(charlie_results.4, 60, "Charlie should have min of 60");
-        } else {
-            panic!("Expected final aggregate results from watermark message");
         }
+        
+        // Verify results
+        assert!(!final_result.is_empty(), "Should produce at least one message");
+        assert_eq!(final_result.len(), 1, "Should produce exactly one message with concatenated results");
+        
+        let message = &final_result[0];
+        let batch = message.record_batch();
+        let actual_schema = batch.schema();
+        assert_eq!(
+            expected_schema.as_ref(), 
+            actual_schema.as_ref(),
+            "Output schema should match AggregateExec schema.\nExpected: {:?}\nActual: {:?}", 
+            expected_schema.fields(),
+            actual_schema.fields()
+        );
+        
+        // Verify we have the expected number of columns and rows
+        assert_eq!(batch.num_columns(), 6, "Should have 6 columns: name, count, sum_value, avg_value, max_value, min_value");
+        assert_eq!(batch.num_rows(), 3, "Should have 3 rows (one for each group: alice, bob, charlie)");
+        
+        // Extract all columns from the batch
+        let name_column = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
+        let count_column = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let sum_column = batch.column(2).as_any().downcast_ref::<Int64Array>().unwrap();
+        let avg_column = batch.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
+        let max_column = batch.column(4).as_any().downcast_ref::<Int64Array>().unwrap();
+        let min_column = batch.column(5).as_any().downcast_ref::<Int64Array>().unwrap();
+        
+        // Check that we have results for each group
+        let mut alice_results = (0i64, 0i64, 0.0f64, 0i64, 0i64); // (count, sum, avg, max, min)
+        let mut bob_results = (0i64, 0i64, 0.0f64, 0i64, 0i64);
+        let mut charlie_results = (0i64, 0i64, 0.0f64, 0i64, 0i64);
+        
+        for i in 0..batch.num_rows() {
+            let name = name_column.value(i);
+            let count = count_column.value(i);
+            let sum_value = sum_column.value(i);
+            let avg_value = avg_column.value(i);
+            let max_value = max_column.value(i);
+            let min_value = min_column.value(i);
+            
+            match name {
+                "alice" => alice_results = (count, sum_value, avg_value, max_value, min_value),
+                "bob" => bob_results = (count, sum_value, avg_value, max_value, min_value),
+                "charlie" => charlie_results = (count, sum_value, avg_value, max_value, min_value),
+                other => panic!("Unexpected name in results: {}", other),
+            }
+        }
+        
+        // Verify expected results for Alice (values: 10, 20, 30)
+        assert_eq!(alice_results.0, 3, "Alice should have count of 3");
+        assert_eq!(alice_results.1, 60, "Alice should have sum of 60 (10+20+30)");
+        assert!((alice_results.2 - 20.0).abs() < 1e-10, "Alice should have avg of 20.0, got {}", alice_results.2);
+        assert_eq!(alice_results.3, 30, "Alice should have max of 30");
+        assert_eq!(alice_results.4, 10, "Alice should have min of 10");
+        
+        // Verify expected results for Bob (values: 40, 50)
+        assert_eq!(bob_results.0, 2, "Bob should have count of 2");
+        assert_eq!(bob_results.1, 90, "Bob should have sum of 90 (40+50)");
+        assert!((bob_results.2 - 45.0).abs() < 1e-10, "Bob should have avg of 45.0, got {}", bob_results.2);
+        assert_eq!(bob_results.3, 50, "Bob should have max of 50");
+        assert_eq!(bob_results.4, 40, "Bob should have min of 40");
+        
+        // Verify expected results for Charlie (values: 60)
+        assert_eq!(charlie_results.0, 1, "Charlie should have count of 1");
+        assert_eq!(charlie_results.1, 60, "Charlie should have sum of 60");
+        assert!((charlie_results.2 - 60.0).abs() < 1e-10, "Charlie should have avg of 60.0, got {}", charlie_results.2);
+        assert_eq!(charlie_results.3, 60, "Charlie should have max of 60");
+        assert_eq!(charlie_results.4, 60, "Charlie should have min of 60");
     }
 }
+

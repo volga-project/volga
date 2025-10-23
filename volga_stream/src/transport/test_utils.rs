@@ -1,7 +1,9 @@
 use anyhow::{Ok, Result};
+use futures::StreamExt;
 use kameo::Actor;
 use kameo::message::Context;
 use crate::common::message::Message;
+use crate::runtime::operators::operator::MessageStream;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client::{DataReader, DataWriter};
 
@@ -14,13 +16,15 @@ pub enum TestDataReaderMessage {
 
 #[derive(Actor)]
 pub struct TestDataReaderActor {
-    reader: DataReader,
+    reader_message_stream: MessageStream,
 }
 
 impl TestDataReaderActor {
     pub fn new(vertex_id: String, transport_client_config: TransportClientConfig) -> Self {
+        let reader = DataReader::new(vertex_id, transport_client_config.reader_receivers.unwrap());
+        let reader_message_stream = reader.message_stream();
         Self {
-            reader: DataReader::new(vertex_id, transport_client_config.reader_receivers.unwrap()),
+            reader_message_stream,
         }
     }
 }
@@ -31,7 +35,7 @@ impl kameo::message::Message<TestDataReaderMessage> for TestDataReaderActor {
     async fn handle(&mut self, msg: TestDataReaderMessage, _ctx: &mut Context<TestDataReaderActor, Result<Option<Message>>>) -> Self::Reply {
         match msg {
             TestDataReaderMessage::ReadMessage => {
-                self.reader.read_message().await
+                Ok(self.reader_message_stream.next().await)
             }
         }
     }
