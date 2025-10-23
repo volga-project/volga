@@ -80,7 +80,7 @@ pub async fn run_window_benchmark(
     
     let start_time = Instant::now();
     
-    // Execute the streaming job
+    // Execute the pipeline job
     context.execute().await.unwrap();
     
     let execution_time = start_time.elapsed();
@@ -122,11 +122,11 @@ pub async fn run_window_benchmark(
     Ok((key_sums, num_records_produced, execution_time))
 }
 
-// #[tokio::test]
+#[tokio::test]
 async fn test_window_benchmark() -> Result<()> {
     let parallelism = 1;
     let num_keys = 4;
-    let total_records = 3000;
+    let total_records = 20;
     let batch_size = 1;
     let rate = 10.0;
 

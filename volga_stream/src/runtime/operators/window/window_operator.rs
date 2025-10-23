@@ -48,7 +48,6 @@ pub struct WindowOperatorConfig {
 }
 
 impl WindowOperatorConfig {
-    // TODO pass all the fileds from upstream/parse window_exprs
     pub fn new(window_exec: Arc<BoundedWindowAggExec>) -> Self {    
         Self {
             window_exec,
@@ -73,8 +72,6 @@ pub struct WindowOperator {
     input_schema: SchemaRef,
     tiling_configs: Vec<Option<TileConfig>>,
     lateness: Option<i64>,
-    // input_stream: Option<MessageStream>,
-    // pending_messages: Vec<Message>, // Buffer for messages waiting to be emitted
 }
 
 impl fmt::Debug for WindowOperator {
@@ -131,7 +128,6 @@ impl WindowOperator {
             base: OperatorBase::new(config, storage),
             windows,
             state: State::new(),
-            // time_index: TimeIndex::new(),
             ts_column_index,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
@@ -620,7 +616,8 @@ impl OperatorTrait for WindowOperator {
                     Message::Watermark(watermark) => {
                         // Inline process_watermark logic
                         if self.execution_mode == ExecutionMode::EventBased {
-                            panic!("EventBased execution mode does not support watermark processing");
+                            // pass through
+                            return OperatorPollResult::Ready(Message::Watermark(watermark));
                         }
                         let result = self.process_buffered().await;
                         self.buffered_keys.clear();
