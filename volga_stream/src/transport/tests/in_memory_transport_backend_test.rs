@@ -102,7 +102,8 @@ async fn test_actor_transport() {
             let message = Message::new(
                 Some(format!("writer{}_stream", writer_idx)),
                 create_test_string_batch(vec![format!("writer{}_batch{}", writer_idx, message_idx)]),
-                Some(100)
+                Some(100),
+                None
             );
             for reader_idx in 0..num_readers {
                 let edge_id = gen_edge_id(&writer_vertex_ids[writer_idx].clone(), &reader_vertex_ids[reader_idx].clone());

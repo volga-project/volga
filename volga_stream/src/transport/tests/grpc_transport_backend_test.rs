@@ -184,7 +184,8 @@ async fn test_grpc_transport_backend() {
             let message = Message::new(
                 Some(format!("writer_{}_stream", writer_idx)),
                 create_test_string_batch(vec![format!("writer_{}_batch_{}", writer_idx, message_idx)]),
-                Some(100)
+                Some(100),
+                None
             );
 
             for reader_idx in 0..reader_vertex_ids.len() {

@@ -287,7 +287,8 @@ fn create_test_message_for_client(client_name: &str, index: usize) -> Message {
             Message::new(
                 Some(format!("upstream_{}", client_name)),
                 record_batch,
-                Some(1234567890 + index as u64)
+                Some(1234567890 + index as u64),
+                None
             )
         }
         1 => {
@@ -317,7 +318,8 @@ fn create_test_message_for_client(client_name: &str, index: usize) -> Message {
                 Some(format!("upstream_{}", client_name)),
                 data_batch,
                 key,
-                Some(1234567890 + index as u64)
+                Some(1234567890 + index as u64),
+                None
             )
         }
         2 => {

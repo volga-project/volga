@@ -71,6 +71,7 @@ impl MapFunctionTrait for FilterFunction {
             message.upstream_vertex_id(),
             result,
             message.ingest_timestamp(),
+            message.get_extras(),
         );
         Ok(new_message)
     }
@@ -129,7 +130,7 @@ mod tests {
         
         // Test 1: Filter only (no projection)
         let filter_func = FilterFunction::new(DFSchemaRef::from(DFSchema::try_from(schema.clone()).unwrap()), predicate.clone(), ctx.clone());
-        let message = Message::new(None, batch.clone(), None);
+        let message = Message::new(None, batch.clone(), None, None);
         
         let result = filter_func.map(message).unwrap();
         let filtered_batch = result.record_batch();

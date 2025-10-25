@@ -529,6 +529,8 @@ impl OperatorTrait for WindowOperator {
         
         match input_stream.next().await {
             Some(message) => {
+                let ingest_ts = message.ingest_timestamp();
+                let extras = message.get_extras();
                 match message {
                     Message::Keyed(keyed_message) => {
                         // Inline process_message logic
@@ -609,8 +611,7 @@ impl OperatorTrait for WindowOperator {
                             };
                             let result = self.process_key(&partition_key, Some(windows_state), late_entries).await;
                             // vertex_id will be set by stream task
-                            // TODO ingest timestamp?
-                            return OperatorPollResult::Ready(Message::new(None, result, None));
+                            return OperatorPollResult::Ready(Message::new(None, result, ingest_ts, extras));
                         }
                     }
                     Message::Watermark(watermark) => {
@@ -622,11 +623,11 @@ impl OperatorTrait for WindowOperator {
                         let result = self.process_buffered().await;
                         self.buffered_keys.clear();
                         // vertex_id will be set by stream task
-                        // TODO ingest timestamp?
+                        // TODO ingest timestamp and extras?
                         
                         // Buffer the watermark to be returned on next call
                         self.base.pending_messages.push(Message::Watermark(watermark));
-                        return OperatorPollResult::Ready(Message::new(None, result, None));
+                        return OperatorPollResult::Ready(Message::new(None, result, None, None));
                     }
                     _ => {
                         panic!("Window operator expects keyed messages or watermarks");
@@ -767,7 +768,7 @@ mod tests {
 
     fn create_keyed_message(batch: RecordBatch, partition_key: &str) -> Message {
         let key = create_test_key(partition_key);
-        Message::new_keyed(None, batch, key, None)
+        Message::new_keyed(None, batch, key, None, None)
     }
 
     fn create_test_runtime_context() -> RuntimeContext {

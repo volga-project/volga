@@ -2,6 +2,7 @@ use arrow::record_batch::RecordBatch;
 use anyhow::Result;
 use serde::{Serialize, Deserialize};
 use std::io::{Cursor, Read, Write};
+use std::collections::HashMap;
 
 use super::Key;
 
@@ -12,10 +13,10 @@ pub struct BaseMessage {
 }
 
 impl BaseMessage {
-    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>) -> Self {
+    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
         Self {
             record_batch,
-            metadata: MessageMetadata { upstream_vertex_id, ingest_timestamp}
+            metadata: MessageMetadata { upstream_vertex_id, ingest_timestamp, extras }
         }
     }
 
@@ -99,16 +100,26 @@ impl BaseMessage {
 pub struct MessageMetadata {
     pub upstream_vertex_id: Option<String>,
     pub ingest_timestamp: Option<u64>,
+    pub extras: Option<HashMap<String, String>>,
 }
 
 impl MessageMetadata {
     pub fn get_memory_size(&self) -> usize {
         // Option<u64> = 8 bytes, Option<String> = 24 bytes + string length
         let mut len = 0;
-        if self.upstream_vertex_id.is_some() {
-            len = self.upstream_vertex_id.as_ref().unwrap().len();
+        if let Some(ref vertex_id) = self.upstream_vertex_id {
+            len += vertex_id.len();
         }
-        8 + 24 + len
+        
+        // Add memory for extras HashMap
+        if let Some(ref extras) = self.extras {
+            len += 24; // HashMap overhead
+            for (key, value) in extras {
+                len += key.len() + value.len() + 48; // String overhead for each entry
+            }
+        }
+        
+        8 + 24 + 24 + len // u64 + Option<String> + Option<HashMap> + content
     }
 }
 
@@ -193,7 +204,8 @@ impl WatermarkMessage {
             watermark_value,
             metadata: MessageMetadata {
                 upstream_vertex_id: Some(upstream_vertex_id),
-                ingest_timestamp
+                ingest_timestamp,
+                extras: None
             }
         }
     }
@@ -231,13 +243,14 @@ pub enum Message {
 }
 
 impl Message {
-    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>) -> Self {
-        Message::Regular(BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp))
+
+    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
+        Message::Regular(BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, extras))
     }
 
-    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: Key, ingest_timestamp: Option<u64>) -> Self {
+    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: Key, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
         Message::Keyed(KeyedMessage::new(
-            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp),
+            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, extras),
             key,
         ))
     }
@@ -289,6 +302,16 @@ impl Message {
             Message::Keyed(message) => message.base.set_upstream_vertex_id(upstream_vertex_id),
             Message::Watermark(message) => message.set_upstream_vertex_id(upstream_vertex_id),
         }
+    }
+
+    pub fn get_extras(&self) -> Option<HashMap<String, String>> {
+        let metadata = match self {
+            Message::Regular(message) => &message.metadata,
+            Message::Keyed(message) => &message.base.metadata,
+            Message::Watermark(message) => &message.metadata,
+        };
+        
+        metadata.extras.clone()
     }
 
     pub fn get_memory_size(&self) -> usize {
@@ -403,11 +426,13 @@ mod tests {
             ]
         ).unwrap();
 
+        // TODO add extras
         // Create a regular message
         let original_message = Message::new(
             Some("upstream_vertex".to_string()),
             record_batch,
-            Some(1234567890)
+            Some(1234567890),
+            None
         );
 
         // Test serialization and deserialization
@@ -453,11 +478,13 @@ mod tests {
         let key = Key::new(key_batch).unwrap();
 
         // Create a keyed message
+        // TODO add extras
         let original_message = Message::new_keyed(
             Some("upstream_vertex".to_string()),
             record_batch,
             key.clone(),
-            Some(1234567890)
+            Some(1234567890),
+            None
         );
 
         // Test serialization and deserialization

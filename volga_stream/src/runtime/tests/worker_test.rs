@@ -16,9 +16,9 @@ fn test_worker_execution() -> Result<()> {
     let runtime = Runtime::new()?;
 
     let expected_messages = vec![
-        Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None),
-        Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None),
-        Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None),
+        Message::new(None, create_test_string_batch(vec!["test1".to_string()]), None, None),
+        Message::new(None, create_test_string_batch(vec!["test2".to_string()]), None, None),
+        Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None, None),
     ];
 
     let mut test_messages = expected_messages.clone();

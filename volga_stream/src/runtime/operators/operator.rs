@@ -139,42 +139,6 @@ impl OperatorTrait for Operator {
         }
     }
 
-    // async fn process_message(&mut self, message: Message) -> Option<Vec<Message>> {
-    //     match &message {
-    //         Message::Watermark(watermark) => {
-    //             panic!("Watermark should not be processed by process_message");
-    //         }
-    //         _ => {
-    //             // Process regular messages as before
-    //             match self {
-    //                 Operator::Map(op) => op.process_message(message).await,
-    //                 Operator::Join(op) => op.process_message(message).await,
-    //                 Operator::Sink(op) => op.process_message(message).await,
-    //                 Operator::Source(op) => op.process_message(message).await,
-    //                 Operator::KeyBy(op) => op.process_message(message).await,
-    //                 Operator::Reduce(op) => op.process_message(message).await,
-    //                 Operator::Aggregate(op) => op.process_message(message).await,
-    //                 Operator::Window(op) => op.process_message(message).await,
-    //                 Operator::Chained(op) => op.process_message(message).await,
-    //             }
-    //         }
-    //     }
-    // }
-
-    // async fn process_watermark(&mut self, watermark_value: u64) -> Option<Vec<Message>> {
-    //     match self {
-    //         Operator::Map(op) => op.process_watermark(watermark_value).await,
-    //         Operator::Join(op) => op.process_watermark(watermark_value).await,
-    //         Operator::Sink(op) => op.process_watermark(watermark_value).await,
-    //         Operator::Source(op) => op.process_watermark(watermark_value).await,
-    //         Operator::KeyBy(op) => op.process_watermark(watermark_value).await,
-    //         Operator::Reduce(op) => op.process_watermark(watermark_value).await,
-    //         Operator::Aggregate(op) => op.process_watermark(watermark_value).await,
-    //         Operator::Window(op) => op.process_watermark(watermark_value).await,
-    //         Operator::Chained(op) => op.process_watermark(watermark_value).await,
-    //     }
-    // }
-
     fn operator_type(&self) -> OperatorType {
         match self {
             Operator::Map(op) => op.operator_type(),
@@ -202,20 +166,6 @@ impl OperatorTrait for Operator {
             Operator::Chained(op) => op.set_input(input),
         }
     }
-
-    // async fn fetch(&mut self) -> Option<Vec<Message>> {
-    //     match self {
-    //         Operator::Map(op) => op.fetch().await,
-    //         Operator::Join(op) => op.fetch().await,
-    //         Operator::Sink(op) => op.fetch().await,
-    //         Operator::Source(op) => op.fetch().await,
-    //         Operator::KeyBy(op) => op.fetch().await,
-    //         Operator::Reduce(op) => op.fetch().await,
-    //         Operator::Aggregate(op) => op.fetch().await,
-    //         Operator::Window(op) => op.fetch().await,
-    //         Operator::Chained(op) => op.fetch().await,
-    //     }
-    // }
     
     async fn poll_next(&mut self) -> OperatorPollResult {
         match self {

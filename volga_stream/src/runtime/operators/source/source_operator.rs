@@ -4,7 +4,7 @@ use anyhow::Result;
 use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
 
 
 #[derive(Debug, Clone)]
@@ -31,6 +31,7 @@ pub enum SourceConfig {
     VectorSourceConfig(VectorSourceConfig),
     WordCountSourceConfig(WordCountSourceConfig),
     DatagenSourceConfig(DatagenSourceConfig),
+    HttpRequestSourceConfig(RequestSourceConfig),
 }
 
 // TODO deprecate in favor of datagen
@@ -91,6 +92,7 @@ impl SourceConfig {
             SourceConfig::VectorSourceConfig(config) => config.get_projection(),
             SourceConfig::WordCountSourceConfig(config) => config.get_projection(),
             SourceConfig::DatagenSourceConfig(config) => config.get_projection(),
+            SourceConfig::HttpRequestSourceConfig(_) => (None, None), // Request source doesn't support projection
         }
     }
 
@@ -99,6 +101,7 @@ impl SourceConfig {
             SourceConfig::VectorSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::WordCountSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::DatagenSourceConfig(config) => config.set_projection(projection, schema),
+            SourceConfig::HttpRequestSourceConfig(_) => {}, // Request source doesn't support projection
         }
     }
 }
@@ -109,6 +112,7 @@ impl std::fmt::Display for SourceConfig {
             SourceConfig::VectorSourceConfig(_) => write!(f, "Vector"),
             SourceConfig::WordCountSourceConfig(_) => write!(f, "WordCount"),
             SourceConfig::DatagenSourceConfig(_) => write!(f, "Datagen"),
+            SourceConfig::HttpRequestSourceConfig(_) => write!(f, "HttpRequest"),
         }
     }
 }
@@ -176,7 +180,7 @@ impl OperatorTrait for SourceOperator {
                         projected_columns,
                     ).unwrap();
                     
-                    let projected_message = Message::new(message.upstream_vertex_id(), projected_batch, message.ingest_timestamp());
+                    let projected_message = Message::new(message.upstream_vertex_id(), projected_batch, message.ingest_timestamp(), message.get_extras());
                     OperatorPollResult::Ready(projected_message)
                 } else {
                     OperatorPollResult::Ready(message)

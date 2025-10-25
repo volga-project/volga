@@ -104,7 +104,8 @@ impl AggregationResultExtractorTrait for AllAggregationsResultExtractor {
         ).unwrap();
         
         Message::Keyed(KeyedMessage::new(
-            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp),
+            // TODO do we need proper extras here?
+            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, None),
             key.clone(),
         ))
     }
@@ -156,7 +157,8 @@ impl AggregationResultExtractorTrait for SingleAggregationResultExtractor {
         ).unwrap();
         
         Message::Keyed(KeyedMessage::new(
-            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp),
+            // TODO do we need proper extras here?
+            BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, None),
             key.clone(),
         ))
     }
@@ -388,7 +390,7 @@ mod tests {
             vec![Arc::new(value_array)]
         ).unwrap();
         
-        let base_message = BaseMessage::new(None, record_batch, None);
+        let base_message = BaseMessage::new(None, record_batch, None, None);
         
         // Create key batch with a single row
         let key_schema = Arc::new(arrow::datatypes::Schema::new(vec![
@@ -498,7 +500,7 @@ mod tests {
             vec![Arc::new(string_array)]
         ).unwrap();
         let string_message = KeyedMessage::new(
-            BaseMessage::new(None, string_batch, None),
+            BaseMessage::new(None, string_batch, None, None),
             Key::new(RecordBatch::try_new(
                 Arc::new(Schema::new(vec![Field::new("key", DataType::Int32, false)])),
                 vec![Arc::new(Int32Array::from(vec![1]))]

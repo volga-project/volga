@@ -483,7 +483,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
     // Convert input batches to messages
     let mut test_messages: Vec<Message> = test_case.input_batches
         .iter()
-        .map(|batch| Message::new(None, batch.clone(), None))
+        .map(|batch| Message::new(None, batch.clone(), None, None))
         .collect();
     
     test_messages.push(Message::Watermark(WatermarkMessage::new(
@@ -517,7 +517,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
     storage_server.stop().await;
 
     // Convert expected batch to message for comparison
-    let expected_messages = vec![Message::new(None, test_case.expected_batch.clone(), None)];
+    let expected_messages = vec![Message::new(None, test_case.expected_batch.clone(), None, None)];
 
     // Verify results - use unordered comparison for group by operations
     let preserve_order = !matches!(test_case.name, 

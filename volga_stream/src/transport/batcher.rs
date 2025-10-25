@@ -218,13 +218,17 @@ impl Batcher {
 
         // ingest_timestamp of a batch should be max among all
         let ingest_timestamp = messages.iter().map(|m| m.ingest_timestamp().unwrap()).max().unwrap();
+        // TODO merge extras
+        let extras = first_message.get_extras();
+
 
         let batched_message = match first_message {
             Message::Regular(_) => {
                 Message::new(
                     first_message.upstream_vertex_id().clone(),
                     batched_record_batch,
-                    Some(ingest_timestamp)
+                    Some(ingest_timestamp),
+                    extras
                 )
             }
             Message::Keyed(_) => {
@@ -234,7 +238,8 @@ impl Batcher {
                     first_message.upstream_vertex_id().clone(),
                     batched_record_batch,
                     key,
-                    Some(ingest_timestamp)
+                    Some(ingest_timestamp),
+                    extras
                 )
             }
             Message::Watermark(_) => {
@@ -462,7 +467,8 @@ mod tests {
         Message::new(
             Some("test_vertex".to_string()),
             record_batch,
-            Some(timestamp)
+            Some(timestamp),
+            None
         )
     }
 
@@ -485,7 +491,8 @@ mod tests {
             Some("test_vertex".to_string()),
             record_batch,
             key_obj,
-            Some(timestamp)
+            Some(timestamp),
+            None
         )
     }
 

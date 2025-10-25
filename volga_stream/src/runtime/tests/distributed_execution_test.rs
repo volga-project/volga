@@ -22,10 +22,11 @@ impl MapFunctionTrait for KeyedToRegularMapFunction {
         let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
         let upstream_vertex_id = message.upstream_vertex_id();
         let ingest_ts = message.ingest_timestamp();
+        let extras = message.get_extras();
         match message {
             Message::Keyed(keyed_message) => {
                 // Create a new regular message with the same record batch
-                Ok(Message::new(upstream_vertex_id, keyed_message.base.record_batch, ingest_ts))
+                Ok(Message::new(upstream_vertex_id, keyed_message.base.record_batch, ingest_ts, extras))
             }
             _ => Ok(message), // Pass through non-keyed messages (like watermarks)
         }
@@ -56,6 +57,7 @@ fn test_distributed_execution() -> Result<()> {
             source_messages.push(Message::new(
                 None,
                 create_test_string_batch(vec![format!("value_{}", i)]),
+                None,
                 None
             ));
         }

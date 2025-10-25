@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use std::fmt;
 use crate::common::message::Message;
+use crate::runtime::functions::source::HttpRequestSourceFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
@@ -20,6 +21,7 @@ pub enum SourceFunction {
     Vector(VectorSourceFunction),
     WordCount(WordCountSourceFunction),
     Datagen(DatagenSourceFunction),
+    HttpRequest(HttpRequestSourceFunction),
 }
 
 impl fmt::Display for SourceFunction {
@@ -28,6 +30,7 @@ impl fmt::Display for SourceFunction {
             SourceFunction::Vector(_) => write!(f, "Vector"),
             SourceFunction::WordCount(_) => write!(f, "WordCount"),
             SourceFunction::Datagen(_) => write!(f, "Datagen"),
+            SourceFunction::HttpRequest(_) => write!(f, "HttpRequest"),
         }
     }
 }
@@ -39,6 +42,7 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.fetch().await,
             SourceFunction::WordCount(f) => f.fetch().await,
             SourceFunction::Datagen(f) => f.fetch().await,
+            SourceFunction::HttpRequest(f) => f.fetch().await,
         }
     }
 }
@@ -50,6 +54,7 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.open(context).await,
             SourceFunction::WordCount(f) => f.open(context).await,
             SourceFunction::Datagen(f) => f.open(context).await,
+            SourceFunction::HttpRequest(f) => f.open(context).await,
         }
     }
     
@@ -58,6 +63,7 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Vector(f) => f.close().await,
             SourceFunction::WordCount(f) => f.close().await,
             SourceFunction::Datagen(f) => f.close().await,
+            SourceFunction::HttpRequest(f) => f.close().await,
         }
     }
     
@@ -87,6 +93,9 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
         }
         SourceConfig::DatagenSourceConfig(datagen_config) => {
             SourceFunction::Datagen(DatagenSourceFunction::new(datagen_config))
+        }
+        SourceConfig::HttpRequestSourceConfig(request_config) => {
+            SourceFunction::HttpRequest(HttpRequestSourceFunction::new(request_config))
         }
     }
 } 

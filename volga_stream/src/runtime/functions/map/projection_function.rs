@@ -87,6 +87,7 @@ impl MapFunctionTrait for ProjectionFunction {
             message.upstream_vertex_id(),
             projected_batch,
             message.ingest_timestamp(),
+            message.get_extras(),
         );
         Ok(new_message)
     }
@@ -158,7 +159,7 @@ mod tests {
             expressions, 
             ctx
         );
-        let message = Message::new(None, batch, None);
+        let message = Message::new(None, batch, None, None);
         
         let result = projection_func.map(message).unwrap();
         let projected_batch = result.record_batch();
@@ -202,7 +203,7 @@ mod tests {
             expressions, 
             ctx
         );
-        let message = Message::new(None, batch, None);
+        let message = Message::new(None, batch, None, None);
         
         let result = projection_func.map(message).unwrap();
         let projected_batch = result.record_batch();

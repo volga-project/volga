@@ -37,7 +37,7 @@ impl MapFunctionTrait for AddPrefixMapFunction {
             vec![Arc::new(output_array)]
         )?;
         
-        Ok(Message::new(message.upstream_vertex_id(), new_batch, message.ingest_timestamp()))
+        Ok(Message::new(message.upstream_vertex_id(), new_batch, message.ingest_timestamp(), None))
     }
 }
 
@@ -61,7 +61,7 @@ impl MapFunctionTrait for ToUpperCaseMapFunction {
             vec![Arc::new(output_array)]
         )?;
         
-        Ok(Message::new(message.upstream_vertex_id(), new_batch, message.ingest_timestamp()))
+        Ok(Message::new(message.upstream_vertex_id(), new_batch, message.ingest_timestamp(), None))
     }
 }
 
@@ -81,7 +81,7 @@ async fn test_chained_operator_map_map() {
     
     // Set up input stream
     let input_batch = create_test_string_batch(vec!["hello".to_string(), "world".to_string()]);
-    let input_message = Message::new(None, input_batch, None);
+    let input_message = Message::new(None, input_batch, None, None);
     let watermark = Message::Watermark(WatermarkMessage::new("test".to_string(), 1000, None));
     
     let input_stream = Box::pin(futures::stream::iter(vec![input_message, watermark]));
@@ -104,8 +104,8 @@ async fn test_chained_operator_map_map() {
 async fn test_chained_operator_source_map() {
     // Create test messages for source
     let test_messages = vec![
-        Message::new(None, create_test_string_batch(vec!["hello".to_string()]), None),
-        Message::new(None, create_test_string_batch(vec!["world".to_string()]), None),
+        Message::new(None, create_test_string_batch(vec!["hello".to_string()]), None, None),
+        Message::new(None, create_test_string_batch(vec!["world".to_string()]), None, None),
         Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
     ];
     let configs = vec![
@@ -157,7 +157,7 @@ async fn test_chained_operator_source_keyby() {
     ).unwrap();
     
     let test_messages = vec![
-        Message::new(None, batch, None),
+        Message::new(None, batch, None, None),
         Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
     ];
     
@@ -220,7 +220,7 @@ async fn test_chained_operator_source_map_keyby() {
     ).unwrap();
     
     let test_messages = vec![
-        Message::new(None, batch, None),
+        Message::new(None, batch, None, None),
         Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
     ];
     
@@ -316,8 +316,8 @@ async fn test_chained_operator_type() {
 async fn test_chained_operator_source_map_sink() {
     // Create test messages for source
     let test_messages = vec![
-        Message::new(None, create_test_string_batch(vec!["hello".to_string()]), None),
-        Message::new(None, create_test_string_batch(vec!["world".to_string()]), None),
+        Message::new(None, create_test_string_batch(vec!["hello".to_string()]), None, None),
+        Message::new(None, create_test_string_batch(vec!["world".to_string()]), None, None),
     ];
 
     let num_messages = test_messages.len();

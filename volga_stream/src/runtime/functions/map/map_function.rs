@@ -121,7 +121,7 @@ mod tests {
                 vec![Arc::new(output_array)]
             )?;
             
-            Ok(Message::new(message.upstream_vertex_id(), new_batch, message.ingest_timestamp()))
+            Ok(Message::new(message.upstream_vertex_id(), new_batch, message.ingest_timestamp(), message.get_extras()))
         }
     }
 
@@ -138,7 +138,7 @@ mod tests {
             vec![Arc::new(input_array)]
         ).unwrap();
         
-        let message = Message::new(None, record_batch, None);
+        let message = Message::new(None, record_batch, None, None);
         
         // Create and execute map function
         let map_function = MapFunction::new_custom(TestMapFunction);

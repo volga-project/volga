@@ -456,7 +456,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         }
 
         match self.generate_batch(batch_size) {
-            Ok(batch) => Some(Message::new(None, batch, None)),
+            Ok(batch) => Some(Message::new(None, batch, None, None)),
             Err(e) => {
                 panic!("Error generating batch: {}", e);
             }

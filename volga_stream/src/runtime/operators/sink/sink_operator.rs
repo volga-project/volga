@@ -9,12 +9,14 @@ use futures::StreamExt;
 #[derive(Clone, Debug)]
 pub enum SinkConfig {
     InMemoryStorageGrpcSinkConfig(String), // server_addr
+    RequestSinkConfig(tokio::sync::mpsc::Sender<Message>), // response_sender
 }
 
 impl std::fmt::Display for SinkConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             SinkConfig::InMemoryStorageGrpcSinkConfig(_) => write!(f, "InMemoryStorageGrpc"),
+            SinkConfig::RequestSinkConfig(_) => write!(f, "Request"),
         }
     }
 }

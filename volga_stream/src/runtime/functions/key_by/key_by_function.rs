@@ -158,7 +158,7 @@ impl KeyByFunctionTrait for ArrowKeyByFunction {
             
             // Create a KeyedMessage with this partition data
             let keyed_message = KeyedMessage::new(
-                BaseMessage::new(message.upstream_vertex_id(), group_batch, message.ingest_timestamp()),
+                BaseMessage::new(message.upstream_vertex_id(), group_batch, message.ingest_timestamp(), message.get_extras().clone()),
                 key,
             );
             
@@ -301,7 +301,7 @@ impl KeyByFunctionTrait for DataFusionKeyFunction {
             let key = Key::new(key_batch).expect("should be able to create key");
             
             let keyed_message = KeyedMessage::new(
-                BaseMessage::new(message.upstream_vertex_id(), group_batch, message.ingest_timestamp()),
+                BaseMessage::new(message.upstream_vertex_id(), group_batch, message.ingest_timestamp(), message.get_extras()),
                 key,
             );
             
@@ -405,7 +405,7 @@ mod tests {
             vec![Arc::new(id_array), Arc::new(value_array)]
         ).unwrap();
         
-        let message = Message::new(None, record_batch, None);
+        let message = Message::new(None, record_batch, None, None);
         
         // Create a key-by function with 'id' as the key column
         let key_by_function = ArrowKeyByFunction::new(vec!["id".to_string()]);
@@ -478,7 +478,7 @@ mod tests {
             ]
         ).unwrap();
         
-        let message = Message::new(None, record_batch, None);
+        let message = Message::new(None, record_batch, None, None);
         
         // Create a key-by function with both columns as keys
         let key_by_function = ArrowKeyByFunction::new(
@@ -575,7 +575,7 @@ mod tests {
             ]
         ).unwrap();
         
-        let message = Message::new(None, record_batch, None);
+        let message = Message::new(None, record_batch, None, None);
         
         (planner, schema, message)
     }

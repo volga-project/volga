@@ -30,6 +30,7 @@ futures = "0.3"
 async-stream = "0.3"
 ordered-float = { version = "3.7", features = ["serde"] }
 arrow = "55.0.0"
+arrow-json = "55.0.0"
 tokio-util = "0.7"
 lazy_static = "1.4"
 kameo = "0.16.0"
@@ -56,6 +57,11 @@ metrics-exporter-tcp = "0.11.1"
 metrics-util = "0.20.0"
 prometheus-parse = "0.2.5"
 indexmap = "2.11.4"
+axum = "0.7"
+hyper = "1.0"
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json"] }
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

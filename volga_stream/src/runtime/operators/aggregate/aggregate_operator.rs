@@ -88,6 +88,7 @@ impl AggregateOperator {
         let (_, (first_message, _)) = &accumulators[0];
         let upstream_vertex_id = first_message.metadata.upstream_vertex_id.clone();
         let ingest_timestamp = first_message.metadata.ingest_timestamp;
+        let extras = first_message.metadata.extras.clone();
 
         for (_key, (first_message, accumulators)) in accumulators {
             // Build columns in the exact order of the final output schema:
@@ -168,7 +169,8 @@ impl AggregateOperator {
         Some(Message::new(
             upstream_vertex_id,
             concatenated_batch,
-            ingest_timestamp
+            ingest_timestamp,
+            extras
         ))
     }
 
@@ -351,7 +353,7 @@ mod tests {
                 
                 // Create keyed message
                 let keyed_message = KeyedMessage::new(
-                    BaseMessage::new(None, batch, Some(0)), // upstream_vertex_id = None, timestamp = 0
+                    BaseMessage::new(None, batch, Some(0), None), // upstream_vertex_id = None, timestamp = 0
                     key
                 );
                 
