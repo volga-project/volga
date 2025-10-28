@@ -94,8 +94,8 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
         SourceConfig::DatagenSourceConfig(datagen_config) => {
             SourceFunction::Datagen(DatagenSourceFunction::new(datagen_config))
         }
-        SourceConfig::HttpRequestSourceConfig(request_config) => {
-            SourceFunction::HttpRequest(HttpRequestSourceFunction::new(request_config))
+        SourceConfig::HttpRequestSourceConfig(_) => {
+            SourceFunction::HttpRequest(HttpRequestSourceFunction::new())
         }
     }
 } 

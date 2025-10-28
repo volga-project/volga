@@ -7,6 +7,7 @@ use petgraph::prelude::EdgeRef;
 use crate::runtime::operators::chained::chained_operator::group_operators_for_chaining;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
+use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 
@@ -218,6 +219,7 @@ impl LogicalGraph {
                 PartitionType::Hash => "Hash",
                 PartitionType::Broadcast => "Broadcast",
                 PartitionType::RoundRobin => "RoundRobin",
+                PartitionType::RequestRoute => "RequestRoute",
             };
             dot_string.push_str(&format!("  {} -> {} [label=\"{}\"];\n", source_id, target_id, partition_type));
         }
@@ -254,6 +256,8 @@ fn validate_linear_operator_list(operators: &[OperatorConfig]) {
 /// Determines the appropriate partition type between two operators
 pub fn determine_partition_type(source_config: &OperatorConfig, target_config: &OperatorConfig) -> PartitionType {
     match (source_config, target_config) {
+        // RequestRoute partitioning when target is a request sink
+        (_, OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig)) => PartitionType::RequestRoute,
         // Hash partitioning when source is KeyBy
         (OperatorConfig::KeyByConfig(_), _) => PartitionType::Hash,
         // Hash partitioning when source is ChainedConfig and the last operator in the chain is KeyBy

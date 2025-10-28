@@ -69,8 +69,8 @@ pub fn create_sink_function(config: SinkConfig) -> SinkFunction {
         SinkConfig::InMemoryStorageGrpcSinkConfig(server_addr) => {
             SinkFunction::InMemoryStorageGrpc(InMemoryStorageSinkFunction::new(server_addr))
         }
-        SinkConfig::RequestSinkConfig(response_sender) => {
-            SinkFunction::Request(RequestSinkFunction::new(response_sender))
+        SinkConfig::RequestSinkConfig => {
+            SinkFunction::Request(RequestSinkFunction::new())
         }
     }
 }

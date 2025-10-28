@@ -17,7 +17,7 @@ impl LocalExecutor {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Executor for LocalExecutor {
     async fn execute(
         &mut self, 

@@ -1,4 +1,4 @@
-use crate::common::message::Message;
+use crate::{common::message::Message, runtime::functions::source::request_source::SOURCE_TASK_INDEX_FIELD};
 use std::fmt;
 
 pub trait PartitionTrait: Send + Sync + fmt::Debug {
@@ -11,6 +11,7 @@ pub enum PartitionType {
     Hash,
     RoundRobin,
     Forward,
+    RequestRoute,
 }
 
 impl fmt::Display for PartitionType {
@@ -20,6 +21,7 @@ impl fmt::Display for PartitionType {
             PartitionType::Hash => write!(f, "Hash"),
             PartitionType::RoundRobin => write!(f, "RoundRobin"),
             PartitionType::Forward => write!(f, "Forward"),
+            PartitionType::RequestRoute => write!(f, "RequestRoute"),
         }
     }
 }
@@ -30,6 +32,7 @@ pub enum Partition {
     Hash(HashPartition),
     RoundRobin(RoundRobinPartition),
     Forward(ForwardPartition),
+    RequestRoute(RequestRoutePartition),
 }
 
 impl PartitionTrait for Partition {
@@ -39,6 +42,7 @@ impl PartitionTrait for Partition {
             Partition::Hash(p) => p.partition(message, num_partitions),
             Partition::RoundRobin(p) => p.partition(message, num_partitions),
             Partition::Forward(p) => p.partition(message, num_partitions),
+            Partition::RequestRoute(p) => p.partition(message, num_partitions),
         }
     }
 }
@@ -50,6 +54,7 @@ impl PartitionType {
             PartitionType::Hash => Partition::Hash(HashPartition::new()),
             PartitionType::RoundRobin => Partition::RoundRobin(RoundRobinPartition::new()),
             PartitionType::Forward => Partition::Forward(ForwardPartition::new()),
+            PartitionType::RequestRoute => Partition::RequestRoute(RequestRoutePartition::new()),
         }
     }
 }
@@ -121,5 +126,31 @@ impl PartitionTrait for ForwardPartition {
             panic!("Forward partition requires exactly one partition");
         }
         vec![0]
+    }
+}
+
+// passes request message from source task to sink task with the same task_index
+#[derive(Debug, Clone)]
+pub struct RequestRoutePartition;
+
+impl RequestRoutePartition {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl PartitionTrait for RequestRoutePartition {
+    fn partition(&mut self, message: &Message, num_partitions: usize) -> Vec<usize> {
+        let extras = message.get_extras().expect("RequestRoutePartition message should have extras");
+        let task_index = extras.get(SOURCE_TASK_INDEX_FIELD)
+            .expect("RequestRoutePartition message should have task_index extra")
+            .parse::<i32>()
+            .expect("task_index should be parsed as i32") as usize;
+
+        if task_index >= num_partitions {
+            panic!("task_index should be within 0..num_partitions")
+        }
+
+        return vec![task_index]
     }
 }

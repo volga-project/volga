@@ -426,7 +426,6 @@ mod tests {
             ]
         ).unwrap();
 
-        // TODO add extras
         // Create a regular message
         let original_message = Message::new(
             Some("upstream_vertex".to_string()),
@@ -478,7 +477,6 @@ mod tests {
         let key = Key::new(key_batch).unwrap();
 
         // Create a keyed message
-        // TODO add extras
         let original_message = Message::new_keyed(
             Some("upstream_vertex".to_string()),
             record_batch,

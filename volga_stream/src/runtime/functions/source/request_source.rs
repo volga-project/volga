@@ -1,8 +1,9 @@
+use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
 use std::any::Any;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use dashmap::DashMap;
 use tokio::time::{timeout, Duration};
 use axum::{
@@ -12,18 +13,21 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use arrow::datatypes::Schema;
 use super::json_utils::{record_batch_to_json, json_to_record_batch};
+use arrow::compute::concat_batches;
 use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::common::message::Message;
+use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::operators::operator::OperatorConfig;
+use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use super::source_function::SourceFunctionTrait;
 
 /// Reserved metadata field names
-pub const SOURCE_VERTEX_ID_FIELD: &str = "_source_vertex_id";
+pub const SOURCE_TASK_INDEX_FIELD: &str = "_source_task_index";
 pub const SOURCE_REQUEST_ID_FIELD: &str = "_source_request_id";
 
 /// Configuration for request source
@@ -32,16 +36,14 @@ pub struct RequestSourceConfig {
     pub bind_address: String,
     pub max_pending_requests: usize,
     pub request_timeout_ms: u64,
-    pub schema: Arc<Schema>,
 }
 
 impl RequestSourceConfig {
-    pub fn new(bind_address: String, max_pending_requests: usize, request_timeout_ms: u64, schema: Arc<Schema>) -> Self {
+    pub fn new(bind_address: String, max_pending_requests: usize, request_timeout_ms: u64) -> Self {
         Self {
             bind_address,
             max_pending_requests,
             request_timeout_ms,
-            schema,
         }
     }
 }
@@ -60,150 +62,105 @@ pub struct ResponsePayload {
 
 /// Internal request structure 
 #[derive(Debug)]
-struct PendingRequest {
-    request_id: String,
-    payload: RequestPayload,
+pub struct PendingRequest {
+    pub request_id: String,
+    pub payload: RequestPayload,
 }
 
-/// HTTP-based request source function
+/// Structure to track accumulated response data for a pending request
 #[derive(Debug)]
-pub struct HttpRequestSourceFunction {
+struct PendingResponse {
+    pub response_tx: oneshot::Sender<ResponsePayload>,
+    pub expected_record_count: usize,
+    pub record_batches: Vec<RecordBatch>,
+    pub record_count: usize,
+}
+
+/// Shared request source processor - one per worker
+#[derive(Debug)]
+pub struct RequestSourceProcessor {
     config: RequestSourceConfig,
-    runtime_context: Option<RuntimeContext>,
     
-    // Channel for receiving incoming requests from HTTP server
-    request_rx: Option<mpsc::Receiver<PendingRequest>>,
-    
-    // Channel for receiving processed responses from sink
-    response_rx: Option<mpsc::Receiver<Message>>,
-    response_tx: Option<mpsc::Sender<Message>>,
-    
-    // Map to track pending requests by request_id
-    pending_requests: Arc<DashMap<String, oneshot::Sender<ResponsePayload>>>,
-    
-    // Server handle for shutdown
+    // HTTP server handle
     server_handle: Option<tokio::task::JoinHandle<()>>,
     
     // Response processing task handle
     response_processor_handle: Option<tokio::task::JoinHandle<()>>,
+    
+    // Shared request queue that all source tasks read from
+    request_tx: mpsc::Sender<PendingRequest>,
+    request_rx: Arc<Mutex<mpsc::Receiver<PendingRequest>>>,
+    
+    // Channel for receiving processed responses from sink tasks
+    response_rx: Option<mpsc::Receiver<Message>>,
+    response_tx: mpsc::Sender<Message>,
+    
+    // Map to track pending requests by request_id
+    pending_requests: Arc<DashMap<String, PendingResponse>>,
 }
 
-impl HttpRequestSourceFunction {
+
+pub fn extract_request_source_config(graph: &ExecutionGraph) -> Option<RequestSourceConfig> {
+    for (_vertex_id, vertex) in graph.get_vertices() {
+        if let OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)) = &vertex.operator_config {
+            return Some(config.clone());
+        }
+    }
+    None
+}
+
+impl RequestSourceProcessor {
     pub fn new(config: RequestSourceConfig) -> Self {
-        let (response_tx, response_rx) = mpsc::channel(1000);
+        let (request_tx, request_rx) = mpsc::channel(config.max_pending_requests);
+        let (response_tx, response_rx) = mpsc::channel(config.max_pending_requests);
         
         Self {
             config,
-            runtime_context: None,
-            request_rx: None, // Will be set when server starts
-            response_rx: Some(response_rx),
-            response_tx: Some(response_tx),
-            pending_requests: Arc::new(DashMap::new()),
             server_handle: None,
             response_processor_handle: None,
+            request_tx,
+            request_rx: Arc::new(Mutex::new(request_rx)),
+            response_rx: Some(response_rx),
+            response_tx,
+            pending_requests: Arc::new(DashMap::new()),
         }
     }
     
-    pub fn get_response_sender(&self) -> Option<mpsc::Sender<Message>> {
+    /// Get a shared receiver handle for source tasks to read requests from
+    pub fn get_shared_request_receiver(&self) -> Arc<Mutex<mpsc::Receiver<PendingRequest>>> {
+        self.request_rx.clone()
+    }
+    
+    /// Get the response sender for sink tasks to send processed responses
+    pub fn get_response_sender(&self) -> mpsc::Sender<Message> {
         self.response_tx.clone()
     }
     
+    /// Get the number of pending requests
     pub fn get_pending_count(&self) -> usize {
-         self.pending_requests.len()
+        self.pending_requests.len()
     }
     
-    fn create_message_from_request(&self, request_id: &str, payload: &RequestPayload) -> Result<Message> {
-        let vertex_id = self.runtime_context.as_ref().expect("Runtime context not set").vertex_id().to_string();
-        
-        let payload_array = match &payload.data {
-            serde_json::Value::Object(obj) => {
-                match obj.get("payload") {
-                    Some(serde_json::Value::Array(arr)) => serde_json::Value::Array(arr.clone()),
-                    Some(_) => return Err(anyhow::anyhow!("Expected 'payload' field to be an array")),
-                    None => return Err(anyhow::anyhow!("Missing 'payload' field in request data")),
-                }
-            }
-            _ => return Err(anyhow::anyhow!("Expected request data to be an object with 'payload' field")),
-        };
-        
-        let record_batch = json_to_record_batch(&payload_array)?;
-        
-        let mut extras = HashMap::new();
-        extras.insert(SOURCE_VERTEX_ID_FIELD.to_string(), vertex_id);
-        extras.insert(SOURCE_REQUEST_ID_FIELD.to_string(), request_id.to_string());
-        
-        let message = Message::new(
-            None, // upstream_vertex_id - will be set by the runtime
-            record_batch,
-            None, // ingest_timestamp - will be set by the runtime
-            Some(extras)
-        );
-        
-        Ok(message)
-    }
-    
-    fn start_response_processor(&mut self) -> Result<()> {
-        let response_rx = self.response_rx.take()
-            .ok_or_else(|| anyhow::anyhow!("Response receiver already taken"))?;
-        let pending_requests = self.pending_requests.clone();
-        
-        self.response_processor_handle = Some(tokio::spawn(async move {
-            Self::response_processor_task(response_rx, pending_requests).await;
-        }));
-        
+    /// Start the HTTP server and response processor
+    pub async fn start(&mut self) -> Result<()> {
+        self.start_server().await?;
+        self.start_response_processor()?;
         Ok(())
     }
     
-    async fn response_processor_task(
-        mut response_rx: mpsc::Receiver<Message>,
-        pending_requests: Arc<DashMap<String, oneshot::Sender<ResponsePayload>>>,
-    ) {
-        while let Some(response) = response_rx.recv().await {
-            if let Err(e) = Self::process_single_response(response, &pending_requests).await {
-                eprintln!("Error processing response: {}", e);
-            }
-        }
-    }
-    
-    async fn process_single_response(
-        response: Message,
-        pending_requests: &Arc<DashMap<String, oneshot::Sender<ResponsePayload>>>,
-    ) -> Result<()> {
-        let request_id = response.get_extras().and_then(|extras| extras.get(SOURCE_REQUEST_ID_FIELD).cloned())
-            .ok_or_else(|| anyhow::anyhow!("Response missing {} in extras", SOURCE_REQUEST_ID_FIELD))?;
-        
-        let response_tx = pending_requests.remove(&request_id).map(|(_, tx)| tx);
-        
-        if let Some(response_tx) = response_tx {
-            let record_batch = response.record_batch();
-            let response_data = match record_batch_to_json(record_batch) {
-                Ok(json_array) => json_array,
-                Err(e) => {
-                    eprintln!("Error converting RecordBatch to JSON: {}", e);
-                    serde_json::json!({"error": "Failed to convert response to JSON"})
-                }
-            };
-            
-            let response_payload = ResponsePayload {
-                data: response_data,
-            };
-            
-            // Send response back to HTTP client (ignore if client disconnected)
-            let _ = response_tx.send(response_payload);
-        }   
-        
+    /// Stop the HTTP server and response processor
+    pub async fn stop(&mut self) -> Result<()> {
+        self.stop_server().await?;
+        self.stop_response_processor().await?;
         Ok(())
     }
     
-    fn start_server(&mut self, _runtime_context: &RuntimeContext) -> Result<()> {
-        let (request_tx, request_rx) = mpsc::channel(self.config.max_pending_requests);
-        
-        self.request_rx = Some(request_rx);
-        
+    async fn start_server(&mut self) -> Result<()> {
         let bind_address = self.config.bind_address.clone();
         let max_pending = self.config.max_pending_requests;
         let request_timeout_ms = self.config.request_timeout_ms;
         let pending_requests = self.pending_requests.clone();
+        let request_tx = self.request_tx.clone();
         
         let app = Router::new()
             .route("/request", post({
@@ -221,18 +178,132 @@ impl HttpRequestSourceFunction {
         Ok(())
     }
     
-    fn stop_server(&mut self) -> Result<()> {
+    async fn stop_server(&mut self) -> Result<()> {
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
         }
         Ok(())
     }
-
-    fn stop_response_processor(&mut self) -> Result<()> {
+    
+    fn start_response_processor(&mut self) -> Result<()> {
+        let response_rx = self.response_rx.take()
+            .ok_or_else(|| anyhow::anyhow!("Response receiver already taken"))?;
+        let pending_requests = self.pending_requests.clone();
+        
+        self.response_processor_handle = Some(tokio::spawn(async move {
+            Self::response_processor_task(response_rx, pending_requests).await;
+        }));
+        
+        Ok(())
+    }
+    
+    async fn stop_response_processor(&mut self) -> Result<()> {
         if let Some(handle) = self.response_processor_handle.take() {
             handle.abort();
         }
         Ok(())
+    }
+    
+    async fn response_processor_task(
+        mut response_rx: mpsc::Receiver<Message>,
+        pending_requests: Arc<DashMap<String, PendingResponse>>,
+    ) {
+        while let Some(response) = response_rx.recv().await {
+            if let Err(e) = Self::process_single_response(response, &pending_requests).await {
+                eprintln!("Error processing response: {}", e);
+            }
+        }
+    }
+    
+    async fn process_single_response(
+        response: Message,
+        pending_requests: &Arc<DashMap<String, PendingResponse>>,
+    ) -> Result<()> {
+        let request_id = response.get_extras().and_then(|extras| extras.get(SOURCE_REQUEST_ID_FIELD).cloned())
+            .ok_or_else(|| anyhow::anyhow!("Response missing {} in extras", SOURCE_REQUEST_ID_FIELD))?;
+        
+        let record_batch = response.record_batch().clone();
+        let record_count = record_batch.num_rows();
+        
+        let mut should_send_response = false;
+        // Check if we have a pending request for this ID
+        if let Some(mut pending_entry) = pending_requests.get_mut(&request_id) {
+            // Accumulate the record batch
+            pending_entry.record_batches.push(record_batch);
+            pending_entry.record_count += record_count;
+            if pending_entry.record_count > pending_entry.expected_record_count {
+                panic!("Received more records than expected for request {}", request_id);
+            }
+            if pending_entry.record_count == pending_entry.expected_record_count {
+                should_send_response = true;
+            }
+        }
+            // Check if we have received all expected records
+        if should_send_response {
+            // We have all the data, now combine all record batches and send response
+            let (_, pending_response) = pending_requests.remove(&request_id).expect("Pending request not found");
+            let response_tx = pending_response.response_tx;
+            let batches = pending_response.record_batches;
+            let schema = batches[0].schema();
+            let result_batch = concat_batches(&schema, &batches).expect("Failed to concatenate record batches");
+            let response_data = record_batch_to_json(&result_batch).expect("Failed to convert record batch to JSON");
+
+            let response_payload = ResponsePayload {
+                data: response_data,
+            };
+            
+            let _ = response_tx.send(response_payload);
+        }
+        
+        Ok(())
+    }
+}
+
+/// HTTP-based request source function - now uses shared processor
+#[derive(Debug)]
+pub struct HttpRequestSourceFunction {
+    runtime_context: Option<RuntimeContext>,
+    
+    // Shared request receiver from the processor
+    shared_request_rx: Option<Arc<tokio::sync::Mutex<mpsc::Receiver<PendingRequest>>>>,
+}
+
+impl HttpRequestSourceFunction {
+    pub fn new() -> Self {
+        Self {
+            runtime_context: None,
+            shared_request_rx: None,
+        }
+    }
+    
+    fn create_message_from_request(&self, request_id: &str, payload: &RequestPayload) -> Result<Message> {
+        let task_index = self.runtime_context.as_ref().expect("Runtime context not set").task_index();
+        
+        let payload_array = match &payload.data {
+            serde_json::Value::Object(obj) => {
+                match obj.get("payload") {
+                    Some(serde_json::Value::Array(arr)) => serde_json::Value::Array(arr.clone()),
+                    Some(_) => return Err(anyhow::anyhow!("Expected 'payload' field to be an array")),
+                    None => return Err(anyhow::anyhow!("Missing 'payload' field in request data")),
+                }
+            }
+            _ => return Err(anyhow::anyhow!("Expected request data to be an object with 'payload' field")),
+        };
+        
+        let record_batch = json_to_record_batch(&payload_array)?;
+        
+        let mut extras = HashMap::new();
+        extras.insert(SOURCE_TASK_INDEX_FIELD.to_string(), task_index.to_string());
+        extras.insert(SOURCE_REQUEST_ID_FIELD.to_string(), request_id.to_string());
+        
+        let message = Message::new(
+            None, // upstream_vertex_id - will be set by the runtime
+            record_batch,
+            None, // ingest_timestamp - will be set by the runtime
+            Some(extras)
+        );
+        
+        Ok(message)
     }
 }
 
@@ -240,7 +311,7 @@ async fn handle_request(
     request_tx: mpsc::Sender<PendingRequest>,
     max_pending_requests: usize,
     request_timeout_ms: u64,
-    pending_requests: Arc<DashMap<String, oneshot::Sender<ResponsePayload>>>,
+    pending_requests: Arc<DashMap<String, PendingResponse>>,
     Json(payload): Json<RequestPayload>,
 ) -> Result<Json<ResponsePayload>, StatusCode> {
     if pending_requests.len() >= max_pending_requests {
@@ -248,9 +319,30 @@ async fn handle_request(
     }
     
     let request_id = Uuid::new_v4().to_string();
+    
+    // Calculate expected record count from the request payload
+    let expected_record_count = match &payload.data {
+        serde_json::Value::Object(obj) => {
+            if let Some(serde_json::Value::Array(payload_array)) = obj.get("payload") {
+                payload_array.len()
+            } else {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+        }
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+    
     let (response_tx, response_rx) = oneshot::channel();
     
-    pending_requests.insert(request_id.clone(), response_tx);
+    // Store pending request with expected record count
+    let pending_response = PendingResponse {
+        response_tx,
+        expected_record_count,
+        record_batches: Vec::new(),
+        record_count: 0,
+    };
+    
+    pending_requests.insert(request_id.clone(), pending_response);
     let pending_request = PendingRequest {
         request_id: request_id.clone(),
         payload,
@@ -281,14 +373,14 @@ async fn handle_request(
 impl FunctionTrait for HttpRequestSourceFunction {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
-        self.start_server(context)?;
-        self.start_response_processor()?;
+        if self.shared_request_rx.is_some() {
+            panic!("shared_request_rx is already set")
+        }
+        self.shared_request_rx = Some(context.get_request_sink_source_request_receiver().expect("request_sink_source_request_receiver should be set"));
         Ok(())
     }
     
     async fn close(&mut self) -> Result<()> {
-        self.stop_server()?;
-        self.stop_response_processor()?;
         Ok(())
     }
     
@@ -304,28 +396,25 @@ impl FunctionTrait for HttpRequestSourceFunction {
 #[async_trait]
 impl SourceFunctionTrait for HttpRequestSourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
-        let request_rx = self.request_rx.as_mut().expect("Request receiver not set");
-        // TODO can we batch requests if channel has multiple?
-        if let Ok(pending_request) = request_rx.try_recv() {
-            match self.create_message_from_request(&pending_request.request_id, &pending_request.payload) {
-                Ok(message) => {
-                    return Some(message);
-                }
-                Err(e) => {
-                    eprintln!("Error creating record batch: {}", e);
-                    // Send error response and remove from pending
-                    let error_response = ResponsePayload {
-                        data: serde_json::json!({"error": e.to_string()}),
-                    };
-                    
-                    if let Some((_, tx)) = self.pending_requests.remove(&pending_request.request_id) {
-                        let _ = tx.send(error_response);
+        if let Some(shared_rx) = &self.shared_request_rx {
+            // Compete with other tasks for messages from the shared queue
+            let pending_request = {
+                let mut rx = shared_rx.lock().await;
+                rx.recv().await
+            };
+            
+            if let Some(pending_request) = pending_request {
+                match self.create_message_from_request(&pending_request.request_id, &pending_request.payload) {
+                    Ok(message) => {
+                        return Some(message);
+                    }
+                    Err(e) => {
+                        eprintln!("Error creating message from request: {}", e);
                     }
                 }
             }
         }
-        
-        None
+        panic!("No shared_request_rx set");
     }
 }
 
@@ -333,18 +422,11 @@ impl SourceFunctionTrait for HttpRequestSourceFunction {
 mod tests {
     use super::*;
     use crate::runtime::runtime_context::RuntimeContext;
-    use arrow::datatypes::{Schema, Field, DataType};
-    use std::sync::Arc;
     use tokio::time::{sleep, Duration};
     use futures::FutureExt;
     use rand;
 
     fn create_test_config() -> RequestSourceConfig {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("name", DataType::Utf8, false),
-            Field::new("age", DataType::Int64, false),
-        ]));
-        
         // Use a random high port to avoid conflicts
         let port = 8000 + (rand::random::<u16>() % 1000);
         
@@ -352,29 +434,42 @@ mod tests {
             format!("127.0.0.1:{}", port),
             2, // max_pending_requests
             1000, // request_timeout_ms
-            schema,
         )
     }
 
     fn create_test_runtime_context() -> RuntimeContext {
         RuntimeContext::new("test_vertex".to_string(), 0, 1, None)
     }
+    
+    async fn create_test_processor_and_source() -> (RequestSourceProcessor, HttpRequestSourceFunction) {
+        let config = create_test_config();
+        let mut processor = RequestSourceProcessor::new(config);
+        
+        // Start the processor
+        processor.start().await.unwrap();
+        
+        let source = HttpRequestSourceFunction::new();
+        
+        (processor, source)
+    }
 
     #[tokio::test]
-    async fn test_fetch_and_request_response_cycle() {
-        let mut source = HttpRequestSourceFunction::new(create_test_config());
-        let runtime_context = create_test_runtime_context();
+    async fn test_request_fetch_response() {
+        let (mut processor, mut source) = create_test_processor_and_source().await;
+        let mut runtime_context = create_test_runtime_context();
+        runtime_context.set_request_sink_source_response_sender(processor.get_response_sender());
+        runtime_context.set_request_sink_source_request_receiver(processor.get_shared_request_receiver().clone());
         
         // Open the source function
         source.open(&runtime_context).await.unwrap();
         
-        let bind_address = source.config.bind_address.clone();
+        let bind_address = processor.config.bind_address.clone();
         
         // Wait a bit for server to start
         sleep(Duration::from_millis(50)).await;
         
         // Verify initial state
-        assert_eq!(source.get_pending_count(), 0);
+        assert_eq!(processor.get_pending_count(), 0);
         
         let client = reqwest::Client::new();
         let test_payload = serde_json::json!({
@@ -386,6 +481,7 @@ mod tests {
             }
         });
         
+        println!("Sending request...");
         // Send HTTP request in background (don't await yet)
         let request_handle = tokio::spawn({
             let client = client.clone();
@@ -404,11 +500,13 @@ mod tests {
         sleep(Duration::from_millis(50)).await;
         
         // Verify that the request is now pending (in DashMap, waiting for response)
-        assert_eq!(source.get_pending_count(), 1);
+        assert_eq!(processor.get_pending_count(), 1);
         
+        println!("Fetching message...");
         // Call fetch() to get the message from the HTTP request
         let message = source.fetch().await.expect("Should receive a message from HTTP request");
         
+        println!("Message fetched");
         // Verify the message structure and content
         let record_batch = message.record_batch();
         assert_eq!(record_batch.num_rows(), 2);
@@ -416,7 +514,7 @@ mod tests {
         
         // Verify extras contain correct metadata
         let extras = message.get_extras().unwrap();
-        assert_eq!(extras.get(SOURCE_VERTEX_ID_FIELD).unwrap(), "test_vertex");
+        assert_eq!(extras.get(SOURCE_TASK_INDEX_FIELD).unwrap(), "0"); // parallelism = 1
         let request_id = extras.get(SOURCE_REQUEST_ID_FIELD).unwrap();
         assert!(!request_id.is_empty()); // Request ID should be generated
         
@@ -434,31 +532,36 @@ mod tests {
         assert_eq!(age_column.value(1), 30);
         
         // Verify internal state: request should still be pending (waiting for response)
-        assert_eq!(source.pending_requests.len(), 1);
-        assert!(source.pending_requests.contains_key(request_id));
+        assert_eq!(processor.get_pending_count(), 1);
+        assert!(processor.pending_requests.contains_key(request_id));
         
-        // Simulate processing by creating a response message with the same extras
-        let response_message = Message::new(
-            Some("processor".to_string()),
-            record_batch.clone(),
-            Some(12345),
-            Some(extras.clone())
-        );
+        // Simulate processing by creating separate response messages with the same extras for each record
+        for i in 0..record_batch.num_rows() {
+            let record_batch_slice = record_batch.slice(i, 1);
+            let response_message = Message::new(
+                Some("processor".to_string()),
+                record_batch_slice,
+                Some(12345),
+                Some(extras.clone())
+            );
         
-        // Send response back through the response channel
-        if let Some(response_tx) = source.get_response_sender() {
+            // Send response back through the processor's response channel
+            let response_tx = processor.get_response_sender();
             response_tx.send(response_message).await.unwrap();
         }
-        
+
         // Wait a bit for response processing
         sleep(Duration::from_millis(50)).await;
         
         // Verify internal state: pending request should be removed after response processing
-        assert!(!source.pending_requests.contains_key(request_id));
-        assert_eq!(source.get_pending_count(), 0);
+        assert!(!processor.pending_requests.contains_key(request_id));
+        assert_eq!(processor.get_pending_count(), 0);
         
+        println!("Waiting for request to complete...");
         // Verify the HTTP request completes successfully
         let response = request_handle.await.unwrap().unwrap();
+        
+        println!("Request completed");
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         
         // Verify response body contains the processed data
@@ -475,20 +578,23 @@ mod tests {
         assert_eq!(response_array[1]["name"], "Bob");
         assert_eq!(response_array[1]["age"], 30);
 
+        // Cleanup
         source.close().await.unwrap();
+        processor.stop().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_backpressure() {
-        let mut source = HttpRequestSourceFunction::new(create_test_config());
-        let runtime_context = create_test_runtime_context();
-        
+        let (mut processor, mut source) = create_test_processor_and_source().await;
+        let mut runtime_context = create_test_runtime_context();
+        runtime_context.set_request_sink_source_response_sender(processor.get_response_sender());
+        runtime_context.set_request_sink_source_request_receiver(processor.get_shared_request_receiver().clone());
         // Open the source function
         source.open(&runtime_context).await.unwrap();
         
         // Get the actual bound address after server starts
-        let bind_address = source.config.bind_address.clone();
-        let max_pending = source.config.max_pending_requests;
+        let bind_address = processor.config.bind_address.clone();
+        let max_pending = processor.config.max_pending_requests;
         
         // Wait a bit for server to start
         sleep(Duration::from_millis(100)).await;
@@ -524,8 +630,7 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
         
         // Check the current state - some requests should be pending
-        let pending_count = source.get_pending_count();
-        println!("Pending requests: {}, Max allowed: {}", pending_count, max_pending);
+        let pending_count = processor.get_pending_count();
         
         // We should have exactly max_pending requests in pending state
         assert_eq!(pending_count, max_pending, "Should have exactly max_pending requests pending");
@@ -542,7 +647,6 @@ mod tests {
                     assert_eq!(response.status(), reqwest::StatusCode::TOO_MANY_REQUESTS, 
                               "Request {} completed immediately but with unexpected status: {}", i, response.status());
                     too_many_requests_count += 1;
-                    println!("Request {} got TOO_MANY_REQUESTS immediately", i);
                 }
                 Some(Ok(Err(e))) => {
                     panic!("Request {} failed immediately with error: {}", i, e);
@@ -553,7 +657,6 @@ mod tests {
                 None => {
                     // Request is still pending
                     still_pending += 1;
-                    println!("Request {} is still pending", i);
                 }
             }
         }
@@ -561,7 +664,9 @@ mod tests {
         assert_eq!(still_pending, max_pending, "Number of pending requests should equal max_pending capacity");
         assert_eq!(too_many_requests_count + still_pending, total_requests, "All requests should be accounted for");
         
+        // Cleanup
         source.close().await.unwrap();
+        processor.stop().await.unwrap();
     }
 
     #[tokio::test]
@@ -570,13 +675,18 @@ mod tests {
         let mut config = create_test_config();
         config.request_timeout_ms = 100; // 100ms timeout
         
-        let mut source = HttpRequestSourceFunction::new(config);
-        let runtime_context = create_test_runtime_context();
+        let mut processor = RequestSourceProcessor::new(config);
+        processor.start().await.unwrap();
         
+        let mut source = HttpRequestSourceFunction::new();
+        let mut runtime_context = create_test_runtime_context();
+        runtime_context.set_request_sink_source_response_sender(processor.get_response_sender());
+        runtime_context.set_request_sink_source_request_receiver(processor.get_shared_request_receiver().clone());
+
         // Open the source function
         source.open(&runtime_context).await.unwrap();
         
-        let bind_address = source.config.bind_address.clone();
+        let bind_address = processor.config.bind_address.clone();
         
         // Wait a bit for server to start
         sleep(Duration::from_millis(50)).await;
@@ -598,9 +708,12 @@ mod tests {
         
         // Should get REQUEST_TIMEOUT due to no response processing
         assert_eq!(response.status(), reqwest::StatusCode::REQUEST_TIMEOUT);
-        assert_eq!(source.get_pending_count(), 0);
+        assert_eq!(processor.get_pending_count(), 0);
         
+        // Cleanup
         source.close().await.unwrap();
+        processor.stop().await.unwrap();
     }
+
 }
 

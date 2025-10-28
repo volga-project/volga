@@ -64,7 +64,7 @@ impl FakeDistributedExecutor {
                 TransportBackendType::Grpc,
             );
             let mut worker_server = WorkerServer::new(worker_config);
-            worker_server.start(&addr).await.map_err(|e| anyhow::anyhow!("Failed to start worker server: {}", e))?;
+            worker_server.start(&addr).await?;
             
             worker_servers.push(worker_server);
             worker_addresses.push(addr.clone());
@@ -80,12 +80,12 @@ impl FakeDistributedExecutor {
     }
 }
 
-#[async_trait(?Send)]
+#[async_trait]
 impl Executor for FakeDistributedExecutor {
     async fn execute(
         &mut self, 
         mut execution_graph: ExecutionGraph, 
-        state_sender: Option<mpsc::Sender<WorkerState>>
+        _state_sender: Option<mpsc::Sender<WorkerState>>
     ) -> Result<ExecutionState> {
         // Create test cluster nodes
         let num_operators = execution_graph.get_vertices().len();
@@ -107,7 +107,7 @@ impl Executor for FakeDistributedExecutor {
 
         // Create and execute master
         let mut master = Master::new();
-        master.execute(worker_addresses).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        master.execute(worker_addresses).await?;
 
         // For now, we don't have a way to get worker states from distributed execution
         // This would need to be implemented in the master/worker communication

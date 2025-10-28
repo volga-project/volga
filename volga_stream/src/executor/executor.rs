@@ -20,8 +20,8 @@ impl ExecutionState {
 }
 
 /// Trait for executing a stream processing job
-#[async_trait(?Send)]
-pub trait Executor: Send {
+#[async_trait]
+pub trait Executor: Send + Sync {
     /// Execute the given execution graph
     /// 
     /// # Parameters

@@ -77,13 +77,13 @@ impl PipelineContext {
         self
     }
 
-    /// Set SQL query for execution (returns self for chaining)
+    /// Set SQL query for execution
     pub fn sql(mut self, sql: &str) -> Self {
         self.sql = Some(sql.to_string());
         self
     }
 
-    /// Set logical graph directly (returns self for chaining)
+    /// Set logical graph directly
     pub fn with_logical_graph(mut self, logical_graph: LogicalGraph) -> Self {
         // Clear SQL since we're setting the graph directly
         self.sql = None;
@@ -91,7 +91,7 @@ impl PipelineContext {
         self
     }
 
-    /// Set executor for running the job (returns self for chaining)
+    /// Set executor for running the job
     pub fn with_executor(mut self, executor: Box<dyn Executor>) -> Self {
         self.executor = Arc::new(Some(executor));
         self

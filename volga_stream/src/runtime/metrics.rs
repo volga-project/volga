@@ -10,10 +10,10 @@ use crate::runtime::{execution_graph::ExecutionGraph, operators::operator::Opera
 
 // Global Prometheus handle for programmatic access
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
-static INIT: Once = Once::new();
+static INIT_METRICS: Once = Once::new();
 
 pub fn init_metrics() {
-    INIT.call_once(|| {
+    INIT_METRICS.call_once(|| {
         _init_metrics().expect("Failed to initialize metrics");
     });
 }

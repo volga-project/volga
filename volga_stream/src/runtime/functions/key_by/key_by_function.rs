@@ -1,5 +1,7 @@
 use std::sync::Arc;
 use async_trait::async_trait;
+use datafusion::functions::core::planner;
+use crate::api::Planner;
 use crate::common::message::{Message, KeyedMessage, BaseMessage};
 use crate::common::Key;
 use anyhow::Result;
@@ -678,27 +680,27 @@ mod tests {
 
     #[tokio::test]
     async fn test_datafusion_key_by_window_source() {
-        let (mut planner, _schema, message) = create_test_setup().await;
+        let (mut planner, _, message) = create_test_setup().await;
         
         // Create SQL query with window function partitioned by multiple columns
         let sql = "SELECT name, department, salary, ROW_NUMBER() OVER (PARTITION BY name, department ORDER BY salary) as rn FROM employees";
-        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+        // let logical_graph = planner.sql_to_graph(sql).await.unwrap();
         
-        // Extract WindowAggExec from the graph
-        let mut window_exec: Option<Arc<BoundedWindowAggExec>> = None;
-        let nodes: Vec<_> = logical_graph.get_nodes().collect();
-        for node in &nodes {
-            if let crate::runtime::operators::operator::OperatorConfig::KeyByConfig(key_by_function) = &node.operator_config {
-                if let KeyByFunction::DataFusion(key_by) = key_by_function {
-                    if let DFKeyExprSource::Window(win_exec) = &key_by.key_expr_source {
-                        window_exec = Some(win_exec.clone());
-                        break;
-                    }
-                }
-            }
-        }
-        
-        let window_exec = window_exec.expect("Should have found a window operator");
+        // // Extract WindowAggExec from the graph
+        // let mut window_exec: Option<Arc<BoundedWindowAggExec>> = None;
+        // let nodes: Vec<_> = logical_graph.get_nodes().collect();
+        // for node in &nodes {
+        //     if let crate::runtime::operators::operator::OperatorConfig::KeyByConfig(key_by_function) = &node.operator_config {
+        //         if let KeyByFunction::DataFusion(key_by) = key_by_function {
+        //             if let DFKeyExprSource::Window(win_exec) = &key_by.key_expr_source {
+        //                 window_exec = Some(win_exec.clone());
+        //                 break;
+        //             }
+        //         }
+        //     }
+        // }
+
+        let window_exec = extract_datafusion_window_exec(sql, &mut planner).await.expect("Should have found a window operator");
         
         // Create DataFusionKeyFunction with window source and test
         let key_by_function = DataFusionKeyFunction::new_window(window_exec);
@@ -707,3 +709,21 @@ mod tests {
         verify_keyed_messages(keyed_messages);
     }
 } 
+
+pub async fn extract_datafusion_window_exec(sql: &str, planner: &mut Planner) -> Option<Arc<BoundedWindowAggExec>> {
+    let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+        
+    let mut window_exec: Option<Arc<BoundedWindowAggExec>> = None;
+    let nodes: Vec<_> = logical_graph.get_nodes().collect();
+    for node in &nodes {
+        if let crate::runtime::operators::operator::OperatorConfig::KeyByConfig(key_by_function) = &node.operator_config {
+            if let KeyByFunction::DataFusion(key_by) = key_by_function {
+                if let DFKeyExprSource::Window(win_exec) = &key_by.key_expr_source {
+                    window_exec = Some(win_exec.clone());
+                    break;
+                }
+            }
+        }
+    }
+    window_exec
+}

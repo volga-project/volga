@@ -3,7 +3,6 @@ pub mod vector_source;
 pub mod word_count_source;
 pub mod datagen_source;
 pub mod request_source;
-pub mod request_response_helper;
 pub mod json_utils;
 
 pub use source_function::{SourceFunction, SourceFunctionTrait, create_source_function};

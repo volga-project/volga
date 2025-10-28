@@ -1,11 +1,13 @@
-use crate::{runtime::{
-    execution_graph::ExecutionGraph, metrics::{StreamTaskMetrics, WorkerMetrics}, operators::operator::OperatorType, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
-}, storage::storage::Storage, transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend}};
+use crate::runtime::{
+    execution_graph::ExecutionGraph, functions::source::request_source::{extract_request_source_config, RequestSourceProcessor}, metrics::WorkerMetrics, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+};
+use crate::storage::storage::Storage;
+use crate::transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use kameo::{spawn, prelude::ActorRef};
-use tokio::{runtime::{Builder, Handle, Runtime}, time::Instant};
+use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 use serde::{Serialize, Deserialize};
@@ -84,6 +86,10 @@ pub struct Worker {
     storage: Arc<Storage>,
     running: Arc<AtomicBool>,
     tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
+
+    // if RequestSource/Sink is configured, run processor - shared between tasks
+    request_source_processor: Option<RequestSourceProcessor>,
+    request_source_processor_runtime: Option<Runtime>,
 }
 
 impl Worker {
@@ -99,6 +105,18 @@ impl Worker {
             task_runtimes.insert(vertex_id.clone(), task_runtime);
         }
 
+        // Set request_source_processor_runtime if needed
+        let request_source_config = extract_request_source_config(&config.graph);
+        let request_source_processor_runtime = if request_source_config.is_some() {
+            Some(Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .thread_name("request-source-processor-runtime")
+                .build().unwrap())
+        } else {
+            None
+        };
+
         Self {
             worker_id: config.worker_id,
             graph: config.graph,
@@ -113,10 +131,12 @@ impl Worker {
                 .enable_all()
                 .thread_name("transport-backend-runtime")
                 .build().unwrap()),
+            request_source_processor_runtime,
             worker_state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
             storage: Arc::new(Storage::default()), // TODO config
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None,
+            request_source_processor: None
         }
     }
 
@@ -234,12 +254,16 @@ impl Worker {
             let task_runtime = self.task_runtimes.get(vertex_id).expect("Task runtime should exist");
 
             // Create runtime context for the vertex
-            let runtime_context = RuntimeContext::new(
+            let mut runtime_context = RuntimeContext::new(
                 vertex_id.clone(),
                 vertex.task_index,
                 vertex.parallelism,
                 None,
             );
+            if let Some(request_source_processor) = &self.request_source_processor {
+                runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
+                runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
+            }
 
             // Create the task and its actor in the task's runtime
             let task = StreamTask::new(
@@ -319,6 +343,44 @@ impl Worker {
         }).await.unwrap();
     }
 
+    async fn start_request_source_processor_if_needed(&mut self) {
+        if let Some(runtime) = &self.request_source_processor_runtime {
+            let request_source_config = extract_request_source_config(&self.graph).expect("request_source_config should be set");
+            println!("[WORKER] Starting request source processor");
+            
+            let mut processor = RequestSourceProcessor::new(request_source_config);
+            
+            // Start the processor in its dedicated runtime
+            let (processor, start_result) = runtime.spawn(async move {
+                let result = processor.start().await;
+                (processor, result)
+            }).await.unwrap();
+            
+            self.request_source_processor = Some(processor);
+            
+            if let Err(e) = start_result {
+                panic!("Failed to start request source processor: {}", e);
+            }
+        }
+    }
+
+    async fn stop_request_source_processor_if_needed(&mut self) {
+        if let Some(mut processor) = self.request_source_processor.take() {
+            let runtime = self.request_source_processor_runtime.as_ref().expect("request_source_processor_runtime should be set");
+            println!("[WORKER] Stopping request source processor");
+            
+            let stop_result = runtime.spawn(async move {
+                processor.stop().await
+            }).await.unwrap();
+            
+            if let Err(e) = stop_result {
+                panic!("Failed to stop request source processor: {}", e);
+            }
+            
+            println!("[WORKER] Request source processor stopped");
+        }
+    }
+
     async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
         println!("[WORKER] Sending {:?} signal to all task actors", signal);
         
@@ -364,6 +426,11 @@ impl Worker {
             runtime.shutdown_background();
         }
 
+        // Shutdown request source processor runtime
+        if let Some(runtime) = self.request_source_processor_runtime.take() {
+            runtime.shutdown_background();
+        }
+
         // Shutdown task runtimes
         for (_, runtime) in self.task_runtimes.drain() {
             runtime.shutdown_background();
@@ -379,6 +446,7 @@ impl Worker {
 
     // control functions
     pub async fn start(&mut self) {
+        self.start_request_source_processor_if_needed().await;
         self.spawn_actors().await;
         self.start_tasks(None).await;
     }
@@ -393,6 +461,7 @@ impl Worker {
     }
 
     pub async fn close(&mut self) {
+        self.stop_request_source_processor_if_needed().await;
         self.cleanup().await;
     }
 
@@ -420,6 +489,7 @@ impl Worker {
         if metrics_sender.is_none() {
             self.start().await;
         } else {
+            self.start_request_source_processor_if_needed().await;
             self.spawn_actors().await;
             self.start_tasks(metrics_sender).await;
         }

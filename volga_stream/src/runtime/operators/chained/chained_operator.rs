@@ -92,6 +92,7 @@ impl OperatorTrait for ChainedOperator {
     }
 }
 
+// TODO handle request route partition
 /// Groups operators into chains based on partition types
 pub fn group_operators_for_chaining(operators: &[OperatorConfig]) -> Vec<OperatorConfig> {
     let mut grouped_operators = Vec::new();

@@ -22,7 +22,7 @@ pub struct WorkerClient {
 }
 
 impl WorkerClient {
-    pub async fn connect(worker_ip: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub async fn connect(worker_ip: String) -> anyhow::Result<Self> {
         const MAX_RETRIES: u32 = 5;
         const RETRY_DELAY_MS: u64 = 1000;
         
@@ -50,15 +50,15 @@ impl WorkerClient {
             }
         }
         
-        Err(format!(
+        Err(anyhow::anyhow!(
             "Failed to connect to worker {} after {} attempts. Last error: {:?}", 
             worker_ip, 
             MAX_RETRIES, 
             last_error
-        ).into())
+        ))
     }
 
-    pub async fn start_worker(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+    pub async fn start_worker(&mut self) -> anyhow::Result<bool> {
         let request = tonic::Request::new(StartWorkerRequest {});
         let response = self.client.start_worker(request).await?;
         
@@ -73,7 +73,7 @@ impl WorkerClient {
         Ok(success)
     }
 
-    pub async fn run_worker_tasks(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+    pub async fn run_worker_tasks(&mut self) -> anyhow::Result<bool> {
         let request = tonic::Request::new(RunWorkerTasksRequest {});
         let response = self.client.run_worker_tasks(request).await?;
         let success = response.get_ref().success;
@@ -86,7 +86,7 @@ impl WorkerClient {
         Ok(success)
     }
 
-    pub async fn close_worker_tasks(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+    pub async fn close_worker_tasks(&mut self) -> anyhow::Result<bool> {
         let request = tonic::Request::new(CloseWorkerTasksRequest {});
         let response = self.client.close_worker_tasks(request).await?;
         let success = response.get_ref().success;
@@ -99,7 +99,7 @@ impl WorkerClient {
         Ok(success)
     }
 
-    pub async fn close_worker(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+    pub async fn close_worker(&mut self) -> anyhow::Result<bool> {
         let request = tonic::Request::new(CloseWorkerRequest {});
         let response = self.client.close_worker(request).await?;
         
@@ -114,13 +114,13 @@ impl WorkerClient {
         Ok(success)
     }
 
-    pub async fn get_worker_state(&mut self) -> Result<WorkerState, Box<dyn std::error::Error>> {
+    pub async fn get_worker_state(&mut self) -> anyhow::Result<WorkerState> {
         let request = tonic::Request::new(GetWorkerStateRequest {});
         let response = self.client.get_worker_state(request).await?;
         
         let state_bytes = &response.get_ref().worker_state_bytes;
         if state_bytes.is_empty() {
-            return Err("Worker state is empty".into());
+            return Err(anyhow::anyhow!("Worker state is empty"));
         }
         
         let worker_state = WorkerState::from_bytes(state_bytes)?;
@@ -147,7 +147,7 @@ impl Master {
     }
 
     /// Connect to all workers
-    pub async fn connect_to_workers(&mut self, worker_ips: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn connect_to_workers(&mut self, worker_ips: Vec<String>) -> anyhow::Result<()> {
         println!("[MASTER] Connecting to {} workers", worker_ips.len());
         
         let mut clients_guard = self.worker_clients.lock().await;
@@ -170,7 +170,7 @@ impl Master {
     }
 
     /// Start all workers
-    pub async fn start_all_workers(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start_all_workers(&mut self) -> anyhow::Result<()> {
         println!("[MASTER] Starting all workers");
         
         // Collect worker IPs first
@@ -188,7 +188,7 @@ impl Master {
                     let result = client.start_worker().await;
                     (worker_ip, result)
                 } else {
-                    (worker_ip, Err("Worker client not found".into()))
+                    (worker_ip, Err(anyhow::anyhow!("Worker client not found")))
                 }
             };
             start_futures.push(future);
@@ -200,11 +200,11 @@ impl Master {
             match result {
                 Ok(success) => {
                     if !success {
-                        return Err(format!("Failed to start worker {}", worker_ip).into());
+                        return Err(anyhow::anyhow!("Failed to start worker {}", worker_ip));
                     }
                 }
                 Err(e) => {
-                    return Err(format!("Error starting worker {}: {}", worker_ip, e).into());
+                    return Err(anyhow::anyhow!("Error starting worker {}: {}", worker_ip, e));
                 }
             }
         }
@@ -252,7 +252,7 @@ impl Master {
     }
 
     /// Wait for all workers to have tasks in the specified status
-    pub async fn wait_for_all_tasks_status(&self, target_status: StreamTaskStatus) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn wait_for_all_tasks_status(&self, target_status: StreamTaskStatus) -> anyhow::Result<()> {
         println!("[MASTER] Waiting for all workers to have tasks in status: {:?}", target_status);
         
         let start_time = std::time::Instant::now();
@@ -261,7 +261,7 @@ impl Master {
         loop {
             // Check timeout
             if start_time.elapsed() > timeout_duration {
-                return Err(format!("Timeout waiting for all tasks to be {:?} after {:?}", target_status, timeout_duration).into());
+                return Err(anyhow::anyhow!("Timeout waiting for all tasks to be {:?} after {:?}", target_status, timeout_duration));
             }
             
             let all_ready = {
@@ -285,7 +285,7 @@ impl Master {
     }
 
     /// Start all tasks on all workers
-    pub async fn run_all_tasks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn run_all_tasks(&mut self) -> anyhow::Result<()> {
         println!("[MASTER] Running all tasks on all workers");
         let worker_ips: Vec<String> = {
             let clients_guard = self.worker_clients.lock().await;
@@ -300,7 +300,7 @@ impl Master {
                     let result = client.run_worker_tasks().await;
                     (worker_ip, result)
                 } else {
-                    (worker_ip, Err("Worker client not found".into()))
+                    (worker_ip, Err(anyhow::anyhow!("Worker client not found")))
                 }
             };
             run_futures.push(future);
@@ -310,11 +310,11 @@ impl Master {
             match result {
                 Ok(success) => {
                     if !success {
-                        return Err(format!("Failed to run tasks on worker {}", worker_ip).into());
+                        return Err(anyhow::anyhow!("Failed to run tasks on worker {}", worker_ip));
                     }
                 }
                 Err(e) => {
-                    return Err(format!("Error running tasks on worker {}: {}", worker_ip, e).into());
+                    return Err(anyhow::anyhow!("Error running tasks on worker {}: {}", worker_ip, e));
                 }
             }
         }
@@ -323,7 +323,7 @@ impl Master {
     }
 
     /// Close all tasks on all workers
-    pub async fn close_all_tasks(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn close_all_tasks(&mut self) -> anyhow::Result<()> {
         println!("[MASTER] Closing all tasks on all workers");
         
         // Collect worker IPs first
@@ -341,7 +341,7 @@ impl Master {
                     let result = client.close_worker_tasks().await;
                     (worker_ip, result)
                 } else {
-                    (worker_ip, Err("Worker client not found".into()))
+                    (worker_ip, Err(anyhow::anyhow!("Worker client not found")))
                 }
             };
             close_futures.push(future);
@@ -353,11 +353,11 @@ impl Master {
             match result {
                 Ok(success) => {
                     if !success {
-                        return Err(format!("Failed to close tasks on worker {}", worker_ip).into());
+                        return Err(anyhow::anyhow!("Failed to close tasks on worker {}", worker_ip));
                     }
                 }
                 Err(e) => {
-                    return Err(format!("Error closing tasks on worker {}: {}", worker_ip, e).into());
+                    return Err(anyhow::anyhow!("Error closing tasks on worker {}: {}", worker_ip, e));
                 }
             }
         }
@@ -367,7 +367,7 @@ impl Master {
     }
 
     /// Close all workers
-    pub async fn close_all_workers(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn close_all_workers(&mut self) -> anyhow::Result<()> {
         println!("[MASTER] Closing all workers");
         
         // Collect worker IPs first
@@ -385,7 +385,7 @@ impl Master {
                     let result = client.close_worker().await;
                     (worker_ip, result)
                 } else {
-                    (worker_ip, Err("Worker client not found".into()))
+                    (worker_ip, Err(anyhow::anyhow!("Worker client not found")))
                 }
             };
             close_futures.push(future);
@@ -397,11 +397,11 @@ impl Master {
             match result {
                 Ok(success) => {
                     if !success {
-                        return Err(format!("Failed to close worker {}", worker_ip).into());
+                        return Err(anyhow::anyhow!("Failed to close worker {}", worker_ip));
                     }
                 }
                 Err(e) => {
-                    return Err(format!("Error closing worker {}: {}", worker_ip, e).into());
+                    return Err(anyhow::anyhow!("Error closing worker {}: {}", worker_ip, e));
                 }
             }
         }
@@ -411,7 +411,7 @@ impl Master {
     }
 
     /// Execute the complete job lifecycle according to the new protocol
-    pub async fn execute(&mut self, worker_ips: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn execute(&mut self, worker_ips: Vec<String>) -> anyhow::Result<()> {
         println!("[MASTER] Starting execution with {} workers", worker_ips.len());
         
         self.running.store(true, std::sync::atomic::Ordering::Relaxed);

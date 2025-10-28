@@ -118,8 +118,7 @@ impl WorkerServer {
         }
     }
 
-    /// Start the gRPC server on the specified address
-    pub async fn start(&mut self, addr: &str) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
         let addr = addr.parse()?;
         let service = worker_service::worker_service_server::WorkerServiceServer::new(
             self.service.clone()
