@@ -176,7 +176,7 @@ impl Tiles {
         };
 
         if let Some(tile_state) = &tile.accumulator_state {
-            merge_accumulator_state(accumulator.as_mut(), tile_state.clone());
+            merge_accumulator_state(accumulator.as_mut(), tile_state.as_ref());
         }
 
         let args = window_expr.evaluate_args(&entry_batch)
@@ -261,7 +261,7 @@ impl Tiles {
         
         for tile in tiles {
             if let Some(tile_state) = &tile.accumulator_state {
-                merge_accumulator_state(final_accumulator.as_mut(), tile_state.clone());
+                merge_accumulator_state(final_accumulator.as_mut(), tile_state.as_ref());
             }
         }
         
@@ -326,8 +326,8 @@ mod tests {
     use datafusion::prelude::SessionContext;
     use datafusion::physical_plan::windows::BoundedWindowAggExec;
     use crate::api::planner::{Planner, PlanningContext};
+    use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-    use crate::runtime::operators::operator::OperatorConfig;
 
     fn create_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -347,17 +347,7 @@ mod tests {
             SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
             schema.clone()
         );
-        
-        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
-        let nodes: Vec<_> = logical_graph.get_nodes().collect();
-        
-        for node in &nodes {
-            if let OperatorConfig::WindowConfig(config) = &node.operator_config {
-                return config.window_exec.clone();
-            }
-        }
-        
-        panic!("No window operator found in SQL: {}", sql);
+        extract_datafusion_window_exec(sql, &mut planner).await
     }
 
     fn extract_first_window_expr(window_exec: &Arc<BoundedWindowAggExec>) -> Arc<dyn datafusion::physical_plan::WindowExpr> {

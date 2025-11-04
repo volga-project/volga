@@ -333,7 +333,6 @@ impl TransportBackend for GrpcTransportBackend {
         for edge in &all_input_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
-            // let (tx, rx) = mpsc::channel(Self::CHANNEL_QUEUE_SIZE);
             let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
             reader_senders.insert(channel_id.clone(), tx);
             reader_receivers.insert(channel_id.clone(), rx);
@@ -345,7 +344,6 @@ impl TransportBackend for GrpcTransportBackend {
         for edge in &all_output_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
-            // let (tx, rx) = mpsc::channel(Self::CHANNEL_QUEUE_SIZE);
             let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
             writer_senders.insert(channel_id.clone(), tx);
             writer_receivers.insert(channel_id.clone(), rx);

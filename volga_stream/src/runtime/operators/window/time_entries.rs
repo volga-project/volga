@@ -2,14 +2,13 @@ use std::sync::Arc;
 use std::cmp::Ordering;
 use arrow::array::RecordBatch;
 use crossbeam_skiplist::{SkipSet, SkipMap};
-use dashmap::DashMap;
 use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexSet;
 
-use crate::common::Key;
 use crate::runtime::operators::window::state::WindowState;
 use crate::runtime::operators::window::tiles::Tile;
+use crate::runtime::operators::window::Tiles;
 use crate::storage::storage::{BatchId, RowIdx, Timestamp, extract_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +50,14 @@ impl TimeEntries {
             entries: SkipSet::new(),
             batch_ids: SkipMap::new(),
         }
+    }
+
+    pub fn latest_idx(&self) -> TimeIdx {
+        self.entries.back().map(|entry| *entry).expect("Time entries should exist")
+    }
+
+    pub fn earliest_idx(&self) -> TimeIdx {
+        self.entries.front().map(|entry| *entry).expect("Time entries should exist")
     }
 
     pub fn insert_batch(
@@ -111,23 +118,23 @@ impl TimeEntries {
         time_idxs
     }
 
-    pub fn get_window_entries(
-        &self,
-        window_frame: &Arc<WindowFrame>,
-        window_end_idx: TimeIdx,
-    ) -> Vec<TimeIdx> {
-        let window_start_idx = self.get_window_start_idx(window_frame, window_end_idx, false);
-        if window_start_idx.is_none() {
-            return self.entries.range(..=window_end_idx).map(|entry| *entry).collect();
-        } else {
-            return self.entries.range(window_start_idx.unwrap()..=window_end_idx).map(|entry| *entry).collect();
-        }
-    }
+    // pub fn get_window_entries(
+    //     &self,
+    //     window_frame: &Arc<WindowFrame>,
+    //     window_end_idx: TimeIdx,
+    // ) -> Vec<TimeIdx> {
+    //     let window_start_idx = self.get_window_start_idx(window_frame, window_end_idx, false);
+    //     if window_start_idx.is_none() {
+    //         return self.entries.range(..=window_end_idx).map(|entry| *entry).collect();
+    //     } else {
+    //         return self.entries.range(window_start_idx.unwrap()..=window_end_idx).map(|entry| *entry).collect();
+    //     }
+    // }
     
-    pub fn get_window_start_idx(
+    pub fn get_window_start(
         &self,
         window_frame: &Arc<WindowFrame>,
-        window_end_idx: TimeIdx,
+        window_end: TimeIdx,
         use_front_as_start: bool,
     ) -> Option<TimeIdx> {
         let res = 
@@ -135,19 +142,46 @@ impl TimeEntries {
                 // Handle ROWS
                 match window_frame.start_bound {
                     WindowFrameBound::Preceding(ScalarValue::UInt64(Some(delta))) => {
-                        // Jump backwards delta elements from new_window_end
-                        let window_start_idx = self.entries.range(..=window_end_idx)
-                            .rev()
-                            .nth(delta as usize)
-                            .map(|entry| *entry);
+                        // For ROWS windows, we need to find the position of window_end in the entries
+                        // and then jump backwards delta elements from that position
+                        
+                        // Find the position where window_end would be inserted (or exists)
+                        let window_start = if let Some(exact_entry) = self.entries.get(&window_end) {
+                            // Exact match found, use all entries up to and including this one
+                            self.entries.range(..=*exact_entry)
+                                .rev()
+                                .nth(delta as usize)
+                                .map(|entry| *entry)
+                        } else {
+                            // No exact match, find the position where it would be inserted
+                            // Use lower_bound to find the first entry greater than window_end
+                            if let Some(next_entry) = self.entries.lower_bound(std::ops::Bound::Excluded(&window_end)) {
+                                self.entries.range(..=*next_entry)
+                                    .rev()
+                                    .nth(delta as usize)
+                                    .map(|entry| *entry)
+                            } else {
+                                // window_end is beyond all entries, use all entries up to and including the latest entry
+                                let latest = self.latest_idx();
+                                // subtract 1 from delta to make sure we include the end which is not inside the range
+                                self.entries.range(..=latest)
+                                    .rev()
+                                    .nth((delta as usize).saturating_sub(1))
+                                    .map(|entry| *entry)
+                            }
+                        };
 
-                        window_start_idx
+                        window_start
                     }
                     _ => panic!("Only Preceding start bound is supported for ROWS WindowFrameUnits"),
                 }
             } else if window_frame.units == WindowFrameUnits::Range {
                 // Handle RANGE
-                let window_end_timestamp = window_end_idx.timestamp;
+                let window_end_timestamp = window_end.timestamp;
+                if window_end_timestamp < self.earliest_idx().timestamp {
+                    panic!("Window end timestamp is before earliest timestamp");
+                }
+
                 let window_start_timestamp = match &window_frame.start_bound {
                     WindowFrameBound::Preceding(delta) => {
                         if window_frame.start_bound.is_unbounded() || delta.is_null() {
@@ -169,10 +203,10 @@ impl TimeEntries {
                     row_idx: 0,
                 };
                 // Include all rows with this timestamp
-                let window_start_idx = self.entries.lower_bound(std::ops::Bound::Included(&search_key))
+                let window_start = self.entries.lower_bound(std::ops::Bound::Included(&search_key))
                     .map(|entry| *entry);
 
-                window_start_idx
+                window_start
             } else {
                 panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
             };
@@ -186,38 +220,43 @@ impl TimeEntries {
     fn find_retracts(
         &self,
         window_frame: &Arc<WindowFrame>,
+        previous_window_start: TimeIdx,
         new_window_end: TimeIdx,
-        window_state: &WindowState,
     ) -> (Vec<TimeIdx>, Option<TimeIdx>) {
-    
-        let new_window_start_idx = self.get_window_start_idx(window_frame, new_window_end, false);
+        let new_window_start = self.get_window_start(window_frame, new_window_end, false);
     
         if window_frame.units == WindowFrameUnits::Rows {
             // Handle ROWS
-            if new_window_start_idx.is_none() {
+            if new_window_start.is_none() {
                 // window does not have enough rows to retract
                 return (Vec::new(), None);
             }
             
             // Collect all TimeIdxs between previous window start and new_window_start for retraction
-            let new_start_idx = new_window_start_idx.expect("Window start idx should exist");
+            let new_start_idx = new_window_start.expect("Window start idx should exist");
             let retract_idxs: Vec<TimeIdx> = self.entries
-                .range(window_state.start_idx..new_start_idx)
-                .map(|entry| *entry)
+                .range(previous_window_start..new_start_idx)
+                .map(|entry: crossbeam_skiplist::set::Entry<'_, TimeIdx>| *entry)
                 .collect();
     
             return (retract_idxs, Some(new_start_idx));
         } else if window_frame.units == WindowFrameUnits::Range {
             // Handle RANGE
-    
-            let previous_window_start_idx = window_state.start_idx;
-            let retract_idxs: Vec<TimeIdx> = self.entries
-                // Exclude window_start_idx
-                .range(previous_window_start_idx..new_window_start_idx.expect("Window start idx should exist"))
-                .map(|entry| *entry)
-                .collect();
-            
-            return (retract_idxs, new_window_start_idx)
+            if new_window_start.is_none() {
+                // window moved beyong range, retract all
+                let retract_idxs: Vec<TimeIdx> = self.entries
+                    .range(previous_window_start..)
+                    .map(|entry| *entry)
+                    .collect();
+                return (retract_idxs, None);
+            } else {
+                let retract_idxs: Vec<TimeIdx> = self.entries
+                    // Exclude new_window_start
+                    .range(previous_window_start..new_window_start.expect("Window start idx should exist"))
+                    .map(|entry| *entry)
+                    .collect();
+                return (retract_idxs, new_window_start);
+            }
         } else {
             panic!("Unsupported WindowFrame type: only ROW and RANGE are supported");
         }
@@ -226,20 +265,20 @@ impl TimeEntries {
     pub fn slide_window_position(
         &self,
         window_frame: &Arc<WindowFrame>, 
-        window_state: &mut WindowState, 
-        with_retracts: bool) -> (Vec<TimeIdx>, Vec<Vec<TimeIdx>>) {
+        previous_window_start: TimeIdx,
+        previous_window_end: TimeIdx,
+        new_window_end: TimeIdx,
+        with_retracts: bool
+    ) -> (Vec<TimeIdx>, Vec<Vec<TimeIdx>>, TimeIdx, TimeIdx) {
         let mut updates = Vec::new();
         let mut retracts = Vec::new();
-        
-        let latest_idx = *self.entries.back().expect("Time entries should exist");
-        let previous_window_end = window_state.end_idx;
     
-        if previous_window_end == latest_idx {
+        if previous_window_end == new_window_end {
             // nothing changed
-            return (updates, retracts);
+            return (updates, retracts, previous_window_start, previous_window_end);
         }
     
-        let range_start_idx = if previous_window_end.batch_id == BatchId::nil() {
+        let diff_range_start = if previous_window_end.batch_id == BatchId::nil() {
             // first time
             *self.entries.front().expect("Time entries should exist")
         } else {
@@ -248,36 +287,34 @@ impl TimeEntries {
                 .map(|entry| *entry).expect(&format!("Range start idx should exist for {:?}, {:?}", previous_window_end, self.entries.iter().collect::<Vec<_>>()))
         };
     
-        for entry in self.entries.range(range_start_idx..=latest_idx) {
+        let mut start = previous_window_start;
+        let mut end = previous_window_end;
+        for entry in self.entries.range(diff_range_start..=new_window_end) {
             let time_idx = *entry;
             
-            let (rets, new_start_idx) = self.find_retracts(window_frame, time_idx, &window_state);
+            let (rets, new_start) = self.find_retracts(window_frame, start, time_idx);
             updates.push(time_idx);
             if with_retracts {
                 retracts.push(rets);
             }
-            if let Some(new_start_idx) = new_start_idx {
-                window_state.start_idx = new_start_idx;
+            if let Some(new_start) = new_start {
+                start = new_start;
             }
-            window_state.end_idx = time_idx;
+            end = time_idx;
         }
         
-        (updates, retracts)
+        (updates, retracts, start, end)
     }
     
     // returns a mix of raw events and tiles for range
-    pub fn get_tiled_range(
+    pub fn get_entries_in_range(
         &self,
-        window_state: Option<&WindowState>,
+        tiles: Option<&Tiles>,
         start_idx: TimeIdx,
         end_idx: TimeIdx
     ) -> (Vec<TimeIdx>, Vec<Tile>, Vec<TimeIdx>) {
-        let tiles_in_range = if let Some(window_state) = window_state {
-            if let Some(ref tiles) = window_state.tiles {
-                tiles.get_tiles_for_range(start_idx.timestamp, end_idx.timestamp)
-            } else {
-                Vec::new()
-            }
+        let tiles_in_range = if let Some(tiles) = tiles {
+            tiles.get_tiles_for_range(start_idx.timestamp, end_idx.timestamp)
         } else {
             Vec::new()
         };
@@ -309,30 +346,32 @@ impl TimeEntries {
             (front_padding, tiles_in_range, back_padding)
         }
     }
+
+    // pub fn get_batch_ids_in_range()
     
     // return batch_id's needed to produce window aggregates for given entries, 
     // excluding ranges covered by tiles
-    pub fn get_batches_for_entries(
-        &self,
-        entries: &Vec<TimeIdx>,
-        window_frame: &Arc<WindowFrame>,
-        window_state: Option<&WindowState>,
-    ) -> IndexSet<BatchId> {
-        let mut res = IndexSet::new();
-        for entry in entries {
-            res.insert(entry.batch_id);
-            let window_start = self.get_window_start_idx(window_frame, *entry, true).expect("Time entries should exist");
-            let tiled_range = self.get_tiled_range(window_state, window_start, *entry);
-            // skip tiles, only front and back padding
-            for entry in tiled_range.0 {
-                res.insert(entry.batch_id);
-            }
-            for entry in tiled_range.2 {
-                res.insert(entry.batch_id);
-            }
-        }
-        res
-    }
+    // pub fn get_batches_for_entries(
+    //     &self,
+    //     entries: &Vec<TimeIdx>,
+    //     window_frame: &Arc<WindowFrame>,
+    //     tiles: Option<&Tiles>,
+    // ) -> IndexSet<BatchId> {
+    //     let mut res = IndexSet::new();
+    //     for entry in entries {
+    //         res.insert(entry.batch_id);
+    //         let window_start = self.get_window_start(window_frame, *entry, true).expect("Time entries should exist");
+    //         let (front_padding, _tiles, back_padding) = self.get_entries_in_range(tiles, window_start, *entry);
+    //         // skip tiles, only front and back padding
+    //         for entry in front_padding {
+    //             res.insert(entry.batch_id);
+    //         }
+    //         for entry in back_padding {
+    //             res.insert(entry.batch_id);
+    //         }
+    //     }
+    //     res
+    // }
 
     pub fn get_cutoff_timestamp(
         &self,
@@ -357,7 +396,7 @@ impl TimeEntries {
                 }
             },
             WindowFrameUnits::Rows => {
-                // For row windows: use lookup key and get_window_start_idx;
+                // For row windows: use lookup key and get_window_start;
                 let search_key = TimeIdx {
                     timestamp: window_state.end_idx.timestamp - lateness,
                     pos_idx: usize::MAX,
@@ -365,8 +404,8 @@ impl TimeEntries {
                     row_idx: 0,
                 };
                 if let Some(last_valid_entry) = self.entries.upper_bound(std::ops::Bound::Included(&search_key)) {
-                    if let Some(window_start_idx) = self.get_window_start_idx(&window_frame, *last_valid_entry, false) {
-                        window_start_idx.timestamp
+                    if let Some(window_start) = self.get_window_start(&window_frame, *last_valid_entry, false) {
+                        window_start.timestamp
                     } else {
                         // If we can't find window start, no cutoff
                         0
@@ -538,7 +577,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_advance_row_window_position() {
+    async fn test_slide_row_window_position() {
         let time_entries = TimeEntries::new();
         
         // First batch: timestamps [1000, 2000, 3000]
@@ -549,18 +588,16 @@ mod tests {
         // Create window frame: ROWS 2 PRECEDING (window size = 3)
         let window_frame = create_rows_window_frame(2);
         
-        // Initial empty window state
-        let mut window_state = WindowState {
-            tiles: None,
-            accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-        };
+        // Initial empty window bounds
+        let start_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
+        let end_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
         
-        // First advance window position after first batch
-        let (first_updates, first_retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
+        // First slide window position after first batch
+        let (first_updates, first_retracts, new_window_start, new_window_end) = time_entries.slide_window_position(
+            &window_frame, start_idx, end_idx, time_entries.latest_idx(), true
+        );
         
-        // Verify first batch processing (similar to test_advance_window_position_first_time)
+        // Verify first batch processing
         assert_eq!(first_updates.len(), 3, "Should have 3 updates for first batch");
         
         let expected_first_updates: [(i64, BatchId, usize, Vec<(i64, BatchId)>); 3] = [
@@ -583,16 +620,16 @@ mod tests {
         }
         
         // Verify window state after first batch
-        assert_eq!(window_state.end_idx.timestamp, 3000, "Window end should be at timestamp 3000 after first batch");
-        assert_eq!(window_state.start_idx.timestamp, 1000, "Window start should be at timestamp 1000 after first batch");
+        assert_eq!(new_window_end.timestamp, 3000, "Window end should be at timestamp 3000 after first batch");
+        assert_eq!(new_window_start.timestamp, 1000, "Window start should be at timestamp 1000 after first batch");
         
         // Add second batch: timestamps [4000, 5000]
         let batch2 = create_test_batch(vec![4000, 5000], vec![40, 50]);
         let batch_id2 = BatchId::random();
         time_entries.insert_batch(batch_id2, &batch2, 0);
         
-        // Second advance window position (incremental processing)
-        let (updates, retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
+        // Second slide window position (incremental processing)
+        let (updates, retracts, new_window_start, new_window_end) = time_entries.slide_window_position(&window_frame, new_window_start, new_window_end, time_entries.latest_idx(), true);
         
         // Should only process new events (4000, 5000)
         assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
@@ -622,12 +659,12 @@ mod tests {
         }
         
         // Verify final window state
-        assert_eq!(window_state.end_idx.timestamp, 5000, "Window end should be at timestamp 5000");
-        assert_eq!(window_state.start_idx.timestamp, 3000, "Window start should be at timestamp 3000");
+        assert_eq!(new_window_end.timestamp, 5000, "Window end should be at timestamp 5000");
+        assert_eq!(new_window_start.timestamp, 3000, "Window start should be at timestamp 3000");
     }
 
     #[tokio::test]
-    async fn test_advance_range_window_position() {
+    async fn test_slide_range_window_position() {
         let time_entries = TimeEntries::new();
         
         // First batch: timestamps [1000, 1200, 1400, 2000, 2200] - multiple events within range
@@ -638,16 +675,14 @@ mod tests {
         // Create range window frame: RANGE 1000ms PRECEDING (1 second window)
         let window_frame = create_range_window_frame(1000);
         
-        // Initial empty window state
-        let mut window_state = WindowState {
-            tiles: None,
-            accumulator_state: None,
-            start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-            end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-        };
+        // Initial empty window bounds
+        let start_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
+        let end_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
         
-        // First advance window position after first batch
-        let (first_updates, first_retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
+        // First slide window position after first batch
+        let (first_updates, first_retracts, new_window_start, new_window_end) = time_entries.slide_window_position(
+            &window_frame, start_idx, end_idx, time_entries.latest_idx(), true
+        );
         
         // Verify first batch processing
         assert_eq!(first_updates.len(), 5, "Should have 5 updates for first batch");
@@ -678,16 +713,18 @@ mod tests {
         }
         
         // Verify window state after first batch
-        assert_eq!(window_state.end_idx.timestamp, 2200, "Window end should be at timestamp 2200 after first batch");
-        assert_eq!(window_state.start_idx.timestamp, 1200, "Window start should be at timestamp 1200 after first batch (1000 was retracted)");
+        assert_eq!(new_window_end.timestamp, 2200, "Window end should be at timestamp 2200 after first batch");
+        assert_eq!(new_window_start.timestamp, 1200, "Window start should be at timestamp 1200 after first batch (1000 was retracted)");
         
         // Add second batch: timestamps [3500, 4000] - will cause multiple retracts
         let batch2 = create_test_batch(vec![3500, 4000], vec![35, 40]);
         let batch_id2 = BatchId::random();
         time_entries.insert_batch(batch_id2, &batch2, 0);
         
-        // Second advance window position (incremental processing)
-        let (updates, retracts) = time_entries.slide_window_position(&window_frame, &mut window_state, true);
+        // Second slide window position (incremental processing)
+        let (updates, retracts, new_window_start, new_window_end) = time_entries.slide_window_position(
+            &window_frame, new_window_start, new_window_end, time_entries.latest_idx(), true
+        );
         
         // Should only process new events (3500, 4000)
         assert_eq!(updates.len(), 2, "Should have 2 incremental updates");
@@ -717,12 +754,12 @@ mod tests {
         }
         
         // Verify final window state
-        assert_eq!(window_state.end_idx.timestamp, 4000, "Window end should be at timestamp 4000");
-        assert_eq!(window_state.start_idx.timestamp, 3500, "Window start should be at timestamp 3500 (4000-1000 range includes 3500)");
+        assert_eq!(new_window_end.timestamp, 4000, "Window end should be at timestamp 4000");
+        assert_eq!(new_window_start.timestamp, 3500, "Window start should be at timestamp 3500 (4000-1000 range includes 3500)");
     }
 
     #[tokio::test]
-    async fn test_same_timestamp() {
+    async fn test_slide_same_timestamp() {
         let time_entries = TimeEntries::new();
         
         // First batch: duplicate timestamps [1000, 1000, 1500, 2000, 2000]
@@ -735,18 +772,15 @@ mod tests {
         
         // Test 1: ROWS 2 PRECEDING window (window size = 3)
         {
-            let mut window_state_rows = WindowState {
-                tiles: None,
-                accumulator_state: None,
-                start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-                end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-            };
+            let start_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
+            let end_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
             
             let rows_frame = create_rows_window_frame(2);
-            // let time_entries = time_index.get_or_create_time_index(&key).await;
             
-            // First advance - process first batch
-            let (first_updates, first_retracts) = time_entries.slide_window_position(&rows_frame, &mut window_state_rows, true);
+            // First slide - process first batch
+            let (first_updates, first_retracts, new_window_start, new_window_end) = time_entries.slide_window_position(
+                &rows_frame, start_idx, end_idx, time_entries.latest_idx(), true
+            );
             assert_eq!(first_updates.len(), 5, "Should process all 5 events with duplicates");
             
             // Verify duplicate timestamps are processed correctly
@@ -772,8 +806,10 @@ mod tests {
             let batch_id2 = BatchId::random();
             time_entries.insert_batch(batch_id2, &batch2, 0);
             
-            // Second advance - incremental processing
-            let (second_updates, second_retracts) = time_entries.slide_window_position(&rows_frame, &mut window_state_rows, true);
+            // Second slide - incremental processing
+            let (second_updates, second_retracts, _, _) = time_entries.slide_window_position(
+                &rows_frame, new_window_start, new_window_end, time_entries.latest_idx(), true
+            );
             assert_eq!(second_updates.len(), 2, "Should process 2 new duplicate events");
             
             let expected_second_updates = [
@@ -793,18 +829,15 @@ mod tests {
         
         // Test 2: RANGE 800ms PRECEDING window
         {
-            let mut window_state_range = WindowState {
-                tiles: None,
-                accumulator_state: None,
-                start_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-                end_idx: TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 },
-            };
-            
+            let start_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
+            let end_idx = TimeIdx { timestamp: 0, pos_idx: 0, batch_id: BatchId::nil(), row_idx: 0 };
+
             let range_frame = create_range_window_frame(800);
-            // let time_entries = time_index.get_or_create_time_index(&key).await;
             
-            // First advance - process first batch
-            let (first_updates, first_retracts) = time_entries.slide_window_position(&range_frame, &mut window_state_range, true);
+            // First slide - process first batch
+            let (first_updates, first_retracts, _, _) = time_entries.slide_window_position(
+                &range_frame, start_idx, end_idx, time_entries.latest_idx(), true
+            );
             assert_eq!(first_updates.len(), 7, "Should process all 7 events (5 from batch1 + 2 from batch2)");
             
             // Verify range window behavior with duplicates
@@ -819,5 +852,117 @@ mod tests {
             assert_eq!(update_5_idx.timestamp, 2000);
             assert_eq!(update_5_retracts.len(), 0, "Second 2000 event should have no retracts");
         }
+    }
+
+    #[tokio::test]
+    async fn test_get_window_start_rows() {
+        let time_entries = TimeEntries::new();
+        
+        // Setup test data: timestamps [500, 1000, 2000, 3000, 4000, 5000]
+        let batch = create_test_batch(vec![500, 1000, 2000, 3000, 4000, 5000], vec![5, 10, 20, 30, 40, 50]);
+        let batch_id = BatchId::random();
+        let time_idxs = time_entries.insert_batch(batch_id, &batch, 0);
+        
+        // Create ROWS 2 PRECEDING window frame (window size = 3)
+        let rows_frame = create_rows_window_frame(2);
+        
+        // Test 1: window_end is within time_range and exactly matches an entry
+        let window_end_exact = time_idxs[3]; // timestamp 3000, should find window start at 1000
+        let window_start = time_entries.get_window_start(&rows_frame, window_end_exact, false);
+        assert!(window_start.is_some(), "Should find window start for exact match");
+        assert_eq!(window_start.unwrap().timestamp, 1000, "Window start should be at timestamp 1000 (3 entries back from 3000)");
+        assert_eq!(window_start.unwrap().batch_id, batch_id, "Window start should have correct batch_id");
+        assert_eq!(window_start.unwrap().row_idx, 1, "Window start should be at row 1");
+        
+        // Test 2: window_end is within time_range but doesn't exactly match any entry
+        let window_end_between = TimeIdx {
+            timestamp: 3500, // Between 3000 and 4000
+            pos_idx: 0,
+            batch_id: BatchId::random(),
+            row_idx: 0,
+        };
+        let window_start = time_entries.get_window_start(&rows_frame, window_end_between, false);
+        assert!(window_start.is_some(), "Should find window start even for non-exact match");
+        assert_eq!(window_start.unwrap().timestamp, 2000, "Window start should be at timestamp 2000 (3 entries back from position near 3500)");
+        
+        // Test 3: window_end is outside (larger than latest), but window start is inside the range
+        let window_end_outside = TimeIdx {
+            timestamp: 7000, // Beyond latest timestamp (5000)
+            pos_idx: 0,
+            batch_id: BatchId::random(),
+            row_idx: 0,
+        };
+        let window_start = time_entries.get_window_start(&rows_frame, window_end_outside, false);
+        assert!(window_start.is_some(), "Should find window start even when window_end is outside range");
+        assert_eq!(window_start.unwrap().timestamp, 4000, "Window start should be at timestamp 4000 (2 entries back from end of available data since we also count end itself)");
+        
+    }
+
+    #[tokio::test]
+    async fn test_get_window_start_range() {
+        let time_entries = TimeEntries::new();
+        
+        // Setup test data: timestamps [1000, 2000, 3000, 4000, 5000]
+        let batch = create_test_batch(vec![1000, 2000, 3000, 4000, 5000], vec![10, 20, 30, 40, 50]);
+        let batch_id = BatchId::random();
+        let time_idxs = time_entries.insert_batch(batch_id, &batch, 0);
+        
+        // Create RANGE 1500ms PRECEDING window frame
+        let range_frame = create_range_window_frame(1500);
+        
+        // Test 1: window_end is within time_range and exactly matches an entry
+        let window_end_exact = time_idxs[3]; // timestamp 4000
+        let window_start = time_entries.get_window_start(&range_frame, window_end_exact, false);
+        assert!(window_start.is_some(), "Should find window start for exact match");
+        // Window range: [4000-1500, 4000] = [2500, 4000], so start should be at 3000 (first entry >= 2500)
+        assert_eq!(window_start.unwrap().timestamp, 3000, "Window start should be at timestamp 3000");
+        assert_eq!(window_start.unwrap().batch_id, batch_id, "Window start should have correct batch_id");
+        assert_eq!(window_start.unwrap().row_idx, 2, "Window start should be at row 2");
+        
+        // Test 2: window_end is within time_range but doesn't exactly match any entry
+        let window_end_between = TimeIdx {
+            timestamp: 3500, // Between 3000 and 4000
+            pos_idx: 0,
+            batch_id: BatchId::random(),
+            row_idx: 0,
+        };
+        let window_start = time_entries.get_window_start(&range_frame, window_end_between, false);
+        assert!(window_start.is_some(), "Should find window start for non-exact match");
+        // Window range: [3500-1500, 3500] = [2000, 3500], so start should be at 2000
+        assert_eq!(window_start.unwrap().timestamp, 2000, "Window start should be at timestamp 2000");
+        
+        // Test 3: window_end is outside (larger than latest), but window start is inside the range
+        let window_end_outside = TimeIdx {
+            timestamp: 6000, // Beyond latest timestamp (5000)
+            pos_idx: 0,
+            batch_id: BatchId::random(),
+            row_idx: 0,
+        };
+        let window_start = time_entries.get_window_start(&range_frame, window_end_outside, false);
+        assert!(window_start.is_some(), "Should find window start when window_end is outside but start is inside");
+        // Window range: [6000-1500, 6000] = [4500, 6000], so start should be at 5000 (first entry >= 4500)
+        assert_eq!(window_start.unwrap().timestamp, 5000, "Window start should be at timestamp 5000");
+        
+        // Test 4: Both window_end and corresponding start are outside (should return None for RANGE)
+        let window_end_far_outside = TimeIdx {
+            timestamp: 10000, // Beyond latest timestamp (5000)
+            pos_idx: 0,
+            batch_id: BatchId::random(),
+            row_idx: 0,
+        };
+        let window_start = time_entries.get_window_start(&range_frame, window_end_far_outside, false);
+        assert!(window_start.is_none(), "Should return None when both window_end and start are outside range");
+        
+        // Test edge case: window_end exactly at boundary
+        let boundary_window_end = TimeIdx {
+            timestamp: 2500, // Exactly 1500ms after first entry (1000)
+            pos_idx: 0,
+            batch_id: BatchId::random(),
+            row_idx: 0,
+        };
+        let window_start = time_entries.get_window_start(&range_frame, boundary_window_end, false);
+        assert!(window_start.is_some(), "Should find window start at boundary");
+        // Window range: [2500-1500, 2500] = [1000, 2500], so start should be at 1000
+        assert_eq!(window_start.unwrap().timestamp, 1000, "Window start should be at timestamp 1000 for boundary case");
     }
 }

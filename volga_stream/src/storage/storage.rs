@@ -182,7 +182,6 @@ impl Storage {
         result
     }
 
-
     pub fn split_by_batch_size(
         batch: &RecordBatch,
         partition_key: &Key,
@@ -219,52 +218,13 @@ impl Storage {
                 .expect("Take record batch operation should succeed");
             
             let uid = rand::random::<u64>(); // should be unique enough within same key and bucket
-            let batch_id= BatchId::new(partition_key.hash(), time_bucket, uid);
+            let batch_id = BatchId::new(partition_key.hash(), time_bucket, uid);
 
             result.push((batch_id, sub_batch));
         }
 
         result
     }
-
-    // TODO this should also be prefixed with operator-id
-    // pub fn generate_batch_id(
-    //     batch: &RecordBatch,
-    //     partition_key: &Key,
-    //     ts_column_index: usize,
-    // ) -> BatchId {
-    //     let partition_hex = hex::encode(partition_key.to_bytes());
-    //     let (min_ts, _) = Self::get_time_range_from_batch(batch, ts_column_index);
-    //     let mut uuid = Uuid::new_v4();
-
-    //     // avoid collisions
-    //     while batch_id_to_key.contains_key(&uuid) {
-    //         uuid = Uuid::new_v4();
-    //     }
-        
-    //     let batch_key = format!("{}-{}-{}", partition_hex, min_ts, uuid.to_string());
-    //     batch_id_to_key.insert(uuid, batch_key.clone());
-
-    //     (uuid, batch_key)
-    // }
-
-    // fn get_time_range_from_batch(batch: &RecordBatch, ts_column_index: usize) -> (Timestamp, Timestamp) {
-    //     if batch.num_rows() == 0 {
-    //         panic!("Batch has no rows");
-    //     }
-
-    //     let timestamp_column = batch.column(ts_column_index);
-    //     let mut min_ts = i64::MAX;
-    //     let mut max_ts = i64::MIN;
-        
-    //     for row_idx in 0..batch.num_rows() {
-    //         let ts = extract_timestamp(timestamp_column, row_idx);
-    //         min_ts = min_ts.min(ts);
-    //         max_ts = max_ts.max(ts);
-    //     }
-        
-    //     (min_ts, max_ts)
-    // }
 
     /// Returns the timestamp (in milliseconds) of the start of the time bucket that the given record's timestamp falls into.
     /// `timestamp_ms` is the timestamp (in milliseconds) of the record.
@@ -273,31 +233,6 @@ impl Storage {
         let granularity_ms = time_granularity.to_millis();
         ((timestamp_ms / granularity_ms) * granularity_ms) as u64
     }
-    // pub fn timestamp_to_time_partition(timestamp_ms: i64, time_granularity: TimeGranularity) -> String {
-    //     // Calculate the time bucket based on granularity duration
-    //     let granularity_ms = time_granularity.to_millis();
-    //     let time_bucket = (timestamp_ms / granularity_ms) * granularity_ms;
-        
-    //     // Convert the time bucket start to UTC DateTime
-    //     let datetime = Utc.timestamp_millis_opt(time_bucket)
-    //         .single()
-    //         .expect("Timestamp should be valid");
-        
-    //     match time_granularity {
-    //         TimeGranularity::Minutes(minutes) => {
-    //             // Format: YYYY-MM-DD-HH-MM-{minutes}min
-    //             format!("{}-{}min", datetime.format("%Y-%m-%d-%H-%M"), minutes)
-    //         },
-    //         TimeGranularity::Hours(hours) => {
-    //             // Format: YYYY-MM-DD-HH-{hours}h
-    //             format!("{}-{}h", datetime.format("%Y-%m-%d-%H"), hours)
-    //         },
-    //         TimeGranularity::Days(days) => {
-    //             // Format: YYYY-MM-DD-{days}d
-    //             format!("{}-{}d", datetime.format("%Y-%m-%d"), days)
-    //         },
-    //     }
-    // }
 
     // Store a batch with per-partition locking
     async fn store_batch(&self, batch_id: BatchId, batch: RecordBatch, partition_key: Key) {
