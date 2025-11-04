@@ -117,19 +117,6 @@ impl TimeEntries {
         
         time_idxs
     }
-
-    // pub fn get_window_entries(
-    //     &self,
-    //     window_frame: &Arc<WindowFrame>,
-    //     window_end_idx: TimeIdx,
-    // ) -> Vec<TimeIdx> {
-    //     let window_start_idx = self.get_window_start_idx(window_frame, window_end_idx, false);
-    //     if window_start_idx.is_none() {
-    //         return self.entries.range(..=window_end_idx).map(|entry| *entry).collect();
-    //     } else {
-    //         return self.entries.range(window_start_idx.unwrap()..=window_end_idx).map(|entry| *entry).collect();
-    //     }
-    // }
     
     pub fn get_window_start(
         &self,
@@ -346,32 +333,6 @@ impl TimeEntries {
             (front_padding, tiles_in_range, back_padding)
         }
     }
-
-    // pub fn get_batch_ids_in_range()
-    
-    // return batch_id's needed to produce window aggregates for given entries, 
-    // excluding ranges covered by tiles
-    // pub fn get_batches_for_entries(
-    //     &self,
-    //     entries: &Vec<TimeIdx>,
-    //     window_frame: &Arc<WindowFrame>,
-    //     tiles: Option<&Tiles>,
-    // ) -> IndexSet<BatchId> {
-    //     let mut res = IndexSet::new();
-    //     for entry in entries {
-    //         res.insert(entry.batch_id);
-    //         let window_start = self.get_window_start(window_frame, *entry, true).expect("Time entries should exist");
-    //         let (front_padding, _tiles, back_padding) = self.get_entries_in_range(tiles, window_start, *entry);
-    //         // skip tiles, only front and back padding
-    //         for entry in front_padding {
-    //             res.insert(entry.batch_id);
-    //         }
-    //         for entry in back_padding {
-    //             res.insert(entry.batch_id);
-    //         }
-    //     }
-    //     res
-    // }
 
     pub fn get_cutoff_timestamp(
         &self,

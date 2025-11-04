@@ -17,7 +17,7 @@ use datafusion::scalar::ScalarValue;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::aggregates::{get_aggregate_type, AggregatorArgs};
+use crate::runtime::operators::window::aggregates::{get_aggregate_type, Aggregation};
 use crate::runtime::operators::window::state::{create_empty_windows_state, AccumulatorState, State, WindowId, WindowsState};
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
@@ -213,7 +213,6 @@ impl WindowOperator {
             .expect("Should be able to concat result batches")
     }
 
-    // TODO do we need to update tiles as well?
     async fn update_retractable_windows_state_with_late_entries(
         &self, 
         key: &Key,
@@ -241,7 +240,7 @@ impl WindowOperator {
                 continue;
             }
 
-            let args = vec![AggregatorArgs::new(
+            let args = vec![Aggregation::new(
                 late_entries_in_window,
                 aggregator_type,
                 window_config.window_expr.clone(),
@@ -275,18 +274,18 @@ impl WindowOperator {
         windows_state: &mut WindowsState,
         late_entries: Option<Vec<TimeIdx>>
     ) -> RecordBatch {
-        // Step 0: Update accumulator states for all retractable windows with late entries if needed
-        // TODO do we update tiles as well?
+        // Update accumulator states for all retractable windows with late entries if needed
+        // Tiles are already updated with late entries, no need to handle it here
         if let Some(ref late_entries_ref) = late_entries {
             self.update_retractable_windows_state_with_late_entries(key, windows_state, late_entries_ref).await
         }
 
         let time_entries = &windows_state.time_entries;
 
-        // Step 1: Advance window positions to latest idx
-        let mut aggregator_args = IndexMap::new();
+        let mut aggregations = IndexMap::new();
         let mut new_window_positions = HashMap::new();
         
+        // Advance window positions to latest idx and configure aggregations for each window
         for (window_id, window_config) in &self.windows {
             let window_frame = window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
@@ -303,8 +302,9 @@ impl WindowOperator {
             // Store new positions for later update
             new_window_positions.insert(*window_id, (new_window_start, new_window_end));
 
+            let mut aggs = Vec::new();
+
             // add late entries
-            let mut args = Vec::new();
             if let Some(ref late_entries_ref) = late_entries {
                 let aggregator_type = if retractable {
                     // late entries are handled without retraction even for retractables
@@ -314,19 +314,20 @@ impl WindowOperator {
                 };
 
                 // TODO split for parallelism
-                args.push(AggregatorArgs::new(
+                aggs.push(Aggregation::new(
                     late_entries_ref.clone(), aggregator_type, window_config.window_expr.clone(), None, window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
                 ));
             }
             // TODO split for parallelism
-            args.push(AggregatorArgs::new(
+            aggs.push(Aggregation::new(
                 updates, aggregator_type, window_config.window_expr.clone(), Some(retracts), window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
             ));
-            aggregator_args.insert(*window_id, args);
+            aggregations.insert(*window_id, aggs);
         }
         
-        // Compute aggregator_idxs before calling load_batches
-        let aggregator_idxs: Vec<TimeIdx> = aggregator_args
+        // Compute aggregated_values_idxs - time indexes of aggregated values.
+        // This is used to load batches from storage
+        let aggregated_values_idxs: Vec<TimeIdx> = aggregations
             .values()
             .next()
             .map(|args_vec| {
@@ -337,26 +338,33 @@ impl WindowOperator {
             })
             .unwrap_or_else(Vec::new);
         
-        let batches = load_batches(&self.base.storage, key, &aggregator_args, time_entries).await;
-        let aggregator_results = produce_aggregates(&aggregator_args, &batches, time_entries, self.thread_pool.as_ref()).await;
+        // Load batches
+        let batches = load_batches(&self.base.storage, key, &aggregations, time_entries).await;
+        
+        // Run aggregation
+        let aggregation_results = produce_aggregates(&aggregations, &batches, time_entries, self.thread_pool.as_ref()).await;
         
         // Update window state positions and accumulator states
-        for (window_id, (new_window_start, new_window_end)) in &new_window_positions {
-            let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
-            window_state.start_idx = *new_window_start;
-            window_state.end_idx = *new_window_end;
-        }
-        
-        // Step 6: Update window accumulator states
-        for (window_id, results) in &aggregator_results {
-            let (_, accumulator_state) = results.last().expect("Results should exist");
-            windows_state.window_states.get_mut(window_id).expect("Window state should exist").accumulator_state = accumulator_state.clone();
+        for (window_id, _) in &self.windows {
+            if let Some((new_window_start, new_window_end)) = &new_window_positions.get(window_id) {
+                let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
+                window_state.start_idx = *new_window_start;
+                window_state.end_idx = *new_window_end;
+            }
+            
+            if let Some(results) = aggregation_results.get(window_id) {
+                let (_, accumulator_state) = results.last().expect("Results should exist");
+                let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
+                
+                window_state.accumulator_state = accumulator_state.clone();
+            }
         }
 
-        let input_values = get_input_values(&aggregator_idxs, &batches, &self.input_schema);
+        // Get input values (original values which were not aggregated)
+        let input_values = get_input_values(&aggregated_values_idxs, &batches, &self.input_schema);
 
         // For each window in aggregator_results, collect/flatten all aggregates into Vec<Vec<_>>
-        let aggregations: Vec<Vec<ScalarValue>> = aggregator_results
+        let aggregated_values: Vec<Vec<ScalarValue>> = aggregation_results
             .values()
             .map(|results| {
                 results
@@ -366,22 +374,22 @@ impl WindowOperator {
             })
             .collect();
 
-        // Step 8: Stack input value rows and result rows producing single batch
-        stack_concat_results(input_values, aggregations, &self.output_schema, &self.input_schema)
+        // Stack input value rows and result rows producing single result batch
+        stack_concat_results(input_values, aggregated_values, &self.output_schema, &self.input_schema)
     }
 }
 
-async fn load_batches<'a>(storage: &Storage, key: &Key, aggregator_args: &IndexMap<WindowId, Vec<AggregatorArgs<'a>>>, time_entries: &TimeEntries) -> HashMap<BatchId, RecordBatch> {
+async fn load_batches<'a>(storage: &Storage, key: &Key, aggregations: &IndexMap<WindowId, Vec<Aggregation<'a>>>, time_entries: &TimeEntries) -> HashMap<BatchId, RecordBatch> {
     let mut batches_to_load = IndexSet::new(); // preserve insertion order
-    for (_window_id, args) in aggregator_args.iter() {
-        for arg in args {
-            let retractable = arg.aggregator_type == AggregatorType::RetractableAccumulator;
-            let window_frame = arg.window_expr.get_window_frame();
-            let entries = &arg.entries;
-            let tiles = arg.tiles.as_ref();
+    for (_window_id, aggs) in aggregations.iter() {
+        for agg in aggs {
+            let retractable = agg.aggregator_type == AggregatorType::RetractableAccumulator;
+            let window_frame = agg.window_expr.get_window_frame();
+            let entries = &agg.entries;
+            let tiles = agg.tiles.as_ref();
             if retractable {
                 // for retarctables, we do not need to scan whole window on each update
-                let retracts = arg.retracts.as_ref();
+                let retracts = agg.retracts.as_ref();
                 for i in 0..entries.len() {
                     batches_to_load.insert(entries[i].batch_id);
                     if let Some(ref retracts) = retracts {
@@ -409,9 +417,9 @@ async fn load_batches<'a>(storage: &Storage, key: &Key, aggregator_args: &IndexM
     storage.load_batches(batches_to_load.into_iter().collect(), key).await
 }
 
-async fn produce_aggregates<'a>(aggregator_args: &IndexMap<WindowId, Vec<AggregatorArgs<'a>>>, batches: &HashMap<BatchId, RecordBatch>, time_entries: &TimeEntries, thread_pool: Option<&ThreadPool>) -> IndexMap<WindowId, Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>> {
-    let futures: Vec<_> = aggregator_args.iter()
-        .map(|(window_id, args)| {
+async fn produce_aggregates<'a>(aggregations: &IndexMap<WindowId, Vec<Aggregation<'a>>>, batches: &HashMap<BatchId, RecordBatch>, time_entries: &TimeEntries, thread_pool: Option<&ThreadPool>) -> IndexMap<WindowId, Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>> {
+    let futures: Vec<_> = aggregations.iter()
+        .map(|(window_id, aggs)| {
             let window_id = *window_id;
             let batches = batches;
             let time_entries = time_entries;
@@ -419,8 +427,8 @@ async fn produce_aggregates<'a>(aggregator_args: &IndexMap<WindowId, Vec<Aggrega
             
             async move {
                 let mut results = Vec::new();
-                for arg in args {
-                    let result = arg.produce_aggregates(batches, time_entries, thread_pool).await;
+                for agg in aggs {
+                    let result = agg.produce_aggregates(batches, time_entries, thread_pool).await;
                     results.push(result);
                 }
                 (window_id, results)
@@ -475,6 +483,7 @@ impl OperatorTrait for WindowOperator {
                         } else {
                             create_empty_windows_state(&window_ids, &self.tiling_configs, &window_exprs)
                         };
+                        
                         let last_entry_before_update = if let Some(last_entry) = windows_state.time_entries.entries.back() {
                             Some(last_entry.value().clone())
                         } else {
@@ -510,7 +519,7 @@ impl OperatorTrait for WindowOperator {
                             return OperatorPollResult::Continue;
                         } 
                         
-                        // calculate pre-aggregated tiles if needed
+                        // calculate pre-aggregated tiles if needed, including not-dropped late entries
                         for (_, window_state) in windows_state.window_states.iter_mut() {
                             if let Some(ref mut tiles) = window_state.tiles {
                                 tiles.add_batch(&record_batch, self.ts_column_index);
@@ -587,7 +596,8 @@ fn create_output_schema(
     )
 }
 
-// Extract input values for each update row
+// Extract input values (values which were in original argument batch, but were not aggregated, e.g keys) 
+// for each update row.
 // We assume window operator schema is fixed: input columns first, then window columns
 pub fn get_input_values(
     result_idxs: &Vec<TimeIdx>, 
@@ -614,9 +624,10 @@ pub fn get_input_values(
     input_values
 }
 
+// creates a record batch by vertically stacking input_values and aggregated_values
 pub fn stack_concat_results(
-    input_values: Vec<Vec<ScalarValue>>, 
-    results: Vec<Vec<ScalarValue>>, 
+    input_values: Vec<Vec<ScalarValue>>, // values from input that were not part of aggregation (e.g keys)
+    aggregated_values: Vec<Vec<ScalarValue>>, // produces aggregates
     output_schema: &SchemaRef,
     input_schema: &SchemaRef
 ) -> RecordBatch {
@@ -638,7 +649,7 @@ pub fn stack_concat_results(
     }
     
     // Add window result columns (remaining columns in output schema)
-    for window_results in results.iter() {
+    for window_results in aggregated_values.iter() {
         let array = ScalarValue::iter_to_array(window_results.iter().cloned())
             .expect("Should be able to convert scalar values to array");
         columns.push(array);

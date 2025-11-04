@@ -7,7 +7,6 @@ use datafusion::scalar::ScalarValue;
 use crate::runtime::operators::window::aggregates::merge_accumulator_state;
 use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
 use crate::runtime::operators::window::state::AccumulatorState;
-// use crate::runtime::operators::window::window_operator::create_sliding_accumulator;
 use crate::storage::storage::{Timestamp, extract_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]

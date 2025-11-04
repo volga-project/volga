@@ -163,7 +163,9 @@ pub fn get_aggregate_type(window_expr: &Arc<dyn WindowExpr>) -> AggregatorType {
     registry.get_aggregator_type(&agg_name).expect(&format!("Unsupported aggregate function: {}", agg_name))
 }
 
-pub fn run_retractable_accumulator(
+// for multiple entries (updates) and optional retracts, produces aggregated values 
+// by incrementally applying (and retracting) updates to accumulator
+fn run_retractable_accumulator(
     window_expr: &Arc<dyn WindowExpr>, 
     updates: Vec<TimeIdx>, 
     retracts: Option<Vec<Vec<TimeIdx>>>, 
@@ -235,7 +237,7 @@ pub fn run_retractable_accumulator(
     (results, accumulator.state().expect("Should be able to get accumulator state"))
 }
 
-pub async fn run_retractable_accumulator_parallel(
+async fn run_retractable_accumulator_parallel(
     thread_pool: &ThreadPool,
     window_expr: Arc<dyn WindowExpr>, 
     updates: Vec<TimeIdx>, 
@@ -248,7 +250,9 @@ pub async fn run_retractable_accumulator_parallel(
     }).await
 }
 
-pub fn run_plain_accumulator(
+// aggregates a range of values (front_entries+middle_tiles+back_entries) into a single value
+// by creating a temporary accumulator, updating it and getting result.
+fn run_plain_accumulator(
     window_expr: &Arc<dyn WindowExpr>, 
     front_entries: Vec<TimeIdx>, 
     middle_tiles: Vec<Tile>, 
@@ -303,7 +307,7 @@ pub fn run_plain_accumulator(
     )
 }
 
-pub async fn run_plain_accumulator_parallel(
+async fn run_plain_accumulator_parallel(
     thread_pool: &ThreadPool,
     window_expr: Arc<dyn WindowExpr>, 
     front_entries: Vec<TimeIdx>, 
@@ -316,7 +320,7 @@ pub async fn run_plain_accumulator_parallel(
     }).await
 }
 
-pub fn run_evaluator(
+fn run_evaluator(
     _window_expr: &Arc<dyn WindowExpr>, 
     _entries: Vec<TimeIdx>, 
     _batches: &HashMap<BatchId, RecordBatch>
@@ -324,8 +328,10 @@ pub fn run_evaluator(
     panic!("Not implemented");
 }
 
+// A single parallelizable unit of work - for multiples entries, produces multiple aggregation values
+// where each value represents aggregated result for a configured window with entry as it's end
 #[derive(Debug)]
-pub struct AggregatorArgs<'a> {
+pub struct Aggregation<'a> {
     pub entries: Vec<TimeIdx>,
     pub aggregator_type: AggregatorType,
     pub window_expr: Arc<dyn WindowExpr>,
@@ -334,7 +340,7 @@ pub struct AggregatorArgs<'a> {
     pub tiles: Option<&'a Tiles>,
 }
 
-impl<'a> AggregatorArgs<'a> {
+impl<'a> Aggregation<'a> {
     pub fn new(
         entries: Vec<TimeIdx>,
         aggregator_type: AggregatorType,
@@ -365,6 +371,7 @@ impl<'a> AggregatorArgs<'a> {
             AggregatorType::PlainAccumulator => {
                 let mut aggregates = Vec::new();
                 
+                // plain needs to run aggregation for each entry and corresponsing values in a window ending and this entry
                 for entry in &self.entries {
                     let window_start = time_entries.get_window_start(self.window_expr.get_window_frame(), *entry, true)
                         .expect("Time entries should exist");
@@ -394,6 +401,8 @@ impl<'a> AggregatorArgs<'a> {
                 
                 (aggregates, None)
             }
+
+            // retractable works incrementally - no need to get all data in window
             AggregatorType::RetractableAccumulator => {
                 let (aggregates, accumulator_state) = if parallelize {
                     run_retractable_accumulator_parallel(
