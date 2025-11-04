@@ -431,3 +431,46 @@ impl<'a> Aggregation<'a> {
         }
     }
 }
+
+// optimization - plain aggregator and evaluators produce aggregation results
+// by running nested for loop for each entry.
+// we split entries where possible, so that nested loops can run on different threads
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggParallelismSplit {
+    None,
+    CpuBased,
+    PerEvent,
+}
+
+// default to CPU-based splitting
+const AGG_PARALLELISM_SPLIT: AggParallelismSplit = AggParallelismSplit::CpuBased;
+
+pub fn split_entries_for_parallelism(entries: &Vec<TimeIdx>) -> Vec<Vec<TimeIdx>> {
+    if entries.is_empty() {
+        return vec![];
+    }
+    
+    match AGG_PARALLELISM_SPLIT {
+        AggParallelismSplit::None => {
+            vec![entries.clone()]
+        }
+        AggParallelismSplit::CpuBased => {
+            let num_threads = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .max(1);
+            
+            // For small number of entries, don't split (overhead not worth it)
+            if entries.len() < num_threads * 2 {
+                return vec![entries.clone()];
+            }
+            
+            // Split into chunks of roughly equal size
+            let chunk_size = (entries.len() + num_threads - 1) / num_threads;
+            entries.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect()
+        }
+        AggParallelismSplit::PerEvent => {
+            entries.iter().map(|entry| vec![*entry]).collect()
+        }
+    }
+}

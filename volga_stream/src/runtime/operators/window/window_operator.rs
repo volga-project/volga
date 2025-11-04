@@ -17,7 +17,7 @@ use datafusion::scalar::ScalarValue;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::aggregates::{get_aggregate_type, Aggregation};
+use crate::runtime::operators::window::aggregates::{get_aggregate_type, split_entries_for_parallelism, Aggregation};
 use crate::runtime::operators::window::state::{create_empty_windows_state, AccumulatorState, State, WindowId, WindowsState};
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
@@ -313,15 +313,25 @@ impl WindowOperator {
                     aggregator_type
                 };
 
-                // TODO split for parallelism
-                aggs.push(Aggregation::new(
-                    late_entries_ref.clone(), aggregator_type, window_config.window_expr.clone(), None, window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
-                ));
+                // split late enrties for parallelism
+                for lates in split_entries_for_parallelism(late_entries_ref) {
+                    aggs.push(Aggregation::new(
+                        lates, aggregator_type, window_config.window_expr.clone(), None, window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
+                    ));
+                }
             }
-            // TODO split for parallelism
-            aggs.push(Aggregation::new(
-                updates, aggregator_type, window_config.window_expr.clone(), Some(retracts), window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
-            ));
+            if retractable {
+                aggs.push(Aggregation::new(
+                    updates, aggregator_type, window_config.window_expr.clone(), Some(retracts), window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
+                ));
+            } else {
+                // split for parallelism
+                for entries in split_entries_for_parallelism(&updates) {
+                    aggs.push(Aggregation::new(
+                        entries, aggregator_type, window_config.window_expr.clone(), None, window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
+                    ));
+                }
+            }
             aggregations.insert(*window_id, aggs);
         }
         
