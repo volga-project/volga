@@ -11,6 +11,7 @@ use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
 use crate::runtime::operators::window::window_operator::{WindowOperatorConfig, WindowOperator};
+use crate::runtime::operators::window::WindowRequestOperator;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
 use crate::storage::storage::Storage;
@@ -77,6 +78,7 @@ pub enum Operator {
     Reduce(ReduceOperator),
     Aggregate(AggregateOperator),
     Window(WindowOperator),
+    WindowRequest(WindowRequestOperator),
     Chained(ChainedOperator),
 }
 
@@ -121,6 +123,7 @@ impl OperatorTrait for Operator {
             Operator::Reduce(op) => op.open(context).await,
             Operator::Aggregate(op) => op.open(context).await,
             Operator::Window(op) => op.open(context).await,
+            Operator::WindowRequest(op) => op.open(context).await,
             Operator::Chained(op) => op.open(context).await
         }
     }
@@ -135,6 +138,7 @@ impl OperatorTrait for Operator {
             Operator::Reduce(op) => op.close().await,
             Operator::Aggregate(op) => op.close().await,
             Operator::Window(op) => op.close().await,
+            Operator::WindowRequest(op) => op.close().await,
             Operator::Chained(op) => op.close().await
         }
     }
@@ -149,6 +153,7 @@ impl OperatorTrait for Operator {
             Operator::Reduce(op) => op.operator_type(),
             Operator::Aggregate(op) => op.operator_type(),
             Operator::Window(op) => op.operator_type(),
+            Operator::WindowRequest(op) => op.operator_type(),
             Operator::Chained(op) => op.operator_type(),
         }
     }
@@ -163,6 +168,8 @@ impl OperatorTrait for Operator {
             Operator::Reduce(op) => op.set_input(input),
             Operator::Aggregate(op) => op.set_input(input),
             Operator::Window(op) => op.set_input(input),
+            Operator::WindowRequest(op) => op.set_input(input),
+            Operator::WindowRequest(op) => op.set_input(input),
             Operator::Chained(op) => op.set_input(input),
         }
     }
@@ -177,6 +184,7 @@ impl OperatorTrait for Operator {
             Operator::Reduce(op) => op.poll_next().await,
             Operator::Aggregate(op) => op.poll_next().await,
             Operator::Window(op) => op.poll_next().await,
+            Operator::WindowRequest(op) => op.poll_next().await,
             Operator::Chained(op) => op.poll_next().await,
         }
     }

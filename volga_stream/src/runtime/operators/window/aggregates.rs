@@ -167,43 +167,13 @@ pub fn get_aggregate_type(window_expr: &Arc<dyn WindowExpr>) -> AggregatorType {
 // by incrementally applying (and retracting) updates to accumulator
 fn run_retractable_accumulator(
     window_expr: &Arc<dyn WindowExpr>, 
-    updates: Vec<TimeIdx>, 
+    updates: Option<Vec<TimeIdx>>, 
     retracts: Option<Vec<Vec<TimeIdx>>>, 
     batches: &HashMap<BatchId, RecordBatch>,
     accumulator_state: Option<&AccumulatorState>
 ) -> (Vec<ScalarValue>, AccumulatorState) {
-    let mut accumulator = match create_window_aggregator(&window_expr) {
-        WindowAggregator::Accumulator(accumulator) => accumulator,
-        WindowAggregator::Evaluator(_) => panic!("Evaluator is not supported for retractable accumulator"),
-    };
 
-    if let Some(accumulator_state) = accumulator_state {
-        merge_accumulator_state(accumulator.as_mut(), accumulator_state);
-    }
-
-    let mut results = Vec::new();
-
-    for i in 0..updates.len() {
-        let update_idx = &updates[i];
-        let retract_idxs = if let Some(ref retracts) = retracts {
-            &retracts[i]
-        } else {
-            &Vec::new()
-        };
-        let update_batch = batches.get(&update_idx.batch_id).expect(&format!("Update batch should exist for {:?}", update_idx));
-        // Extract single row from update batch using the row index
-        let update_row_batch = {
-            let indices = UInt64Array::from(vec![update_idx.row_idx as u64]);
-            arrow::compute::take_record_batch(update_batch, &indices)
-                .expect("Should be able to take row from batch")
-        };
-
-        let update_args = window_expr.evaluate_args(&update_row_batch)
-            .expect("Should be able to evaluate window args");
-
-        accumulator.update_batch(&update_args).expect("Should be able to update accumulator");
-
-        // Handle retractions
+    fn retract(window_expr: &Arc<dyn WindowExpr>, accumulator: &mut dyn Accumulator, retract_idxs: &Vec<TimeIdx>, batches: &HashMap<BatchId, RecordBatch>) {
         if !retract_idxs.is_empty() {
             // Extract retract rows in original order
             let mut retract_batches = Vec::new();
@@ -229,7 +199,51 @@ fn run_retractable_accumulator(
 
             accumulator.retract_batch(&retract_args).expect("Should be able to retract from accumulator");
         }
+    }
 
+    let mut accumulator = match create_window_aggregator(&window_expr) {
+        WindowAggregator::Accumulator(accumulator) => accumulator,
+        WindowAggregator::Evaluator(_) => panic!("Evaluator is not supported for retractable accumulator"),
+    };
+
+    if let Some(accumulator_state) = accumulator_state {
+        merge_accumulator_state(accumulator.as_mut(), accumulator_state);
+    }
+
+    let mut results = Vec::new();
+
+    if let Some(updates) = updates {
+        for i in 0..updates.len() {
+            let update_idx = &updates[i];
+            let retract_idxs = if let Some(ref retracts) = retracts {
+                &retracts[i]
+            } else {
+                &Vec::new()
+            };
+            let update_batch = batches.get(&update_idx.batch_id).expect(&format!("Update batch should exist for {:?}", update_idx));
+            // Extract single row from update batch using the row index
+            let update_row_batch = {
+                let indices = UInt64Array::from(vec![update_idx.row_idx as u64]);
+                arrow::compute::take_record_batch(update_batch, &indices)
+                    .expect("Should be able to take row from batch")
+            };
+
+            let update_args = window_expr.evaluate_args(&update_row_batch)
+                .expect("Should be able to evaluate window args");
+
+            accumulator.update_batch(&update_args).expect("Should be able to update accumulator");
+
+            // Handle retractions
+            retract(window_expr, accumulator.as_mut(), retract_idxs, batches);
+
+            let result = accumulator.evaluate().expect("Should be able to evaluate accumulator");
+            results.push(result);
+        } 
+    } else {
+        // Special case - we have a single retracts range to run
+        let retracts_vec = retracts.expect("Retracts should exist");
+        let retract_idxs = retracts_vec.first().expect("Should have at least one retract");
+        retract(window_expr, accumulator.as_mut(), retract_idxs, batches);
         let result = accumulator.evaluate().expect("Should be able to evaluate accumulator");
         results.push(result);
     }
@@ -240,7 +254,7 @@ fn run_retractable_accumulator(
 async fn run_retractable_accumulator_parallel(
     thread_pool: &ThreadPool,
     window_expr: Arc<dyn WindowExpr>, 
-    updates: Vec<TimeIdx>, 
+    updates: Option<Vec<TimeIdx>>, 
     retracts: Option<Vec<Vec<TimeIdx>>>, 
     batches: Arc<HashMap<BatchId, RecordBatch>>,
     previous_accumulator_state: Option<AccumulatorState>
@@ -359,23 +373,30 @@ impl<'a> Aggregation<'a> {
         }
     }
 
+    // TODO add exlcude_current_time
     pub async fn produce_aggregates(
         &self, 
         batches: &HashMap<BatchId, RecordBatch>, 
         time_entries: &TimeEntries, 
         thread_pool: Option<&ThreadPool>,
+        exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         let parallelize = thread_pool.is_some();
-        
+                
         match self.aggregator_type {
             AggregatorType::PlainAccumulator => {
                 let mut aggregates = Vec::new();
-                
+                    
                 // plain needs to run aggregation for each entry and corresponsing values in a window ending and this entry
                 for entry in &self.entries {
                     let window_start = time_entries.get_window_start(self.window_expr.get_window_frame(), *entry, true)
                         .expect("Time entries should exist");
-                    let (front_padding, middle_tiles, back_padding) = time_entries.get_entries_in_range(self.tiles, window_start, *entry);
+                    let (mut front_padding, middle_tiles, back_padding) = time_entries.get_entries_in_range(self.tiles, window_start, *entry);
+                    
+                    // in request mode, if specified, exclude the virtual current row from aggregation
+                    if exclude_current_row.is_some() && !exclude_current_row.unwrap() {
+                        front_padding.push(entry.clone());
+                    }
                     
                     let (aggregate_for_entry, _) = if parallelize {
                         run_plain_accumulator_parallel(
@@ -404,11 +425,18 @@ impl<'a> Aggregation<'a> {
 
             // retractable works incrementally - no need to get all data in window
             AggregatorType::RetractableAccumulator => {
+                let mut updates = Some(self.entries.clone());
+
+                // in request mode, we expect entries to be a single value vec - virtual current row.
+                // include it in aggregation if needed, otherwise empty updates, only retracts
+                if exclude_current_row.is_some() && exclude_current_row.unwrap() {
+                    updates = None;
+                }
                 let (aggregates, accumulator_state) = if parallelize {
                     run_retractable_accumulator_parallel(
                         thread_pool.expect("ThreadPool should exist"),
                         self.window_expr.clone(),
-                        self.entries.clone(),
+                        updates,
                         self.retracts.clone(),
                         Arc::new(batches.clone()),
                         self.accumulator_state.cloned()
@@ -416,7 +444,7 @@ impl<'a> Aggregation<'a> {
                 } else {
                     run_retractable_accumulator(
                         &self.window_expr,
-                        self.entries.clone(),
+                        updates,
                         self.retracts.clone(),
                         batches,
                         self.accumulator_state

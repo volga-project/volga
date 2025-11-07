@@ -204,7 +204,7 @@ impl TimeEntries {
         res
     }
     
-    fn find_retracts(
+    pub fn find_retracts(
         &self,
         window_frame: &Arc<WindowFrame>,
         previous_window_start: TimeIdx,

@@ -93,6 +93,34 @@ impl fmt::Debug for WindowOperator {
     }
 }
 
+pub fn init(window_operator_config: &WindowOperatorConfig) -> (usize, BTreeMap<WindowId, WindowConfig>, SchemaRef, SchemaRef, Option<ThreadPool>) {
+    let ts_column_index = window_operator_config.window_exec.window_expr()[0].order_by()[0].expr.as_any().downcast_ref::<Column>().expect("Expected Column expression in ORDER BY").index();
+    
+    let mut windows = BTreeMap::new();
+    for (window_id, window_expr) in window_operator_config.window_exec.window_expr().iter().enumerate() {
+        windows.insert(window_id, WindowConfig {
+            window_id,
+            window_expr: window_expr.clone(),
+            tiling: window_operator_config.tiling_configs.get(window_id).and_then(|config| config.clone()),
+            aggregator_type: get_aggregate_type(window_expr),
+        });
+    }
+
+    let input_schema = window_operator_config.window_exec.input().schema();
+    let output_schema = create_output_schema(&input_schema, &window_operator_config.window_exec.window_expr());
+
+    let thread_pool = if window_operator_config.parallelize {
+        Some(ThreadPoolBuilder::new()
+            .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+            .build()
+            .expect("Failed to create thread pool"))
+    } else {
+        None
+    };
+
+    (ts_column_index, windows, input_schema, output_schema, thread_pool)
+}
+
 impl WindowOperator {
     pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
         let window_operator_config = match config.clone() {
@@ -100,29 +128,31 @@ impl WindowOperator {
             _ => panic!("Expected WindowConfig, got {:?}", config),
         };
 
-        let ts_column_index = window_operator_config.window_exec.window_expr()[0].order_by()[0].expr.as_any().downcast_ref::<Column>().expect("Expected Column expression in ORDER BY").index();
+        // let ts_column_index = window_operator_config.window_exec.window_expr()[0].order_by()[0].expr.as_any().downcast_ref::<Column>().expect("Expected Column expression in ORDER BY").index();
 
-        let mut windows = BTreeMap::new();
-        for (window_id, window_expr) in window_operator_config.window_exec.window_expr().iter().enumerate() {
-            windows.insert(window_id, WindowConfig {
-                window_id,
-                window_expr: window_expr.clone(),
-                tiling: window_operator_config.tiling_configs.get(window_id).and_then(|config| config.clone()),
-                aggregator_type: get_aggregate_type(window_expr),
-            });
-        }
+        // let mut windows = BTreeMap::new();
+        // for (window_id, window_expr) in window_operator_config.window_exec.window_expr().iter().enumerate() {
+        //     windows.insert(window_id, WindowConfig {
+        //         window_id,
+        //         window_expr: window_expr.clone(),
+        //         tiling: window_operator_config.tiling_configs.get(window_id).and_then(|config| config.clone()),
+        //         aggregator_type: get_aggregate_type(window_expr),
+        //     });
+        // }
 
-        let input_schema = window_operator_config.window_exec.input().schema();
-        let output_schema = create_output_schema(&input_schema, &window_operator_config.window_exec.window_expr());
+        // let input_schema = window_operator_config.window_exec.input().schema();
+        // let output_schema = create_output_schema(&input_schema, &window_operator_config.window_exec.window_expr());
 
-        let thread_pool = if window_operator_config.parallelize {
-            Some(ThreadPoolBuilder::new()
-                .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
-                .build()
-                .expect("Failed to create thread pool"))
-        } else {
-            None
-        };
+        // let thread_pool = if window_operator_config.parallelize {
+        //     Some(ThreadPoolBuilder::new()
+        //         .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
+        //         .build()
+        //         .expect("Failed to create thread pool"))
+        // } else {
+        //     None
+        // };
+
+        let (ts_column_index, windows, input_schema, output_schema, thread_pool) = init(&window_operator_config);
 
         Self {
             base: OperatorBase::new(config, storage),
@@ -291,6 +321,9 @@ impl WindowOperator {
             let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
             let aggregator_type = self.windows[window_id].aggregator_type;
             let retractable = aggregator_type == AggregatorType::RetractableAccumulator;
+            let tiles = window_state.tiles.as_ref();
+            let accumulator_state = window_state.accumulator_state.as_ref();
+            
             let (updates, retracts, new_window_start, new_window_end) = time_entries.slide_window_position(
                 window_frame, 
                 window_state.start_idx, 
@@ -306,6 +339,8 @@ impl WindowOperator {
 
             // add late entries
             if let Some(ref late_entries_ref) = late_entries {
+                // TODO what if entry is outside of this window (too late), but inside the other?
+
                 let aggregator_type = if retractable {
                     // late entries are handled without retraction even for retractables
                     AggregatorType::PlainAccumulator
@@ -316,27 +351,27 @@ impl WindowOperator {
                 // split late enrties for parallelism
                 for lates in split_entries_for_parallelism(late_entries_ref) {
                     aggs.push(Aggregation::new(
-                        lates, aggregator_type, window_config.window_expr.clone(), None, window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
+                        lates, aggregator_type, window_config.window_expr.clone(), None, accumulator_state, tiles
                     ));
                 }
             }
             if retractable {
                 aggs.push(Aggregation::new(
-                    updates, aggregator_type, window_config.window_expr.clone(), Some(retracts), window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
+                    updates, aggregator_type, window_config.window_expr.clone(), Some(retracts), accumulator_state, tiles
                 ));
             } else {
                 // split for parallelism
                 for entries in split_entries_for_parallelism(&updates) {
                     aggs.push(Aggregation::new(
-                        entries, aggregator_type, window_config.window_expr.clone(), None, window_state.accumulator_state.as_ref(), window_state.tiles.as_ref()
+                        entries, aggregator_type, window_config.window_expr.clone(), None, accumulator_state, tiles
                     ));
                 }
             }
             aggregations.insert(*window_id, aggs);
         }
         
-        // Compute aggregated_values_idxs - time indexes of aggregated values.
-        // This is used to load batches from storage
+        // Get aggregated_values_idxs - time indexes of aggregated values
+        // This is used to get input values
         let aggregated_values_idxs: Vec<TimeIdx> = aggregations
             .values()
             .next()
@@ -346,7 +381,7 @@ impl WindowOperator {
                     .flat_map(|arg| arg.entries.iter().cloned())
                     .collect()
             })
-            .unwrap_or_else(Vec::new);
+            .expect("Should be able to get aggregated values idxs");
         
         // Load batches
         let batches = load_batches(&self.base.storage, key, &aggregations, time_entries).await;
@@ -389,7 +424,7 @@ impl WindowOperator {
     }
 }
 
-async fn load_batches<'a>(storage: &Storage, key: &Key, aggregations: &IndexMap<WindowId, Vec<Aggregation<'a>>>, time_entries: &TimeEntries) -> HashMap<BatchId, RecordBatch> {
+pub async fn load_batches<'a>(storage: &Storage, key: &Key, aggregations: &IndexMap<WindowId, Vec<Aggregation<'a>>>, time_entries: &TimeEntries) -> HashMap<BatchId, RecordBatch> {
     let mut batches_to_load = IndexSet::new(); // preserve insertion order
     for (_window_id, aggs) in aggregations.iter() {
         for agg in aggs {
@@ -427,7 +462,7 @@ async fn load_batches<'a>(storage: &Storage, key: &Key, aggregations: &IndexMap<
     storage.load_batches(batches_to_load.into_iter().collect(), key).await
 }
 
-async fn produce_aggregates<'a>(aggregations: &IndexMap<WindowId, Vec<Aggregation<'a>>>, batches: &HashMap<BatchId, RecordBatch>, time_entries: &TimeEntries, thread_pool: Option<&ThreadPool>) -> IndexMap<WindowId, Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>> {
+pub async fn produce_aggregates<'a>(aggregations: &IndexMap<WindowId, Vec<Aggregation<'a>>>, batches: &HashMap<BatchId, RecordBatch>, time_entries: &TimeEntries, thread_pool: Option<&ThreadPool>) -> IndexMap<WindowId, Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>> {
     let futures: Vec<_> = aggregations.iter()
         .map(|(window_id, aggs)| {
             let window_id = *window_id;
@@ -438,7 +473,7 @@ async fn produce_aggregates<'a>(aggregations: &IndexMap<WindowId, Vec<Aggregatio
             async move {
                 let mut results = Vec::new();
                 for agg in aggs {
-                    let result = agg.produce_aggregates(batches, time_entries, thread_pool).await;
+                    let result = agg.produce_aggregates(batches, time_entries, thread_pool, None).await;
                     results.push(result);
                 }
                 (window_id, results)
@@ -500,29 +535,11 @@ impl OperatorTrait for WindowOperator {
                             None
                         };
 
-                        let record_batch = keyed_message.base.record_batch.clone();
-
-                        // Drop events that are too late based on lateness configuration
+                        // Drop events that are too late based on lateness configuration, if needed
                         let record_batch = if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry_before_update.clone()) {
-                            let cutoff_timestamp = last_entry.timestamp - lateness_ms as i64;
-                            
-                            let mut keep_indices = Vec::new();
-                            for row_idx in 0..record_batch.num_rows() {
-                                let timestamp = extract_timestamp(record_batch.column(self.ts_column_index), row_idx);
-                                if timestamp >= cutoff_timestamp {
-                                    keep_indices.push(row_idx as u32);
-                                }
-                            }
-                            
-                            if keep_indices.len() == record_batch.num_rows() {
-                                record_batch.clone()
-                            } else {
-                                let indices = arrow::array::UInt32Array::from(keep_indices);
-                                arrow::compute::take_record_batch(&record_batch, &indices)
-                                    .expect("Should be able to filter record batch")
-                            }
+                            drop_too_late_entries(&keyed_message.base.record_batch, self.ts_column_index, lateness_ms, last_entry)
                         } else {
-                            record_batch.clone()
+                            keyed_message.base.record_batch.clone()
                         };
 
                         if record_batch.num_rows() == 0 {
@@ -536,6 +553,7 @@ impl OperatorTrait for WindowOperator {
                             }
                         }
 
+                        // append records to storage and get inserted idxs
                         let batches = storage.append_records(record_batch.clone(), key, self.ts_column_index).await;
                         let mut inserted_idxs = Vec::new();
                         for (batch_id, batch) in batches {
@@ -550,12 +568,7 @@ impl OperatorTrait for WindowOperator {
                             return OperatorPollResult::Continue;
                         } else {
                             let late_entries = if let Some(last_entry) = last_entry_before_update {
-                                let lates = inserted_idxs.into_iter().filter(|idx| *idx < last_entry).collect::<Vec<_>>();
-                                if lates.len() > 0 {
-                                    Some(lates)
-                                } else{
-                                    None
-                                }
+                                get_late_entries(inserted_idxs, last_entry)
                             } else {
                                 None
                             };
@@ -588,8 +601,45 @@ impl OperatorTrait for WindowOperator {
     }
 }
 
+pub fn drop_too_late_entries(record_batch: &RecordBatch, ts_column_index: usize, lateness_ms: i64, last_entry: TimeIdx) -> RecordBatch {
+    let cutoff_timestamp = last_entry.timestamp - lateness_ms;
+                            
+    let mut keep_indices = Vec::new();
+    for row_idx in 0..record_batch.num_rows() {
+        let timestamp = extract_timestamp(record_batch.column(ts_column_index), row_idx);
+        if !is_ts_too_late(timestamp, last_entry, lateness_ms) {
+            keep_indices.push(row_idx as u32);
+        }
+    }
+    
+    if keep_indices.len() == record_batch.num_rows() {
+        record_batch.clone()
+    } else {
+        let indices = arrow::array::UInt32Array::from(keep_indices);
+        arrow::compute::take_record_batch(&record_batch, &indices)
+            .expect("Should be able to filter record batch")
+    }
+}
+
+pub fn get_late_entries(entries: Vec<TimeIdx>, last_entry: TimeIdx) -> Option<Vec<TimeIdx>> {
+    let lates = entries.into_iter().filter(|idx| is_entry_late(*idx, last_entry)).collect::<Vec<_>>();
+    if lates.len() > 0 {
+        Some(lates)
+    } else {
+        None
+    }
+}
+
+pub fn is_ts_too_late(timestamp: i64, last_entry: TimeIdx, lateness_ms: i64) -> bool {
+    timestamp < last_entry.timestamp - lateness_ms
+}
+
+pub fn is_entry_late(entry: TimeIdx, last_entry: TimeIdx) -> bool {
+    entry < last_entry
+}
+
 // copied from private DataFusion function
-fn create_output_schema(
+pub fn create_output_schema(
     input_schema: &Schema,
     window_expr: &[Arc<dyn WindowExpr>],
 ) -> Arc<Schema> {
@@ -609,7 +659,7 @@ fn create_output_schema(
 // Extract input values (values which were in original argument batch, but were not aggregated, e.g keys) 
 // for each update row.
 // We assume window operator schema is fixed: input columns first, then window columns
-pub fn get_input_values(
+fn get_input_values(
     result_idxs: &Vec<TimeIdx>, 
     batches: &HashMap<BatchId, RecordBatch>, 
     input_schema: &SchemaRef
