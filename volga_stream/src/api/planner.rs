@@ -27,6 +27,7 @@ use datafusion::sql::TableReference;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
+use petgraph::Direction;
 
 use super::logical_graph::{LogicalNode, LogicalGraph};
 use crate::runtime::functions::key_by::key_by_function::{DataFusionKeyFunction};
@@ -474,7 +475,7 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             // key_by -> window
             self.logical_graph.add_edge(key_by_node_index, window_node_index);
 
-            // prev -> window
+            // window -> prev
             let prev_node_index = self.node_stack.last().expect("key by should have a node before it");
             self.logical_graph.add_edge(window_node_index, *prev_node_index);
 
@@ -487,6 +488,9 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             self.logical_graph.add_edge(node_index, *prev_node_index);
         } else {
             // no prev node - this is the root of the plan
+            // Mark this as the root node
+            self.logical_graph.set_root_node(node_index);
+            
             // if sink is configured add here
             if let Some(sink_config) = &self.context.sink_config {
                 self.create_sink_node(sink_config.clone(), node_index, self.context.parallelism)?;
@@ -516,6 +520,7 @@ mod tests {
         Aggregate,
         Join,
         Window,
+        WindowRequest,
     }
 
     /// Helper function to get node type from operator config (used in planner tests)
@@ -530,6 +535,7 @@ mod tests {
             OperatorConfig::AggregateConfig(_) => NodeType::Aggregate,
             OperatorConfig::JoinConfig(_) => NodeType::Join,
             OperatorConfig::WindowConfig(_) => NodeType::Window,
+            OperatorConfig::WindowRequestConfig(_) => NodeType::WindowRequest,
             _ => panic!("Unsupported operator config: {:?}", operator_config),
         }
     }
@@ -881,5 +887,71 @@ mod tests {
             (NodeType::KeyBy, NodeType::Window, PartitionType::Hash, 1),
             (NodeType::Window, NodeType::Projection, PartitionType::RoundRobin, 1),
         ]);
+    }
+
+    #[tokio::test]
+    async fn test_window_query_to_request_mode() {
+        let mut planner = create_planner();
+        
+        // Register additional test table with timestamp column for window functions
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("event_time", DataType::Timestamp(arrow::datatypes::TimeUnit::Millisecond, None), false),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        planner.register_source(
+            "events".to_string(), 
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
+            schema
+        );
+        
+        // Window query with SUM over a time-based window partitioned by key
+        let sql = "SELECT 
+                    event_time, 
+                    key, 
+                    value, 
+                    SUM(value) OVER (
+                        PARTITION BY key 
+                        ORDER BY event_time 
+                        RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW
+                    ) as sum_value
+                   FROM events";
+        
+        let mut graph = planner.sql_to_graph(sql).await.unwrap();
+        
+        // Convert to request mode
+        use crate::runtime::functions::source::request_source::RequestSourceConfig;
+        let request_config = RequestSourceConfig::new(
+            "127.0.0.1:8080".to_string(),
+            100,
+            5000
+        );
+        graph.to_request_mode(request_config).expect("Should convert to request mode");
+        
+        // Verify structure after conversion
+        let nodes_after: Vec<_> = graph.get_nodes().collect();
+        assert_eq!(nodes_after.len(), 8, "Should have 8 nodes after conversion (original 4 + request_source + keyby + window_request + request_sink)");
+        
+        // Verify edge connectivity using verify_edge_connectivity helper
+        // Expected structure after conversion:
+        //   - source -> keyby -> window (window has no outgoing edges)
+        //   - request_source -> keyby -> window_request -> projection (root)
+        //   - root -> request_sink
+        verify_edge_connectivity(&graph, &[
+            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 2), // original source -> keyby + request_source -> keyby
+            (NodeType::KeyBy, NodeType::Window, PartitionType::Hash, 1), // original keyby -> window
+            (NodeType::KeyBy, NodeType::WindowRequest, PartitionType::Hash, 1), // new keyby -> window_request
+            (NodeType::WindowRequest, NodeType::Projection, PartitionType::RoundRobin, 1), // window_request -> projection
+            (NodeType::Projection, NodeType::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
+        ]);
+        
+        // Verify window node has no outgoing edges
+        let window_node = nodes_after.iter()
+            .find(|n| matches!(n.operator_config, OperatorConfig::WindowConfig(_)))
+            .expect("Should have window node");
+        let window_node_idx = graph.get_node_index(&window_node.node_id)
+            .expect("Should find window node index");
+        let outgoing_after = graph.get_neighbors(window_node_idx, Direction::Outgoing);
+        assert_eq!(outgoing_after.len(), 0, "Window should have no outgoing edges after conversion");
     }
 } 

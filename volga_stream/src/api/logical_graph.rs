@@ -4,10 +4,14 @@ use std::fmt;
 use arrow::datatypes::Schema as ArrowSchema;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
+use petgraph::Direction;
 use crate::runtime::operators::chained::chained_operator::group_operators_for_chaining;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
+use crate::runtime::operators::source::source_operator::SourceConfig;
+use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
+use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 
@@ -48,10 +52,36 @@ pub struct LogicalEdge {
     pub partition_type: PartitionType,
 }
 
+/// Find distance from source to target node using BFS
+fn distance(graph: &DiGraph<LogicalNode, LogicalEdge>, source: NodeIndex, target: NodeIndex) -> usize {
+    use std::collections::VecDeque;
+    let mut queue = VecDeque::new();
+    let mut visited = std::collections::HashSet::new();
+    
+    queue.push_back((source, 0));
+    visited.insert(source);
+    
+    while let Some((node, distance)) = queue.pop_front() {
+        if node == target {
+            return distance;
+        }
+        
+        for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
+            if !visited.contains(&neighbor) {
+                visited.insert(neighbor);
+                queue.push_back((neighbor, distance + 1));
+            }
+        }
+    }
+    
+    usize::MAX // No path found
+}
+
 #[derive(Debug, Clone)]
 pub struct LogicalGraph {
     graph: DiGraph<LogicalNode, LogicalEdge>,
     operator_type_counters: HashMap<String, u32>,
+    root_node_index: Option<NodeIndex>,
 }
 
 impl LogicalGraph {
@@ -59,7 +89,35 @@ impl LogicalGraph {
         Self {
             graph: DiGraph::new(),
             operator_type_counters: HashMap::new(),
+            root_node_index: None,
         }
+    }
+    
+    pub fn set_root_node(&mut self, node_index: NodeIndex) {
+        if self.root_node_index.is_some() && self.root_node_index.unwrap() != node_index {
+            panic!("Root node already set to a different node");
+        }
+        self.root_node_index = Some(node_index);
+    }
+    
+    pub fn get_root_node(&self) -> Option<NodeIndex> {
+        self.root_node_index
+    }
+    
+    /// Get node index by node_id (for testing)
+    pub fn get_node_index(&self, node_id: &str) -> Option<NodeIndex> {
+        self.graph.node_indices()
+            .find(|&idx| self.graph[idx].node_id == node_id)
+    }
+    
+    /// Get neighbors of a node (for testing)
+    pub fn get_neighbors(&self, node_index: NodeIndex, direction: Direction) -> Vec<NodeIndex> {
+        self.graph.neighbors_directed(node_index, direction).collect()
+    }
+    
+    /// Get node by index (for testing)
+    pub fn get_node_by_index(&self, node_index: NodeIndex) -> &LogicalNode {
+        &self.graph[node_index]
     }
 
     pub fn add_node(&mut self, mut node: LogicalNode) -> NodeIndex {
@@ -201,6 +259,128 @@ impl LogicalGraph {
         logical_graph
     }
 
+    /// Convert logical graph to request mode by:
+    /// 1. Finding the top-level window operator (closest to root)
+    /// 2. Creating a window_request operator node
+    /// 3. Adding request_source -> keyby -> window_request chain before window_request
+    /// 4. Moving followers of window operator to window_request operator
+    /// 5. Adding request sink as the final node in the chain from window_request
+    pub fn to_request_mode(&mut self, request_source_config: RequestSourceConfig) -> Result<(), String> {
+        // Step 1: Find all window operators
+        let mut window_nodes = Vec::new();
+        
+        for node_idx in self.graph.node_indices() {
+            if matches!(&self.graph[node_idx].operator_config, OperatorConfig::WindowConfig(_)) {
+                window_nodes.push(node_idx);
+            }
+        }
+        
+        if window_nodes.is_empty() {
+            return Err("No window operators found in graph".to_string());
+        }
+        
+        // Step 2: Find top-level window operator (closest to root)
+        let root_node = self.root_node_index
+            .ok_or_else(|| "Root node not set in graph".to_string())?;
+        
+        let top_window_node = {
+            // Find window operator with shortest path from root
+            let mut min_distance = usize::MAX;
+            let mut top_window = window_nodes[0];
+            
+            for &window_idx in &window_nodes {
+                let distance = distance(&self.graph, root_node, window_idx);
+                if distance < min_distance {
+                    min_distance = distance;
+                    top_window = window_idx;
+                }
+            }
+            top_window
+        };
+        
+        // Step 3: Get the KeyBy operator that precedes the window operator
+        // Window node should have exactly one preceding node, which must be a KeyBy
+        let incoming: Vec<NodeIndex> = self.graph
+            .neighbors_directed(top_window_node, Direction::Incoming)
+            .collect();
+        
+        assert_eq!(incoming.len(), 1, "Window operator should have exactly one preceding node");
+        let keyby_node = incoming[0];
+        
+        assert!(
+            matches!(&self.graph[keyby_node].operator_config, OperatorConfig::KeyByConfig(_)),
+            "Preceding node of window operator must be a KeyBy operator"
+        );
+        
+        let keyby_config = self.graph[keyby_node].operator_config.clone();
+        let window_config = match &self.graph[top_window_node].operator_config {
+            OperatorConfig::WindowConfig(config) => config.clone(),
+            _ => return Err("Expected WindowConfig".to_string()),
+        };
+        
+        // Step 4: Create new nodes: request_source -> keyby -> window_request
+        let parallelism = self.graph[top_window_node].parallelism;
+        
+        let request_source_node = LogicalNode::new(
+            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(request_source_config)),
+            parallelism,
+            None,
+            None,
+        );
+        let request_source_idx = self.add_node(request_source_node);
+        
+        let keyby_node_new = LogicalNode::new(
+            keyby_config,
+            parallelism,
+            None,
+            None,
+        );
+        let keyby_idx_new = self.add_node(keyby_node_new);
+        
+        let window_request_config = WindowRequestOperatorConfig::from_window_operator_config(window_config);
+        let window_request_node = LogicalNode::new(
+            OperatorConfig::WindowRequestConfig(window_request_config),
+            parallelism,
+            None,
+            None,
+        );
+        let window_request_idx = self.add_node(window_request_node);
+        
+        // Step 5: Add edges: request_source -> keyby -> window_request
+        self.add_edge(request_source_idx, keyby_idx_new);
+        self.add_edge(keyby_idx_new, window_request_idx);
+        
+        // Step 6: Remove edge from window operator to its follower
+        // Window node should have exactly one outgoing edge
+        let outgoing: Vec<NodeIndex> = self.graph
+            .neighbors_directed(top_window_node, Direction::Outgoing)
+            .collect();
+        
+        assert_eq!(outgoing.len(), 1, "Window operator should have exactly one outgoing edge");
+        let target_node = outgoing[0];
+        
+        // Remove edge from window to follower
+        let edge_idx = self.graph.find_edge(top_window_node, target_node).expect("Window operator should have exactly one outgoing edge");
+        self.graph.remove_edge(edge_idx);
+        
+        // Add edge from window_request to follower
+        self.add_edge(window_request_idx, target_node);
+        
+        // Step 7: Add request sink node connected to root
+        let request_sink_node = LogicalNode::new(
+            OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
+            parallelism,
+            None,
+            None,
+        );
+        let request_sink_idx = self.add_node(request_sink_node);
+        
+        // Connect root to request sink
+        self.add_edge(root_node, request_sink_idx);
+        
+        Ok(())
+    }
+    
     /// Generate DOT format string
     pub fn to_dot(&self) -> String {
         let mut dot_string = String::from("digraph LogicalGraph {\n");

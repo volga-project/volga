@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
 use async_trait::async_trait;
