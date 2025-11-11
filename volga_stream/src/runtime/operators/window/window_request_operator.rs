@@ -108,6 +108,7 @@ impl WindowRequestOperator {
             .expect("State should be WindowOperatorState")
     }
 
+    // TODO use info from logical graph to get window_operator<->window_request_operator pair
     fn get_peer_window_operator_vertex_id(&self, vertex_id: String, graph: &ExecutionGraph) -> String {
         let current_vertex = graph.get_vertex(&vertex_id)
             .expect(&format!("Vertex {} not found in execution graph", vertex_id));

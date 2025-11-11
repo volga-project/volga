@@ -11,11 +11,8 @@ use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, Execution
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
-use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
-
-
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
@@ -50,31 +47,6 @@ pub struct LogicalEdge {
     pub source_node_id: String,
     pub target_node_id: String,
     pub partition_type: PartitionType,
-}
-
-/// Find distance from source to target node using BFS
-fn distance(graph: &DiGraph<LogicalNode, LogicalEdge>, source: NodeIndex, target: NodeIndex) -> usize {
-    use std::collections::VecDeque;
-    let mut queue = VecDeque::new();
-    let mut visited = std::collections::HashSet::new();
-    
-    queue.push_back((source, 0));
-    visited.insert(source);
-    
-    while let Some((node, distance)) = queue.pop_front() {
-        if node == target {
-            return distance;
-        }
-        
-        for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
-            if !visited.contains(&neighbor) {
-                visited.insert(neighbor);
-                queue.push_back((neighbor, distance + 1));
-            }
-        }
-    }
-    
-    usize::MAX // No path found
 }
 
 #[derive(Debug, Clone)]
@@ -265,7 +237,7 @@ impl LogicalGraph {
     /// 3. Adding request_source -> keyby -> window_request chain before window_request
     /// 4. Moving followers of window operator to window_request operator
     /// 5. Adding request sink as the final node in the chain from window_request
-    pub fn to_request_mode(&mut self, request_source_config: RequestSourceConfig) -> Result<(), String> {
+    pub fn to_request_mode(&mut self, request_source_config: SourceConfig, request_sink_config: SinkConfig) -> Result<(), String> {
         // Step 1: Find all window operators
         let mut window_nodes = Vec::new();
         
@@ -321,8 +293,11 @@ impl LogicalGraph {
         // Step 4: Create new nodes: request_source -> keyby -> window_request
         let parallelism = self.graph[top_window_node].parallelism;
         
+        if !matches!(request_source_config, SourceConfig::HttpRequestSourceConfig(_)) {
+            panic!("Source config must be HttpRequestSourceConfig in request mode");
+        }
         let request_source_node = LogicalNode::new(
-            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(request_source_config)),
+            OperatorConfig::SourceConfig(request_source_config),
             parallelism,
             None,
             None,
@@ -367,8 +342,12 @@ impl LogicalGraph {
         self.add_edge(window_request_idx, target_node);
         
         // Step 7: Add request sink node connected to root
+        if !matches!(request_sink_config, SinkConfig::RequestSinkConfig) {
+            panic!("Sink config must be RequestSinkConfig in request mode");
+        }
+        
         let request_sink_node = LogicalNode::new(
-            OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
+            OperatorConfig::SinkConfig(request_sink_config),
             parallelism,
             None,
             None,
@@ -407,6 +386,32 @@ impl LogicalGraph {
         dot_string.push_str("}\n");
         dot_string
     }
+}
+
+
+/// Find distance from source to target node using BFS
+fn distance(graph: &DiGraph<LogicalNode, LogicalEdge>, source: NodeIndex, target: NodeIndex) -> usize {
+    use std::collections::VecDeque;
+    let mut queue = VecDeque::new();
+    let mut visited = std::collections::HashSet::new();
+    
+    queue.push_back((source, 0));
+    visited.insert(source);
+    
+    while let Some((node, distance)) = queue.pop_front() {
+        if node == target {
+            return distance;
+        }
+        
+        for neighbor in graph.neighbors_directed(node, Direction::Outgoing) {
+            if !visited.contains(&neighbor) {
+                visited.insert(neighbor);
+                queue.push_back((neighbor, distance + 1));
+            }
+        }
+    }
+    
+    usize::MAX // No path found
 }
 
 fn validate_linear_operator_list(operators: &[OperatorConfig]) {

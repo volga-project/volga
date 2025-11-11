@@ -16,6 +16,13 @@ use crate::runtime::worker::WorkerState;
 use tokio::sync::mpsc;
 use anyhow::Result;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionMode {
+    Request,
+    Streaming,
+    Batch,
+}
+
 /// Context for pipeline execution containing sources, sinks, and execution parameters
 #[derive(Clone)]
 pub struct PipelineContext {
@@ -33,6 +40,8 @@ pub struct PipelineContext {
     logical_graph: Option<LogicalGraph>,
     /// Executor for running the job
     executor: Arc<Option<Box<dyn Executor>>>,
+    /// Execution mode
+    execution_mode: ExecutionMode,
 }
 
 impl fmt::Debug for PipelineContext {
@@ -45,6 +54,7 @@ impl fmt::Debug for PipelineContext {
             .field("df_session_context", &"<SessionContext>")
             .field("logical_graph", &self.logical_graph)
             .field("executor", &"<Executor>")
+            .field("execution_mode", &self.execution_mode)
             .finish()
     }
 }
@@ -59,6 +69,7 @@ impl PipelineContext {
             sql: None,
             logical_graph: None,
             executor: Arc::new(None),
+            execution_mode: ExecutionMode::Streaming,
         }
     }
 
@@ -97,6 +108,11 @@ impl PipelineContext {
         self
     }
 
+    pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
+        self
+    }
+
     /// Build logical graph from the current SQL query or return existing graph
     pub async fn build_logical_graph(&self) -> LogicalGraph {
         if let Some(ref graph) = self.logical_graph {
@@ -105,7 +121,7 @@ impl PipelineContext {
 
         let sql = self.sql.as_ref().expect("No SQL query or logical graph set. Call sql() or with_logical_graph() first.");
         
-        let mut planner = Planner::new(PlanningContext::new(self.df_session_context.clone()).with_parallelism(self.parallelism));
+        let mut planner = Planner::new(PlanningContext::new(self.df_session_context.clone()).with_parallelism(self.parallelism).with_execution_mode(self.execution_mode));
 
         // Register source tables
         for (table_name, (source_config, schema)) in &self.sources {

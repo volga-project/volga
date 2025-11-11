@@ -239,64 +239,63 @@ async fn test_request_source_sink_e2e() {
 
         // Create test configuration
     let config = create_test_config(max_pending_requests, request_timeout_ms);
-        let bind_address = config.bind_address.clone();
+    let bind_address = config.bind_address.clone();
 
-        // Create schema that matches our test data
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("name", DataType::Utf8, false),
-            Field::new("department", DataType::Utf8, false),
-            Field::new("salary", DataType::Int64, false),
-        ]));
+    // Create schema that matches our test data
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8, false),
+        Field::new("department", DataType::Utf8, false),
+        Field::new("salary", DataType::Int64, false),
+    ]));
 
-        // Create DataFusion planner to extract window exec
-        let ctx = SessionContext::new();
-        let mut planner = Planner::new(PlanningContext::new(ctx));
-        
-        // Register a dummy source with our schema
-        planner.register_source(
-            "employees".to_string(),
-            SourceConfig::VectorSourceConfig(crate::runtime::operators::source::source_operator::VectorSourceConfig::new(vec![])),
-            schema.clone()
-        );
+    // Create DataFusion planner to extract window exec
+    let ctx = SessionContext::new();
+    let mut planner = Planner::new(PlanningContext::new(ctx));
 
-        // Extract window exec from SQL query
-        let sql = "SELECT name, department, salary, ROW_NUMBER() OVER (PARTITION BY name, department ORDER BY salary) as rn FROM employees";
+    // Register a dummy source with our schema
+    planner.register_source(
+        "employees".to_string(),
+        SourceConfig::VectorSourceConfig(crate::runtime::operators::source::source_operator::VectorSourceConfig::new(vec![])),
+        schema.clone()
+    );
+
+    // Extract window exec from SQL query
+    let sql = "SELECT name, department, salary, ROW_NUMBER() OVER (PARTITION BY name, department ORDER BY salary) as rn FROM employees";
     let window_exec = extract_datafusion_window_exec(sql, &mut planner).await;
 
         // Create pipeline operators
     let parallelism = 4; // Test with parallelism > 1
-        let operators = vec![
-            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)),
-            OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(
-                crate::runtime::functions::key_by::key_by_function::DataFusionKeyFunction::new_window(window_exec)
-            )),
-            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
-        ];
+    let operators = vec![
+        OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)),
+        OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(
+            crate::runtime::functions::key_by::key_by_function::DataFusionKeyFunction::new_window(window_exec)
+        )),
+        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+        OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
+    ];
 
     // Create logical graph, no chaining
-        let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
+    let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
 
-        // Create pipeline context with LocalExecutor
-        let context = PipelineContext::new()
-            .with_parallelism(parallelism)
-            .with_logical_graph(logical_graph)
-            .with_executor(Box::new(LocalExecutor::new()));
+    // Create pipeline context with LocalExecutor
+    let context = PipelineContext::new()
+        .with_parallelism(parallelism)
+        .with_logical_graph(logical_graph)
+        .with_executor(Box::new(LocalExecutor::new()));
 
-        // Start pipeline execution in background
+    // Start pipeline execution in background
     // TODO implement stop for context
     let pipeline_handle = tokio::spawn(async move {
-                context.execute().await.unwrap();
+        context.execute().await.unwrap();
     });
 
-        // Wait for server to start
-        sleep(Duration::from_millis(200)).await;
+    // Wait for server to start
+    sleep(Duration::from_millis(200)).await;
 
-        // Create test client
-        let client = reqwest::Client::new();
+    // Create test client
+    let client = reqwest::Client::new();
 
     println!("🚀 Starting continuous request load test...");
-    
     
     // Run continuous requests using the helper function
     let results = run_continuous_requests(

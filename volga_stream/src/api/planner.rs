@@ -30,6 +30,7 @@ use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 
 use super::logical_graph::{LogicalNode, LogicalGraph};
+use crate::api::pipeline_context::ExecutionMode;
 use crate::runtime::functions::key_by::key_by_function::{DataFusionKeyFunction};
 use crate::runtime::functions::key_by::KeyByFunction;
 use crate::runtime::operators::operator::OperatorConfig;
@@ -40,6 +41,8 @@ use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::partition::PartitionType;
+
+static REQUEST_SOURCE_NAME: &str = "request_source";
 
 /// Custom table provider creating dummy tables with no execution logic
 #[derive(Debug, Clone)]
@@ -118,6 +121,7 @@ pub struct PlanningContext {
     pub connector_configs: HashMap<String, SourceConfig>,
     pub sink_config: Option<SinkConfig>,
     pub df_planner: Arc<DefaultPhysicalPlanner>,
+    pub execution_mode: ExecutionMode,
 
     // TODO figure out how to set parallelism per node
     pub parallelism: usize,
@@ -130,12 +134,18 @@ impl PlanningContext {
             connector_configs: HashMap::new(),
             sink_config: None,
             df_planner: Arc::new(DefaultPhysicalPlanner::default()),
+            execution_mode: ExecutionMode::Streaming,
             parallelism: 1, // Default parallelism
         }
     }
 
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
         self.parallelism = parallelism;
+        self
+    }
+
+    pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
+        self.execution_mode = execution_mode;
         self
     }
 }
@@ -162,6 +172,11 @@ impl Planner {
     }
 
     pub fn register_sink(&mut self, config: SinkConfig) {
+        if self.context.execution_mode == ExecutionMode::Request {
+            if !matches!(config, SinkConfig::RequestSinkConfig) {
+                panic!("Request mode only supports RequestSinkConfig");
+            }
+        }
         self.context.sink_config = Some(config);
     }
 
@@ -179,7 +194,13 @@ impl Planner {
         
         // println!("{}", logical_plan.display_indent());
 
-        self.logical_plan_to_graph(&logical_plan).await
+        let mut graph = self.logical_plan_to_graph(&logical_plan).await?;
+        if self.context.execution_mode == ExecutionMode::Request {
+            let request_source_config = self.context.connector_configs.get(REQUEST_SOURCE_NAME).expect("Request source configuration not found").clone();
+            let request_sink_config = self.context.sink_config.clone().expect("Request sink configuration not found");
+            graph.to_request_mode(request_source_config, request_sink_config).map_err(|e| DataFusionError::Plan(e))?;
+        }
+        Ok(graph)
     }
 
     fn create_source_node(&mut self, table_scan: &TableScan, parallelism: usize) -> Result<()> {
@@ -491,8 +512,9 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             // Mark this as the root node
             self.logical_graph.set_root_node(node_index);
             
-            // if sink is configured add here
-            if let Some(sink_config) = &self.context.sink_config {
+            // if sink is configured add here (not in request mode), for request mode sink is set later
+            if self.context.execution_mode != ExecutionMode::Request && self.context.sink_config.is_some() {
+                let sink_config = self.context.sink_config.clone().unwrap();
                 self.create_sink_node(sink_config.clone(), node_index, self.context.parallelism)?;
             }
         }
@@ -503,7 +525,7 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::operators::source::source_operator::VectorSourceConfig;
+    use crate::runtime::{functions::source::RequestSourceConfig, operators::source::source_operator::VectorSourceConfig};
 
     use super::*;
     use arrow::datatypes::{Schema, Field, DataType};
@@ -892,6 +914,9 @@ mod tests {
     #[tokio::test]
     async fn test_window_query_to_request_mode() {
         let mut planner = create_planner();
+
+        // set execution mode to request
+        planner.context.execution_mode = ExecutionMode::Request;
         
         // Register additional test table with timestamp column for window functions
         let schema = Arc::new(Schema::new(vec![
@@ -902,8 +927,19 @@ mod tests {
         planner.register_source(
             "events".to_string(), 
             SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
-            schema
+            schema.clone()
         );
+        let request_source_config = SourceConfig::HttpRequestSourceConfig(RequestSourceConfig::new(
+            "127.0.0.1:8080".to_string(),
+            100,
+            5000
+        ));
+        planner.register_source(
+            REQUEST_SOURCE_NAME.to_string(), 
+            request_source_config, 
+            schema.clone()
+        );
+        planner.register_sink(SinkConfig::RequestSinkConfig);
         
         // Window query with SUM over a time-based window partitioned by key
         let sql = "SELECT 
@@ -917,16 +953,7 @@ mod tests {
                     ) as sum_value
                    FROM events";
         
-        let mut graph = planner.sql_to_graph(sql).await.unwrap();
-        
-        // Convert to request mode
-        use crate::runtime::functions::source::request_source::RequestSourceConfig;
-        let request_config = RequestSourceConfig::new(
-            "127.0.0.1:8080".to_string(),
-            100,
-            5000
-        );
-        graph.to_request_mode(request_config).expect("Should convert to request mode");
+        let graph = planner.sql_to_graph(sql).await.unwrap();
         
         // Verify structure after conversion
         let nodes_after: Vec<_> = graph.get_nodes().collect();
