@@ -1,7 +1,6 @@
 use crate::runtime::{
-    execution_graph::ExecutionGraph, functions::source::request_source::{extract_request_source_config, RequestSourceProcessor}, metrics::WorkerMetrics, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+    execution_graph::ExecutionGraph, functions::source::request_source::{extract_request_source_config, RequestSourceProcessor}, metrics::WorkerMetrics, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}, state::OperatorStates
 };
-use crate::storage::storage::Storage;
 use crate::transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
@@ -83,7 +82,7 @@ pub struct Worker {
     task_runtimes: HashMap<String, Runtime>,
     transport_backend_runtime: Option<Runtime>,
     worker_state: Arc<tokio::sync::Mutex<WorkerState>>,
-    storage: Arc<Storage>,
+    operator_states: Arc<OperatorStates>,
     running: Arc<AtomicBool>,
     tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
 
@@ -133,7 +132,7 @@ impl Worker {
                 .build().unwrap()),
             request_source_processor_runtime,
             worker_state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
-            storage: Arc::new(Storage::default()), // TODO config
+            operator_states: Arc::new(OperatorStates::new()),
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None,
             request_source_processor: None
@@ -259,6 +258,8 @@ impl Worker {
                 vertex.task_index,
                 vertex.parallelism,
                 None,
+                Some(self.operator_states.clone()),
+                Some(self.graph.clone()),
             );
             if let Some(request_source_processor) = &self.request_source_processor {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
@@ -272,7 +273,6 @@ impl Worker {
                 transport_client_configs.remove(&vertex_id.clone()).unwrap(),
                 runtime_context,
                 self.graph.clone(),
-                self.storage.clone(),
             );
             let task_actor = StreamTaskActor::new(task);
             let task_ref = task_runtime.spawn(async{

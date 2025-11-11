@@ -1,6 +1,6 @@
 use crate::{common::MAX_WATERMARK_VALUE, runtime::{
     collector::Collector, execution_graph::ExecutionGraph, metrics::{get_stream_task_metrics, init_metrics, StreamTaskMetrics, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT}, operators::operator::{create_operator, OperatorConfig, OperatorTrait, OperatorType, OperatorPollResult, MessageStream}, runtime_context::RuntimeContext
-}, storage::storage::Storage, transport::transport_client::TransportClientConfig};
+}, storage::batch_store::BatchStore, transport::transport_client::TransportClientConfig};
 use anyhow::Result;
 use futures::StreamExt;
 use async_stream::stream;
@@ -62,7 +62,6 @@ pub struct StreamTask {
     close_signal_sender: Option<watch::Sender<bool>>,
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>, // upstream_vertex_id -> watermark_value
     current_watermark: Arc<AtomicU64>,
-    storage: Arc<Storage>,
 }
 
 impl StreamTask {
@@ -72,7 +71,6 @@ impl StreamTask {
         transport_client_config: TransportClientConfig,
         runtime_context: RuntimeContext,
         execution_graph: ExecutionGraph,
-        storage: Arc<Storage>,
     ) -> Self {
         init_metrics();
         Self {
@@ -87,7 +85,6 @@ impl StreamTask {
             close_signal_sender: None,
             upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
             current_watermark: Arc::new(AtomicU64::new(0)),
-            storage,
         }
     }
 
@@ -289,7 +286,6 @@ impl StreamTask {
         
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
-        let storage = self.storage.clone();
         
         let upstream_vertices: Vec<String> = execution_graph.get_edges_for_vertex(&vertex_id)
             .map(|(input_edges, _)| input_edges.iter().map(|e| e.source_vertex_id.clone()).collect())
@@ -305,7 +301,7 @@ impl StreamTask {
         
         // Main stream task lifecycle loop
         let run_loop_handle = tokio::spawn(async move {
-            let mut operator = create_operator(operator_config, storage.clone());
+            let mut operator = create_operator(operator_config);
             
             let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
             

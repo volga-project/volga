@@ -11,14 +11,13 @@ use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
 use crate::runtime::operators::window::window_operator::{WindowOperatorConfig, WindowOperator};
+use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
 use crate::runtime::operators::window::WindowRequestOperator;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
-use crate::storage::storage::Storage;
 use anyhow::Result;
 use std::fmt;
 use std::pin::Pin;
-use std::sync::Arc;
 use crate::runtime::functions::{
     function_trait::FunctionTrait,
     map::MapFunction,
@@ -92,6 +91,7 @@ pub enum OperatorConfig {
     ReduceConfig(ReduceFunction, Option<AggregationResultExtractor>),
     AggregateConfig(AggregateConfig),
     WindowConfig(WindowOperatorConfig),
+    WindowRequestConfig(WindowRequestOperatorConfig),
     ChainedConfig(Vec<OperatorConfig>),
 }
 
@@ -106,6 +106,7 @@ impl fmt::Display for OperatorConfig {
             OperatorConfig::ReduceConfig(reduce_func, _) => write!(f, "Reduce({})", reduce_func),
             OperatorConfig::AggregateConfig(_) => write!(f, "Aggregate"),
             OperatorConfig::WindowConfig(_) => write!(f, "Window"),
+            OperatorConfig::WindowRequestConfig(_) => write!(f, "WindowRequest"),
             OperatorConfig::ChainedConfig(configs) => write!(f, "Chained({} ops)", configs.len()),
         }
     }
@@ -169,7 +170,6 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.set_input(input),
             Operator::Window(op) => op.set_input(input),
             Operator::WindowRequest(op) => op.set_input(input),
-            Operator::WindowRequest(op) => op.set_input(input),
             Operator::Chained(op) => op.set_input(input),
         }
     }
@@ -195,7 +195,6 @@ pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
     pub function: Option<Box<dyn FunctionTrait>>,
     pub operator_config: OperatorConfig,
-    pub storage: Arc<Storage>,
     pub input: Option<MessageStream>,
     pub pending_messages: Vec<Message>,
 }
@@ -206,7 +205,6 @@ impl fmt::Debug for OperatorBase {
             .field("runtime_context", &self.runtime_context)
             .field("function", &self.function)
             .field("operator_config", &self.operator_config)
-            .field("storage", &self.storage)
             .field("input", &"<MessageStream>")
             .field("pending_messages", &self.pending_messages)
             .finish()
@@ -214,23 +212,21 @@ impl fmt::Debug for OperatorBase {
 }
 
 impl OperatorBase {
-    pub fn new(operator_config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(operator_config: OperatorConfig) -> Self {
         Self {
             runtime_context: None,
             function: None,
             operator_config,
-            storage,
             input: None,
             pending_messages: Vec::new(),
         }
     }
     
-    pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig) -> Self {
         Self {
             runtime_context: None,
             function: Some(Box::new(function)),
             operator_config,
-            storage,
             input: None,
             pending_messages: Vec::new(),
         }
@@ -282,19 +278,19 @@ impl OperatorTrait for OperatorBase {
 
 
 pub fn create_operator(
-    operator_config: OperatorConfig,
-    storage: Arc<Storage>,
+    operator_config: OperatorConfig
 ) -> Operator {
     let operator = match operator_config {
-        OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config, storage)),
-        OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config, storage)),
-        OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config, storage)),
-        OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config, storage)),
-        OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config, storage)),
-        OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config, storage)),
-        OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config, storage)),
-        OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config, storage)),
-        OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config, storage)),
+        OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config)),
+        OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config)),
+        OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config)),
+        OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config)),
+        OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
+        OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config)),
+        OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
+        OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config)),
+        OperatorConfig::WindowRequestConfig(_) => Operator::WindowRequest(WindowRequestOperator::new(operator_config)),
+        OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config)),
     };
     operator
 }
@@ -333,7 +329,8 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
         OperatorConfig::KeyByConfig(_) | 
         OperatorConfig::ReduceConfig(_, _) |
         OperatorConfig::AggregateConfig(_) |
-        OperatorConfig::WindowConfig(_) => {
+        OperatorConfig::WindowConfig(_) |
+        OperatorConfig::WindowRequestConfig(_) => {
             OperatorType::Processor
         }
     }

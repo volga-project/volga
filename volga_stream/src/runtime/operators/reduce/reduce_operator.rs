@@ -4,7 +4,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
 
-use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
 
 pub struct ReduceOperator {
@@ -24,13 +24,13 @@ impl fmt::Debug for ReduceOperator {
 }
 
 impl ReduceOperator {
-    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
         let (reduce_function, extractor) = match config.clone() {
             OperatorConfig::ReduceConfig(reduce_function, extractor) => (reduce_function, extractor),
             _ => panic!("Expected ReduceConfig, got {:?}", config),
         };
         Self {
-            base: OperatorBase::new_with_function(reduce_function, config, storage),
+            base: OperatorBase::new_with_function(reduce_function, config),
             accumulators: HashMap::new(),
             result_extractor: extractor.unwrap_or_else(AggregationResultExtractor::all_aggregations),
         }

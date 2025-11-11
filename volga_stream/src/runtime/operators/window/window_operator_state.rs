@@ -3,17 +3,19 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use datafusion::common::ScalarValue;
 use datafusion::physical_plan::WindowExpr;
+use tokio::sync::RwLock;
 
 use crate::common::Key;
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{TileConfig, Tiles};
-use crate::storage::storage::BatchId;
+use crate::runtime::state::OperatorState;
+use crate::storage::batch_store::{BatchId, BatchStore};
 
 pub type WindowId = usize;
 
 pub type AccumulatorState = Vec<ScalarValue>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WindowState {
     pub tiles: Option<Tiles>,
     pub accumulator_state: Option<AccumulatorState>,
@@ -21,33 +23,60 @@ pub struct WindowState {
     pub end_idx: TimeIdx,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct WindowsState {
     pub window_states: HashMap<WindowId, WindowState>,
     pub time_entries: TimeEntries,
 }
 
 #[derive(Debug)]
-pub struct State {
+pub struct WindowOperatorState {
     window_states: DashMap<Key, WindowsState>,
+
+    lock_pool: Vec<Arc<RwLock<()>>>,
+
+    batch_store: Arc<BatchStore>,
 }
 
-impl State {
-    pub fn new() -> Self {
+impl WindowOperatorState {
+    pub fn new(batch_store: Arc<BatchStore>) -> Self {
+        let lock_pool_size = 4096; // pass as param? TODO
+        let lock_pool = (0..lock_pool_size)
+            .map(|_| Arc::new(RwLock::new(())))
+            .collect();
         Self {
             window_states: DashMap::new(),
+            lock_pool,
+            batch_store,
         }
+    }
+    
+    fn get_key_lock(&self, key: &Key) -> Arc<RwLock<()>> {
+        let hash = key.hash();
+        let lock_index = (hash as usize) % self.lock_pool.len();
+        
+        self.lock_pool[lock_index].clone()
     }
 
     pub async fn insert_windows_state(&self, key: &Key, windows_state: WindowsState) {
+        let key_lock = self.get_key_lock(key);
+        let _key_guard = key_lock.write().await;
         self.window_states.insert(key.clone(), windows_state);
     }
 
     pub async fn take_windows_state(&self, key: &Key) -> Option<WindowsState> {
+        let key_lock = self.get_key_lock(key);
+        let _key_guard = key_lock.write().await;
         if self.window_states.contains_key(key) {
             return Some(self.window_states.remove(key).unwrap().1)
         }
         None
+    }
+
+    pub async fn get_windows_state_clone(&self, key: &Key) -> Option<WindowsState> {
+        let key_lock = self.get_key_lock(key);
+        let _key_guard = key_lock.read().await;
+        self.window_states.get(key).map(|ref_entry| ref_entry.value().clone())
     }
 
     pub fn verify_pruning_for_testing(
@@ -82,6 +111,20 @@ impl State {
                 }
             }
         }
+    }
+
+    pub fn get_batch_store(&self) -> &Arc<BatchStore> {
+        &self.batch_store
+    }
+}
+
+impl OperatorState for WindowOperatorState {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

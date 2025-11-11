@@ -10,11 +10,11 @@ use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 use tokio_rayon::AsyncThreadPool;
 
-use crate::runtime::operators::window::state::AccumulatorState;
+use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::tiles::Tile;
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::Tiles;
-use crate::storage::storage::BatchId;
+use crate::storage::batch_store::BatchId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregatorType {
@@ -392,7 +392,7 @@ impl<'a> Aggregation<'a> {
                     let window_start = time_entries.get_window_start(self.window_expr.get_window_frame(), *entry, true)
                         .expect("Time entries should exist");
                     let (mut front_padding, middle_tiles, back_padding) = time_entries.get_entries_in_range(self.tiles, window_start, *entry);
-                    
+
                     // in request mode, if specified, exclude the virtual current row from aggregation
                     if exclude_current_row.is_some() && !exclude_current_row.unwrap() {
                         front_padding.push(entry.clone());

@@ -3,7 +3,7 @@ pub mod window_request_operator;
 pub mod time_entries;
 pub mod tiles;
 pub mod aggregates;
-pub mod state;
+pub mod window_operator_state;
 
 pub use window_operator::WindowOperator;
 pub use window_request_operator::WindowRequestOperator;

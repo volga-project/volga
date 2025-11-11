@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::fmt;
 
-use crate::{common::Message, runtime::{operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use async_trait::async_trait;
 use anyhow::Result;
 use futures::StreamExt;
@@ -23,13 +23,13 @@ impl fmt::Debug for JoinOperator {
 }
 
 impl JoinOperator {
-    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
         let join_function = match config.clone() {
             OperatorConfig::JoinConfig(join_function) => join_function,
             _ => panic!("Expected JoinConfig, got {:?}", config),
         };
         Self { 
-            base: OperatorBase::new_with_function(join_function, config, storage),
+            base: OperatorBase::new_with_function(join_function, config),
             left_buffer: Vec::new(),
             right_buffer: Vec::new(),
         }

@@ -3,12 +3,6 @@ use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
-use crate::common::message::Message;
-use crate::runtime::functions::{
-    map::MapFunction,
-    key_by::KeyByFunction,
-    reduce::{ReduceFunction, AggregationResultExtractor},
-};
 use crate::runtime::operators::operator::OperatorType;
 
 #[derive(Debug, Clone)]
@@ -187,7 +181,7 @@ impl ExecutionGraph {
 
     // TODO we should separate execution graph and channel configurations - 
     // execution graph should be static and compiled by planner,
-    // channel mapping depend on cluster configuration and are defined at runtime
+    // channel mapping depends on cluster configuration and is defined at runtime
     pub fn update_channels_with_node_mapping(
         &mut self,
         execution_vertex_to_cluster_node: Option<&ExecutionVertexNodeMapping>,

@@ -438,7 +438,7 @@ mod tests {
     }
 
     fn create_test_runtime_context() -> RuntimeContext {
-        RuntimeContext::new("test_vertex".to_string(), 0, 1, None)
+        RuntimeContext::new("test_vertex".to_string(), 0, 1, None, None, None)
     }
     
     async fn create_test_processor_and_source() -> (RequestSourceProcessor, HttpRequestSourceFunction) {

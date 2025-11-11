@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{operators::operator::{create_operator, MessageStream, Operator, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{operators::operator::{create_operator, MessageStream, Operator, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::try_join_all;
@@ -15,7 +15,7 @@ pub struct ChainedOperator {
 }
 
 impl ChainedOperator {
-    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
         let configs = match config.clone() {
             OperatorConfig::ChainedConfig(configs) => configs,
             _ => panic!("Expected ChainedConfig, got {:?}", config),
@@ -28,7 +28,7 @@ impl ChainedOperator {
         let mut operators = Vec::new();
         let mut chain_senders = Vec::new();
         for i in 0..configs.len() {
-            let mut operator = create_operator(configs[i].clone(), storage.clone());
+            let mut operator = create_operator(configs[i].clone());
             if i > 0 {
                 let (tx, rx) = mpsc::channel(10);
                 chain_senders.push(Some(tx));
@@ -41,7 +41,7 @@ impl ChainedOperator {
         }
         
         Self { 
-            base: OperatorBase::new(config, storage.clone()), 
+            base: OperatorBase::new(config), 
             chain_senders,
             operators,
         }

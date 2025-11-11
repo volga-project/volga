@@ -2,7 +2,9 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use serde_json::Value;
 
+use crate::runtime::execution_graph::ExecutionGraph;
 use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
+use crate::runtime::state::OperatorStates;
 
 #[derive(Clone, Debug)]
 pub struct RuntimeContext {
@@ -10,6 +12,8 @@ pub struct RuntimeContext {
     task_index: i32,
     parallelism: i32,
     job_config: HashMap<String, Value>,
+    operator_states: Option<Arc<OperatorStates>>,
+    execution_graph: Option<ExecutionGraph>,
 
     // if we have request source+sink configured:
     // shared receiver for source tasks to receive requests from RequestSourceProcessor
@@ -25,12 +29,16 @@ impl RuntimeContext {
         task_index: i32,
         parallelism: i32,
         job_config: Option<HashMap<String, Value>>,
+        operator_states: Option<Arc<OperatorStates>>,
+        execution_graph: Option<ExecutionGraph>,
     ) -> Self {
         Self {
             vertex_id,
             task_index,
             parallelism,
             job_config: job_config.unwrap_or_default(),
+            operator_states,
+            execution_graph,
             request_sink_source_request_receiver: None,
             request_sink_source_response_sender: None
         }
@@ -40,6 +48,8 @@ impl RuntimeContext {
     pub fn task_index(&self) -> i32 { self.task_index }
     pub fn parallelism(&self) -> i32 { self.parallelism }
     pub fn job_config(&self) -> &HashMap<String, Value> { &self.job_config }
+    pub fn operator_states(&self) -> &Arc<OperatorStates> { self.operator_states.as_ref().expect("operator states should be set") }
+    pub fn execution_graph(&self) -> &ExecutionGraph { self.execution_graph.as_ref().expect("execution graph should be set") }
 
     pub fn set_request_sink_source_request_receiver(&mut self, receiver: Arc<Mutex<mpsc::Receiver<PendingRequest>>>) {
         self.request_sink_source_request_receiver = Some(receiver)

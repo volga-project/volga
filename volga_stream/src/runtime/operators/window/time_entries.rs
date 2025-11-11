@@ -6,10 +6,10 @@ use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexSet;
 
-use crate::runtime::operators::window::state::WindowState;
+use crate::runtime::operators::window::window_operator_state::WindowState;
 use crate::runtime::operators::window::tiles::Tile;
 use crate::runtime::operators::window::Tiles;
-use crate::storage::storage::{BatchId, RowIdx, Timestamp, extract_timestamp};
+use crate::storage::batch_store::{BatchId, RowIdx, Timestamp, extract_timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeIdx {
@@ -42,6 +42,22 @@ impl Ord for TimeIdx {
 pub struct TimeEntries {
     pub entries: SkipSet<TimeIdx>,
     pub batch_ids: SkipMap<Timestamp, Vec<BatchId>>,
+}
+
+impl Clone for TimeEntries {
+    fn clone(&self) -> Self {
+        let mut entries = SkipSet::new();
+        for entry in self.entries.iter() {
+            entries.insert(*entry);
+        }
+        
+        let mut batch_ids = SkipMap::new();
+        for entry in self.batch_ids.iter() {
+            batch_ids.insert(*entry.key(), entry.value().clone());
+        }
+        
+        Self { entries, batch_ids }
+    }
 }
 
 impl TimeEntries {

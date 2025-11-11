@@ -576,6 +576,8 @@ mod tests {
                 task_index,
                 parallelism,
                 None,
+                None,
+                None
             );
             
             source.open(&ctx).await.unwrap();
@@ -706,6 +708,8 @@ mod tests {
                     task_index,
                     parallelism,
                     None,
+                    None,
+                    None
                 );
                 
                 source.open(&ctx).await.unwrap();

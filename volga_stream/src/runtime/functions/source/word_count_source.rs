@@ -302,7 +302,7 @@ async fn test_word_count_source(
         batching_mode,
     );
 
-    source.open(&RuntimeContext::new("test".to_string(), 0, 1, None)).await.unwrap();
+    source.open(&RuntimeContext::new("test".to_string(), 0, 1, None, None, None)).await.unwrap();
 
     let mut word_counts = HashMap::new();
     let mut watermark_received = false;

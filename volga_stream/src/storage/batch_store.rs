@@ -75,20 +75,19 @@ impl TimeGranularity {
 
 
 #[derive(Debug, Clone)]
-pub struct StorageStats {
+pub struct BatchStoreStats {
     pub total_batches: usize,
     pub total_rows: usize,
     pub memory_usage_bytes: usize,
 }
 
 #[derive(Debug)]
-pub struct Storage {
+pub struct BatchStore {
     // Global lock for exclusive operations (stats, pruning, cleanup, rebalance)
     global_lock: Arc<RwLock<()>>,
     
     // Lock pool for partition-based locking
     lock_pool: Vec<Arc<RwLock<()>>>,
-    lock_pool_size: usize,
     
     // In-memory storage
     batch_store: Arc<DashMap<BatchId, RecordBatch>>, // TODO use foyer
@@ -98,13 +97,13 @@ pub struct Storage {
     max_batch_size: usize,
 }
 
-impl Default for Storage {
+impl Default for BatchStore {
     fn default() -> Self {
         Self::new(4096, TimeGranularity::Minutes(5), 1024)
     }
 }
 
-impl Storage {
+impl BatchStore {
     
     pub fn new(lock_pool_size: usize, time_granularity: TimeGranularity, max_batch_size: usize) -> Self {
         let lock_pool = (0..lock_pool_size)
@@ -114,38 +113,34 @@ impl Storage {
         Self {
             global_lock: Arc::new(RwLock::new(())),
             lock_pool,
-            lock_pool_size,
             batch_store: Arc::new(DashMap::new()),
             time_granularity,
             max_batch_size,
         }
     }
 
-    // Get per-partition lock from pool using hash
-    fn get_partition_lock(&self, partition_key: &Key) -> Arc<RwLock<()>> {
-        let hash = partition_key.hash();
-        let lock_index = (hash as usize) % self.lock_pool_size;
+    fn get_key_lock(&self, key: &Key) -> Arc<RwLock<()>> {
+        let hash = key.hash();
+        let lock_index = (hash as usize) % self.lock_pool.len();
         
         self.lock_pool[lock_index].clone()
     }
 
     // Global exclusive lock
-    pub async fn acquire_global_exclusive_lock(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
+    async fn acquire_global_exclusive_lock(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
         self.global_lock.write().await
     }
 
     pub async fn append_records(&self, batch: RecordBatch, partition_key: &Key, ts_column_index: usize) -> Vec<(BatchId, RecordBatch)> {
         // Partition batch by time granularity and get batch ids and keys
-        let time_partitioned_batches = Self::time_partition_batch(&batch,&partition_key, ts_column_index, self.time_granularity, self.max_batch_size);
+        let time_partitioned_batches = Self::time_partition_batch(&batch, &partition_key, ts_column_index, self.time_granularity, self.max_batch_size);
         
-        for (batch_id, sub_batch) in &time_partitioned_batches {
-            self.store_batch(batch_id.clone(), sub_batch.clone(), partition_key.clone()).await;
-        }
+        self.store_batches(partition_key, &time_partitioned_batches).await;
         
         time_partitioned_batches
     }
 
-    pub fn time_partition_batch(
+    fn time_partition_batch(
         batch: &RecordBatch, 
         partition_key: &Key, 
         ts_column_index: usize,
@@ -182,7 +177,7 @@ impl Storage {
         result
     }
 
-    pub fn split_by_batch_size(
+    fn split_by_batch_size(
         batch: &RecordBatch,
         partition_key: &Key,
         time_bucket: u64,
@@ -229,23 +224,21 @@ impl Storage {
     /// Returns the timestamp (in milliseconds) of the start of the time bucket that the given record's timestamp falls into.
     /// `timestamp_ms` is the timestamp (in milliseconds) of the record.
     /// `time_granularity` specifies the bucket size.
-    pub fn get_time_bucket_start(timestamp_ms: i64, time_granularity: TimeGranularity) -> u64 {
+    fn get_time_bucket_start(timestamp_ms: i64, time_granularity: TimeGranularity) -> u64 {
         let granularity_ms = time_granularity.to_millis();
         ((timestamp_ms / granularity_ms) * granularity_ms) as u64
     }
 
     // Store a batch with per-partition locking
-    async fn store_batch(&self, batch_id: BatchId, batch: RecordBatch, partition_key: Key) {
+    async fn store_batches(&self, partition_key: &Key, batches: &Vec<(BatchId, RecordBatch)>) {
         // Acquire global read lock (allows concurrent operations unless global exclusive is held)
         let _global_guard = self.global_lock.read().await;
         
-        // Acquire per-partition write lock for atomic operations
-        let partition_lock = self.get_partition_lock(&partition_key);
+        let partition_lock = self.get_key_lock(&partition_key);
         let _partition_guard = partition_lock.write().await;
-        
-        // Atomic operations under partition lock:
-        // 1. Store batch in memory
-        self.batch_store.insert(batch_id, batch);
+        for (batch_id, batch) in batches {
+            self.batch_store.insert(batch_id.clone(), batch.clone());
+        }
 
         // TODO put to slatedb and store write handle
     }
@@ -258,7 +251,7 @@ impl Storage {
         let _global_guard = self.global_lock.read().await;
         
         // Acquire per-partition read lock
-        let partition_lock = self.get_partition_lock(partition_key);
+        let partition_lock = self.get_key_lock(partition_key);
         let _partition_guard = partition_lock.read().await;
 
         let mut result = HashMap::new();
@@ -277,7 +270,7 @@ impl Storage {
         let _global_guard = self.global_lock.read().await;
         
         // Acquire per-partition write lock
-        let partition_lock = self.get_partition_lock(partition_key);
+        let partition_lock = self.get_key_lock(partition_key);
         let _partition_guard = partition_lock.write().await;
 
         for batch_id in batch_ids {
@@ -286,7 +279,7 @@ impl Storage {
     }
 
     // Get storage statistics with global exclusive lock
-    pub async fn get_stats(&self) -> StorageStats {
+    pub async fn get_stats(&self) -> BatchStoreStats {
         // Acquire global exclusive lock to get consistent snapshot
         let _global_exclusive = self.global_lock.write().await;
         
@@ -309,7 +302,7 @@ impl Storage {
         // Add overhead for metadata structures
         memory_usage_bytes += total_batches * 64; // BatchId keys
         
-        StorageStats {
+        BatchStoreStats {
             total_batches,
             total_rows,
             memory_usage_bytes,

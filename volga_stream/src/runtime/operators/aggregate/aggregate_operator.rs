@@ -13,7 +13,6 @@ use anyhow::Result as AnyhowResult;
 use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, OperatorPollResult, MessageStream};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::{BaseMessage, Message, MAX_WATERMARK_VALUE};
-use crate::storage::storage::Storage;
 use std::sync::Arc;
 use std::fmt;
 
@@ -44,14 +43,14 @@ impl fmt::Debug for AggregateOperator {
 }
 
 impl AggregateOperator {
-    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
         let aggregate_confg = match config.clone() {
             OperatorConfig::AggregateConfig(aggregate_config) => aggregate_config,
             _ => panic!("Expected AggregateConfig, got {:?}", config),
         };
 
         Self {
-            base: OperatorBase::new(OperatorConfig::AggregateConfig(aggregate_confg.clone()), storage),
+            base: OperatorBase::new(config),
             aggregate_exec: Arc::new(aggregate_confg.aggregate_exec),
             group_input_exprs: aggregate_confg.group_input_exprs,
             accumulators: HashMap::new(),
@@ -313,7 +312,7 @@ mod tests {
         let nodes: Vec<_> = logical_graph.get_nodes().collect();
         for node in &nodes {
             if let OperatorConfig::AggregateConfig(config) = &node.operator_config {
-                aggregate_operator = Some(AggregateOperator::new(OperatorConfig::AggregateConfig(config.clone()), Arc::new(Storage::default())));
+                aggregate_operator = Some(AggregateOperator::new(OperatorConfig::AggregateConfig(config.clone())));
                 break;
             }
         }

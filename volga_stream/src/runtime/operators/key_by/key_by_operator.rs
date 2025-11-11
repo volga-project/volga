@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use anyhow::Result;
 use futures::StreamExt;
 
-use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
 pub struct KeyByOperator {
     base: OperatorBase,
@@ -19,13 +19,13 @@ impl fmt::Debug for KeyByOperator {
 }
 
 impl KeyByOperator {
-    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
         let key_by_function = match config.clone() {
             OperatorConfig::KeyByConfig(key_by_function) => key_by_function,
             _ => panic!("Expected KeyByConfig, got {:?}", config),
         };
         Self { 
-            base: OperatorBase::new_with_function(key_by_function, config, storage),
+            base: OperatorBase::new_with_function(key_by_function, config),
         }
     }
 }

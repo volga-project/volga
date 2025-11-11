@@ -203,6 +203,8 @@ mod tests {
                 0,
                 1,
                 None,
+                None,
+                None
             );
             sink_function.open(&context).await?;
 

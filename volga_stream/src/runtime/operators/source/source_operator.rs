@@ -4,7 +4,7 @@ use anyhow::Result;
 use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
 
 #[derive(Debug, Clone)]
@@ -125,14 +125,14 @@ pub struct SourceOperator {
 }
 
 impl SourceOperator {
-    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
         let source_config = match config.clone() {
             OperatorConfig::SourceConfig(source_config) => source_config,
             _ => panic!("Expected SourceConfig, got {:?}", config),
         };
         let source_function = create_source_function(source_config);
         Self {
-            base: OperatorBase::new_with_function(source_function, config, storage),
+            base: OperatorBase::new_with_function(source_function, config),
             projection: None,
             projected_schema: None,
         }

@@ -1,6 +1,6 @@
 use std::{sync::Arc, fmt};
 
-use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::storage::Storage};
+use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::StreamExt;
@@ -34,14 +34,14 @@ impl fmt::Debug for SinkOperator {
 }
 
 impl SinkOperator {
-    pub fn new(config: OperatorConfig, storage: Arc<Storage>) -> Self {
+    pub fn new(config: OperatorConfig) -> Self {
         let sink_config = match config.clone() {
             OperatorConfig::SinkConfig(sink_config) => sink_config,
             _ => panic!("Expected SinkConfig, got {:?}", config),
         };
         let sink_function = create_sink_function(sink_config);
         Self {
-            base: OperatorBase::new_with_function(sink_function, config, storage),
+            base: OperatorBase::new_with_function(sink_function, config),
         }
     }
 }
