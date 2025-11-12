@@ -237,7 +237,7 @@ impl LogicalGraph {
     /// 3. Adding request_source -> keyby -> window_request chain before window_request
     /// 4. Moving followers of window operator to window_request operator
     /// 5. Adding request sink as the final node in the chain from window_request
-    pub fn to_request_mode(&mut self, request_source_config: SourceConfig, request_sink_config: SinkConfig) -> Result<(), String> {
+    pub fn to_request_mode(&mut self, mut request_source_config: SourceConfig, request_sink_config: SinkConfig) -> Result<(), String> {
         // Step 1: Find all window operators
         let mut window_nodes = Vec::new();
         
@@ -293,9 +293,14 @@ impl LogicalGraph {
         // Step 4: Create new nodes: request_source -> keyby -> window_request
         let parallelism = self.graph[top_window_node].parallelism;
         
-        if !matches!(request_source_config, SourceConfig::HttpRequestSourceConfig(_)) {
+        // set schema for request source
+        if let SourceConfig::HttpRequestSourceConfig(ref mut http_req_cfg) = request_source_config {
+            let window_input_schema = window_config.window_exec.input().schema();
+            http_req_cfg.schema = Some(window_input_schema.clone());
+        } else {
             panic!("Source config must be HttpRequestSourceConfig in request mode");
         }
+
         let request_source_node = LogicalNode::new(
             OperatorConfig::SourceConfig(request_source_config),
             parallelism,

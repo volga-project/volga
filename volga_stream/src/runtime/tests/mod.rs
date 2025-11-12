@@ -5,3 +5,4 @@ pub mod distributed_execution_test;
 pub mod word_count_benchmark;
 pub mod window_operator_benchmark;
 pub mod request_source_e2e_test;
+pub mod request_execution_mode_test;

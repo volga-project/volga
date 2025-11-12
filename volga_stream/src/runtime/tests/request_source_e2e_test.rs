@@ -24,7 +24,7 @@ use tokio::sync::Semaphore;
 use rand;
 use std::collections::HashMap;
 
-fn create_test_config(max_pending_requests: usize, request_timeout_ms: u64) -> RequestSourceConfig {
+pub fn create_test_config(max_pending_requests: usize, request_timeout_ms: u64) -> RequestSourceConfig {
     // Use a random high port to avoid conflicts
     let port = 8000 + (rand::random::<u16>() % 1000);
     
@@ -36,15 +36,15 @@ fn create_test_config(max_pending_requests: usize, request_timeout_ms: u64) -> R
 }
 
 #[derive(Debug, Clone)]
-struct RequestResult {
-    request_id: usize,
-    request_payload: serde_json::Value,
-    response_result: Result<(u16, serde_json::Value), String>,
-    duration: Duration,
+pub struct RequestResult {
+    pub request_id: usize,
+    pub request_payload: serde_json::Value,
+    pub response_result: Result<(u16, serde_json::Value), String>,
+    pub duration: Duration,
 }
 
 /// Generate a random request payload for testing
-fn generate_request_payload(_request_id: usize) -> serde_json::Value {
+pub fn generate_request_payload(_request_id: usize) -> serde_json::Value {
     use rand::Rng;
     
     let names = ["Alice", "Bob", "Charlie", "Diana", "Eve", "Frank", "Grace", "Henry", "Iris", "Jack"];
@@ -74,13 +74,17 @@ fn generate_request_payload(_request_id: usize) -> serde_json::Value {
 }
 
 /// Helper function to continuously run requests at a specified rate with concurrency control
-async fn run_continuous_requests(
+pub async fn run_continuous_requests<F>(
     client: reqwest::Client,
     bind_address: String,
     requests_per_second: f64,
     total_requests: usize,
     max_concurrent: Option<usize>,
-) -> Vec<RequestResult> {
+    payload_generator: F,
+) -> Vec<RequestResult>
+where
+    F: Fn(usize) -> serde_json::Value,
+{
     let semaphore = max_concurrent.map(|limit| Arc::new(Semaphore::new(limit)));
     let mut results = Vec::new();
     let mut interval = interval(Duration::from_millis((1000.0 / requests_per_second) as u64));
@@ -91,7 +95,7 @@ async fn run_continuous_requests(
         // Wait for the next tick to maintain the desired rate
         interval.tick().await;
         
-        let request_payload = generate_request_payload(i);
+        let request_payload = payload_generator(i);
         let client = client.clone();
         let bind_address = bind_address.clone();
         let semaphore = semaphore.clone();
@@ -149,8 +153,15 @@ async fn run_continuous_requests(
     results
 }
 
-/// Verify that request and response payloads match
-fn verify_request_response_match(request_result: &RequestResult) -> Result<(), String> {
+/// Verify that request and response payloads match using a custom key extractor
+pub fn verify_request_response_match<F>(
+    request_result: &RequestResult,
+    key_extractor: F,
+    fields_to_verify: &[&str],
+) -> Result<(), String>
+where
+    F: Fn(&serde_json::Value) -> String,
+{
     match &request_result.response_result {
         Ok((status, response_body)) => {
             if *status != 200 {
@@ -182,23 +193,15 @@ fn verify_request_response_match(request_result: &RequestResult) -> Result<(), S
             let mut request_records: HashMap<String, serde_json::Value> = HashMap::new();
             let mut response_records: HashMap<String, serde_json::Value> = HashMap::new();
             
-            // Index request records by a composite key (name + department + salary)
+            // Index request records by composite key
             for record in request_data {
-                let key = format!("{}:{}:{}", 
-                    record.get("name").unwrap().as_str().unwrap(),
-                    record.get("department").unwrap().as_str().unwrap(),
-                    record.get("salary").unwrap().as_i64().unwrap()
-                );
+                let key = key_extractor(record);
                 request_records.insert(key, record.clone());
             }
             
             // Index response records by the same composite key
             for record in response_data {
-                let key = format!("{}:{}:{}", 
-                    record.get("name").unwrap().as_str().unwrap(),
-                    record.get("department").unwrap().as_str().unwrap(),
-                    record.get("salary").unwrap().as_i64().unwrap()
-                );
+                let key = key_extractor(record);
                 response_records.insert(key, record.clone());
             }
             
@@ -208,9 +211,11 @@ fn verify_request_response_match(request_result: &RequestResult) -> Result<(), S
                     .ok_or_else(|| format!("Request {} missing record in response: {}", request_result.request_id, key))?;
                 
                 // Verify field values match
-                for field in ["name", "department", "salary"] {
-                    let request_value = request_record.get(field).unwrap();
-                    let response_value = response_record.get(field).unwrap();
+                for field in fields_to_verify {
+                    let request_value = request_record.get(field)
+                        .ok_or_else(|| format!("Request {} missing field '{}' in request", request_result.request_id, field))?;
+                    let response_value = response_record.get(field)
+                        .ok_or_else(|| format!("Request {} missing field '{}' in response", request_result.request_id, field))?;
                     
                     if request_value != response_value {
                         return Err(format!(
@@ -227,6 +232,21 @@ fn verify_request_response_match(request_result: &RequestResult) -> Result<(), S
     }
 }
 
+/// Verify request/response match for the default employee schema (name, department, salary)
+pub fn verify_employee_request_response_match(request_result: &RequestResult) -> Result<(), String> {
+    verify_request_response_match(
+        request_result,
+        |record| {
+            format!("{}:{}:{}", 
+                record.get("name").unwrap().as_str().unwrap(),
+                record.get("department").unwrap().as_str().unwrap(),
+                record.get("salary").unwrap().as_i64().unwrap()
+            )
+        },
+        &["name", "department", "salary"],
+    )
+}
+
 #[tokio::test]
 async fn test_request_source_sink_e2e() {
     // Operator config
@@ -238,7 +258,7 @@ async fn test_request_source_sink_e2e() {
     let total_requests = 400;
 
         // Create test configuration
-    let config = create_test_config(max_pending_requests, request_timeout_ms);
+    let mut config = create_test_config(max_pending_requests, request_timeout_ms);
     let bind_address = config.bind_address.clone();
 
     // Create schema that matches our test data
@@ -248,10 +268,12 @@ async fn test_request_source_sink_e2e() {
         Field::new("salary", DataType::Int64, false),
     ]));
 
+    let config = config.set_schema(schema.clone());
+
     // Create DataFusion planner to extract window exec
     let ctx = SessionContext::new();
     let mut planner = Planner::new(PlanningContext::new(ctx));
-
+    
     // Register a dummy source with our schema
     planner.register_source(
         "employees".to_string(),
@@ -265,25 +287,25 @@ async fn test_request_source_sink_e2e() {
 
         // Create pipeline operators
     let parallelism = 4; // Test with parallelism > 1
-    let operators = vec![
-        OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)),
-        OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(
-            crate::runtime::functions::key_by::key_by_function::DataFusionKeyFunction::new_window(window_exec)
-        )),
-        OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-        OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
-    ];
+        let operators = vec![
+            OperatorConfig::SourceConfig(SourceConfig::HttpRequestSourceConfig(config)),
+            OperatorConfig::KeyByConfig(KeyByFunction::DataFusion(
+                crate::runtime::functions::key_by::key_by_function::DataFusionKeyFunction::new_window(window_exec)
+            )),
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            OperatorConfig::SinkConfig(SinkConfig::RequestSinkConfig),
+        ];
 
     // Create logical graph, no chaining
-    let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
+        let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
 
-    // Create pipeline context with LocalExecutor
-    let context = PipelineContext::new()
-        .with_parallelism(parallelism)
-        .with_logical_graph(logical_graph)
-        .with_executor(Box::new(LocalExecutor::new()));
+        // Create pipeline context with LocalExecutor
+        let context = PipelineContext::new()
+            .with_parallelism(parallelism)
+            .with_logical_graph(logical_graph)
+            .with_executor(Box::new(LocalExecutor::new()));
 
-    // Start pipeline execution in background
+        // Start pipeline execution in background
     // TODO implement stop for context
     let pipeline_handle = tokio::spawn(async move {
         context.execute().await.unwrap();
@@ -304,6 +326,7 @@ async fn test_request_source_sink_e2e() {
         requests_per_second,
         total_requests,
         Some(max_pending_requests),
+        generate_request_payload,
     ).await;
 
     println!("📊 Completed {} requests, analyzing results...", results.len());
@@ -317,7 +340,7 @@ async fn test_request_source_sink_e2e() {
     for result in &results {
         all_durations.push(result.duration);
         
-        match verify_request_response_match(result) {
+        match verify_employee_request_response_match(result) {
             Ok(()) => {
                 successful_requests += 1;
             }

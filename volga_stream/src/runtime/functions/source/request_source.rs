@@ -1,4 +1,5 @@
 use arrow::array::RecordBatch;
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use anyhow::Result;
 use std::sync::Arc;
@@ -36,6 +37,7 @@ pub struct RequestSourceConfig {
     pub bind_address: String,
     pub max_pending_requests: usize,
     pub request_timeout_ms: u64,
+    pub schema: Option<SchemaRef>,
 }
 
 impl RequestSourceConfig {
@@ -44,7 +46,13 @@ impl RequestSourceConfig {
             bind_address,
             max_pending_requests,
             request_timeout_ms,
+            schema: None,
         }
+    }
+    
+    pub fn set_schema(mut self, schema: arrow::datatypes::SchemaRef) -> Self {
+        self.schema = Some(schema);
+        self
     }
 }
 
@@ -266,13 +274,17 @@ pub struct HttpRequestSourceFunction {
     
     // Shared request receiver from the processor
     shared_request_rx: Option<Arc<tokio::sync::Mutex<mpsc::Receiver<PendingRequest>>>>,
+    
+    // Schema for converting JSON to RecordBatch
+    schema: SchemaRef,
 }
 
 impl HttpRequestSourceFunction {
-    pub fn new() -> Self {
+    pub fn new(schema: SchemaRef) -> Self {
         Self {
             runtime_context: None,
             shared_request_rx: None,
+            schema: schema,
         }
     }
     
@@ -290,7 +302,7 @@ impl HttpRequestSourceFunction {
             _ => return Err(anyhow::anyhow!("Expected request data to be an object with 'payload' field")),
         };
         
-        let record_batch = json_to_record_batch(&payload_array)?;
+        let record_batch = json_to_record_batch(&payload_array, self.schema.clone())?;
         
         let mut extras = HashMap::new();
         extras.insert(SOURCE_TASK_INDEX_FIELD.to_string(), task_index.to_string());
@@ -422,40 +434,49 @@ impl SourceFunctionTrait for HttpRequestSourceFunction {
 mod tests {
     use super::*;
     use crate::runtime::runtime_context::RuntimeContext;
+    use arrow::datatypes::{DataType, Field, Schema};
     use tokio::time::{sleep, Duration};
     use futures::FutureExt;
     use rand;
 
-    fn create_test_config() -> RequestSourceConfig {
+    
+    fn create_test_config(schema: SchemaRef) -> RequestSourceConfig {
         // Use a random high port to avoid conflicts
         let port = 8000 + (rand::random::<u16>() % 1000);
         
-        RequestSourceConfig::new(
+        let mut config = RequestSourceConfig::new(
             format!("127.0.0.1:{}", port),
             2, // max_pending_requests
             1000, // request_timeout_ms
-        )
+        );
+        config.schema = Some(schema);
+        config
     }
 
     fn create_test_runtime_context() -> RuntimeContext {
         RuntimeContext::new("test_vertex".to_string(), 0, 1, None, None, None)
     }
     
-    async fn create_test_processor_and_source() -> (RequestSourceProcessor, HttpRequestSourceFunction) {
-        let config = create_test_config();
+    async fn create_test_processor_and_source(schema: SchemaRef) -> (RequestSourceProcessor, HttpRequestSourceFunction) {
+        let config = create_test_config(schema.clone());
         let mut processor = RequestSourceProcessor::new(config);
         
         // Start the processor
         processor.start().await.unwrap();
         
-        let source = HttpRequestSourceFunction::new();
+        let source = HttpRequestSourceFunction::new(schema.clone());
         
         (processor, source)
     }
 
     #[tokio::test]
     async fn test_request_fetch_response() {
-        let (mut processor, mut source) = create_test_processor_and_source().await;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("age", DataType::Int64, false),
+        ]));
+        let (mut processor, mut source) = create_test_processor_and_source(schema.clone()).await;
         let mut runtime_context = create_test_runtime_context();
         runtime_context.set_request_sink_source_response_sender(processor.get_response_sender());
         runtime_context.set_request_sink_source_request_receiver(processor.get_shared_request_receiver().clone());
@@ -585,7 +606,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_backpressure() {
-        let (mut processor, mut source) = create_test_processor_and_source().await;
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("age", DataType::Int64, false),
+        ]));
+
+        let (mut processor, mut source) = create_test_processor_and_source(schema.clone()).await;
         let mut runtime_context = create_test_runtime_context();
         runtime_context.set_request_sink_source_response_sender(processor.get_response_sender());
         runtime_context.set_request_sink_source_request_receiver(processor.get_shared_request_receiver().clone());
@@ -672,13 +699,17 @@ mod tests {
     #[tokio::test]
     async fn test_request_timeout() {
         // Create config with very short timeout
-        let mut config = create_test_config();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("age", DataType::Int64, false),
+        ]));
+        let mut config = create_test_config(schema.clone());
         config.request_timeout_ms = 100; // 100ms timeout
         
         let mut processor = RequestSourceProcessor::new(config);
         processor.start().await.unwrap();
         
-        let mut source = HttpRequestSourceFunction::new();
+        let mut source = HttpRequestSourceFunction::new(schema.clone());
         let mut runtime_context = create_test_runtime_context();
         runtime_context.set_request_sink_source_response_sender(processor.get_response_sender());
         runtime_context.set_request_sink_source_request_receiver(processor.get_shared_request_receiver().clone());

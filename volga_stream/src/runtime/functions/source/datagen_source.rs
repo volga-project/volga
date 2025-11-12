@@ -144,24 +144,11 @@ impl DatagenSourceFunction {
             let key_field_name = self.schema.fields()[key_idx].name();
             if let Some(FieldGenerator::Key { num_unique }) = self.config.fields.get(key_field_name) {
                 // Distribute unique keys across all tasks
-                let keys_per_task = num_unique / parallelism as usize;
-                let remainder = num_unique % parallelism as usize;
-                
-                // If there's a remainder, give it to the last task
-                let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
-                    keys_per_task + remainder
-                } else {
-                    keys_per_task
-                };
-                
-                for key_id in 0..num_keys_for_task {
-                    let key = format!("key-{}-{}", task_index, key_id);
-                    self.key_values.push(key.clone());
-                    
-                    // Initialize per-key state
+                self.key_values = Self::gen_key_values_for_task(parallelism as usize, task_index as usize, *num_unique);
+                for key in self.key_values.iter() {
                     self.per_key_timestamps.insert(key.clone(), 0);
                     self.per_key_increments.insert(key.clone(), HashMap::new());
-                    self.per_key_values_indices.insert(key, HashMap::new());
+                    self.per_key_values_indices.insert(key.clone(), HashMap::new());
                 }
             }
         } else {
@@ -172,6 +159,26 @@ impl DatagenSourceFunction {
             self.per_key_increments.insert(global_key.clone(), HashMap::new());
             self.per_key_values_indices.insert(global_key, HashMap::new());
         }
+    }
+
+    pub fn gen_key_values_for_task(parallelism: usize, task_index: usize, num_unique: usize) -> Vec<String> {
+        let mut key_values = Vec::new();
+        
+        let keys_per_task = num_unique / parallelism as usize;
+        let remainder = num_unique % parallelism as usize;
+        
+        // If there's a remainder, give it to the last task
+        let num_keys_for_task = if remainder != 0 && task_index == parallelism - 1 {
+            keys_per_task + remainder
+        } else {
+            keys_per_task
+        };
+        
+        for key_id in 0..num_keys_for_task {
+            let key = format!("key-{}-{}", task_index, key_id);
+            key_values.push(key.clone());
+        }
+        key_values
     }
 
     /// Generate a single record batch

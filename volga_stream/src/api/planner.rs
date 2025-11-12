@@ -42,7 +42,7 @@ use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::partition::PartitionType;
 
-static REQUEST_SOURCE_NAME: &str = "request_source";
+pub static REQUEST_SOURCE_NAME: &str = "request_source";
 
 /// Custom table provider creating dummy tables with no execution logic
 #[derive(Debug, Clone)]
@@ -157,6 +157,10 @@ impl Planner {
             node_stack: Vec::new(),
             context,
         }
+    }
+
+    pub fn register_request_source(&mut self, config: SourceConfig) {
+        self.context.connector_configs.insert(REQUEST_SOURCE_NAME.to_string(), config);
     }
 
     pub fn register_source(&mut self, table_name: String, config: SourceConfig, schema: SchemaRef) {

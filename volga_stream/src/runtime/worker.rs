@@ -89,6 +89,8 @@ pub struct Worker {
     // if RequestSource/Sink is configured, run processor - shared between tasks
     request_source_processor: Option<RequestSourceProcessor>,
     request_source_processor_runtime: Option<Runtime>,
+
+    // TODO separate backend runtime for request mode channels
 }
 
 impl Worker {

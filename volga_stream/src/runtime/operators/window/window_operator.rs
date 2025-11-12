@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::fmt;
 
 use anyhow::Result;
-use arrow::array::{ArrayRef, RecordBatch};
-use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
+use arrow::array::{ArrayRef, RecordBatch, TimestampMillisecondArray};
+use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef, DataType, TimeUnit};
 use async_trait::async_trait;
 use futures::{future, StreamExt};
 use indexmap::{IndexMap, IndexSet};
@@ -259,14 +259,14 @@ impl WindowOperator {
                 continue;
             }
             
-                    let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
-                    let window_start = window_state.start_idx;
-                    let window_end = window_state.end_idx;
-                    
-                    let late_entries_in_window: Vec<_> = late_entries.iter()
-                        .filter(|entry| **entry >= window_start && **entry < window_end)
-                        .cloned()
-                        .collect();
+            let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
+            let window_start = window_state.start_idx;
+            let window_end = window_state.end_idx;
+            
+            let late_entries_in_window: Vec<_> = late_entries.iter()
+                .filter(|entry| **entry >= window_start && **entry < window_end)
+                .cloned()
+                .collect();
                     
             if late_entries_in_window.is_empty() {
                 continue;
@@ -461,7 +461,7 @@ pub async fn load_batches<'a>(storage: &BatchStore, key: &Key, aggregations: &In
                         }
                     }
                 }
-        } else {
+            } else {
                 // non-rets (plain and evaluators) need whole window data (excluding tiles) for each update/entry
                 for entry in entries {
                     let window_start = time_entries.get_window_start(window_frame, *entry, true).expect("Time entries should exist");

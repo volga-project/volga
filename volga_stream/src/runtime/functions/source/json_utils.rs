@@ -1,5 +1,6 @@
 use anyhow::Result;
 use arrow::record_batch::RecordBatch;
+use arrow::datatypes::SchemaRef;
 use arrow_json::writer::LineDelimitedWriter;
 use arrow_json::{ReaderBuilder};
 use arrow_json::reader::infer_json_schema;
@@ -29,7 +30,7 @@ pub fn record_batch_to_json(record_batch: &RecordBatch) -> Result<Value> {
     Ok(Value::Array(json_objects))
 }
 
-pub fn json_to_record_batch(json_value: &Value) -> Result<RecordBatch> {
+pub fn json_to_record_batch(json_value: &Value, schema: SchemaRef) -> Result<RecordBatch> {
     // Ensure we have an array
     let json_array = match json_value {
         Value::Array(arr) => arr,
@@ -46,13 +47,18 @@ pub fn json_to_record_batch(json_value: &Value) -> Result<RecordBatch> {
     
     let json_bytes = json_string.into_bytes();
     
-    // Infer schema
-    let mut cursor_for_schema = Cursor::new(&json_bytes);
-    let (schema, _) = infer_json_schema(&mut cursor_for_schema, None)
-        .map_err(|e| anyhow::anyhow!("Failed to infer JSON schema: {}", e))?;
+    // Use provided schema or infer it
+    // let schema = if let Some(schema) = schema {
+    //     schema
+    // } else {
+    //     let mut cursor_for_schema = Cursor::new(&json_bytes);
+    //     let (inferred_schema, _) = infer_json_schema(&mut cursor_for_schema, None)
+    //         .map_err(|e| anyhow::anyhow!("Failed to infer JSON schema: {}", e))?;
+    //     Arc::new(inferred_schema)
+    // };
     
     let cursor = Cursor::new(json_bytes);
-    let mut reader = ReaderBuilder::new(Arc::new(schema)).build(cursor)?;
+    let mut reader = ReaderBuilder::new(schema).build(cursor)?;
     
     // Read the first and only batch
     reader.next()
@@ -109,9 +115,14 @@ mod tests {
             {"name": "Alice", "age": 25},
             {"name": "Bob", "age": 30}
         ]);
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("name", DataType::Utf8, false),
+            Field::new("age", DataType::Int64, false),
+        ]));
         
         // Convert to RecordBatch
-        let record_batch = json_to_record_batch(&json_value).unwrap();
+        let record_batch = json_to_record_batch(&json_value, schema).unwrap();
         
         // Verify the RecordBatch
         assert_eq!(record_batch.num_rows(), 2);

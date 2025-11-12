@@ -9,7 +9,7 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 
-use crate::api::planner::{Planner, PlanningContext};
+use crate::api::planner::{Planner, PlanningContext, REQUEST_SOURCE_NAME};
 use crate::api::logical_graph::LogicalGraph;
 use crate::executor::executor::{ExecutionState, Executor};
 use crate::runtime::worker::WorkerState;
@@ -30,6 +30,8 @@ pub struct PipelineContext {
     df_session_context: SessionContext,
     /// Source table configurations (table_name -> (source_config, schema))
     sources: HashMap<String, (SourceConfig, Arc<Schema>)>,
+    /// Request source configuration
+    request_source_config: Option<SourceConfig>,
     /// Optional sink configuration
     sink_config: Option<SinkConfig>,
     /// Parallelism level for each operator
@@ -64,6 +66,7 @@ impl PipelineContext {
         Self {
             df_session_context: SessionContext::new(),
             sources: HashMap::new(),
+            request_source_config: None,
             sink_config: None,
             parallelism: 1,
             sql: None,
@@ -75,6 +78,11 @@ impl PipelineContext {
 
     pub fn with_source(mut self, table_name: String, source_config: SourceConfig, schema: Arc<Schema>) -> Self {
         self.sources.insert(table_name, (source_config, schema));
+        self
+    }
+
+    pub fn with_request_source(mut self, source_config: SourceConfig) -> Self {
+        self.request_source_config = Some(source_config);
         self
     }
 
@@ -126,6 +134,10 @@ impl PipelineContext {
         // Register source tables
         for (table_name, (source_config, schema)) in &self.sources {
             planner.register_source(table_name.clone(), source_config.clone(), schema.clone());
+        }
+
+        if let Some(request_source_config) = &self.request_source_config {
+            planner.register_request_source(request_source_config.clone());
         }
 
         // Register sink if provided
