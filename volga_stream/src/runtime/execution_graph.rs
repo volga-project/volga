@@ -179,6 +179,8 @@ impl ExecutionGraph {
             .collect()
     }
 
+    // TODO we should add topology verification for request mode (window+window_request and reques source+sink tasks on same nodes)
+
     // TODO we should separate execution graph and channel configurations - 
     // execution graph should be static and compiled by planner,
     // channel mapping depends on cluster configuration and is defined at runtime

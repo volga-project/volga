@@ -176,7 +176,7 @@ impl WindowOperator {
         let mut windows_state = if let Some(windows_state) = windows_state {
             windows_state
         } else {
-            self.state.take_windows_state(key).await.expect("Windows state should exist")
+            self.state.get_windows_state_clone(key).await.expect("Windows state should exist")
         };
         
         let result = self.advance_windows(key, &mut windows_state, late_entries).await;
@@ -221,6 +221,8 @@ impl WindowOperator {
 
             // Prune storage - remove batches that are no longer needed
             if !pruned_batch_ids.is_empty() {
+                // TODO this should be an async removal and also synced with request operator
+                // (if this key is being read by request op, we should delay removal of batches that are still used)
                 self.state.get_batch_store().remove_batches(&pruned_batch_ids, key).await;
             }
         }
@@ -549,7 +551,7 @@ impl OperatorTrait for WindowOperator {
                         
                         let window_ids: Vec<_> = self.window_configs.keys().cloned().collect();
                         let window_exprs: Vec<_> = self.window_configs.values().map(|window| window.window_expr.clone()).collect();
-                        let mut windows_state = if let Some(windows_state) = self.state.take_windows_state(key).await {
+                        let mut windows_state = if let Some(windows_state) = self.state.get_windows_state_clone(key).await {
                             windows_state
                         } else {
                             create_empty_windows_state(&window_ids, &self.tiling_configs, &window_exprs)

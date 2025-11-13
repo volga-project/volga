@@ -46,12 +46,12 @@ pub struct TimeEntries {
 
 impl Clone for TimeEntries {
     fn clone(&self) -> Self {
-        let mut entries = SkipSet::new();
+        let entries = SkipSet::new();
         for entry in self.entries.iter() {
             entries.insert(*entry);
         }
         
-        let mut batch_ids = SkipMap::new();
+        let batch_ids = SkipMap::new();
         for entry in self.batch_ids.iter() {
             batch_ids.insert(*entry.key(), entry.value().clone());
         }

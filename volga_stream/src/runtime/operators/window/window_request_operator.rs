@@ -155,6 +155,7 @@ impl WindowRequestOperator {
     ) -> (Vec<Option<TimeIdx>>, BatchId) {
         let mut virtual_entries = Vec::with_capacity(record_batch.num_rows());
         let last_entry = time_entries.entries.back().map(|entry| *entry);
+        let first_entry = time_entries.entries.front().map(|entry| *entry);
 
         let batch_id = BatchId::random(); // virtual batch id
 
@@ -168,6 +169,15 @@ impl WindowRequestOperator {
                 row_idx: 0,
             };
 
+            // filter out entries before first entry
+            if let Some(first_entry) = first_entry {
+                if timestamp < first_entry.timestamp {
+                    virtual_entries.push(None);
+                    continue;
+                }
+            }
+
+            // filter out late entries
             if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry) {
                 if is_ts_too_late(timestamp, last_entry, lateness_ms) {
                     virtual_entries.push(None);
@@ -414,10 +424,18 @@ impl OperatorTrait for WindowRequestOperator {
                     Message::Keyed(keyed_message) => {
                         let key = keyed_message.key();
                         
-                        // TODO handle case when windows state does not exist
 
                         // read-only access to windows state
                         let state = self.get_state();
+
+                        // TODO we may have a race condition here - 
+                        // getting state copy is ok even if winow operator updates previous version of it
+                        // The problem is that window operator may prune batches that are still used by request operator for this version of state
+                        // we need to somehow sync this or add a flag to state to indicate which batches are still used by request operator
+                        // eg similar to mvcc pattern
+
+
+                        // TODO handle case when windows state does not exist
                         let windows_state = state.get_windows_state_clone(key).await
                             .expect("Window state should exist for request operator");
 

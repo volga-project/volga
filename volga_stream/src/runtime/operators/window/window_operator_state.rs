@@ -64,15 +64,6 @@ impl WindowOperatorState {
         self.window_states.insert(key.clone(), windows_state);
     }
 
-    pub async fn take_windows_state(&self, key: &Key) -> Option<WindowsState> {
-        let key_lock = self.get_key_lock(key);
-        let _key_guard = key_lock.write().await;
-        if self.window_states.contains_key(key) {
-            return Some(self.window_states.remove(key).unwrap().1)
-        }
-        None
-    }
-
     pub async fn get_windows_state_clone(&self, key: &Key) -> Option<WindowsState> {
         let key_lock = self.get_key_lock(key);
         let _key_guard = key_lock.read().await;
