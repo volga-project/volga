@@ -424,7 +424,6 @@ impl OperatorTrait for WindowRequestOperator {
                     Message::Keyed(keyed_message) => {
                         let key = keyed_message.key();
                         
-
                         // read-only access to windows state
                         let state = self.get_state();
 
@@ -443,7 +442,11 @@ impl OperatorTrait for WindowRequestOperator {
                         };
 
                         OperatorPollResult::Ready(Message::new(None, result, ingest_ts, extras))
-                    }
+                    },
+                    Message::Watermark(watermark) => {
+                        // pass through
+                        return OperatorPollResult::Ready(Message::Watermark(watermark));
+                    },
                     _ => {
                         panic!("Window request operator expects keyed messages only");
                     }

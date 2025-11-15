@@ -374,6 +374,10 @@ impl StreamTask {
                 // TODO do we need timeout here?
                 match operator.poll_next().await {
                     OperatorPollResult::Ready(mut message) => {
+                        if vertex_id == "Window_1_2" {
+                            // todo remove after debugging
+                            println!("StreamTask {:?} produced message {:?}", vertex_id, message);
+                        }
                         if is_source {
                             message.set_ingest_timestamp(SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -401,7 +405,7 @@ impl StreamTask {
                         message.set_upstream_vertex_id(vertex_id.clone());
                         Self::record_metrics(vertex_id.clone(), &message, false);
 
-                        // Send to collectors (same logic as original)
+                        // Send to collectors
                         Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,

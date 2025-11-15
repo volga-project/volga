@@ -42,7 +42,7 @@ use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::partition::PartitionType;
 
-pub static REQUEST_SOURCE_NAME: &str = "request_source";
+// pub static REQUEST_SOURCE_NAME: &str = "request_source";
 
 /// Custom table provider creating dummy tables with no execution logic
 #[derive(Debug, Clone)]
@@ -120,6 +120,10 @@ pub struct PlanningContext {
     pub df_session_context: SessionContext,
     pub connector_configs: HashMap<String, SourceConfig>,
     pub sink_config: Option<SinkConfig>,
+
+    pub request_source_config: Option<SourceConfig>,
+    pub request_sink_config: Option<SinkConfig>,
+
     pub df_planner: Arc<DefaultPhysicalPlanner>,
     pub execution_mode: ExecutionMode,
 
@@ -133,6 +137,8 @@ impl PlanningContext {
             df_session_context,
             connector_configs: HashMap::new(),
             sink_config: None,
+            request_source_config: None,
+            request_sink_config: None,
             df_planner: Arc::new(DefaultPhysicalPlanner::default()),
             execution_mode: ExecutionMode::Streaming,
             parallelism: 1, // Default parallelism
@@ -159,8 +165,9 @@ impl Planner {
         }
     }
 
-    pub fn register_request_source(&mut self, config: SourceConfig) {
-        self.context.connector_configs.insert(REQUEST_SOURCE_NAME.to_string(), config);
+    pub fn register_request_source_sink(&mut self, source_config: SourceConfig, sink_config: Option<SinkConfig>) {
+        self.context.request_source_config = Some(source_config);
+        self.context.request_sink_config = sink_config;
     }
 
     pub fn register_source(&mut self, table_name: String, config: SourceConfig, schema: SchemaRef) {
@@ -202,9 +209,10 @@ impl Planner {
 
         let mut graph = self.logical_plan_to_graph(&logical_plan)?;
         if self.context.execution_mode == ExecutionMode::Request {
-            let request_source_config = self.context.connector_configs.get(REQUEST_SOURCE_NAME).expect("Request source configuration not found").clone();
-            let request_sink_config = self.context.sink_config.clone();
-            graph.to_request_mode(request_source_config, request_sink_config).map_err(|e| DataFusionError::Plan(e))?;
+            graph.to_request_mode(
+                self.context.request_source_config.clone().expect("Request source configuration not found"), 
+                self.context.request_sink_config.clone()
+            ).map_err(|e| DataFusionError::Plan(e))?;
         }
         Ok(graph)
     }
@@ -519,7 +527,11 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             self.logical_graph.set_root_node(node_index);
             
             // if sink is configured add here (not in request mode), for request mode sink is set later
-            if self.context.execution_mode != ExecutionMode::Request && self.context.sink_config.is_some() {
+            if self.context.sink_config.is_some() {
+                if self.context.execution_mode == ExecutionMode::Request {
+                    panic!("Request mode should not set sinks directly")
+                }
+                
                 let sink_config = self.context.sink_config.clone().unwrap();
                 self.create_sink_node(sink_config.clone(), node_index, self.context.parallelism)?;
             }
@@ -940,12 +952,13 @@ mod tests {
             100,
             5000
         ));
-        planner.register_source(
-            REQUEST_SOURCE_NAME.to_string(), 
-            request_source_config, 
-            schema.clone()
-        );
-        planner.register_sink(SinkConfig::RequestSinkConfig);
+        // planner.register_source(
+        //     REQUEST_SOURCE_NAME.to_string(), 
+        //     request_source_config, 
+        //     schema.clone()
+        // );
+        // planner.register_sink(SinkConfig::RequestSinkConfig);
+        planner.register_request_source_sink(request_source_config, Some(SinkConfig::RequestSinkConfig));
         
         // Window query with SUM over a time-based window partitioned by key
         let sql = "SELECT 

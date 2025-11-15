@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::PipelineContext,
+    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
     common::test_utils::gen_unique_grpc_port,
     executor::local_executor::LocalExecutor,
     runtime::{
@@ -53,7 +53,7 @@ pub async fn run_window_benchmark(
     );
 
     // Create streaming context with datagen source and tumbling window
-    let context = PipelineContext::new()
+    let context = PipelineContextBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
             "datagen_source".to_string(), 
@@ -74,7 +74,8 @@ pub async fn run_window_benchmark(
                 RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW
             )
         ")
-        .with_executor(Box::new(LocalExecutor::new()));
+        .with_executor(Box::new(LocalExecutor::new()))
+        .build();
 
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();

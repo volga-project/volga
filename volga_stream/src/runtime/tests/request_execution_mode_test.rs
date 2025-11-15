@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, ExecutionMode},
+    api::pipeline_context::{PipelineContext, PipelineContextBuilder, ExecutionMode},
     executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
@@ -118,7 +118,7 @@ fn create_payload_generator(
 
 #[tokio::test]
 async fn test_request_execution_mode() {
-    let parallelism = 1;
+    let parallelism = 4;
     let max_pending_requests = 5000;
     let request_timeout_ms = 100000;
     let total_requests = 10000;
@@ -129,10 +129,10 @@ async fn test_request_execution_mode() {
 
     // datagen config
     let num_record_to_gen = None;
-    let batch_size = 1;
+    let batch_size = 10;
     let start_ms = 1000;
     let step_ms = 1000;
-    let num_unique_keys = 1;
+    let num_unique_keys = 100;
     let value_start = 10.0;
     let value_step = 10.0;
 
@@ -157,20 +157,21 @@ async fn test_request_execution_mode() {
 
     // TODO set window config - tiling, lateness, etc
     
-    let context = PipelineContext::new()
+    let context = PipelineContextBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
             "events".to_string(),
             SourceConfig::DatagenSourceConfig(datagen_config),
             schema.clone()
         )
-        .with_request_source(
-            SourceConfig::HttpRequestSourceConfig(request_source_config.clone())
+        .with_request_source_sink(
+            SourceConfig::HttpRequestSourceConfig(request_source_config.clone()),
+            Some(SinkConfig::RequestSinkConfig)
         )
-        .with_sink(SinkConfig::RequestSinkConfig)
         .sql(sql)
         .with_executor(Box::new(LocalExecutor::new()))
-        .with_execution_mode(ExecutionMode::Request);
+        .with_execution_mode(ExecutionMode::Request)
+        .build();
 
     let pipeline_handle = tokio::spawn(async move {
         context.execute().await.unwrap();
@@ -254,7 +255,7 @@ async fn test_request_execution_mode() {
                 }
             }
             Err(e) => {
-                println!("❌ Request {}: Error: {}", result.request_id, e);
+                // println!("❌ Request {}: Error: {}", result.request_id, e);
                 failed_requests += 1;
             }
         }

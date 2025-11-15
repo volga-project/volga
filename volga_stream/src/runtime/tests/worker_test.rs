@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::PipelineContext,
+    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
     common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
     executor::local_executor::LocalExecutor,
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
@@ -36,7 +36,7 @@ fn test_worker_execution() -> Result<()> {
     ]));
     
     // Create streaming context using SQL
-    let context = PipelineContext::new()
+    let context = PipelineContextBuilder::new()
         .with_parallelism(1)
         .with_source(
             "test_table".to_string(),
@@ -45,7 +45,8 @@ fn test_worker_execution() -> Result<()> {
         )
         .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT value FROM test_table")
-        .with_executor(Box::new(LocalExecutor::new()));
+        .with_executor(Box::new(LocalExecutor::new()))
+        .build();
 
     let vector_messages = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();

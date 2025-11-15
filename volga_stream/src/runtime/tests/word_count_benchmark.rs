@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::PipelineContext,
+    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     executor::local_executor::LocalExecutor,
     runtime::{
@@ -155,7 +155,7 @@ pub async fn run_word_count_benchmark(
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Create streaming context using SQL instead of manual operator configuration
-    let context = PipelineContext::new()
+    let context = PipelineContextBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
             "word_count_source".to_string(), 
@@ -174,7 +174,8 @@ pub async fn run_word_count_benchmark(
         )
         .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_executor(Box::new(LocalExecutor::new()));
+        .with_executor(Box::new(LocalExecutor::new()))
+        .build();
 
     let logical_graph = context.get_logical_graph().unwrap();
 

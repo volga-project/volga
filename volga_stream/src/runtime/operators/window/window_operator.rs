@@ -364,7 +364,7 @@ impl WindowOperator {
                     aggs.push(Aggregation::new(
                         updates, aggregator_type, window_config.window_expr.clone(), Some(retracts), accumulator_state, tiles
                     ));
-            } else {
+                } else {
                     // split for parallelism
                     for entries in split_entries_for_parallelism(&updates) {
                         aggs.push(Aggregation::new(
@@ -601,8 +601,13 @@ impl OperatorTrait for WindowOperator {
                                 None
                             };
                             let result = self.process_key(&key, Some(windows_state), late_entries).await;
-                            // vertex_id will be set by stream task
-                            return OperatorPollResult::Ready(Message::new(None, result, ingest_ts, extras));
+                            if self.execution_mode == ExecutionMode::Request {
+                                // request mode produces no output, just updates state
+                                return OperatorPollResult::Continue;
+                            } else {
+                                // vertex_id will be set by stream task
+                                return OperatorPollResult::Ready(Message::new(None, result, ingest_ts, extras));
+                            }
                         }
                     }
                     Message::Watermark(watermark) => {
@@ -612,12 +617,20 @@ impl OperatorTrait for WindowOperator {
                         }
                         let result = self.process_buffered().await;
                         self.buffered_keys.clear();
+
                         // vertex_id will be set by stream task
                         // TODO ingest timestamp and extras?
                         
-                        // Buffer the watermark to be returned on next call
+                        // Buffer the watermark to be returned on next poll
                         self.base.pending_messages.push(Message::Watermark(watermark));
-                        return OperatorPollResult::Ready(Message::new(None, result, None, None));
+
+                        if self.execution_mode == ExecutionMode::Request {
+                            // request mode produces no output, just updates state
+                            return OperatorPollResult::Continue;
+                        } else {
+                            // vertex_id will be set by stream task
+                            return OperatorPollResult::Ready(Message::new(None, result, None, None));
+                        }
                     }
                     _ => {
                         panic!("Window operator expects keyed messages or watermarks");
@@ -1781,10 +1794,8 @@ mod tests {
         window_operator.set_input(Some(input_stream));
         
         let result1 = window_operator.poll_next().await;
-        let message1_result = result1.get_result_message();
-        let result_batch1 = message1_result.record_batch();
-        assert_eq!(result_batch1.num_rows(), 0, "Request mode should produce empty batch");
-        
+        assert!(matches!(result1, OperatorPollResult::Continue), "Request mode should produce no output");
+    
         // Verify state was updated
         let state1 = window_operator.get_state().get_windows_state_clone(&partition_key).await
             .expect("State should exist");
@@ -1806,9 +1817,7 @@ mod tests {
         window_operator.set_input(Some(input_stream2));
         
         let result2 = window_operator.poll_next().await;
-        let message2_result = result2.get_result_message();
-        let result_batch2 = message2_result.record_batch();
-        assert_eq!(result_batch2.num_rows(), 0, "Request mode should produce empty batch");
+        assert!(matches!(result2, OperatorPollResult::Continue), "Request mode should produce no output");
         
         // Verify state was updated with late entry
         let state2 = window_operator.get_state().get_windows_state_clone(&partition_key).await
@@ -1827,9 +1836,7 @@ mod tests {
         window_operator.set_input(Some(input_stream3));
         
         let result3 = window_operator.poll_next().await;
-        let message3_result = result3.get_result_message();
-        let result_batch3 = message3_result.record_batch();
-        assert_eq!(result_batch3.num_rows(), 0, "Request mode should produce empty batch");
+        assert!(matches!(result3, OperatorPollResult::Continue), "Request mode should produce no output");
         
         // Verify state was updated
         let state3 = window_operator.get_state().get_windows_state_clone(&partition_key).await

@@ -10,6 +10,7 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
+use crate::runtime::operators::window::window_operator::ExecutionMode;
 use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
@@ -280,6 +281,13 @@ impl LogicalGraph {
             }
             top_window
         };
+
+        // Set execution mode of top window operator to request
+        if let Some(node) = self.graph.node_weight_mut(top_window_node) {
+            if let OperatorConfig::WindowConfig(ref mut config) = node.operator_config {
+                config.execution_mode = ExecutionMode::Request;
+            }
+        }
         
         // Step 3: Get the KeyBy operator that precedes the window operator
         // Window node should have exactly one preceding node, which must be a KeyBy
@@ -296,13 +304,14 @@ impl LogicalGraph {
         );
         
         let keyby_config = self.graph[keyby_node].operator_config.clone();
+        
+        // Step 4: Create new nodes: request_source -> keyby -> window_request
+        let parallelism = self.graph[top_window_node].parallelism;
+
         let window_config = match &self.graph[top_window_node].operator_config {
             OperatorConfig::WindowConfig(config) => config.clone(),
             _ => return Err("Expected WindowConfig".to_string()),
         };
-        
-        // Step 4: Create new nodes: request_source -> keyby -> window_request
-        let parallelism = self.graph[top_window_node].parallelism;
         
         // set schema for request source, if necessary
         if let SourceConfig::HttpRequestSourceConfig(ref mut http_req_cfg) = source_config {
@@ -355,6 +364,7 @@ impl LogicalGraph {
         // Add edge from window_request to follower
         self.add_edge(window_request_idx, target_node);
         
+
         // Step 7: Add request sink node connected to root, if necessary
         if let Some(sink_config) = sink_config {
             let request_sink_node = LogicalNode::new(

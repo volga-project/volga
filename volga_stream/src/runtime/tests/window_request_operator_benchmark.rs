@@ -1,18 +1,26 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, ExecutionMode},
+    api::pipeline_context::{PipelineContext, PipelineContextBuilder, ExecutionMode},
+    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     executor::local_executor::LocalExecutor,
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
-        operators::source::source_operator::SourceConfig,
+        master::PipelineState,
+        operators::{
+            sink::sink_operator::SinkConfig,
+            source::source_operator::SourceConfig,
+        },
     },
+    storage::InMemoryStorageServer,
 };
 use anyhow::Result;
 use arrow::datatypes::{Schema, Field, DataType, TimeUnit};
+use core::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use datafusion::common::ScalarValue;
-use tokio::time::Duration;
+use tokio::sync::Mutex;
+use tokio::sync::mpsc;
 
 fn create_datagen_config(
     rate: Option<f32>,
@@ -48,11 +56,55 @@ fn create_datagen_config(
 }
 
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
+pub struct MetricSample {
+    pub timestamp: u64,
+    pub pipeline_state: PipelineState,
+}
+
+#[derive(Debug, Clone)]
 pub struct BenchmarkMetrics {
     pub execution_time: Duration,
     pub requests_processed: usize,
     pub requests_per_second: f64,
+    pub samples: Vec<MetricSample>,
+}
+
+impl BenchmarkMetrics {
+    pub fn new() -> Self {
+        Self {
+            execution_time: Duration::from_secs(0),
+            requests_processed: 0,
+            requests_per_second: 0.0,
+            samples: Vec::new(),
+        }
+    }
+
+    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineState) {
+        self.samples.push(MetricSample {
+            timestamp,
+            pipeline_state,
+        });
+    }
+}
+
+async fn poll_pipeline_state_updates(
+    state_updates_receiver: &mut mpsc::Receiver<PipelineState>,
+    benchmark_metrics: &mut BenchmarkMetrics,
+) -> Option<PipelineState> {
+    let pipeline_state = match state_updates_receiver.recv().await {
+        Some(state) => state,
+        None => return None,
+    };
+    
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    
+    benchmark_metrics.add_sample(timestamp, pipeline_state.clone());
+    
+    Some(pipeline_state)
 }
 
 pub async fn run_window_request_benchmark(
@@ -62,11 +114,14 @@ pub async fn run_window_request_benchmark(
     datagen_rate: Option<f32>,
     request_rate: Option<f32>,
     batch_size: usize,
+    polling_interval_ms: u64,
 ) -> Result<BenchmarkMetrics> {
     let start_ms = 1000;
     let step_ms = 1000;
-    let value_start = 10.0;
-    let value_step = 10.0;
+    let value_start = 1.0;
+    let value_step = 0.001;
+
+    let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Datagen source for query input (builds window state)
     let query_datagen_config = create_datagen_config(
@@ -111,44 +166,84 @@ pub async fn run_window_request_benchmark(
 
     let benchmark_start = Instant::now();
 
-    let context = PipelineContext::new()
+    let context = PipelineContextBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
             "events".to_string(),
             SourceConfig::DatagenSourceConfig(query_datagen_config),
             schema.clone()
         )
-        .with_request_source(
-            SourceConfig::DatagenSourceConfig(request_datagen_config)
+        .with_request_source_sink(
+            SourceConfig::DatagenSourceConfig(request_datagen_config),
+            Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         )
         .sql(sql)
         .with_executor(Box::new(LocalExecutor::new()))
-        .with_execution_mode(ExecutionMode::Request);
+        .with_execution_mode(ExecutionMode::Request)
+        .build();
 
-    // Execute pipeline - it will complete when both sources finish (after run_for_s)
-    let _pipeline_state = context.execute().await?;
+    let (state_updates_sender, mut state_updates_receiver) = mpsc::channel(100);
+    let running = Arc::new(AtomicBool::new(true));
 
-    let execution_time = benchmark_start.elapsed();
+    let mut storage_server = InMemoryStorageServer::new();
+    storage_server.start(&storage_server_addr).await.unwrap();
+    
+    let benchmark_metrics = Arc::new(Mutex::new(BenchmarkMetrics::new()));
+    let benchmark_metrics_clone = benchmark_metrics.clone();
+    
+    let running_clone = running.clone();
+    let state_updates_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(polling_interval_ms));
+        let mut last_print_timestamp = Instant::now();
+        
+        while running_clone.load(Ordering::SeqCst) {
+            interval.tick().await;
+            
+            {
+                let mut metrics_guard = benchmark_metrics_clone.lock().await;
+                
+                let pipeline_state = match poll_pipeline_state_updates(
+                    &mut state_updates_receiver,
+                    &mut *metrics_guard,
+                ).await {
+                    Some(state) => state,
+                    None => break,
+                };
 
-    // Calculate requests processed based on rate and duration
-    let requests_processed = if let Some(rate) = request_rate {
-        (rate * run_for_s as f32) as usize
-    } else {
-        // If no rate limit, estimate based on execution time
-        (execution_time.as_secs_f64() * 1000.0) as usize
-    };
+                let now = Instant::now();
+                if now.duration_since(last_print_timestamp).as_secs() >= 1 {
+                    println!("[{}] Worker State", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
+                    print_pipeline_state(&pipeline_state);
+                    last_print_timestamp = now;
+                }
+            }
+        }
+    });
+    
+    context.execute_with_state_updates(Some(state_updates_sender)).await?;
+    running.store(false, Ordering::Relaxed);
 
-    let requests_per_second = if execution_time.as_secs_f64() > 0.0 {
-        requests_processed as f64 / execution_time.as_secs_f64()
-    } else {
-        0.0
-    };
+    let _ = state_updates_task.await;
+    
+    let mut benchmark_metrics = (*benchmark_metrics.lock().await).clone();
+    benchmark_metrics.execution_time = benchmark_start.elapsed();
+    
+    storage_server.stop().await;
 
-    Ok(BenchmarkMetrics {
-        execution_time,
-        requests_processed,
-        requests_per_second,
-    })
+    // let requests_processed = if let Some(rate) = request_rate {
+    //     (rate * run_for_s as f32) as usize
+    // } else {
+    //     benchmark_metrics.samples.len() * batch_size
+    // };
+
+    // benchmark_metrics.requests_processed = requests_processed;
+    // benchmark_metrics.requests_per_second = if benchmark_metrics.execution_time.as_secs_f64() > 0.0 {
+    //     requests_processed as f64 / benchmark_metrics.execution_time.as_secs_f64()
+    // } else {
+    //     0.0
+    // };
+
+    Ok(benchmark_metrics)
 }
 
 // #[tokio::test]
@@ -159,6 +254,7 @@ async fn test_window_request_benchmark() -> Result<()> {
     let datagen_rate = None;
     let request_rate = Some(100.0);
     let batch_size = 10;
+    let polling_interval_ms = 100;
 
     let metrics = run_window_request_benchmark(
         parallelism,
@@ -167,6 +263,7 @@ async fn test_window_request_benchmark() -> Result<()> {
         datagen_rate,
         request_rate,
         batch_size,
+        polling_interval_ms,
     ).await?;
 
     println!("\n=== Window Request Operator Benchmark Results ===");
@@ -177,11 +274,13 @@ async fn test_window_request_benchmark() -> Result<()> {
     println!("  Query Datagen Rate: {:?}", datagen_rate);
     println!("  Request Datagen Rate: {:?}", request_rate);
     println!("  Batch Size: {}", batch_size);
+    println!("  Polling Interval: {}ms", polling_interval_ms);
 
     println!("\nResults:");
     println!("  Execution Time: {:?}", metrics.execution_time);
     println!("  Requests Processed: {}", metrics.requests_processed);
     println!("  Requests Per Second: {:.2}", metrics.requests_per_second);
+    println!("  Sample Count: {}", metrics.samples.len());
     println!("==========================================\n");
 
     assert!(metrics.requests_processed > 0, "Should have processed at least some requests");

@@ -1,5 +1,5 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::PipelineContext},
+    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}},
     common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::{Message, WatermarkMessage}, MAX_WATERMARK_VALUE},
     executor::fake_distributed_executor::FakeDistributedExecutor,
     runtime::{
@@ -79,10 +79,11 @@ fn test_distributed_execution() -> Result<()> {
 
         // Create streaming context with FakeDistributedExecutor
         let total_parallelism = num_workers_per_operator * parallelism_per_worker;
-        let context = PipelineContext::new()
+        let context = PipelineContextBuilder::new()
             .with_parallelism(total_parallelism) // Total parallelism across all workers
             .with_logical_graph(LogicalGraph::from_linear_operators(operators, total_parallelism, false)) // chained = false for distributed
-            .with_executor(Box::new(FakeDistributedExecutor::new(num_workers_per_operator)));
+            .with_executor(Box::new(FakeDistributedExecutor::new(num_workers_per_operator)))
+            .build();
 
         println!("[TEST] Starting distributed execution");
         

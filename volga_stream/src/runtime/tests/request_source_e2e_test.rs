@@ -1,5 +1,5 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::PipelineContext, planner::{Planner, PlanningContext}},
+    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}, planner::{Planner, PlanningContext}},
     common::test_utils::IdentityMapFunction,
     executor::local_executor::LocalExecutor,
     runtime::{
@@ -264,7 +264,7 @@ async fn test_request_source_sink_e2e() {
     let total_requests = 400;
 
         // Create test configuration
-    let mut config = create_test_config(max_pending_requests, request_timeout_ms);
+    let config = create_test_config(max_pending_requests, request_timeout_ms);
     let bind_address = config.bind_address.clone();
 
     // Create schema that matches our test data
@@ -306,10 +306,11 @@ async fn test_request_source_sink_e2e() {
         let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
 
         // Create pipeline context with LocalExecutor
-        let context = PipelineContext::new()
+        let context = PipelineContextBuilder::new()
             .with_parallelism(parallelism)
             .with_logical_graph(logical_graph)
-            .with_executor(Box::new(LocalExecutor::new()));
+            .with_executor(Box::new(LocalExecutor::new()))
+            .build();
 
         // Start pipeline execution in background
     // TODO implement stop for context
