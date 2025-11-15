@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::common::Message;
 use crate::runtime::functions::map::MapFunctionTrait;
-use crate::runtime::worker::WorkerState;
+use crate::runtime::master::PipelineState;
 
 pub fn create_test_string_batch(data: Vec<String>) -> RecordBatch {
     let schema = Schema::new(vec![
@@ -41,29 +41,63 @@ pub fn gen_unique_grpc_port() -> u16 {
     }
 }
 
-pub fn print_worker_metrics(worker_state: &WorkerState) {
-    // print metrics
-    println!("\n=== Worker Metrics ===");
-    println!("Task Statuses:");
-    for (vertex_id, status) in &worker_state.task_statuses {
-        println!("  {}: {:?}", vertex_id, status);
+pub fn print_pipeline_state(pipeline_state: &PipelineState) {
+    println!("\n=== Pipeline State ===");
+    
+    for (worker_id, worker_state) in &pipeline_state.worker_states {
+        println!("\n--- Worker: {} ---", worker_id);
+        
+        println!("Task Statuses:");
+        for (vertex_id, status) in &worker_state.task_statuses {
+            println!("  {}: {:?}", vertex_id, status);
+        }
+        
+        if let Some(worker_metrics) = &worker_state.worker_metrics {
+            println!("\nOperator Metrics:");
+            for (operator_id, operator_metrics) in &worker_metrics.operator_metrics {
+                println!("  Operator: {}", operator_id);
+                println!("    Throughput:");
+                println!("      Messages Sent: {}", operator_metrics.throughput_metrics.messages_sent);
+                println!("      Messages Recv: {}", operator_metrics.throughput_metrics.messages_recv);
+                println!("      Records Sent: {}", operator_metrics.throughput_metrics.records_sent);
+                println!("      Records Recv: {}", operator_metrics.throughput_metrics.records_recv);
+                println!("      Bytes Sent: {}", operator_metrics.throughput_metrics.bytes_sent);
+                println!("      Bytes Recv: {}", operator_metrics.throughput_metrics.bytes_recv);
+                println!("    Latency:");
+                println!("      P99: {:.2}ms", operator_metrics.latency_metrics.p99);
+                println!("      P95: {:.2}ms", operator_metrics.latency_metrics.p95);
+                println!("      P50: {:.2}ms", operator_metrics.latency_metrics.p50);
+                println!("      Avg: {:.2}ms", operator_metrics.latency_metrics.avg);
+            }
+            
+            println!("\nTask Metrics:");
+            for (vertex_id, task_metrics) in &worker_metrics.tasks_metrics {
+                println!("  Task: {}", vertex_id);
+                println!("    Throughput:");
+                println!("      Messages Sent: {}", task_metrics.throughput_stast.messages_sent);
+                println!("      Messages Recv: {}", task_metrics.throughput_stast.messages_recv);
+                println!("      Records Sent: {}", task_metrics.throughput_stast.records_sent);
+                println!("      Records Recv: {}", task_metrics.throughput_stast.records_recv);
+                println!("      Bytes Sent: {}", task_metrics.throughput_stast.bytes_sent);
+                println!("      Bytes Recv: {}", task_metrics.throughput_stast.bytes_recv);
+                println!("    Latency:");
+                println!("      P99: {:.2}ms", task_metrics.latency_stats.p99);
+                println!("      P95: {:.2}ms", task_metrics.latency_stats.p95);
+                println!("      P50: {:.2}ms", task_metrics.latency_stats.p50);
+                println!("      Avg: {:.2}ms", task_metrics.latency_stats.avg);
+                if !task_metrics.backpressure_per_peer.is_empty() {
+                    println!("    Backpressure per Peer:");
+                    for (peer_id, ratio) in &task_metrics.backpressure_per_peer {
+                        println!("      {}: {:.2}", peer_id, ratio);
+                    }
+                }
+            }
+        } else {
+            println!("  No metrics available");
+        }
     }
     
-    let worker_metrics = worker_state.worker_metrics.as_ref().unwrap();
-
-    println!("\nTask Metrics:");
-    for (vertex_id, metrics) in worker_metrics.tasks_metrics.iter() {
-        println!("  {}:", vertex_id);
-        println!("    Messages: {}", metrics.messages_sent);
-        println!("    Records: {}", metrics.records_sent);
-        println!("    Latency Histogram: {:?}", metrics.latency_histogram);
-    }
-
-    println!("\nWorker Metrics:");
-    println!("  Total Messages: {}", worker_metrics.source_messages_recv);
-    println!("  Total Records: {}", worker_metrics.source_records_recv);
-    println!("  Latency Histogram: {:?}", worker_metrics.latency_histogram);
-    println!("===================\n");
+    println!("\n===================\n");
 }
 
 

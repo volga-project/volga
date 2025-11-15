@@ -77,7 +77,7 @@ pub fn generate_request_payload(_request_id: usize) -> serde_json::Value {
 pub async fn run_continuous_requests<F>(
     client: reqwest::Client,
     bind_address: String,
-    requests_per_second: f64,
+    requests_per_second: Option<f32>,
     total_requests: usize,
     max_concurrent: Option<usize>,
     payload_generator: F,
@@ -87,13 +87,15 @@ where
 {
     let semaphore = max_concurrent.map(|limit| Arc::new(Semaphore::new(limit)));
     let mut results = Vec::new();
-    let mut interval = interval(Duration::from_millis((1000.0 / requests_per_second) as u64));
+    let mut interval_opt = requests_per_second.map(|rps| interval(Duration::from_millis((1000.0 / rps) as u64)));
     
     let mut request_futures = Vec::new();
     
     for i in 0..total_requests {
-        // Wait for the next tick to maintain the desired rate
-        interval.tick().await;
+        // Wait for the next tick to maintain the desired rate (if rate limiting is enabled)
+        if let Some(ref mut interval) = interval_opt {
+            interval.tick().await;
+        }
         
         let request_payload = payload_generator(i);
         let client = client.clone();
@@ -109,6 +111,7 @@ where
             };
             
             let start_time = Instant::now();
+            // println!("Sending request {}", i);
             let response_result = client
                 .post(&format!("http://{}/request", bind_address))
                 .json(&request_payload)
@@ -117,13 +120,16 @@ where
                 .await;
             
             let duration = start_time.elapsed();
+            // println!("Received response for request {} in {} seconds", i, duration.as_secs_f64());
             
             let result = match response_result {
                 Ok(response) => {
+                    // TODO check status is 200
                     let status = response.status().as_u16();
-                    match response.json::<serde_json::Value>().await {
+                    let text = response.text().await.unwrap_or_default();
+                    match serde_json::from_str::<serde_json::Value>(&text) {
                         Ok(body) => Ok((status, body)),
-                        Err(e) => Err(format!("Failed to parse response JSON: {}", e)),
+                        Err(e) => Err(format!("Failed to parse response JSON, response: {:?}, status: {}, error: {}", text, status, e)),
                     }
                 }
                 Err(e) => Err(format!("Request failed: {}", e)),
@@ -323,7 +329,7 @@ async fn test_request_source_sink_e2e() {
     let results = run_continuous_requests(
         client.clone(),
         bind_address.clone(),
-        requests_per_second,
+        Some(requests_per_second),
         total_requests,
         Some(max_pending_requests),
         generate_request_payload,

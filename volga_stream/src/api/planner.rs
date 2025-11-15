@@ -176,15 +176,10 @@ impl Planner {
     }
 
     pub fn register_sink(&mut self, config: SinkConfig) {
-        if self.context.execution_mode == ExecutionMode::Request {
-            if !matches!(config, SinkConfig::RequestSinkConfig) {
-                panic!("Request mode only supports RequestSinkConfig");
-            }
-        }
         self.context.sink_config = Some(config);
     }
 
-    pub async fn logical_plan_to_graph(&mut self, logical_plan: &LogicalPlan) -> Result<LogicalGraph> {
+    pub fn logical_plan_to_graph(&mut self, logical_plan: &LogicalPlan) -> Result<LogicalGraph> {
         self.node_stack.clear();
 
         let optimized_plan = self.optimize_plan(logical_plan.clone())?;
@@ -193,15 +188,22 @@ impl Planner {
         Ok(self.logical_graph.clone())
     }
 
-    pub async fn sql_to_graph(&mut self, sql: &str) -> Result<LogicalGraph> {
-        let logical_plan = self.context.df_session_context.state().create_logical_plan(sql).await?;
+    pub fn sql_to_graph(&mut self, sql: &str) -> Result<LogicalGraph> {
+        let logical_plan = std::thread::scope(|s| {
+            let handle = s.spawn(|| {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| DataFusionError::External(Box::new(e)))?;
+                rt.block_on(self.context.df_session_context.state().create_logical_plan(sql))
+            });
+            handle.join().unwrap()
+        })?;
         
         // println!("{}", logical_plan.display_indent());
 
-        let mut graph = self.logical_plan_to_graph(&logical_plan).await?;
+        let mut graph = self.logical_plan_to_graph(&logical_plan)?;
         if self.context.execution_mode == ExecutionMode::Request {
             let request_source_config = self.context.connector_configs.get(REQUEST_SOURCE_NAME).expect("Request source configuration not found").clone();
-            let request_sink_config = self.context.sink_config.clone().expect("Request sink configuration not found");
+            let request_sink_config = self.context.sink_config.clone();
             graph.to_request_mode(request_source_config, request_sink_config).map_err(|e| DataFusionError::Plan(e))?;
         }
         Ok(graph)
@@ -634,7 +636,7 @@ mod tests {
         let mut planner = create_planner();
         
         let sql = "SELECT id, name FROM test_table";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
 
         // println!("{}", graph);
         
@@ -664,7 +666,7 @@ mod tests {
         planner.register_sink(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()));
         
         let sql = "SELECT id, name FROM test_table";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
         
         // Should have 3 nodes: source, projection, and sink
         let nodes: Vec<_> = graph.get_nodes().collect();
@@ -692,7 +694,7 @@ mod tests {
         let mut planner = create_planner();
         
         let sql = "SELECT id, name FROM test_table WHERE value > 3.0";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
 
         // println!("{}", graph);
         
@@ -722,7 +724,7 @@ mod tests {
         
         let sql = "SELECT t1.id, t1.name, t2.value FROM test_table t1 JOIN test_table2 t2 ON t1.id = t2.id";
         
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
         // println!("{}", graph);
         
         // Should have 4 nodes: 2 sources, join, projection
@@ -744,7 +746,7 @@ mod tests {
         let mut planner = create_planner();
         
         let sql = "SELECT name, COUNT(*) as count FROM test_table GROUP BY name";
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
 
         // Should have 4 nodes: source -> key_by -> aggregate -> projection
         let nodes: Vec<_> = graph.get_nodes().collect();
@@ -806,7 +808,7 @@ mod tests {
                   FROM dept_stats
                   GROUP BY department";
                   
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
         
         // Should have structure:
         // source -> key_by1 -> aggregate1 -> projection1 -> key_by2 -> aggregate2 -> projection2
@@ -888,7 +890,7 @@ mod tests {
                     ) as sum_value
                    FROM events";
                    
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
         
         // Should have structure: source -> key_by -> window -> projection
         // DataFusion adds a projection node after window expressions
@@ -957,7 +959,7 @@ mod tests {
                     ) as sum_value
                    FROM events";
         
-        let graph = planner.sql_to_graph(sql).await.unwrap();
+        let graph = planner.sql_to_graph(sql).unwrap();
         
         // Verify structure after conversion
         let nodes_after: Vec<_> = graph.get_nodes().collect();
@@ -980,7 +982,7 @@ mod tests {
         let window_node = nodes_after.iter()
             .find(|n| matches!(n.operator_config, OperatorConfig::WindowConfig(_)))
             .expect("Should have window node");
-        let window_node_idx = graph.get_node_index(&window_node.node_id)
+        let window_node_idx = graph.get_node_index(&window_node.operator_id)
             .expect("Should find window node index");
         let outgoing_after = graph.get_neighbors(window_node_idx, Direction::Outgoing);
         assert_eq!(outgoing_after.len(), 0, "Window should have no outgoing edges after conversion");

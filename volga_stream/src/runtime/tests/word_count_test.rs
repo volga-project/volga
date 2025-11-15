@@ -1,6 +1,6 @@
 use crate::{
     api::{logical_graph::LogicalGraph, pipeline_context::PipelineContext},
-    common::{test_utils::{gen_unique_grpc_port, print_worker_metrics}, message::Message},
+    common::{test_utils::{gen_unique_grpc_port, print_pipeline_state}, message::Message},
     executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
@@ -52,22 +52,20 @@ fn test_word_count() -> Result<()> {
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_executor(Box::new(LocalExecutor::new()));
 
-    let (result_vec, worker_state) = runtime.block_on(async {
+    let (result_vec, pipeline_state) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
         
-        let execution_state = context.execute().await.unwrap();
-        // single worker
-        let worker_state = execution_state.worker_states.into_iter().next().unwrap();
+        let pipeline_state = context.execute().await.unwrap();
         
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let result_vec = client.get_vector().await.unwrap();
         storage_server.stop().await;
-        (result_vec, worker_state)
+        (result_vec, pipeline_state)
     });
 
     println!("{:?}", result_vec);
-    print_worker_metrics(&worker_state);
+    print_pipeline_state(&pipeline_state);
 
     assert_eq!(result_vec.len(), parallelism, "Should have exactly one message per parallelism instance");
 

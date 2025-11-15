@@ -22,7 +22,7 @@ use std::collections::HashMap;
 use tokio::time::{sleep, Duration};
 
 fn create_datagen_config(
-    rate: f32,
+    rate: Option<f32>,
     limit: Option<usize>,
     batch_size: usize,
     start_ms: i64,
@@ -51,7 +51,7 @@ fn create_datagen_config(
         }),
     ]);
 
-    DatagenSourceConfig::new(schema, rate, limit, batch_size, fields)
+    DatagenSourceConfig::new(schema, rate, limit, None, batch_size, fields)
 }
 
 fn create_payload_generator(
@@ -113,27 +113,30 @@ fn create_payload_generator(
     }
 }
 
+
+// TODO make single hot key test case to make sure no deadlocks occur
+
 #[tokio::test]
 async fn test_request_execution_mode() {
-    let parallelism = 4;
-    let max_pending_requests = 100;
-    let request_timeout_ms = 5000;
-    let total_requests = 100;
+    let parallelism = 1;
+    let max_pending_requests = 5000;
+    let request_timeout_ms = 100000;
+    let total_requests = 10000;
     let request_source_config = create_test_config(max_pending_requests, request_timeout_ms);
     
     // Use the same rate for datagen and requests
-    let rate = 50.0f64;
+    let rate = None;
 
     // datagen config
-    let limit = Some(total_requests);
-    let batch_size = 5;
+    let num_record_to_gen = None;
+    let batch_size = 1;
     let start_ms = 1000;
     let step_ms = 1000;
-    let num_unique_keys = 10;
+    let num_unique_keys = 1;
     let value_start = 10.0;
     let value_step = 10.0;
 
-    let datagen_config = create_datagen_config(rate as f32, limit, batch_size, start_ms, step_ms, num_unique_keys, value_start, value_step);
+    let datagen_config = create_datagen_config(rate, num_record_to_gen, batch_size, start_ms, step_ms, num_unique_keys, value_start, value_step);
     let schema = datagen_config.schema.clone();
 
     let sql = "SELECT 
@@ -232,9 +235,9 @@ async fn test_request_execution_mode() {
                                 responses_by_key.entry(key.clone()).or_insert_with(Vec::new)
                                     .push((event_time.to_string(), sum, count, avg, min, max));
                                 
-                                println!("✅ Request {} (key={}): timestamp={}, sum={}, count={}, avg={:.2}, min={}, max={}",
-                                    result.request_id, key, event_time, sum, count, avg, min, max
-                                );
+                                // println!("✅ Request {} (key={}): timestamp={}, sum={}, count={}, avg={:.2}, min={}, max={}",
+                                //     result.request_id, key, event_time, sum, count, avg, min, max
+                                // );
                             } else {
                                 println!("⚠️ Request {}: Empty response array", result.request_id);
                                 failed_requests += 1;
@@ -286,8 +289,8 @@ async fn test_request_execution_mode() {
     println!("\n  Successful: {}", successful_requests);
     println!("  Failed: {}", failed_requests);
 
-    assert!(successful_requests > 0, "Should have at least some successful requests");
-    assert_eq!(successful_requests + failed_requests, total_requests, "Should complete all requests");
+    // assert!(successful_requests > 0, "Should have at least some successful requests");
+    assert_eq!(successful_requests, total_requests, "Should complete all requests");
 
     pipeline_handle.abort();
 }

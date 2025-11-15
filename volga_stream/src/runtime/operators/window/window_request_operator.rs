@@ -428,20 +428,19 @@ impl OperatorTrait for WindowRequestOperator {
                         // read-only access to windows state
                         let state = self.get_state();
 
-                        // TODO we may have a race condition here - 
+                        // TODO we have a race condition here:
                         // getting state copy is ok even if winow operator updates previous version of it
-                        // The problem is that window operator may prune batches that are still used by request operator for this version of state
-                        // we need to somehow sync this or add a flag to state to indicate which batches are still used by request operator
+                        // The problem is that window operator may prune batches (they are not part of the state, we only have references to them) that are still used by request operator for this version of state.
+                        // We need to somehow sync this or add a flag to state to indicate which batches are still used by request operator
                         // eg similar to mvcc pattern
 
-
-                        // TODO handle case when windows state does not exist
-                        let windows_state = state.get_windows_state_clone(key).await
-                            .expect("Window state should exist for request operator");
-
-                        let record_batch = keyed_message.base.record_batch.clone();
-
-                        let result = self.process_key(&key, &windows_state, &record_batch).await;
+                        let windows_state = state.get_windows_state_clone(key).await;
+                            
+                        let result = if let Some(windows_state) = windows_state {
+                            self.process_key(&key, &windows_state, &keyed_message.base.record_batch.clone()).await
+                        } else {
+                            RecordBatch::new_empty(self.output_schema.clone())
+                        };
 
                         OperatorPollResult::Ready(Message::new(None, result, ingest_ts, extras))
                     }

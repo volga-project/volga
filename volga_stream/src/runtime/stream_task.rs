@@ -144,7 +144,6 @@ impl StreamTask {
         vertex_id: String,
         message: &Message,
         recv_or_send: bool,
-        is_sink: bool
     ) {
         let is_watermark = matches!(message, Message::Watermark(_));
         
@@ -153,16 +152,14 @@ impl StreamTask {
                 counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
                 counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
                 counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
-                if is_sink {
-                    // record latency for sink only
-                    let ingest_timestamp= message.ingest_timestamp().unwrap();
-                    let current_time = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    let latency = current_time.saturating_sub(ingest_timestamp);
-                    histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone()).record(latency as f64);
-                }
+                
+                let ingest_timestamp= message.ingest_timestamp().unwrap();
+                let current_time = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let latency = current_time.saturating_sub(ingest_timestamp);
+                histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone()).record(latency as f64);
 
             } else {
                 counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
@@ -187,7 +184,7 @@ impl StreamTask {
             
             while let Some(message) = input_stream.next().await {
                 
-                Self::record_metrics(vertex_id.clone(), &message, true, false);
+                Self::record_metrics(vertex_id.clone(), &message, true);
                 
                 match &message {
                     Message::Watermark(watermark) => {
@@ -354,7 +351,6 @@ impl StreamTask {
 
             let operator_type = operator.operator_type();
             let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
-            let is_sink = operator_type == OperatorType::Sink || operator_type == OperatorType::ChainedSourceSink;
             
             if !is_source {
                 // Pre-process input stream for non-source operators
@@ -403,7 +399,7 @@ impl StreamTask {
                         
                         // Set upstream vertex id for all messages before sending downstream
                         message.set_upstream_vertex_id(vertex_id.clone());
-                        Self::record_metrics(vertex_id.clone(), &message, false, is_sink);
+                        Self::record_metrics(vertex_id.clone(), &message, false);
 
                         // Send to collectors (same logic as original)
                         Self::send_to_collectors_if_needed(
@@ -462,7 +458,7 @@ impl StreamTask {
     }
 
     async fn wait_for_signal(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>, skip_on_finished: bool) {
-        let timeout = Duration::from_millis(5000);
+        let timeout = Duration::from_millis(50000);
         let start_time = SystemTime::now();
         
         loop {

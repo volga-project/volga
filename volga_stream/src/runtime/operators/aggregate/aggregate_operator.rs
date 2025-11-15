@@ -306,7 +306,7 @@ mod tests {
         );
         
         let sql = "SELECT name, COUNT(*) as count, SUM(value) as sum_value, AVG(value) as avg_value, MAX(value) as max_value, MIN(value) as min_value FROM test_table GROUP BY name";
-        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+        let logical_graph = planner.sql_to_graph(sql).unwrap();
         
         let mut aggregate_operator = None;
         let nodes: Vec<_> = logical_graph.get_nodes().collect();

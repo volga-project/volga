@@ -16,7 +16,7 @@ use crate::transport::channel::Channel;
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
-    pub node_id: String,
+    pub operator_id: String, // unique id for the node/operator
     pub operator_config: OperatorConfig,
     pub parallelism: usize,
     pub in_schema: Option<Arc<ArrowSchema>>,
@@ -26,7 +26,7 @@ pub struct LogicalNode {
 impl LogicalNode {
     pub fn new(operator_config: OperatorConfig, parallelism: usize, in_schema: Option<Arc<ArrowSchema>>, out_schema: Option<Arc<ArrowSchema>>) -> Self {
         Self {
-            node_id: String::new(), // Will be set by add_node
+            operator_id: String::new(), // Will be set by add_node
             operator_config,
             parallelism,
             in_schema,
@@ -76,28 +76,28 @@ impl LogicalGraph {
         self.root_node_index
     }
     
-    /// Get node index by node_id (for testing)
-    pub fn get_node_index(&self, node_id: &str) -> Option<NodeIndex> {
+    /// Get node index by operator_id
+    pub fn get_node_index(&self, operator_id: &String) -> Option<NodeIndex> {
         self.graph.node_indices()
-            .find(|&idx| self.graph[idx].node_id == node_id)
+            .find(|&idx| self.graph[idx].operator_id == *operator_id)
     }
     
-    /// Get neighbors of a node (for testing)
+    /// Get neighbors of a node
     pub fn get_neighbors(&self, node_index: NodeIndex, direction: Direction) -> Vec<NodeIndex> {
         self.graph.neighbors_directed(node_index, direction).collect()
     }
     
-    /// Get node by index (for testing)
+    /// Get node by index
     pub fn get_node_by_index(&self, node_index: NodeIndex) -> &LogicalNode {
         &self.graph[node_index]
     }
 
     pub fn add_node(&mut self, mut node: LogicalNode) -> NodeIndex {
-        // Generate unique operator_id based on operator type name
-        let operator_type_name = format!("{}", node.operator_config);
-        let counter = self.operator_type_counters.entry(operator_type_name.clone()).or_insert(0);
+        // Generate unique operator_id based on operator configtype
+        let operator_config_type = format!("{}", node.operator_config);
+        let counter = self.operator_type_counters.entry(operator_config_type.clone()).or_insert(0);
         *counter += 1;
-        node.node_id = format!("{}_{}", operator_type_name, counter);
+        node.operator_id = format!("{}_{}", operator_config_type, counter);
         
         let node_index = self.graph.add_node(node);
         node_index
@@ -108,8 +108,8 @@ impl LogicalGraph {
         let target_node = &self.graph[target];
         let partition_type = determine_partition_type(&source_node.operator_config, &target_node.operator_config);
         let edge = LogicalEdge {
-            source_node_id: source_node.node_id.clone(),
-            target_node_id: target_node.node_id.clone(),
+            source_node_id: source_node.operator_id.clone(),
+            target_node_id: target_node.operator_id.clone(),
             partition_type,
         };
         
@@ -117,7 +117,7 @@ impl LogicalGraph {
     }
 
     pub fn get_node(&self, operator_id: String) -> Option<&LogicalNode> {
-        self.graph.node_weights().find(|node| node.node_id == operator_id)
+        self.graph.node_weights().find(|node| node.operator_id == operator_id)
     }
 
     pub fn get_nodes(&self) -> impl Iterator<Item = &LogicalNode> {
@@ -128,6 +128,17 @@ impl LogicalGraph {
         self.graph.edge_references().map(|edge| (edge.source(), edge.target(), edge.weight()))
     }
 
+    /// Get node IDs that match a predicate on their operator config
+    pub fn get_nodes_by_predicate<F>(&self, predicate: F) -> Vec<&LogicalNode>
+    where
+        F: Fn(&LogicalNode) -> bool,
+    {
+        self.graph
+            .node_weights()
+            .filter(|node| predicate(node))
+            .collect::<Vec<&LogicalNode>>()
+    }
+
     /// Convert logical graph to execution graph using parallelism from each logical node
     pub fn to_execution_graph(&self) -> ExecutionGraph {
         let mut execution_graph = ExecutionGraph::new();
@@ -136,7 +147,7 @@ impl LogicalGraph {
         // Create execution vertices for each logical node
         for logical_node in self.graph.node_weights() {
             let logical_node_index = self.graph.node_indices()
-                .find(|&idx| self.graph[idx].node_id == logical_node.node_id)
+                .find(|&idx| self.graph[idx].operator_id == logical_node.operator_id)
                 .unwrap();
 
             let mut execution_vertex_ids = Vec::new();
@@ -144,11 +155,11 @@ impl LogicalGraph {
 
             // Create parallel execution vertices for this logical node
             for i in 0..parallelism {
-                let execution_vertex_id = format!("{}_{}", logical_node.node_id, i);
+                let execution_vertex_id = format!("{}_{}", logical_node.operator_id, i);
 
                 let execution_vertex = ExecutionVertex::new(
                     execution_vertex_id.clone(),
-                    logical_node.node_id.clone(),
+                    logical_node.operator_id.clone(),
                     logical_node.operator_config.clone(),
                     parallelism as i32,
                     i as i32,
@@ -178,7 +189,7 @@ impl LogicalGraph {
                     let execution_edge = ExecutionEdge::new(
                         source_execution_vertex_id.clone(),
                         target_execution_vertex_id.clone(),
-                        self.graph[target_logical_node_index].node_id.clone(),
+                        self.graph[target_logical_node_index].operator_id.clone(),
                         partition_type.clone(),
                         None, // No channel initially
                     );
@@ -237,7 +248,7 @@ impl LogicalGraph {
     /// 3. Adding request_source -> keyby -> window_request chain before window_request
     /// 4. Moving followers of window operator to window_request operator
     /// 5. Adding request sink as the final node in the chain from window_request
-    pub fn to_request_mode(&mut self, mut request_source_config: SourceConfig, request_sink_config: SinkConfig) -> Result<(), String> {
+    pub fn to_request_mode(&mut self, mut source_config: SourceConfig, sink_config: Option<SinkConfig>) -> Result<(), String> {
         // Step 1: Find all window operators
         let mut window_nodes = Vec::new();
         
@@ -293,16 +304,14 @@ impl LogicalGraph {
         // Step 4: Create new nodes: request_source -> keyby -> window_request
         let parallelism = self.graph[top_window_node].parallelism;
         
-        // set schema for request source
-        if let SourceConfig::HttpRequestSourceConfig(ref mut http_req_cfg) = request_source_config {
+        // set schema for request source, if necessary
+        if let SourceConfig::HttpRequestSourceConfig(ref mut http_req_cfg) = source_config {
             let window_input_schema = window_config.window_exec.input().schema();
             http_req_cfg.schema = Some(window_input_schema.clone());
-        } else {
-            panic!("Source config must be HttpRequestSourceConfig in request mode");
         }
 
         let request_source_node = LogicalNode::new(
-            OperatorConfig::SourceConfig(request_source_config),
+            OperatorConfig::SourceConfig(source_config),
             parallelism,
             None,
             None,
@@ -346,21 +355,19 @@ impl LogicalGraph {
         // Add edge from window_request to follower
         self.add_edge(window_request_idx, target_node);
         
-        // Step 7: Add request sink node connected to root
-        if !matches!(request_sink_config, SinkConfig::RequestSinkConfig) {
-            panic!("Sink config must be RequestSinkConfig in request mode");
+        // Step 7: Add request sink node connected to root, if necessary
+        if let Some(sink_config) = sink_config {
+            let request_sink_node = LogicalNode::new(
+                OperatorConfig::SinkConfig(sink_config),
+                parallelism,
+                None,
+                None,
+            );
+            let request_sink_idx = self.add_node(request_sink_node);
+            
+            // Connect root to request sink
+            self.add_edge(root_node, request_sink_idx);
         }
-        
-        let request_sink_node = LogicalNode::new(
-            OperatorConfig::SinkConfig(request_sink_config),
-            parallelism,
-            None,
-            None,
-        );
-        let request_sink_idx = self.add_node(request_sink_node);
-        
-        // Connect root to request sink
-        self.add_edge(root_node, request_sink_idx);
         
         Ok(())
     }
@@ -371,13 +378,13 @@ impl LogicalGraph {
         
         // Add nodes with labels
         for node in self.graph.node_weights() {
-            dot_string.push_str(&format!("  {} [label=\"{}: {}\"];\n", node.node_id, node.node_id, node.operator_config));
+            dot_string.push_str(&format!("  {} [label=\"{}: {}\"];\n", node.operator_id, node.operator_id, node.operator_config));
         }
         
         // Add edges with labels
         for edge in self.graph.edge_references() {
-            let source_id = self.graph[edge.source()].node_id.clone();
-            let target_id = self.graph[edge.target()].node_id.clone();
+            let source_id = self.graph[edge.source()].operator_id.clone();
+            let target_id = self.graph[edge.target()].operator_id.clone();
             let partition_type = match edge.weight().partition_type {
                 PartitionType::Forward => "Forward",
                 PartitionType::Hash => "Hash",

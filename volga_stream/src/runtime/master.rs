@@ -1,9 +1,23 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use crate::runtime::worker::WorkerState;
 use crate::runtime::stream_task::StreamTaskStatus;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PipelineState {
+    pub worker_states: HashMap<String, WorkerState>,
+}
+
+impl PipelineState {
+    pub fn new(worker_states: HashMap<String, WorkerState>) -> Self {
+        Self {
+            worker_states,
+        }
+    }
+}
 
 // Include the generated protobuf client code
 pub mod worker_service {

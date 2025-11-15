@@ -21,8 +21,9 @@ use datafusion::common::ScalarValue;
 #[derive(Debug, Clone)]
 pub struct DatagenSourceConfig {
     pub schema: Arc<Schema>, // Arrow schema for the generated data
-    pub rate: f32, // Events per second (global rate across all tasks)
+    pub rate: Option<f32>, // Events per second (global rate across all tasks), None = as fast as possible
     pub limit: Option<usize>, // Total number of records to generate (across all tasks)
+    pub run_for_s: Option<f64>, // Run for exactly this duration in seconds, limit must be None if set
     pub batch_size: usize, // Number of records per batch
     pub fields: HashMap<String, FieldGenerator>,
     pub projection: Option<Vec<usize>>,
@@ -30,8 +31,8 @@ pub struct DatagenSourceConfig {
 }
 
 impl DatagenSourceConfig {
-    pub fn new(schema: Arc<Schema>, rate: f32, limit: Option<usize>, batch_size: usize, fields: HashMap<String, FieldGenerator>) -> Self {
-        Self { schema, rate, limit, batch_size, fields, projection: None, projected_schema: None }
+    pub fn new(schema: Arc<Schema>, rate: Option<f32>, limit: Option<usize>, run_for_s: Option<f64>, batch_size: usize, fields: HashMap<String, FieldGenerator>) -> Self {
+        Self { schema, rate, limit, run_for_s, batch_size, fields, projection: None, projected_schema: None }
     }
 
     pub fn get_projection(&self) -> (Option<Vec<usize>>, Option<SchemaRef>) {
@@ -72,6 +73,7 @@ pub struct DatagenSourceFunction {
     gen_interval: Option<Duration>,
     records_generated: usize,
     task_records_limit: Option<usize>,
+    start_time: Option<SystemTime>, // When datagen started (for run_for_s)
     
     // Generation state
     rng: Option<StdRng>,
@@ -98,6 +100,7 @@ impl DatagenSourceFunction {
             gen_interval: None,
             records_generated: 0,
             task_records_limit: None,
+            start_time: None,
             rng: None,
             schema,
             key_values: Vec::new(),
@@ -109,19 +112,24 @@ impl DatagenSourceFunction {
     }
 
     /// Calculate deterministic timing for this task
-    fn calculate_timing(&self) -> (Duration, SystemTime) {
+    fn calculate_timing(&self) -> Option<(Duration, SystemTime)> {
+        let rate = match self.config.rate {
+            Some(rate) => rate,
+            None => return None, // No rate limiting
+        };
+        
         let task_index = self.task_index.expect("Task index not set");
         let parallelism = self.parallelism.expect("Parallelism not set");
         
         // Each task gets: global_rate / parallelism
-        let task_rate = self.config.rate / parallelism as f32;
+        let task_rate = rate / parallelism as f32;
         let interval = Duration::from_secs_f32(1.0 / task_rate);
         
         // Stagger task start times to spread load
-        let start_offset = Duration::from_secs_f32(task_index as f32 / self.config.rate);
+        let start_offset = Duration::from_secs_f32(task_index as f32 / rate);
         let start_time = SystemTime::now() + start_offset;
         
-        (interval, start_time)
+        Some((interval, start_time))
     }
 
     fn init_keys(&mut self) {
@@ -145,6 +153,8 @@ impl DatagenSourceFunction {
             if let Some(FieldGenerator::Key { num_unique }) = self.config.fields.get(key_field_name) {
                 // Distribute unique keys across all tasks
                 self.key_values = Self::gen_key_values_for_task(parallelism as usize, task_index as usize, *num_unique);
+                
+                // Initialize per-key state for distributed keys
                 for key in self.key_values.iter() {
                     self.per_key_timestamps.insert(key.clone(), 0);
                     self.per_key_increments.insert(key.clone(), HashMap::new());
@@ -409,11 +419,24 @@ impl DatagenSourceFunction {
 
     /// Check if we should generate more records
     fn should_continue(&self) -> bool {
+        // Check record limit
         if let Some(limit) = self.task_records_limit {
-            self.records_generated < limit
-        } else {
-            true
+            if self.records_generated >= limit {
+                return false;
+            }
         }
+        
+        // Check time limit
+        if let Some(run_for_s) = self.config.run_for_s {
+            if let Some(start_time) = self.start_time {
+                let elapsed = start_time.elapsed().unwrap_or_default();
+                if elapsed.as_secs_f64() >= run_for_s {
+                    return false;
+                }
+            }
+        }
+        
+        true
     }
 
     /// Send max watermark if needed
@@ -435,6 +458,11 @@ impl DatagenSourceFunction {
 #[async_trait]
 impl SourceFunctionTrait for DatagenSourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
+        // If this task has no keys assigned, don't produce anything
+        if self.key_values.is_empty() {
+            return self.send_max_watermark_if_needed();
+        }
+
         // Check if we should continue generating
         if !self.should_continue() {
             return self.send_max_watermark_if_needed();
@@ -458,8 +486,9 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             }
             
             // Calculate next event time based on the number of events in this batch
-            let interval = self.gen_interval.expect("Event interval not set");
-            self.next_gen_time = Some(next_time + interval * batch_size as u32);
+            if let Some(interval) = self.gen_interval {
+                self.next_gen_time = Some(next_time + interval * batch_size as u32);
+            }
         }
 
         match self.generate_batch(batch_size) {
@@ -501,10 +530,16 @@ impl FunctionTrait for DatagenSourceFunction {
         // Initialize keys
         self.init_keys();
         
-        // Set up timing
-        let (interval, start_time) = self.calculate_timing();
-        self.gen_interval = Some(interval);
-        self.next_gen_time = Some(start_time);
+        // Set start time if run_for_s is configured
+        if self.config.run_for_s.is_some() {
+            self.start_time = Some(SystemTime::now());
+        }
+        
+        // Set up timing if rate limiting is enabled
+        if let Some((interval, start_time)) = self.calculate_timing() {
+            self.gen_interval = Some(interval);
+            self.next_gen_time = Some(start_time);
+        }
         
         Ok(())
     }
@@ -563,7 +598,7 @@ mod tests {
             }),
         ]);
 
-        DatagenSourceConfig::new(schema, 1000.0, Some(121), 10, fields)
+        DatagenSourceConfig::new(schema, Some(1000.0), Some(121), None, 10, fields)
     }
 
     #[tokio::test]
@@ -699,7 +734,7 @@ mod tests {
             }),
         ]);
 
-        let config = DatagenSourceConfig::new(schema, 10.0, Some(40), 1, fields);
+        let config = DatagenSourceConfig::new(schema, Some(10.0), Some(40), None, 1, fields);
 
         let parallelism = 4; // 4 tasks, so each should generate at ~10 events/sec
         // Run tasks concurrently using tokio::spawn
@@ -765,7 +800,8 @@ mod tests {
         // Verify we got the expected number of records
         assert_eq!(all_timestamps.len(), 40, "Should generate exactly 40 records");
         
-        let expected_interval_ms = 1000.0 / config.rate; // Global interval: 100ms for 10 events/sec
+        let rate = config.rate.expect("Rate should be set for this test");
+        let expected_interval_ms = 1000.0 / rate; // Global interval: 100ms for 10 events/sec
         let tolerance = expected_interval_ms * 0.5; // ±50% tolerance for timing variations
         
          for i in 1..all_timestamps.len() {

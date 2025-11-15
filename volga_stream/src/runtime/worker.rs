@@ -19,7 +19,7 @@ pub struct WorkerConfig {
     pub worker_id: String,
     pub graph: ExecutionGraph,
     pub vertex_ids: Vec<String>,
-    pub num_io_threads: usize,
+    pub num_threads_per_task: usize,
     pub transport_backend_type: TransportBackendType,
 }
 
@@ -28,14 +28,14 @@ impl WorkerConfig {
         worker_id: String,
         graph: ExecutionGraph,
         vertex_ids: Vec<String>,
-        num_io_threads: usize,
+        num_threads_per_task: usize,
         transport_backend_type: TransportBackendType,
     ) -> Self {
         Self {
             worker_id,
             graph,
             vertex_ids,
-            num_io_threads,
+            num_threads_per_task,
             transport_backend_type,
         }
     }
@@ -98,7 +98,7 @@ impl Worker {
         let mut task_runtimes = HashMap::new();
         for vertex_id in &config.vertex_ids {
             let task_runtime = Builder::new_multi_thread()
-                .worker_threads(config.num_io_threads)
+                .worker_threads(config.num_threads_per_task)
                 .enable_all()
                 .thread_name(format!("task-runtime-{}", vertex_id))
                 .build().unwrap();
@@ -147,7 +147,7 @@ impl Worker {
         task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
         state: Arc<tokio::sync::Mutex<WorkerState>>,
-        metrics_sender: Option<mpsc::Sender<WorkerState>>
+        state_update_sender: Option<mpsc::Sender<WorkerState>>
     ) {
         let mut task_futures = Vec::new();
         for (vertex_id, runtime) in &task_runtimes {
@@ -173,7 +173,7 @@ impl Worker {
         }
 
         let worker_metrics = WorkerMetrics::new(worker_id, task_metrics, &graph);
-        worker_metrics.record_operator_and_worker_metrics();
+        worker_metrics.record();
 
         // Update shared WorkerState
         {
@@ -181,8 +181,8 @@ impl Worker {
             state_guard.task_statuses = task_statuses;
             state_guard.set_metrics(worker_metrics);
             // state_guard.worker_metrics.set_tasks_metrics(task_metrics.clone());
-            if metrics_sender.is_some() {
-                metrics_sender.unwrap().send(state_guard.clone()).await.unwrap();
+            if state_update_sender.is_some() {
+                state_update_sender.unwrap().send(state_guard.clone()).await.unwrap();
             }
         } // Release lock before sleep
     }
@@ -289,7 +289,7 @@ impl Worker {
 
     async fn start_tasks(
         &mut self, 
-        metrics_sender: Option<mpsc::Sender<WorkerState>>
+        state_updates_sender: Option<mpsc::Sender<WorkerState>>
     ) {
         println!("[WORKER] Starting tasks");
 
@@ -326,11 +326,11 @@ impl Worker {
         
         let polling_handle = tokio::spawn(async move { 
             while running.load(Ordering::SeqCst) {
-                Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone(), metrics_sender.clone()).await;
+                Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone(), state_updates_sender.clone()).await;
                 sleep(Duration::from_millis(100)).await;
             }
             // final poll
-            Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles, task_actors, graph, state, metrics_sender.clone()).await;
+            Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles, task_actors, graph, state, state_updates_sender.clone()).await;
         });
 
         self.tasks_state_polling_handle = Some(polling_handle);
@@ -475,25 +475,25 @@ impl Worker {
         self._execute_worker_lifecycle_for_testing(None).await
     }
 
-    pub async fn execute_worker_lifecycle_for_testing_with_metrics(
+    pub async fn execute_worker_lifecycle_for_testing_with_state_updates(
         &mut self,
-        metrics_sender: mpsc::Sender<WorkerState>
+        state_udpates_sender: mpsc::Sender<WorkerState>
     ) {
-        self._execute_worker_lifecycle_for_testing(Some(metrics_sender)).await
+        self._execute_worker_lifecycle_for_testing(Some(state_udpates_sender)).await
     }
 
     async fn _execute_worker_lifecycle_for_testing(
         &mut self,
-        metrics_sender: Option<mpsc::Sender<WorkerState>>
+        state_updates_sender: Option<mpsc::Sender<WorkerState>>
     ) {
         println!("[WORKER] Starting worker execution");
         
-        if metrics_sender.is_none() {
+        if state_updates_sender.is_none() {
             self.start().await;
         } else {
             self.start_request_source_processor_if_needed().await;
             self.spawn_actors().await;
-            self.start_tasks(metrics_sender).await;
+            self.start_tasks(state_updates_sender).await;
         }
 
         println!("[WORKER] Worker started, waiting for all tasks to be opened");

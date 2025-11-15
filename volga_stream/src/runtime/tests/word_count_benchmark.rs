@@ -1,9 +1,9 @@
 use crate::{
     api::pipeline_context::PipelineContext,
-    common::test_utils::{gen_unique_grpc_port, print_worker_metrics},
+    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     executor::local_executor::LocalExecutor,
     runtime::{
-        functions::source::word_count_source::BatchingMode, metrics::{calculate_histogram_stats, LATENCY_BUCKET_BOUNDARIES}, operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
+        functions::source::word_count_source::BatchingMode, master::PipelineState, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
@@ -68,12 +68,12 @@ impl BenchmarkMetrics {
         }
     }
 
-    pub fn calculate_latency_stats(&self) -> (f64, f64, f64, f64) {
+    pub fn calculate_latency_stats(&self) -> Option<LatencyMetrics> {
         if self.latency_histogram.is_none() {
-            return (0.0, 0.0, 0.0, 0.0)
+            return None;
         }
 
-        return calculate_histogram_stats(self.latency_histogram.as_ref().unwrap(), &LATENCY_BUCKET_BOUNDARIES.to_vec())
+        Some(LatencyMetrics::new(self.latency_histogram.clone().unwrap()))
     }
 }
 
@@ -102,21 +102,25 @@ fn calculate_stddev(values: &[f64]) -> f64 {
     variance.sqrt()
 }
 
-async fn poll_worker_metrics(
-    metrics_receiver: &mut mpsc::Receiver<WorkerState>,
+async fn poll_pipeline_state_updates(
+    state_updates_receiver: &mut mpsc::Receiver<PipelineState>,
     benchmark_metrics: &mut BenchmarkMetrics,
     last_metrics: &mut Option<(u64, u64)>, // (messages, records)
     last_timestamp: &mut Instant,
-) -> Option<WorkerState> {
+    source_operator_id: String,
+    sink_operator_id: String,
+) -> Option<PipelineState> {
     let current_time = Instant::now();
-    let worker_state = match metrics_receiver.recv().await {
+    let pipeline_state = match state_updates_receiver.recv().await {
         Some(state) => state,
         None => return None, // Channel closed, execution finished
     };
     
-    let worker_metrics = worker_state.worker_metrics.as_ref().unwrap();
-    let current_messages = worker_metrics.source_messages_recv;
-    let current_records = worker_metrics.source_records_recv;
+    let worker_metrics = pipeline_state.worker_states.values().next().unwrap().worker_metrics.as_ref().unwrap();
+    let source_operator_metrics = worker_metrics.operator_metrics.get(&source_operator_id).unwrap();
+    let sink_operator_metrics = worker_metrics.operator_metrics.get(&sink_operator_id).unwrap();
+    let current_messages = source_operator_metrics.throughput_metrics.messages_recv;
+    let current_records = source_operator_metrics.throughput_metrics.records_recv;
     
     if let Some((last_messages, last_records)) = *last_metrics {
         let time_diff = current_time.duration_since(*last_timestamp).as_secs_f64();
@@ -128,7 +132,7 @@ async fn poll_worker_metrics(
             let records_per_sec = records_diff as f64 / time_diff;
             
             // Calculate average latency from histogram
-            let latency_ms = worker_metrics.latency_avg;
+            let latency_ms = sink_operator_metrics.latency_metrics.avg;
 
             benchmark_metrics.add_sample(messages_per_sec, records_per_sec, latency_ms);
         }
@@ -136,7 +140,7 @@ async fn poll_worker_metrics(
     
     *last_metrics = Some((current_messages, current_records));
     *last_timestamp = current_time;
-    Some(worker_state.clone())
+    Some(pipeline_state.clone())
 }
 
 pub async fn run_word_count_benchmark(
@@ -172,7 +176,12 @@ pub async fn run_word_count_benchmark(
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_executor(Box::new(LocalExecutor::new()));
 
-    let (metrics_sender, mut metrics_receiver) = mpsc::channel(100);
+    let logical_graph = context.get_logical_graph().unwrap();
+
+    let source_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SourceConfig(_))).first().unwrap().operator_id.clone();
+    let sink_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SinkConfig(_))).first().unwrap().operator_id.clone();
+
+    let (state_updates_sender, mut state_updates_receiver) = mpsc::channel(100);
     let running = Arc::new(AtomicBool::new(true));
 
     let mut storage_server = InMemoryStorageServer::new();
@@ -183,7 +192,7 @@ pub async fn run_word_count_benchmark(
     let benchmark_metrics_clone = benchmark_metrics.clone();
     
     let running_clone = running.clone();
-    let metrics_task = tokio::spawn(async move {
+    let state_updates_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(polling_interval_ms));
         let mut last_metrics: Option<(u64, u64)> = None;
         let mut last_timestamp = Instant::now();
@@ -195,11 +204,13 @@ pub async fn run_word_count_benchmark(
             {
                 let mut metrics_guard = benchmark_metrics_clone.lock().await;
                 
-                let worker_state = match poll_worker_metrics(
-                    &mut metrics_receiver,
+                let pipeline_state = match poll_pipeline_state_updates(
+                    &mut state_updates_receiver,
                     &mut *metrics_guard,
                     &mut last_metrics,
                     &mut last_timestamp,
+                    source_operator_id.clone(),
+                    sink_operator_id.clone(),
                 ).await {
                     Some(state) => state,
                     None => break, // Channel closed, execution finished
@@ -208,7 +219,7 @@ pub async fn run_word_count_benchmark(
                 let now = Instant::now();
                 if now.duration_since(last_print_timestamp).as_secs() >= 1 {
                     println!("[{}] Worker State", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
-                    print_worker_metrics(&worker_state);
+                    print_pipeline_state(&pipeline_state);
                     last_print_timestamp = now;
                 }
             }
@@ -216,11 +227,11 @@ pub async fn run_word_count_benchmark(
     });
     
     // Execute using StreamingContext with metrics
-    context.execute_with_state_updates(Some(metrics_sender)).await.unwrap();
+    context.execute_with_state_updates(Some(state_updates_sender)).await.unwrap();
     running.store(false, Ordering::Relaxed);
 
     // Wait for metrics task to complete
-    let _ = metrics_task.await;
+    let _ = state_updates_task.await;
     
     // Get final metrics
     let benchmark_metrics = benchmark_metrics.lock().await.clone();
@@ -313,12 +324,13 @@ async fn test_word_count_benchmark() -> Result<()> {
     println!("    StdDev: {:.2}", throughput_stats.records_stddev);
     
     // Calculate and print latency statistics
-    let (p99, p95, p50, avg) = benchmark_metrics.calculate_latency_stats();
-    println!("\nLatency Statistics (ms):");
-    println!("  P99: {}", p99);
-    println!("  P95: {}", p95);
-    println!("  P50: {}", p50);
-    println!("  Avg: {}", avg);
+    if let Some(latency_metrics) = benchmark_metrics.calculate_latency_stats() {
+        println!("\nLatency Statistics (ms):");
+        println!("  P99: {}", latency_metrics.p99);
+        println!("  P95: {}", latency_metrics.p95);
+        println!("  P50: {}", latency_metrics.p50);
+        println!("  Avg: {}", latency_metrics.avg);
+    }
     
     println!("\nSample Count: {}", benchmark_metrics.messages_per_second.len());
     println!("=====================================\n");

@@ -654,7 +654,7 @@ mod tests {
         
         // Create SQL query with multiple GROUP BY columns
         let sql = "SELECT name, department, COUNT(*) as count FROM employees GROUP BY name, department";
-        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+        let logical_graph = planner.sql_to_graph(sql).unwrap();
         
         // Extract AggregateExec from the graph
         let mut aggregate_exec: Option<Arc<AggregateExec>> = None;
@@ -698,7 +698,7 @@ mod tests {
 
 // TODO move to test utils
 pub async fn extract_datafusion_window_exec(sql: &str, planner: &mut Planner) -> Arc<BoundedWindowAggExec> {
-    let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+    let logical_graph = planner.sql_to_graph(sql).unwrap();
     let nodes: Vec<_> = logical_graph.get_nodes().collect();
         
     for node in &nodes {

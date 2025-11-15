@@ -1,22 +1,19 @@
 use crate::{
     cluster::{
         cluster_provider::create_test_cluster_nodes,
-        node_assignment::{node_to_vertex_ids, ExecutionVertexNodeMapping, NodeAssignStrategy, OperatorPerNodeStrategy},
-    },
-    runtime::{
+        node_assignment::{ExecutionVertexNodeMapping, NodeAssignStrategy, OperatorPerNodeStrategy, node_to_vertex_ids},
+    }, common::test_utils::gen_unique_grpc_port, runtime::{
         execution_graph::ExecutionGraph,
-        master::Master,
+        master::{Master, PipelineState},
         worker::{WorkerConfig, WorkerState},
         worker_server::WorkerServer,
-    },
-    transport::transport_backend_actor::TransportBackendType,
-    common::test_utils::gen_unique_grpc_port,
+    }, transport::transport_backend_actor::TransportBackendType
 };
 use anyhow::Result;
 use async_trait::async_trait;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{Mutex, mpsc};
-use super::executor::{Executor, ExecutionState};
+use super::executor::Executor;
 
 /// Emulates distributed execution by creating multiple worker servers and a master
 pub struct FakeDistributedExecutor {
@@ -85,8 +82,8 @@ impl Executor for FakeDistributedExecutor {
     async fn execute(
         &mut self, 
         mut execution_graph: ExecutionGraph, 
-        _state_sender: Option<mpsc::Sender<WorkerState>>
-    ) -> Result<ExecutionState> {
+        _state_updates_sender: Option<mpsc::Sender<PipelineState>>
+    ) -> Result<PipelineState> {
         // Create test cluster nodes
         let num_operators = execution_graph.get_vertices().len();
         let num_workers = num_operators * self.num_workers_per_operator;
@@ -112,6 +109,6 @@ impl Executor for FakeDistributedExecutor {
         // For now, we don't have a way to get worker states from distributed execution
         // This would need to be implemented in the master/worker communication
         // Return empty execution state as placeholder
-        Ok(ExecutionState::new(vec![]))
+        Ok(PipelineState::new(HashMap::new()))
     }
 }

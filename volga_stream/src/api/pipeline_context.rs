@@ -6,12 +6,13 @@ use arrow::datatypes::Schema;
 use crate::cluster::cluster_provider::ClusterNode;
 use crate::cluster::node_assignment::{ExecutionVertexNodeMapping, NodeAssignStrategy, OperatorPerNodeStrategy};
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::master::PipelineState;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 
 use crate::api::planner::{Planner, PlanningContext, REQUEST_SOURCE_NAME};
 use crate::api::logical_graph::LogicalGraph;
-use crate::executor::executor::{ExecutionState, Executor};
+use crate::executor::executor::Executor;
 use crate::runtime::worker::WorkerState;
 use tokio::sync::mpsc;
 use anyhow::Result;
@@ -99,6 +100,7 @@ impl PipelineContext {
     /// Set SQL query for execution
     pub fn sql(mut self, sql: &str) -> Self {
         self.sql = Some(sql.to_string());
+        self.logical_graph = Some(self.build_logical_graph());
         self
     }
 
@@ -121,8 +123,12 @@ impl PipelineContext {
         self
     }
 
+    pub fn get_logical_graph(&self) -> Option<LogicalGraph> {
+        self.logical_graph.clone()
+    }
+
     /// Build logical graph from the current SQL query or return existing graph
-    pub async fn build_logical_graph(&self) -> LogicalGraph {
+    fn build_logical_graph(&self) -> LogicalGraph {
         if let Some(ref graph) = self.logical_graph {
             return graph.clone();
         }
@@ -146,14 +152,14 @@ impl PipelineContext {
         }
 
         // Convert SQL to logical graph
-        planner.sql_to_graph(sql).await.expect("Failed to create logical graph from SQL")
+        planner.sql_to_graph(sql).expect("Failed to create logical graph from SQL")
     }
 
     /// Execute the job with optional state updates broadcasting
     /// Returns the final execution state
-    pub async fn execute_with_state_updates(self, state_sender: Option<mpsc::Sender<WorkerState>>) -> Result<ExecutionState> {
-        // Build logical graph first
-        let logical_graph = self.build_logical_graph().await;
+    pub async fn execute_with_state_updates(self, state_updates_sender: Option<mpsc::Sender<PipelineState>>) -> Result<PipelineState> {
+        
+        let logical_graph = self.logical_graph.as_ref().expect("Logical graph not set. Call sql() or with_logical_graph() first.");
 
         println!("logical_graph: {:?}", logical_graph.to_dot());
 
@@ -166,11 +172,11 @@ impl PipelineContext {
         let mut executor = executor_option.expect("No executor set. Call with_executor() first.");
 
         // Execute using the configured executor
-        executor.execute(execution_graph, state_sender).await
+        executor.execute(execution_graph, state_updates_sender).await
     }
 
     /// Execute the job and return only the final execution state
-    pub async fn execute(self) -> Result<ExecutionState> {
+    pub async fn execute(self) -> Result<PipelineState> {
         self.execute_with_state_updates(None).await
     }
 

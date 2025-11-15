@@ -45,8 +45,9 @@ pub async fn run_window_benchmark(
 
     let datagen_config = DatagenSourceConfig::new(
         schema.clone(),
-        rate,
+        Some(rate),
         Some(total_records),
+        None,
         batch_size,
         fields
     );

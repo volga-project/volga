@@ -65,13 +65,10 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
 mod tests {
     use super::*;
     use crate::cluster::cluster_provider::create_test_cluster_nodes;
-    use crate::runtime::operators::operator::OperatorConfig;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-    use crate::runtime::functions::map::MapFunction;
-    use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
-    use crate::runtime::partition::PartitionType;
+    use crate::runtime::execution_graph::ExecutionGraph;
 
-    async fn create_test_execution_graph() -> ExecutionGraph {
+    fn create_test_execution_graph() -> ExecutionGraph {
         use crate::api::planner::{Planner, PlanningContext};
         use datafusion::execution::context::SessionContext;
         use arrow::datatypes::{Schema, Field, DataType};
@@ -92,7 +89,7 @@ mod tests {
         
         // Create logical graph from SQL
         let sql = "SELECT id FROM test_table WHERE value > 3.0";
-        let logical_graph = planner.sql_to_graph(sql).await.unwrap();
+        let logical_graph = planner.sql_to_graph(sql).unwrap();
         
         // Convert to execution graph
         logical_graph.to_execution_graph()
@@ -100,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_operator_per_node_strategy() {
-        let execution_graph = create_test_execution_graph().await;
+        let execution_graph = create_test_execution_graph();
 
         // Group vertices by operator_id
         let mut operator_to_vertices: HashMap<String, Vec<String>> = HashMap::new();
