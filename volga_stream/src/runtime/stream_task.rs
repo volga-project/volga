@@ -224,7 +224,7 @@ impl StreamTask {
         status: Arc<AtomicU8>
     ) {
         if collectors_per_target_operator.is_empty() {
-            // Sink operator - no downstream collectors
+            // Edge operator - no downstream collectors
             return;
         }
 
@@ -305,6 +305,7 @@ impl StreamTask {
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
             let (_, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
+            let num_output_edges = output_edges.len();
 
             for edge in output_edges {
                 let channel = edge.get_channel();
@@ -332,7 +333,7 @@ impl StreamTask {
             }
 
             operator.open(&runtime_context).await?;
-            println!("{:?} Operator {:?} opened", timestamp(), vertex_id);
+            println!("{:?} Operator {:?} opened with {} output edges", timestamp(), vertex_id, num_output_edges);
 
             // if task is not finished/closed early, mark as opened
             if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
@@ -374,10 +375,10 @@ impl StreamTask {
                 // TODO do we need timeout here?
                 match operator.poll_next().await {
                     OperatorPollResult::Ready(mut message) => {
-                        if vertex_id == "Window_1_2" {
-                            // todo remove after debugging
-                            println!("StreamTask {:?} produced message {:?}", vertex_id, message);
-                        }
+                        // if vertex_id == "Window_1_2" {
+                        //     // todo remove after debugging
+                        //     println!("StreamTask {:?} produced message {:?}", vertex_id, message);
+                        // }
                         if is_source {
                             message.set_ingest_timestamp(SystemTime::now()
                                 .duration_since(UNIX_EPOCH)
@@ -399,6 +400,7 @@ impl StreamTask {
                             if watermark.watermark_value == MAX_WATERMARK_VALUE {
                                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                             }
+                            println!("StreamTask {:?} produced watermark {:?}", vertex_id, watermark.watermark_value);
                         }
                         
                         // Set upstream vertex id for all messages before sending downstream

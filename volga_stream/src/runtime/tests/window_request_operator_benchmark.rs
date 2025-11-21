@@ -213,7 +213,7 @@ pub async fn run_window_request_benchmark(
                 let now = Instant::now();
                 if now.duration_since(last_print_timestamp).as_secs() >= 1 {
                     println!("[{}] Worker State", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
-                    print_pipeline_state(&pipeline_state);
+                    print_pipeline_state(&pipeline_state, Some(&["Window_1".to_string()]), true, false);
                     last_print_timestamp = now;
                 }
             }

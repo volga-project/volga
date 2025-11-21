@@ -8,4 +8,4 @@ pub mod window_operator_state;
 pub use window_operator::WindowOperator;
 pub use window_request_operator::WindowRequestOperator;
 pub use tiles::{Tiles, TileConfig, TimeGranularity};
-pub use aggregates::{AggregatorType, Evaluator, AggregateRegistry, WindowAggregator, create_window_aggregator, get_aggregate_registry};
+pub use aggregates::{AggregatorType, Evaluator, AggregateRegistry, WindowAggregator, create_window_aggregator, get_aggregate_registry, Aggregation, PlainAggregation, RetractableAggregation};

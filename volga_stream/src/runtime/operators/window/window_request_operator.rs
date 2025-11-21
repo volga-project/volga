@@ -17,8 +17,8 @@ use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::aggregates::{split_entries_for_parallelism, Aggregation};
-use crate::runtime::operators::window::window_operator_state::{WindowOperatorState, WindowId, WindowsState};
+use crate::runtime::operators::window::aggregates::{split_entries_for_parallelism, Aggregation, PlainAggregation, RetractableAggregation};
+use crate::runtime::operators::window::window_operator_state::{WindowOperatorState, WindowId};
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::operators::window::window_operator::{
@@ -208,7 +208,16 @@ impl WindowRequestOperator {
         (virtual_entries, batch_id)
     }
 
-    async fn process_key(&self, key: &Key, windows_state: &WindowsState, record_batch: &RecordBatch) -> RecordBatch {
+    async fn process_key(&self, key: &Key, record_batch: &RecordBatch) -> RecordBatch {
+        let windows_state_guard = self.get_state().get_windows_state(key).await;
+
+        if windows_state_guard.is_none() {
+            return RecordBatch::new_empty(self.output_schema.clone());
+        }
+
+        let windows_state_guard = windows_state_guard.unwrap();
+        let windows_state = windows_state_guard.value();
+        
         let time_entries = &windows_state.time_entries;
         let (virtual_entries, temp_batch_id) = self.create_virtual_entries(record_batch, time_entries);
         
@@ -221,10 +230,10 @@ impl WindowRequestOperator {
             let window_frame = window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
             let aggregator_type = self.window_configs[window_id].aggregator_type;
-            let tiles = window_state.tiles.as_ref();
+            let tiles = &window_state.tiles;
             let accumulator_state = window_state.accumulator_state.as_ref();
             
-            let mut aggs = Vec::new();
+            let mut aggs: Vec<Box<dyn Aggregation>> = Vec::new();
             let mut agg_idx = 0;
 
             let mut plain_agg_entries = Vec::new();
@@ -245,14 +254,13 @@ impl WindowRequestOperator {
                     match aggregator_type {
                         AggregatorType::RetractableAccumulator => {
                             let (retracts, _) = time_entries.find_retracts(window_frame, window_state.start_idx, entry);
-                            let aggregation = Aggregation::new(
+                            let aggregation: Box<dyn Aggregation> = Box::new(RetractableAggregation::new(
                                 vec![entry],
-                                aggregator_type,
                                 window_config.window_expr.clone(),
+                                tiles.clone(),
                                 Some(vec![retracts]),
-                                accumulator_state,
-                                tiles,
-                            );
+                                accumulator_state.cloned(),
+                            ));
                             aggs.push(aggregation);
                             orig_positions.insert((*window_id, agg_idx), vec![i]);
                             agg_idx += 1;
@@ -272,15 +280,13 @@ impl WindowRequestOperator {
             let mut pos_idx = 0;
             for entries in split_entries_for_parallelism(&plain_agg_entries) {
                 let entries_len = entries.len();
-                aggs.push(Aggregation::new(
+                let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
                     entries,
-                    AggregatorType::PlainAccumulator,
                     window_config.window_expr.clone(),
-                    None,
-                    accumulator_state,
-                    tiles,
+                    tiles.clone(),
+                    time_entries,
                 ));
-
+                aggs.push(aggregation);
                 let orig_pos = plain_agg_orig_positions[pos_idx..pos_idx + entries_len].to_vec();
                 orig_positions.insert((*window_id, agg_idx), orig_pos);
                 pos_idx += entries_len;
@@ -290,15 +296,13 @@ impl WindowRequestOperator {
             pos_idx = 0;
             for entries in split_entries_for_parallelism(&eval_agg_entries) {
                 let entries_len = entries.len();
-                aggs.push(Aggregation::new(
+                let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
                     entries,
-                    AggregatorType::Evaluator,
                     window_config.window_expr.clone(),
-                    None,
-                    accumulator_state,
-                    tiles,
+                    tiles.clone(),
+                    time_entries,
                 ));
-
+                aggs.push(aggregation);
                 let orig_pos = eval_agg_orig_positions[pos_idx..pos_idx + entries_len].to_vec();
                 orig_positions.insert((*window_id, agg_idx), orig_pos);
                 pos_idx += entries_len;
@@ -308,15 +312,18 @@ impl WindowRequestOperator {
             aggregations.insert(*window_id, aggs);
         }
 
+        // Drop guard after creating all aggregations - they own their data now
+        drop(windows_state_guard);
+
         // Load batches
         let state = self.get_state();
-        let mut batches = load_batches(state.get_batch_store(), key, &aggregations, time_entries).await;
+        let mut batches = load_batches(state.get_batch_store(), key, &aggregations).await;
         
         // Add current batch
         batches.insert(temp_batch_id, record_batch.clone());
 
         // Run aggregation
-        let aggregation_results = produce_aggregates(&self.window_configs, &aggregations, &batches, time_entries, self.thread_pool.as_ref()).await;
+        let aggregation_results = produce_aggregates(&self.window_configs, &aggregations, &batches, self.thread_pool.as_ref()).await;
         
         let mut aggregated_values = Vec::new();
         
@@ -425,22 +432,22 @@ impl OperatorTrait for WindowRequestOperator {
                         let key = keyed_message.key();
                         
                         // read-only access to windows state
-                        let state = self.get_state();
+                        // let state = self.get_state();
 
                         // TODO we have a race condition here:
                         // getting state copy is ok even if winow operator updates previous version of it
                         // The problem is that window operator may prune batches (they are not part of the state, we only have references to them) that are still used by request operator for this version of state.
                         // We need to somehow sync this or add a flag to state to indicate which batches are still used by request operator
                         // eg similar to mvcc pattern
-
-                        let windows_state = state.get_windows_state_clone(key).await;
                             
-                        let result = if let Some(windows_state) = windows_state {
-                            self.process_key(&key, &windows_state, &keyed_message.base.record_batch.clone()).await
-                        } else {
-                            RecordBatch::new_empty(self.output_schema.clone())
-                        };
+                        // let result = if let Some(windows_state) = windows_state {
+                        //     self.process_key(&key, &windows_state, &keyed_message.base.record_batch.clone()).await
+                        // } else {
+                        //     RecordBatch::new_empty(self.output_schema.clone())
+                        // };
 
+
+                        let result = self.process_key(&key, &keyed_message.base.record_batch.clone()).await;
                         OperatorPollResult::Ready(Message::new(None, result, ingest_ts, extras))
                     },
                     Message::Watermark(watermark) => {

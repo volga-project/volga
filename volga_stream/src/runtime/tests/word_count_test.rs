@@ -66,7 +66,7 @@ fn test_word_count() -> Result<()> {
     });
 
     println!("{:?}", result_vec);
-    print_pipeline_state(&pipeline_state);
+    print_pipeline_state(&pipeline_state, None, false, false);
 
     assert_eq!(result_vec.len(), parallelism, "Should have exactly one message per parallelism instance");
 

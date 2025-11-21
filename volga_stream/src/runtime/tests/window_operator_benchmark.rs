@@ -18,9 +18,9 @@ use datafusion::common::ScalarValue;
 pub async fn run_window_benchmark(
     parallelism: usize,
     num_keys: usize,
-    total_records: usize,
+    total_records: Option<usize>,
     batch_size: usize,
-    rate: f32,
+    rate: Option<f32>,
 ) -> Result<(HashMap<String, i64>, usize, std::time::Duration)> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
@@ -45,8 +45,8 @@ pub async fn run_window_benchmark(
 
     let datagen_config = DatagenSourceConfig::new(
         schema.clone(),
-        Some(rate),
-        Some(total_records),
+        rate,
+        total_records,
         None,
         batch_size,
         fields
@@ -124,13 +124,14 @@ pub async fn run_window_benchmark(
     Ok((key_sums, num_records_produced, execution_time))
 }
 
-#[tokio::test]
+// #[tokio::test]
 async fn test_window_benchmark() -> Result<()> {
-    let parallelism = 1;
+    let parallelism = 4;
     let num_keys = 4;
-    let total_records = 20;
-    let batch_size = 1;
-    let rate = 10.0;
+    let total_records = Some(20000);
+    let batch_size = 1000;
+    // let rate = Some(10.0);
+    let rate = None;
 
     let (key_sums, num_records_produced, execution_time) = run_window_benchmark(
         parallelism,
@@ -144,9 +145,9 @@ async fn test_window_benchmark() -> Result<()> {
     println!("Configuration:");
     println!("  Parallelism: {}", parallelism);
     println!("  Number of Keys: {}", num_keys);
-    println!("  Total Records: {}", total_records);
+    println!("  Total Records: {:?}", total_records);
     println!("  Batch Size: {}", batch_size);
-    println!("  Rate: {} events/sec", rate);
+    println!("  Rate: {:?} events/sec", rate);
 
     println!("\nResults:");
     println!("  Records Produced: {}", num_records_produced);

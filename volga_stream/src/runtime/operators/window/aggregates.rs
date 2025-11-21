@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use arrow::array::{RecordBatch, UInt64Array};
@@ -6,6 +6,7 @@ use datafusion::logical_expr::Accumulator;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
+use async_trait::async_trait;
 
 use tokio_rayon::rayon::ThreadPool;
 use tokio_rayon::AsyncThreadPool;
@@ -15,6 +16,7 @@ use crate::runtime::operators::window::tiles::Tile;
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::Tiles;
 use crate::storage::batch_store::BatchId;
+use indexmap::IndexSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregatorType {
@@ -342,121 +344,269 @@ fn run_evaluator(
     panic!("Not implemented");
 }
 
-// A single parallelizable unit of work - for multiples entries, produces multiple aggregation values
-// where each value represents aggregated result for a configured window with entry as it's end
-#[derive(Debug)]
-pub struct Aggregation<'a> {
-    pub entries: Vec<TimeIdx>,
-    pub aggregator_type: AggregatorType,
-    pub window_expr: Arc<dyn WindowExpr>,
-    pub retracts: Option<Vec<Vec<TimeIdx>>>,
-    pub accumulator_state: Option<&'a AccumulatorState>,
-    pub tiles: Option<&'a Tiles>,
+#[async_trait]
+pub trait Aggregation: Send + Sync {
+    async fn produce_aggregates(
+        &self,
+        batches: &HashMap<BatchId, RecordBatch>,
+        thread_pool: Option<&ThreadPool>,
+        exclude_current_row: Option<bool>,
+    ) -> (Vec<ScalarValue>, Option<AccumulatorState>);
+    
+    fn entries(&self) -> &[TimeIdx];
+    fn window_expr(&self) -> &Arc<dyn WindowExpr>;
+    fn tiles(&self) -> Option<&Tiles>;
+    fn aggregator_type(&self) -> AggregatorType;
+    
+    fn get_batches_to_load(&self) -> IndexSet<BatchId>;
 }
 
-impl<'a> Aggregation<'a> {
+
+#[derive(Debug)]
+pub struct PlainAggregation {
+    pub entries: Vec<TimeIdx>,
+    pub window_expr: Arc<dyn WindowExpr>,
+    pub tiles: Option<Tiles>,
+    pub relevant_time_entries: TimeEntries,
+    pub batches_to_load: IndexSet<BatchId>,
+}
+
+impl PlainAggregation {
     pub fn new(
         entries: Vec<TimeIdx>,
-        aggregator_type: AggregatorType,
         window_expr: Arc<dyn WindowExpr>,
-        retracts: Option<Vec<Vec<TimeIdx>>>,
-        accumulator_state: Option<&'a AccumulatorState>,
-        tiles: Option<&'a Tiles>,
+        tiles: Option<Tiles>,
+        time_entries: &TimeEntries,
     ) -> Self {
+        let (relevant_time_entries, batches_to_load) = Self::get_relevant_entries(&window_expr, &entries, time_entries, tiles.as_ref());
         Self {
             entries,
-            aggregator_type,
             window_expr,
-            retracts,
-            accumulator_state,
             tiles,
+            relevant_time_entries,
+            batches_to_load,
         }
     }
 
-    // TODO add exlcude_current_time
-    pub async fn produce_aggregates(
-        &self, 
-        batches: &HashMap<BatchId, RecordBatch>, 
-        time_entries: &TimeEntries, 
+    // create a copy of entries needed for this aggregation so we do not copy all the stored data
+    fn get_relevant_entries(window_expr: &Arc<dyn WindowExpr>, entries: &Vec<TimeIdx>, time_entries: &TimeEntries, tiles: Option<&Tiles>) -> (TimeEntries, IndexSet<BatchId>) {
+        let mut inserted = HashSet::new();
+
+        let relevant_time_entries = TimeEntries::new();
+        let mut batches_to_load = IndexSet::new();
+        // TODO is there a more efficient way, e.g finding overlaping ranges so we do not go over the same entres twice
+        for entry in entries {
+            let window_start = time_entries.get_window_start(window_expr.get_window_frame(), *entry, true)
+                .expect("Time entries should exist");
+            
+            let (front_padding, _, back_padding) = time_entries.get_entries_in_range(tiles, window_start, *entry);
+            for entry in front_padding {
+                let k = (entry.timestamp, entry.pos_idx);
+                if !inserted.contains(&k) {
+                    inserted.insert(k);
+                    relevant_time_entries.entries.insert(entry);
+                    batches_to_load.insert(entry.batch_id);
+                }
+            }
+            for entry in back_padding {
+                let k = (entry.timestamp, entry.pos_idx);
+                if !inserted.contains(&k) {
+                    inserted.insert(k);
+                    relevant_time_entries.entries.insert(entry);
+                    batches_to_load.insert(entry.batch_id);
+                }
+            }
+        }
+        
+
+        (relevant_time_entries, batches_to_load)
+    }    
+    
+}
+
+#[async_trait]
+impl Aggregation for PlainAggregation {
+    async fn produce_aggregates(
+        &self,
+        batches: &HashMap<BatchId, RecordBatch>,
         thread_pool: Option<&ThreadPool>,
         exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         let parallelize = thread_pool.is_some();
-                
-        match self.aggregator_type {
-            AggregatorType::PlainAccumulator => {
-                let mut aggregates = Vec::new();
-                    
-                // plain needs to run aggregation for each entry and corresponsing values in a window ending and this entry
-                for entry in &self.entries {
-                    let window_start = time_entries.get_window_start(self.window_expr.get_window_frame(), *entry, true)
-                        .expect("Time entries should exist");
-                    let (mut front_padding, middle_tiles, back_padding) = time_entries.get_entries_in_range(self.tiles, window_start, *entry);
+        let mut aggregates = Vec::new();
+            
+        // plain needs to run aggregation for each entry and corresponding values in a window ending at this entry
+        for entry in &self.entries {
+            let window_start = self.relevant_time_entries.get_window_start(self.window_expr.get_window_frame(), *entry, true)
+                .expect("Time entries should exist");
+            let (mut front_padding, middle_tiles, back_padding) = self.relevant_time_entries.get_entries_in_range(self.tiles.as_ref(), window_start, *entry);
 
-                    // in request mode, if specified, exclude the virtual current row from aggregation
-                    if exclude_current_row.is_some() && !exclude_current_row.unwrap() {
-                        front_padding.push(entry.clone());
-                    }
-                    
-                    let (aggregate_for_entry, _) = if parallelize {
-                        run_plain_accumulator_parallel(
-                            thread_pool.expect("ThreadPool should exist"), 
-                            self.window_expr.clone(), 
-                            front_padding, 
-                            middle_tiles, 
-                            back_padding, 
-                            batches.clone()
-                        ).await
-                    } else {
-                        run_plain_accumulator(
-                            &self.window_expr, 
-                            front_padding, 
-                            middle_tiles, 
-                            back_padding, 
-                            batches
-                        )
-                    };
-                    
-                    aggregates.push(aggregate_for_entry);
-                }
-                
-                (aggregates, None)
+            // in request mode, if specified, exclude the virtual current row from aggregation
+            if exclude_current_row.is_some() && !exclude_current_row.unwrap() {
+                front_padding.push(entry.clone());
             }
+            
+            let (aggregate_for_entry, _) = if parallelize {
+                run_plain_accumulator_parallel(
+                    thread_pool.expect("ThreadPool should exist"), 
+                    self.window_expr.clone(), 
+                    front_padding, 
+                    middle_tiles, 
+                    back_padding, 
+                    batches.clone()
+                ).await
+            } else {
+                run_plain_accumulator(
+                    &self.window_expr, 
+                    front_padding, 
+                    middle_tiles, 
+                    back_padding, 
+                    batches
+                )
+            };
+            
+            aggregates.push(aggregate_for_entry);
+        }
+        
+        (aggregates, None)
+    }
+    
+    fn entries(&self) -> &[TimeIdx] {
+        &self.entries
+    }
+    
+    fn window_expr(&self) -> &Arc<dyn WindowExpr> {
+        &self.window_expr
+    }
+    
+    fn tiles(&self) -> Option<&Tiles> {
+        self.tiles.as_ref()
+    }
+    
+    fn aggregator_type(&self) -> AggregatorType {
+        AggregatorType::PlainAccumulator
+    }
+    
+    fn get_batches_to_load(&self) -> IndexSet<BatchId> {
+        // let mut batches_to_load = IndexSet::new();
+        let _window_frame = self.window_expr.get_window_frame();
+        
+        // // non-rets (plain and evaluators) need whole window data (excluding tiles) for each update/entry
+        // for entry in &self.entries {
+        //     let window_start = self.time_entries.get_window_start(window_frame, *entry, true)
+        //         .expect("Time entries should exist");
+        //     let (front, _tiles, end) = self.time_entries.get_entries_in_range(self.tiles.as_ref(), window_start, *entry);
+        //     for entry in front {
+        //         batches_to_load.insert(entry.batch_id);
+        //     }
+        //     for entry in end {
+        //         batches_to_load.insert(entry.batch_id);
+        //     }
+        // }
+        // for entry in self.relevant_time_entries.entries.iter() {
+        //     batches_to_load.insert(entry.batch_id);
+        // }
+        
+        self.batches_to_load.clone()
+    }
+}
 
-            // retractable works incrementally - no need to get all data in window
-            AggregatorType::RetractableAccumulator => {
-                let mut updates = Some(self.entries.clone());
+#[derive(Debug)]
+pub struct RetractableAggregation {
+    pub entries: Vec<TimeIdx>,
+    pub window_expr: Arc<dyn WindowExpr>,
+    pub tiles: Option<Tiles>,
+    pub retracts: Option<Vec<Vec<TimeIdx>>>,
+    pub accumulator_state: Option<AccumulatorState>,
+}
 
-                // in request mode, we expect entries to be a single value vec - virtual current row.
-                // include it in aggregation if needed, otherwise empty updates, only retracts
-                if exclude_current_row.is_some() && exclude_current_row.unwrap() {
-                    updates = None;
+impl RetractableAggregation {
+    pub fn new(
+        entries: Vec<TimeIdx>,
+        window_expr: Arc<dyn WindowExpr>,
+        tiles: Option<Tiles>,
+        retracts: Option<Vec<Vec<TimeIdx>>>,
+        accumulator_state: Option<AccumulatorState>,
+    ) -> Self {
+        Self {
+            entries,
+            window_expr,
+            tiles,
+            retracts,
+            accumulator_state,
+        }
+    }
+    
+}
+
+#[async_trait]
+impl Aggregation for RetractableAggregation {
+    async fn produce_aggregates(
+        &self,
+        batches: &HashMap<BatchId, RecordBatch>,
+        thread_pool: Option<&ThreadPool>,
+        exclude_current_row: Option<bool>,
+    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+        let parallelize = thread_pool.is_some();
+        let mut updates = Some(self.entries.clone());
+
+        // in request mode, we expect entries to be a single value vec - virtual current row.
+        // include it in aggregation if needed, otherwise empty updates, only retracts
+        if exclude_current_row.is_some() && exclude_current_row.unwrap() {
+            updates = None;
+        }
+        let (aggregates, accumulator_state) = if parallelize {
+            run_retractable_accumulator_parallel(
+                thread_pool.expect("ThreadPool should exist"),
+                self.window_expr.clone(),
+                updates,
+                self.retracts.clone(),
+                Arc::new(batches.clone()),
+                self.accumulator_state.clone()
+            ).await
+        } else {
+            run_retractable_accumulator(
+                &self.window_expr,
+                updates,
+                self.retracts.clone(),
+                batches,
+                self.accumulator_state.as_ref()
+            )
+        };
+        
+        (aggregates, Some(accumulator_state))
+    }
+    
+    fn entries(&self) -> &[TimeIdx] {
+        &self.entries
+    }
+    
+    fn window_expr(&self) -> &Arc<dyn WindowExpr> {
+        &self.window_expr
+    }
+    
+    fn tiles(&self) -> Option<&Tiles> {
+        self.tiles.as_ref()
+    }
+    
+    fn aggregator_type(&self) -> AggregatorType {
+        AggregatorType::RetractableAccumulator
+    }
+    
+    fn get_batches_to_load(&self) -> IndexSet<BatchId> {
+        let mut batches_to_load = IndexSet::new();
+        
+        // for retractables, we do not need to scan whole window on each update
+        for i in 0..self.entries.len() {
+            batches_to_load.insert(self.entries[i].batch_id);
+            if let Some(ref retracts) = self.retracts {
+                for retract_idx in &retracts[i] {
+                    batches_to_load.insert(retract_idx.batch_id);
                 }
-                let (aggregates, accumulator_state) = if parallelize {
-                    run_retractable_accumulator_parallel(
-                        thread_pool.expect("ThreadPool should exist"),
-                        self.window_expr.clone(),
-                        updates,
-                        self.retracts.clone(),
-                        Arc::new(batches.clone()),
-                        self.accumulator_state.cloned()
-                    ).await
-                } else {
-                    run_retractable_accumulator(
-                        &self.window_expr,
-                        updates,
-                        self.retracts.clone(),
-                        batches,
-                        self.accumulator_state
-                    )
-                };
-                
-                (aggregates, Some(accumulator_state))
-            }
-            AggregatorType::Evaluator => {
-                panic!("Evaluator is not supported yet");
             }
         }
+        
+        batches_to_load
     }
 }
 

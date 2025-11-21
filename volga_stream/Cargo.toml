@@ -1,6 +1,16 @@
 [profile.dev]
 incremental = true
 
+[profile.release]
+# Keep debug info for profiling
+debug = "line-tables-only"
+
+# Optional: Create a dedicated profiling profile
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = false
+
 [package]
 name = "volga_stream"
 version = "0.1.0"

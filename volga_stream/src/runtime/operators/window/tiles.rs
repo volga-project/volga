@@ -171,7 +171,7 @@ impl Tiles {
         
         let mut accumulator = match create_window_aggregator(&window_expr) {
             WindowAggregator::Accumulator(accumulator) => accumulator,
-            WindowAggregator::Evaluator(evaluator) => panic!("Evaluator is not supported for retractable accumulator"),
+            WindowAggregator::Evaluator(_evaluator) => panic!("Evaluator is not supported for retractable accumulator"),
         };
 
         if let Some(tile_state) = &tile.accumulator_state {

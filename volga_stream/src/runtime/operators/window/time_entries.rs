@@ -44,22 +44,6 @@ pub struct TimeEntries {
     pub batch_ids: SkipMap<Timestamp, Vec<BatchId>>,
 }
 
-impl Clone for TimeEntries {
-    fn clone(&self) -> Self {
-        let entries = SkipSet::new();
-        for entry in self.entries.iter() {
-            entries.insert(*entry);
-        }
-        
-        let batch_ids = SkipMap::new();
-        for entry in self.batch_ids.iter() {
-            batch_ids.insert(*entry.key(), entry.value().clone());
-        }
-        
-        Self { entries, batch_ids }
-    }
-}
-
 impl TimeEntries {
     pub fn new() -> Self {
         Self {
@@ -287,7 +271,7 @@ impl TimeEntries {
         } else {
             // start from closest timestamp to previous window end
             self.entries.lower_bound(std::ops::Bound::Excluded(&previous_window_end))
-                .map(|entry| *entry).expect(&format!("Range start idx should exist for {:?}, {:?}", previous_window_end, self.entries.iter().collect::<Vec<_>>()))
+                .map(|entry| *entry).expect(&format!("Range start idx should exist for {:?}", previous_window_end))
         };
     
         let mut start = previous_window_start;
