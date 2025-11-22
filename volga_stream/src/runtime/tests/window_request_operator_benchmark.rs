@@ -1,6 +1,7 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, PipelineContextBuilder, ExecutionMode},
+    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
+    runtime::metrics::PipelineStateHistory,
     executor::local_executor::LocalExecutor,
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
@@ -57,17 +58,11 @@ fn create_datagen_config(
 
 
 #[derive(Debug, Clone)]
-pub struct MetricSample {
-    pub timestamp: u64,
-    pub pipeline_state: PipelineState,
-}
-
-#[derive(Debug, Clone)]
 pub struct BenchmarkMetrics {
     pub execution_time: Duration,
     pub requests_processed: usize,
     pub requests_per_second: f64,
-    pub samples: Vec<MetricSample>,
+    pub history: PipelineStateHistory,
 }
 
 impl BenchmarkMetrics {
@@ -76,15 +71,12 @@ impl BenchmarkMetrics {
             execution_time: Duration::from_secs(0),
             requests_processed: 0,
             requests_per_second: 0.0,
-            samples: Vec::new(),
+            history: PipelineStateHistory::new(),
         }
     }
 
     pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineState) {
-        self.samples.push(MetricSample {
-            timestamp,
-            pipeline_state,
-        });
+        self.history.add_sample(timestamp, pipeline_state);
     }
 }
 
@@ -115,6 +107,7 @@ pub async fn run_window_request_benchmark(
     request_rate: Option<f32>,
     batch_size: usize,
     polling_interval_ms: u64,
+    throughput_window_seconds: Option<u64>,
 ) -> Result<BenchmarkMetrics> {
     let start_ms = 1000;
     let step_ms = 1000;
@@ -192,9 +185,11 @@ pub async fn run_window_request_benchmark(
     let benchmark_metrics_clone = benchmark_metrics.clone();
     
     let running_clone = running.clone();
+    let throughput_window_seconds_clone = throughput_window_seconds;
     let state_updates_task = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_millis(polling_interval_ms));
         let mut last_print_timestamp = Instant::now();
+        let mut history = PipelineStateHistory::new();
         
         while running_clone.load(Ordering::SeqCst) {
             interval.tick().await;
@@ -210,10 +205,25 @@ pub async fn run_window_request_benchmark(
                     None => break,
                 };
 
+                // Add to history
+                let timestamp = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                history.add_sample(timestamp, pipeline_state.clone());
+
                 let now = Instant::now();
                 if now.duration_since(last_print_timestamp).as_secs() >= 1 {
-                    println!("[{}] Worker State", SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs());
-                    print_pipeline_state(&pipeline_state, Some(&["Window_1".to_string()]), true, false);
+                    println!("[{}] Worker State", timestamp);
+                    
+                    print_pipeline_state(
+                        &pipeline_state, 
+                        Some(&["Window_1".to_string()]), 
+                        true, 
+                        false,
+                        Some(&history),
+                        throughput_window_seconds_clone,
+                    );
                     last_print_timestamp = now;
                 }
             }
@@ -253,8 +263,9 @@ async fn test_window_request_benchmark() -> Result<()> {
     let run_for_s = 10.0;
     let datagen_rate = None;
     let request_rate = Some(100.0);
-    let batch_size = 10;
+    let batch_size = 1000;
     let polling_interval_ms = 100;
+    let throughput_window_seconds = Some(5);
 
     let metrics = run_window_request_benchmark(
         parallelism,
@@ -264,6 +275,7 @@ async fn test_window_request_benchmark() -> Result<()> {
         request_rate,
         batch_size,
         polling_interval_ms,
+        throughput_window_seconds,
     ).await?;
 
     println!("\n=== Window Request Operator Benchmark Results ===");
@@ -280,7 +292,47 @@ async fn test_window_request_benchmark() -> Result<()> {
     println!("  Execution Time: {:?}", metrics.execution_time);
     println!("  Requests Processed: {}", metrics.requests_processed);
     println!("  Requests Per Second: {:.2}", metrics.requests_per_second);
-    println!("  Sample Count: {}", metrics.samples.len());
+    println!("  Sample Count: {}", metrics.history.samples.len());
+    
+    // Print final aggregated statistics
+    let final_stats = metrics.history.final_stats();
+    
+    if !final_stats.throughput_per_task.is_empty() {
+        println!("\nThroughput Statistics (per task, aggregated over all history):");
+        for (task_id, task_stats) in &final_stats.throughput_per_task {
+            println!("  Task: {}", task_id);
+            println!("    Messages Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} msg/s", 
+                task_stats.messages_sent.avg, task_stats.messages_sent.min, 
+                task_stats.messages_sent.max, task_stats.messages_sent.stddev);
+            println!("    Messages Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} msg/s", 
+                task_stats.messages_recv.avg, task_stats.messages_recv.min, 
+                task_stats.messages_recv.max, task_stats.messages_recv.stddev);
+            println!("    Records Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} rec/s", 
+                task_stats.records_sent.avg, task_stats.records_sent.min, 
+                task_stats.records_sent.max, task_stats.records_sent.stddev);
+            println!("    Records Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} rec/s", 
+                task_stats.records_recv.avg, task_stats.records_recv.min, 
+                task_stats.records_recv.max, task_stats.records_recv.stddev);
+            println!("    Bytes Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} B/s", 
+                task_stats.bytes_sent.avg, task_stats.bytes_sent.min, 
+                task_stats.bytes_sent.max, task_stats.bytes_sent.stddev);
+            println!("    Bytes Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} B/s", 
+                task_stats.bytes_recv.avg, task_stats.bytes_recv.min, 
+                task_stats.bytes_recv.max, task_stats.bytes_recv.stddev);
+        }
+    }
+    
+    if !final_stats.latency_per_task.is_empty() {
+        println!("\nLatency Statistics (per task, merged histogram over all history):");
+        for (task_id, latency_stats) in &final_stats.latency_per_task {
+            println!("  Task: {}", task_id);
+            println!("    Avg: {:.2} ms", latency_stats.avg);
+            println!("    P50: {:.2} ms", latency_stats.p50);
+            println!("    P95: {:.2} ms", latency_stats.p95);
+            println!("    P99: {:.2} ms", latency_stats.p99);
+        }
+    }
+    
     println!("==========================================\n");
 
     assert!(metrics.requests_processed > 0, "Should have processed at least some requests");

@@ -93,6 +93,11 @@ impl LogicalGraph {
         &self.graph[node_index]
     }
 
+    /// Get mutable node by index
+    pub fn get_node_by_index_mut(&mut self, node_index: NodeIndex) -> Option<&mut LogicalNode> {
+        self.graph.node_weight_mut(node_index)
+    }
+
     pub fn add_node(&mut self, mut node: LogicalNode) -> NodeIndex {
         // Generate unique operator_id based on operator configtype
         let operator_config_type = format!("{}", node.operator_config);

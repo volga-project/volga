@@ -292,6 +292,268 @@ impl WorkerMetrics {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct PipelineStateHistory {
+    pub samples: Vec<(u64, crate::runtime::master::PipelineState)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ThroughputStats {
+    pub avg: f64,
+    pub min: f64,
+    pub max: f64,
+    pub stddev: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct TaskThroughputStats {
+    pub messages_sent: ThroughputStats,
+    pub messages_recv: ThroughputStats,
+    pub records_sent: ThroughputStats,
+    pub records_recv: ThroughputStats,
+    pub bytes_sent: ThroughputStats,
+    pub bytes_recv: ThroughputStats,
+}
+
+#[derive(Debug, Clone)]
+pub struct FinalStats {
+    pub throughput_per_task: HashMap<String, TaskThroughputStats>,
+    pub latency_per_task: HashMap<String, LatencyMetrics>,
+}
+
+impl PipelineStateHistory {
+    pub fn new() -> Self {
+        Self {
+            samples: Vec::new(),
+        }
+    }
+
+    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: crate::runtime::master::PipelineState) {
+        self.samples.push((timestamp, pipeline_state));
+    }
+
+    pub fn calculate_throughput_rates(&self, window_seconds: u64) -> HashMap<String, ThroughputRates> {
+        let mut rates = HashMap::new();
+        
+        if self.samples.is_empty() {
+            return rates;
+        }
+        
+        // Use the last sample as the end state
+        let (end_timestamp, end_state) = self.samples.last().unwrap();
+        let end_timestamp = *end_timestamp;
+        
+        let window_start_timestamp = end_timestamp.saturating_sub(window_seconds);
+        
+        // Find the first state within the window
+        let window_start_idx = self.samples
+            .iter()
+            .position(|(ts, _)| *ts >= window_start_timestamp)
+            .unwrap_or(0);
+        
+        if window_start_idx >= self.samples.len() {
+            return rates;
+        }
+        
+        let (start_timestamp, start_state) = &self.samples[window_start_idx];
+        let start_timestamp = *start_timestamp;
+        
+        let time_diff_seconds = (end_timestamp - start_timestamp) as f64;
+        if time_diff_seconds <= 0.0 {
+            return rates;
+        }
+        
+        // Calculate rates for each task (vertex)
+        for (worker_id, end_worker_state) in &end_state.worker_states {
+            if let Some(end_worker_metrics) = &end_worker_state.worker_metrics {
+                if let Some(start_worker_state) = start_state.worker_states.get(worker_id) {
+                    if let Some(start_worker_metrics) = &start_worker_state.worker_metrics {
+                        for (vertex_id, end_task_metrics) in &end_worker_metrics.tasks_metrics {
+                            if let Some(start_task_metrics) = start_worker_metrics.tasks_metrics.get(vertex_id) {
+                                let messages_sent_diff = end_task_metrics.throughput_stast.messages_sent
+                                    .saturating_sub(start_task_metrics.throughput_stast.messages_sent);
+                                let messages_recv_diff = end_task_metrics.throughput_stast.messages_recv
+                                    .saturating_sub(start_task_metrics.throughput_stast.messages_recv);
+                                let records_sent_diff = end_task_metrics.throughput_stast.records_sent
+                                    .saturating_sub(start_task_metrics.throughput_stast.records_sent);
+                                let records_recv_diff = end_task_metrics.throughput_stast.records_recv
+                                    .saturating_sub(start_task_metrics.throughput_stast.records_recv);
+                                let bytes_sent_diff = end_task_metrics.throughput_stast.bytes_sent
+                                    .saturating_sub(start_task_metrics.throughput_stast.bytes_sent);
+                                let bytes_recv_diff = end_task_metrics.throughput_stast.bytes_recv
+                                    .saturating_sub(start_task_metrics.throughput_stast.bytes_recv);
+                                
+                                rates.insert(vertex_id.clone(), ThroughputRates {
+                                    messages_sent_per_sec: messages_sent_diff as f64 / time_diff_seconds,
+                                    messages_recv_per_sec: messages_recv_diff as f64 / time_diff_seconds,
+                                    records_sent_per_sec: records_sent_diff as f64 / time_diff_seconds,
+                                    records_recv_per_sec: records_recv_diff as f64 / time_diff_seconds,
+                                    bytes_sent_per_sec: bytes_sent_diff as f64 / time_diff_seconds,
+                                    bytes_recv_per_sec: bytes_recv_diff as f64 / time_diff_seconds,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        rates
+    }
+
+    pub fn final_stats(&self) -> FinalStats {
+        let mut throughput_per_task: HashMap<String, TaskThroughputStats> = HashMap::new();
+        let mut latency_per_task: HashMap<String, LatencyMetrics> = HashMap::new();
+        
+        if self.samples.len() < 2 {
+            return FinalStats {
+                throughput_per_task,
+                latency_per_task,
+            };
+        }
+        
+        // Calculate throughput rates for each consecutive pair of samples
+        let mut all_rates_per_task: HashMap<String, Vec<ThroughputRates>> = HashMap::new();
+        
+        for i in 1..self.samples.len() {
+            let (start_timestamp, start_state) = &self.samples[i - 1];
+            let (end_timestamp, end_state) = &self.samples[i];
+            
+            let time_diff_seconds = (*end_timestamp - *start_timestamp) as f64;
+            if time_diff_seconds <= 0.0 {
+                continue;
+            }
+            
+            // Calculate rates for each task
+            for (worker_id, end_worker_state) in &end_state.worker_states {
+                if let Some(end_worker_metrics) = &end_worker_state.worker_metrics {
+                    if let Some(start_worker_state) = start_state.worker_states.get(worker_id) {
+                        if let Some(start_worker_metrics) = &start_worker_state.worker_metrics {
+                            for (vertex_id, end_task_metrics) in &end_worker_metrics.tasks_metrics {
+                                if let Some(start_task_metrics) = start_worker_metrics.tasks_metrics.get(vertex_id) {
+                                    let messages_sent_diff = end_task_metrics.throughput_stast.messages_sent
+                                        .saturating_sub(start_task_metrics.throughput_stast.messages_sent);
+                                    let messages_recv_diff = end_task_metrics.throughput_stast.messages_recv
+                                        .saturating_sub(start_task_metrics.throughput_stast.messages_recv);
+                                    let records_sent_diff = end_task_metrics.throughput_stast.records_sent
+                                        .saturating_sub(start_task_metrics.throughput_stast.records_sent);
+                                    let records_recv_diff = end_task_metrics.throughput_stast.records_recv
+                                        .saturating_sub(start_task_metrics.throughput_stast.records_recv);
+                                    let bytes_sent_diff = end_task_metrics.throughput_stast.bytes_sent
+                                        .saturating_sub(start_task_metrics.throughput_stast.bytes_sent);
+                                    let bytes_recv_diff = end_task_metrics.throughput_stast.bytes_recv
+                                        .saturating_sub(start_task_metrics.throughput_stast.bytes_recv);
+                                    
+                                    let rates = ThroughputRates {
+                                        messages_sent_per_sec: messages_sent_diff as f64 / time_diff_seconds,
+                                        messages_recv_per_sec: messages_recv_diff as f64 / time_diff_seconds,
+                                        records_sent_per_sec: records_sent_diff as f64 / time_diff_seconds,
+                                        records_recv_per_sec: records_recv_diff as f64 / time_diff_seconds,
+                                        bytes_sent_per_sec: bytes_sent_diff as f64 / time_diff_seconds,
+                                        bytes_recv_per_sec: bytes_recv_diff as f64 / time_diff_seconds,
+                                    };
+                                    
+                                    all_rates_per_task.entry(vertex_id.clone())
+                                        .or_insert_with(Vec::new)
+                                        .push(rates);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Calculate stats (avg, min, max, stddev) for each task's throughput rates
+        for (vertex_id, rates_vec) in all_rates_per_task {
+            if rates_vec.is_empty() {
+                continue;
+            }
+            
+            let messages_sent_values: Vec<f64> = rates_vec.iter().map(|r| r.messages_sent_per_sec).collect();
+            let messages_recv_values: Vec<f64> = rates_vec.iter().map(|r| r.messages_recv_per_sec).collect();
+            let records_sent_values: Vec<f64> = rates_vec.iter().map(|r| r.records_sent_per_sec).collect();
+            let records_recv_values: Vec<f64> = rates_vec.iter().map(|r| r.records_recv_per_sec).collect();
+            let bytes_sent_values: Vec<f64> = rates_vec.iter().map(|r| r.bytes_sent_per_sec).collect();
+            let bytes_recv_values: Vec<f64> = rates_vec.iter().map(|r| r.bytes_recv_per_sec).collect();
+            
+            throughput_per_task.insert(vertex_id.clone(), TaskThroughputStats {
+                messages_sent: Self::calculate_stats(&messages_sent_values),
+                messages_recv: Self::calculate_stats(&messages_recv_values),
+                records_sent: Self::calculate_stats(&records_sent_values),
+                records_recv: Self::calculate_stats(&records_recv_values),
+                bytes_sent: Self::calculate_stats(&bytes_sent_values),
+                bytes_recv: Self::calculate_stats(&bytes_recv_values),
+            });
+        }
+        
+        // Aggregate latency histograms per task across all samples
+        let mut latency_histograms_per_task: HashMap<String, Vec<&LatencyMetrics>> = HashMap::new();
+        
+        for (_timestamp, pipeline_state) in &self.samples {
+            for (_worker_id, worker_state) in &pipeline_state.worker_states {
+                if let Some(worker_metrics) = &worker_state.worker_metrics {
+                    for (vertex_id, task_metrics) in &worker_metrics.tasks_metrics {
+                        latency_histograms_per_task.entry(vertex_id.clone())
+                            .or_insert_with(Vec::new)
+                            .push(&task_metrics.latency_stats);
+                    }
+                }
+            }
+        }
+        
+        // Merge histograms and calculate stats for each task
+        for (vertex_id, latency_metrics_vec) in latency_histograms_per_task {
+            let merged_latency = LatencyMetrics::merge(latency_metrics_vec);
+            latency_per_task.insert(vertex_id, merged_latency);
+        }
+        
+        FinalStats {
+            throughput_per_task,
+            latency_per_task,
+        }
+    }
+    
+    fn calculate_stats(values: &[f64]) -> ThroughputStats {
+        if values.is_empty() {
+            return ThroughputStats {
+                avg: 0.0,
+                min: 0.0,
+                max: 0.0,
+                stddev: 0.0,
+            };
+        }
+        
+        let avg = values.iter().sum::<f64>() / values.len() as f64;
+        let min = values.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+        let max = values.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+        
+        let variance = if values.len() > 1 {
+            values.iter()
+                .map(|x| (x - avg).powi(2))
+                .sum::<f64>() / (values.len() - 1) as f64
+        } else {
+            0.0
+        };
+        let stddev = variance.sqrt();
+        
+        ThroughputStats {
+            avg,
+            min,
+            max,
+            stddev,
+        }
+    }
+}
+
+pub struct ThroughputRates {
+    pub messages_sent_per_sec: f64,
+    pub messages_recv_per_sec: f64,
+    pub records_sent_per_sec: f64,
+    pub records_recv_per_sec: f64,
+    pub bytes_sent_per_sec: f64,
+    pub bytes_recv_per_sec: f64,
+}
 
 fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     // Assert that we don't have f64::MAX in bucket boundaries

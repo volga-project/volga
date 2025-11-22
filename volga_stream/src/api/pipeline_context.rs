@@ -152,6 +152,10 @@ impl PipelineContext {
         self.logical_graph.as_ref()
     }
 
+    pub fn get_logical_graph_mut(&mut self) -> Option<&mut LogicalGraph> {
+        self.logical_graph.as_mut()
+    }
+
     /// Build logical graph from the current SQL query or return existing graph
     fn build_logical_graph(&self) -> LogicalGraph {
         if let Some(ref graph) = self.logical_graph {

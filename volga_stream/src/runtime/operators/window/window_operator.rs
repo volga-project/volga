@@ -454,8 +454,6 @@ impl OperatorTrait for WindowOperator {
                 match message {
                     Message::Keyed(keyed_message) => {
                         let key = keyed_message.key();
-                        
-
 
                         let new_entries = self.state.insert_batch(key, &self.window_configs, &self.tiling_configs, self.ts_column_index, self.lateness, keyed_message.base.record_batch.clone()).await;
                         if self.update_mode == UpdateMode::PerWatermark {

@@ -1,27 +1,213 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
-    common::test_utils::gen_unique_grpc_port,
+    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
+    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     executor::local_executor::LocalExecutor,
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
-        operators::{sink::sink_operator::SinkConfig, source::source_operator::SourceConfig},
+        master::PipelineState,
+        metrics::PipelineStateHistory,
+        operators::{
+            sink::sink_operator::SinkConfig,
+            source::source_operator::SourceConfig,
+            window::window_operator::{UpdateMode, ExecutionMode as WindowExecutionMode},
+            window::TileConfig,
+        },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use std::collections::HashMap;
-use arrow::{array::Int64Array, datatypes::{DataType, Field, Schema, TimeUnit}};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use core::sync::atomic::{AtomicBool, Ordering};
 use datafusion::common::ScalarValue;
+use tokio::sync::{Mutex, mpsc};
+use petgraph::prelude::NodeIndex;
 
-pub async fn run_window_benchmark(
-    parallelism: usize,
-    num_keys: usize,
-    total_records: Option<usize>,
-    batch_size: usize,
-    rate: Option<f32>,
-) -> Result<(HashMap<String, i64>, usize, std::time::Duration)> {
+#[derive(Debug, Clone)]
+pub enum WindowType {
+    Range { milliseconds: i64 },
+    Rows { preceding: i64 },
+}
+
+#[derive(Debug, Clone)]
+pub enum AggregationType {
+    Plain,      // MIN, MAX
+    Retractable, // SUM, COUNT, AVG
+    Mixed,      // Combination of both
+}
+
+#[derive(Debug, Clone)]
+pub struct WindowBenchmarkConfig {
+    // Basic params
+    pub parallelism: usize,
+    pub num_keys: usize,
+    pub total_records: Option<usize>,
+    pub batch_size: usize,
+    pub rate: Option<f32>,
+    pub run_for_s: Option<f64>,
+    
+    // Window params
+    pub window_type: WindowType,
+    pub num_windows: usize, // Number of window functions in query (1 = SUM, 2 = SUM+AVG, etc)
+    pub aggregation_type: AggregationType,
+    
+    // Window operator config params
+    pub update_mode: UpdateMode,
+    pub execution_mode: WindowExecutionMode,
+    pub parallelize: bool,
+    pub tiling_configs: Option<Vec<Option<TileConfig>>>,
+    pub lateness: Option<i64>,
+    
+    // Metrics collection params
+    pub polling_interval_ms: u64,
+    pub throughput_window_seconds: Option<u64>,
+}
+
+impl Default for WindowBenchmarkConfig {
+    fn default() -> Self {
+        Self {
+            parallelism: 4,
+            num_keys: 4,
+            total_records: Some(20000),
+            batch_size: 1000,
+            rate: None,
+            run_for_s: None,
+            window_type: WindowType::Range { milliseconds: 1000 },
+            num_windows: 1,
+            aggregation_type: AggregationType::Retractable,
+            update_mode: UpdateMode::PerMessage,
+            execution_mode: WindowExecutionMode::Regular,
+            parallelize: false,
+            tiling_configs: None,
+            lateness: None,
+            polling_interval_ms: 100,
+            throughput_window_seconds: Some(5),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct BenchmarkMetrics {
+    pub execution_time: Duration,
+    pub records_produced: usize,
+    pub history: PipelineStateHistory,
+}
+
+impl BenchmarkMetrics {
+    pub fn new() -> Self {
+        Self {
+            execution_time: Duration::from_secs(0),
+            records_produced: 0,
+            history: PipelineStateHistory::new(),
+        }
+    }
+
+    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineState) {
+        self.history.add_sample(timestamp, pipeline_state);
+    }
+}
+
+
+fn build_sql_query(config: &WindowBenchmarkConfig) -> String {
+    let mut select_clauses = vec![
+        "event_time".to_string(),
+        "key".to_string(),
+        "value".to_string(),
+    ];
+    
+    let window_def = match &config.window_type {
+        WindowType::Range { milliseconds } => {
+            format!("RANGE BETWEEN INTERVAL '{}' MILLISECOND PRECEDING AND CURRENT ROW", milliseconds)
+        }
+        WindowType::Rows { preceding } => {
+            format!("ROWS BETWEEN {} PRECEDING AND CURRENT ROW", preceding)
+        }
+    };
+    
+    let window_name = "w";
+    
+    // Determine which aggregates to use based on aggregation_type
+    let aggregates = match config.aggregation_type {
+        AggregationType::Plain => {
+            vec!["MIN(value) OVER {} as min_value", "MAX(value) OVER {} as max_value"]
+        }
+        AggregationType::Retractable => {
+            vec!["SUM(value) OVER {} as sum_value", "COUNT(value) OVER {} as count_value", "AVG(value) OVER {} as avg_value"]
+        }
+        AggregationType::Mixed => {
+            vec![
+                "SUM(value) OVER {} as sum_value",
+                "COUNT(value) OVER {} as count_value",
+                "AVG(value) OVER {} as avg_value",
+                "MIN(value) OVER {} as min_value",
+                "MAX(value) OVER {} as max_value",
+            ]
+        }
+    };
+    
+    // Take only the requested number of windows
+    let aggregates_to_use: Vec<String> = aggregates
+        .iter()
+        .take(config.num_windows)
+        .map(|agg| agg.replace("{}", window_name))
+        .collect();
+    
+    select_clauses.extend(aggregates_to_use);
+    
+    format!(
+        "SELECT {} FROM datagen_source WINDOW {} AS (PARTITION BY key ORDER BY event_time {})",
+        select_clauses.join(", "),
+        window_name,
+        window_def
+    )
+}
+
+fn update_window_configs_in_graph(
+    graph: &mut crate::api::logical_graph::LogicalGraph,
+    config: &WindowBenchmarkConfig,
+) -> Result<()> {
+    use crate::runtime::operators::operator::OperatorConfig;
+    
+    // Find all window operator nodes
+    let window_nodes: Vec<NodeIndex> = graph
+        .get_nodes()
+        .filter(|node| matches!(node.operator_config, OperatorConfig::WindowConfig(_)))
+        .map(|node| graph.get_node_index(&node.operator_id).unwrap())
+        .collect();
+    
+    for node_idx in window_nodes {
+        if let Some(node) = graph.get_node_by_index_mut(node_idx) {
+            if let OperatorConfig::WindowConfig(ref mut window_config) = node.operator_config {
+                // Update window config parameters
+                window_config.update_mode = config.update_mode.clone();
+                window_config.execution_mode = config.execution_mode.clone();
+                window_config.parallelize = config.parallelize;
+                window_config.lateness = config.lateness;
+                
+                // Set tiling configs if provided
+                if let Some(ref tiling_configs) = config.tiling_configs {
+                    let num_window_exprs = window_config.window_exec.window_expr().len();
+                    // Use provided tiling configs, padding with None if needed
+                    let mut configs = tiling_configs.clone();
+                    while configs.len() < num_window_exprs {
+                        configs.push(None);
+                    }
+                    window_config.tiling_configs = configs.into_iter().take(num_window_exprs).collect();
+                } else {
+                    // Clear tiling configs
+                    let num_window_exprs = window_config.window_exec.window_expr().len();
+                    window_config.tiling_configs = vec![None; num_window_exprs];
+                }
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<BenchmarkMetrics> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Create schema for datagen
@@ -35,7 +221,7 @@ pub async fn run_window_benchmark(
     let fields = HashMap::from([
         ("event_time".to_string(), FieldGenerator::ProcessingTimestamp),
         ("key".to_string(), FieldGenerator::Key { 
-            num_unique: num_keys 
+            num_unique: config.num_keys 
         }),
         ("value".to_string(), FieldGenerator::Increment { 
             start: ScalarValue::Int64(Some(1)), 
@@ -45,47 +231,186 @@ pub async fn run_window_benchmark(
 
     let datagen_config = DatagenSourceConfig::new(
         schema.clone(),
-        rate,
-        total_records,
-        None,
-        batch_size,
+        config.rate,
+        config.total_records,
+        config.run_for_s,
+        config.batch_size,
         fields
     );
 
-    // Create streaming context with datagen source and tumbling window
-    let context = PipelineContextBuilder::new()
-        .with_parallelism(parallelism)
+    // Build SQL query based on config
+    let sql = build_sql_query(&config);
+
+    // Create pipeline context builder
+    let mut context_builder = PipelineContextBuilder::new()
+        .with_parallelism(config.parallelism)
         .with_source(
             "datagen_source".to_string(), 
             SourceConfig::DatagenSourceConfig(datagen_config), 
             schema
         )
         .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
-        .sql("
-            SELECT 
-                event_time, 
-                key, 
-                value, 
-                SUM(value) OVER w as sum_value
-            FROM datagen_source
-            WINDOW w AS (
-                PARTITION BY key 
-                ORDER BY event_time 
-                RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW
-            )
-        ")
-        .with_executor(Box::new(LocalExecutor::new()))
-        .build();
+        .sql(&sql)
+        .with_executor(Box::new(LocalExecutor::new()));
+    
+    // Set execution mode if needed
+    if config.execution_mode == WindowExecutionMode::Request {
+        context_builder = context_builder.with_execution_mode(ExecutionMode::Request);
+    }
+    
+    let mut context = context_builder.build();
+    
+    // Get logical graph and update window configs
+    if let Some(ref mut logical_graph) = context.get_logical_graph_mut() {
+        update_window_configs_in_graph(logical_graph, &config)?;
+    }
 
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();
     
-    let start_time = Instant::now();
+    let benchmark_start = Instant::now();
+    let benchmark_metrics = Arc::new(Mutex::new(BenchmarkMetrics::new()));
+    let benchmark_metrics_clone = benchmark_metrics.clone();
     
-    // Execute the pipeline job
-    context.execute().await.unwrap();
+    let (state_updates_sender, mut state_updates_receiver) = mpsc::channel::<PipelineState>(100);
+    let running = Arc::new(AtomicBool::new(true));
+    let running_clone = running.clone();
+    let throughput_window_seconds_clone = config.throughput_window_seconds;
     
-    let execution_time = start_time.elapsed();
+    // Calculate timeout duration
+    let timeout_duration = if let Some(run_for_s) = config.run_for_s {
+        // Add a small buffer (10%) to account for overhead
+        Duration::from_secs_f64(run_for_s * 1.1)
+    } else if let Some(total_records) = config.total_records {
+        // Estimate timeout based on records and rate, or use a default
+        if let Some(rate) = config.rate {
+            Duration::from_secs_f64((total_records as f64 / rate as f64) * 1.5)
+        } else {
+            Duration::from_secs(300) // Default 5 minutes
+        }
+    } else {
+        Duration::from_secs(300) // Default 5 minutes
+    };
+    
+    // Start metrics polling task
+    let state_updates_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(config.polling_interval_ms));
+        let mut last_print_timestamp = Instant::now();
+        
+        while running_clone.load(Ordering::SeqCst) {
+            interval.tick().await;
+            
+            // Try to receive state updates with a short timeout
+            loop {
+                match tokio::time::timeout(Duration::from_millis(10), state_updates_receiver.recv()).await {
+                    Ok(Some(pipeline_state)) => {
+                        let timestamp = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_secs();
+                        
+                        {
+                            let mut metrics_guard = benchmark_metrics_clone.lock().await;
+                            // Add to history
+                            metrics_guard.add_sample(timestamp, pipeline_state.clone());
+                        }
+
+                        let now = Instant::now();
+                        if now.duration_since(last_print_timestamp).as_secs() >= 1 {
+                            println!("[{}] Worker State", timestamp);
+                            
+                            // Find window operator IDs
+                            let window_operator_ids: Vec<String> = pipeline_state.worker_states
+                                .values()
+                                .flat_map(|ws| {
+                                    ws.worker_metrics.as_ref()
+                                        .map(|wm| {
+                                            wm.operator_metrics.keys()
+                                                .filter(|id| id.starts_with("Window_"))
+                                                .cloned()
+                                                .collect::<Vec<_>>()
+                                        })
+                                        .unwrap_or_default()
+                                })
+                                .collect();
+                            
+                            // Get history from metrics for throughput calculation
+                            let history = {
+                                let metrics_guard = benchmark_metrics_clone.lock().await;
+                                metrics_guard.history.clone()
+                            };
+                            
+                            print_pipeline_state(
+                                &pipeline_state, 
+                                if window_operator_ids.is_empty() { None } else { Some(&window_operator_ids) }, 
+                                false, 
+                                false,
+                                Some(&history),
+                                throughput_window_seconds_clone,
+                            );
+                            last_print_timestamp = now;
+                        }
+                    }
+                    Ok(None) => {
+                        // Channel closed, execution finished
+                        break;
+                    }
+                    Err(_) => {
+                        // Timeout - no more updates available right now, continue polling
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    
+    // Spawn execution task
+    let execution_task = tokio::spawn(async move {
+        context.execute_with_state_updates(Some(state_updates_sender)).await
+    });
+    
+    // Race between execution completion and timeout
+    let timed_out = tokio::select! {
+        result = execution_task => {
+            // Execution finished
+            match result {
+                Ok(Ok(_)) => {
+                    // Execution completed successfully
+                    false
+                }
+                Ok(Err(e)) => {
+                    // Execution failed
+                    eprintln!("[ERROR] Execution failed: {}", e);
+                    false
+                }
+                Err(e) => {
+                    // Task panicked
+                    eprintln!("[ERROR] Execution task panicked: {:?}", e);
+                    false
+                }
+            }
+        }
+        _ = tokio::time::sleep(timeout_duration) => {
+            // Timeout reached
+            println!("[TIMEOUT] Benchmark execution timed out after {:?}", timeout_duration);
+            running.store(false, Ordering::Relaxed);
+            true
+        }
+    };
+    
+    // Wait a bit for metrics task to collect any remaining updates
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    running.store(false, Ordering::Relaxed);
+    
+    // Wait for metrics task to finish (with a timeout to avoid hanging)
+    let _ = tokio::time::timeout(Duration::from_secs(2), state_updates_task).await;
+    
+    let execution_time = benchmark_start.elapsed();
+    
+    // Log if we timed out
+    if timed_out {
+        println!("[WARNING] Execution was interrupted due to timeout. Collected metrics may be incomplete.");
+    }
     
     // Get results
     let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
@@ -93,91 +418,116 @@ pub async fn run_window_benchmark(
     storage_server.stop().await;
 
     // Process results
-    let mut key_sums = HashMap::new();
     let mut num_records_produced = 0;
     
     for (batch_idx, message) in result_vec.iter().enumerate() {
         let batch = message.record_batch();
-        // println!("produced batch: {:?}", batch);
         num_records_produced += batch.num_rows();
-        
-        if batch.num_columns() != 4 {
-            println!("Warning: Batch {} has {} columns instead of 4", batch_idx, batch.num_columns());
-            continue;
-        }
-        
-        // Columns: event_time, key, value, sum_value
-        let key_column = batch.column(1).as_any().downcast_ref::<arrow::array::StringArray>().unwrap();
-        let sum_column = batch.column(3).as_any().downcast_ref::<Int64Array>().unwrap();
-        
-        for i in 0..batch.num_rows() {
-            let key = key_column.value(i).to_string();
-            let sum = sum_column.value(i);
-            
-            // For window functions, we want the final sum value per key (not accumulating)
-            key_sums.insert(key, sum);
-        }
-        
         println!("Batch {}: {} rows", batch_idx, batch.num_rows());
     }
 
-    Ok((key_sums, num_records_produced, execution_time))
+    let mut benchmark_metrics = (*benchmark_metrics.lock().await).clone();
+    benchmark_metrics.execution_time = execution_time;
+    benchmark_metrics.records_produced = num_records_produced;
+
+    Ok(benchmark_metrics)
 }
 
-// #[tokio::test]
-async fn test_window_benchmark() -> Result<()> {
-    let parallelism = 4;
-    let num_keys = 4;
-    let total_records = Some(20000);
-    let batch_size = 1000;
-    // let rate = Some(10.0);
-    let rate = None;
-
-    let (key_sums, num_records_produced, execution_time) = run_window_benchmark(
-        parallelism,
-        num_keys,
-        total_records,
-        batch_size,
-        rate
-    ).await?;
-
+pub fn print_benchmark_results(config: &WindowBenchmarkConfig, metrics: &BenchmarkMetrics) {
     println!("\n=== Window Operator Benchmark Results ===");
     println!("Configuration:");
-    println!("  Parallelism: {}", parallelism);
-    println!("  Number of Keys: {}", num_keys);
-    println!("  Total Records: {:?}", total_records);
-    println!("  Batch Size: {}", batch_size);
-    println!("  Rate: {:?} events/sec", rate);
+    println!("  Parallelism: {}", config.parallelism);
+    println!("  Number of Keys: {}", config.num_keys);
+    println!("  Total Records: {:?}", config.total_records);
+    println!("  Batch Size: {}", config.batch_size);
+    println!("  Rate: {:?} events/sec", config.rate);
+    println!("  Run Duration: {:?}s", config.run_for_s);
+    println!("  Window Type: {:?}", config.window_type);
+    println!("  Number of Windows: {}", config.num_windows);
+    println!("  Aggregation Type: {:?}", config.aggregation_type);
+    println!("  Update Mode: {:?}", config.update_mode);
+    println!("  Execution Mode: {:?}", config.execution_mode);
+    println!("  Parallelize: {}", config.parallelize);
+    println!("  Tiling Configs: {:?}", config.tiling_configs);
+    println!("  Lateness: {:?}", config.lateness);
 
     println!("\nResults:");
-    println!("  Records Produced: {}", num_records_produced);
-    println!("  Execution Time: {:?}", execution_time);
-    println!("  Average Rate: {}", num_records_produced as f64 / execution_time.as_secs_f64());
-    println!("  Unique Keys Processed: {}", key_sums.len());
-    println!("  Expected Keys: {}", num_keys);
+    println!("  Records Produced: {}", metrics.records_produced);
+    println!("  Execution Time: {:?}", metrics.execution_time);
+    if metrics.execution_time.as_secs_f64() > 0.0 {
+        println!("  Average Rate: {:.2} records/sec", metrics.records_produced as f64 / metrics.execution_time.as_secs_f64());
+    }
+    println!("  Sample Count: {}", metrics.history.samples.len());
     
-    println!("\nKey Sums:");
-    for (key, sum) in &key_sums {
-        println!("  {}: {}", key, sum);
+    // Print final aggregated statistics
+    let final_stats = metrics.history.final_stats();
+    
+    if !final_stats.throughput_per_task.is_empty() {
+        println!("\nThroughput Statistics (per task, aggregated over all history):");
+        for (task_id, task_stats) in &final_stats.throughput_per_task {
+            println!("  Task: {}", task_id);
+            println!("    Messages Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} msg/s", 
+                task_stats.messages_sent.avg, task_stats.messages_sent.min, 
+                task_stats.messages_sent.max, task_stats.messages_sent.stddev);
+            println!("    Messages Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} msg/s", 
+                task_stats.messages_recv.avg, task_stats.messages_recv.min, 
+                task_stats.messages_recv.max, task_stats.messages_recv.stddev);
+            println!("    Records Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} rec/s", 
+                task_stats.records_sent.avg, task_stats.records_sent.min, 
+                task_stats.records_sent.max, task_stats.records_sent.stddev);
+            println!("    Records Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} rec/s", 
+                task_stats.records_recv.avg, task_stats.records_recv.min, 
+                task_stats.records_recv.max, task_stats.records_recv.stddev);
+            println!("    Bytes Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} B/s", 
+                task_stats.bytes_sent.avg, task_stats.bytes_sent.min, 
+                task_stats.bytes_sent.max, task_stats.bytes_sent.stddev);
+            println!("    Bytes Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} B/s", 
+                task_stats.bytes_recv.avg, task_stats.bytes_recv.min, 
+                task_stats.bytes_recv.max, task_stats.bytes_recv.stddev);
+        }
+    }
+    
+    if !final_stats.latency_per_task.is_empty() {
+        println!("\nLatency Statistics (per task, merged histogram over all history):");
+        for (task_id, latency_stats) in &final_stats.latency_per_task {
+            println!("  Task: {}", task_id);
+            println!("    Avg: {:.2} ms", latency_stats.avg);
+            println!("    P50: {:.2} ms", latency_stats.p50);
+            println!("    P95: {:.2} ms", latency_stats.p95);
+            println!("    P99: {:.2} ms", latency_stats.p99);
+        }
     }
     
     println!("==========================================\n");
+}
 
-    // Basic assertions
-    assert_eq!(key_sums.len(), num_keys, 
-        "Should have exactly {} unique keys", num_keys);
-    
-    // Verify all sums are positive
-    for (key, sum) in &key_sums {
-        assert!(*sum > 0, "Sum for key {} should be positive: {}", key, sum);
-    }
+// #[tokio::test]
+async fn test_window_benchmark_basic() -> Result<()> {
+    let config = WindowBenchmarkConfig {
+        parallelism: 4,
+        num_keys: 40,
+        total_records: Some(200000),
+        batch_size: 1000,
+        rate: None,
+        run_for_s: None,
+        // window_type: WindowType::Range { milliseconds: 1000 },
+        window_type: WindowType::Rows { preceding: 10000 },
+        num_windows: 1,
+        aggregation_type: AggregationType::Retractable,
+        update_mode: UpdateMode::PerMessage,
+        execution_mode: WindowExecutionMode::Regular,
+        parallelize: false,
+        tiling_configs: None,
+        lateness: None,
+        polling_interval_ms: 100,
+        throughput_window_seconds: Some(5),
+    };
 
-    // For window functions, each record contributes to multiple window calculations
-    // We can't easily verify the exact total sum since it depends on the window overlap
-    // Instead, verify that we have reasonable sums for each key
-    let total_sum: i64 = key_sums.values().sum();
-    assert!(total_sum > 0, "Total sum should be positive: {}", total_sum);
+    let metrics = run_window_benchmark(config.clone()).await?;
+    print_benchmark_results(&config, &metrics);
+
+    assert_eq!(metrics.records_produced, config.total_records.unwrap());
+    assert!(metrics.execution_time.as_secs_f64() > 0.0);
 
     Ok(())
 }
-

@@ -220,7 +220,7 @@ pub async fn run_word_count_benchmark(
                 let now = Instant::now();
                 if now.duration_since(last_print_timestamp).as_secs() >= 1 {
                     println!("[{}] Worker State", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
-                    print_pipeline_state(&pipeline_state, None, false, false);
+                    print_pipeline_state(&pipeline_state, None, false, false, None, None);
                     last_print_timestamp = now;
                 }
             }

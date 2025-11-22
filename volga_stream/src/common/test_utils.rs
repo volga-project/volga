@@ -12,6 +12,7 @@ use async_trait::async_trait;
 use crate::common::Message;
 use crate::runtime::functions::map::MapFunctionTrait;
 use crate::runtime::master::PipelineState;
+use crate::runtime::metrics::{PipelineStateHistory, ThroughputRates};
 
 pub fn create_test_string_batch(data: Vec<String>) -> RecordBatch {
     let schema = Schema::new(vec![
@@ -41,13 +42,27 @@ pub fn gen_unique_grpc_port() -> u16 {
     }
 }
 
+
 pub fn print_pipeline_state(
     pipeline_state: &PipelineState,
     operator_ids: Option<&[String]>,
     tasks_only: bool,
     operators_only: bool,
+    history: Option<&PipelineStateHistory>,
+    throughput_window_seconds: Option<u64>,
 ) {
     println!("\n=== Pipeline State ===");
+    
+    // Calculate throughput rates if history is provided
+    let throughput_rates: Option<HashMap<String, ThroughputRates>> = if let (Some(hist), Some(window_secs)) = (history, throughput_window_seconds) {
+        if !hist.samples.is_empty() {
+            Some(hist.calculate_throughput_rates(window_secs))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     
     // Helper function to check if an operator_id should be included
     let should_include_operator = |operator_id: &str| -> bool {
@@ -83,61 +98,75 @@ pub fn print_pipeline_state(
         
         if let Some(worker_metrics) = &worker_state.worker_metrics {
             if !tasks_only {
-                println!("\nOperator Metrics:");
-                let mut has_operator_metrics = false;
-                for (operator_id, operator_metrics) in &worker_metrics.operator_metrics {
-                    if should_include_operator(operator_id) {
-                        println!("  Operator: {}", operator_id);
-                        println!("    Throughput:");
-                        println!("      Messages Sent: {}", operator_metrics.throughput_metrics.messages_sent);
-                        println!("      Messages Recv: {}", operator_metrics.throughput_metrics.messages_recv);
-                        println!("      Records Sent: {}", operator_metrics.throughput_metrics.records_sent);
-                        println!("      Records Recv: {}", operator_metrics.throughput_metrics.records_recv);
-                        println!("      Bytes Sent: {}", operator_metrics.throughput_metrics.bytes_sent);
-                        println!("      Bytes Recv: {}", operator_metrics.throughput_metrics.bytes_recv);
-                        println!("    Latency:");
-                        println!("      P99: {:.2}ms", operator_metrics.latency_metrics.p99);
-                        println!("      P95: {:.2}ms", operator_metrics.latency_metrics.p95);
-                        println!("      P50: {:.2}ms", operator_metrics.latency_metrics.p50);
-                        println!("      Avg: {:.2}ms", operator_metrics.latency_metrics.avg);
-                        has_operator_metrics = true;
-                    }
-                }
-                if !has_operator_metrics && operator_ids.is_some() {
-                    println!("  (no matching operators)");
+            println!("\nOperator Metrics:");
+            let mut has_operator_metrics = false;
+            for (operator_id, operator_metrics) in &worker_metrics.operator_metrics {
+                if should_include_operator(operator_id) {
+                    println!("  Operator: {}", operator_id);
+                    println!("    Throughput:");
+                    println!("      Messages Sent: {} (total)", operator_metrics.throughput_metrics.messages_sent);
+                    println!("      Messages Recv: {} (total)", operator_metrics.throughput_metrics.messages_recv);
+                    println!("      Records Sent: {} (total)", operator_metrics.throughput_metrics.records_sent);
+                    println!("      Records Recv: {} (total)", operator_metrics.throughput_metrics.records_recv);
+                    println!("      Bytes Sent: {} (total)", operator_metrics.throughput_metrics.bytes_sent);
+                    println!("      Bytes Recv: {} (total)", operator_metrics.throughput_metrics.bytes_recv);
+                    println!("    Latency:");
+                    println!("      P99: {:.2}ms", operator_metrics.latency_metrics.p99);
+                    println!("      P95: {:.2}ms", operator_metrics.latency_metrics.p95);
+                    println!("      P50: {:.2}ms", operator_metrics.latency_metrics.p50);
+                    println!("      Avg: {:.2}ms", operator_metrics.latency_metrics.avg);
+                    has_operator_metrics = true;
                 }
             }
-            
-            if !operators_only {
-                println!("\nTask Metrics:");
-                let mut has_task_metrics = false;
-                for (vertex_id, task_metrics) in &worker_metrics.tasks_metrics {
-                    if should_include_task(vertex_id) {
-                        println!("  Task: {}", vertex_id);
-                        println!("    Throughput:");
-                        println!("      Messages Sent: {}", task_metrics.throughput_stast.messages_sent);
-                        println!("      Messages Recv: {}", task_metrics.throughput_stast.messages_recv);
-                        println!("      Records Sent: {}", task_metrics.throughput_stast.records_sent);
-                        println!("      Records Recv: {}", task_metrics.throughput_stast.records_recv);
-                        println!("      Bytes Sent: {}", task_metrics.throughput_stast.bytes_sent);
-                        println!("      Bytes Recv: {}", task_metrics.throughput_stast.bytes_recv);
-                        println!("    Latency:");
-                        println!("      P99: {:.2}ms", task_metrics.latency_stats.p99);
-                        println!("      P95: {:.2}ms", task_metrics.latency_stats.p95);
-                        println!("      P50: {:.2}ms", task_metrics.latency_stats.p50);
-                        println!("      Avg: {:.2}ms", task_metrics.latency_stats.avg);
-                        if !task_metrics.backpressure_per_peer.is_empty() {
-                            println!("    Backpressure per Peer:");
-                            for (peer_id, ratio) in &task_metrics.backpressure_per_peer {
-                                println!("      {}: {:.2}", peer_id, ratio);
-                            }
+            if !has_operator_metrics && operator_ids.is_some() {
+                println!("  (no matching operators)");
+            }
+        }
+        
+        if !operators_only {
+            println!("\nTask Metrics:");
+            let mut has_task_metrics = false;
+            for (vertex_id, task_metrics) in &worker_metrics.tasks_metrics {
+                if should_include_task(vertex_id) {
+                    println!("  Task: {}", vertex_id);
+                    println!("    Throughput:");
+                    println!("      Messages Sent: {} (total)", task_metrics.throughput_stast.messages_sent);
+                    println!("      Messages Recv: {} (total)", task_metrics.throughput_stast.messages_recv);
+                    println!("      Records Sent: {} (total)", task_metrics.throughput_stast.records_sent);
+                    println!("      Records Recv: {} (total)", task_metrics.throughput_stast.records_recv);
+                    println!("      Bytes Sent: {} (total)", task_metrics.throughput_stast.bytes_sent);
+                    println!("      Bytes Recv: {} (total)", task_metrics.throughput_stast.bytes_recv);
+                    
+                    // Print throughput rates if available
+                    if let Some(ref rates) = throughput_rates {
+                        if let Some(rate) = rates.get(vertex_id) {
+                            println!("    Throughput Rates (avg over {}s window):", throughput_window_seconds.unwrap_or(0));
+                            println!("      Messages Sent: {:.2}/s", rate.messages_sent_per_sec);
+                            println!("      Messages Recv: {:.2}/s", rate.messages_recv_per_sec);
+                            println!("      Records Sent: {:.2}/s", rate.records_sent_per_sec);
+                            println!("      Records Recv: {:.2}/s", rate.records_recv_per_sec);
+                            println!("      Bytes Sent: {:.2}/s", rate.bytes_sent_per_sec);
+                            println!("      Bytes Recv: {:.2}/s", rate.bytes_recv_per_sec);
                         }
-                        has_task_metrics = true;
                     }
+                    
+                    println!("    Latency:");
+                    println!("      P99: {:.2}ms", task_metrics.latency_stats.p99);
+                    println!("      P95: {:.2}ms", task_metrics.latency_stats.p95);
+                    println!("      P50: {:.2}ms", task_metrics.latency_stats.p50);
+                    println!("      Avg: {:.2}ms", task_metrics.latency_stats.avg);
+                    if !task_metrics.backpressure_per_peer.is_empty() {
+                        println!("    Backpressure per Peer:");
+                        for (peer_id, ratio) in &task_metrics.backpressure_per_peer {
+                            println!("      {}: {:.2}", peer_id, ratio);
+                        }
+                    }
+                    has_task_metrics = true;
                 }
-                if !has_task_metrics && operator_ids.is_some() {
-                    println!("  (no matching tasks)");
-                }
+            }
+            if !has_task_metrics && operator_ids.is_some() {
+                println!("  (no matching tasks)");
+            }
             }
         } else {
             println!("  No metrics available");
