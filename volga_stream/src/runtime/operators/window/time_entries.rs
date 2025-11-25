@@ -9,7 +9,7 @@ use indexmap::IndexSet;
 use crate::runtime::operators::window::window_operator_state::WindowState;
 use crate::runtime::operators::window::tiles::Tile;
 use crate::runtime::operators::window::Tiles;
-use crate::storage::batch_store::{BatchId, RowIdx, Timestamp, extract_timestamp};
+use crate::storage::batch_store::{BatchId, RowIdx, Timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TimeIdx {
@@ -41,7 +41,7 @@ impl Ord for TimeIdx {
 #[derive(Debug)]
 pub struct TimeEntries {
     pub entries: SkipSet<TimeIdx>,
-    pub batch_ids: SkipMap<Timestamp, Vec<BatchId>>,
+    pub batch_ids: SkipMap<Timestamp, Arc<Vec<BatchId>>>,
 }
 
 impl TimeEntries {
@@ -66,36 +66,74 @@ impl TimeEntries {
         batch: &RecordBatch,
         ts_column_index: usize
     ) -> Vec<TimeIdx> {
-        let mut time_idxs = Vec::new();
-        let mut max_timestamp = i64::MIN;
+        use arrow::array::{TimestampMillisecondArray, Array};
+        use arrow::compute::kernels::aggregate::max;
         
-        // TODO can we use arrow::compute::* kernels here for SIMD?
-        for row_idx in 0..batch.num_rows() {
-            let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
-            max_timestamp = max_timestamp.max(timestamp);
-            
-            // Search for lower bound with (timestamp, usize::MAX)
-            let search_key = TimeIdx {
-                timestamp,
-                pos_idx: usize::MAX,
-                batch_id: BatchId::nil(), // dummy values for search
-                row_idx: 0,
-            };
-            
-            // Find the position index to use
-            let pos_idx = if let Some(existing_entry) = self.entries.upper_bound(std::ops::Bound::Included(&search_key)) {
-                if existing_entry.timestamp == timestamp {
-                    // Same timestamp exists, increment position
-                    existing_entry.pos_idx + 1
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return Vec::new();
+        }
+        
+        let ts_column = batch.column(ts_column_index);
+        let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
+            .expect("Timestamp column should be TimestampMillisecondArray");
+        
+        // Extract all timestamps at once (vectorized)
+        let timestamps: Vec<i64> = (0..num_rows)
+            .map(|i| {
+                if ts_array.is_null(i) {
+                    i64::MIN // Handle nulls - will be filtered or handled separately if needed
                 } else {
-                    // Different timestamp
-                    0
+                    ts_array.value(i)
                 }
+            })
+            .collect();
+        
+        // Find max timestamp using Arrow kernel
+        let max_timestamp = max(ts_array)
+            .and_then(|sv| i64::try_from(sv).ok())
+            .unwrap_or(i64::MIN);
+        
+        // Track the last pos_idx used for each timestamp to optimize lookups
+        // This allows us to avoid SkipSet lookup for consecutive rows with same timestamp
+        use std::collections::HashMap;
+        let mut timestamp_to_last_pos: HashMap<i64, usize> = HashMap::new();
+        
+        let mut time_idxs = Vec::with_capacity(num_rows);
+        
+        // Process rows in order to maintain correct pos_idx assignment
+        for row_idx in 0..num_rows {
+            let timestamp = timestamps[row_idx];
+            
+            // Get or compute the pos_idx for this timestamp
+            let pos_idx = if let Some(&last_pos) = timestamp_to_last_pos.get(&timestamp) {
+                // We've seen this timestamp in this batch, increment
+                let next_pos = last_pos + 1;
+                timestamp_to_last_pos.insert(timestamp, next_pos);
+                next_pos
             } else {
-                // No existing entries
-                0
+                // First time seeing this timestamp in this batch, find max in SkipSet
+                let search_key = TimeIdx {
+                    timestamp,
+                    pos_idx: usize::MAX,
+                    batch_id: BatchId::nil(),
+                    row_idx: 0,
+                };
+                
+                let base_pos_idx = if let Some(existing_entry) = self.entries.upper_bound(std::ops::Bound::Included(&search_key)) {
+                    if existing_entry.timestamp == timestamp {
+                        existing_entry.pos_idx + 1
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+                
+                timestamp_to_last_pos.insert(timestamp, base_pos_idx);
+                base_pos_idx
             };
-
+            
             let time_idx = TimeIdx {
                 timestamp,
                 pos_idx,
@@ -108,13 +146,13 @@ impl TimeEntries {
         }
         
         // Insert batch mapping once with max timestamp
+        // Use Arc to avoid cloning the Vec - only clone the Arc reference
         if let Some(existing_batches) = self.batch_ids.get(&max_timestamp) {
-            // TODO avoid cloning, it's expensive
-            let mut batches = existing_batches.value().clone();
+            let mut batches: Vec<BatchId> = existing_batches.value().as_ref().clone();
             batches.push(batch_id);
-            self.batch_ids.insert(max_timestamp, batches);
+            self.batch_ids.insert(max_timestamp, Arc::new(batches));
         } else {
-            self.batch_ids.insert(max_timestamp, vec![batch_id]);
+            self.batch_ids.insert(max_timestamp, Arc::new(vec![batch_id]));
         }
         
         time_idxs
@@ -395,7 +433,7 @@ impl TimeEntries {
             .range(..cutoff_timestamp)
             .map(|entry| {
                 // Add all batch IDs for this timestamp
-                for batch_id in entry.value() {
+                for batch_id in entry.value().iter() {
                     batches_to_delete.insert(*batch_id);
                 }
                 *entry.key()

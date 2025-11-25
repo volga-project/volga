@@ -24,7 +24,7 @@ use crate::runtime::operators::window::window_operator_state::{AccumulatorState,
 use crate::runtime::operators::window::time_entries::TimeIdx;
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::storage::batch_store::{extract_timestamp, BatchId, BatchStore};
+use crate::storage::batch_store::{BatchId, BatchStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -183,7 +183,6 @@ impl WindowOperator {
             // prune if lateness is configured
             self.state.prune(key, self.lateness.unwrap(), &self.window_configs).await;
         }
-        // self.state.insert_windows_state(key, windows_state).await;
         result
     }
 
@@ -511,21 +510,30 @@ impl OperatorTrait for WindowOperator {
     }
 }
 
-// TODO use gt_scalar, lt_scalar, and from arrow::compute for time-based filtering  for SIMD
 pub fn drop_too_late_entries(record_batch: &RecordBatch, ts_column_index: usize, lateness_ms: i64, last_entry: TimeIdx) -> RecordBatch {
-    let mut keep_indices = Vec::new();
-    for row_idx in 0..record_batch.num_rows() {
-        let timestamp = extract_timestamp(record_batch.column(ts_column_index), row_idx);
-        if !is_ts_too_late(timestamp, last_entry, lateness_ms) {
-            keep_indices.push(row_idx as u32);
-        }
-    }
+    use arrow::compute::{filter_record_batch};
+    use arrow::compute::kernels::cmp::gt_eq;
+    use arrow::array::{TimestampMillisecondArray, Scalar};
     
-    if keep_indices.len() == record_batch.num_rows() {
+    let ts_column = record_batch.column(ts_column_index);
+    
+    // Calculate cutoff timestamp: last_entry.timestamp - lateness_ms
+    let cutoff_timestamp = last_entry.timestamp - lateness_ms;
+    
+    // Create scalar array with the cutoff timestamp using the same data type as the timestamp column
+    let cutoff_array = TimestampMillisecondArray::from_value(cutoff_timestamp, 1);
+    let cutoff_scalar = Scalar::new(&cutoff_array);
+    
+    // Create boolean mask - keep rows where timestamp >= cutoff
+    let keep_mask = gt_eq(ts_column, &cutoff_scalar)
+        .expect("Should be able to compare with cutoff timestamp");
+    
+    // Check if all rows should be kept
+    if keep_mask.true_count() == record_batch.num_rows() {
         record_batch.clone()
     } else {
-        let indices = arrow::array::UInt32Array::from(keep_indices);
-        arrow::compute::take_record_batch(&record_batch, &indices)
+        // Filter the batch using the boolean mask
+        filter_record_batch(record_batch, &keep_mask)
             .expect("Should be able to filter record batch")
     }
 }
@@ -537,10 +545,6 @@ pub fn get_late_entries(entries: Vec<TimeIdx>, last_entry: TimeIdx) -> Option<Ve
     } else {
         None
     }
-}
-
-pub fn is_ts_too_late(timestamp: i64, last_entry: TimeIdx, lateness_ms: i64) -> bool {
-    timestamp < last_entry.timestamp - lateness_ms
 }
 
 pub fn is_entry_late(entry: TimeIdx, last_entry: TimeIdx) -> bool {

@@ -1,13 +1,13 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use arrow::array::{RecordBatch, UInt64Array};
+use arrow::array::RecordBatch;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::merge_accumulator_state;
 use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::storage::batch_store::{Timestamp, extract_timestamp};
+use crate::storage::batch_store::Timestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeGranularity {
@@ -121,74 +121,170 @@ impl Tiles {
         }
     }
 
-    // TODO can we use arrow::compute::* kernels here for SIMD?
     pub fn add_batch(&mut self, batch: &RecordBatch, ts_column_index: usize) {
-        // Extract timestamps
-        let mut entries = Vec::new();
+        use arrow::array::{TimestampMillisecondArray, Int64Array, Array};
         
-        for row_idx in 0..batch.num_rows() {
-            let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
-            entries.push((timestamp, row_idx));
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return;
         }
         
-        for (timestamp, row_idx) in entries {
-            self.add_entry(batch, row_idx, timestamp);
-        }
-    }
-
-    fn add_entry(&mut self, batch: &RecordBatch, row_idx: usize, timestamp: Timestamp) {
-        let granularities = self.config.granularities.clone();
+        let ts_column = batch.column(ts_column_index);
+        let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
+            .expect("Timestamp column should be TimestampMillisecondArray");
         
+        // Convert timestamp array to Int64Array for arithmetic operations
+        use arrow::compute::kernels::cast::cast;
+        use arrow::datatypes::DataType;
+        let ts_int64_array_owned = cast(ts_array, &DataType::Int64)
+            .expect("Should be able to cast TimestampMillisecondArray to Int64Array");
+        let ts_int64_array = ts_int64_array_owned.as_any().downcast_ref::<Int64Array>()
+            .expect("Cast result should be Int64Array");
+        
+        // Collect granularities first to avoid borrowing conflicts
+        let granularities: Vec<TimeGranularity> = self.config.granularities.iter().copied().collect();
+        
+        // Process each granularity separately
         for granularity in granularities {
-            self.add_entry_to_granularity(batch, row_idx, timestamp, granularity);
+            Self::add_batch_for_granularity(
+                &mut self.tiles,
+                &self.window_expr,
+                batch,
+                ts_int64_array,
+                granularity,
+                num_rows,
+            );
         }
     }
-
-    fn add_entry_to_granularity(
-        &mut self, 
-        batch: &RecordBatch, 
-        row_idx: usize, 
-        timestamp: Timestamp, 
-        granularity: TimeGranularity
+    
+    fn add_batch_for_granularity(
+        tiles: &mut BTreeMap<TimeGranularity, BTreeMap<Timestamp, Tile>>,
+        window_expr: &Arc<dyn WindowExpr>,
+        batch: &RecordBatch,
+        ts_int64_array: &arrow::array::Int64Array,
+        granularity: TimeGranularity,
+        num_rows: usize,
     ) {
-        let tile_start = granularity.tile_start(timestamp);
+        use arrow::array::{Int64Array, Array};
+        use arrow::compute::kernels::numeric::{div, mul_wrapping};
+        use arrow::compute::kernels::sort::{lexsort_to_indices, SortColumn, SortOptions};
+        use arrow::compute::kernels::partition::partition;
+        use arrow::compute::take;
         
-        let tiles_for_granularity = self.tiles.get_mut(&granularity)
+        let granularity_ms = granularity.to_millis();
+        
+        // Create a constant array filled with granularity_ms for vectorized operations
+        let granularity_array = Int64Array::from_value(granularity_ms, num_rows);
+        
+        // Compute tile_start for all rows vectorized: tile_start = (timestamp / granularity_ms) * granularity_ms
+        let divided = div(ts_int64_array, &granularity_array)
+            .expect("Should be able to divide timestamps by granularity");
+        let divided_int64 = divided.as_any().downcast_ref::<Int64Array>()
+            .expect("Division result should be Int64Array");
+        
+        let tile_starts = mul_wrapping(divided_int64, &granularity_array)
+            .expect("Should be able to multiply tile quotients by granularity");
+        let tile_start_array = tile_starts.as_any().downcast_ref::<Int64Array>()
+            .expect("Tile start array should be Int64Array");
+        
+        // Create original index array for stable sorting (preserve order within same tile)
+        let original_indices = Int64Array::from_iter((0..num_rows).map(|i| i as i64));
+        
+        // Sort by (tile_start, original_index) to group consecutive rows with same tile_start
+        let sort_columns = vec![
+            SortColumn {
+                values: Arc::new(tile_start_array.clone()) as Arc<dyn Array>,
+                options: Some(SortOptions {
+                    nulls_first: false,
+                    descending: false,
+                }),
+            },
+            SortColumn {
+                values: Arc::new(original_indices) as Arc<dyn Array>,
+                options: Some(SortOptions {
+                    nulls_first: false,
+                    descending: false,
+                }),
+            },
+        ];
+        
+        let sort_indices = lexsort_to_indices(&sort_columns, None)
+            .expect("Should be able to sort by tile_start and original index");
+        
+        // Apply sort to all columns
+        let mut sorted_columns = Vec::new();
+        for i in 0..batch.num_columns() {
+            let sorted_array = take(batch.column(i), &sort_indices, None)
+                .expect("Should be able to take sorted columns");
+            sorted_columns.push(sorted_array);
+        }
+        
+        let sorted_batch = RecordBatch::try_new(batch.schema(), sorted_columns)
+            .expect("Should be able to create sorted batch");
+        
+        // Apply sort to tile_start array
+        let tile_start_array_ref: Arc<dyn Array> = Arc::new(tile_start_array.clone());
+        let sorted_tile_start_array = take(tile_start_array_ref.as_ref(), &sort_indices, None)
+            .expect("Should be able to take sorted tile_start array");
+        let sorted_tile_start_array_ref: Arc<dyn Array> = Arc::new(sorted_tile_start_array.clone());
+        let sorted_tile_starts = sorted_tile_start_array.as_any().downcast_ref::<Int64Array>()
+            .expect("Sorted tile_start array should be Int64Array");
+        
+        // Group consecutive rows with the same tile_start using partition
+        let partition_ranges = partition(&[sorted_tile_start_array_ref])
+            .expect("Should be able to partition by tile_start");
+        
+        let tiles_for_granularity = tiles.get_mut(&granularity)
             .expect(&format!("No tiles found for granularity {:?}", granularity));
         
-        let tile = tiles_for_granularity.entry(tile_start)
-            .or_insert_with(|| Tile::new(tile_start, granularity));
-        
-        Self::update_tile_with_entry(&self.window_expr, tile, batch, row_idx);
+        // Process each tile range
+        for range in partition_ranges.ranges() {
+            let tile_start = sorted_tile_starts.value(range.start) as Timestamp;
+            
+            // Extract consecutive rows using slice (more efficient than take_record_batch)
+            let tile_batch = sorted_batch.slice(range.start, range.end - range.start);
+            
+            let tile = tiles_for_granularity.entry(tile_start)
+                .or_insert_with(|| Tile::new(tile_start, granularity));
+            
+            // Update tile with consecutive rows
+            Self::update_tile_with_batch(window_expr, tile, &tile_batch);
+        }
     }
 
-    fn update_tile_with_entry(window_expr: &Arc<dyn WindowExpr>, tile: &mut Tile, batch: &RecordBatch, row_idx: usize) {
-        
-        let indices = UInt64Array::from(vec![row_idx as u64]);
-        let entry_batch = arrow::compute::take_record_batch(batch, &indices)
-            .expect("Failed to extract entry row");
-        
-        // let mut accumulator = create_sliding_accumulator(window_expr, tile.accumulator_state.clone());
+    fn update_tile_with_batch(
+        window_expr: &Arc<dyn WindowExpr>, 
+        tile: &mut Tile, 
+        tile_batch: &RecordBatch,
+    ) {
+        if tile_batch.num_rows() == 0 {
+            return;
+        }
         
         let mut accumulator = match create_window_aggregator(&window_expr) {
             WindowAggregator::Accumulator(accumulator) => accumulator,
             WindowAggregator::Evaluator(_evaluator) => panic!("Evaluator is not supported for retractable accumulator"),
         };
 
+        // Load existing tile state if it exists
         if let Some(tile_state) = &tile.accumulator_state {
             merge_accumulator_state(accumulator.as_mut(), tile_state.as_ref());
         }
 
-        let args = window_expr.evaluate_args(&entry_batch)
+        // Evaluate args for all rows in the tile batch
+        let args = window_expr.evaluate_args(tile_batch)
             .expect("Failed to evaluate window args");
         
+        // Update accumulator with all rows at once
         accumulator.update_batch(&args)
             .expect("Failed to update accumulator");
         
+        // Save updated state
         tile.accumulator_state = Some(accumulator.state()
             .expect("Failed to get accumulator state"));
         
-        tile.entry_count += 1;
+        // Update entry count
+        tile.entry_count += tile_batch.num_rows() as u64;
     }
 
     pub fn get_tiles_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<Tile> {

@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
+use crate::runtime::operators::window::time_entries::TimeIdx;
 use crate::runtime::operators::window::Tiles;
 use crate::storage::batch_store::BatchId;
 use indexmap::IndexSet;

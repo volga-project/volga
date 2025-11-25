@@ -1,8 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
-use arrow::compute::take_record_batch;
-use arrow::array::UInt64Array;
 use datafusion::common::ScalarValue;
 use arrow::array::Array;
 use tokio::sync::RwLock;
@@ -135,7 +133,6 @@ impl BatchStore {
         time_partitioned_batches
     }
 
-    // TODO can we use arrow::compute::* kernels here for SIMD?
     fn time_partition_batch(
         batch: &RecordBatch, 
         partition_key: &Key, 
@@ -147,83 +144,114 @@ impl BatchStore {
             panic!("Batch has no rows");
         }
 
-        // Group row indices by time buckets, keep the order of the rows
-        let mut time_buckets: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        use arrow::array::{TimestampMillisecondArray, Int64Array, Array};
+        use arrow::compute::kernels::numeric::{div, mul_wrapping};
         
-        for row_idx in 0..batch.num_rows() {
-            let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
-            let time_bucket = Self::get_time_bucket_start(timestamp, time_granularity);
-            
-            time_buckets.entry(time_bucket)
-                .or_insert_with(Vec::new)
-                .push(row_idx);
-        }
-
-        let mut result = Vec::new();
-        for (time_bucket, row_indices) in time_buckets {
-            let sub_batches = Self::split_by_batch_size(
-                batch, 
-                partition_key, 
-                time_bucket,
-                row_indices, 
-                max_batch_size,
-            );
-            result.extend(sub_batches);
-        }
-        result
-    }
-
-    fn split_by_batch_size(
-        batch: &RecordBatch,
-        partition_key: &Key,
-        time_bucket: u64,
-        row_indices: Vec<usize>,
-        max_batch_size: usize,
-    ) -> Vec<(BatchId, RecordBatch)> {
-        let mut result = Vec::new();
+        let ts_column = batch.column(ts_column_index);
         
-        if row_indices.len() <= max_batch_size {
-            // No splitting needed
-            let indices_array = UInt64Array::from(
-                row_indices.into_iter().map(|idx| idx as u64).collect::<Vec<_>>()
-            );
-            
-            let sub_batch = take_record_batch(batch, &indices_array)
-                .expect("Take record batch operation should succeed");
-            
-            let uid = rand::random::<u64>(); // should be unique enough within same key and bucket
-            let batch_id = BatchId::new(partition_key.hash(), time_bucket, uid);
-            result.push((batch_id, sub_batch));
-            return result;
-        }
-
-        // Split into chunks of max_batch_size
-        let chunks: Vec<_> = row_indices.chunks(max_batch_size).collect();
+        // Cast to TimestampMillisecondArray for timestamp operations
+        let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
+            .expect("Timestamp column should be TimestampMillisecondArray");
         
-        for (_, chunk) in chunks.iter().enumerate() {
-            let indices_array = UInt64Array::from(
-                chunk.iter().map(|&idx| idx as u64).collect::<Vec<_>>()
-            );
-            
-            let sub_batch = take_record_batch(batch, &indices_array)
-                .expect("Take record batch operation should succeed");
-            
-            let uid = rand::random::<u64>(); // should be unique enough within same key and bucket
-            let batch_id = BatchId::new(partition_key.hash(), time_bucket, uid);
-
-            result.push((batch_id, sub_batch));
-        }
-
-        result
-    }
-
-    /// Returns the timestamp (in milliseconds) of the start of the time bucket that the given record's timestamp falls into.
-    /// `timestamp_ms` is the timestamp (in milliseconds) of the record.
-    /// `time_granularity` specifies the bucket size.
-    fn get_time_bucket_start(timestamp_ms: i64, time_granularity: TimeGranularity) -> u64 {
         let granularity_ms = time_granularity.to_millis();
-        ((timestamp_ms / granularity_ms) * granularity_ms) as u64
+        let num_rows = batch.num_rows();
+        
+        // Convert timestamp array to Int64Array for arithmetic operations
+        // Use Arrow's cast to preserve nulls properly
+        use arrow::compute::kernels::cast::cast;
+        use arrow::datatypes::DataType;
+        let ts_int64_array = cast(ts_array, &DataType::Int64)
+            .expect("Should be able to cast TimestampMillisecondArray to Int64Array");
+        let ts_int64_array = ts_int64_array.as_any().downcast_ref::<Int64Array>()
+            .expect("Cast result should be Int64Array");
+        
+        // Create a constant array filled with granularity_ms for vectorized operations
+        let granularity_array = Int64Array::from_value(granularity_ms, num_rows);
+        
+        // Compute buckets vectorized: bucket = (timestamp / granularity_ms) * granularity_ms
+        // First, divide timestamps by granularity (integer division)
+        let divided = div(&ts_int64_array, &granularity_array)
+            .expect("Should be able to divide timestamps by granularity");
+        let divided_int64 = divided.as_any().downcast_ref::<Int64Array>()
+            .expect("Division result should be Int64Array");
+        
+        // Multiply back by granularity to get bucket start timestamps
+        let bucket_timestamps = mul_wrapping(divided_int64, &granularity_array)
+            .expect("Should be able to multiply bucket quotients by granularity");
+        let bucket_array = bucket_timestamps.as_any().downcast_ref::<Int64Array>()
+            .expect("Bucket array should be Int64Array");
+        
+        // Create original index array for stable sorting (preserve order within buckets)
+        let original_indices = Int64Array::from_iter((0..num_rows).map(|i| i as i64));
+        
+        // Sort by (bucket, original_index) to group consecutive rows with same bucket
+        use arrow::compute::kernels::sort::{lexsort_to_indices, SortColumn, SortOptions};
+        let sort_columns = vec![
+            SortColumn {
+                values: Arc::new(bucket_array.clone()) as Arc<dyn Array>,
+                options: Some(SortOptions {
+                    nulls_first: false,
+                    descending: false,
+                }),
+            },
+            SortColumn {
+                values: Arc::new(original_indices) as Arc<dyn Array>,
+                options: Some(SortOptions {
+                    nulls_first: false,
+                    descending: false,
+                }),
+            },
+        ];
+        
+        let sort_indices = lexsort_to_indices(&sort_columns, None)
+            .expect("Should be able to sort by bucket and original index");
+        
+        // Apply sort to all columns
+        use arrow::compute::take;
+        let mut sorted_columns = Vec::new();
+        for i in 0..batch.num_columns() {
+            let sorted_array = take(batch.column(i), &sort_indices, None)
+                .expect("Should be able to take sorted columns");
+            sorted_columns.push(sorted_array);
+        }
+        
+        let sorted_batch = RecordBatch::try_new(batch.schema(), sorted_columns)
+            .expect("Should be able to create sorted batch");
+        
+        // Apply sort to bucket array to get sorted buckets
+        let bucket_array_ref: Arc<dyn Array> = Arc::new(bucket_array.clone());
+        let sorted_bucket_array = take(bucket_array_ref.as_ref(), &sort_indices, None)
+            .expect("Should be able to take sorted bucket array");
+        let sorted_bucket_array_ref: Arc<dyn Array> = Arc::new(sorted_bucket_array.clone());
+        let sorted_buckets = sorted_bucket_array.as_any().downcast_ref::<Int64Array>()
+            .expect("Sorted bucket array should be Int64Array");
+        
+        // Group consecutive rows with the same bucket using partition
+        use arrow::compute::kernels::partition::partition;
+        let partition_ranges = partition(&[sorted_bucket_array_ref])
+            .expect("Should be able to partition by bucket");
+        
+        let mut result = Vec::new();
+        for range in partition_ranges.ranges() {
+            let time_bucket = sorted_buckets.value(range.start) as u64;
+            
+            // Split the range into chunks of max_batch_size
+            let mut start = range.start;
+            while start < range.end {
+                let end = (start + max_batch_size).min(range.end);
+                let sub_batch = sorted_batch.slice(start, end - start);
+                
+                let uid = rand::random::<u64>();
+                let batch_id = BatchId::new(partition_key.hash(), time_bucket, uid);
+                result.push((batch_id, sub_batch));
+                
+                start = end;
+            }
+        }
+        
+        result
     }
+
 
     // Store a batch with per-partition locking
     async fn store_batches(&self, partition_key: &Key, batches: &Vec<(BatchId, RecordBatch)>) {
@@ -306,10 +334,11 @@ impl BatchStore {
     }
 }
 
-pub fn extract_timestamp(array: &dyn Array, index: usize) -> i64 {
-    let scalar_value = ScalarValue::try_from_array(array, index)
-        .expect("Should be able to extract scalar timestamp value from array");
+
+// pub fn extract_timestamp(array: &dyn Array, index: usize) -> i64 {
+//     let scalar_value = ScalarValue::try_from_array(array, index)
+//         .expect("Should be able to extract scalar timestamp value from array");
     
-    i64::try_from(scalar_value.clone())
-        .expect("Should be able to convert scalar timestamp value to i64")
-}
+//     i64::try_from(scalar_value.clone())
+//         .expect("Should be able to convert scalar timestamp value to i64")
+// }

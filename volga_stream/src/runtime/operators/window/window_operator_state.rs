@@ -12,7 +12,7 @@ use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::window_operator::{WindowConfig, drop_too_late_entries};
 use crate::runtime::operators::window::{AggregatorType, TileConfig, Tiles, WindowAggregator, create_window_aggregator};
 use crate::runtime::state::OperatorState;
-use crate::storage::batch_store::{BatchId, BatchStore, extract_timestamp};
+use crate::storage::batch_store::{BatchId, BatchStore};
 
 pub type WindowId = usize;
 
@@ -119,7 +119,6 @@ impl WindowOperatorState {
     // TODO what if RANGE window - we also need retracts.
     // TODO should event outisde of window chnage state?
     
-    // TODO use gt_scalar, lt_scalar, and from arrow::compute for time-based filtering  for SIMD
     fn update_accumulators(
         window_configs: &BTreeMap<WindowId, WindowConfig>,
         windows_state: &mut WindowsState,
@@ -144,22 +143,36 @@ impl WindowOperatorState {
             let window_start = window_state.start_idx;
             let window_end = window_state.end_idx;
 
-            // Filter record_batch to get entries within window
-            let mut keep_indices = Vec::new();
-            for row_idx in 0..record_batch.num_rows() {
-                let timestamp = extract_timestamp(record_batch.column(ts_column_index), row_idx);
-                if timestamp >= window_start.timestamp && timestamp <= window_end.timestamp {
-                    keep_indices.push(row_idx as u32);
-                }
-            }
-
-            if keep_indices.is_empty() {
+            // Filter record_batch to get entries within window using SIMD kernels
+            use arrow::compute::{and, filter_record_batch};
+            use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
+            use arrow::array::{TimestampMillisecondArray, Scalar};
+            
+            let ts_column = record_batch.column(ts_column_index);
+            
+            // Create scalar arrays with the window bounds using the same data type as the timestamp column
+            let start_array = TimestampMillisecondArray::from_value(window_start.timestamp, 1);
+            let end_array = TimestampMillisecondArray::from_value(window_end.timestamp, 1);
+            let start_scalar = Scalar::new(&start_array);
+            let end_scalar = Scalar::new(&end_array);
+            
+            // Create boolean masks using SIMD kernels
+            let ge_start = gt_eq(ts_column, &start_scalar)
+                .expect("Should be able to compare with start timestamp");
+            let le_end = lt_eq(ts_column, &end_scalar)
+                .expect("Should be able to compare with end timestamp");
+            
+            // Combine conditions with AND
+            let within_window = and(&ge_start, &le_end)
+                .expect("Should be able to combine boolean arrays");
+            
+            // Check if any rows match the filter
+            if within_window.true_count() == 0 {
                 continue;
             }
-
-            // Extract filtered batch
-            let indices = arrow::array::UInt32Array::from(keep_indices);
-            let filtered_batch = arrow::compute::take_record_batch(record_batch, &indices)
+            
+            // Filter the batch using the boolean mask
+            let filtered_batch = filter_record_batch(record_batch, &within_window)
                 .expect("Should be able to filter record batch");
 
             // Create accumulator and restore existing state

@@ -24,11 +24,11 @@ use crate::runtime::operators::window::window_operator_state::{WindowOperatorSta
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::operators::window::window_operator::{
-    init, is_entry_late, is_ts_too_late, load_batches, produce_aggregates, stack_concat_results, WindowConfig, WindowOperatorConfig
+    init, is_entry_late, load_batches, produce_aggregates, stack_concat_results, WindowConfig, WindowOperatorConfig
 };
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
-use crate::storage::batch_store::{extract_timestamp, BatchId};
+use crate::storage::batch_store::BatchId;
 use tokio_rayon::rayon::ThreadPool;
 use tokio::time::{sleep, Duration, Instant};
 
@@ -155,39 +155,93 @@ impl WindowRequestOperator {
         record_batch: &RecordBatch,
         time_entries: &TimeEntries,
     ) -> (Vec<Option<TimeIdx>>, BatchId) {
-        let mut virtual_entries = Vec::with_capacity(record_batch.num_rows());
+        use arrow::array::{TimestampMillisecondArray, Int64Array, BooleanArray, Array};
+        use arrow::compute::kernels::cmp::lt;
+        
+        let num_rows = record_batch.num_rows();
+        if num_rows == 0 {
+            return (Vec::new(), BatchId::random());
+        }
+        
         let last_entry = time_entries.entries.back().map(|entry| *entry);
         let first_entry = time_entries.entries.front().map(|entry| *entry);
-
-        let batch_id = BatchId::random(); // virtual batch id
-
-        // TODO can we use arrow::compute::* kernels here for SIMD?
-        for row_idx in 0..record_batch.num_rows() {
-            let timestamp = extract_timestamp(record_batch.column(self.ts_column_index), row_idx);
-
+        let batch_id = BatchId::random();
+        
+        let ts_column = record_batch.column(self.ts_column_index);
+        let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
+            .expect("Timestamp column should be TimestampMillisecondArray");
+        
+        // Extract all timestamps at once (vectorized)
+        let timestamps: Vec<i64> = (0..num_rows)
+            .map(|i| {
+                if ts_array.is_null(i) {
+                    i64::MIN
+                } else {
+                    ts_array.value(i)
+                }
+            })
+            .collect();
+        
+        // Create boolean mask for valid entries (not filtered out)
+        let mut valid_mask = vec![true; num_rows];
+        
+        // Convert timestamp array to Int64Array for comparison
+        use arrow::compute::kernels::cast::cast;
+        use arrow::datatypes::DataType;
+        let ts_int64_array = cast(ts_array, &DataType::Int64)
+            .expect("Should be able to cast TimestampMillisecondArray to Int64Array");
+        let ts_int64_array = ts_int64_array.as_any().downcast_ref::<Int64Array>()
+            .expect("Cast result should be Int64Array");
+        
+        // Filter out entries before first entry using SIMD
+        if let Some(first_entry) = first_entry {
+            let first_ts_array = Int64Array::from_value(first_entry.timestamp, num_rows);
+            let lt_first = lt(ts_int64_array, &first_ts_array)
+                .expect("Should be able to compare with first entry timestamp");
+            let lt_first_bool = lt_first.as_any().downcast_ref::<BooleanArray>()
+                .expect("Comparison result should be BooleanArray");
+            
+            for i in 0..num_rows {
+                if lt_first_bool.value(i) {
+                    valid_mask[i] = false;
+                }
+            }
+        }
+        
+        // Filter out late entries using SIMD
+        if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry) {
+            let cutoff_timestamp = last_entry.timestamp - lateness_ms;
+            let cutoff_array = Int64Array::from_value(cutoff_timestamp, num_rows);
+            let lt_cutoff = lt(ts_int64_array, &cutoff_array)
+                .expect("Should be able to compare with cutoff timestamp");
+            let lt_cutoff_bool = lt_cutoff.as_any().downcast_ref::<BooleanArray>()
+                .expect("Comparison result should be BooleanArray");
+            
+            for i in 0..num_rows {
+                if lt_cutoff_bool.value(i) {
+                    valid_mask[i] = false;
+                }
+            }
+        }
+        
+        let mut virtual_entries = Vec::with_capacity(num_rows);
+        
+        // Process rows in order
+        for row_idx in 0..num_rows {
+            if !valid_mask[row_idx] {
+                virtual_entries.push(None);
+                continue;
+            }
+            
+            let timestamp = timestamps[row_idx];
+            
             let search_key = TimeIdx {
                 timestamp,
                 pos_idx: usize::MAX,
                 batch_id,
                 row_idx: 0,
             };
-
-            // filter out entries before first entry
-            if let Some(first_entry) = first_entry {
-                if timestamp < first_entry.timestamp {
-                    virtual_entries.push(None);
-                    continue;
-                }
-            }
-
-            // filter out late entries
-            if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry) {
-                if is_ts_too_late(timestamp, last_entry, lateness_ms) {
-                    virtual_entries.push(None);
-                    continue;
-                }
-            }
-
+            
             let pos_idx = time_entries
                 .entries
                 .upper_bound(Bound::Included(&search_key))
@@ -199,7 +253,7 @@ impl WindowRequestOperator {
                     }
                 })
                 .unwrap_or(0);
-
+            
             virtual_entries.push(Some(TimeIdx {
                 timestamp,
                 pos_idx,
@@ -207,7 +261,7 @@ impl WindowRequestOperator {
                 row_idx,
             }));
         }
-
+        
         (virtual_entries, batch_id)
     }
 
