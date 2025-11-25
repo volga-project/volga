@@ -266,15 +266,15 @@ impl Master {
     }
 
     /// Wait for all workers to have tasks in the specified status
-    pub async fn wait_for_all_tasks_status(&self, target_status: StreamTaskStatus) -> anyhow::Result<()> {
+    pub async fn wait_for_all_tasks_status(&self, target_status: StreamTaskStatus, timeout_duration: Option<Duration>) -> anyhow::Result<()> {
         println!("[MASTER] Waiting for all workers to have tasks in status: {:?}", target_status);
         
         let start_time = std::time::Instant::now();
-        let timeout_duration = Duration::from_secs(5);
+        // let timeout_duration = Duration::from_secs(5);
         
         loop {
             // Check timeout
-            if start_time.elapsed() > timeout_duration {
+            if timeout_duration.is_some() && start_time.elapsed() > timeout_duration.unwrap() {
                 return Err(anyhow::anyhow!("Timeout waiting for all tasks to be {:?} after {:?}", target_status, timeout_duration));
             }
             
@@ -440,19 +440,19 @@ impl Master {
         self.start_state_polling();
         
         // 4. Master waits for all tasks on all workers to be opened
-        self.wait_for_all_tasks_status(StreamTaskStatus::Opened).await?;
+        self.wait_for_all_tasks_status(StreamTaskStatus::Opened, Some(Duration::from_secs(30))).await?;
         
         // 5. Master runs all tasks on all workers
         self.run_all_tasks().await?;
         
         // 6. Master waits for all tasks on all workers to be finished
-        self.wait_for_all_tasks_status(StreamTaskStatus::Finished).await?;
+        self.wait_for_all_tasks_status(StreamTaskStatus::Finished, None).await?;
         
         // 7. Master closes all tasks on all workers
         self.close_all_tasks().await?;
         
         // 8. Master waits for all tasks on all workers to be closed
-        self.wait_for_all_tasks_status(StreamTaskStatus::Closed).await?;
+        self.wait_for_all_tasks_status(StreamTaskStatus::Closed, Some(Duration::from_secs(30))).await?;
         
         // 9. Master closes workers
         self.close_all_workers().await?;

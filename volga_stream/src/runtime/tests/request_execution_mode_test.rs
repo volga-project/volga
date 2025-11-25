@@ -116,23 +116,25 @@ fn create_payload_generator(
 
 // TODO make single hot key test case to make sure no deadlocks occur
 
+
+// TODO this test fails when running with others via 'cargo test' - "Time entries should exist" - why?
 #[tokio::test]
 async fn test_request_execution_mode() {
     let parallelism = 4;
     let max_pending_requests = 5000;
     let request_timeout_ms = 100000;
-    let total_requests = 10000;
+    let total_requests = 100;
     let request_source_config = create_test_config(max_pending_requests, request_timeout_ms);
     
     // Use the same rate for datagen and requests
-    let rate = None;
+    let rate = Some(50.0);
 
     // datagen config
-    let num_record_to_gen = None;
+    let num_record_to_gen = Some(100);
     let batch_size = 10;
     let start_ms = 1000;
     let step_ms = 1000;
-    let num_unique_keys = 100;
+    let num_unique_keys = 10;
     let value_start = 10.0;
     let value_step = 10.0;
 

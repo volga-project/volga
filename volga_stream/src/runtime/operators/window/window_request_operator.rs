@@ -17,7 +17,9 @@ use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::aggregates::{split_entries_for_parallelism, Aggregation, PlainAggregation, RetractableAggregation};
+use crate::runtime::operators::window::aggregates::{split_entries_for_parallelism, Aggregation};
+use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
+use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
 use crate::runtime::operators::window::window_operator_state::{WindowOperatorState, WindowId};
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
@@ -159,6 +161,7 @@ impl WindowRequestOperator {
 
         let batch_id = BatchId::random(); // virtual batch id
 
+        // TODO can we use arrow::compute::* kernels here for SIMD?
         for row_idx in 0..record_batch.num_rows() {
             let timestamp = extract_timestamp(record_batch.column(self.ts_column_index), row_idx);
 

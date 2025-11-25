@@ -118,6 +118,8 @@ impl WindowOperatorState {
 
     // TODO what if RANGE window - we also need retracts.
     // TODO should event outisde of window chnage state?
+    
+    // TODO use gt_scalar, lt_scalar, and from arrow::compute for time-based filtering  for SIMD
     fn update_accumulators(
         window_configs: &BTreeMap<WindowId, WindowConfig>,
         windows_state: &mut WindowsState,

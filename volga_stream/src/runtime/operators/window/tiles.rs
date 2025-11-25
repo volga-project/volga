@@ -121,6 +121,7 @@ impl Tiles {
         }
     }
 
+    // TODO can we use arrow::compute::* kernels here for SIMD?
     pub fn add_batch(&mut self, batch: &RecordBatch, ts_column_index: usize) {
         // Extract timestamps
         let mut entries = Vec::new();

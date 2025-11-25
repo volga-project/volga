@@ -126,11 +126,6 @@ impl BatchStore {
         self.lock_pool[lock_index].clone()
     }
 
-    // Global exclusive lock
-    async fn acquire_global_exclusive_lock(&self) -> tokio::sync::RwLockWriteGuard<'_, ()> {
-        self.global_lock.write().await
-    }
-
     pub async fn append_records(&self, batch: RecordBatch, partition_key: &Key, ts_column_index: usize) -> Vec<(BatchId, RecordBatch)> {
         // Partition batch by time granularity and get batch ids and keys
         let time_partitioned_batches = Self::time_partition_batch(&batch, &partition_key, ts_column_index, self.time_granularity, self.max_batch_size);
@@ -140,6 +135,7 @@ impl BatchStore {
         time_partitioned_batches
     }
 
+    // TODO can we use arrow::compute::* kernels here for SIMD?
     fn time_partition_batch(
         batch: &RecordBatch, 
         partition_key: &Key, 

@@ -69,6 +69,7 @@ impl TimeEntries {
         let mut time_idxs = Vec::new();
         let mut max_timestamp = i64::MIN;
         
+        // TODO can we use arrow::compute::* kernels here for SIMD?
         for row_idx in 0..batch.num_rows() {
             let timestamp = extract_timestamp(batch.column(ts_column_index), row_idx);
             max_timestamp = max_timestamp.max(timestamp);
@@ -108,6 +109,7 @@ impl TimeEntries {
         
         // Insert batch mapping once with max timestamp
         if let Some(existing_batches) = self.batch_ids.get(&max_timestamp) {
+            // TODO avoid cloning, it's expensive
             let mut batches = existing_batches.value().clone();
             batches.push(batch_id);
             self.batch_ids.insert(max_timestamp, batches);

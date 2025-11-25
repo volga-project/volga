@@ -17,7 +17,9 @@ use datafusion::scalar::ScalarValue;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::aggregates::{get_aggregate_type, split_entries_for_parallelism, Aggregation, PlainAggregation, RetractableAggregation};
+use crate::runtime::operators::window::aggregates::{get_aggregate_type, split_entries_for_parallelism, Aggregation};
+use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
+use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
 use crate::runtime::operators::window::time_entries::TimeIdx;
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
@@ -509,6 +511,7 @@ impl OperatorTrait for WindowOperator {
     }
 }
 
+// TODO use gt_scalar, lt_scalar, and from arrow::compute for time-based filtering  for SIMD
 pub fn drop_too_late_entries(record_batch: &RecordBatch, ts_column_index: usize, lateness_ms: i64, last_entry: TimeIdx) -> RecordBatch {
     let mut keep_indices = Vec::new();
     for row_idx in 0..record_batch.num_rows() {
