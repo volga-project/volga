@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
+    api::pipeline_context::{ExecutionMode, PipelineContextBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     executor::local_executor::LocalExecutor,
     runtime::{
@@ -9,8 +9,7 @@ use crate::{
         operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
-            window::window_operator::{UpdateMode, ExecutionMode as WindowExecutionMode},
-            window::TileConfig,
+            window::{TileConfig, TimeGranularity, window_operator::{ExecutionMode as WindowExecutionMode, UpdateMode}},
         },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -219,7 +218,9 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     // Create field generators
     let fields = HashMap::from([
-        ("event_time".to_string(), FieldGenerator::ProcessingTimestamp),
+        // ("event_time".to_string(), FieldGenerator::ProcessingTimestamp),
+
+        ("event_time".to_string(), FieldGenerator::IncrementalTimestamp { start_ms: 1000, step_ms: 1 }),
         ("key".to_string(), FieldGenerator::Key { 
             num_unique: config.num_keys 
         }),
@@ -241,6 +242,8 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     // Build SQL query based on config
     let sql = build_sql_query(&config);
 
+    println!("Query: {}", sql);
+
     // Create pipeline context builder
     let mut context_builder = PipelineContextBuilder::new()
         .with_parallelism(config.parallelism)
@@ -249,13 +252,19 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
             SourceConfig::DatagenSourceConfig(datagen_config), 
             schema
         )
-        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql(&sql)
         .with_executor(Box::new(LocalExecutor::new()));
+
     
-    // Set execution mode if needed
+    // Set execution mode 
     if config.execution_mode == WindowExecutionMode::Request {
+        // request mode has no direct sink
         context_builder = context_builder.with_execution_mode(ExecutionMode::Request);
+    } else {
+        context_builder = context_builder
+            .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+            .with_execution_mode(ExecutionMode::Streaming);
+
     }
     
     let mut context = context_builder.build();
@@ -503,6 +512,17 @@ pub fn print_benchmark_results(config: &WindowBenchmarkConfig, metrics: &Benchma
 
 // #[tokio::test]
 async fn test_window_benchmark_basic() -> Result<()> {
+    let num_windows = 1;
+
+    let mut tiling_configs = Vec::new();
+    for _ in 0..num_windows {
+        tiling_configs.push(Some(TileConfig::new(vec![
+            TimeGranularity::Seconds(1)
+        ]).unwrap()));
+    }
+
+    // TODO pass num task threads to worker via config
+
     let config = WindowBenchmarkConfig {
         parallelism: 4,
         num_keys: 40,
@@ -512,12 +532,12 @@ async fn test_window_benchmark_basic() -> Result<()> {
         run_for_s: None,
         // window_type: WindowType::Range { milliseconds: 1000 },
         window_type: WindowType::Rows { preceding: 10000 },
-        num_windows: 1,
-        aggregation_type: AggregationType::Retractable,
+        num_windows: num_windows,
+        aggregation_type: AggregationType::Plain,
         update_mode: UpdateMode::PerMessage,
-        execution_mode: WindowExecutionMode::Regular,
+        execution_mode: WindowExecutionMode::Request,
         parallelize: false,
-        tiling_configs: None,
+        tiling_configs: Some(tiling_configs),
         lateness: None,
         polling_interval_ms: 100,
         throughput_window_seconds: Some(5),

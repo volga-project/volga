@@ -209,10 +209,16 @@ impl Planner {
 
         let mut graph = self.logical_plan_to_graph(&logical_plan)?;
         if self.context.execution_mode == ExecutionMode::Request {
-            graph.to_request_mode(
-                self.context.request_source_config.clone().expect("Request source configuration not found"), 
-                self.context.request_sink_config.clone()
-            ).map_err(|e| DataFusionError::Plan(e))?;
+            // TODO is it an ok logic?
+            if self.context.request_source_config.is_some() {
+                graph.to_request_mode(
+                    self.context.request_source_config.clone().expect("Request source configuration not found"), 
+                    self.context.request_sink_config.clone()
+                ).map_err(|e| DataFusionError::Plan(e))?;
+            } else {
+                // warn that request mode is without request source - most likely for window operator debug
+                println!("Warning: Request mode is without request source - most likely for window operator debug");
+            }
         }
         Ok(graph)
     }

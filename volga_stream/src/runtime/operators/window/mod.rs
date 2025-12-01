@@ -4,6 +4,7 @@ pub mod time_entries;
 pub mod tiles;
 pub mod aggregates;
 pub mod window_operator_state;
+pub mod batch_index;
 
 pub use window_operator::WindowOperator;
 pub use window_request_operator::WindowRequestOperator;

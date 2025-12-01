@@ -11,6 +11,7 @@ use crate::storage::batch_store::Timestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeGranularity {
+    Seconds(u32),
     Minutes(u32),
     Hours(u32),
     Days(u32),
@@ -21,6 +22,7 @@ impl TimeGranularity {
 
     pub fn to_millis(&self) -> i64 {
         match self {
+            TimeGranularity::Seconds(s) => *s as i64 * 1000,
             TimeGranularity::Minutes(m) => *m as i64 * 60 * 1000,
             TimeGranularity::Hours(h) => *h as i64 * 60 * 60 * 1000,
             TimeGranularity::Days(d) => *d as i64 * 24 * 60 * 60 * 1000,
@@ -288,6 +290,18 @@ impl Tiles {
     }
 
     pub fn get_tiles_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<Tile> {
+        let (tiles, _) = self.get_tiles_and_uncovered_ranges(start_time, end_time);
+        tiles
+    }
+    
+    /// Get ranges within [start, end] that are NOT covered by any tiles
+    pub fn get_uncovered_ranges(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<(Timestamp, Timestamp)> {
+        let (_, uncovered) = self.get_tiles_and_uncovered_ranges(start_time, end_time);
+        uncovered
+    }
+    
+    /// Internal: get both tiles and uncovered ranges in one pass
+    fn get_tiles_and_uncovered_ranges(&self, start_time: Timestamp, end_time: Timestamp) -> (Vec<Tile>, Vec<(Timestamp, Timestamp)>) {
         let mut selected_tiles: Vec<Tile> = Vec::new();
         let mut remaining_ranges = vec![(start_time, end_time)];
         
@@ -339,7 +353,7 @@ impl Tiles {
             }
         }
         
-        selected_tiles
+        (selected_tiles, remaining_ranges)
     }
 
 

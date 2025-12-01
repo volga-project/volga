@@ -256,8 +256,10 @@ impl WindowOperator {
                         if let Some(new_entries) = &new_entries {
                             // Late entries are handled without retraction, so use PlainAggregation
                             let late_entries = get_late_entries(new_entries.clone(), end_idx);
-                            
+
                             if let Some(late_entries) = late_entries {
+
+                                println!("Late len: {:?}",late_entries.len());
                                 for lates in split_entries_for_parallelism(&late_entries) {
                                     aggs.push(Box::new(PlainAggregation::new(
                                         lates, window_config.window_expr.clone(), tiles_owned.clone(), time_entries

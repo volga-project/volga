@@ -36,7 +36,7 @@ impl Executor for LocalExecutor {
             worker_id.clone(),
             execution_graph,
             vertex_ids,
-            1,
+            4,
             TransportBackendType::InMemory,
         );
 

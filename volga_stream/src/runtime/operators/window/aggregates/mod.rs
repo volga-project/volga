@@ -129,6 +129,8 @@ pub fn create_window_aggregator(window_expr: &Arc<dyn WindowExpr>) -> WindowAggr
     let aggregator_type = registry
         .get_aggregator_type(&agg_name)
         .expect(&format!("Unsupported aggregate function: {}", agg_name));
+
+    // println!("Agg type {:?} for {agg_name}", aggregator_type);
     
     match aggregator_type {
         AggregatorType::Evaluator => {

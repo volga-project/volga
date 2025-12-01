@@ -36,6 +36,10 @@ impl BatchId {
     pub fn random() -> Self {
         Self {partition_key_hash: rand::random(), time_bucket: rand::random(), uid: rand::random()}
     }
+    
+    pub fn time_bucket(&self) -> u64 {
+        self.time_bucket
+    }
 }
 
 impl Eq for BatchId {}
