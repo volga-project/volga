@@ -13,29 +13,31 @@ use tokio_rayon::rayon::ThreadPool;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::time_entries::TimeIdx;
 use crate::runtime::operators::window::Tiles;
-use crate::storage::batch_store::BatchId;
+use crate::storage::batch_store::{BatchId, Timestamp};
 use indexmap::IndexSet;
 
 pub mod arrow_utils;
 pub mod evaluator;
 pub mod plain;
 pub mod retractable;
+pub mod utils;
 
 #[async_trait]
 pub trait Aggregation: Send + Sync {
     async fn produce_aggregates(
         &self,
-        batches: &HashMap<BatchId, RecordBatch>,
+        sorted_bucket_view: &HashMap<Timestamp, SortedBucketView>,
         thread_pool: Option<&ThreadPool>,
         exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>);
     
-    fn entries(&self) -> &[TimeIdx];
     fn window_expr(&self) -> &Arc<dyn WindowExpr>;
     fn tiles(&self) -> Option<&Tiles>;
     fn aggregator_type(&self) -> AggregatorType;
     
-    fn get_batches_to_load(&self) -> IndexSet<BatchId>;
+    // fn get_batches_to_load(&self) -> IndexSet<BatchId>;
+
+    fn get_relevant_buckets(&self) -> Vec<BucketRange>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

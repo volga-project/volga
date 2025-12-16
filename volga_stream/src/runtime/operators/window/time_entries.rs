@@ -386,7 +386,8 @@ impl TimeEntries {
                 // cutoff = end_timestamp - (lateness + window_length_ms)
                 if let WindowFrameBound::Preceding(window_length) = &window_frame.start_bound {
                     let window_length_ms = convert_interval_to_milliseconds(window_length);
-                    let cutoff = window_state.end_idx.timestamp - (lateness + window_length_ms);
+                    // let cutoff = window_state.end_idx.timestamp - (lateness + window_length_ms);
+                    let cutoff = 0;
                     if cutoff > 0 {
                         cutoff
                     } else {
@@ -399,7 +400,8 @@ impl TimeEntries {
             WindowFrameUnits::Rows => {
                 // For row windows: use lookup key and get_window_start;
                 let search_key = TimeIdx {
-                    timestamp: window_state.end_idx.timestamp - lateness,
+                    // timestamp: window_state.end_idx.timestamp - lateness,
+                    timestamp: 0,
                     pos_idx: usize::MAX,
                     batch_id: BatchId::nil(),
                     row_idx: 0,

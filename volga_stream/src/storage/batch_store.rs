@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
-use datafusion::common::ScalarValue;
 use arrow::array::Array;
 use tokio::sync::RwLock;
 use dashmap::DashMap;
@@ -58,6 +57,7 @@ impl Hash for BatchId {
     }
 }
 
+// TODO we also have TimeGranularity in runtime/operators/window/tiles.rs, we should unify them
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TimeGranularity {
     Minutes(u32),
@@ -88,7 +88,7 @@ pub struct BatchStore {
     // Global lock for exclusive operations (stats, pruning, cleanup, rebalance)
     global_lock: Arc<RwLock<()>>,
     
-    // Lock pool for partition-based locking
+    // Lock pool for partition-based locking - TODO do we need pooling?
     lock_pool: Vec<Arc<RwLock<()>>>,
     
     // In-memory storage

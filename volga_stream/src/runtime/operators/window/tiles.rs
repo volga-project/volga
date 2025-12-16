@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use arrow::array::RecordBatch;
 use datafusion::physical_plan::WindowExpr;
@@ -9,7 +9,8 @@ use crate::runtime::operators::window::{create_window_aggregator, WindowAggregat
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::storage::batch_store::Timestamp;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+// TODO we also have TimeGranularity in batch_store.rs, we should unify them
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TimeGranularity {
     Seconds(u32),
     Minutes(u32),
@@ -37,13 +38,17 @@ impl TimeGranularity {
         self_millis > other_millis && self_millis % other_millis == 0
     }
 
-    pub fn tile_start(&self, timestamp: Timestamp) -> Timestamp {
+    pub fn start(&self, timestamp: Timestamp) -> Timestamp {
         let duration_millis = self.to_millis();
         (timestamp / duration_millis) * duration_millis
     }
 
-    pub fn next_tile_start(&self, timestamp: Timestamp) -> Timestamp {
-        self.tile_start(timestamp) + self.to_millis()
+    pub fn next_start(&self, timestamp: Timestamp) -> Timestamp {
+        self.start(timestamp) + self.to_millis()
+    }
+
+    pub fn prev_start(&self, timestamp: Timestamp) -> Timestamp {
+        panic!("Not impl")
     }
 }
 
@@ -105,15 +110,15 @@ pub struct Tiles {
     config: TileConfig,
     window_expr: Arc<dyn WindowExpr>,
     // Map: granularity -> tile_start -> tile
-    tiles: BTreeMap<TimeGranularity, BTreeMap<Timestamp, Tile>>,
+    tiles: HashMap<TimeGranularity, HashMap<Timestamp, Tile>>,
 }
 
 impl Tiles {
     pub fn new(config: TileConfig, window_expr: Arc<dyn WindowExpr>) -> Self {
-        let mut tiles = BTreeMap::new();
+        let mut tiles = HashMap::new();
         
         for granularity in &config.granularities {
-            tiles.insert(*granularity, BTreeMap::new());
+            tiles.insert(*granularity, HashMap::new());
         }
         
         Self {
@@ -121,6 +126,10 @@ impl Tiles {
             window_expr,
             tiles,
         }
+    }
+
+    pub fn granularities(&self) -> &Vec<TimeGranularity> {
+        &self.config.granularities
     }
 
     pub fn add_batch(&mut self, batch: &RecordBatch, ts_column_index: usize) {
@@ -160,7 +169,7 @@ impl Tiles {
     }
     
     fn add_batch_for_granularity(
-        tiles: &mut BTreeMap<TimeGranularity, BTreeMap<Timestamp, Tile>>,
+        tiles: &mut HashMap<TimeGranularity, HashMap<Timestamp, Tile>>,
         window_expr: &Arc<dyn WindowExpr>,
         batch: &RecordBatch,
         ts_int64_array: &arrow::array::Int64Array,
@@ -289,73 +298,59 @@ impl Tiles {
         tile.entry_count += tile_batch.num_rows() as u64;
     }
 
-    pub fn get_tiles_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<Tile> {
-        let (tiles, _) = self.get_tiles_and_uncovered_ranges(start_time, end_time);
-        tiles
-    }
-    
-    /// Get ranges within [start, end] that are NOT covered by any tiles
-    pub fn get_uncovered_ranges(&self, start_time: Timestamp, end_time: Timestamp) -> Vec<(Timestamp, Timestamp)> {
-        let (_, uncovered) = self.get_tiles_and_uncovered_ranges(start_time, end_time);
-        uncovered
-    }
-    
-    /// Internal: get both tiles and uncovered ranges in one pass
-    fn get_tiles_and_uncovered_ranges(&self, start_time: Timestamp, end_time: Timestamp) -> (Vec<Tile>, Vec<(Timestamp, Timestamp)>) {
-        let mut selected_tiles: Vec<Tile> = Vec::new();
-        let mut remaining_ranges = vec![(start_time, end_time)];
-        
-        // Try granularities from largest to smallest (reverse order)
+
+    pub fn get_tiles_for_range(&self, start_ts: Timestamp, end_ts: Timestamp) -> Vec<Tile> {
+        let mut selected_tiles = Vec::new();
+
+        if start_ts >= end_ts {
+            return Vec::new();
+        }
+
+        let min_granularity = self.config.granularities.first().unwrap();
+        if end_ts - start_ts < min_granularity.to_millis() {
+            return Vec::new();
+        }
+
+        let mut range_start = start_ts;
+        let range_end = end_ts;
+
         for &granularity in self.config.granularities.iter().rev() {
-            let tiles_for_granularity = match self.tiles.get(&granularity) {
-                Some(tiles) => tiles,
-                None => continue,
-            };
-            
-            let mut new_remaining_ranges = Vec::new();
-            
-            for (range_start, range_end) in remaining_ranges {
-                // Find all tiles that are fully contained within this range using range query
-                let tiles_in_range: Vec<_> = tiles_for_granularity
-                    .range(range_start..range_end)
-                    .filter(|(&tile_start, tile)| {
-                        tile_start >= range_start && tile.tile_end <= range_end
-                    })
-                    .collect();
-                
-                for (_, tile) in &tiles_in_range {
-                    selected_tiles.push((*tile).clone());
-                }
-                
-                if tiles_in_range.is_empty() {
-                    new_remaining_ranges.push((range_start, range_end));
-                } else {
-                    let mut current_pos = range_start;
-                    
-                    for (&tile_start, tile) in &tiles_in_range {
-                        if current_pos < tile_start {
-                            new_remaining_ranges.push((current_pos, tile_start));
-                        }
-                        
-                        current_pos = tile.tile_end;
-                    }
-                    
-                    if current_pos < range_end {
-                        new_remaining_ranges.push((current_pos, range_end));
-                    }
-                }
-            }
-            
-            remaining_ranges = new_remaining_ranges;
-            
-            if remaining_ranges.is_empty() {
+            if range_start >= range_end {
                 break;
             }
-        }
-        
-        (selected_tiles, remaining_ranges)
-    }
 
+            let tiles_for_granularity = self.tiles.get(&granularity)
+                .expect(&format!("No tiles found for granularity {:?}", granularity));
+
+            let aligned_start = granularity.start(range_start);
+            let first_tile_ts = if aligned_start < range_start {
+                granularity.next_start(range_start)
+            } else {
+                aligned_start
+            };
+
+            if first_tile_ts >= range_end {
+                continue;
+            }
+
+            let tile_duration = granularity.to_millis();
+            let num_tiles = (range_end - first_tile_ts) / tile_duration;
+
+            if num_tiles > 0 {
+                for i in 0..num_tiles {
+                    let tile_start = first_tile_ts + i * tile_duration;
+                    let tile = tiles_for_granularity.get(&tile_start)
+                        .expect("Tile should exist for covered range");
+                    // TODO return refs instead of cloning
+                    selected_tiles.push(tile.clone());
+                }
+
+                range_start = first_tile_ts + num_tiles * tile_duration;
+            }
+        }
+
+        selected_tiles
+    }
 
     pub fn compute_aggregate_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> ScalarValue {
         let tiles = self.get_tiles_for_range(start_time, end_time);

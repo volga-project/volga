@@ -24,7 +24,7 @@ use crate::runtime::operators::window::window_operator_state::{WindowOperatorSta
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::operators::window::window_operator::{
-    init, is_entry_late, load_batches, produce_aggregates, stack_concat_results, WindowConfig, WindowOperatorConfig
+    init, load_batches, produce_aggregates, stack_concat_results, WindowConfig, WindowOperatorConfig
 };
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
@@ -275,8 +275,9 @@ impl WindowRequestOperator {
         let windows_state_guard = windows_state_guard.unwrap();
         let windows_state = windows_state_guard.value();
         
-        let time_entries = &windows_state.time_entries;
-        let (virtual_entries, temp_batch_id) = self.create_virtual_entries(record_batch, time_entries);
+        // let time_entries = &windows_state.time_entries;
+        let time_entries = TimeEntries::new();// TODO this is so things can compile
+        let (virtual_entries, temp_batch_id) = self.create_virtual_entries(record_batch, &time_entries);
         
         let last_entry = time_entries.latest_idx();
 
@@ -300,7 +301,8 @@ impl WindowRequestOperator {
 
             for i in 0..virtual_entries.len() {
                 if let Some(entry) = virtual_entries[i] {
-                    let is_late = is_entry_late(entry, last_entry);
+                    // let is_late = is_entry_late(entry, last_entry);
+                    let is_late = false;
                     let aggregator_type = if is_late {
                         // lates are handled as plain
                         AggregatorType::PlainAccumulator
@@ -310,15 +312,15 @@ impl WindowRequestOperator {
 
                     match aggregator_type {
                         AggregatorType::RetractableAccumulator => {
-                            let (retracts, _) = time_entries.find_retracts(window_frame, window_state.start_idx, entry);
-                            let aggregation: Box<dyn Aggregation> = Box::new(RetractableAggregation::new(
-                                vec![entry],
-                                window_config.window_expr.clone(),
-                                tiles.clone(),
-                                Some(vec![retracts]),
-                                accumulator_state.cloned(),
-                            ));
-                            aggs.push(aggregation);
+                            // let (retracts, _) = time_entries.find_retracts(window_frame, window_state.start_idx, entry);
+                            // let aggregation: Box<dyn Aggregation> = Box::new(RetractableAggregation::new(
+                            //     vec![entry],
+                            //     window_config.window_expr.clone(),
+                            //     tiles.clone(),
+                            //     Some(vec![retracts]),
+                            //     accumulator_state.cloned(),
+                            // ));
+                            // aggs.push(aggregation);
                             orig_positions.insert((*window_id, agg_idx), vec![i]);
                             agg_idx += 1;
                         }
@@ -337,13 +339,13 @@ impl WindowRequestOperator {
             let mut pos_idx = 0;
             for entries in split_entries_for_parallelism(&plain_agg_entries) {
                 let entries_len = entries.len();
-                let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
-                    entries,
-                    window_config.window_expr.clone(),
-                    tiles.clone(),
-                    time_entries,
-                ));
-                aggs.push(aggregation);
+                // let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
+                //     entries,
+                //     window_config.window_expr.clone(),
+                //     tiles.clone(),
+                //     time_entries,
+                // ));
+                // aggs.push(aggregation);
                 let orig_pos = plain_agg_orig_positions[pos_idx..pos_idx + entries_len].to_vec();
                 orig_positions.insert((*window_id, agg_idx), orig_pos);
                 pos_idx += entries_len;
@@ -353,13 +355,13 @@ impl WindowRequestOperator {
             pos_idx = 0;
             for entries in split_entries_for_parallelism(&eval_agg_entries) {
                 let entries_len = entries.len();
-                let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
-                    entries,
-                    window_config.window_expr.clone(),
-                    tiles.clone(),
-                    time_entries,
-                ));
-                aggs.push(aggregation);
+                // let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
+                //     entries,
+                //     window_config.window_expr.clone(),
+                //     tiles.clone(),
+                //     time_entries,
+                // ));
+                // aggs.push(aggregation);
                 let orig_pos = eval_agg_orig_positions[pos_idx..pos_idx + entries_len].to_vec();
                 orig_positions.insert((*window_id, agg_idx), orig_pos);
                 pos_idx += entries_len;

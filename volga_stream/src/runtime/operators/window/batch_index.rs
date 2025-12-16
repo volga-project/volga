@@ -1,5 +1,4 @@
-use std::collections::BTreeMap;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use datafusion::logical_expr::{WindowFrame, WindowFrameUnits};
 use crate::storage::batch_store::{BatchId, Timestamp};
 
@@ -26,9 +25,23 @@ impl Bucket {
         Self { timestamp, batches: Vec::new(), row_count: 0 }
     }
     
+    pub fn from_batches(timestamp: Timestamp, batches: Vec<BatchMetadata>) -> Self {
+        let row_count = batches.iter().map(|b| b.row_count).sum();
+        Self { timestamp, batches, row_count }
+    }
+    
     pub fn push(&mut self, metadata: BatchMetadata) {
         self.row_count += metadata.row_count;
         self.batches.push(metadata);
+    }
+
+    pub fn get_batch_idx(&self, batch_id: &BatchId) -> Option<usize> {
+        for (i, batch) in self.batches.iter().enumerate() {
+            if batch.batch_id == *batch_id {
+                return Some(i);
+            }
+        }
+        None
     }
 }
 
@@ -53,7 +66,7 @@ pub struct SlideInfo<'a> {
 /// Batch-level index using bucket timestamps
 #[derive(Debug, Clone)]
 pub struct BatchIndex {
-    buckets: BTreeMap<Timestamp, Bucket>,
+    buckets: BTreeMap<Timestamp, Bucket>, // TODO this can be hashmap for better performance
     total_rows: usize,
     max_timestamp_seen: Timestamp,
 }
@@ -90,7 +103,7 @@ impl BatchIndex {
             row_count,
         };
 
-        // TODO this is not correct, bucket is late any of entrie in batch is below max_timestamp_seen
+        // TODO this is not correct, bucket is late any if any entry in batch is below max_timestamp_seen (or window_end?)
         let is_late = max_ts < self.max_timestamp_seen;
 
         self.buckets
@@ -120,20 +133,10 @@ impl BatchIndex {
     /// (buckets with data in [timestamp - window_length_ms, timestamp])
     pub fn get_relevant_buckets_for_range_windows(
         &self,
-        bucketed_update_timestamps: &[Timestamp],
+        bucket_range: &BucketRange,
         window_length_ms: i64,
     ) -> Vec<&Bucket> {
-        if bucketed_update_timestamps.is_empty() {
-            return vec![];
-        }
-        
-        // Compute merged ranges: for each update timestamp, window is [ts - window_length, ts]
-        let mut ranges: Vec<(Timestamp, Timestamp)> = bucketed_update_timestamps
-            .iter()
-            .map(|&ts| (ts.saturating_sub(window_length_ms), ts))
-            .collect();
-        
-        ranges.sort_by_key(|(start, _)| *start);
+    
         
         // Merge overlapping ranges
         let mut merged = vec![ranges[0]];
@@ -166,12 +169,9 @@ impl BatchIndex {
     /// by going backwards and collecting window_size rows.
     pub fn get_relevant_buckets_for_rows_windows(
         &self,
-        bucketed_update_timestamps: &[Timestamp],
+        bucket_range: &BucketRange,
         window_size: usize,
     ) -> Vec<&Bucket> {
-        if bucketed_update_timestamps.is_empty() {
-            return vec![];
-        }
         
         let mut seen = HashSet::new();
         let mut result = Vec::new();
@@ -194,7 +194,7 @@ impl BatchIndex {
         result.sort_by_key(|b| b.timestamp);
         result
     }
-
+    
     pub fn total_rows(&self) -> usize {
         self.total_rows
     }
@@ -205,6 +205,17 @@ impl BatchIndex {
 
     pub fn is_empty(&self) -> bool {
         self.buckets.is_empty()
+    }
+
+    pub fn bucket_timestamps(&self) -> Vec<Timestamp> {
+        self.buckets.keys().copied().collect()
+    }
+
+    /// Get batch metadata by batch ID
+    pub fn get_batch_metadata(&self, batch_id: &BatchId) -> Option<&BatchMetadata> {
+        let bucket_ts = batch_id.time_bucket() as Timestamp;
+        self.buckets.get(&bucket_ts)
+            .and_then(|bucket| bucket.batches.iter().find(|m| m.batch_id == *batch_id))
     }
 
     pub fn prune(&mut self, cutoff_timestamp: Timestamp) -> Vec<BatchId> {
@@ -429,6 +440,7 @@ pub fn get_window_size_rows(window_frame: &WindowFrame) -> usize {
     }
 }
 
+// TODO test row_distance
 #[cfg(test)]
 mod tests {
     use super::*;

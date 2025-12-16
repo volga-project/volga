@@ -5,6 +5,29 @@ use arrow::array::RecordBatch;
 use datafusion::physical_plan::WindowExpr;
 use crate::storage::batch_store::BatchId;
 
+/// Sort a RecordBatch by timestamp column using Arrow kernels
+pub fn sort_batch_by_timestamp(batch: &RecordBatch, ts_column_index: usize) -> RecordBatch {
+    use arrow::compute::kernels::sort::{sort_to_indices, SortOptions};
+    use arrow::compute::take_record_batch;
+    
+    if batch.num_rows() <= 1 {
+        return batch.clone();
+    }
+    
+    let ts_column = batch.column(ts_column_index);
+    
+    let sort_options = SortOptions {
+        descending: false,
+        nulls_first: false,
+    };
+    
+    let indices = sort_to_indices(ts_column, Some(sort_options), None)
+        .expect("Should be able to sort by timestamp");
+    
+    take_record_batch(batch, &indices)
+        .expect("Should be able to reorder batch by sort indices")
+}
+
 // Core batch evaluation logic - take batch rows and evaluates args based on window expr
 pub fn evalute_batch(
     batch: &RecordBatch,

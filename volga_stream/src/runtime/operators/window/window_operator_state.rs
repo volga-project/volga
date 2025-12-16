@@ -8,15 +8,22 @@ use tokio::sync::RwLock;
 
 use crate::common::Key;
 use crate::runtime::operators::window::aggregates::merge_accumulator_state;
-use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
-use crate::runtime::operators::window::window_operator::{WindowConfig, drop_too_late_entries};
+use crate::runtime::operators::window::batch_index::BatchIndex;
+use crate::runtime::operators::window::window_operator::WindowConfig;
 use crate::runtime::operators::window::{AggregatorType, TileConfig, Tiles, WindowAggregator, create_window_aggregator};
 use crate::runtime::state::OperatorState;
-use crate::storage::batch_store::{BatchId, BatchStore};
+use crate::storage::batch_store::{BatchId, BatchStore, Timestamp};
 
 pub type WindowId = usize;
 
 pub type AccumulatorState = Vec<ScalarValue>;
+
+/// Result of inserting a batch - contains normal and late batch IDs
+#[derive(Debug, Clone)]
+pub struct InsertBatchResult {
+    pub normal_batch_ids: Vec<BatchId>,
+    pub late_batch_ids: Vec<BatchId>,
+}
 
 pub struct WindowsStateGuard {
     _arc: Arc<RwLock<WindowsState>>,
@@ -33,14 +40,13 @@ impl WindowsStateGuard {
 pub struct WindowState {
     pub tiles: Option<Tiles>,
     pub accumulator_state: Option<AccumulatorState>,
-    pub start_idx: TimeIdx,
-    pub end_idx: TimeIdx,
+    pub end_timestamp: Timestamp,
 }
 
 #[derive(Debug)]
 pub struct WindowsState {
     pub window_states: HashMap<WindowId, WindowState>,
-    pub time_entries: TimeEntries,
+    pub batch_index: BatchIndex,
 }
 
 #[derive(Debug)]
@@ -67,7 +73,7 @@ impl WindowOperatorState {
         })
     }
 
-    pub async fn insert_batch(&self, key: &Key, window_configs: &BTreeMap<WindowId, WindowConfig>, tiling_configs: &Vec<Option<TileConfig>>, ts_column_index: usize, lateness: Option<i64>, batch: RecordBatch) -> Vec<TimeIdx> {
+    pub async fn insert_batch(&self, key: &Key, window_configs: &BTreeMap<WindowId, WindowConfig>, tiling_configs: &Vec<Option<TileConfig>>, ts_column_index: usize, lateness: Option<i64>, batch: RecordBatch) -> InsertBatchResult {
         let window_ids: Vec<_> = window_configs.keys().cloned().collect();
         let window_exprs: Vec<_> = window_configs.values().map(|window| window.window_expr.clone()).collect();
         
@@ -84,98 +90,137 @@ impl WindowOperatorState {
         // Acquire write lock for mutable access
         let mut windows_state = arc_rwlock.write().await;
 
-        // all windows should have the same end
-        let last_entry_before_update = Some(windows_state.window_states.iter().next().unwrap().1.end_idx);
+        let max_timestamp_seen = windows_state.batch_index.max_timestamp_seen();
 
-        // Drop events that are too late based on lateness configuration, if needed
-        let record_batch = if let (Some(lateness_ms), Some(last_entry)) = (lateness, last_entry_before_update.clone()) {
-            drop_too_late_entries(&batch, ts_column_index, lateness_ms, last_entry)
+        // Drop events that are too late based on lateness configuration
+        let record_batch = if let Some(lateness_ms) = lateness {
+            if max_timestamp_seen > i64::MIN {
+                drop_too_late_entries(&batch, ts_column_index, lateness_ms, max_timestamp_seen)
+            } else {
+                batch.clone()
+            }
         } else {
             batch.clone()
         };
 
         if record_batch.num_rows() == 0 {
-            return Vec::new();
+            return InsertBatchResult {
+                normal_batch_ids: vec![],
+                late_batch_ids: vec![],
+            };
         } 
         
-        // calculate pre-aggregated tiles if needed, including not-dropped late entries
+        // Calculate pre-aggregated tiles if needed
         for (_, window_state) in windows_state.window_states.iter_mut() {
             if let Some(ref mut tiles) = window_state.tiles {
                 tiles.add_batch(&record_batch, ts_column_index);
             }
         }
 
-        Self::update_accumulators(window_configs, &mut *windows_state, &record_batch, ts_column_index);
-
-        // append records to storage and get inserted idxs
+        // Append records to storage (time-partitioned batches)
         let batches = self.batch_store.append_records(record_batch.clone(), key, ts_column_index).await;
-        let mut inserted_idxs = Vec::new();
-        for (batch_id, batch) in batches {
-            inserted_idxs.extend(windows_state.time_entries.insert_batch(batch_id, &batch, ts_column_index));
+        
+        // Insert into batch index and track which batches are late
+        let mut normal_batch_ids = Vec::new();
+        let mut late_batch_ids = Vec::new();
+        
+        for (batch_id, batch_data) in &batches {
+            let (min_ts, max_ts) = get_batch_timestamp_range(&batch_data, ts_column_index);
+            let row_count = batch_data.num_rows();
+            
+            let insert_result = windows_state.batch_index.insert_batch(*batch_id, min_ts, max_ts, row_count);
+            
+            match insert_result {
+                crate::runtime::operators::window::batch_index::InsertResult::Normal => {
+                    normal_batch_ids.push(*batch_id);
         }
-        inserted_idxs
+                crate::runtime::operators::window::batch_index::InsertResult::LateArrival => {
+                    late_batch_ids.push(*batch_id);
+                }
+            }
     }
 
-    // TODO what if RANGE window - we also need retracts.
-    // TODO should event outisde of window chnage state?
-    
-    fn update_accumulators(
+        // Update accumulators for late arrivals that fall within current window
+        if !late_batch_ids.is_empty() {
+            Self::update_accumulators_for_late_batches(
+                window_configs, 
+                &mut *windows_state, 
+                &batches, 
+                &late_batch_ids, 
+                ts_column_index
+            );
+        }
+
+        InsertBatchResult {
+            normal_batch_ids,
+            late_batch_ids,
+        }
+    }
+
+    /// Update accumulators for late batches that fall within current window bounds
+    fn update_accumulators_for_late_batches(
         window_configs: &BTreeMap<WindowId, WindowConfig>,
         windows_state: &mut WindowsState,
-        record_batch: &RecordBatch,
+        batches: &[(BatchId, RecordBatch)],
+        late_batch_ids: &[BatchId],
         ts_column_index: usize,
     ) {
+        use arrow::compute::{and, filter_record_batch};
+        use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
+        use arrow::array::{TimestampMillisecondArray, Scalar};
+        use crate::runtime::operators::window::batch_index::get_window_length_ms;
+        
+        // Create a map for quick lookup
+        let batch_map: HashMap<BatchId, &RecordBatch> = batches.iter()
+            .map(|(id, batch)| (*id, batch))
+            .collect();
+        
         for (window_id, window_config) in window_configs {
             let aggregator_type = window_config.aggregator_type;
             if aggregator_type != AggregatorType::RetractableAccumulator {
-                // Only retractable aggs keep accumulator state
                 continue;
             }
             
             let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
             
-            // Only update if accumulator state already exists
             let accumulator_state = match window_state.accumulator_state.as_ref() {
                 Some(state) => state,
                 None => continue,
             };
             
-            let window_start = window_state.start_idx;
-            let window_end = window_state.end_idx;
+            let window_frame = window_config.window_expr.get_window_frame();
+            let window_end = window_state.end_timestamp;
+            let window_start = window_end - get_window_length_ms(window_frame);
 
-            // Filter record_batch to get entries within window using SIMD kernels
-            use arrow::compute::{and, filter_record_batch};
-            use arrow::compute::kernels::cmp::{gt_eq, lt_eq};
-            use arrow::array::{TimestampMillisecondArray, Scalar};
+            // Process each late batch
+            for late_batch_id in late_batch_ids {
+                let record_batch = match batch_map.get(late_batch_id) {
+                    Some(batch) => *batch,
+                    None => continue,
+                };
             
             let ts_column = record_batch.column(ts_column_index);
             
-            // Create scalar arrays with the window bounds using the same data type as the timestamp column
-            let start_array = TimestampMillisecondArray::from_value(window_start.timestamp, 1);
-            let end_array = TimestampMillisecondArray::from_value(window_end.timestamp, 1);
+                let start_array = TimestampMillisecondArray::from_value(window_start, 1);
+                let end_array = TimestampMillisecondArray::from_value(window_end, 1);
             let start_scalar = Scalar::new(&start_array);
             let end_scalar = Scalar::new(&end_array);
             
-            // Create boolean masks using SIMD kernels
             let ge_start = gt_eq(ts_column, &start_scalar)
                 .expect("Should be able to compare with start timestamp");
             let le_end = lt_eq(ts_column, &end_scalar)
                 .expect("Should be able to compare with end timestamp");
             
-            // Combine conditions with AND
             let within_window = and(&ge_start, &le_end)
                 .expect("Should be able to combine boolean arrays");
             
-            // Check if any rows match the filter
             if within_window.true_count() == 0 {
                 continue;
             }
             
-            // Filter the batch using the boolean mask
             let filtered_batch = filter_record_batch(record_batch, &within_window)
                 .expect("Should be able to filter record batch");
 
-            // Create accumulator and restore existing state
             let mut accumulator = match create_window_aggregator(&window_config.window_expr) {
                 WindowAggregator::Accumulator(accumulator) => accumulator,
                 WindowAggregator::Evaluator(_) => panic!("Evaluator is not supported for retractable accumulator"),
@@ -183,20 +228,21 @@ impl WindowOperatorState {
 
             merge_accumulator_state(accumulator.as_mut(), accumulator_state);
 
-            // Evaluate window expression arguments and update accumulator
             let update_args = window_config.window_expr.evaluate_args(&filtered_batch)
                 .expect("Should be able to evaluate window args");
 
             accumulator.update_batch(&update_args)
                 .expect("Should be able to update accumulator");
 
-            // Save updated accumulator state
             let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
             window_state.accumulator_state = Some(accumulator.state().expect("Should be able to get accumulator state"));
+            }
         }
     }
 
     pub async fn prune(&self, key: &Key, lateness: i64, window_configs: &BTreeMap<WindowId, WindowConfig>) {
+        use crate::runtime::operators::window::batch_index::get_window_length_ms;
+        
         let arc_rwlock = self.window_states.get(key).expect("Windows state should exist").value().clone();
         let mut windows_state = arc_rwlock.write().await;
         let mut min_cutoff_timestamp = i64::MAX;
@@ -207,12 +253,14 @@ impl WindowOperatorState {
             let window_config = window_configs.get(&window_id).expect("Window config should exist");
             let window_frame = window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(&window_id).expect("Window state should exist");
-            let window_cutoff = windows_state.time_entries.get_cutoff_timestamp(window_frame, window_state, lateness);
+            
+            // Calculate cutoff: end_timestamp - window_length - lateness
+            let window_length = get_window_length_ms(window_frame);
+            let window_cutoff = window_state.end_timestamp - window_length - lateness;
 
             min_cutoff_timestamp = min_cutoff_timestamp.min(window_cutoff);
             
             if window_cutoff > 0 {
-                // Prune tiles for this window with its specific cutoff
                 let window_state = windows_state.window_states.get_mut(&window_id).expect("Window state should exist");
                 if let Some(ref mut tiles) = window_state.tiles {
                     tiles.prune(window_cutoff);
@@ -220,16 +268,11 @@ impl WindowOperatorState {
             }
         }
 
-        // Since data in storage is shared between windows,
-        // use minimal cutoff (earliest) timestamp to prune time_index and storage
+        // Use minimal cutoff to prune batch_index and storage
         if min_cutoff_timestamp != i64::MAX && min_cutoff_timestamp > 0 {
-            // Prune time index and get list of pruned batch IDs
-            let pruned_batch_ids = windows_state.time_entries.prune(min_cutoff_timestamp);
+            let pruned_batch_ids = windows_state.batch_index.prune(min_cutoff_timestamp);
 
-            // Prune storage - remove batches that are no longer needed
             if !pruned_batch_ids.is_empty() {
-                // TODO this should be an async removal and also synced with request operator
-                // (if this key is being read by request op, we should delay removal of batches that are still used)
                 self.batch_store.remove_batches(&pruned_batch_ids, key).await;
             }
         }
@@ -238,19 +281,15 @@ impl WindowOperatorState {
     pub async fn update_window_positions_and_accumulators(
         &self,
         key: &Key,
-        new_window_positions: &HashMap<WindowId, (TimeIdx, TimeIdx)>,
+        new_end_timestamps: &HashMap<WindowId, Timestamp>,
         accumulator_states: &HashMap<WindowId, Option<AccumulatorState>>,
     ) {
         let arc_rwlock = self.window_states.get(key).expect("Windows state should exist").value().clone();
         let mut windows_state = arc_rwlock.write().await;
         
-        for (window_id, _) in new_window_positions {
+        for (window_id, new_end_ts) in new_end_timestamps {
             let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
-            
-            if let Some((new_window_start, new_window_end)) = new_window_positions.get(window_id) {
-                window_state.start_idx = *new_window_start;
-                window_state.end_idx = *new_window_end;
-            }
+            window_state.end_timestamp = *new_end_ts;
             
             if let Some(accumulator_state) = accumulator_states.get(window_id) {
                 window_state.accumulator_state = accumulator_state.clone();
@@ -263,26 +302,19 @@ impl WindowOperatorState {
         partition_key: &Key,
         expected_min_timestamp: i64
     ) {
-        // Check time index entries
         let windows_state_ref = self.window_states.get(partition_key).unwrap();
         let arc_rwlock = windows_state_ref.value();
         let windows_state = arc_rwlock.read().await;
-        let remaining_entries: Vec<_> = windows_state.time_entries.entries.iter().map(|entry| entry.timestamp).collect();
         
-        assert!(remaining_entries.iter().all(|&ts| ts >= expected_min_timestamp), 
-                "All time entries should be >= {}ms, found: {:?}", expected_min_timestamp, remaining_entries);
+        // Check batch_index buckets are correctly pruned
+        let remaining_bucket_timestamps: Vec<_> = windows_state.batch_index.bucket_timestamps();
         
-        
-        // Check batch_ids mapping is correctly pruned
-        let remaining_batch_timestamps: Vec<_> = windows_state.time_entries.batch_ids.iter().map(|entry| *entry.key()).collect();
-        
-        assert!(remaining_batch_timestamps.iter().all(|&ts| ts >= expected_min_timestamp),
-                "All batch timestamps should be >= {}ms, found: {:?}", expected_min_timestamp, remaining_batch_timestamps);
+        assert!(remaining_bucket_timestamps.iter().all(|&ts| ts >= expected_min_timestamp),
+                "All bucket timestamps should be >= {}ms, found: {:?}", expected_min_timestamp, remaining_bucket_timestamps);
     
         // Check window state and tiles
         for (_, window_state) in windows_state.window_states.iter() {
             if let Some(ref tiles) = window_state.tiles {
-                // Assert tile boundaries respect the cutoff timestamp
                 let tile_ranges: Vec<_> = tiles.get_tiles_for_range(0, i64::MAX);
                 for tile in tile_ranges {
                     assert!(tile.tile_end > expected_min_timestamp, 
@@ -314,20 +346,49 @@ pub fn create_empty_windows_state(window_ids: &[WindowId], tiling_configs: &[Opt
             (window_id, WindowState {
                 tiles: tiling_configs.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone(), window_exprs[window_id].clone()))),
                 accumulator_state: None,
-                start_idx: TimeIdx { 
-                    batch_id: BatchId::random(),
-                    timestamp: 0,
-                    pos_idx: 0,
-                    row_idx: 0,
-                },
-                end_idx: TimeIdx { 
-                    batch_id: BatchId::random(),
-                    timestamp: 0,
-                    pos_idx: 0,
-                    row_idx: 0,
-                },
+                end_timestamp: i64::MIN,
             })
         }).collect(),
-        time_entries: TimeEntries::new(),
+        batch_index: BatchIndex::new(),
+    }
+}
+
+/// Get min and max timestamps from a batch
+fn get_batch_timestamp_range(batch: &RecordBatch, ts_column_index: usize) -> (Timestamp, Timestamp) {
+    use arrow::array::TimestampMillisecondArray;
+    use arrow::compute::kernels::aggregate::{min, max};
+    
+    let ts_column = batch.column(ts_column_index);
+    let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
+        .expect("Timestamp column should be TimestampMillisecondArray");
+    
+    let min_ts = min(ts_array).expect("Should have min timestamp");
+    let max_ts = max(ts_array).expect("Should have max timestamp");
+    
+    (min_ts, max_ts)
+}
+
+/// Drop entries that are too late based on lateness configuration
+pub fn drop_too_late_entries(record_batch: &RecordBatch, ts_column_index: usize, lateness_ms: i64, max_timestamp_seen: Timestamp) -> RecordBatch {
+    use arrow::compute::filter_record_batch;
+    use arrow::compute::kernels::cmp::gt_eq;
+    use arrow::array::{TimestampMillisecondArray, Scalar};
+    
+    let ts_column = record_batch.column(ts_column_index);
+    
+    // Calculate cutoff timestamp: max_timestamp_seen - lateness_ms
+    let cutoff_timestamp = max_timestamp_seen - lateness_ms;
+    
+    let cutoff_array = TimestampMillisecondArray::from_value(cutoff_timestamp, 1);
+    let cutoff_scalar = Scalar::new(&cutoff_array);
+    
+    let keep_mask = gt_eq(ts_column, &cutoff_scalar)
+        .expect("Should be able to compare with cutoff timestamp");
+    
+    if keep_mask.true_count() == record_batch.num_rows() {
+        record_batch.clone()
+    } else {
+        filter_record_batch(record_batch, &keep_mask)
+            .expect("Should be able to filter record batch")
     }
 }
