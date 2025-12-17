@@ -52,8 +52,8 @@ impl Collector {
     pub fn gen_partitioned_channels(&mut self, message: &Message) -> Vec<Channel> {
         let num_partitions = self.output_channels.len();
         
-        // Use BroadcastPartition for watermark messages, otherwise use the configured partition strategy
-        let partitions = if let Message::Watermark(_) = message {
+        // Use BroadcastPartition for control messages, otherwise use the configured partition strategy
+        let partitions = if matches!(message, Message::Watermark(_) | Message::CheckpointBarrier(_)) {
             crate::runtime::partition::BroadcastPartition::new().partition(message, num_partitions)
         } else {
             self.partition.partition(message, num_partitions)

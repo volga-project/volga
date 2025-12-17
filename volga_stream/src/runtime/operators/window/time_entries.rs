@@ -5,13 +5,14 @@ use crossbeam_skiplist::{SkipSet, SkipMap};
 use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexSet;
+use serde::{Serialize, Deserialize};
 
 use crate::runtime::operators::window::window_operator_state::WindowState;
 use crate::runtime::operators::window::tiles::Tile;
 use crate::runtime::operators::window::Tiles;
 use crate::storage::batch_store::{BatchId, RowIdx, Timestamp};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeIdx {
     pub timestamp: Timestamp,
     pub pos_idx: usize, // position within same timestamp

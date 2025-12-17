@@ -16,6 +16,7 @@ use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
 use rand::distributions::Alphanumeric;
 use datafusion::common::ScalarValue;
+use serde::{Serialize, Deserialize};
 
 /// Configuration for datagen source
 #[derive(Debug, Clone)]
@@ -28,11 +29,12 @@ pub struct DatagenSourceConfig {
     pub fields: HashMap<String, FieldGenerator>,
     pub projection: Option<Vec<usize>>,
     pub projected_schema: Option<SchemaRef>,
+    pub replayable: bool,
 }
 
 impl DatagenSourceConfig {
     pub fn new(schema: Arc<Schema>, rate: Option<f32>, limit: Option<usize>, run_for_s: Option<f64>, batch_size: usize, fields: HashMap<String, FieldGenerator>) -> Self {
-        Self { schema, rate, limit, run_for_s, batch_size, fields, projection: None, projected_schema: None }
+        Self { schema, rate, limit, run_for_s, batch_size, fields, projection: None, projected_schema: None, replayable: false }
     }
 
     pub fn get_projection(&self) -> (Option<Vec<usize>>, Option<SchemaRef>) {
@@ -42,6 +44,10 @@ impl DatagenSourceConfig {
     pub fn set_projection(&mut self, projection: Vec<usize>, schema: SchemaRef) {
         self.projection = Some(projection);
         self.projected_schema = Some(schema);
+    }
+
+    pub fn set_replayable(&mut self, replayable: bool) {
+        self.replayable = replayable;
     }
 }
 
@@ -55,6 +61,26 @@ pub enum FieldGenerator {
     Increment { start: ScalarValue, step: ScalarValue },
     Uniform { min: ScalarValue, max: ScalarValue },
     Values { values: Vec<ScalarValue> }, // Round-robin through provided values
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DatagenSourcePosition {
+    records_generated: usize,
+    max_watermark_sent: bool,
+    current_key_index: usize,
+    task_records_limit: Option<usize>,
+    key_values: Vec<String>,
+    per_key_timestamps: HashMap<String, i64>,
+    per_key_increments_bytes: Vec<u8>,
+    per_key_values_indices: HashMap<String, HashMap<usize, usize>>,
+}
+
+fn serialize_per_key_increments(_map: &HashMap<String, HashMap<usize, ScalarValue>>) -> Result<Vec<u8>> {
+    Ok(vec![])
+}
+
+fn deserialize_per_key_increments(_bytes: &[u8]) -> Result<HashMap<String, HashMap<usize, ScalarValue>>> {
+    Ok(HashMap::new())
 }
 
 /// Datagen source function with deterministic rate coordination
@@ -108,6 +134,28 @@ impl DatagenSourceFunction {
             per_key_timestamps: HashMap::new(),
             per_key_increments: HashMap::new(),
             per_key_values_indices: HashMap::new(),
+        }
+    }
+
+    fn validate_replayable_config(&self) {
+        if !self.config.replayable {
+            return;
+        }
+
+        for (field_name, gen) in &self.config.fields {
+            let ok = matches!(
+                gen,
+                FieldGenerator::IncrementalTimestamp { .. }
+                    | FieldGenerator::Key { .. }
+                    | FieldGenerator::Increment { .. }
+                    | FieldGenerator::Values { .. }
+            );
+            if !ok {
+                panic!(
+                    "Datagen replayable mode requires deterministic generators only; field '{}' has {:?}",
+                    field_name, gen
+                );
+            }
         }
     }
 
@@ -498,11 +546,51 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             }
         }
     }
+
+    async fn snapshot_position(&self) -> Result<Vec<u8>> {
+        if !self.config.replayable {
+            return Ok(vec![]);
+        }
+
+        let per_key_increments_bytes = serialize_per_key_increments(&self.per_key_increments)?;
+
+        let pos = DatagenSourcePosition {
+            records_generated: self.records_generated,
+            max_watermark_sent: self.max_watermark_sent,
+            current_key_index: self.current_key_index,
+            task_records_limit: self.task_records_limit,
+            key_values: self.key_values.clone(),
+            per_key_timestamps: self.per_key_timestamps.clone(),
+            per_key_increments_bytes,
+            per_key_values_indices: self.per_key_values_indices.clone(),
+        };
+        Ok(bincode::serialize(&pos)?)
+    }
+
+    async fn restore_position(&mut self, bytes: &[u8]) -> Result<()> {
+        if !self.config.replayable {
+            return Ok(());
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let pos: DatagenSourcePosition = bincode::deserialize(bytes)?;
+        self.records_generated = pos.records_generated;
+        self.max_watermark_sent = pos.max_watermark_sent;
+        self.current_key_index = pos.current_key_index;
+        self.task_records_limit = pos.task_records_limit;
+        self.key_values = pos.key_values;
+        self.per_key_timestamps = pos.per_key_timestamps;
+        self.per_key_increments = deserialize_per_key_increments(&pos.per_key_increments_bytes)?;
+        self.per_key_values_indices = pos.per_key_values_indices;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl FunctionTrait for DatagenSourceFunction {
     async fn open(&mut self, ctx: &RuntimeContext) -> Result<()> {
+        self.validate_replayable_config();
         // Set runtime context
         self.task_index = Some(ctx.task_index());
         self.parallelism = Some(ctx.parallelism());
@@ -658,6 +746,7 @@ mod tests {
                         panic!("Unexpected keyed message");
                     },
                     Some(Message::Watermark(_)) => break,
+                    Some(Message::CheckpointBarrier(_)) => break,
                     None => break,
                 }
                 

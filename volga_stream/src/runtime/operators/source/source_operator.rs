@@ -187,4 +187,18 @@ impl OperatorTrait for SourceOperator {
             None => OperatorPollResult::None,
         }
     }
+
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
+        let pos = function.snapshot_position().await?;
+        Ok(vec![("source_position".to_string(), pos)])
+    }
+
+    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
+        if let Some((_, bytes)) = blobs.iter().find(|(name, _)| name == "source_position") {
+            function.restore_position(bytes).await?;
+        }
+        Ok(())
+    }
 }

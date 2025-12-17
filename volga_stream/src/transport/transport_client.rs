@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use crate::{common::message::Message, runtime::{metrics::{LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
+use tokio::sync::{mpsc, watch};
 use futures::stream::{Stream, StreamExt};
 use std::pin::Pin;
 use futures::stream;
@@ -48,6 +49,32 @@ pub struct DataReader {
     receivers: HashMap<String, BatchReceiver>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DataReaderControl {
+    // upstream_vertex_id -> enabled
+    enabled: HashMap<String, watch::Sender<bool>>,
+}
+
+impl DataReaderControl {
+    pub fn block_upstream(&self, upstream_vertex_id: &str) {
+        if let Some(tx) = self.enabled.get(upstream_vertex_id) {
+            let _ = tx.send(false);
+        }
+    }
+
+    pub fn unblock_upstream(&self, upstream_vertex_id: &str) {
+        if let Some(tx) = self.enabled.get(upstream_vertex_id) {
+            let _ = tx.send(true);
+        }
+    }
+
+    pub fn unblock_all(&self) {
+        for tx in self.enabled.values() {
+            let _ = tx.send(true);
+        }
+    }
+}
+
 impl DataReader {
     pub fn new(vertex_id: String, receivers: HashMap<String, BatchReceiver>) -> Self {
         Self {
@@ -72,6 +99,53 @@ impl DataReader {
             .collect();
         
         Box::pin(stream::select_all(receiver_streams))
+    }
+
+    pub fn message_stream_with_control(self) -> (MessageStream, DataReaderControl) {
+        let (out_tx, out_rx) = mpsc::unbounded_channel::<Message>();
+        let mut enabled = HashMap::new();
+
+        for (channel_id, mut rx) in self.receivers {
+            // channel id is "{source}_to_{target}"
+            let upstream_vertex_id = channel_id
+                .split("_to_")
+                .next()
+                .unwrap_or("")
+                .to_string();
+
+            let (en_tx, mut en_rx) = watch::channel(true);
+            enabled.insert(upstream_vertex_id.clone(), en_tx);
+
+            let out_tx = out_tx.clone();
+            tokio::spawn(async move {
+                loop {
+                    // wait until enabled
+                    while !*en_rx.borrow() {
+                        if en_rx.changed().await.is_err() {
+                            return;
+                        }
+                    }
+
+                    match rx.recv().await {
+                        Some(message) => {
+                            if out_tx.send(message).is_err() {
+                                return;
+                            }
+                        }
+                        None => return,
+                    }
+                }
+            });
+        }
+
+        let stream = Box::pin(stream::unfold(out_rx, |mut rx| async move {
+            match rx.recv().await {
+                Some(message) => Some((message, rx)),
+                None => None,
+            }
+        })) as MessageStream;
+
+        (stream, DataReaderControl { enabled })
     }
 }
 

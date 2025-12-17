@@ -510,6 +510,48 @@ impl OperatorTrait for WindowOperator {
             None => return OperatorPollResult::None,
         }
     }
+
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        let state_cp = self.state.to_checkpoint();
+        let batch_store_cp = self.state.get_batch_store().to_checkpoint();
+
+        Ok(vec![
+            ("window_operator_state".to_string(), bincode::serialize(&state_cp)?),
+            ("batch_store".to_string(), bincode::serialize(&batch_store_cp)?),
+        ])
+    }
+
+    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+        let state_bytes = blobs
+            .iter()
+            .find(|(name, _)| name == "window_operator_state")
+            .map(|(_, b)| b.as_slice());
+        let batch_store_bytes = blobs
+            .iter()
+            .find(|(name, _)| name == "batch_store")
+            .map(|(_, b)| b.as_slice());
+
+        if state_bytes.is_none() && batch_store_bytes.is_none() {
+            return Ok(());
+        }
+
+        let batch_store = if let Some(bytes) = batch_store_bytes {
+            let cp: crate::storage::batch_store::BatchStoreCheckpoint = bincode::deserialize(bytes)?;
+            Arc::new(crate::storage::batch_store::BatchStore::from_checkpoint(cp))
+        } else {
+            Arc::new(crate::storage::batch_store::BatchStore::default())
+        };
+
+        let restored_state = Arc::new(WindowOperatorState::new(batch_store));
+        if let Some(bytes) = state_bytes {
+            let cp: crate::runtime::operators::window::window_operator_state::WindowOperatorStateCheckpoint =
+                bincode::deserialize(bytes)?;
+            restored_state.apply_checkpoint(cp, &self.window_configs, &self.tiling_configs);
+        }
+
+        self.state = restored_state;
+        Ok(())
+    }
 }
 
 pub fn drop_too_late_entries(record_batch: &RecordBatch, ts_column_index: usize, lateness_ms: i64, last_entry: TimeIdx) -> RecordBatch {

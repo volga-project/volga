@@ -159,6 +159,13 @@ pub async fn stream_grpc_many_clients_one_server() {
                 println!("[TEST] Watermark message: {} -> {}", 
                         watermark_msg.metadata.upstream_vertex_id.as_ref().unwrap(), watermark_msg.watermark_value);
             }
+            Message::CheckpointBarrier(barrier_msg) => {
+                println!(
+                    "[TEST] Checkpoint barrier: {} -> {}",
+                    barrier_msg.metadata.upstream_vertex_id.as_ref().unwrap(),
+                    barrier_msg.checkpoint_id
+                );
+            }
         }
         
         // Check if we've received all expected messages
@@ -251,6 +258,7 @@ enum MessageType {
     Regular,
     Keyed,
     Watermark,
+    CheckpointBarrier,
 }
 
 fn get_message_type(message: &Message) -> MessageType {
@@ -258,6 +266,7 @@ fn get_message_type(message: &Message) -> MessageType {
         Message::Regular(_) => MessageType::Regular,
         Message::Keyed(_) => MessageType::Keyed,
         Message::Watermark(_) => MessageType::Watermark,
+        Message::CheckpointBarrier(_) => MessageType::CheckpointBarrier,
     }
 }
 

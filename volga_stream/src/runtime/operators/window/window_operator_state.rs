@@ -13,6 +13,7 @@ use crate::runtime::operators::window::window_operator::{WindowConfig, drop_too_
 use crate::runtime::operators::window::{AggregatorType, TileConfig, Tiles, WindowAggregator, create_window_aggregator};
 use crate::runtime::state::OperatorState;
 use crate::storage::batch_store::{BatchId, BatchStore};
+use serde::{Serialize, Deserialize};
 
 pub type WindowId = usize;
 
@@ -50,11 +51,95 @@ pub struct WindowOperatorState {
     batch_store: Arc<BatchStore>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeEntriesCheckpoint {
+    pub entries: Vec<TimeIdx>,
+    pub batch_ids: Vec<(i64, Vec<BatchId>)>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeyWindowsStateCheckpoint {
+    pub key_bytes: Vec<u8>,
+    pub window_positions: Vec<(u32, TimeIdx, TimeIdx)>, // (window_id, start, end)
+    pub time_entries: TimeEntriesCheckpoint,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowOperatorStateCheckpoint {
+    pub keys: Vec<KeyWindowsStateCheckpoint>,
+}
+
 impl WindowOperatorState {
     pub fn new(batch_store: Arc<BatchStore>) -> Self {
         Self {
             window_states: DashMap::new(),
             batch_store,
+        }
+    }
+
+    pub fn to_checkpoint(&self) -> WindowOperatorStateCheckpoint {
+        let mut keys = Vec::new();
+        for entry in self.window_states.iter() {
+            let key = entry.key().clone();
+            let arc = entry.value().clone();
+            let windows_state = arc.try_read().expect("Failed to read windows state for checkpoint");
+
+            let window_positions = windows_state
+                .window_states
+                .iter()
+                .map(|(window_id, ws)| (*window_id as u32, ws.start_idx, ws.end_idx))
+                .collect::<Vec<_>>();
+
+            let entries = windows_state.time_entries.entries.iter().map(|e| *e).collect::<Vec<_>>();
+            let batch_ids = windows_state
+                .time_entries
+                .batch_ids
+                .iter()
+                .map(|e| (*e.key(), (*e.value()).as_ref().clone()))
+                .collect::<Vec<_>>();
+
+            keys.push(KeyWindowsStateCheckpoint {
+                key_bytes: key.to_bytes(),
+                window_positions,
+                time_entries: TimeEntriesCheckpoint { entries, batch_ids },
+            });
+        }
+        WindowOperatorStateCheckpoint { keys }
+    }
+
+    pub fn apply_checkpoint(
+        &self,
+        checkpoint: WindowOperatorStateCheckpoint,
+        window_configs: &BTreeMap<WindowId, WindowConfig>,
+        tiling_configs: &Vec<Option<TileConfig>>,
+    ) {
+        let window_ids: Vec<_> = window_configs.keys().cloned().collect();
+        let window_exprs: Vec<_> = window_configs.values().map(|w| w.window_expr.clone()).collect();
+
+        for key_cp in checkpoint.keys {
+            let key = Key::from_bytes(&key_cp.key_bytes);
+            let mut windows_state = create_empty_windows_state(&window_ids, tiling_configs, &window_exprs);
+
+            // restore positions
+            for (wid_u32, start, end) in key_cp.window_positions {
+                let wid = wid_u32 as WindowId;
+                if let Some(ws) = windows_state.window_states.get_mut(&wid) {
+                    ws.start_idx = start;
+                    ws.end_idx = end;
+                    // accumulator_state/tiles are reconstructed by create_empty_windows_state (acc state stays None)
+                }
+            }
+
+            // restore time entries
+            for time_idx in key_cp.time_entries.entries {
+                windows_state.time_entries.entries.insert(time_idx);
+            }
+            for (ts, batch_ids) in key_cp.time_entries.batch_ids {
+                windows_state.time_entries.batch_ids.insert(ts, Arc::new(batch_ids));
+            }
+
+            let arc = Arc::new(RwLock::new(windows_state));
+            self.window_states.insert(key, arc);
         }
     }
     

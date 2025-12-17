@@ -65,6 +65,14 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     fn set_input(&mut self, _input: Option<MessageStream>) {
         panic!("set_input not implemented for this operator")
     }
+
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        Ok(vec![])
+    }
+
+    async fn restore(&mut self, _blobs: &[(String, Vec<u8>)]) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
