@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use futures::Stream;
+use futures::{Stream, StreamExt};
 
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
@@ -57,6 +57,7 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()>;
     async fn close(&mut self) -> Result<()>;
     fn operator_type(&self) -> OperatorType;
+    fn operator_config(&self) -> &OperatorConfig;
 
     async fn poll_next(&mut self) -> OperatorPollResult {
         panic!("poll_next not implemented for this operator")
@@ -72,6 +73,21 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
 
     async fn restore(&mut self, _blobs: &[(String, Vec<u8>)]) -> Result<()> {
         Ok(())
+    }
+}
+
+pub fn operator_config_requires_checkpoint(operator_config: &OperatorConfig) -> bool {
+    match operator_config {
+        OperatorConfig::WindowConfig(_) => true,
+        OperatorConfig::SourceConfig(source_cfg) => {
+            match source_cfg {
+                // Only replayable datagen participates in checkpointing.
+                SourceConfig::DatagenSourceConfig(cfg) => cfg.replayable,
+                _ => false,
+            }
+        }
+        OperatorConfig::ChainedConfig(configs) => configs.iter().any(operator_config_requires_checkpoint),
+        _ => false,
     }
 }
 
@@ -166,6 +182,21 @@ impl OperatorTrait for Operator {
             Operator::Chained(op) => op.operator_type(),
         }
     }
+
+    fn operator_config(&self) -> &OperatorConfig {
+        match self {
+            Operator::Map(op) => op.operator_config(),
+            Operator::Join(op) => op.operator_config(),
+            Operator::Sink(op) => op.operator_config(),
+            Operator::Source(op) => op.operator_config(),
+            Operator::KeyBy(op) => op.operator_config(),
+            Operator::Reduce(op) => op.operator_config(),
+            Operator::Aggregate(op) => op.operator_config(),
+            Operator::Window(op) => op.operator_config(),
+            Operator::WindowRequest(op) => op.operator_config(),
+            Operator::Chained(op) => op.operator_config(),
+        }
+    }
     
     fn set_input(&mut self, input: Option<MessageStream>) {
         match self {
@@ -249,6 +280,19 @@ impl OperatorBase {
         self.function.as_mut()
             .and_then(|f| f.as_any_mut().downcast_mut::<T>())
     }
+
+    pub fn pop_pending_output(&mut self) -> Option<Message> {
+        self.pending_messages.pop()
+    }
+
+    pub async fn next_input(&mut self) -> Option<Message> {
+        let input_stream = self.input.as_mut().expect("input stream not set");
+        input_stream.next().await
+    }
+
+    pub fn operator_config(&self) -> &OperatorConfig {
+        &self.operator_config
+    }
 }
 
 #[async_trait]
@@ -273,6 +317,10 @@ impl OperatorTrait for OperatorBase {
     fn operator_type(&self) -> OperatorType {
         get_operator_type_from_config(&self.operator_config)
     }   
+
+    fn operator_config(&self) -> &OperatorConfig {
+        &self.operator_config
+    }
     
     fn set_input(&mut self, input: Option<MessageStream>) {
         self.input = input;

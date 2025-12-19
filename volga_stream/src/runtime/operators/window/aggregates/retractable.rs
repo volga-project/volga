@@ -197,7 +197,12 @@ fn run_retractable_accumulator(
         results.push(result);
     }
 
-    (results, accumulator.state().expect("Should be able to get accumulator state"))
+    (
+        results,
+        accumulator
+            .state()
+            .expect("Should be able to get accumulator state")
+    )
 }
 
 fn get_update_args(

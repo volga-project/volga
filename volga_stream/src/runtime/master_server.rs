@@ -174,7 +174,7 @@ impl MasterServer {
         }
     }
 
-    pub async fn set_expected_tasks(&mut self, tasks: Vec<TaskKey>) {
+    pub async fn set_checkpointable_tasks(&mut self, tasks: Vec<TaskKey>) {
         let mut registry = self.service.registry.lock().await;
         registry.expected_tasks = tasks.into_iter().collect();
     }

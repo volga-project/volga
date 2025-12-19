@@ -12,6 +12,7 @@ use futures::future::join_all;
 use serde::{Serialize, Deserialize};
 use anyhow::Result;
 use crate::runtime::operators::operator::OperatorType;
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
 
 use tokio::sync::mpsc;
@@ -504,6 +505,13 @@ impl Worker {
                 continue;
             }
 
+            // Only trigger sources that actually participate in checkpointing.
+            if let Some(v) = self.graph.get_vertices().get(&vertex_id) {
+                if !operator_config_requires_checkpoint(&v.operator_config) {
+                    continue;
+                }
+            }
+
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
             let fut = runtime.spawn(async move {
                 let _ = task_ref.ask(StreamTaskMessage::TriggerCheckpoint(checkpoint_id)).await;
@@ -515,6 +523,25 @@ impl Worker {
     pub async fn close(&mut self) {
         self.stop_request_source_processor_if_needed().await;
         self.cleanup().await;
+    }
+
+    // Test-only "crash": abort runtimes without graceful close.
+    pub async fn kill_for_testing(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+
+        // Best-effort: stop request source processor (if any) to avoid background noise in tests.
+        self.stop_request_source_processor_if_needed().await;
+
+        // Drop actors + abort task runtimes quickly.
+        self.task_actors.clear();
+        self.backend_actor = None;
+
+        for (_id, rt) in self.task_runtimes.drain() {
+            rt.shutdown_timeout(Duration::from_millis(10));
+        }
+        if let Some(rt) = self.transport_backend_runtime.take() {
+            rt.shutdown_timeout(Duration::from_millis(10));
+        }
     }
 
     // This should only be used for testing - simulates worker execution

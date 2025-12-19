@@ -151,6 +151,10 @@ impl OperatorTrait for SourceOperator {
         OperatorType::Source
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     fn set_input(&mut self, input: Option<MessageStream>) {
         self.base.set_input(input);
     }

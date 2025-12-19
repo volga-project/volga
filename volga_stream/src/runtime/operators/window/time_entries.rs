@@ -45,6 +45,51 @@ pub struct TimeEntries {
     pub batch_ids: SkipMap<Timestamp, Arc<Vec<BatchId>>>,
 }
 
+impl Serialize for TimeEntries {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct TimeEntriesSerde {
+            entries: Vec<TimeIdx>,
+            batch_ids: Vec<(Timestamp, Vec<BatchId>)>,
+        }
+
+        let entries = self.entries.iter().map(|e| *e).collect::<Vec<_>>();
+        let batch_ids = self
+            .batch_ids
+            .iter()
+            .map(|e| (*e.key(), (*e.value()).as_ref().clone()))
+            .collect::<Vec<_>>();
+
+        TimeEntriesSerde { entries, batch_ids }.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeEntries {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TimeEntriesSerde {
+            entries: Vec<TimeIdx>,
+            batch_ids: Vec<(Timestamp, Vec<BatchId>)>,
+        }
+
+        let decoded = TimeEntriesSerde::deserialize(deserializer)?;
+        let time_entries = TimeEntries::new();
+        for entry in decoded.entries {
+            time_entries.entries.insert(entry);
+        }
+        for (ts, batch_ids) in decoded.batch_ids {
+            time_entries.batch_ids.insert(ts, Arc::new(batch_ids));
+        }
+        Ok(time_entries)
+    }
+}
+
 impl TimeEntries {
     pub fn new() -> Self {
         Self {

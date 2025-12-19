@@ -2,14 +2,17 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use arrow::array::RecordBatch;
 use datafusion::physical_plan::WindowExpr;
-use datafusion::scalar::ScalarValue;
+use datafusion::common::ScalarValue;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 
 use crate::runtime::operators::window::aggregates::merge_accumulator_state;
 use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
+use crate::runtime::utils;
 use crate::storage::batch_store::Timestamp;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TimeGranularity {
     Seconds(u32),
     Minutes(u32),
@@ -48,11 +51,13 @@ impl TimeGranularity {
 }
 
 /// A tile represents pre-aggregated data for a specific time bucket
-#[derive(Debug, Clone)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tile {
     pub tile_start: Timestamp,
     pub tile_end: Timestamp,
     pub granularity: TimeGranularity,
+    #[serde_as(as = "Option<Vec<utils::ScalarValueAsBytes>>")]
     pub accumulator_state: Option<AccumulatorState>,
     pub entry_count: u64,
 }
@@ -69,7 +74,7 @@ impl Tile {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TileConfig {
     pub granularities: Vec<TimeGranularity>,
 }
@@ -100,16 +105,15 @@ impl TileConfig {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tiles {
     config: TileConfig,
-    window_expr: Arc<dyn WindowExpr>,
     // Map: granularity -> tile_start -> tile
     tiles: BTreeMap<TimeGranularity, BTreeMap<Timestamp, Tile>>,
 }
 
 impl Tiles {
-    pub fn new(config: TileConfig, window_expr: Arc<dyn WindowExpr>) -> Self {
+    pub fn new(config: TileConfig, ) -> Self {
         let mut tiles = BTreeMap::new();
         
         for granularity in &config.granularities {
@@ -118,12 +122,11 @@ impl Tiles {
         
         Self {
             config,
-            window_expr,
             tiles,
         }
     }
 
-    pub fn add_batch(&mut self, batch: &RecordBatch, ts_column_index: usize) {
+    pub fn add_batch(&mut self, batch: &RecordBatch, window_expr: &Arc<dyn WindowExpr>, ts_column_index: usize) {
         use arrow::array::{TimestampMillisecondArray, Int64Array, Array};
         
         let num_rows = batch.num_rows();
@@ -150,7 +153,7 @@ impl Tiles {
         for granularity in granularities {
             Self::add_batch_for_granularity(
                 &mut self.tiles,
-                &self.window_expr,
+                window_expr,
                 batch,
                 ts_int64_array,
                 granularity,
@@ -282,8 +285,11 @@ impl Tiles {
             .expect("Failed to update accumulator");
         
         // Save updated state
-        tile.accumulator_state = Some(accumulator.state()
-            .expect("Failed to get accumulator state"));
+        tile.accumulator_state = Some(
+            accumulator
+                .state()
+                .expect("Failed to get accumulator state"),
+        );
         
         // Update entry count
         tile.entry_count += tile_batch.num_rows() as u64;
@@ -357,14 +363,14 @@ impl Tiles {
     }
 
 
-    pub fn compute_aggregate_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> ScalarValue {
+    pub fn compute_aggregate_for_range(&self, window_expr: &Arc<dyn WindowExpr>, start_time: Timestamp, end_time: Timestamp) -> ScalarValue {
         let tiles = self.get_tiles_for_range(start_time, end_time);
         
         if tiles.is_empty() {
             return ScalarValue::Null;
         }
         
-        let mut final_accumulator = match create_window_aggregator(&self.window_expr) {
+        let mut final_accumulator = match create_window_aggregator(window_expr) {
             WindowAggregator::Accumulator(accumulator) => accumulator,
             WindowAggregator::Evaluator(_) => panic!("Evaluator is not supported for retractable accumulator"),
         };
@@ -502,7 +508,7 @@ mod tests {
             TimeGranularity::Hours(1),
         ]).expect("Failed to create tile config");
         
-        let mut tiles = Tiles::new(config, window_expr);
+        let mut tiles = Tiles::new(config);
 
         // Create test data spanning multiple hours
         let base_time = 1625097600000; // 2021-07-01 00:00:00 UTC
@@ -533,7 +539,7 @@ mod tests {
         let batch = create_test_batch(timestamps, values);
         
         // Add batch to tiles - should work with unsorted data
-        tiles.add_batch(&batch, 0);
+        tiles.add_batch(&batch, &window_expr, 0);
 
         // Validate tiles were created at all granularities
         let stats = tiles.get_stats();
@@ -674,9 +680,9 @@ mod tests {
         let expected_large_sum = 10.0 + 20.0 + 25.0 + 35.0 + 40.0 + 60.0 + 75.0 + 90.0 + 110.0 + 125.0;
         
         // Compute actual results
-        let small_result = tiles.compute_aggregate_for_range(small_range_start, small_range_end);
-        let medium_result = tiles.compute_aggregate_for_range(medium_range_start, medium_range_end);
-        let large_result = tiles.compute_aggregate_for_range(large_range_start, large_range_end);
+        let small_result = tiles.compute_aggregate_for_range(&window_expr, small_range_start, small_range_end);
+        let medium_result = tiles.compute_aggregate_for_range(&window_expr, medium_range_start, medium_range_end);
+        let large_result = tiles.compute_aggregate_for_range(&window_expr, large_range_start, large_range_end);
         
         println!("Expected vs Actual results:");
         println!("  Small range: expected={}, actual={:?}", expected_small_sum, small_result);
@@ -737,11 +743,11 @@ mod tests {
             TimeGranularity::Hours(1),
         ]).expect("Failed to create tile config");
         
-        let mut sum_tiles = Tiles::new(config.clone(), sum_expr);
-        let mut count_tiles = Tiles::new(config.clone(), count_expr);
-        let mut avg_tiles = Tiles::new(config.clone(), avg_expr);
-        let mut min_tiles = Tiles::new(config.clone(), min_expr);
-        let mut max_tiles = Tiles::new(config, max_expr);
+        let mut sum_tiles = Tiles::new(config.clone());
+        let mut count_tiles = Tiles::new(config.clone());
+        let mut avg_tiles = Tiles::new(config.clone());
+        let mut min_tiles = Tiles::new(config.clone());
+        let mut max_tiles = Tiles::new(config.clone());
         
         // Create test data with corner cases: gaps, duplicates, unsorted
         // Use realistic time scale: minutes instead of seconds, with hour-long gaps
@@ -783,11 +789,11 @@ mod tests {
         let batch = create_test_batch(timestamps, values);
         
         // Add the same batch to all tile sets
-        sum_tiles.add_batch(&batch, 0);
-        count_tiles.add_batch(&batch, 0);
-        avg_tiles.add_batch(&batch, 0);
-        min_tiles.add_batch(&batch, 0);
-        max_tiles.add_batch(&batch, 0);
+        sum_tiles.add_batch(&batch, &sum_expr, 0);
+        count_tiles.add_batch(&batch, &count_expr, 0);
+        avg_tiles.add_batch(&batch, &avg_expr, 0);
+        min_tiles.add_batch(&batch, &min_expr, 0);
+        max_tiles.add_batch(&batch, &max_expr, 0);
         
         // Test multiple time ranges with different characteristics
         let test_ranges = vec![
@@ -807,11 +813,11 @@ mod tests {
         for (range_start, range_end, range_name) in test_ranges {
             
             // Get results from each tile set
-            let sum_result = sum_tiles.compute_aggregate_for_range(range_start, range_end);
-            let count_result = count_tiles.compute_aggregate_for_range(range_start, range_end);
-            let avg_result = avg_tiles.compute_aggregate_for_range(range_start, range_end);
-            let min_result = min_tiles.compute_aggregate_for_range(range_start, range_end);
-            let max_result = max_tiles.compute_aggregate_for_range(range_start, range_end);
+            let sum_result = sum_tiles.compute_aggregate_for_range(&sum_expr, range_start, range_end);
+            let count_result = count_tiles.compute_aggregate_for_range(&count_expr, range_start, range_end);
+            let avg_result = avg_tiles.compute_aggregate_for_range(&avg_expr, range_start, range_end);
+            let min_result = min_tiles.compute_aggregate_for_range(&min_expr, range_start, range_end);
+            let max_result = max_tiles.compute_aggregate_for_range(&max_expr, range_start, range_end);
             
             // Calculate expected values manually
             // Window: 10 seconds preceding + current row
@@ -886,11 +892,11 @@ mod tests {
         let empty_range_start = base_time + 150 * 60 * 1000;  // Beyond all data (02:30:00)
         let empty_range_end = base_time + 180 * 60 * 1000;    // (03:00:00)
         
-        let empty_sum = sum_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
-        let empty_count = count_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
-        let empty_avg = avg_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
-        let empty_min = min_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
-        let empty_max = max_tiles.compute_aggregate_for_range(empty_range_start, empty_range_end);
+        let empty_sum = sum_tiles.compute_aggregate_for_range(&sum_expr, empty_range_start, empty_range_end);
+        let empty_count = count_tiles.compute_aggregate_for_range(&count_expr, empty_range_start, empty_range_end);
+        let empty_avg = avg_tiles.compute_aggregate_for_range(&avg_expr, empty_range_start, empty_range_end);
+        let empty_min = min_tiles.compute_aggregate_for_range(&min_expr, empty_range_start, empty_range_end);
+        let empty_max = max_tiles.compute_aggregate_for_range(&max_expr, empty_range_start, empty_range_end);
         
         // Verify empty range results
         match empty_sum {

@@ -6,7 +6,7 @@ use anyhow::Result;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
-use futures::{future, StreamExt};
+use futures::future;
 use indexmap::{IndexMap, IndexSet};
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 
@@ -440,16 +440,17 @@ impl OperatorTrait for WindowOperator {
         self.base.operator_type()
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
         // First, return any buffered messages
-        if let Some(msg) = self.base.pending_messages.pop() {
+        if let Some(msg) = self.base.pop_pending_output() {
             return OperatorPollResult::Ready(msg);
         }
 
-        // Then process input stream
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        
-        match input_stream.next().await {
+        match self.base.next_input().await {
             Some(message) => {
                 
                 let ingest_ts = message.ingest_timestamp();
@@ -502,6 +503,10 @@ impl OperatorTrait for WindowOperator {
                             return OperatorPollResult::Ready(Message::new(None, result, None, None));
                         }
                     }
+                    Message::CheckpointBarrier(barrier) => {
+                        // pass through (StreamTask intercepts and checkpoints synchronously)
+                        return OperatorPollResult::Ready(Message::CheckpointBarrier(barrier));
+                    }
                     _ => {
                         panic!("Window operator expects keyed messages or watermarks");
                     }
@@ -539,7 +544,7 @@ impl OperatorTrait for WindowOperator {
             let cp: crate::storage::batch_store::BatchStoreCheckpoint = bincode::deserialize(bytes)?;
             Arc::new(crate::storage::batch_store::BatchStore::from_checkpoint(cp))
         } else {
-            Arc::new(crate::storage::batch_store::BatchStore::default())
+            panic!("Batch store bytes are missing");
         };
 
         let restored_state = Arc::new(WindowOperatorState::new(batch_store));
@@ -547,6 +552,8 @@ impl OperatorTrait for WindowOperator {
             let cp: crate::runtime::operators::window::window_operator_state::WindowOperatorStateCheckpoint =
                 bincode::deserialize(bytes)?;
             restored_state.apply_checkpoint(cp, &self.window_configs, &self.tiling_configs);
+        } else {
+            panic!("Window operator state bytes are missing");
         }
 
         self.state = restored_state;

@@ -7,10 +7,11 @@ use crate::{
         master::{Master, PipelineState},
         master_server::MasterServer,
         master_server::TaskKey,
-        worker::{WorkerConfig, WorkerState},
+        worker::WorkerConfig,
         worker_server::WorkerServer,
     }, transport::transport_backend_actor::TransportBackendType
 };
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
@@ -106,9 +107,10 @@ impl Executor for FakeDistributedExecutor {
         let expected_tasks = execution_graph
             .get_vertices()
             .values()
+            .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
             .map(|v| TaskKey { vertex_id: v.vertex_id.clone(), task_index: v.task_index })
             .collect::<Vec<_>>();
-        master_server.set_expected_tasks(expected_tasks).await;
+        master_server.set_checkpointable_tasks(expected_tasks).await;
         master_server.start(&master_addr).await?;
 
         // Start worker servers

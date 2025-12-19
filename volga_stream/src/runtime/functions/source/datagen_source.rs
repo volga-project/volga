@@ -8,7 +8,7 @@ use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use super::source_function::SourceFunctionTrait;
 use arrow::array::ArrayRef;
 use arrow::array::builder::{Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -17,6 +17,8 @@ use rand::rngs::StdRng;
 use rand::distributions::Alphanumeric;
 use datafusion::common::ScalarValue;
 use serde::{Serialize, Deserialize};
+use crate::runtime::utils;
+use serde_with::serde_as;
 
 /// Configuration for datagen source
 #[derive(Debug, Clone)]
@@ -63,6 +65,7 @@ pub enum FieldGenerator {
     Values { values: Vec<ScalarValue> }, // Round-robin through provided values
 }
 
+#[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DatagenSourcePosition {
     records_generated: usize,
@@ -71,16 +74,9 @@ struct DatagenSourcePosition {
     task_records_limit: Option<usize>,
     key_values: Vec<String>,
     per_key_timestamps: HashMap<String, i64>,
-    per_key_increments_bytes: Vec<u8>,
+    #[serde_as(as = "HashMap<_, HashMap<_, utils::ScalarValueAsBytes>>")]
+    per_key_increments: HashMap<String, HashMap<usize, ScalarValue>>,
     per_key_values_indices: HashMap<String, HashMap<usize, usize>>,
-}
-
-fn serialize_per_key_increments(_map: &HashMap<String, HashMap<usize, ScalarValue>>) -> Result<Vec<u8>> {
-    Ok(vec![])
-}
-
-fn deserialize_per_key_increments(_bytes: &[u8]) -> Result<HashMap<String, HashMap<usize, ScalarValue>>> {
-    Ok(HashMap::new())
 }
 
 /// Datagen source function with deterministic rate coordination
@@ -552,8 +548,6 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             return Ok(vec![]);
         }
 
-        let per_key_increments_bytes = serialize_per_key_increments(&self.per_key_increments)?;
-
         let pos = DatagenSourcePosition {
             records_generated: self.records_generated,
             max_watermark_sent: self.max_watermark_sent,
@@ -561,7 +555,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             task_records_limit: self.task_records_limit,
             key_values: self.key_values.clone(),
             per_key_timestamps: self.per_key_timestamps.clone(),
-            per_key_increments_bytes,
+            per_key_increments: self.per_key_increments.clone(),
             per_key_values_indices: self.per_key_values_indices.clone(),
         };
         Ok(bincode::serialize(&pos)?)
@@ -581,7 +575,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         self.task_records_limit = pos.task_records_limit;
         self.key_values = pos.key_values;
         self.per_key_timestamps = pos.per_key_timestamps;
-        self.per_key_increments = deserialize_per_key_increments(&pos.per_key_increments_bytes)?;
+        self.per_key_increments = pos.per_key_increments;
         self.per_key_values_indices = pos.per_key_values_indices;
         Ok(())
     }
@@ -651,6 +645,7 @@ mod tests {
     use crate::runtime::runtime_context::RuntimeContext;
     use std::collections::HashSet;
     use arrow::array::{Array, StringArray, Int64Array, Float64Array, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType, Field, TimeUnit};
 
     fn create_test_config() -> DatagenSourceConfig {
         let schema = Arc::new(Schema::new(vec![

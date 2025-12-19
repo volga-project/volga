@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use super::executor::Executor;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master_server::TaskKey;
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 /// Executes the job locally in a single process using a Worker instance
 pub struct LocalExecutor;
@@ -42,9 +43,10 @@ impl Executor for LocalExecutor {
         let expected_tasks = execution_graph
             .get_vertices()
             .values()
+            .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
             .map(|v| TaskKey { vertex_id: v.vertex_id.clone(), task_index: v.task_index })
             .collect::<Vec<_>>();
-        master_server.set_expected_tasks(expected_tasks).await;
+        master_server.set_checkpointable_tasks(expected_tasks).await;
         master_server.start(&master_addr).await?;
 
         let worker_config = WorkerConfig::new(
