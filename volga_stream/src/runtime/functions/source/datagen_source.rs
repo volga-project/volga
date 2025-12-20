@@ -646,6 +646,7 @@ mod tests {
     use std::collections::HashSet;
     use arrow::array::{Array, StringArray, Int64Array, Float64Array, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, TimeUnit};
+    use crate::common::message::Message;
 
     fn create_test_config() -> DatagenSourceConfig {
         let schema = Arc::new(Schema::new(vec![
@@ -897,5 +898,166 @@ mod tests {
                 interval, tolerance, expected_interval_ms
             );
          }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Row {
+        ts: i64,
+        key: String,
+        value: f64,
+    }
+
+    fn create_replayable_checkpoint_test_config(total_records: usize, batch_size: usize, num_unique_keys: usize) -> DatagenSourceConfig {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "timestamp".to_string(),
+            FieldGenerator::IncrementalTimestamp {
+                start_ms: 1000,
+                step_ms: 1,
+            },
+        );
+        fields.insert(
+            "key".to_string(),
+            FieldGenerator::Key {
+                num_unique: num_unique_keys,
+            },
+        );
+        fields.insert(
+            "value".to_string(),
+            FieldGenerator::Values {
+                values: vec![
+                    ScalarValue::Float64(Some(1.0)),
+                    ScalarValue::Float64(Some(2.0)),
+                ],
+            },
+        );
+
+        let mut cfg = DatagenSourceConfig::new(schema, None, Some(total_records), None, batch_size, fields);
+        cfg.set_replayable(true);
+        cfg
+    }
+
+    async fn collect_all_rows(source: &mut DatagenSourceFunction) -> Vec<Row> {
+        collect_rows(source, None).await
+    }
+
+    async fn collect_rows(source: &mut DatagenSourceFunction, target_rows: Option<usize>) -> Vec<Row> {
+        let mut out = Vec::new();
+        loop {
+            if let Some(n) = target_rows {
+                if out.len() >= n {
+                    break;
+                }
+            }
+
+            match source.fetch().await {
+                Some(Message::Regular(base_msg)) => {
+                    let batch = &base_msg.record_batch;
+                    let ts = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .expect("timestamp col");
+                    let key = batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .expect("key col");
+                    let value = batch
+                        .column(2)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("value col");
+
+                    for i in 0..batch.num_rows() {
+                        out.push(Row {
+                            ts: ts.value(i),
+                            key: key.value(i).to_string(),
+                            value: value.value(i),
+                        });
+                        if let Some(n) = target_rows {
+                            if out.len() >= n {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Message::Watermark(_)) => break,
+                Some(Message::CheckpointBarrier(_)) => break,
+                Some(Message::Keyed(_)) => panic!("Unexpected keyed message from datagen"),
+                None => break,
+            }
+        }
+
+        if let Some(n) = target_rows {
+            assert_eq!(out.len(), n, "test expects aligned checkpoint after full batches");
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn test_datagen_checkpoint_restore_matches_uninterrupted() {
+        let parallelism = 4;
+        let batch_size = 50;
+        let total_records = 1000;
+        let checkpoint_after = 200; // must be multiple of batch_size
+        assert_eq!(checkpoint_after % batch_size, 0);
+
+        let cfg = create_replayable_checkpoint_test_config(total_records, batch_size, 8);
+
+        for task_index in 0..parallelism {
+            // Baseline: uninterrupted run
+            let mut baseline = DatagenSourceFunction::new(cfg.clone());
+            let ctx = RuntimeContext::new(
+                "test".to_string(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            baseline.open(&ctx).await.unwrap();
+            let baseline_rows = collect_all_rows(&mut baseline).await;
+
+            // Interrupted: run until checkpoint, snapshot, restart, restore, continue
+            let mut first = DatagenSourceFunction::new(cfg.clone());
+            let ctx_first = RuntimeContext::new(
+                "test".to_string(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            first.open(&ctx_first).await.unwrap();
+            let mut resumed_rows = collect_rows(&mut first, Some(checkpoint_after)).await;
+            let snapshot = first.snapshot_position().await.unwrap();
+
+            let mut second = DatagenSourceFunction::new(cfg.clone());
+            let ctx_second = RuntimeContext::new(
+                "test".to_string(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            second.open(&ctx_second).await.unwrap();
+            second.restore_position(&snapshot).await.unwrap();
+            resumed_rows.extend(collect_rows(&mut second, None).await);
+
+            assert_eq!(
+                baseline_rows,
+                resumed_rows,
+                "checkpoint+restore must produce identical rows for task_index={}",
+                task_index
+            );
+        }
     }
 }

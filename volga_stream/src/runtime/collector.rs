@@ -40,6 +40,9 @@ impl Collector {
             panic!("Output channel already exists");
         }
         self.output_channels.push(channel);
+        // Deterministic ordering is required for stable partition->channel mapping across restarts.
+        self.output_channels
+            .sort_by(|a, b| a.get_channel_id().cmp(&b.get_channel_id()));
     }
 
     pub fn output_channels(&self) -> Vec<Channel> {

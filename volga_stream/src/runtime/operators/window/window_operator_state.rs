@@ -3,7 +3,6 @@ use std::sync::Arc;
 use arrow::array::RecordBatch;
 use dashmap::DashMap;
 use datafusion::common::ScalarValue;
-use datafusion::physical_plan::WindowExpr;
 use serde_with::serde_as;
 use tokio::sync::RwLock;
 
@@ -87,22 +86,12 @@ impl WindowOperatorState {
     pub fn apply_checkpoint(
         &self,
         checkpoint: WindowOperatorStateCheckpoint,
-        window_configs: &BTreeMap<WindowId, WindowConfig>,
-        tiling_configs: &Vec<Option<TileConfig>>,
     ) {
-        let window_ids: Vec<_> = window_configs.keys().cloned().collect();
-        
+        self.window_states.clear();
         for (key_bytes, windows_state_bytes) in checkpoint.keys {
             let key = Key::from_bytes(&key_bytes);
             let windows_state: WindowsState =
                 bincode::deserialize(&windows_state_bytes).expect("Failed to deserialize WindowsState checkpoint");
-
-            // We still ensure window_ids exist in config; if config mismatch happens, we prefer to fail fast for now.
-            for wid in &window_ids {
-                if !windows_state.window_states.contains_key(wid) {
-                    panic!("Checkpoint is missing window_id={}", wid);
-                }
-            }
 
             let arc = Arc::new(RwLock::new(windows_state));
             self.window_states.insert(key, arc);

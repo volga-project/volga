@@ -227,6 +227,36 @@ impl OperatorTrait for Operator {
             Operator::Chained(op) => op.poll_next().await,
         }
     }
+
+    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        match self {
+            Operator::Map(op) => op.checkpoint(checkpoint_id).await,
+            Operator::Join(op) => op.checkpoint(checkpoint_id).await,
+            Operator::Sink(op) => op.checkpoint(checkpoint_id).await,
+            Operator::Source(op) => op.checkpoint(checkpoint_id).await,
+            Operator::KeyBy(op) => op.checkpoint(checkpoint_id).await,
+            Operator::Reduce(op) => op.checkpoint(checkpoint_id).await,
+            Operator::Aggregate(op) => op.checkpoint(checkpoint_id).await,
+            Operator::Window(op) => op.checkpoint(checkpoint_id).await,
+            Operator::WindowRequest(op) => op.checkpoint(checkpoint_id).await,
+            Operator::Chained(op) => op.checkpoint(checkpoint_id).await,
+        }
+    }
+
+    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+        match self {
+            Operator::Map(op) => op.restore(blobs).await,
+            Operator::Join(op) => op.restore(blobs).await,
+            Operator::Sink(op) => op.restore(blobs).await,
+            Operator::Source(op) => op.restore(blobs).await,
+            Operator::KeyBy(op) => op.restore(blobs).await,
+            Operator::Reduce(op) => op.restore(blobs).await,
+            Operator::Aggregate(op) => op.restore(blobs).await,
+            Operator::Window(op) => op.restore(blobs).await,
+            Operator::WindowRequest(op) => op.restore(blobs).await,
+            Operator::Chained(op) => op.restore(blobs).await,
+        }
+    }
 }
 
 

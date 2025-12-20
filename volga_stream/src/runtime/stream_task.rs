@@ -168,6 +168,11 @@ impl StreamTask {
             return Ok(());
         };
 
+        println!(
+            "[CHECKPOINT] {} task_index={} restoring from checkpoint_id={}",
+            vertex_id, task_index, restore_checkpoint_id
+        );
+
         let req = crate::runtime::master_server::master_service::GetTaskCheckpointRequest {
             checkpoint_id: restore_checkpoint_id,
             vertex_id: vertex_id.to_string(),
@@ -180,12 +185,23 @@ impl StreamTask {
             .into_inner();
 
         if resp.success && !resp.blobs.is_empty() {
+            println!(
+                "[CHECKPOINT] {} restore found {} blobs",
+                vertex_id,
+                resp.blobs.len()
+            );
             let blobs = resp
                 .blobs
                 .into_iter()
                 .map(|b| (b.name, b.bytes))
                 .collect::<Vec<_>>();
             operator.restore(&blobs).await?;
+            println!("[CHECKPOINT] {} restore applied", vertex_id);
+        } else {
+            println!(
+                "[CHECKPOINT] {} restore had no blobs (success={})",
+                vertex_id, resp.success
+            );
         }
         Ok(())
     }
@@ -455,17 +471,20 @@ impl StreamTask {
                 None
             };
 
-            // Optional restore hook (before open)
+            operator.open(&runtime_context).await?;
+            println!("{:?} Operator {:?} opened with {} output edges", timestamp(), vertex_id, num_output_edges);
+
+            // Optional restore hook (after open, before run).
+            // Important: some operators (e.g. sources) initialize internal state in open();
+            // restoring before open would be overwritten by that initialization.
             Self::restore_from_master_if_configured(
                 &mut operator,
                 &mut master_client,
                 restore_checkpoint_id,
                 &vertex_id,
                 runtime_context.task_index(),
-            ).await?;
-
-            operator.open(&runtime_context).await?;
-            println!("{:?} Operator {:?} opened with {} output edges", timestamp(), vertex_id, num_output_edges);
+            )
+            .await?;
 
             // if task is not finished/closed early, mark as opened
             if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
@@ -513,13 +532,19 @@ impl StreamTask {
                 // like a poll_next() output (same code path, no duplication).
                 let produced = if is_source && crate::runtime::operators::operator::operator_config_requires_checkpoint(operator.operator_config()) {
                     match checkpoint_receiver.try_recv() {
-                        Ok(checkpoint_id) => Some(Message::CheckpointBarrier(
-                            crate::common::message::CheckpointBarrierMessage::new(
-                                vertex_id.clone(),
-                                checkpoint_id,
-                                None,
-                            ),
-                        )),
+                        Ok(checkpoint_id) => {
+                            println!(
+                                "[CHECKPOINT] {} received trigger for checkpoint_id={}",
+                                vertex_id, checkpoint_id
+                            );
+                            Some(Message::CheckpointBarrier(
+                                crate::common::message::CheckpointBarrierMessage::new(
+                                    vertex_id.clone(),
+                                    checkpoint_id,
+                                    None,
+                                ),
+                            ))
+                        }
                         Err(mpsc::error::TryRecvError::Empty) => None,
                         Err(mpsc::error::TryRecvError::Disconnected) => None,
                     }
@@ -539,7 +564,16 @@ impl StreamTask {
                             let checkpoint_id = barrier.checkpoint_id;
 
                             if crate::runtime::operators::operator::operator_config_requires_checkpoint(operator.operator_config()) {
+                                println!(
+                                    "[CHECKPOINT] {} checkpointing checkpoint_id={}",
+                                    vertex_id, checkpoint_id
+                                );
                                 let blobs = operator.checkpoint(checkpoint_id).await?;
+                                println!(
+                                    "[CHECKPOINT] {} checkpointed {} blobs, reporting...",
+                                    vertex_id,
+                                    blobs.len()
+                                );
 
                                 master_client
                                     .as_mut()
@@ -556,6 +590,10 @@ impl StreamTask {
                                         },
                                     ))
                                     .await?;
+                                println!(
+                                    "[CHECKPOINT] {} reported checkpoint_id={}",
+                                    vertex_id, checkpoint_id
+                                );
                             }
 
                             // Resume input after checkpointing

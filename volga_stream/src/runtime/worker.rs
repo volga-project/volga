@@ -537,10 +537,11 @@ impl Worker {
         self.backend_actor = None;
 
         for (_id, rt) in self.task_runtimes.drain() {
-            rt.shutdown_timeout(Duration::from_millis(10));
+            // Important: do not use shutdown_timeout() here (it blocks), as this is called from async tests.
+            rt.shutdown_background();
         }
         if let Some(rt) = self.transport_backend_runtime.take() {
-            rt.shutdown_timeout(Duration::from_millis(10));
+            rt.shutdown_background();
         }
     }
 

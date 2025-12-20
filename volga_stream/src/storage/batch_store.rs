@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
-use datafusion::common::ScalarValue;
 use arrow::array::Array;
 use tokio::sync::RwLock;
 use dashmap::DashMap;
@@ -380,13 +379,14 @@ impl BatchStore {
         }
     }
 
-    pub fn from_checkpoint(cp: BatchStoreCheckpoint) -> Self {
-        let store = BatchStore::new(4096, cp.time_granularity, cp.max_batch_size);
+    pub fn apply_checkpoint(&self, cp: BatchStoreCheckpoint) {
+        // We assume time_granularity/max_batch_size match for now (same job).
+        // Clear and repopulate the in-memory store.
+        self.batch_store.clear();
         for (batch_id, bytes) in cp.batches {
             let batch = Self::record_batch_from_ipc_bytes(&bytes);
-            store.batch_store.insert(batch_id, batch);
+            self.batch_store.insert(batch_id, batch);
         }
-        store
     }
 }
 
