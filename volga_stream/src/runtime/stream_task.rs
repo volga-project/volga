@@ -13,6 +13,9 @@ use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 use serde::{Serialize, Deserialize};
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
+use std::sync::atomic::AtomicBool;
+
+pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug)]
 struct CheckpointAligner {
@@ -630,6 +633,10 @@ impl StreamTask {
                             println!("StreamTask {:?} produced watermark {:?}", vertex_id, watermark.watermark_value);
                         }
                         
+                        if MESSAGE_TRACE_ENABLED.load(Ordering::Relaxed) {
+                            message.append_trace(&vertex_id);
+                        }
+
                         // Set upstream vertex id for all messages before sending downstream
                         message.set_upstream_vertex_id(vertex_id.clone());
                         Self::record_metrics(vertex_id.clone(), &message, false);

@@ -361,6 +361,23 @@ impl Message {
         metadata.extras.clone()
     }
 
+    pub fn append_trace(&mut self, vertex_id: &str) {
+        let extras = match self {
+            Message::Regular(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
+            Message::Keyed(m) => m.base.metadata.extras.get_or_insert_with(HashMap::new),
+            Message::Watermark(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
+            Message::CheckpointBarrier(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
+        };
+
+        let entry = extras.entry("trace".to_string()).or_insert_with(String::new);
+        if entry.is_empty() {
+            *entry = vertex_id.to_string();
+        } else {
+            entry.push(',');
+            entry.push_str(vertex_id);
+        }
+    }
+
     pub fn get_memory_size(&self) -> usize {
         match self {
             Message::Regular(msg) => msg.get_memory_size(),

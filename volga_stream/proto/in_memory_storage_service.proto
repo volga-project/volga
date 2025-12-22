@@ -21,6 +21,12 @@ service InMemoryStorageService {
   
   // Get all messages from map storage
   rpc GetMap(GetMapRequest) returns (GetMapResponse);
+
+  // Drain (get + clear) all messages from vector storage
+  rpc DrainVector(DrainVectorRequest) returns (DrainVectorResponse);
+
+  // Drain (get + clear) all messages from map storage
+  rpc DrainMap(DrainMapRequest) returns (DrainMapResponse);
 }
 
 // Request message for Append
@@ -91,3 +97,27 @@ message GetMapResponse {
   string error_message = 2;
   map<string, bytes> keyed_messages = 3;
 } 
+
+// Request message for DrainVector
+message DrainVectorRequest {
+  // Empty request
+}
+
+// Response message for DrainVector
+message DrainVectorResponse {
+  bool success = 1;
+  string error_message = 2;
+  repeated bytes messages_bytes = 3;
+}
+
+// Request message for DrainMap
+message DrainMapRequest {
+  // Empty request
+}
+
+// Response message for DrainMap
+message DrainMapResponse {
+  bool success = 1;
+  string error_message = 2;
+  map<string, bytes> keyed_messages = 3;
+}

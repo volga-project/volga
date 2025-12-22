@@ -1,4 +1,3 @@
-use arrow::array::StringArray;
 use async_trait::async_trait;
 use anyhow::Result;
 use crate::common::message::Message;
@@ -43,7 +42,7 @@ impl InMemoryStorageSinkFunction {
         storage_client: &Arc<Mutex<InMemoryStorageClient>>,
         buffer: &Arc<Mutex<Vec<Message>>>,
         keyed_buffer: &Arc<Mutex<HashMap<u64, Message>>>,
-        vertex_id: Option<&str>,
+        _vertex_id: Option<&str>,
     ) -> Result<()> {
         // Flush regular batches
         let mut regular_batches = buffer.lock().await;
@@ -71,7 +70,6 @@ impl InMemoryStorageSinkFunction {
 #[async_trait]
 impl SinkFunctionTrait for InMemoryStorageSinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
-
         match &message {
             Message::Keyed(keyed_message) => {
                 let key = keyed_message.key().hash();

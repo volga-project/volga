@@ -16,6 +16,8 @@ use in_memory_storage_service::{
     InsertKeyedManyRequest,
     GetVectorRequest,
     GetMapRequest,
+    DrainVectorRequest,
+    DrainMapRequest,
 };
 
 /// Client for the InMemoryStorageService
@@ -167,6 +169,38 @@ impl InMemoryStorageClient {
             keyed_messages.insert(key, message);
         }
         
+        Ok(keyed_messages)
+    }
+
+    /// Drain (get + clear) all messages from vector storage
+    pub async fn drain_vector(&mut self) -> Result<Vec<Message>> {
+        let request = tonic::Request::new(DrainVectorRequest {});
+        let response = self.client.drain_vector(request).await?.into_inner();
+
+        if !response.success {
+            return Err(anyhow::anyhow!("DrainVector failed: {}", response.error_message));
+        }
+
+        let mut messages = Vec::new();
+        for message_bytes in response.messages_bytes {
+            messages.push(Message::from_bytes(&message_bytes));
+        }
+        Ok(messages)
+    }
+
+    /// Drain (get + clear) all messages from map storage
+    pub async fn drain_map(&mut self) -> Result<HashMap<String, Message>> {
+        let request = tonic::Request::new(DrainMapRequest {});
+        let response = self.client.drain_map(request).await?.into_inner();
+
+        if !response.success {
+            return Err(anyhow::anyhow!("DrainMap failed: {}", response.error_message));
+        }
+
+        let mut keyed_messages = HashMap::new();
+        for (key, message_bytes) in response.keyed_messages {
+            keyed_messages.insert(key, Message::from_bytes(&message_bytes));
+        }
         Ok(keyed_messages)
     }
 } 

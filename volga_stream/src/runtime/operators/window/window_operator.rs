@@ -926,7 +926,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_window_operator_checkpoint_restore_matches_uninterrupted() {
+    async fn test_window_operator_checkpoint_consistency() {
         // Same query shape as the end-to-end checkpoint recovery test.
         let sql = "SELECT timestamp, value, partition_key, \
                    SUM(value) OVER w as sum_val, \
