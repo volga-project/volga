@@ -2,7 +2,6 @@ use std::{collections::HashMap, sync::{Arc, Mutex}, fmt};
 
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::StreamExt;
 
 use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
@@ -44,7 +43,6 @@ impl OperatorTrait for ReduceOperator {
     }
 
     async fn close(&mut self) -> Result<()> {
-        let vertex_id = self.base.runtime_context.as_ref().unwrap().vertex_id();
         self.base.close().await
     }
 
@@ -52,12 +50,14 @@ impl OperatorTrait for ReduceOperator {
         self.base.set_input(input);
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        match input_stream.next().await {
-            Some(Message::Watermark(watermark)) => {
-                return OperatorPollResult::Ready(Message::Watermark(watermark));
-            }
+        match self.base.next_input().await {
+            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
+            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
             Some(message) => {
                 let upstream_vertex_id = message.upstream_vertex_id();
                 let ingest_ts = message.ingest_timestamp();

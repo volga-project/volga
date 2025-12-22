@@ -26,7 +26,7 @@ pub mod worker_service {
 
 use worker_service::{
     worker_service_client::WorkerServiceClient,
-    GetWorkerStateRequest, StartWorkerRequest, RunWorkerTasksRequest, CloseWorkerTasksRequest, CloseWorkerRequest,
+    GetWorkerStateRequest, StartWorkerRequest, RunWorkerTasksRequest, CloseWorkerTasksRequest, CloseWorkerRequest, TriggerCheckpointRequest,
 };
 
 /// Client for communicating with a worker server
@@ -139,6 +139,17 @@ impl WorkerClient {
         
         let worker_state = WorkerState::from_bytes(state_bytes)?;
         Ok(worker_state)
+    }
+
+    pub async fn trigger_checkpoint(&mut self, checkpoint_id: u64) -> anyhow::Result<bool> {
+        let request = tonic::Request::new(TriggerCheckpointRequest { checkpoint_id });
+        let response = self.client.trigger_checkpoint(request).await?;
+        let success = response.get_ref().success;
+        if !success {
+            let error_msg = &response.get_ref().error_message;
+            println!("[MASTER] Failed to trigger checkpoint {} on worker {}: {}", checkpoint_id, self.worker_ip, error_msg);
+        }
+        Ok(success)
     }
 }
 

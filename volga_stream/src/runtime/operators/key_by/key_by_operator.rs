@@ -1,8 +1,7 @@
-use std::{sync::Arc, fmt};
+use std::{fmt};
 
 use async_trait::async_trait;
 use anyhow::Result;
-use futures::StreamExt;
 
 use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
@@ -40,18 +39,18 @@ impl OperatorTrait for KeyByOperator {
         self.base.set_input(input);
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
-        // First, return any buffered messages
-        if let Some(msg) = self.base.pending_messages.pop() {
+        if let Some(msg) = self.base.pop_pending_output() {
             return OperatorPollResult::Ready(msg);
         }
-        
-        // Then process input stream
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        match input_stream.next().await {
-            Some(Message::Watermark(watermark)) => {
-                return OperatorPollResult::Ready(Message::Watermark(watermark));
-            }
+
+        match self.base.next_input().await {
+            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
+            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
             Some(message) => {
                 let function = self.base.get_function_mut::<KeyByFunction>().unwrap();
                 let function = function.clone();

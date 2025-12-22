@@ -1,9 +1,8 @@
-use std::{sync::Arc, fmt};
+use std::{fmt};
 
-use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}, storage::batch_store::BatchStore};
+use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::StreamExt;
 
 pub struct MapOperator {
     base: OperatorBase,
@@ -42,12 +41,14 @@ impl OperatorTrait for MapOperator {
         self.base.set_input(input);
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        match input_stream.next().await {
-            Some(Message::Watermark(watermark)) => {
-                return OperatorPollResult::Ready(Message::Watermark(watermark));
-            }
+        match self.base.next_input().await {
+            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
+            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
             Some(message) => {
                 let function = self.base.get_function_mut::<MapFunction>().unwrap();
                 let function = function.clone();

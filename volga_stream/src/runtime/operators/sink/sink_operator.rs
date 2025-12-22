@@ -1,9 +1,8 @@
-use std::{sync::Arc, fmt};
+use std::{fmt};
 
 use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
-use futures::StreamExt;
 
 
 #[derive(Clone, Debug)]
@@ -64,12 +63,14 @@ impl OperatorTrait for SinkOperator {
         self.base.set_input(input);
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        match input_stream.next().await {
-            Some(Message::Watermark(watermark)) => {
-                OperatorPollResult::Ready(Message::Watermark(watermark))
-            }
+        match self.base.next_input().await {
+            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
+            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
             Some(message) => {
                 let function = self.base.get_function_mut::<SinkFunction>().unwrap();
                 function.sink(message.clone()).await.unwrap();

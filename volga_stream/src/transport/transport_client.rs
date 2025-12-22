@@ -1,13 +1,14 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{metrics::{LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{metrics::{LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
-use futures::stream::{Stream, StreamExt};
-use std::pin::Pin;
+use tokio::sync::Notify;
+use futures::stream::StreamExt;
 use futures::stream;
-use crate::transport::batcher::{Batcher, BatcherConfig};
+use crate::transport::batcher::BatcherConfig;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 // pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 
@@ -48,6 +49,56 @@ pub struct DataReader {
     receivers: HashMap<String, BatchReceiver>,
 }
 
+#[derive(Debug)]
+struct UpstreamGate {
+    enabled: AtomicBool,
+    notify: Notify,
+}
+
+impl UpstreamGate {
+    fn new() -> Self {
+        Self {
+            enabled: AtomicBool::new(true),
+            notify: Notify::new(),
+        }
+    }
+
+    fn block(&self) {
+        self.enabled.store(false, Ordering::Release);
+    }
+
+    fn unblock(&self) {
+        self.enabled.store(true, Ordering::Release);
+        self.notify.notify_waiters();
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DataReaderControl {
+    // upstream_vertex_id -> gate shared by all channels from that upstream
+    gates: HashMap<String, Arc<UpstreamGate>>,
+}
+
+impl DataReaderControl {
+    pub fn block_upstream(&self, upstream_vertex_id: &str) {
+        if let Some(gate) = self.gates.get(upstream_vertex_id) {
+            gate.block();
+        }
+    }
+
+    pub fn unblock_upstream(&self, upstream_vertex_id: &str) {
+        if let Some(gate) = self.gates.get(upstream_vertex_id) {
+            gate.unblock();
+        }
+    }
+
+    pub fn unblock_all(&self) {
+        for gate in self.gates.values() {
+            gate.unblock();
+        }
+    }
+}
+
 impl DataReader {
     pub fn new(vertex_id: String, receivers: HashMap<String, BatchReceiver>) -> Self {
         Self {
@@ -72,6 +123,44 @@ impl DataReader {
             .collect();
         
         Box::pin(stream::select_all(receiver_streams))
+    }
+
+    pub fn message_stream_with_control(self) -> (MessageStream, DataReaderControl) {
+        let mut gates: HashMap<String, Arc<UpstreamGate>> = HashMap::new();
+
+        // Convert each BatchReceiver into a gated stream and then select_all.
+        // No background tasks: gating happens inside the stream.
+        let receiver_streams: Vec<MessageStream> = self.receivers
+            .into_iter()
+            .map(|(channel_id, receiver)| {
+                // channel id is "{source}_to_{target}"
+                let upstream_vertex_id = channel_id
+                    .split("_to_")
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+
+                let gate = gates
+                    .entry(upstream_vertex_id)
+                    .or_insert_with(|| Arc::new(UpstreamGate::new()))
+                    .clone();
+
+                Box::pin(stream::unfold((receiver, gate), |(mut rx, gate)| async move {
+                    loop {
+                        while !gate.enabled.load(Ordering::Acquire) {
+                            gate.notify.notified().await;
+                        }
+
+                        match rx.recv().await {
+                            Some(message) => return Some((message, (rx, gate))),
+                            None => return None, // Channel closed
+                        }
+                    }
+                })) as MessageStream
+            })
+            .collect();
+
+        (Box::pin(stream::select_all(receiver_streams)), DataReaderControl { gates })
     }
 }
 

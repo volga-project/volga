@@ -75,8 +75,8 @@ impl Batcher {
 
     // TODO remove keyes on flush
     pub async fn write_message(&mut self, channel_id: &String, message: Message) -> Result<(), mpsc::error::SendError<Message>> {
-        // For watermark, flush channel immediatelly and pass watermark through
-        if let Message::Watermark(_) = message {
+        // For control messages, flush channel immediately and pass through
+        if matches!(message, Message::Watermark(_) | Message::CheckpointBarrier(_)) {
             self.flush_channel(channel_id).await?;
             let sender = self.senders.get(channel_id).unwrap();
             let timeout_duration = Duration::from_millis(self.config.send_timeout_ms);
@@ -114,6 +114,9 @@ impl Batcher {
             }
             Message::Watermark(_) => {
                 panic!("No batching for watermarks")
+            }
+            Message::CheckpointBarrier(_) => {
+                panic!("No batching for checkpoint barriers")
             }
         }
     }
@@ -244,6 +247,9 @@ impl Batcher {
             }
             Message::Watermark(_) => {
                 panic!("No batching for watermarks")
+            }
+            Message::CheckpointBarrier(_) => {
+                panic!("No batching for checkpoint barriers")
             }
         };
 
@@ -984,6 +990,9 @@ mod tests {
                                         break;
                                     }
                                 }
+                                Message::CheckpointBarrier(_) => {
+                                    // ignore in this test
+                                }
                             }
                         }
                         println!("[DEBUG] Channel {} receiver finished, total messages: {}", channel_id_clone, msg_count);
@@ -1159,12 +1168,14 @@ mod tests {
                         Message::Regular(base_msg) => &base_msg.record_batch,
                         Message::Keyed(keyed_msg) => &keyed_msg.base.record_batch,
                         Message::Watermark(_) => panic!("Unexpected watermark in sent messages"),
+                        Message::CheckpointBarrier(_) => panic!("Unexpected checkpoint barrier in sent messages"),
                     };
                     
                     let received_rows = match received_msg {
                         Message::Regular(base_msg) => &base_msg.record_batch,
                         Message::Keyed(keyed_msg) => &keyed_msg.base.record_batch,
                         Message::Watermark(_) => panic!("Unexpected watermark in batched messages"),
+                        Message::CheckpointBarrier(_) => panic!("Unexpected checkpoint barrier in batched messages"),
                     };
                     
                     let sent_ids = sent_rows.column(0).as_any().downcast_ref::<Int64Array>().unwrap();

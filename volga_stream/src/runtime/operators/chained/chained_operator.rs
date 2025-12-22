@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{operators::operator::{create_operator, MessageStream, Operator, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -65,6 +63,10 @@ impl OperatorTrait for ChainedOperator {
 
     fn operator_type(&self) -> OperatorType {
         self.base.operator_type()
+    }
+
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
     }
 
     async fn close(&mut self) -> Result<()> {

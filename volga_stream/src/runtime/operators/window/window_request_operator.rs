@@ -8,7 +8,6 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
-use futures::StreamExt;
 use indexmap::IndexMap;
 
 use datafusion::scalar::ScalarValue;
@@ -476,10 +475,12 @@ impl OperatorTrait for WindowRequestOperator {
         self.base.operator_type()
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        
-        match input_stream.next().await {
+        match self.base.next_input().await {
             Some(message) => {
                 let ingest_ts = message.ingest_timestamp();
                 let extras = message.get_extras();
@@ -511,6 +512,9 @@ impl OperatorTrait for WindowRequestOperator {
                         // pass through
                         return OperatorPollResult::Ready(Message::Watermark(watermark));
                     },
+                    Message::CheckpointBarrier(barrier) => {
+                        return OperatorPollResult::Ready(Message::CheckpointBarrier(barrier));
+                    }
                     _ => {
                         panic!("Window request operator expects keyed messages only");
                     }

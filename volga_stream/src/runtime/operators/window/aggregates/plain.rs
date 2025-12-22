@@ -189,7 +189,8 @@ fn run_plain_accumulator(
     (
         accumulator.evaluate()
             .expect("Should be able to evaluate accumulator"), 
-        accumulator.state()
+        accumulator
+            .state()
             .expect("Should be able to get accumulator state")
     )
 }

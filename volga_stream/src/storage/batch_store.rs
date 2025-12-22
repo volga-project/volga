@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
-use datafusion::common::ScalarValue;
 use arrow::array::Array;
 use tokio::sync::RwLock;
 use dashmap::DashMap;
@@ -9,11 +8,13 @@ use dashmap::DashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::common::Key;
+use serde::{Serialize, Deserialize};
+use std::io::Cursor;
 
 pub type Timestamp = i64;
 pub type RowIdx = usize; // row index within a batch
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct BatchId {
     partition_key_hash: u64,
     time_bucket: u64, // bucket start timestamp for this batch
@@ -58,11 +59,18 @@ impl Hash for BatchId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum TimeGranularity {
     Minutes(u32),
     Hours(u32),
     Days(u32),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchStoreCheckpoint {
+    pub time_granularity: TimeGranularity,
+    pub max_batch_size: usize,
+    pub batches: Vec<(BatchId, Vec<u8>)>, // RecordBatch serialized as Arrow IPC bytes
 }
 
 impl TimeGranularity {
@@ -334,6 +342,50 @@ impl BatchStore {
             total_batches,
             total_rows,
             memory_usage_bytes,
+        }
+    }
+
+    fn record_batch_to_ipc_bytes(batch: &RecordBatch) -> Vec<u8> {
+        let mut arrow_buffer = Vec::new();
+        let mut writer = arrow::ipc::writer::FileWriter::try_new(
+            Cursor::new(&mut arrow_buffer),
+            batch.schema().as_ref(),
+        ).unwrap();
+        writer.write(batch).unwrap();
+        writer.finish().unwrap();
+        arrow_buffer
+    }
+
+    fn record_batch_from_ipc_bytes(bytes: &[u8]) -> RecordBatch {
+        let mut reader = arrow::ipc::reader::FileReader::try_new(Cursor::new(bytes), None).unwrap();
+        match reader.next() {
+            Some(Ok(batch)) => batch,
+            Some(Err(e)) => panic!("Failed to read record batch: {}", e),
+            None => panic!("No record batch in IPC bytes"),
+        }
+    }
+
+    pub fn to_checkpoint(&self) -> BatchStoreCheckpoint {
+        let batches = self
+            .batch_store
+            .iter()
+            .map(|entry| (*entry.key(), Self::record_batch_to_ipc_bytes(entry.value())))
+            .collect::<Vec<_>>();
+
+        BatchStoreCheckpoint {
+            time_granularity: self.time_granularity,
+            max_batch_size: self.max_batch_size,
+            batches,
+        }
+    }
+
+    pub fn apply_checkpoint(&self, cp: BatchStoreCheckpoint) {
+        // We assume time_granularity/max_batch_size match for now (same job).
+        // Clear and repopulate the in-memory store.
+        self.batch_store.clear();
+        for (batch_id, bytes) in cp.batches {
+            let batch = Self::record_batch_from_ipc_bytes(&bytes);
+            self.batch_store.insert(batch_id, batch);
         }
     }
 }

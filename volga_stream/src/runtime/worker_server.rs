@@ -16,6 +16,7 @@ use worker_service::{
     RunWorkerTasksRequest, RunWorkerTasksResponse,
     CloseWorkerTasksRequest, CloseWorkerTasksResponse,
     CloseWorkerRequest, CloseWorkerResponse,
+    TriggerCheckpointRequest, TriggerCheckpointResponse,
 };
 
 /// Server implementation of the WorkerService
@@ -98,6 +99,19 @@ impl WorkerService for WorkerServiceImpl {
         worker_guard.signal_tasks_close().await;
         println!("[WORKER_SERVER] Tasks closed successfully");
         Ok(Response::new(CloseWorkerTasksResponse {
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn trigger_checkpoint(
+        &self,
+        request: Request<TriggerCheckpointRequest>,
+    ) -> Result<Response<TriggerCheckpointResponse>, Status> {
+        let checkpoint_id = request.get_ref().checkpoint_id;
+        let mut worker_guard = self.worker.lock().await;
+        worker_guard.trigger_checkpoint(checkpoint_id).await;
+        Ok(Response::new(TriggerCheckpointResponse {
             success: true,
             error_message: String::new(),
         }))

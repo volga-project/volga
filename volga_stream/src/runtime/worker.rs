@@ -11,6 +11,9 @@ use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 use serde::{Serialize, Deserialize};
 use anyhow::Result;
+use crate::runtime::operators::operator::OperatorType;
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
+use serde_json::Value;
 
 use tokio::sync::mpsc;
 
@@ -21,6 +24,8 @@ pub struct WorkerConfig {
     pub vertex_ids: Vec<String>,
     pub num_threads_per_task: usize,
     pub transport_backend_type: TransportBackendType,
+    pub master_addr: Option<String>,
+    pub restore_checkpoint_id: Option<u64>,
 }
 
 impl WorkerConfig {
@@ -37,7 +42,19 @@ impl WorkerConfig {
             vertex_ids,
             num_threads_per_task,
             transport_backend_type,
+            master_addr: None,
+            restore_checkpoint_id: None,
         }
+    }
+
+    pub fn with_master_addr(mut self, master_addr: String) -> Self {
+        self.master_addr = Some(master_addr);
+        self
+    }
+
+    pub fn with_restore_checkpoint_id(mut self, checkpoint_id: u64) -> Self {
+        self.restore_checkpoint_id = Some(checkpoint_id);
+        self
     }
 }
 
@@ -77,6 +94,8 @@ pub struct Worker {
     graph: ExecutionGraph,
     vertex_ids: Vec<String>,
     transport_backend_type: TransportBackendType,
+    master_addr: Option<String>,
+    restore_checkpoint_id: Option<u64>,
     task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<String, Runtime>,
@@ -124,6 +143,8 @@ impl Worker {
             vertex_ids: config.vertex_ids.clone(),
             task_actors: HashMap::new(),
             transport_backend_type: config.transport_backend_type,
+            master_addr: config.master_addr.clone(),
+            restore_checkpoint_id: config.restore_checkpoint_id,
             backend_actor: None,
             task_runtimes,
             transport_backend_runtime: Some(
@@ -259,7 +280,16 @@ impl Worker {
                 vertex_id.clone(),
                 vertex.task_index,
                 vertex.parallelism,
-                None,
+                {
+                    let mut cfg = HashMap::<String, Value>::new();
+                    if let Some(master_addr) = &self.master_addr {
+                        cfg.insert("master_addr".to_string(), Value::String(master_addr.clone()));
+                    }
+                    if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
+                        cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
+                    }
+                    Some(cfg)
+                },
                 Some(self.operator_states.clone()),
                 Some(self.graph.clone()),
             );
@@ -415,6 +445,10 @@ impl Worker {
         self.worker_state.lock().await.clone()
     }
 
+    pub fn operator_states(&self) -> Arc<OperatorStates> {
+        self.operator_states.clone()
+    }
+
     async fn cleanup(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.tasks_state_polling_handle.take() {
@@ -462,9 +496,53 @@ impl Worker {
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
     }
 
+    pub async fn trigger_checkpoint(&mut self, checkpoint_id: u64) {
+        println!("[WORKER] Triggering checkpoint {} on source tasks", checkpoint_id);
+        for (vertex_id, runtime) in &self.task_runtimes {
+            let vertex_id = vertex_id.clone();
+            let vertex_type = self.graph.get_vertex_type(&vertex_id);
+            if vertex_type != OperatorType::Source && vertex_type != OperatorType::ChainedSourceSink {
+                continue;
+            }
+
+            // Only trigger sources that actually participate in checkpointing.
+            if let Some(v) = self.graph.get_vertices().get(&vertex_id) {
+                if !operator_config_requires_checkpoint(&v.operator_config) {
+                    continue;
+                }
+            }
+
+            let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
+            let fut = runtime.spawn(async move {
+                let _ = task_ref.ask(StreamTaskMessage::TriggerCheckpoint(checkpoint_id)).await;
+            });
+            let _ = fut.await;
+        }
+    }
+
     pub async fn close(&mut self) {
         self.stop_request_source_processor_if_needed().await;
         self.cleanup().await;
+    }
+
+    // Test-only "crash": abort runtimes without graceful close.
+    pub async fn kill_for_testing(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+
+        // Best-effort: stop request source processor (if any) to avoid background noise in tests.
+        self.stop_request_source_processor_if_needed().await;
+
+        // Drop actors + abort task runtimes quickly.
+        self.task_actors.clear();
+        self.backend_actor = None;
+
+        for (_id, rt) in self.task_runtimes.drain() {
+            // Important: do not use shutdown_timeout() here (it blocks), as this is called from async tests.
+            rt.shutdown_background();
+        }
+        if let Some(rt) = self.transport_backend_runtime.take() {
+            rt.shutdown_background();
+        }
     }
 
     // This should only be used for testing - simulates worker execution

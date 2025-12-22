@@ -40,6 +40,9 @@ impl Collector {
             panic!("Output channel already exists");
         }
         self.output_channels.push(channel);
+        // Deterministic ordering is required for stable partition->channel mapping across restarts.
+        self.output_channels
+            .sort_by(|a, b| a.get_channel_id().cmp(&b.get_channel_id()));
     }
 
     pub fn output_channels(&self) -> Vec<Channel> {
@@ -52,8 +55,8 @@ impl Collector {
     pub fn gen_partitioned_channels(&mut self, message: &Message) -> Vec<Channel> {
         let num_partitions = self.output_channels.len();
         
-        // Use BroadcastPartition for watermark messages, otherwise use the configured partition strategy
-        let partitions = if let Message::Watermark(_) = message {
+        // Use BroadcastPartition for control messages, otherwise use the configured partition strategy
+        let partitions = if matches!(message, Message::Watermark(_) | Message::CheckpointBarrier(_)) {
             crate::runtime::partition::BroadcastPartition::new().partition(message, num_partitions)
         } else {
             self.partition.partition(message, num_partitions)

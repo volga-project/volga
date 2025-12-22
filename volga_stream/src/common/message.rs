@@ -235,11 +235,51 @@ impl WatermarkMessage {
 
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckpointBarrierMessage {
+    pub checkpoint_id: u64,
+    pub metadata: MessageMetadata,
+}
+
+impl CheckpointBarrierMessage {
+    pub fn new(upstream_vertex_id: String, checkpoint_id: u64, ingest_timestamp: Option<u64>) -> Self {
+        Self {
+            checkpoint_id,
+            metadata: MessageMetadata {
+                upstream_vertex_id: Some(upstream_vertex_id),
+                ingest_timestamp,
+                extras: None,
+            },
+        }
+    }
+
+    pub fn set_ingest_timestamp(&mut self, ingest_timestamp: u64) {
+        self.metadata.ingest_timestamp = Some(ingest_timestamp);
+    }
+
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+        self.metadata.upstream_vertex_id = Some(upstream_vertex_id);
+    }
+
+    pub fn to_bytes(&self) -> Vec<u8> {
+        bincode::serialize(self).unwrap()
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Self {
+        bincode::deserialize(bytes).unwrap()
+    }
+
+    pub fn get_memory_size(&self) -> usize {
+        self.metadata.get_memory_size() + 8 // checkpoint_id
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     Regular(BaseMessage),
     Keyed(KeyedMessage),
     Watermark(WatermarkMessage),
+    CheckpointBarrier(CheckpointBarrierMessage),
 }
 
 impl Message {
@@ -260,6 +300,7 @@ impl Message {
             Message::Regular(message) => message.metadata.upstream_vertex_id.clone(),
             Message::Keyed(message) => message.base.metadata.upstream_vertex_id.clone(),
             Message::Watermark(message) => message.metadata.upstream_vertex_id.clone(),
+            Message::CheckpointBarrier(message) => message.metadata.upstream_vertex_id.clone(),
         }
     }
 
@@ -268,6 +309,7 @@ impl Message {
             Message::Regular(message) => &message.record_batch,
             Message::Keyed(message) => &message.base.record_batch,
             Message::Watermark(_) => panic!("Watermark message does not have a record batch"),
+            Message::CheckpointBarrier(_) => panic!("Checkpoint barrier does not have a record batch"),
         }
     }
 
@@ -277,6 +319,7 @@ impl Message {
             Message::Regular(_) => Err(anyhow::anyhow!("Regular message does not have a key")),
             Message::Keyed(message) => Ok(&message.key),
             Message::Watermark(_) => Err(anyhow::anyhow!("Watermark message does not have a key")),
+            Message::CheckpointBarrier(_) => Err(anyhow::anyhow!("Checkpoint barrier does not have a key")),
         }
     }
 
@@ -285,6 +328,7 @@ impl Message {
             Message::Regular(message) => message.metadata.ingest_timestamp,
             Message::Keyed(message) => message.base.metadata.ingest_timestamp,
             Message::Watermark(message) => message.metadata.ingest_timestamp,
+            Message::CheckpointBarrier(message) => message.metadata.ingest_timestamp,
         }
     }
 
@@ -293,6 +337,7 @@ impl Message {
             Message::Regular(message) => message.set_ingest_timestamp(ingest_timestamp),
             Message::Keyed(message) => message.base.set_ingest_timestamp(ingest_timestamp),
             Message::Watermark(message) => message.set_ingest_timestamp(ingest_timestamp),
+            Message::CheckpointBarrier(message) => message.set_ingest_timestamp(ingest_timestamp),
         }
     }
 
@@ -301,6 +346,7 @@ impl Message {
             Message::Regular(message) => message.set_upstream_vertex_id(upstream_vertex_id),
             Message::Keyed(message) => message.base.set_upstream_vertex_id(upstream_vertex_id),
             Message::Watermark(message) => message.set_upstream_vertex_id(upstream_vertex_id),
+            Message::CheckpointBarrier(message) => message.set_upstream_vertex_id(upstream_vertex_id),
         }
     }
 
@@ -309,16 +355,35 @@ impl Message {
             Message::Regular(message) => &message.metadata,
             Message::Keyed(message) => &message.base.metadata,
             Message::Watermark(message) => &message.metadata,
+            Message::CheckpointBarrier(message) => &message.metadata,
         };
         
         metadata.extras.clone()
+    }
+
+    pub fn append_trace(&mut self, vertex_id: &str) {
+        let extras = match self {
+            Message::Regular(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
+            Message::Keyed(m) => m.base.metadata.extras.get_or_insert_with(HashMap::new),
+            Message::Watermark(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
+            Message::CheckpointBarrier(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
+        };
+
+        let entry = extras.entry("trace".to_string()).or_insert_with(String::new);
+        if entry.is_empty() {
+            *entry = vertex_id.to_string();
+        } else {
+            entry.push(',');
+            entry.push_str(vertex_id);
+        }
     }
 
     pub fn get_memory_size(&self) -> usize {
         match self {
             Message::Regular(msg) => msg.get_memory_size(),
             Message::Keyed(msg) => msg.get_memory_size(),
-            Message::Watermark(msg) => msg.get_memory_size()
+            Message::Watermark(msg) => msg.get_memory_size(),
+            Message::CheckpointBarrier(msg) => msg.get_memory_size(),
         }
     }
 
@@ -326,7 +391,8 @@ impl Message {
         match self {
             Message::Regular(msg) => msg.record_batch.num_rows(),
             Message::Keyed(msg) => msg.base.record_batch.num_rows(),
-            Message::Watermark(msg) => 1
+            Message::Watermark(_) => 1,
+            Message::CheckpointBarrier(_) => 1,
         }
     }
 
@@ -339,6 +405,7 @@ impl Message {
             Message::Regular(_) => 0u8,
             Message::Keyed(_) => 1u8,
             Message::Watermark(_) => 2u8,
+            Message::CheckpointBarrier(_) => 3u8,
         };
         buffer.write_all(&[message_type]).unwrap();
         
@@ -355,6 +422,11 @@ impl Message {
                 buffer.write_all(&msg_bytes).unwrap();
             }
             Message::Watermark(msg) => {
+                let msg_bytes = msg.to_bytes();
+                buffer.write_all(&(msg_bytes.len() as u32).to_le_bytes()).unwrap();
+                buffer.write_all(&msg_bytes).unwrap();
+            }
+            Message::CheckpointBarrier(msg) => {
                 let msg_bytes = msg.to_bytes();
                 buffer.write_all(&(msg_bytes.len() as u32).to_le_bytes()).unwrap();
                 buffer.write_all(&msg_bytes).unwrap();
@@ -395,6 +467,10 @@ impl Message {
             2 => {
                 let watermark_msg = WatermarkMessage::from_bytes(&msg_bytes);
                 Message::Watermark(watermark_msg)
+            }
+            3 => {
+                let barrier_msg = CheckpointBarrierMessage::from_bytes(&msg_bytes);
+                Message::CheckpointBarrier(barrier_msg)
             }
             _ => panic!("Unknown message type: {}", message_type),
         }

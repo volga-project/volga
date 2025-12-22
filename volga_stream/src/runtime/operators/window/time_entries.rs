@@ -5,13 +5,14 @@ use crossbeam_skiplist::{SkipSet, SkipMap};
 use datafusion::logical_expr::{WindowFrame, WindowFrameBound, WindowFrameUnits};
 use datafusion::scalar::ScalarValue;
 use indexmap::IndexSet;
+use serde::{Serialize, Deserialize};
 
 use crate::runtime::operators::window::window_operator_state::WindowState;
 use crate::runtime::operators::window::tiles::Tile;
 use crate::runtime::operators::window::Tiles;
 use crate::storage::batch_store::{BatchId, RowIdx, Timestamp};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeIdx {
     pub timestamp: Timestamp,
     pub pos_idx: usize, // position within same timestamp
@@ -42,6 +43,51 @@ impl Ord for TimeIdx {
 pub struct TimeEntries {
     pub entries: SkipSet<TimeIdx>,
     pub batch_ids: SkipMap<Timestamp, Arc<Vec<BatchId>>>,
+}
+
+impl Serialize for TimeEntries {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct TimeEntriesSerde {
+            entries: Vec<TimeIdx>,
+            batch_ids: Vec<(Timestamp, Vec<BatchId>)>,
+        }
+
+        let entries = self.entries.iter().map(|e| *e).collect::<Vec<_>>();
+        let batch_ids = self
+            .batch_ids
+            .iter()
+            .map(|e| (*e.key(), (*e.value()).as_ref().clone()))
+            .collect::<Vec<_>>();
+
+        TimeEntriesSerde { entries, batch_ids }.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for TimeEntries {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct TimeEntriesSerde {
+            entries: Vec<TimeIdx>,
+            batch_ids: Vec<(Timestamp, Vec<BatchId>)>,
+        }
+
+        let decoded = TimeEntriesSerde::deserialize(deserializer)?;
+        let time_entries = TimeEntries::new();
+        for entry in decoded.entries {
+            time_entries.entries.insert(entry);
+        }
+        for (ts, batch_ids) in decoded.batch_ids {
+            time_entries.batch_ids.insert(ts, Arc::new(batch_ids));
+        }
+        Ok(time_entries)
+    }
 }
 
 impl TimeEntries {

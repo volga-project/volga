@@ -6,7 +6,7 @@ use anyhow::Result;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
-use futures::{future, StreamExt};
+use futures::future;
 use indexmap::{IndexMap, IndexSet};
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 
@@ -258,8 +258,6 @@ impl WindowOperator {
                             let late_entries = get_late_entries(new_entries.clone(), end_idx);
 
                             if let Some(late_entries) = late_entries {
-
-                                println!("Late len: {:?}",late_entries.len());
                                 for lates in split_entries_for_parallelism(&late_entries) {
                                     aggs.push(Box::new(PlainAggregation::new(
                                         lates, window_config.window_expr.clone(), tiles_owned.clone(), time_entries
@@ -440,16 +438,17 @@ impl OperatorTrait for WindowOperator {
         self.base.operator_type()
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
         // First, return any buffered messages
-        if let Some(msg) = self.base.pending_messages.pop() {
+        if let Some(msg) = self.base.pop_pending_output() {
             return OperatorPollResult::Ready(msg);
         }
 
-        // Then process input stream
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        
-        match input_stream.next().await {
+        match self.base.next_input().await {
             Some(message) => {
                 
                 let ingest_ts = message.ingest_timestamp();
@@ -502,6 +501,10 @@ impl OperatorTrait for WindowOperator {
                             return OperatorPollResult::Ready(Message::new(None, result, None, None));
                         }
                     }
+                    Message::CheckpointBarrier(barrier) => {
+                        // pass through (StreamTask intercepts and checkpoints synchronously)
+                        return OperatorPollResult::Ready(Message::CheckpointBarrier(barrier));
+                    }
                     _ => {
                         panic!("Window operator expects keyed messages or watermarks");
                     }
@@ -509,6 +512,49 @@ impl OperatorTrait for WindowOperator {
             }
             None => return OperatorPollResult::None,
         }
+    }
+
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        let state_cp = self.state.to_checkpoint();
+        let batch_store_cp = self.state.get_batch_store().to_checkpoint();
+
+        Ok(vec![
+            ("window_operator_state".to_string(), bincode::serialize(&state_cp)?),
+            ("batch_store".to_string(), bincode::serialize(&batch_store_cp)?),
+        ])
+    }
+
+    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+        let state_bytes = blobs
+            .iter()
+            .find(|(name, _)| name == "window_operator_state")
+            .map(|(_, b)| b.as_slice());
+        let batch_store_bytes = blobs
+            .iter()
+            .find(|(name, _)| name == "batch_store")
+            .map(|(_, b)| b.as_slice());
+
+        if state_bytes.is_none() && batch_store_bytes.is_none() {
+            return Ok(());
+        }
+
+        if let Some(bytes) = batch_store_bytes {
+            let cp: crate::storage::batch_store::BatchStoreCheckpoint = bincode::deserialize(bytes)?;
+            self.state.get_batch_store().apply_checkpoint(cp);
+        } else {
+            panic!("Batch store bytes are missing");
+        }
+
+        if let Some(bytes) = state_bytes {
+            let cp: crate::runtime::operators::window::window_operator_state::WindowOperatorStateCheckpoint =
+                bincode::deserialize(bytes)?;
+            // Important: do not replace self.state Arc (it is registered in OperatorStates in open()).
+            self.state.apply_checkpoint(cp);
+        } else {
+            panic!("Window operator state bytes are missing");
+        }
+
+        Ok(())
     }
 }
 
@@ -696,6 +742,7 @@ mod tests {
     use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::operators::operator::OperatorConfig;
+    use crate::runtime::operators::operator::OperatorTrait;
     use crate::common::message::Message;
     use crate::runtime::runtime_context::RuntimeContext;
     use crate::runtime::state::OperatorStates;
@@ -717,6 +764,57 @@ mod tests {
         
         RecordBatch::try_new(schema, vec![timestamp_array, value_array, partition_array])
             .expect("Should be able to create test batch")
+    }
+
+    fn generate_keyed_messages(num_keys: usize, rows_per_key: usize, batch_size: usize) -> Vec<Message> {
+        assert!(num_keys > 0);
+        assert!(rows_per_key > 0);
+        assert!(batch_size > 0);
+
+        let key_names: Vec<String> = (0..num_keys).map(|i| format!("K{}", i)).collect();
+
+        let mut per_key_next_ts: Vec<i64> = (0..num_keys).map(|k| 1000 + (k as i64) * 7).collect();
+        let mut per_key_rows_emitted: Vec<usize> = vec![0; num_keys];
+
+        let mut out = Vec::new();
+        loop {
+            let mut any = false;
+            for k in 0..num_keys {
+                if per_key_rows_emitted[k] >= rows_per_key {
+                    continue;
+                }
+                any = true;
+
+                let remaining = rows_per_key - per_key_rows_emitted[k];
+                let n = remaining.min(batch_size);
+
+                let mut ts = Vec::with_capacity(n);
+                let mut vals = Vec::with_capacity(n);
+                let mut keys = Vec::with_capacity(n);
+
+                for i in 0..n {
+                    let t = per_key_next_ts[k];
+                    per_key_next_ts[k] += 1;
+                    ts.push(t);
+
+                    let pos = per_key_rows_emitted[k] + i;
+                    let v = ((k as i64 * 31 + pos as i64 * 17) % 5) as f64 + 1.0;
+                    vals.push(v);
+
+                    keys.push(key_names[k].as_str());
+                }
+
+                per_key_rows_emitted[k] += n;
+                let batch = create_test_batch(ts, vals, keys);
+                out.push(create_keyed_message(batch, &key_names[k]));
+            }
+
+            if !any {
+                break;
+            }
+        }
+
+        out
     }
 
     fn create_test_key(partition_name: &str) -> Key {
@@ -759,6 +857,136 @@ mod tests {
             Some(Arc::new(OperatorStates::new())),
             None
         )
+    }
+
+    async fn collect_regular_output_rows(window_operator: &mut WindowOperator) -> Vec<(i64, f64, String, f64, i64, f64)> {
+        let mut rows = Vec::new();
+        loop {
+            match window_operator.poll_next().await {
+                OperatorPollResult::Ready(msg) => match msg {
+                    Message::Regular(base) => {
+                        let batch = base.record_batch;
+                        if batch.num_rows() == 0 {
+                            continue;
+                        }
+
+                        // Columns: timestamp, value, partition_key, sum_val, cnt_val, avg_val
+                        let ts = batch
+                            .column(0)
+                            .as_any()
+                            .downcast_ref::<TimestampMillisecondArray>()
+                            .expect("timestamp col");
+                        let val = batch
+                            .column(1)
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .expect("value col");
+                        let key = batch
+                            .column(2)
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .expect("partition_key col");
+                        let sum = batch
+                            .column(3)
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .expect("sum col");
+                        let cnt = batch
+                            .column(4)
+                            .as_any()
+                            .downcast_ref::<Int64Array>()
+                            .expect("count col");
+                        let avg = batch
+                            .column(5)
+                            .as_any()
+                            .downcast_ref::<Float64Array>()
+                            .expect("avg col");
+
+                        for i in 0..batch.num_rows() {
+                            rows.push((
+                                ts.value(i),
+                                val.value(i),
+                                key.value(i).to_string(),
+                                sum.value(i),
+                                cnt.value(i),
+                                avg.value(i),
+                            ));
+                        }
+                    }
+                    Message::Watermark(_) | Message::CheckpointBarrier(_) => {
+                        // Not expected in these tests; if it happens it's fine to ignore.
+                    }
+                    _ => panic!("Unexpected output message from window operator: {:?}", msg),
+                },
+                OperatorPollResult::Continue => continue,
+                OperatorPollResult::None => break,
+            }
+        }
+        rows
+    }
+
+    #[tokio::test]
+    async fn test_window_operator_checkpoint_consistency() {
+        // Same query shape as the end-to-end checkpoint recovery test.
+        let sql = "SELECT timestamp, value, partition_key, \
+                   SUM(value) OVER w as sum_val, \
+                   COUNT(value) OVER w as cnt_val, \
+                   AVG(value) OVER w as avg_val \
+                   FROM test_table \
+                   WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp \
+                   RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW)";
+
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut window_config = WindowOperatorConfig::new(window_exec);
+        window_config.update_mode = UpdateMode::PerMessage;
+        window_config.parallelize = false;
+
+        let operator_config = OperatorConfig::WindowConfig(window_config.clone());
+
+        let msgs: Vec<Message> = generate_keyed_messages(16, 250, 32);
+
+        // Baseline: run uninterrupted.
+        let mut baseline = WindowOperator::new(operator_config.clone());
+        let baseline_ctx = create_test_runtime_context();
+        baseline.open(&baseline_ctx).await.expect("open baseline");
+        baseline.set_input(Some(Box::pin(futures::stream::iter(msgs.clone()))));
+        let baseline_rows = collect_regular_output_rows(&mut baseline).await;
+
+        // With checkpoint+restore in the middle.
+        let split_at = msgs.len() / 2;
+        let mut first = WindowOperator::new(operator_config.clone());
+        let first_ctx = create_test_runtime_context();
+        first.open(&first_ctx).await.expect("open first");
+        first.set_input(Some(Box::pin(futures::stream::iter(msgs[..split_at].to_vec()))));
+        let first_rows = collect_regular_output_rows(&mut first).await;
+        let blobs = first.checkpoint(1).await.expect("checkpoint");
+
+        let mut second = WindowOperator::new(operator_config);
+        let second_ctx = create_test_runtime_context();
+        second.open(&second_ctx).await.expect("open second");
+        second.restore(&blobs).await.expect("restore");
+        second.set_input(Some(Box::pin(futures::stream::iter(msgs[split_at..].to_vec()))));
+        let second_rows = collect_regular_output_rows(&mut second).await;
+
+        let mut restored_rows = first_rows;
+        restored_rows.extend(second_rows);
+
+        assert_eq!(
+            baseline_rows.len(),
+            restored_rows.len(),
+            "row count mismatch baseline={} restored={}",
+            baseline_rows.len(),
+            restored_rows.len()
+        );
+
+        for (i, (b, r)) in baseline_rows.iter().zip(restored_rows.iter()).enumerate() {
+            assert_eq!(b.0, r.0, "timestamp mismatch at row {}", i);
+            assert_eq!(b.2, r.2, "partition_key mismatch at row {}", i);
+            assert_eq!(b.4, r.4, "count mismatch at row {}", i);
+            assert!((b.1 - r.1).abs() < 1e-9, "value mismatch at row {}: {} vs {}", i, b.1, r.1);
+            assert!((b.3 - r.3).abs() < 1e-9, "sum mismatch at row {}: {} vs {}", i, b.3, r.3);
+            assert!((b.5 - r.5).abs() < 1e-9, "avg mismatch at row {}: {} vs {}", i, b.5, r.5);
+        }
     }
 
     #[tokio::test]
