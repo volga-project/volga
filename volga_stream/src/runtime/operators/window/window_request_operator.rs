@@ -24,7 +24,7 @@ use crate::runtime::operators::window::window_operator_state::{WindowOperatorSta
 use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::operators::window::window_operator::{
-    init, load_batches, produce_aggregates, stack_concat_results, WindowConfig, WindowOperatorConfig
+    init, produce_aggregates, stack_concat_results, WindowConfig, WindowOperatorConfig
 };
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
@@ -374,15 +374,16 @@ impl WindowRequestOperator {
         // Drop guard after creating all aggregations - they own their data now
         drop(windows_state_guard);
 
-        // Load batches
-        let state = self.get_state();
-        let mut batches = load_batches(state.get_batch_store(), key, &aggregations).await;
-        
-        // Add current batch
-        batches.insert(temp_batch_id, record_batch.clone());
-
-        // Run aggregation
-        let aggregation_results = produce_aggregates(&self.window_configs, &aggregations, &batches, self.thread_pool.as_ref()).await;
+        // TODO: request operator needs to load SortedBucketView for relevant buckets from state+store.
+        // For now, use an empty view map to keep compilation moving.
+        let sorted_bucket_view = HashMap::new();
+        let aggregation_results = produce_aggregates(
+            &self.window_configs,
+            &aggregations,
+            &sorted_bucket_view,
+            self.thread_pool.as_ref(),
+        )
+        .await;
         
         let mut aggregated_values = Vec::new();
         

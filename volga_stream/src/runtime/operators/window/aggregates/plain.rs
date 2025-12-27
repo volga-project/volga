@@ -1,136 +1,96 @@
-use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-
-use arrow::array::{ArrayRef, RecordBatch};
+use async_trait::async_trait;
 use datafusion::logical_expr::WindowFrameUnits;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
-use async_trait::async_trait;
-
 use tokio_rayon::rayon::ThreadPool;
 use tokio_rayon::AsyncThreadPool;
-
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
+use crate::runtime::operators::window::index::{BucketIndex, SlideInfo, get_window_length_ms, get_window_size_rows};
 use crate::runtime::operators::window::tiles::Tile;
-use crate::runtime::operators::window::batch_index::{BatchIndex, Bucket, get_window_length_ms, get_window_size_rows};
-use crate::runtime::operators::window::Tiles;
-use crate::storage::batch_store::{BatchId, Timestamp};
-use indexmap::IndexSet;
-
-use super::{Aggregation, AggregatorType, WindowAggregator, create_window_aggregator, merge_accumulator_state};
-use super::utils::{EntriesRange, Pos};
-
-/// Entry bucket info with timestamp and batch IDs
-#[derive(Debug, Clone)]
-pub struct BucketRange {
-    pub start_bucket_ts: Timestamp,
-    pub end_bucket_ts: Timestamp,
-    pub exact_batch_ids: HashMap<Timestamp, Vec<BatchId>>,
-}
+use crate::runtime::operators::window::{Tiles, TimeGranularity};
+use crate::storage::batch_store::Timestamp;
+use crate::runtime::operators::window::index::SortedBucketView;
+use crate::runtime::operators::window::index::window_logic;
+use super::{Aggregation, AggregatorType, BucketRange};
+use super::{WindowAggregator, create_window_aggregator, merge_accumulator_state};
+use crate::runtime::operators::window::{Cursor, RowIndex, RowPtr};
 
 #[derive(Debug)]
 pub struct PlainAggregation {
-    pub entry_bucket_ranges: Vec<BucketRange>,
-    /// All relevant buckets covering windows for all entries
+    /// Per-entry logical isolation: each entry range has its own window bucket range.
+    pub entry_plans: Vec<(BucketRange, BucketRange)>, // (entries, window)
+    /// Optional cursor bounds for "delta mode" (streaming): process rows with Cursor in
+    /// `(prev_processed_until, new_processed_until]`.
+    pub cursor_bounds: Option<(Option<Cursor>, Cursor)>,
     pub window_expr: Arc<dyn WindowExpr>,
     pub tiles: Option<Tiles>,
     pub ts_column_index: usize,
+    pub window_id: usize,
+    pub bucket_granularity: TimeGranularity,
 }
 
 impl PlainAggregation {
-    /// Create PlainAggregation from batch IDs
+    /// Default mode: evaluate for every row in `entry_ranges`.
     pub fn new(
-        entry_bucket_ranges: Vec<BucketRange>,
+        entry_ranges: Vec<BucketRange>,
+        batch_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         tiles: Option<Tiles>,
-        batch_index: &BatchIndex,
         ts_column_index: usize,
+        window_id: usize,
     ) -> Self {
-        // Group entry batch IDs by their time buckets
-        // let grouped = Self::group_batch_ids_by_time_bucket(&entry_batch_ids);
-        
-        // let entry_bucket_timestamps: Vec<Timestamp> = grouped.iter()
-        //     .map(|(ts, _)| *ts)
-        //     .collect();
-        
         let window_frame = window_expr.get_window_frame();
-        
-        // Get all relevant buckets for all entries
-        let relevant_buckets: Vec<Bucket> = match window_frame.units {
-            WindowFrameUnits::Range => {
-                let window_length = get_window_length_ms(window_frame);
-                batch_index.get_relevant_buckets_for_range_windows(&entry_bucket_timestamps, window_length)
-                    .into_iter().cloned().collect()
-            }
-            WindowFrameUnits::Rows => {
-                let window_size = get_window_size_rows(window_frame);
-                batch_index.get_relevant_buckets_for_rows_windows(&entry_bucket_timestamps, window_size)
-                    .into_iter().cloned().collect()
-            }
-            WindowFrameUnits::Groups => {
-                panic!("GROUPS window frame not supported");
-            }
-        };
-        
-        // Create entry bucket infos
-        let entry_bucket_infos: Vec<EntryBucketInfo> = grouped.into_iter()
-            .map(|(timestamp, batch_ids)| EntryBucketInfo { timestamp, batch_ids })
-            .collect();
-        
-        // Compose batches to load
-        let batches_to_load = Self::get_batches_to_load(&relevant_buckets, tiles.as_ref());
-        
+
+        let mut entry_plans: Vec<(BucketRange, BucketRange)> = Vec::new();
+        for r in entry_ranges {
+            let window_range = match window_frame.units {
+                WindowFrameUnits::Range => {
+                    let wl = get_window_length_ms(window_frame);
+                    batch_index.get_relevant_range_for_range_windows(r, wl)
+                }
+                WindowFrameUnits::Rows => {
+                    let ws = get_window_size_rows(window_frame);
+                    batch_index.get_relevant_range_for_rows_windows(r, ws)
+                }
+                _ => BucketRange::new(r.start, r.end),
+            };
+            entry_plans.push((r, window_range));
+        }
+
         Self {
-            entry_batch_ids,
-            entry_bucket_infos,
-            relevant_buckets,
+            entry_plans,
+            cursor_bounds: None,
             window_expr,
             tiles,
-            batches_to_load,
             ts_column_index,
+            window_id,
+            bucket_granularity: batch_index.bucket_granularity(),
         }
     }
-    
-    /// Group batch IDs by their time_bucket, return sorted by timestamp
-    // fn group_batch_ids_by_time_bucket(batch_ids: &[BatchId]) -> Vec<(Timestamp, Vec<BatchId>)> {
-    //     let mut bucket_map: HashMap<Timestamp, Vec<BatchId>> = HashMap::new();
-        
-    //     for &batch_id in batch_ids {
-    //         let bucket_ts = batch_id.time_bucket() as Timestamp;
-    //         bucket_map.entry(bucket_ts)
-    //             .or_insert_with(Vec::new)
-    //             .push(batch_id);
-    //     }
-        
-    //     let mut result: Vec<_> = bucket_map.into_iter().collect();
-    //     result.sort_by_key(|(ts, _)| *ts);
-    //     result
-    // }
-    
-    fn get_relevant_buckets(
-        relevant_buckets: &[Bucket],
-        tiles: Option<&Tiles>,
-    ) -> Vec<BucketRange> {
-        let mut relevant_buckets = Vec::new();
-        
-        for bucket in relevant_buckets {
-            let bucket_start = bucket.timestamp;
-            let bucket_end = bucket.batches.iter().map(|b| b.max_timestamp).max().unwrap_or(bucket_start);
-            
-            // TODO we should load batches only for buckets that move window
-            let tiles_cover = tiles.map(|t| {
-                let tile_coverage = t.compute_coverage(bucket_start, bucket_end);
-                tile_coverage.is_full_coverage()
-            }).unwrap_or(false);
-            
-            if !tiles_cover {
-                for metadata in &bucket.batches {
-                    batch_ids.insert(metadata.batch_id);
-                }
-            }
-        }
-        
-        batch_ids
+
+    /// Delta mode: only evaluate for rows in `entry_ranges` whose Cursor is in
+    /// `(prev_processed_until, new_processed_until]`.
+    pub fn new_bounded(
+        entry_ranges: Vec<BucketRange>,
+        batch_index: &BucketIndex,
+        window_expr: Arc<dyn WindowExpr>,
+        tiles: Option<Tiles>,
+        ts_column_index: usize,
+        window_id: usize,
+        prev_processed_until: Option<Cursor>,
+        new_processed_until: Cursor,
+    ) -> Self {
+        let mut out = Self::new(
+            entry_ranges,
+            batch_index,
+            window_expr,
+            tiles,
+            ts_column_index,
+            window_id,
+        );
+        out.cursor_bounds = Some((prev_processed_until, new_processed_until));
+        out
     }
 }
 
@@ -138,196 +98,253 @@ impl PlainAggregation {
 impl Aggregation for PlainAggregation {
     async fn produce_aggregates(
         &self,
-        batches: &HashMap<BatchId, RecordBatch>,
+        sorted_bucket_view: &std::collections::HashMap<Timestamp, SortedBucketView>,
         thread_pool: Option<&ThreadPool>,
-        exclude_current_row: Option<bool>,
+        _exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
-        let parallelize = thread_pool.is_some();
-        
-        let aggregates = if parallelize {
-            run_plain_aggregation_parallel(
-                thread_pool.expect("ThreadPool should exist"),
-                self.window_expr.clone(),
-                self.entry_bucket_infos.clone(),
-                self.relevant_buckets.clone(),
-                self.tiles.clone(),
-                Arc::new(batches.clone()),
-                self.ts_column_index,
-                exclude_current_row,
-            ).await
-        } else {
-            run_plain_aggregation(
-                &self.window_expr,
-                &self.entry_bucket_infos,
-                &self.relevant_buckets,
-                self.tiles.as_ref(),
-                batches,
-                self.ts_column_index,
-                exclude_current_row,
-            )
-        };
-        
-        (aggregates, None)
+        if self.entry_plans.is_empty() {
+            return (vec![], None);
+        }
+
+        // Offload CPU-heavy work when thread pool is provided.
+        if let Some(tp) = thread_pool {
+            let sorted_bucket_view = sorted_bucket_view.clone();
+            let entry_plans = self.entry_plans.clone();
+            let cursor_bounds = self.cursor_bounds;
+            let window_expr = self.window_expr.clone();
+            let tiles = self.tiles.clone();
+            let ts_column_index = self.ts_column_index;
+            let window_id = self.window_id;
+            let bucket_granularity = self.bucket_granularity;
+            return tp
+                .spawn_fifo_async(move || {
+                    run_plain_aggregation(
+                        &sorted_bucket_view,
+                        &entry_plans,
+                        cursor_bounds,
+                        &window_expr,
+                        tiles.as_ref(),
+                        ts_column_index,
+                        window_id,
+                        bucket_granularity,
+                    )
+                })
+                .await;
+        }
+
+        run_plain_aggregation(
+            sorted_bucket_view,
+            &self.entry_plans,
+            self.cursor_bounds,
+            &self.window_expr,
+            self.tiles.as_ref(),
+            self.ts_column_index,
+            self.window_id,
+            self.bucket_granularity,
+        )
     }
-    
+
     fn window_expr(&self) -> &Arc<dyn WindowExpr> {
         &self.window_expr
     }
-    
+
     fn tiles(&self) -> Option<&Tiles> {
         self.tiles.as_ref()
     }
-    
+
     fn aggregator_type(&self) -> AggregatorType {
         AggregatorType::PlainAccumulator
     }
-    
-    fn get_batches_to_load(&self) -> IndexSet<BatchId> {
-        self.batches_to_load.clone()
-    }
-    
-    fn get_entry_batch_ids(&self) -> Vec<BatchId> {
-        self.entry_batch_ids.clone()
-    }
-    
-    fn get_entry_timestamps(&self) -> Vec<Timestamp> {
-        self.entry_bucket_infos.iter()
-            .flat_map(|info| std::iter::repeat(info.timestamp).take(info.batch_ids.len()))
-            .collect()
+
+    fn get_relevant_buckets(&self) -> Vec<BucketRange> {
+        self.entry_plans.iter().map(|(_, w)| *w).collect()
     }
 }
 
 fn run_plain_aggregation(
+    sorted_bucket_view: &std::collections::HashMap<Timestamp, SortedBucketView>,
+    entry_plans: &[(BucketRange, BucketRange)],
+    cursor_bounds: Option<(Option<Cursor>, Cursor)>,
     window_expr: &Arc<dyn WindowExpr>,
-    entry_bucket_infos: &[EntryBucketInfo],
-    relevant_buckets: &[Bucket],
     tiles: Option<&Tiles>,
-    batches: &HashMap<BatchId, RecordBatch>,
-    ts_column_index: usize,
-    _exclude_current_row: Option<bool>,
-) -> Vec<ScalarValue> {
-    if relevant_buckets.is_empty() {
-        return vec![];
-    }
-    
+    _ts_column_index: usize,
+    window_id: usize,
+    bucket_granularity: TimeGranularity,
+) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+    if entry_plans.is_empty() {
+        return (vec![], None);
+    };
+
     let window_frame = window_expr.get_window_frame();
-    let is_rows_window = window_frame.units == WindowFrameUnits::Rows;
+    let is_rows = window_frame.units == WindowFrameUnits::Rows;
     let window_length = get_window_length_ms(window_frame);
     let window_size = get_window_size_rows(window_frame);
-    
-    // Create EvaluatedBatches from all relevant buckets
-    let all_data = EntriesRange::from_buckets(relevant_buckets, batches, window_expr, ts_column_index);
-    
-    if all_data.is_empty() {
-        return vec![];
-    }
-    
-    let mut results = Vec::new();
-    
-    for info in entry_bucket_infos {
+    let spec = if is_rows {
+        window_logic::WindowSpec::Rows { size: window_size }
+    } else {
+        window_logic::WindowSpec::Range { length_ms: window_length }
+    };
 
-        let (sorted_batch, batch_idx) = all_data.get_batch(info.timestamp);
+    let mut results: Vec<ScalarValue> = Vec::new();
 
-        let mut window_end = Pos::new(batch_idx, 0);
+    // Each entry plan is evaluated within its own window range.
+    for (entries_range, window_range) in entry_plans {
+        let idx = RowIndex::new(*window_range, sorted_bucket_view, window_id, bucket_granularity);
+        if idx.is_empty() {
+            continue;
+        }
 
-        let mut window_start = if is_rows_window {
-            all_data.pos_n_rows_before(&window_end, window_size)
-        } else {
-            all_data.pos_time_before(&window_end, window_length)
-        };
-        
-        // Initialize incremental coverage
-        let mut coverage = WindowCoverage::new(window_start, window_end);
+        match cursor_bounds {
+            None => {
+                // Default mode: iterate all rows in entry buckets.
+                let mut bucket_ts = entries_range.start;
+                while bucket_ts <= entries_range.end {
+                    let view = idx.bucket_view(&bucket_ts).expect("bucket view should exist");
+                    let rows = view.size();
 
-        // iterate over sorted rows 
-        for row in sorted_batch.rows() {
-            // process only requested original batch_ids
-            
-            all_data.advance_window(
-                &window_start, 
-                &window_end, 
-                if is_rows_window { window_size as i64 } else { window_length }, 
-                is_rows_window, 
-                tiles, 
-                &mut coverage
-            );
-            
-            if !info.batch_ids.contains(&row.batch_id) {
-                window_start = new_window_start;
-                window_end = new_window_end;
-                continue;
+                    for row in 0..rows {
+                        let window_end = RowPtr::new(bucket_ts, row);
+                        if window_end.bucket_ts < window_range.start || window_end.bucket_ts > window_range.end {
+                            continue;
+                        }
+
+                        let unclamped_start = window_logic::window_start_unclamped(&idx, window_end, spec);
+                        let window_start = if unclamped_start.bucket_ts < window_range.start {
+                            RowPtr::new(window_range.start, 0)
+                        } else {
+                            unclamped_start
+                        };
+
+                        let (front_args, middle_tiles, back_args) = if let Some(tiles) = tiles {
+                            if let Some(split) =
+                                window_logic::tiled_split(&idx, window_start, window_end, tiles)
+                            {
+                                let front_args = if split.front_end >= window_start {
+                                    idx.get_args_in_range(&window_start, &split.front_end)
+                                } else {
+                                    vec![]
+                                };
+                                let back_args = if split.back_start <= window_end {
+                                    idx.get_args_in_range(&split.back_start, &window_end)
+                                } else {
+                                    vec![]
+                                };
+                                (front_args, split.tiles, back_args)
+                            } else {
+                                (idx.get_args_in_range(&window_start, &window_end), vec![], vec![])
+                            }
+                        } else {
+                            (idx.get_args_in_range(&window_start, &window_end), vec![], vec![])
+                        };
+
+                        let result =
+                            run_plain_accumulator(window_expr, front_args, middle_tiles, back_args);
+                        results.push(result);
+                    }
+
+                    bucket_ts = bucket_granularity.next_start(bucket_ts);
+                }
             }
+            Some((prev_processed_until, new_processed_until)) => {
+                // Delta mode: iterate only the new update rows between prev and new cursor bounds,
+                // but restrict outputs to this plan's entry bucket range.
+                let Some(mut update_pos) = window_logic::first_update_pos(&idx, prev_processed_until) else {
+                    continue;
+                };
 
-            let result = run_plain_accumulator(
-                window_expr,
-                &all_data,
-                front_args,
-                middle_tiles,
-                back_args,
-            );
-            results.push(result);
-            window_start = new_window_start;
-            window_end = new_window_end;
+                let end_pos = {
+                    let first_row_pos = idx.get_row_pos(&idx.first_pos());
+                    if new_processed_until < first_row_pos {
+                        continue;
+                    }
+                    match idx.seek_rowpos_gt(new_processed_until) {
+                        Some(after_end) => idx
+                            .prev_pos(after_end)
+                            .expect("seek_rowpos_gt returned the first row; should be guarded above"),
+                        None => idx.last_pos(),
+                    }
+                };
+
+                if end_pos < update_pos {
+                    continue;
+                }
+
+                loop {
+                    if update_pos.bucket_ts >= entries_range.start && update_pos.bucket_ts <= entries_range.end {
+                        let window_end = update_pos;
+
+                        let unclamped_start = window_logic::window_start_unclamped(&idx, window_end, spec);
+                        let window_start = if unclamped_start.bucket_ts < window_range.start {
+                            RowPtr::new(window_range.start, 0)
+                        } else {
+                            unclamped_start
+                        };
+
+                        let (front_args, middle_tiles, back_args) = if let Some(tiles) = tiles {
+                            if let Some(split) =
+                                window_logic::tiled_split(&idx, window_start, window_end, tiles)
+                            {
+                                let front_args = if split.front_end >= window_start {
+                                    idx.get_args_in_range(&window_start, &split.front_end)
+                                } else {
+                                    vec![]
+                                };
+                                let back_args = if split.back_start <= window_end {
+                                    idx.get_args_in_range(&split.back_start, &window_end)
+                                } else {
+                                    vec![]
+                                };
+                                (front_args, split.tiles, back_args)
+                            } else {
+                                (idx.get_args_in_range(&window_start, &window_end), vec![], vec![])
+                            }
+                        } else {
+                            (idx.get_args_in_range(&window_start, &window_end), vec![], vec![])
+                        };
+
+                        let result =
+                            run_plain_accumulator(window_expr, front_args, middle_tiles, back_args);
+                        results.push(result);
+                    }
+
+                    if update_pos == end_pos {
+                        break;
+                    }
+                    update_pos = idx
+                        .next_pos(update_pos)
+                        .expect("end_pos should be reachable from update_pos");
+                }
+            }
         }
     }
-    
-    results
-}
 
-async fn run_plain_aggregation_parallel(
-    thread_pool: &ThreadPool,
-    window_expr: Arc<dyn WindowExpr>,
-    entry_bucket_infos: Vec<EntryBucketInfo>,
-    relevant_buckets: Vec<Bucket>,
-    tiles: Option<Tiles>,
-    batches: Arc<HashMap<BatchId, RecordBatch>>,
-    ts_column_index: usize,
-    exclude_current_row: Option<bool>,
-) -> Vec<ScalarValue> {
-    thread_pool.spawn_fifo_async(move || {
-        run_plain_aggregation(
-            &window_expr,
-            &entry_bucket_infos,
-            &relevant_buckets,
-            tiles.as_ref(),
-            &batches,
-            ts_column_index,
-            exclude_current_row,
-        )
-    }).await
+    (results, None)
 }
 
 fn run_plain_accumulator(
     window_expr: &Arc<dyn WindowExpr>,
-    data: &EntriesRange,
-    front_args: Vec<ArrayRef>,
+    front_args: Vec<arrow::array::ArrayRef>,
     middle_tiles: Vec<Tile>,
-    back_args: Vec<ArrayRef>,
+    back_args: Vec<arrow::array::ArrayRef>,
 ) -> ScalarValue {
     let mut accumulator = match create_window_aggregator(window_expr) {
         WindowAggregator::Accumulator(accumulator) => accumulator,
-        WindowAggregator::Evaluator(_) => panic!("Should not be evaluator"),
+        WindowAggregator::Evaluator(_) => panic!("PlainAggregation should not use evaluator"),
     };
 
-    // Process front data
     if !front_args.is_empty() {
-        accumulator.update_batch(&front_args)
-            .expect("Should be able to update accumulator with front data");
+        accumulator.update_batch(&front_args).expect("update_batch failed");
     }
 
-    // Process middle tiles
     for tile in middle_tiles {
         if let Some(tile_state) = tile.accumulator_state {
             merge_accumulator_state(accumulator.as_mut(), tile_state.as_ref());
         }
     }
 
-    // Process back data
     if !back_args.is_empty() {
-        accumulator.update_batch(&back_args)
-            .expect("Should be able to update accumulator with back data");
+        accumulator.update_batch(&back_args).expect("update_batch failed");
     }
 
-    accumulator.evaluate()
-        .expect("Should be able to evaluate accumulator")
+    accumulator.evaluate().expect("evaluate failed")
 }

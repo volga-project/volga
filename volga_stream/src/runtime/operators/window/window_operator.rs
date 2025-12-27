@@ -20,8 +20,11 @@ use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorC
 use crate::runtime::operators::window::aggregates::{get_aggregate_type, Aggregation};
 use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
 use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
-use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId, InsertBatchResult};
-use crate::runtime::operators::window::{AggregatorType, TileConfig};
+use crate::runtime::operators::window::index::SortedBucketView;
+use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
+use crate::runtime::operators::window::{AggregatorType, TileConfig, TimeGranularity};
+use crate::runtime::operators::window::Cursor;
+use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::batch_store::{BatchId, BatchStore, Timestamp};
 
@@ -83,6 +86,7 @@ pub struct WindowOperator {
     input_schema: SchemaRef,
     tiling_configs: Vec<Option<TileConfig>>,
     lateness: Option<i64>,
+    current_watermark: Option<u64>,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -159,7 +163,7 @@ impl WindowOperator {
         Self {
             base: OperatorBase::new(config),
             window_configs: windows,
-            state: Arc::new(WindowOperatorState::new(Arc::new(BatchStore::default()))), // Temporary, will be replaced in open()
+            state: Arc::new(WindowOperatorState::new(Arc::new(BatchStore::new(4096, TimeGranularity::Seconds(1), 1024)))),
             ts_column_index,
             buffered_keys: HashSet::new(),
             update_mode: window_operator_config.update_mode,
@@ -170,12 +174,17 @@ impl WindowOperator {
             input_schema,
             tiling_configs: window_operator_config.tiling_configs,
             lateness: window_operator_config.lateness,
+            current_watermark: None,
         }
     }
 
-    async fn process_key(&self, key: &Key, insert_result: Option<InsertBatchResult>) -> RecordBatch {
+    async fn process_key(
+        &self,
+        key: &Key,
+        process_until: Option<Cursor>,
+    ) -> RecordBatch {
         
-        let result = self.advance_windows(key, insert_result).await;
+        let result = self.advance_windows(key, process_until).await;
 
         if self.lateness.is_some() {
             self.state.prune(key, self.lateness.unwrap(), &self.window_configs).await;
@@ -187,12 +196,11 @@ impl WindowOperator {
         &self.state
     }
 
-
-    async fn process_buffered(&self) -> RecordBatch {
+    async fn process_buffered(&self, process_until: Option<Cursor>) -> RecordBatch {
         // TODO limit number of concurrent keys to process
         let futures: Vec<_> = self.buffered_keys.iter()
             .map(|key| async move {
-                self.process_key(key, None).await
+                self.process_key(key, process_until).await
             })
             .collect();
         
@@ -210,16 +218,16 @@ impl WindowOperator {
     async fn configure_aggregations(
         &self, 
         key: &Key,
-        insert_result: Option<InsertBatchResult>,
-    ) -> (IndexMap<WindowId, Vec<Box<dyn Aggregation>>>, HashMap<WindowId, Timestamp>) {
+        process_until: Option<Cursor>,
+    ) -> (IndexMap<WindowId, Vec<Box<dyn Aggregation>>>, HashMap<WindowId, Cursor>) {
         let windows_state_guard = self.state.get_windows_state(key).await
             .expect("Windows state should exist - insert_batch should have created it");
         let windows_state = windows_state_guard.value();
         
-        let batch_index = &windows_state.batch_index;
+        let batch_index = &windows_state.bucket_index;
 
         let mut aggregations: IndexMap<WindowId, Vec<Box<dyn Aggregation>>> = IndexMap::new();
-        let mut new_end_timestamps = HashMap::new();
+        let mut new_processed_until = HashMap::new();
         
         for (window_id, window_config) in &self.window_configs {
             let window_frame = window_config.window_expr.get_window_frame();
@@ -227,61 +235,55 @@ impl WindowOperator {
             let aggregator_type = self.window_configs[window_id].aggregator_type;
             let tiles_owned = window_state.tiles.clone();
             let accumulator_state_owned = window_state.accumulator_state.clone();
-            let prev_end_timestamp = window_state.end_timestamp;
+            let prev_processed_until = window_state.processed_until;
             
-            // Get slide info from batch index
-            let slide_info = batch_index.slide_window(window_frame, Some(prev_end_timestamp));
+            // Get slide info from batch index (optionally capped by watermark).
+            let slide_info = match process_until {
+                Some(until) => batch_index.slide_window_until(window_frame, prev_processed_until, until),
+                None => batch_index.slide_window(window_frame, prev_processed_until),
+            };
             
-            let new_end_ts = slide_info.as_ref()
-                .map(|s| s.new_end_timestamp)
-                .unwrap_or(prev_end_timestamp);
+            let new_pos = slide_info
+                .as_ref()
+                .map(|s| s.new_processed_until)
+                .unwrap_or_else(|| prev_processed_until.unwrap_or(Cursor::new(i64::MIN, 0)));
             
-            new_end_timestamps.insert(*window_id, new_end_ts);
+            new_processed_until.insert(*window_id, new_pos);
 
             let mut aggs: Vec<Box<dyn Aggregation>> = Vec::new();
 
             if self.execution_mode == ExecutionMode::Regular {
                 match aggregator_type {
                     AggregatorType::RetractableAccumulator => {
-                        // Handle late batches with PlainAggregation
-                        if let Some(ref result) = insert_result {
-                            if !result.late_batch_ids.is_empty() {
-                                aggs.push(Box::new(PlainAggregation::from_batch_ids(
-                                    result.late_batch_ids.clone(),
+                        // Simplified: retractable aggregates only advance in-order; out-of-order rows
+                        // are dropped on ingest (see WindowOperatorState::insert_batch).
+                        if let Some(ref slide) = slide_info {
+                            if slide.update_range.is_some() {
+                                aggs.push(Box::new(RetractableAggregation::from_slide_info(
+                                    *window_id,
+                                    slide,
+                                    prev_processed_until,
                                     window_config.window_expr.clone(),
-                                    tiles_owned.clone(),
-                                    batch_index,
+                                    accumulator_state_owned.clone(),
                                     self.ts_column_index,
+                                    batch_index.bucket_granularity(),
                                 )));
                             }
                         }
-                        
-                        // Non-late entries use RetractableAggregation with slide info
-                        if let Some(ref slide) = slide_info {
-                            aggs.push(Box::new(RetractableAggregation::from_slide_info(
-                                slide,
-                                prev_end_timestamp,
-                                window_config.window_expr.clone(),
-                                accumulator_state_owned.clone(),
-                                self.ts_column_index,
-                            )));
-                        }
                     }
                     AggregatorType::PlainAccumulator => {
-                        // For plain aggregators, get all relevant buckets based on entry batch IDs
-                        if let Some(ref result) = insert_result {
-                            let all_batch_ids: Vec<BatchId> = result.normal_batch_ids.iter()
-                                .chain(result.late_batch_ids.iter())
-                                .copied()
-                                .collect();
-                            
-                            if !all_batch_ids.is_empty() {
-                                aggs.push(Box::new(PlainAggregation::from_batch_ids(
-                                    all_batch_ids,
+                        if let Some(ref slide) = slide_info {
+                            if slide.update_range.is_some() {
+                                let entry_ranges = vec![slide.update_range.expect("checked above")];
+                                aggs.push(Box::new(PlainAggregation::new_bounded(
+                                    entry_ranges,
+                                    batch_index,
                                     window_config.window_expr.clone(),
                                     tiles_owned.clone(),
-                                    batch_index,
                                     self.ts_column_index,
+                                    *window_id,
+                                    prev_processed_until,
+                                    slide.new_processed_until,
                                 )));
                             }
                         }
@@ -295,13 +297,15 @@ impl WindowOperator {
                 match aggregator_type {
                     AggregatorType::RetractableAccumulator => {
                         if let Some(ref slide) = slide_info {
-                            if !slide.update_buckets.is_empty() || !slide.retract_buckets.is_empty() {
+                            if slide.update_range.is_some() || slide.retract_range.is_some() {
                                 aggs.push(Box::new(RetractableAggregation::from_slide_info(
+                                    *window_id,
                                     slide,
-                                    prev_end_timestamp,
+                                    prev_processed_until,
                                     window_config.window_expr.clone(),
                                     accumulator_state_owned.clone(),
                                     self.ts_column_index,
+                                    batch_index.bucket_granularity(),
                                 )));
                             }
                         }
@@ -315,47 +319,26 @@ impl WindowOperator {
         }
 
         drop(windows_state_guard);
-        (aggregations, new_end_timestamps)
+        (aggregations, new_processed_until)
     }
 
     async fn advance_windows(
         &self, 
         key: &Key, 
-        insert_result: Option<InsertBatchResult>
+        process_until: Option<Cursor>,
     ) -> RecordBatch {
 
-        let (aggregations, new_end_timestamps) = self.configure_aggregations(key, insert_result).await;
+        let (aggregations, new_processed_until) =
+            self.configure_aggregations(key, process_until).await;
         
         if aggregations.is_empty() {
             return RecordBatch::new_empty(self.output_schema.clone());
         }
         
-        // Get batch IDs to load for input values
-        let entry_batch_ids: Vec<BatchId> = aggregations
-            .values()
-            .next()
-            .map(|args_vec| {
-                args_vec
-                    .iter()
-                    .flat_map(|arg| arg.get_entry_batch_ids())
-                    .collect()
-            })
-            .unwrap_or_default();
+        // TODO: in the bucket-view design we will derive input values from bucket views.
         
-        // Get entry timestamps for ordering results
-        let entry_timestamps: Vec<Timestamp> = aggregations
-            .values()
-            .next()
-            .map(|args_vec| {
-                args_vec
-                    .iter()
-                    .flat_map(|arg| arg.get_entry_timestamps())
-                    .collect()
-            })
-            .unwrap_or_default();
-        
-        // Load batches
-        let sorted_bucket_view = load_sorted_buckets_view(self.state.get_batch_store(), key, &aggregations).await;
+        // Load bucket views
+        let sorted_bucket_view = load_sorted_buckets_view(&self.state, key, &aggregations, self.ts_column_index).await;
         
         // Run aggregation
         let aggregation_results = produce_aggregates(&self.window_configs, &aggregations, &sorted_bucket_view, self.thread_pool.as_ref()).await;
@@ -372,14 +355,17 @@ impl WindowOperator {
         drop(aggregations);
         
         // Update window state positions and accumulator states
-        self.state.update_window_positions_and_accumulators(key, &new_end_timestamps, &accumulator_states).await;
+        self.state
+            .update_window_positions_and_accumulators(key, &new_processed_until, &accumulator_states)
+            .await;
 
         if self.execution_mode == ExecutionMode::Request {
             return RecordBatch::new_empty(self.output_schema.clone());
         }
 
-        // Get input values from batches
-        let input_values = get_input_values_from_batches(&entry_batch_ids, &entry_timestamps, &batches, &self.input_schema, self.ts_column_index);
+        // TODO: return input columns + aggregates once entry extraction is updated.
+        // For now, return only window columns (empty input) to keep compilation moving.
+        let input_values: Vec<Vec<ScalarValue>> = Vec::new();
 
         // Collect aggregated values
         let aggregated_values: Vec<Vec<ScalarValue>> = aggregation_results
@@ -410,15 +396,124 @@ impl WindowOperator {
 //     storage.load_batches(batches_to_load.into_iter().collect(), key).await
 // }
 
-pub async fn load_sorted_buckets_view(storage: &BatchStore, key: &Key, aggregations: &IndexMap<WindowId, Vec<Box<dyn Aggregation>>>) -> HashMap<Timestamp, SortedBucketView> {
-    let mut sorted_bucket_view = HashMap::new(); // preserve insertion order
+pub async fn load_sorted_buckets_view(
+    state: &WindowOperatorState,
+    key: &Key,
+    aggregations: &IndexMap<WindowId, Vec<Box<dyn Aggregation>>>,
+    ts_column_index: usize,
+) -> HashMap<Timestamp, SortedBucketView> {
+    use indexmap::IndexSet;
+
+    let key_hash = key.hash();
+    let Some(windows_state_guard) = state.get_windows_state(key).await else {
+        return HashMap::new();
+    };
+    let windows_state = windows_state_guard.value();
+    let batch_index = &windows_state.bucket_index;
+
+    // Collect bucket -> batch_ids mapping while holding the state guard.
+    let mut bucket_to_info: HashMap<Timestamp, (u64, Vec<BatchId>)> = HashMap::new(); // ts -> (version, batch_ids)
+    let mut batch_ids_to_load: IndexSet<BatchId> = IndexSet::new();
+
     for (_window_id, aggs) in aggregations.iter() {
         for agg in aggs {
-            let relevant_buckets = agg.get_relevant_buckets();
-            // TODO go to store for this
+            for range in agg.get_relevant_buckets() {
+                for bucket in batch_index.query_buckets_in_range(range.start, range.end) {
+                    let entry = bucket_to_info
+                        .entry(bucket.timestamp)
+                        .or_insert_with(|| (bucket.version, Vec::new()));
+                    // Keep latest version if bucket is encountered multiple times.
+                    entry.0 = bucket.version;
+                    for meta in &bucket.batches {
+                        entry.1.push(meta.batch_id);
+                        batch_ids_to_load.insert(meta.batch_id);
+                    }
+                }
+            }
         }
     }
-    panic!("Not implemented");
+
+    // We no longer need the state guard after we captured the mapping.
+    drop(windows_state_guard);
+
+    // First, satisfy what we can from cache.
+    let mut result: HashMap<Timestamp, SortedBucketView> = HashMap::new();
+    let mut buckets_to_build: Vec<(Timestamp, u64, Vec<BatchId>)> = Vec::new();
+    for (bucket_ts, (version, batch_ids)) in bucket_to_info {
+        if let Some(existing) = state
+            .get_bucket_view_cache()
+            .get(&(key_hash, bucket_ts, version))
+            .map(|e| e.value().clone())
+        {
+            result.insert(bucket_ts, (*existing).clone());
+        } else {
+            buckets_to_build.push((bucket_ts, version, batch_ids));
+        }
+    }
+
+    if buckets_to_build.is_empty() {
+        return result;
+    }
+
+    // Load batches needed for cache misses.
+    let loaded = state
+        .get_batch_store()
+        .load_batches(batch_ids_to_load.into_iter().collect(), key)
+        .await;
+
+    // Build per-bucket sorted batches.
+    for (bucket_ts, version, batch_ids) in buckets_to_build {
+        let mut bucket_batches: Vec<RecordBatch> = Vec::new();
+        for batch_id in batch_ids {
+            if let Some(b) = loaded.get(&batch_id) {
+                bucket_batches.push(b.clone());
+            }
+        }
+        if bucket_batches.is_empty() {
+            continue;
+        }
+
+        // Concatenate then sort within bucket.
+        let schema = bucket_batches[0].schema();
+        let concatenated = if bucket_batches.len() == 1 {
+            bucket_batches.remove(0)
+        } else {
+            arrow::compute::concat_batches(&schema, &bucket_batches)
+                .expect("Should be able to concat bucket batches")
+        };
+        let seq_column_index = concatenated
+            .schema()
+            .fields()
+            .iter()
+            .position(|f| f.name() == SEQ_NO_COLUMN_NAME)
+            .expect("Expected __seq_no column to exist");
+
+        let sorted = crate::runtime::operators::window::aggregates::arrow_utils::sort_batch_by_rowpos(
+            &concatenated,
+            ts_column_index,
+            seq_column_index,
+        );
+        let mut bucket_args: HashMap<usize, Arc<Vec<ArrayRef>>> = HashMap::new();
+        for (window_id, aggs) in aggregations.iter() {
+            let window_id_usize = *window_id as usize;
+            let window_expr = aggs
+                .first()
+                .expect("window should have at least one aggregation")
+                .window_expr();
+            let args = window_expr
+                .evaluate_args(&sorted)
+                .expect("Should be able to evaluate window args");
+            bucket_args.insert(window_id_usize, Arc::new(args));
+        }
+
+        let view = SortedBucketView::new(bucket_ts, sorted, ts_column_index, seq_column_index, bucket_args);
+        state
+            .get_bucket_view_cache()
+            .insert((key_hash, bucket_ts, version), Arc::new(view.clone()));
+        result.insert(bucket_ts, view);
+    }
+
+    result
 }
 
 pub async fn produce_aggregates(window_configs: &BTreeMap<WindowId, WindowConfig>, aggregations: &IndexMap<WindowId, Vec<Box<dyn Aggregation>>>, sorted_bucket_view: &HashMap<Timestamp, SortedBucketView>, thread_pool: Option<&ThreadPool>) -> IndexMap<WindowId, Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>> {
@@ -426,7 +521,7 @@ pub async fn produce_aggregates(window_configs: &BTreeMap<WindowId, WindowConfig
         .map(|(window_id, aggs)| {
             let window_id = *window_id;
             let window_config = window_configs.get(&window_id).expect("Window config should exist");
-            let sorted_bucket_view = sorted_bucket_view.get(&window_id).expect("Sorted bucket view should exist");
+            let sorted_bucket_view = sorted_bucket_view;
             let thread_pool = thread_pool;
             
             async move {
@@ -487,12 +582,26 @@ impl OperatorTrait for WindowOperator {
                     Message::Keyed(keyed_message) => {
                         let key = keyed_message.key();
 
-                        let insert_result = self.state.insert_batch(key, &self.window_configs, &self.tiling_configs, self.ts_column_index, self.lateness, keyed_message.base.record_batch.clone()).await;
+                        let watermark_ts = self.current_watermark.map(|v| v as i64);
+                        let enforce_monotonic = self.update_mode == UpdateMode::PerMessage;
+                        let _dropped_rows = self
+                            .state
+                            .insert_batch(
+                                key,
+                                &self.window_configs,
+                                &self.tiling_configs,
+                                self.ts_column_index,
+                                self.lateness,
+                                enforce_monotonic,
+                                watermark_ts,
+                                keyed_message.base.record_batch.clone(),
+                            )
+                            .await;
                         if self.update_mode == UpdateMode::PerWatermark {
                             self.buffered_keys.insert(key.clone());
                             return OperatorPollResult::Continue;
                         } else {
-                            let result = self.process_key(&key, Some(insert_result)).await;
+                            let result = self.process_key(&key, None).await;
                             if self.execution_mode == ExecutionMode::Request {
                                 return OperatorPollResult::Continue;
                             } else {
@@ -503,14 +612,16 @@ impl OperatorTrait for WindowOperator {
                     Message::Watermark(watermark) => {
                         let vertex_id = self.base.runtime_context.as_ref().unwrap().vertex_id().to_string();
                         println!("[{}] Window operator received watermark: {:?}", vertex_id, watermark);
+
+                        self.current_watermark = Some(watermark.watermark_value);
                         
                         if self.update_mode == UpdateMode::PerMessage {
                             // pass through
                             return OperatorPollResult::Ready(Message::Watermark(watermark));
                         }
-                        // TODO we should respect lateness and process only within proper range
+                        let process_until = Some(Cursor::new(watermark.watermark_value as i64, u64::MAX));
 
-                        let result = self.process_buffered().await;
+                        let result = self.process_buffered(process_until).await;
                         self.buffered_keys.clear();
 
                         // vertex_id will be set by stream task
@@ -1682,7 +1793,7 @@ mod tests {
         let state1_guard = window_operator.state.get_windows_state(&partition_key).await
             .expect("State should exist");
         let state1 = state1_guard.value();
-        assert_eq!(state1.batch_index.total_rows(), 3, "Should have 3 rows");
+        assert_eq!(state1.bucket_index.total_rows(), 3, "Should have 3 rows");
         
         // Verify accumulator states were updated for retractable aggregates
         let window_state_w1 = state1.window_states.get(&0).expect("Window state should exist");
@@ -1709,7 +1820,7 @@ mod tests {
         let state2_guard = window_operator.state.get_windows_state(&partition_key).await
             .expect("State should exist");
         let state2 = state2_guard.value();
-        assert_eq!(state2.batch_index.total_rows(), 4, "Should have 4 rows after late entry");
+        assert_eq!(state2.bucket_index.total_rows(), 4, "Should have 4 rows after late entry");
         
         // Verify accumulator state was updated (late entries update retractable accumulators)
         let window_state2 = state2.window_states.get(&0).expect("Window state should exist");
@@ -1732,11 +1843,15 @@ mod tests {
         let state3_guard = window_operator.state.get_windows_state(&partition_key).await
             .expect("State should exist");
         let state3 = state3_guard.value();
-        assert_eq!(state3.batch_index.total_rows(), 6, "Should have 6 rows");
+        assert_eq!(state3.bucket_index.total_rows(), 6, "Should have 6 rows");
         
         // Verify window positions advanced
         let window_state3_w3 = state3.window_states.get(&3).expect("Window state should exist");
-        assert_eq!(window_state3_w3.end_timestamp, 5000, "Window end should advance to latest entry");
+        assert_eq!(
+            window_state3_w3.processed_until.map(|p| p.ts).unwrap_or(i64::MIN),
+            5000,
+            "Window processed_until.ts should advance to latest entry"
+        );
         let window_state3_w4 = state3.window_states.get(&4).expect("Window state should exist");
         
         // Verify tiles were updated (for MIN and MAX)

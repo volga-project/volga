@@ -7,7 +7,7 @@ use dashmap::DashMap;
 
 use std::hash::{Hash, Hasher};
 
-use crate::common::Key;
+use crate::{common::Key, runtime::operators::window::TimeGranularity};
 
 pub type Timestamp = i64;
 pub type RowIdx = usize; // row index within a batch
@@ -15,12 +15,12 @@ pub type RowIdx = usize; // row index within a batch
 #[derive(Debug, Clone, Copy)]
 pub struct BatchId {
     partition_key_hash: u64,
-    time_bucket: u64, // bucket start timestamp for this batch
+    time_bucket: Timestamp, // bucket start timestamp for this batch
     uid: u64 // small unique id for this batch
 }
 
 impl BatchId {
-    pub fn new(partition_key_hash: u64, time_bucket: u64, uid: u64) -> Self {
+    pub fn new(partition_key_hash: u64, time_bucket: Timestamp, uid: u64) -> Self {
         Self { partition_key_hash, time_bucket, uid }
     }
 
@@ -36,7 +36,7 @@ impl BatchId {
         Self {partition_key_hash: rand::random(), time_bucket: rand::random(), uid: rand::random()}
     }
     
-    pub fn time_bucket(&self) -> u64 {
+    pub fn time_bucket(&self) -> Timestamp {
         self.time_bucket
     }
 }
@@ -57,25 +57,6 @@ impl Hash for BatchId {
     }
 }
 
-// TODO we also have TimeGranularity in runtime/operators/window/tiles.rs, we should unify them
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TimeGranularity {
-    Minutes(u32),
-    Hours(u32),
-    Days(u32),
-}
-
-impl TimeGranularity {
-    pub fn to_millis(&self) -> i64 {
-        match self {
-            TimeGranularity::Minutes(m) => *m as i64 * 60 * 1000,
-            TimeGranularity::Hours(h) => *h as i64 * 60 * 60 * 1000,
-            TimeGranularity::Days(d) => *d as i64 * 24 * 60 * 60 * 1000,
-        }
-    }
-}
-
-
 #[derive(Debug, Clone)]
 pub struct BatchStoreStats {
     pub total_batches: usize,
@@ -95,19 +76,13 @@ pub struct BatchStore {
     batch_store: Arc<DashMap<BatchId, RecordBatch>>, // TODO use foyer
     
     // Time partitioning configuration
-    time_granularity: TimeGranularity,
+    bucket_granularity: TimeGranularity,
     max_batch_size: usize,
-}
-
-impl Default for BatchStore {
-    fn default() -> Self {
-        Self::new(4096, TimeGranularity::Minutes(5), 1024)
-    }
 }
 
 impl BatchStore {
     
-    pub fn new(lock_pool_size: usize, time_granularity: TimeGranularity, max_batch_size: usize) -> Self {
+    pub fn new(lock_pool_size: usize, bucket_granularity: TimeGranularity, max_batch_size: usize) -> Self {
         let lock_pool = (0..lock_pool_size)
             .map(|_| Arc::new(RwLock::new(())))
             .collect();
@@ -116,9 +91,13 @@ impl BatchStore {
             global_lock: Arc::new(RwLock::new(())),
             lock_pool,
             batch_store: Arc::new(DashMap::new()),
-            time_granularity,
+            bucket_granularity,
             max_batch_size,
         }
+    }
+
+    pub fn bucket_granularity(&self) -> TimeGranularity {
+        self.bucket_granularity
     }
 
     fn get_key_lock(&self, key: &Key) -> Arc<RwLock<()>> {
@@ -130,7 +109,7 @@ impl BatchStore {
 
     pub async fn append_records(&self, batch: RecordBatch, partition_key: &Key, ts_column_index: usize) -> Vec<(BatchId, RecordBatch)> {
         // Partition batch by time granularity and get batch ids and keys
-        let time_partitioned_batches = Self::time_partition_batch(&batch, &partition_key, ts_column_index, self.time_granularity, self.max_batch_size);
+        let time_partitioned_batches = Self::time_partition_batch(&batch, &partition_key, ts_column_index, self.bucket_granularity, self.max_batch_size);
         
         self.store_batches(partition_key, &time_partitioned_batches).await;
         
@@ -237,7 +216,7 @@ impl BatchStore {
         
         let mut result = Vec::new();
         for range in partition_ranges.ranges() {
-            let time_bucket = sorted_buckets.value(range.start) as u64;
+            let time_bucket = sorted_buckets.value(range.start);
             
             // Split the range into chunks of max_batch_size
             let mut start = range.start;
@@ -337,12 +316,3 @@ impl BatchStore {
         }
     }
 }
-
-
-// pub fn extract_timestamp(array: &dyn Array, index: usize) -> i64 {
-//     let scalar_value = ScalarValue::try_from_array(array, index)
-//         .expect("Should be able to extract scalar timestamp value from array");
-    
-//     i64::try_from(scalar_value.clone())
-//         .expect("Should be able to convert scalar timestamp value to i64")
-// }

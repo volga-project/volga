@@ -22,6 +22,21 @@ pub mod plain;
 pub mod retractable;
 pub mod utils;
 
+use self::utils::SortedBucketView;
+
+/// A logical bucket interval in bucket timestamp space (inclusive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketRange {
+    pub start: Timestamp,
+    pub end: Timestamp,
+}
+
+impl BucketRange {
+    pub fn new(start: Timestamp, end: Timestamp) -> Self {
+        Self { start, end }
+    }
+}
+
 #[async_trait]
 pub trait Aggregation: Send + Sync {
     async fn produce_aggregates(

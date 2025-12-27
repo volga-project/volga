@@ -9,7 +9,6 @@ use crate::runtime::operators::window::{create_window_aggregator, WindowAggregat
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::storage::batch_store::Timestamp;
 
-// TODO we also have TimeGranularity in batch_store.rs, we should unify them
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum TimeGranularity {
     Seconds(u32),
@@ -48,7 +47,9 @@ impl TimeGranularity {
     }
 
     pub fn prev_start(&self, timestamp: Timestamp) -> Timestamp {
-        panic!("Not impl")
+        let step = self.to_millis();
+        // previous bucket start relative to `timestamp` bucket start
+        self.start(timestamp) - step
     }
 }
 
