@@ -1,4 +1,4 @@
-use crate::runtime::operators::window::index::RowIndex;
+use crate::runtime::operators::window::index::SortedRangeIndex;
 use crate::runtime::operators::window::index::RowPtr;
 use crate::runtime::operators::window::tiles::{Tile, Tiles};
 use crate::runtime::operators::window::Cursor;
@@ -18,7 +18,7 @@ pub struct TiledSplit {
 }
 
 /// Compute window start for a given window end position (no bucket-range clamping).
-pub fn window_start_unclamped(idx: &RowIndex, end: RowPtr, spec: WindowSpec) -> RowPtr {
+pub fn window_start_unclamped(idx: &SortedRangeIndex, end: RowPtr, spec: WindowSpec) -> RowPtr {
     match spec {
         WindowSpec::Rows { size } => idx.pos_n_rows(&end, size.saturating_sub(1), true),
         WindowSpec::Range { length_ms } => {
@@ -41,7 +41,12 @@ pub fn clamp_start_to_bucket(start: RowPtr, min_bucket_ts: Timestamp) -> RowPtr 
 /// Compute tiled split for a window [start,end] (both inclusive).
 ///
 /// Returns None when tiling doesn't help (no full tiles strictly inside the window).
-pub fn tiled_split(idx: &RowIndex, start: RowPtr, end: RowPtr, tiles: &Tiles) -> Option<TiledSplit> {
+pub fn tiled_split(
+    idx: &SortedRangeIndex,
+    start: RowPtr,
+    end: RowPtr,
+    tiles: &Tiles,
+) -> Option<TiledSplit> {
     let start_ts = idx.get_timestamp(&start);
     let end_ts = idx.get_timestamp(&end);
 
@@ -79,7 +84,7 @@ pub fn tiled_split(idx: &RowIndex, start: RowPtr, end: RowPtr, tiles: &Tiles) ->
 }
 
 /// Find the first update position for retractable aggregations.
-pub fn first_update_pos(idx: &RowIndex, prev_processed_until: Option<Cursor>) -> Option<RowPtr> {
+pub fn first_update_pos(idx: &SortedRangeIndex, prev_processed_until: Option<Cursor>) -> Option<RowPtr> {
     match prev_processed_until {
         None => Some(idx.first_pos()),
         Some(p) => {
@@ -95,8 +100,8 @@ pub fn first_update_pos(idx: &RowIndex, prev_processed_until: Option<Cursor>) ->
 
 /// ROWS retract start position logic extracted from `retractable.rs`.
 pub fn initial_retract_pos_rows(
-    retracts: &RowIndex,
-    updates: &RowIndex,
+    retracts: &SortedRangeIndex,
+    updates: &SortedRangeIndex,
     update_pos: RowPtr,
     window_size: usize,
     row_distance: usize,
@@ -110,7 +115,7 @@ pub fn initial_retract_pos_rows(
 
 /// RANGE retract start position logic extracted from `retractable.rs`.
 pub fn initial_retract_pos_range(
-    retracts: &RowIndex,
+    retracts: &SortedRangeIndex,
     prev_processed_until: Cursor,
     window_length_ms: i64,
 ) -> RowPtr {
@@ -129,12 +134,13 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
 
-    use crate::runtime::operators::window::index::SortedBucketView;
     use crate::runtime::operators::window::tiles::TimeGranularity;
+    use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeBucket, SortedRangeIndex, SortedRangeView};
+    use crate::runtime::operators::window::Cursor;
 
     use super::*;
 
-    fn make_view(bucket_ts: i64, rows: &[(i64, u64, i64)], window_id: usize) -> SortedBucketView {
+    fn make_bucket(bucket_ts: i64, rows: &[(i64, u64, i64)]) -> SortedRangeBucket {
         let ts: TimestampMillisecondArray =
             rows.iter().map(|(ts, _, _)| *ts).collect::<Vec<_>>().into();
         let seq: UInt64Array = rows.iter().map(|(_, seq, _)| *seq).collect::<Vec<_>>().into();
@@ -156,18 +162,28 @@ mod tests {
         )
         .expect("record batch");
 
-        let mut args: HashMap<usize, Arc<Vec<ArrayRef>>> = HashMap::new();
-        args.insert(window_id, Arc::new(vec![Arc::new(val) as ArrayRef]));
-
-        SortedBucketView::new(bucket_ts, batch, 0, 1, args)
+        let args = Arc::new(vec![Arc::new(val) as ArrayRef]);
+        SortedRangeBucket::new(bucket_ts, batch, 0, 1, args)
     }
 
     #[test]
     fn test_window_start_unclamped_rows() {
-        let mut views = HashMap::new();
-        views.insert(1000, make_view(1000, &[(1000, 1, 10), (1500, 2, 11)], 0));
-        views.insert(2000, make_view(2000, &[(2000, 1, 20), (2500, 2, 21)], 0));
-        let idx = RowIndex::new(crate::runtime::operators::window::aggregates::BucketRange::new(1000, 2000), &views, 0, TimeGranularity::Seconds(1));
+        let mut buckets = HashMap::new();
+        buckets.insert(1000, make_bucket(1000, &[(1000, 1, 10), (1500, 2, 11)]));
+        buckets.insert(2000, make_bucket(2000, &[(2000, 1, 20), (2500, 2, 21)]));
+
+        let req = DataRequest {
+            bucket_range: crate::runtime::operators::window::aggregates::BucketRange::new(1000, 2000),
+            bounds: DataBounds::All,
+        };
+        let view = SortedRangeView::new(
+            req,
+            TimeGranularity::Seconds(1),
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            buckets,
+        );
+        let idx = SortedRangeIndex::new(&view);
 
         let end = RowPtr::new(2000, 0);
         let start = window_start_unclamped(&idx, end, WindowSpec::Rows { size: 2 });
@@ -186,4 +202,5 @@ mod tests {
     // Note: `tiled_split` is tested indirectly in `Tiles` module tests; creating a `Tiles`
     // instance requires a DataFusion `WindowExpr`, which is intentionally kept out of these unit tests.
 }
+
 

@@ -9,7 +9,7 @@ use crate::{
         operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
-            window::{TileConfig, TimeGranularity, window_operator::{ExecutionMode as WindowExecutionMode, UpdateMode}},
+            window::{TileConfig, TimeGranularity, window_operator::ExecutionMode as WindowExecutionMode},
         },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -53,7 +53,6 @@ pub struct WindowBenchmarkConfig {
     pub aggregation_type: AggregationType,
     
     // Window operator config params
-    pub update_mode: UpdateMode,
     pub execution_mode: WindowExecutionMode,
     pub parallelize: bool,
     pub tiling_configs: Option<Vec<Option<TileConfig>>>,
@@ -76,7 +75,6 @@ impl Default for WindowBenchmarkConfig {
             window_type: WindowType::Range { milliseconds: 1000 },
             num_windows: 1,
             aggregation_type: AggregationType::Retractable,
-            update_mode: UpdateMode::PerMessage,
             execution_mode: WindowExecutionMode::Regular,
             parallelize: false,
             tiling_configs: None,
@@ -180,7 +178,6 @@ fn update_window_configs_in_graph(
         if let Some(node) = graph.get_node_by_index_mut(node_idx) {
             if let OperatorConfig::WindowConfig(ref mut window_config) = node.operator_config {
                 // Update window config parameters
-                window_config.update_mode = config.update_mode.clone();
                 window_config.execution_mode = config.execution_mode.clone();
                 window_config.parallelize = config.parallelize;
                 window_config.lateness = config.lateness;
@@ -454,7 +451,6 @@ pub fn print_benchmark_results(config: &WindowBenchmarkConfig, metrics: &Benchma
     println!("  Window Type: {:?}", config.window_type);
     println!("  Number of Windows: {}", config.num_windows);
     println!("  Aggregation Type: {:?}", config.aggregation_type);
-    println!("  Update Mode: {:?}", config.update_mode);
     println!("  Execution Mode: {:?}", config.execution_mode);
     println!("  Parallelize: {}", config.parallelize);
     println!("  Tiling Configs: {:?}", config.tiling_configs);
@@ -534,7 +530,6 @@ async fn test_window_benchmark_basic() -> Result<()> {
         window_type: WindowType::Rows { preceding: 10000 },
         num_windows: num_windows,
         aggregation_type: AggregationType::Plain,
-        update_mode: UpdateMode::PerMessage,
         execution_mode: WindowExecutionMode::Request,
         parallelize: false,
         tiling_configs: Some(tiling_configs),

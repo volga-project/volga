@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
+use arrow::array::ArrayRef;
 use datafusion::logical_expr::Accumulator;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;
@@ -12,17 +12,13 @@ use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::time_entries::TimeIdx;
-use crate::runtime::operators::window::Tiles;
-use crate::storage::batch_store::{BatchId, Timestamp};
-use indexmap::IndexSet;
+use crate::storage::batch_store::Timestamp;
+use crate::runtime::operators::window::index::{DataRequest, SortedRangeView};
 
 pub mod arrow_utils;
 pub mod evaluator;
 pub mod plain;
 pub mod retractable;
-pub mod utils;
-
-use self::utils::SortedBucketView;
 
 /// A logical bucket interval in bucket timestamp space (inclusive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,22 +33,34 @@ impl BucketRange {
     }
 }
 
+/// A single "virtual" point for request-mode window evaluation.
+#[derive(Debug, Clone)]
+pub struct VirtualPoint {
+    pub ts: Timestamp,
+    /// Optional pre-evaluated args for this single row (length=1 arrays).
+    pub args: Option<Arc<Vec<ArrayRef>>>,
+}
+
 #[async_trait]
 pub trait Aggregation: Send + Sync {
-    async fn produce_aggregates(
+    fn window_expr(&self) -> &Arc<dyn WindowExpr>;
+    fn aggregator_type(&self) -> AggregatorType;
+
+    /// Row-level data requests for request-mode (range views).
+    fn get_data_requests(&self, exclude_current_row: Option<bool>) -> Vec<DataRequest>;
+
+    /// Produce aggregates from preloaded `SortedRangeView`s corresponding to `get_data_requests(...)`.
+    async fn produce_aggregates_from_ranges(
         &self,
-        sorted_bucket_view: &HashMap<Timestamp, SortedBucketView>,
+        sorted_ranges: &[SortedRangeView],
         thread_pool: Option<&ThreadPool>,
         exclude_current_row: Option<bool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>);
-    
-    fn window_expr(&self) -> &Arc<dyn WindowExpr>;
-    fn tiles(&self) -> Option<&Tiles>;
-    fn aggregator_type(&self) -> AggregatorType;
-    
-    // fn get_batches_to_load(&self) -> IndexSet<BatchId>;
-
-    fn get_relevant_buckets(&self) -> Vec<BucketRange>;
+    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+        let _ = sorted_ranges;
+        let _ = thread_pool;
+        let _ = exclude_current_row;
+        panic!("Aggregation must implement produce_aggregates_from_ranges")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -10,9 +10,12 @@ use tokio::sync::RwLock;
 use crate::common::Key;
 use crate::runtime::operators::window::window_operator::WindowConfig;
 use crate::runtime::operators::window::{BucketIndex, Cursor, SEQ_NO_COLUMN_NAME, TileConfig, Tiles, TimeGranularity};
-use crate::runtime::operators::window::index::SortedBucketView;
+use crate::runtime::operators::window::index::SortedBucketBatch;
 use crate::runtime::state::OperatorState;
-use crate::storage::batch_store::{BatchId, BatchStore, Timestamp};
+use crate::storage::batch_store::{
+    BatchStore,
+    Timestamp,
+};
 
 pub type WindowId = usize;
 
@@ -49,7 +52,7 @@ pub struct WindowOperatorState {
 
     batch_store: Arc<BatchStore>,
 
-    bucket_view_cache: DashMap<(u64, Timestamp, u64), Arc<SortedBucketView>>,
+    sorted_bucket_cache: DashMap<(u64, Timestamp, u64), Arc<SortedBucketBatch>>,
 
     bucket_granularity: TimeGranularity,
 }
@@ -60,7 +63,7 @@ impl WindowOperatorState {
         Self {
             window_states: DashMap::new(),
             batch_store,
-            bucket_view_cache: DashMap::new(),
+            sorted_bucket_cache: DashMap::new(),
             bucket_granularity,
         }
     }
@@ -81,7 +84,6 @@ impl WindowOperatorState {
         tiling_configs: &Vec<Option<TileConfig>>,
         ts_column_index: usize,
         lateness: Option<i64>,
-        enforce_monotonic: bool,
         watermark_ts: Option<Timestamp>,
         batch: RecordBatch,
     ) -> usize {
@@ -112,21 +114,10 @@ impl WindowOperatorState {
             .next_seq_no
             .saturating_add(record_batch_with_seq.num_rows() as u64);
 
-        // Drop rows according to simplified policy:
-        // - Per-message mode: enforce monotonic Cursor order, drop anything < max_pos_seen.
-        // - Watermark mode: if watermark is known, drop anything older than (watermark - lateness).
-        // - Otherwise: keep all rows.
-        let (record_batch, dropped_rows) = if enforce_monotonic {
-            let cutoff = windows_state.bucket_index.max_pos_seen();
-            let seq_column_index =
-                get_seq_no_column_index(&record_batch_with_seq).expect("__seq_no must exist");
-            drop_rows_before_cursor(
-                &record_batch_with_seq,
-                ts_column_index,
-                seq_column_index,
-                cutoff,
-            )
-        } else if let (Some(lateness_ms), Some(wm)) = (lateness, watermark_ts) {
+        // Drop rows according to watermark-based policy:
+        // - If watermark is known, drop anything older than (watermark - lateness).
+        // - Otherwise: keep all rows (can't classify lateness yet).
+        let (record_batch, dropped_rows) = if let (Some(lateness_ms), Some(wm)) = (lateness, watermark_ts) {
             drop_too_late_entries(&record_batch_with_seq, ts_column_index, lateness_ms, wm)
         } else {
             (record_batch_with_seq.clone(), 0)
@@ -252,8 +243,8 @@ impl WindowOperatorState {
         &self.batch_store
     }
 
-    pub fn get_bucket_view_cache(&self) -> &DashMap<(u64, Timestamp, u64), Arc<SortedBucketView>> {
-        &self.bucket_view_cache
+    pub fn get_sorted_bucket_cache(&self) -> &DashMap<(u64, Timestamp, u64), Arc<SortedBucketBatch>> {
+        &self.sorted_bucket_cache
     }
 }
 
@@ -389,39 +380,5 @@ pub fn drop_too_late_entries(
     (kept, dropped)
 }
 
-fn drop_rows_before_cursor(
-    record_batch: &RecordBatch,
-    ts_column_index: usize,
-    seq_column_index: usize,
-    cutoff: Cursor,
-) -> (RecordBatch, usize) {
-    use arrow::array::{BooleanArray, TimestampMillisecondArray, UInt64Array};
-    use arrow::compute::filter_record_batch;
-
-    let ts = record_batch
-        .column(ts_column_index)
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .expect("Timestamp column should be TimestampMillisecondArray");
-    let seq = record_batch
-        .column(seq_column_index)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("__seq_no column should be UInt64Array");
-
-    let mut keep = Vec::with_capacity(record_batch.num_rows());
-    for i in 0..record_batch.num_rows() {
-        let p = Cursor::new(ts.value(i), seq.value(i));
-        keep.push(p >= cutoff);
-    }
-    let keep_mask = BooleanArray::from(keep);
-
-    if keep_mask.true_count() == record_batch.num_rows() {
-        return (record_batch.clone(), 0);
-    }
-
-    let kept = filter_record_batch(record_batch, &keep_mask)
-        .expect("Should be able to filter record batch");
-    let dropped = record_batch.num_rows() - kept.num_rows();
-    (kept, dropped)
-}
+// Previously we supported a "monotonic cursor" ingest mode (drop out-of-order rows).
+// With watermark-only semantics, we don't need it.

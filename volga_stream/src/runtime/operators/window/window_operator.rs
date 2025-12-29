@@ -7,7 +7,7 @@ use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
 use futures::{future, StreamExt};
-use indexmap::{IndexMap, IndexSet};
+use indexmap::IndexMap;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 
 use datafusion::physical_plan::expressions::Column;
@@ -20,11 +20,10 @@ use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorC
 use crate::runtime::operators::window::aggregates::{get_aggregate_type, Aggregation};
 use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
 use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
-use crate::runtime::operators::window::index::SortedBucketView;
+use crate::runtime::operators::window::data_loader::load_sorted_ranges_view;
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
 use crate::runtime::operators::window::{AggregatorType, TileConfig, TimeGranularity};
 use crate::runtime::operators::window::Cursor;
-use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::batch_store::{BatchId, BatchStore, Timestamp};
 
@@ -32,12 +31,6 @@ use crate::storage::batch_store::{BatchId, BatchStore, Timestamp};
 pub enum ExecutionMode {
     Regular, // operator produces messages
     Request, // operator only updates state, produces no messages
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UpdateMode {
-    PerMessage, // all events are processed immediately, late events are handled with best effort
-    PerWatermark, // events are buffered until watermark is reached, late events are dropped
 }
 
 #[derive(Debug, Clone)]
@@ -52,7 +45,6 @@ pub struct WindowConfig {
 #[derive(Debug, Clone)]
 pub struct WindowOperatorConfig {
     pub window_exec: Arc<BoundedWindowAggExec>,
-    pub update_mode: UpdateMode,
     pub execution_mode: ExecutionMode,
     pub parallelize: bool,
     pub tiling_configs: Vec<Option<TileConfig>>,
@@ -63,7 +55,6 @@ impl WindowOperatorConfig {
     pub fn new(window_exec: Arc<BoundedWindowAggExec>) -> Self {    
         Self {
             window_exec,
-            update_mode: UpdateMode::PerMessage,
             execution_mode: ExecutionMode::Regular,
             parallelize: false,
             tiling_configs: Vec::new(),
@@ -78,7 +69,6 @@ pub struct WindowOperator {
     state: Arc<WindowOperatorState>,
     ts_column_index: usize,
     buffered_keys: HashSet<Key>,
-    update_mode: UpdateMode,
     execution_mode: ExecutionMode,
     parallelize: bool,
     thread_pool: Option<ThreadPool>,
@@ -97,7 +87,6 @@ impl fmt::Debug for WindowOperator {
             .field("state", &self.state)
             .field("ts_column_index", &self.ts_column_index)
             .field("buffered_keys", &self.buffered_keys)
-            .field("update_mode", &self.update_mode)
             .field("execution_mode", &self.execution_mode)
             .field("parallelize", &self.parallelize)
             .field("thread_pool", &self.thread_pool)
@@ -166,7 +155,6 @@ impl WindowOperator {
             state: Arc::new(WindowOperatorState::new(Arc::new(BatchStore::new(4096, TimeGranularity::Seconds(1), 1024)))),
             ts_column_index,
             buffered_keys: HashSet::new(),
-            update_mode: window_operator_config.update_mode,
             execution_mode: window_operator_config.execution_mode,
             parallelize: window_operator_config.parallelize,
             thread_pool,
@@ -259,7 +247,7 @@ impl WindowOperator {
                         // are dropped on ingest (see WindowOperatorState::insert_batch).
                         if let Some(ref slide) = slide_info {
                             if slide.update_range.is_some() {
-                                aggs.push(Box::new(RetractableAggregation::from_slide_info(
+                                aggs.push(Box::new(RetractableAggregation::from_range(
                                     *window_id,
                                     slide,
                                     prev_processed_until,
@@ -274,16 +262,17 @@ impl WindowOperator {
                     AggregatorType::PlainAccumulator => {
                         if let Some(ref slide) = slide_info {
                             if slide.update_range.is_some() {
-                                let entry_ranges = vec![slide.update_range.expect("checked above")];
-                                aggs.push(Box::new(PlainAggregation::new_bounded(
-                                    entry_ranges,
+                                aggs.push(Box::new(PlainAggregation::for_range(
+                                    slide.update_range.expect("checked above"),
                                     batch_index,
                                     window_config.window_expr.clone(),
                                     tiles_owned.clone(),
                                     self.ts_column_index,
                                     *window_id,
-                                    prev_processed_until,
-                                    slide.new_processed_until,
+                                    Some(crate::runtime::operators::window::aggregates::plain::CursorBounds {
+                                        prev: prev_processed_until,
+                                        new: slide.new_processed_until,
+                                    }),
                                 )));
                             }
                         }
@@ -298,7 +287,7 @@ impl WindowOperator {
                     AggregatorType::RetractableAccumulator => {
                         if let Some(ref slide) = slide_info {
                             if slide.update_range.is_some() || slide.retract_range.is_some() {
-                                aggs.push(Box::new(RetractableAggregation::from_slide_info(
+                                aggs.push(Box::new(RetractableAggregation::from_range(
                                     *window_id,
                                     slide,
                                     prev_processed_until,
@@ -337,11 +326,37 @@ impl WindowOperator {
         
         // TODO: in the bucket-view design we will derive input values from bucket views.
         
-        // Load bucket views
-        let sorted_bucket_view = load_sorted_buckets_view(&self.state, key, &aggregations, self.ts_column_index).await;
-        
-        // Run aggregation
-        let aggregation_results = produce_aggregates(&self.window_configs, &aggregations, &sorted_bucket_view, self.thread_pool.as_ref()).await;
+        let mut aggregation_results: IndexMap<
+            WindowId,
+            Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>,
+        > = IndexMap::new();
+        for (window_id, aggs) in &aggregations {
+            let window_config = self
+                .window_configs
+                .get(window_id)
+                .expect("Window config should exist");
+            let mut results = Vec::new();
+            for agg in aggs {
+                let requests = agg.get_data_requests(window_config.exclude_current_row);
+                let views = load_sorted_ranges_view(
+                    &self.state,
+                    key,
+                    self.ts_column_index,
+                    &requests,
+                    agg.window_expr(),
+                )
+                .await;
+                let result = agg
+                    .produce_aggregates_from_ranges(
+                        &views,
+                        self.thread_pool.as_ref(),
+                        window_config.exclude_current_row,
+                    )
+                    .await;
+                results.push(result);
+            }
+            aggregation_results.insert(*window_id, results);
+        }
         
         // Collect accumulator states
         let accumulator_states: HashMap<WindowId, Option<AccumulatorState>> = aggregation_results
@@ -396,149 +411,6 @@ impl WindowOperator {
 //     storage.load_batches(batches_to_load.into_iter().collect(), key).await
 // }
 
-pub async fn load_sorted_buckets_view(
-    state: &WindowOperatorState,
-    key: &Key,
-    aggregations: &IndexMap<WindowId, Vec<Box<dyn Aggregation>>>,
-    ts_column_index: usize,
-) -> HashMap<Timestamp, SortedBucketView> {
-    use indexmap::IndexSet;
-
-    let key_hash = key.hash();
-    let Some(windows_state_guard) = state.get_windows_state(key).await else {
-        return HashMap::new();
-    };
-    let windows_state = windows_state_guard.value();
-    let batch_index = &windows_state.bucket_index;
-
-    // Collect bucket -> batch_ids mapping while holding the state guard.
-    let mut bucket_to_info: HashMap<Timestamp, (u64, Vec<BatchId>)> = HashMap::new(); // ts -> (version, batch_ids)
-    let mut batch_ids_to_load: IndexSet<BatchId> = IndexSet::new();
-
-    for (_window_id, aggs) in aggregations.iter() {
-        for agg in aggs {
-            for range in agg.get_relevant_buckets() {
-                for bucket in batch_index.query_buckets_in_range(range.start, range.end) {
-                    let entry = bucket_to_info
-                        .entry(bucket.timestamp)
-                        .or_insert_with(|| (bucket.version, Vec::new()));
-                    // Keep latest version if bucket is encountered multiple times.
-                    entry.0 = bucket.version;
-                    for meta in &bucket.batches {
-                        entry.1.push(meta.batch_id);
-                        batch_ids_to_load.insert(meta.batch_id);
-                    }
-                }
-            }
-        }
-    }
-
-    // We no longer need the state guard after we captured the mapping.
-    drop(windows_state_guard);
-
-    // First, satisfy what we can from cache.
-    let mut result: HashMap<Timestamp, SortedBucketView> = HashMap::new();
-    let mut buckets_to_build: Vec<(Timestamp, u64, Vec<BatchId>)> = Vec::new();
-    for (bucket_ts, (version, batch_ids)) in bucket_to_info {
-        if let Some(existing) = state
-            .get_bucket_view_cache()
-            .get(&(key_hash, bucket_ts, version))
-            .map(|e| e.value().clone())
-        {
-            result.insert(bucket_ts, (*existing).clone());
-        } else {
-            buckets_to_build.push((bucket_ts, version, batch_ids));
-        }
-    }
-
-    if buckets_to_build.is_empty() {
-        return result;
-    }
-
-    // Load batches needed for cache misses.
-    let loaded = state
-        .get_batch_store()
-        .load_batches(batch_ids_to_load.into_iter().collect(), key)
-        .await;
-
-    // Build per-bucket sorted batches.
-    for (bucket_ts, version, batch_ids) in buckets_to_build {
-        let mut bucket_batches: Vec<RecordBatch> = Vec::new();
-        for batch_id in batch_ids {
-            if let Some(b) = loaded.get(&batch_id) {
-                bucket_batches.push(b.clone());
-            }
-        }
-        if bucket_batches.is_empty() {
-            continue;
-        }
-
-        // Concatenate then sort within bucket.
-        let schema = bucket_batches[0].schema();
-        let concatenated = if bucket_batches.len() == 1 {
-            bucket_batches.remove(0)
-        } else {
-            arrow::compute::concat_batches(&schema, &bucket_batches)
-                .expect("Should be able to concat bucket batches")
-        };
-        let seq_column_index = concatenated
-            .schema()
-            .fields()
-            .iter()
-            .position(|f| f.name() == SEQ_NO_COLUMN_NAME)
-            .expect("Expected __seq_no column to exist");
-
-        let sorted = crate::runtime::operators::window::aggregates::arrow_utils::sort_batch_by_rowpos(
-            &concatenated,
-            ts_column_index,
-            seq_column_index,
-        );
-        let mut bucket_args: HashMap<usize, Arc<Vec<ArrayRef>>> = HashMap::new();
-        for (window_id, aggs) in aggregations.iter() {
-            let window_id_usize = *window_id as usize;
-            let window_expr = aggs
-                .first()
-                .expect("window should have at least one aggregation")
-                .window_expr();
-            let args = window_expr
-                .evaluate_args(&sorted)
-                .expect("Should be able to evaluate window args");
-            bucket_args.insert(window_id_usize, Arc::new(args));
-        }
-
-        let view = SortedBucketView::new(bucket_ts, sorted, ts_column_index, seq_column_index, bucket_args);
-        state
-            .get_bucket_view_cache()
-            .insert((key_hash, bucket_ts, version), Arc::new(view.clone()));
-        result.insert(bucket_ts, view);
-    }
-
-    result
-}
-
-pub async fn produce_aggregates(window_configs: &BTreeMap<WindowId, WindowConfig>, aggregations: &IndexMap<WindowId, Vec<Box<dyn Aggregation>>>, sorted_bucket_view: &HashMap<Timestamp, SortedBucketView>, thread_pool: Option<&ThreadPool>) -> IndexMap<WindowId, Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>> {
-    let futures: Vec<_> = aggregations.iter()
-        .map(|(window_id, aggs)| {
-            let window_id = *window_id;
-            let window_config = window_configs.get(&window_id).expect("Window config should exist");
-            let sorted_bucket_view = sorted_bucket_view;
-            let thread_pool = thread_pool;
-            
-            async move {
-                let mut results = Vec::new();
-                for agg in aggs {
-                    let result = agg.produce_aggregates(sorted_bucket_view, thread_pool, window_config.exclude_current_row).await;
-                    results.push(result);
-                }
-                (window_id, results)
-            }
-        })
-        .collect();
-        
-    let results = future::join_all(futures).await;
-    results.into_iter().collect()
-}
-
 #[async_trait]
 impl OperatorTrait for WindowOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
@@ -576,14 +448,13 @@ impl OperatorTrait for WindowOperator {
         match input_stream.next().await {
             Some(message) => {
                 
-                let ingest_ts = message.ingest_timestamp();
-                let extras = message.get_extras();
+                let _ingest_ts = message.ingest_timestamp();
+                let _extras = message.get_extras();
                 match message {
                     Message::Keyed(keyed_message) => {
                         let key = keyed_message.key();
 
                         let watermark_ts = self.current_watermark.map(|v| v as i64);
-                        let enforce_monotonic = self.update_mode == UpdateMode::PerMessage;
                         let _dropped_rows = self
                             .state
                             .insert_batch(
@@ -592,33 +463,19 @@ impl OperatorTrait for WindowOperator {
                                 &self.tiling_configs,
                                 self.ts_column_index,
                                 self.lateness,
-                                enforce_monotonic,
                                 watermark_ts,
                                 keyed_message.base.record_batch.clone(),
                             )
                             .await;
-                        if self.update_mode == UpdateMode::PerWatermark {
-                            self.buffered_keys.insert(key.clone());
-                            return OperatorPollResult::Continue;
-                        } else {
-                            let result = self.process_key(&key, None).await;
-                            if self.execution_mode == ExecutionMode::Request {
-                                return OperatorPollResult::Continue;
-                            } else {
-                                return OperatorPollResult::Ready(Message::new(None, result, ingest_ts, extras));
-                            }
-                        }
+                        // Always buffer and wait for watermark to emit.
+                        self.buffered_keys.insert(key.clone());
+                        return OperatorPollResult::Continue;
                     }
                     Message::Watermark(watermark) => {
                         let vertex_id = self.base.runtime_context.as_ref().unwrap().vertex_id().to_string();
                         println!("[{}] Window operator received watermark: {:?}", vertex_id, watermark);
 
                         self.current_watermark = Some(watermark.watermark_value);
-                        
-                        if self.update_mode == UpdateMode::PerMessage {
-                            // pass through
-                            return OperatorPollResult::Ready(Message::Watermark(watermark));
-                        }
                         let process_until = Some(Cursor::new(watermark.watermark_value as i64, u64::MAX));
 
                         let result = self.process_buffered(process_until).await;
@@ -895,7 +752,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
 
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -997,7 +853,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
 
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -1054,7 +909,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerWatermark;
         window_config.parallelize = true;
         
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -1117,7 +971,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
         
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -1201,7 +1054,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
         
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -1281,7 +1133,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
         
         let operator_config = OperatorConfig::WindowConfig(window_config);
@@ -1394,7 +1245,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
         
         // Set up tiling configs for all three aggregates
@@ -1591,7 +1441,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
         window_config.lateness = Some(3000); // 3 seconds lateness
         
@@ -1752,7 +1601,6 @@ mod tests {
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec);
         window_config.execution_mode = ExecutionMode::Request;
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.parallelize = true;
         
         // Set up tiling configs for MIN and MAX (plain aggregates)

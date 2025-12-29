@@ -56,7 +56,7 @@ impl Bucket {
 
 /// Result of sliding the window - returns buckets for aggregation layer.
 #[derive(Debug, Clone)]
-pub struct SlideInfo {
+pub struct SlideRangeInfo {
     pub update_range: Option<BucketRange>,
     pub retract_range: Option<BucketRange>,
     pub new_processed_until: Cursor,
@@ -116,6 +116,49 @@ impl BucketIndex {
     /// Query buckets with bucket_timestamp in range [start, end]
     pub fn query_buckets_in_range(&self, start: Timestamp, end: Timestamp) -> Vec<&Bucket> {
         self.buckets.range(start..=end).map(|(_, b)| b).collect()
+    }
+
+    pub fn plan_rows_tail(
+        &self,
+        end_ts: Timestamp,
+        rows: usize,
+        within: BucketRange,
+    ) -> Option<BucketRange> {
+        if rows == 0 || self.buckets.is_empty() {
+            return None;
+        }
+
+        let end_bucket_ts = self.bucket_granularity.start(end_ts);
+        let end_bucket_ts = end_bucket_ts.min(within.end);
+
+        let buckets: Vec<&Bucket> = self
+            .buckets
+            .range(within.start..=end_bucket_ts)
+            .map(|(_, b)| b)
+            .collect();
+        if buckets.is_empty() {
+            return None;
+        }
+
+        // Walk backwards to cover `rows` by bucket row_count.
+        let mut remaining = rows;
+        let mut start_bucket_ts = buckets[0].timestamp;
+
+        for b in buckets.iter().rev() {
+            if remaining <= b.row_count {
+                start_bucket_ts = b.timestamp;
+                remaining = 0;
+                break;
+            }
+            remaining -= b.row_count;
+        }
+
+        // If we didn't cover `rows`, we need everything within the range.
+        if remaining > 0 {
+            start_bucket_ts = buckets[0].timestamp;
+        }
+
+        Some(BucketRange::new(start_bucket_ts, end_bucket_ts))
     }
 
     /// Get buckets for RANGE windows given update bucket timestamps.
@@ -234,7 +277,7 @@ impl BucketIndex {
         &self,
         window_frame: &WindowFrame,
         previous_processed_until: Option<Cursor>,
-    ) -> Option<SlideInfo> {
+    ) -> Option<SlideRangeInfo> {
         self.slide_window_until(window_frame, previous_processed_until, self.max_pos_seen)
     }
 
@@ -246,7 +289,7 @@ impl BucketIndex {
         window_frame: &WindowFrame,
         previous_processed_until: Option<Cursor>,
         until: Cursor,
-    ) -> Option<SlideInfo> {
+    ) -> Option<SlideRangeInfo> {
         if self.buckets.is_empty() {
             return None;
         }
@@ -267,10 +310,10 @@ impl BucketIndex {
         }
     }
 
-    fn slide_range_window(&self, window_length_ms: i64, prev: Cursor, new_end: Cursor) -> SlideInfo {
+    fn slide_range_window(&self, window_length_ms: i64, prev: Cursor, new_end: Cursor) -> SlideRangeInfo {
 
         if new_end <= prev {
-            return SlideInfo {
+            return SlideRangeInfo {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
@@ -290,7 +333,7 @@ impl BucketIndex {
         };
 
         if update_buckets.is_empty() {
-            return SlideInfo {
+            return SlideRangeInfo {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
@@ -324,7 +367,7 @@ impl BucketIndex {
             ))
         };
 
-        SlideInfo {
+        SlideRangeInfo {
             update_range,
             retract_range,
             new_processed_until: new_end,
@@ -332,10 +375,10 @@ impl BucketIndex {
         }
     }
 
-    fn slide_rows_window(&self, window_size: usize, prev: Cursor, new_end: Cursor) -> SlideInfo {
+    fn slide_rows_window(&self, window_size: usize, prev: Cursor, new_end: Cursor) -> SlideRangeInfo {
 
         if new_end <= prev {
-            return SlideInfo {
+            return SlideRangeInfo {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
@@ -355,7 +398,7 @@ impl BucketIndex {
         };
 
         if update_buckets.is_empty() {
-            return SlideInfo {
+            return SlideRangeInfo {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
@@ -415,7 +458,7 @@ impl BucketIndex {
             ))
         };
 
-        SlideInfo {
+        SlideRangeInfo {
             update_range,
             retract_range,
             new_processed_until: new_end,
@@ -647,4 +690,5 @@ mod tests {
         assert_eq!(index.bucket_timestamps(), vec![2000, 3000]);
     }
 }
+
 

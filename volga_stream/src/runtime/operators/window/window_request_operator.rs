@@ -1,10 +1,9 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::fmt;
-use std::ops::Bound;
 use std::sync::Arc;
 
 use anyhow::Result;
-use arrow::array::RecordBatch;
+use arrow::array::{RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
@@ -17,20 +16,19 @@ use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::aggregates::{split_entries_for_parallelism, Aggregation};
-use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
-use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
+use crate::runtime::operators::window::aggregates::VirtualPoint;
+use crate::runtime::operators::window::aggregates::{Aggregation, plain::PlainAggregation, retractable::RetractableAggregation};
 use crate::runtime::operators::window::window_operator_state::{WindowOperatorState, WindowId};
-use crate::runtime::operators::window::time_entries::{TimeEntries, TimeIdx};
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::operators::window::window_operator::{
-    init, produce_aggregates, stack_concat_results, WindowConfig, WindowOperatorConfig
+    init, stack_concat_results, WindowConfig, WindowOperatorConfig
 };
+use crate::runtime::operators::window::data_loader::load_sorted_ranges_view;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
-use crate::storage::batch_store::BatchId;
 use tokio_rayon::rayon::ThreadPool;
 use tokio::time::{sleep, Duration, Instant};
+use datafusion::physical_plan::WindowExpr;
 
 #[derive(Debug, Clone)]
 pub struct WindowRequestOperatorConfig {
@@ -150,121 +148,6 @@ impl WindowRequestOperator {
         panic!("No window operator vertex found with task_index {} for vertex {}", task_index, vertex_id)
     }
 
-    fn create_virtual_entries(
-        &self,
-        record_batch: &RecordBatch,
-        time_entries: &TimeEntries,
-    ) -> (Vec<Option<TimeIdx>>, BatchId) {
-        use arrow::array::{TimestampMillisecondArray, Int64Array, BooleanArray, Array};
-        use arrow::compute::kernels::cmp::lt;
-        
-        let num_rows = record_batch.num_rows();
-        if num_rows == 0 {
-            return (Vec::new(), BatchId::random());
-        }
-        
-        let last_entry = time_entries.entries.back().map(|entry| *entry);
-        let first_entry = time_entries.entries.front().map(|entry| *entry);
-        let batch_id = BatchId::random();
-        
-        let ts_column = record_batch.column(self.ts_column_index);
-        let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
-            .expect("Timestamp column should be TimestampMillisecondArray");
-        
-        // Extract all timestamps at once (vectorized)
-        let timestamps: Vec<i64> = (0..num_rows)
-            .map(|i| {
-                if ts_array.is_null(i) {
-                    i64::MIN
-                } else {
-                    ts_array.value(i)
-                }
-            })
-            .collect();
-        
-        // Create boolean mask for valid entries (not filtered out)
-        let mut valid_mask = vec![true; num_rows];
-        
-        // Convert timestamp array to Int64Array for comparison
-        use arrow::compute::kernels::cast::cast;
-        use arrow::datatypes::DataType;
-        let ts_int64_array = cast(ts_array, &DataType::Int64)
-            .expect("Should be able to cast TimestampMillisecondArray to Int64Array");
-        let ts_int64_array = ts_int64_array.as_any().downcast_ref::<Int64Array>()
-            .expect("Cast result should be Int64Array");
-        
-        // Filter out entries before first entry using SIMD
-        if let Some(first_entry) = first_entry {
-            let first_ts_array = Int64Array::from_value(first_entry.timestamp, num_rows);
-            let lt_first = lt(ts_int64_array, &first_ts_array)
-                .expect("Should be able to compare with first entry timestamp");
-            let lt_first_bool = lt_first.as_any().downcast_ref::<BooleanArray>()
-                .expect("Comparison result should be BooleanArray");
-            
-            for i in 0..num_rows {
-                if lt_first_bool.value(i) {
-                    valid_mask[i] = false;
-                }
-            }
-        }
-        
-        // Filter out late entries using SIMD
-        if let (Some(lateness_ms), Some(last_entry)) = (self.lateness, last_entry) {
-            let cutoff_timestamp = last_entry.timestamp - lateness_ms;
-            let cutoff_array = Int64Array::from_value(cutoff_timestamp, num_rows);
-            let lt_cutoff = lt(ts_int64_array, &cutoff_array)
-                .expect("Should be able to compare with cutoff timestamp");
-            let lt_cutoff_bool = lt_cutoff.as_any().downcast_ref::<BooleanArray>()
-                .expect("Comparison result should be BooleanArray");
-            
-            for i in 0..num_rows {
-                if lt_cutoff_bool.value(i) {
-                    valid_mask[i] = false;
-                }
-            }
-        }
-        
-        let mut virtual_entries = Vec::with_capacity(num_rows);
-        
-        // Process rows in order
-        for row_idx in 0..num_rows {
-            if !valid_mask[row_idx] {
-                virtual_entries.push(None);
-                continue;
-            }
-            
-            let timestamp = timestamps[row_idx];
-            
-            let search_key = TimeIdx {
-                timestamp,
-                pos_idx: usize::MAX,
-                batch_id,
-                row_idx: 0,
-            };
-            
-            let pos_idx = time_entries
-                .entries
-                .upper_bound(Bound::Included(&search_key))
-                .map(|existing_entry| {
-                    if existing_entry.timestamp == timestamp {
-                        existing_entry.pos_idx + 1
-                    } else {
-                        0
-                    }
-                })
-                .unwrap_or(0);
-            
-            virtual_entries.push(Some(TimeIdx {
-                timestamp,
-                pos_idx,
-                batch_id,
-                row_idx,
-            }));
-        }
-        
-        (virtual_entries, batch_id)
-    }
-
     async fn process_key(&self, key: &Key, record_batch: &RecordBatch) -> RecordBatch {
         let windows_state_guard = self.get_state().get_windows_state(key).await;
 
@@ -274,140 +157,210 @@ impl WindowRequestOperator {
 
         let windows_state_guard = windows_state_guard.unwrap();
         let windows_state = windows_state_guard.value();
-        
-        // let time_entries = &windows_state.time_entries;
-        let time_entries = TimeEntries::new();// TODO this is so things can compile
-        let (virtual_entries, temp_batch_id) = self.create_virtual_entries(record_batch, &time_entries);
-        
-        let last_entry = time_entries.latest_idx();
 
-        let mut orig_positions = HashMap::new();
-        let mut aggregations = IndexMap::new();
-        
-        for (window_id, window_config) in &self.window_configs {
-            let window_frame = window_config.window_expr.get_window_frame();
-            let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
-            let aggregator_type = self.window_configs[window_id].aggregator_type;
-            let tiles = &window_state.tiles;
-            let accumulator_state = window_state.accumulator_state.as_ref();
-            
-            let mut aggs: Vec<Box<dyn Aggregation>> = Vec::new();
-            let mut agg_idx = 0;
+        let batch_index = &windows_state.bucket_index;
+        let max_seen_ts = batch_index.max_pos_seen().ts;
 
-            let mut plain_agg_entries = Vec::new();
-            let mut plain_agg_orig_positions = Vec::new();
-            let mut eval_agg_entries = Vec::new();
-            let mut eval_agg_orig_positions = Vec::new();
+        let ts_array = record_batch
+            .column(self.ts_column_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("Timestamp column should be TimestampMillisecondArray");
 
-            for i in 0..virtual_entries.len() {
-                if let Some(entry) = virtual_entries[i] {
-                    // let is_late = is_entry_late(entry, last_entry);
-                    let is_late = false;
-                    let aggregator_type = if is_late {
-                        // lates are handled as plain
-                        AggregatorType::PlainAccumulator
-                    } else {
-                        aggregator_type
-                    };
+        // Filter out "too late" request rows (watermark-style cutoff = max_seen - lateness).
+        let cutoff_ts = self
+            .lateness
+            .filter(|_| max_seen_ts > i64::MIN)
+            .map(|lateness_ms| max_seen_ts - lateness_ms);
 
-                    match aggregator_type {
-                        AggregatorType::RetractableAccumulator => {
-                            // let (retracts, _) = time_entries.find_retracts(window_frame, window_state.start_idx, entry);
-                            // let aggregation: Box<dyn Aggregation> = Box::new(RetractableAggregation::new(
-                            //     vec![entry],
-                            //     window_config.window_expr.clone(),
-                            //     tiles.clone(),
-                            //     Some(vec![retracts]),
-                            //     accumulator_state.cloned(),
-                            // ));
-                            // aggs.push(aggregation);
-                            orig_positions.insert((*window_id, agg_idx), vec![i]);
-                            agg_idx += 1;
-                        }
-                        AggregatorType::PlainAccumulator => {
-                            plain_agg_entries.push(entry);
-                            plain_agg_orig_positions.push(i);
-                        }
-                        AggregatorType::Evaluator => {
-                            eval_agg_entries.push(entry);
-                            eval_agg_orig_positions.push(i);
-                        }
-                    }
+        let mut kept_rows: Vec<usize> = Vec::new();
+        for i in 0..record_batch.num_rows() {
+            let ts = ts_array.value(i);
+            if let Some(cutoff) = cutoff_ts {
+                if ts < cutoff {
+                    continue;
                 }
             }
-
-            let mut pos_idx = 0;
-            for entries in split_entries_for_parallelism(&plain_agg_entries) {
-                let entries_len = entries.len();
-                // let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
-                //     entries,
-                //     window_config.window_expr.clone(),
-                //     tiles.clone(),
-                //     time_entries,
-                // ));
-                // aggs.push(aggregation);
-                let orig_pos = plain_agg_orig_positions[pos_idx..pos_idx + entries_len].to_vec();
-                orig_positions.insert((*window_id, agg_idx), orig_pos);
-                pos_idx += entries_len;
-                agg_idx += 1;
-            }
-
-            pos_idx = 0;
-            for entries in split_entries_for_parallelism(&eval_agg_entries) {
-                let entries_len = entries.len();
-                // let aggregation: Box<dyn Aggregation> = Box::new(PlainAggregation::new(
-                //     entries,
-                //     window_config.window_expr.clone(),
-                //     tiles.clone(),
-                //     time_entries,
-                // ));
-                // aggs.push(aggregation);
-                let orig_pos = eval_agg_orig_positions[pos_idx..pos_idx + entries_len].to_vec();
-                orig_positions.insert((*window_id, agg_idx), orig_pos);
-                pos_idx += entries_len;
-                agg_idx += 1;
-            }
-
-            aggregations.insert(*window_id, aggs);
+            kept_rows.push(i);
         }
 
-        // Drop guard after creating all aggregations - they own their data now
+        if kept_rows.is_empty() {
+            return RecordBatch::new_empty(self.output_schema.clone());
+        }
+
+        // Always provide window exprs for bucket arg evaluation, even if we don't execute an agg for that window.
+        let window_exprs_for_args: Vec<(WindowId, Arc<dyn WindowExpr>)> = self
+            .window_configs
+            .iter()
+            .map(|(id, cfg)| (*id, cfg.window_expr.clone()))
+            .collect();
+
+        // Drop guard before IO / expensive work.
         drop(windows_state_guard);
 
-        // TODO: request operator needs to load SortedBucketView for relevant buckets from state+store.
-        // For now, use an empty view map to keep compilation moving.
-        let sorted_bucket_view = HashMap::new();
-        let aggregation_results = produce_aggregates(
-            &self.window_configs,
-            &aggregations,
-            &sorted_bucket_view,
-            self.thread_pool.as_ref(),
-        )
-        .await;
-        
-        let mut aggregated_values = Vec::new();
-        
-        // Insert aggregated values into original positions
-        for (window_id, aggs) in aggregation_results {
-            let null_scalar = ScalarValue::Null;
-            let mut values: Vec<ScalarValue> = vec![null_scalar.clone(); virtual_entries.len()];
-            
-            for (agg_idx, (agg_values, _)) in aggs.iter().enumerate() {
-                let orig_pos = orig_positions.get(&(window_id, agg_idx)).expect("orig position should exist");
-                if agg_values.len() != orig_pos.len() {
-                    panic!("Mismatch between aggregate values count ({}) and original positions count ({})", agg_values.len(), orig_pos.len());
+        // Compute window results per window_id, keeping original request row order.
+        let mut aggregated_values: Vec<Vec<ScalarValue>> = Vec::new();
+        for (window_id, window_config) in &self.window_configs {
+            let windows_state_guard = self
+                .get_state()
+                .get_windows_state(key)
+                .await
+                .expect("Windows state should exist");
+            let windows_state = windows_state_guard.value();
+            let window_state = windows_state
+                .window_states
+                .get(window_id)
+                .expect("Window state should exist");
+
+            let exclude_current_row = window_config.exclude_current_row.unwrap_or(false);
+            let exclude_current_row_opt = Some(exclude_current_row);
+
+            // Build points with per-row args (only if we might include current row).
+            let points: Vec<VirtualPoint> = kept_rows
+                .iter()
+                .map(|&row| {
+                    let ts = ts_array.value(row);
+                    let args = if exclude_current_row {
+                        None
+                    } else {
+                        let one = record_batch.slice(row, 1);
+                        let evaluated = window_config
+                            .window_expr
+                            .evaluate_args(&one)
+                            .expect("Should be able to evaluate window args for request row");
+                        Some(Arc::new(evaluated))
+                    };
+                    VirtualPoint { ts, args }
+                })
+                .collect();
+
+            let values = match window_config.aggregator_type {
+                AggregatorType::PlainAccumulator => {
+                    let agg = PlainAggregation::for_points(
+                        points,
+                        &windows_state.bucket_index,
+                        window_config.window_expr.clone(),
+                        window_state.tiles.clone(),
+                        self.ts_column_index,
+                        *window_id as usize,
+                    );
+                    let requests = agg.get_data_requests(exclude_current_row_opt);
+                    let views = load_sorted_ranges_view(
+                        self.get_state(),
+                        key,
+                        self.ts_column_index,
+                        &requests,
+                        agg.window_expr(),
+                    )
+                    .await;
+                    let (vals, _) = agg
+                        .produce_aggregates_from_ranges(
+                            &views,
+                            self.thread_pool.as_ref(),
+                            exclude_current_row_opt,
+                        )
+                        .await;
+                    vals
                 }
-                for (i, scalar) in orig_pos.iter().zip(agg_values.iter()) {
-                    values[*i] = scalar.clone();
+                AggregatorType::RetractableAccumulator => {
+                    let processed_until = window_state
+                        .processed_until
+                        .expect("Retractable request points require processed_until");
+                    let base_state = window_state
+                        .accumulator_state
+                        .clone()
+                        .expect("Retractable request points require accumulator_state");
+
+                    let mut out: Vec<ScalarValue> = vec![ScalarValue::Null; points.len()];
+                    let mut late_points: Vec<VirtualPoint> = Vec::new();
+                    let mut late_pos: Vec<usize> = Vec::new();
+                    let mut normal_points: Vec<VirtualPoint> = Vec::new();
+                    let mut normal_pos: Vec<usize> = Vec::new();
+
+                    for (i, p) in points.into_iter().enumerate() {
+                        if p.ts < processed_until.ts {
+                            late_pos.push(i);
+                            late_points.push(p);
+                        } else {
+                            normal_pos.push(i);
+                            normal_points.push(p);
+                        }
+                    }
+
+                    if !late_points.is_empty() {
+                        let agg = PlainAggregation::for_points(
+                            late_points,
+                            &windows_state.bucket_index,
+                            window_config.window_expr.clone(),
+                            window_state.tiles.clone(),
+                            self.ts_column_index,
+                            *window_id as usize,
+                        );
+                        let requests = agg.get_data_requests(exclude_current_row_opt);
+                        let views = load_sorted_ranges_view(
+                            self.get_state(),
+                            key,
+                            self.ts_column_index,
+                            &requests,
+                            agg.window_expr(),
+                        )
+                        .await;
+                        let (vals, _) = agg
+                            .produce_aggregates_from_ranges(
+                                &views,
+                                self.thread_pool.as_ref(),
+                                exclude_current_row_opt,
+                            )
+                            .await;
+                        for (slot, v) in late_pos.into_iter().zip(vals.into_iter()) {
+                            out[slot] = v;
+                        }
+                    }
+
+                    if !normal_points.is_empty() {
+                        let agg = RetractableAggregation::for_points(
+                            normal_points,
+                            &windows_state.bucket_index,
+                            window_config.window_expr.clone(),
+                            self.ts_column_index,
+                            *window_id as usize,
+                            Some(processed_until),
+                            Some(base_state.clone()),
+                        );
+                        let requests = agg.get_data_requests(exclude_current_row_opt);
+                        let views = load_sorted_ranges_view(
+                            self.get_state(),
+                            key,
+                            self.ts_column_index,
+                            &requests,
+                            agg.window_expr(),
+                        )
+                        .await;
+                        let (vals, _) = agg
+                            .produce_aggregates_from_ranges(
+                                &views,
+                                self.thread_pool.as_ref(),
+                                exclude_current_row_opt,
+                            )
+                            .await;
+                        for (slot, v) in normal_pos.into_iter().zip(vals.into_iter()) {
+                            out[slot] = v;
+                        }
+                    }
+
+                    out
                 }
-            }
-            
+                AggregatorType::Evaluator => {
+                    // Not supported in request mode yet.
+                    vec![ScalarValue::Null; kept_rows.len()]
+                }
+            };
+
             aggregated_values.push(values);
         }
-        
-        let input_values = get_input_values(&record_batch, &self.input_schema);
 
-        // Stack input value rows and result rows producing single result batch
+        let input_values = get_input_values_for_rows(record_batch, &self.input_schema, &kept_rows);
+
         stack_concat_results(input_values, aggregated_values, &self.output_schema, &self.input_schema)
     }
 }
@@ -416,15 +369,16 @@ impl WindowRequestOperator {
 // Extract input values (values which were in original argument batch, but were not aggregated, e.g keys) 
 // for each update row.
 // We assume window operator schema is fixed: input columns first, then window columns
-fn get_input_values(
-    batch: &RecordBatch, 
-    input_schema: &SchemaRef
+fn get_input_values_for_rows(
+    batch: &RecordBatch,
+    input_schema: &SchemaRef,
+    rows: &[usize],
 ) -> Vec<Vec<ScalarValue>> {
     let mut input_values = Vec::new();
         
     let input_column_count = input_schema.fields().len();
     
-    for row_idx in 0..batch.num_rows() {
+    for &row_idx in rows {
         let mut row_input_values = Vec::new();
         for col_idx in 0..input_column_count {
             let array = batch.column(col_idx);
@@ -436,8 +390,6 @@ fn get_input_values(
     }
     input_values
 }
-
-
 #[async_trait]
 impl OperatorTrait for WindowRequestOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
@@ -536,7 +488,7 @@ mod tests {
     use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::operators::operator::OperatorConfig;
-    use crate::runtime::operators::window::window_operator::{ExecutionMode, UpdateMode, WindowOperator, WindowOperatorConfig};
+    use crate::runtime::operators::window::window_operator::{ExecutionMode, WindowOperator, WindowOperatorConfig};
     use crate::common::message::Message;
     use crate::runtime::runtime_context::RuntimeContext;
     use crate::runtime::state::OperatorStates;
@@ -608,7 +560,6 @@ mod tests {
         
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec.clone());
-        window_config.update_mode = UpdateMode::PerMessage;
         window_config.execution_mode = ExecutionMode::Request;
         window_config.parallelize = true;
         window_config.lateness = Some(2000); // 2 seconds lateness tolerance

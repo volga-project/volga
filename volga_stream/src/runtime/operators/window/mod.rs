@@ -4,8 +4,8 @@ pub mod time_entries;
 pub mod tiles;
 pub mod aggregates;
 pub mod window_operator_state;
-pub mod batch_index;
 pub mod index;
+pub mod data_loader;
 
 pub use window_operator::WindowOperator;
 pub use window_request_operator::WindowRequestOperator;
@@ -13,7 +13,7 @@ pub use tiles::{Tiles, TileConfig, TimeGranularity};
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";
 
-pub use index::{BucketIndex, Cursor, RowIndex, RowPtr};
+pub use index::{BucketIndex, Cursor, RowPtr};
 
 /// Backwards-compat: old name used across the codebase.
 // pub type RowPos = Cursor;
