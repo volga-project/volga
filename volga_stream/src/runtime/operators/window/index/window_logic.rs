@@ -69,8 +69,11 @@ pub fn tiled_split(
     let first_tile_pos = idx.seek_ts_ge(first_tile_start_ts)?;
     let front_end = idx.prev_pos(first_tile_pos)?;
 
-    // back_start: first row strictly after last tile end ts
-    let back_start = idx.seek_ts_gt(last_tile_end_ts)?;
+    // back_start: first row at/after last tile end ts
+    //
+    // Tiles cover [tile_start, tile_end) (half-open). A row with ts == tile_end belongs to the next
+    // tile and must be accounted for in the "back" segment. Using `gt` would skip it.
+    let back_start = idx.seek_ts_ge(last_tile_end_ts)?;
 
     if front_end < start || back_start > end {
         return None;
@@ -126,7 +129,103 @@ pub fn initial_retract_pos_range(
 }
 
 #[cfg(test)]
-mod tests {
+mod tiled_split_tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow::record_batch::RecordBatch;
+    use datafusion::logical_expr::WindowFrameUnits;
+
+    use crate::runtime::operators::window::aggregates::test_utils;
+    use crate::runtime::operators::window::aggregates::BucketRange;
+    use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeBucket, SortedRangeIndex, SortedRangeView};
+    use crate::runtime::operators::window::tiles::{TileConfig, TimeGranularity as TileGranularity, Tiles};
+    use crate::runtime::operators::window::{Cursor, RowPtr};
+
+    use super::tiled_split;
+
+    fn make_view(
+        gran: TileGranularity,
+        bucket_range: BucketRange,
+        buckets: Vec<(i64, RecordBatch)>,
+    ) -> SortedRangeView {
+        let request = DataRequest {
+            bucket_range,
+            bounds: DataBounds::All,
+        };
+        let mut out: HashMap<i64, SortedRangeBucket> = HashMap::new();
+        for (bucket_ts, b) in buckets {
+            out.insert(bucket_ts, SortedRangeBucket::new(bucket_ts, b, 0, 3, Arc::new(vec![])));
+        }
+        SortedRangeView::new(
+            request,
+            gran,
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            out,
+        )
+    }
+
+    #[tokio::test]
+    async fn tiled_split_respects_half_open_tile_end_boundary() {
+        // We want a case where the last selected tile ends exactly at an existing row timestamp
+        // so `back_start` must use `>= tile_end`, not `> tile_end`.
+        //
+        // With 1s tiles and a window [0..5000] (inclusive), the mid tiles selected are:
+        // [1000..2000), [2000..3000), [3000..4000), so last_tile_end_ts == 4000.
+        // back_start must point to the row at ts=4000 (not 5000).
+
+        let sql = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
+FROM test_table
+WINDOW w AS (
+  PARTITION BY partition_key
+  ORDER BY timestamp
+  RANGE BETWEEN INTERVAL '4000' MILLISECOND PRECEDING AND CURRENT ROW
+)"#;
+        let window_expr = test_utils::window_expr_from_sql(sql).await;
+        assert_eq!(window_expr.get_window_frame().units, WindowFrameUnits::Range);
+
+        let gran = TileGranularity::Seconds(1);
+        let rows: Vec<(i64, f64, &str, u64)> = vec![
+            (0, 1.0, "A", 0),
+            (1000, 2.0, "A", 1),
+            (2000, 3.0, "A", 2),
+            (3000, 4.0, "A", 3),
+            (4000, 5.0, "A", 4),
+            (5000, 6.0, "A", 5),
+        ];
+
+        // Build tiles from the full batch.
+        let all = test_utils::batch(&rows);
+        let mut tiles = Tiles::new(
+            TileConfig::new(vec![TileGranularity::Seconds(1)]).expect("tile config"),
+            window_expr,
+        );
+        tiles.add_batch(&all, 0);
+
+        // Build a view with one row per bucket (bucket_ts == ts for 1s granularity).
+        let buckets: Vec<(i64, RecordBatch)> = rows
+            .iter()
+            .map(|(ts, v, pk, seq)| (*ts, test_utils::batch(&[(*ts, *v, *pk, *seq)])))
+            .collect();
+        let view = make_view(gran, BucketRange::new(0, 5000), buckets);
+        let idx = SortedRangeIndex::new(&view);
+
+        let start = RowPtr::new(0, 0);
+        let end = RowPtr::new(5000, 0);
+        let split = tiled_split(&idx, start, end, &tiles).expect("should split");
+
+        assert_eq!(split.front_end, RowPtr::new(0, 0));
+        assert_eq!(split.back_start, RowPtr::new(4000, 0));
+        assert_eq!(split.tiles.len(), 3);
+        assert_eq!(split.tiles[0].tile_start, 1000);
+        assert_eq!(split.tiles[1].tile_start, 2000);
+        assert_eq!(split.tiles[2].tile_start, 3000);
+    }
+}
+
+#[cfg(test)]
+mod window_logic_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 

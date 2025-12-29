@@ -254,3 +254,92 @@ pub fn split_entries_for_parallelism(entries: &Vec<TimeIdx>) -> Vec<Vec<TimeIdx>
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use std::sync::Arc;
+    use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::physical_plan::windows::BoundedWindowAggExec;
+    use datafusion::physical_plan::WindowExpr;
+    use datafusion::prelude::SessionContext;
+
+    use crate::api::planner::{Planner, PlanningContext};
+    use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
+    use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
+    use crate::runtime::operators::window::index::{DataRequest, SortedRangeBucket, SortedRangeView};
+    use crate::runtime::operators::window::{Cursor, TimeGranularity, SEQ_NO_COLUMN_NAME};
+    use crate::storage::batch_store::Timestamp;
+
+    pub fn test_schema_with_seq() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("partition_key", DataType::Utf8, false),
+            Field::new(SEQ_NO_COLUMN_NAME, DataType::UInt64, false),
+        ]))
+    }
+
+    pub fn batch(rows: &[(Timestamp, f64, &str, u64)]) -> RecordBatch {
+        let schema = test_schema_with_seq();
+        let ts = Arc::new(TimestampMillisecondArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>()));
+        let v = Arc::new(Float64Array::from(rows.iter().map(|r| r.1).collect::<Vec<_>>()));
+        let pk = Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>()));
+        let seq = Arc::new(UInt64Array::from(rows.iter().map(|r| r.3).collect::<Vec<_>>()));
+        RecordBatch::try_new(schema, vec![ts, v, pk, seq]).expect("test batch")
+    }
+
+    pub fn one_row_batch(ts: Timestamp, value: f64, pk: &str, seq: u64) -> RecordBatch {
+        batch(&[(ts, value, pk, seq)])
+    }
+
+    pub async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
+        let ctx = SessionContext::new();
+        let mut planner = Planner::new(PlanningContext::new(ctx));
+        planner.register_source(
+            "test_table".to_string(),
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+            test_schema_with_seq(),
+        );
+        extract_datafusion_window_exec(sql, &mut planner).await
+    }
+
+    pub async fn window_expr_from_sql(sql: &str) -> Arc<dyn WindowExpr> {
+        let exec = window_exec_from_sql(sql).await;
+        exec.window_expr()[0].clone()
+    }
+
+    pub fn make_view(
+        granularity: TimeGranularity,
+        request: DataRequest,
+        buckets: Vec<(Timestamp, RecordBatch)>,
+        window_expr_for_args: &Arc<dyn WindowExpr>,
+    ) -> SortedRangeView {
+        use std::collections::HashMap;
+        let (start, end) = match request.bounds {
+            crate::runtime::operators::window::index::DataBounds::All => {
+                (Cursor::new(i64::MIN, 0), Cursor::new(i64::MAX, u64::MAX))
+            }
+            crate::runtime::operators::window::index::DataBounds::Time { start_ts, end_ts } => {
+                (Cursor::new(start_ts, 0), Cursor::new(end_ts, u64::MAX))
+            }
+            crate::runtime::operators::window::index::DataBounds::RowsTail { end_ts, .. } => {
+                (Cursor::new(i64::MIN, 0), Cursor::new(end_ts, u64::MAX))
+            }
+        };
+
+        let mut out: HashMap<Timestamp, SortedRangeBucket> = HashMap::new();
+        for (bucket_ts, b) in buckets {
+            let args = window_expr_for_args.evaluate_args(&b).expect("eval args");
+            out.insert(
+                bucket_ts,
+                SortedRangeBucket::new(bucket_ts, b, 0, 3, Arc::new(args)),
+            );
+        }
+        SortedRangeView::new(request, granularity, start, end, out)
+    }
+}
+
+#[cfg(test)]
+mod agg_tests;

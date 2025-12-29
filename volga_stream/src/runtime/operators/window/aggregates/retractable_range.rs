@@ -5,10 +5,9 @@ use datafusion::logical_expr::WindowFrameUnits;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::index::window_logic;
+use crate::runtime::operators::window::index::{get_window_size_rows, window_logic};
 use crate::runtime::operators::window::index::{
     get_window_length_ms,
-    get_window_size_rows,
     DataBounds,
     DataRequest,
     SlideRangeInfo,
@@ -17,7 +16,7 @@ use crate::runtime::operators::window::index::{
 };
 use crate::runtime::operators::window::tiles::TimeGranularity;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::runtime::operators::window::{Cursor, RowPtr, Tiles};
+use crate::runtime::operators::window::{Cursor, RowPtr};
 
 use super::super::{create_window_aggregator, merge_accumulator_state, WindowAggregator};
 use super::{Aggregation, AggregatorType, BucketRange};
@@ -81,8 +80,11 @@ impl Aggregation for RetractableRangeAggregation {
             update
         };
         let window_frame = self.window_expr.get_window_frame();
-        let wl = get_window_length_ms(window_frame);
-        let ws = get_window_size_rows(window_frame);
+        let wl = if window_frame.units == WindowFrameUnits::Range {
+            get_window_length_ms(window_frame)
+        } else {
+            0
+        };
 
         let bounds = if window_frame.units == WindowFrameUnits::Range {
             let start_ts = self
@@ -110,7 +112,7 @@ impl Aggregation for RetractableRangeAggregation {
         let window_frame = self.window_expr.get_window_frame();
         let is_rows_window = window_frame.units == WindowFrameUnits::Rows;
         let window_length = get_window_length_ms(window_frame);
-        let window_size = get_window_size_rows(window_frame);
+        let window_size = if is_rows_window { get_window_size_rows(window_frame) } else { 0 };
 
         let Some(update_range) = self.update_range else {
             return (vec![], self.accumulator_state.clone());
@@ -292,5 +294,122 @@ fn run_retractable_accumulator_from_indices(
             .state()
             .expect("Should be able to get accumulator state"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::operators::window::aggregates::test_utils;
+    use crate::runtime::operators::window::index::BucketIndex;
+    use crate::runtime::operators::window::TimeGranularity;
+    use crate::storage::batch_store::BatchId;
+
+    fn assert_f64s(vals: &[ScalarValue], expected: &[f64]) {
+        assert_eq!(vals.len(), expected.len());
+        for (i, (v, e)) in vals.iter().zip(expected.iter()).enumerate() {
+            let ScalarValue::Float64(Some(got)) = v else {
+                panic!("expected Float64 at {i}, got {v:?}");
+            };
+            assert!((got - e).abs() < 1e-9, "mismatch at {i}: got={got} expected={e}");
+        }
+    }
+
+    fn eval_state(window_expr: &Arc<dyn WindowExpr>, state: &AccumulatorState) -> f64 {
+        let mut acc = match create_window_aggregator(window_expr) {
+            WindowAggregator::Accumulator(a) => a,
+            WindowAggregator::Evaluator(_) => panic!("not supported"),
+        };
+        merge_accumulator_state(acc.as_mut(), state);
+        let ScalarValue::Float64(Some(v)) = acc.evaluate().expect("evaluate failed") else {
+            panic!("expected Float64");
+        };
+        v
+    }
+
+    #[tokio::test]
+    async fn test_retractable_range_sum_range_window_two_steps() {
+        let sql = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
+FROM test_table
+WINDOW w AS (
+  PARTITION BY partition_key
+  ORDER BY timestamp
+  RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW
+)"#;
+        let window_expr = test_utils::window_expr_from_sql(sql).await;
+        let window_frame = window_expr.get_window_frame().clone();
+        let gran = TimeGranularity::Seconds(1);
+
+        // Step 1: rows up to t=2000.
+        let b1000 = test_utils::batch(&[(1000, 10.0, "A", 0), (1500, 30.0, "A", 1)]);
+        let b2000 = test_utils::batch(&[(2000, 20.0, "A", 2)]);
+
+        let mut bucket_index = BucketIndex::new(gran);
+        bucket_index.insert_batch(
+            BatchId::new(0, 1000, 0),
+            Cursor::new(1000, 0),
+            Cursor::new(1500, 1),
+            2,
+        );
+        bucket_index.insert_batch(
+            BatchId::new(0, 2000, 0),
+            Cursor::new(2000, 2),
+            Cursor::new(2000, 2),
+            1,
+        );
+
+        let slide1 = bucket_index.slide_window(&window_frame, None).expect("slide1");
+        let agg1 = RetractableRangeAggregation::new(
+            0,
+            &slide1,
+            None,
+            window_expr.clone(),
+            None,
+            0,
+            gran,
+        );
+        let req1 = agg1.get_data_requests(None)[0];
+        let view1 = test_utils::make_view(gran, req1, vec![(1000, b1000), (2000, b2000)], &window_expr);
+        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&[view1], None, None).await;
+        assert_f64s(&vals1, &[10.0, 40.0, 60.0]);
+        let state1 = state1.expect("state1");
+        assert!((eval_state(&window_expr, &state1) - 60.0).abs() < 1e-9);
+
+        // Step 2: add t=3200 and slide again from prev processed.
+        let b3000 = test_utils::batch(&[(3200, 5.0, "A", 3)]);
+        bucket_index.insert_batch(
+            BatchId::new(0, 3000, 0),
+            Cursor::new(3200, 3),
+            Cursor::new(3200, 3),
+            1,
+        );
+
+        let prev = Some(slide1.new_processed_until);
+        let slide2 = bucket_index.slide_window(&window_frame, prev).expect("slide2");
+        let agg2 = RetractableRangeAggregation::new(
+            0,
+            &slide2,
+            prev,
+            window_expr.clone(),
+            Some(state1.clone()),
+            0,
+            gran,
+        );
+        let req2 = agg2.get_data_requests(None)[0];
+        let view2 = test_utils::make_view(
+            gran,
+            req2,
+            vec![
+                (1000, test_utils::batch(&[(1000, 10.0, "A", 0), (1500, 30.0, "A", 1)])),
+                (2000, test_utils::batch(&[(2000, 20.0, "A", 2)])),
+                (3000, b3000),
+            ],
+            &window_expr,
+        );
+
+        let (vals2, state2) = agg2.produce_aggregates_from_ranges(&[view2], None, None).await;
+        assert_f64s(&vals2, &[55.0]);
+        let state2 = state2.expect("state2");
+        assert!((eval_state(&window_expr, &state2) - 55.0).abs() < 1e-9);
+    }
 }
 

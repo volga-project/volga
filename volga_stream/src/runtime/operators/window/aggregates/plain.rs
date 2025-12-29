@@ -63,16 +63,12 @@ impl PlainAggregation {
         batch_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         tiles: Option<Tiles>,
-        ts_column_index: usize,
-        window_id: usize,
     ) -> Self {
         Self::Points(plain_points::PlainPointsAggregation::new(
             points,
             batch_index,
             window_expr,
             tiles,
-            ts_column_index,
-            window_id,
         ))
     }
 }
@@ -158,6 +154,7 @@ fn apply_stored_window(
     }
 }
 
+// TODO we should avoid calling tiled_split on each iteration
 fn window_slices(
     row_index: &SortedRangeIndex,
     start: RowPtr,

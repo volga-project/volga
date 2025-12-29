@@ -17,15 +17,16 @@ use datafusion::scalar::ScalarValue;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
-use crate::runtime::operators::window::aggregates::{get_aggregate_type, Aggregation};
+use crate::runtime::operators::window::aggregates::{get_aggregate_type, Aggregation, BucketRange};
 use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
 use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
-use crate::runtime::operators::window::data_loader::load_sorted_ranges_view;
+use crate::runtime::operators::window::data_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
 use crate::runtime::operators::window::{AggregatorType, TileConfig, TimeGranularity};
 use crate::runtime::operators::window::Cursor;
+use crate::runtime::operators::window::index::{window_logic, SortedRangeIndex, SortedRangeView};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::storage::batch_store::{BatchId, BatchStore, Timestamp};
+use crate::storage::batch_store::BatchStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -207,7 +208,11 @@ impl WindowOperator {
         &self, 
         key: &Key,
         process_until: Option<Cursor>,
-    ) -> (IndexMap<WindowId, Vec<Box<dyn Aggregation>>>, HashMap<WindowId, Cursor>) {
+    ) -> (
+        IndexMap<WindowId, Vec<Box<dyn Aggregation>>>,
+        HashMap<WindowId, Cursor>,
+        Option<(Option<Cursor>, Cursor, BucketRange)>,
+    ) {
         let windows_state_guard = self.state.get_windows_state(key).await
             .expect("Windows state should exist - insert_batch should have created it");
         let windows_state = windows_state_guard.value();
@@ -216,6 +221,12 @@ impl WindowOperator {
 
         let mut aggregations: IndexMap<WindowId, Vec<Box<dyn Aggregation>>> = IndexMap::new();
         let mut new_processed_until = HashMap::new();
+        let ref_window_id = *self
+            .window_configs
+            .keys()
+            .next()
+            .expect("window_configs must be non-empty");
+        let mut entry_delta: Option<(Option<Cursor>, Cursor, BucketRange)> = None;
         
         for (window_id, window_config) in &self.window_configs {
             let window_frame = window_config.window_expr.get_window_frame();
@@ -237,6 +248,14 @@ impl WindowOperator {
                 .unwrap_or_else(|| prev_processed_until.unwrap_or(Cursor::new(i64::MIN, 0)));
             
             new_processed_until.insert(*window_id, new_pos);
+
+            if *window_id == ref_window_id {
+                if let Some(ref slide) = slide_info {
+                    if let Some(update_range) = slide.update_range {
+                        entry_delta = Some((prev_processed_until, new_pos, update_range));
+                    }
+                }
+            }
 
             let mut aggs: Vec<Box<dyn Aggregation>> = Vec::new();
 
@@ -308,7 +327,7 @@ impl WindowOperator {
         }
 
         drop(windows_state_guard);
-        (aggregations, new_processed_until)
+        (aggregations, new_processed_until, entry_delta)
     }
 
     async fn advance_windows(
@@ -317,7 +336,7 @@ impl WindowOperator {
         process_until: Option<Cursor>,
     ) -> RecordBatch {
 
-        let (aggregations, new_processed_until) =
+        let (aggregations, new_processed_until, entry_delta) =
             self.configure_aggregations(key, process_until).await;
         
         if aggregations.is_empty() {
@@ -326,36 +345,59 @@ impl WindowOperator {
         
         // TODO: in the bucket-view design we will derive input values from bucket views.
         
-        let mut aggregation_results: IndexMap<
-            WindowId,
-            Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>,
-        > = IndexMap::new();
+        struct Exec<'a> {
+            window_id: WindowId,
+            exclude_current_row: Option<bool>,
+            agg: &'a dyn Aggregation,
+        }
+
+        let mut execs: Vec<Exec<'_>> = Vec::new();
+        let mut load_plans: Vec<RangesLoadPlan> = Vec::new();
         for (window_id, aggs) in &aggregations {
             let window_config = self
                 .window_configs
                 .get(window_id)
                 .expect("Window config should exist");
-            let mut results = Vec::new();
+            let exclude_current_row = window_config.exclude_current_row;
             for agg in aggs {
-                let requests = agg.get_data_requests(window_config.exclude_current_row);
-                let views = load_sorted_ranges_view(
-                    &self.state,
-                    key,
-                    self.ts_column_index,
-                    &requests,
-                    agg.window_expr(),
-                )
-                .await;
-                let result = agg
+                let requests = agg.get_data_requests(exclude_current_row);
+                load_plans.push(RangesLoadPlan {
+                    requests,
+                    window_expr_for_args: agg.window_expr().clone(),
+                });
+                execs.push(Exec {
+                    window_id: *window_id,
+                    exclude_current_row,
+                    agg: agg.as_ref(),
+                });
+            }
+        }
+
+        let views_by_agg = load_sorted_ranges_views(&self.state, key, self.ts_column_index, &load_plans).await;
+
+        let futures: Vec<_> = execs
+            .iter()
+            .zip(views_by_agg.iter())
+            .map(|(exec, views)| async move {
+                let result = exec
+                    .agg
                     .produce_aggregates_from_ranges(
-                        &views,
+                        views,
                         self.thread_pool.as_ref(),
-                        window_config.exclude_current_row,
+                        exec.exclude_current_row,
                     )
                     .await;
-                results.push(result);
-            }
-            aggregation_results.insert(*window_id, results);
+                (exec.window_id, result)
+            })
+            .collect();
+
+        let results = future::join_all(futures).await;
+        let mut aggregation_results: IndexMap<
+            WindowId,
+            Vec<(Vec<ScalarValue>, Option<AccumulatorState>)>,
+        > = IndexMap::new();
+        for (window_id, r) in results {
+            aggregation_results.entry(window_id).or_default().push(r);
         }
         
         // Collect accumulator states
@@ -378,9 +420,14 @@ impl WindowOperator {
             return RecordBatch::new_empty(self.output_schema.clone());
         }
 
-        // TODO: return input columns + aggregates once entry extraction is updated.
-        // For now, return only window columns (empty input) to keep compilation moving.
-        let input_values: Vec<Vec<ScalarValue>> = Vec::new();
+        let input_values = match entry_delta {
+            None => Vec::new(),
+            Some(d) => extract_input_values_for_output(d, &views_by_agg, &self.input_schema),
+        };
+
+        if input_values.is_empty() {
+            return RecordBatch::new_empty(self.output_schema.clone());
+        }
 
         // Collect aggregated values
         let aggregated_values: Vec<Vec<ScalarValue>> = aggregation_results
@@ -392,9 +439,71 @@ impl WindowOperator {
                     .collect()
             })
             .collect();
+
+        debug_assert!(
+            aggregated_values
+                .iter()
+                .all(|col| col.len() == input_values.len()),
+            "All window result columns must match input row count"
+        );
         
         stack_concat_results(input_values, aggregated_values, &self.output_schema, &self.input_schema)
     }
+}
+
+fn extract_input_values_for_output(
+    (prev, new, entry_range): (Option<Cursor>, Cursor, BucketRange),
+    views_by_agg: &[Vec<SortedRangeView>],
+    input_schema: &SchemaRef,
+) -> Vec<Vec<ScalarValue>> {
+    let view_for_entries = views_by_agg
+        .iter()
+        .flat_map(|g| g.iter())
+        .find(|v| {
+            let r = v.bucket_range();
+            r.start <= entry_range.start && r.end >= entry_range.end
+        });
+    let Some(view) = view_for_entries else {
+        return Vec::new();
+    };
+
+    let idx = SortedRangeIndex::new(view);
+    let Some(mut pos) = window_logic::first_update_pos(&idx, prev) else {
+        return Vec::new();
+    };
+
+    let end = match idx.seek_rowpos_gt(new) {
+        Some(after) => match idx.prev_pos(after) {
+            Some(p) => p,
+            None => return Vec::new(),
+        },
+        None => idx.last_pos(),
+    };
+    if end < pos {
+        return Vec::new();
+    }
+
+    let input_cols = input_schema.fields().len();
+    let mut out: Vec<Vec<ScalarValue>> = Vec::new();
+    loop {
+        if pos.bucket_ts >= entry_range.start && pos.bucket_ts <= entry_range.end {
+            let b = view.buckets().get(&pos.bucket_ts).expect("bucket must exist");
+            let batch = b.batch();
+            let mut row_vals = Vec::with_capacity(input_cols);
+            for col_idx in 0..input_cols {
+                row_vals.push(
+                    ScalarValue::try_from_array(batch.column(col_idx), pos.row)
+                        .expect("Should be able to extract scalar value"),
+                );
+            }
+            out.push(row_vals);
+        }
+        if pos == end {
+            break;
+        }
+        pos = idx.next_pos(pos).expect("must have next pos until end");
+    }
+    out
 }
 
 // pub async fn load_batches(storage: &BatchStore, key: &Key, aggregations: &IndexMap<WindowId, Vec<Box<dyn Aggregation>>>) -> HashMap<BatchId, RecordBatch> {
@@ -522,55 +631,6 @@ pub fn create_output_schema(
         .finish()
         .with_metadata(input_schema.metadata().clone())
     )
-}
-
-/// Extract input values from batches for result rows
-/// Groups rows by batch, sorts by timestamp within each batch, then extracts values
-fn get_input_values_from_batches(
-    entry_batch_ids: &[BatchId],
-    entry_timestamps: &[Timestamp],
-    batches: &HashMap<BatchId, RecordBatch>,
-    input_schema: &SchemaRef,
-    ts_column_index: usize,
-) -> Vec<Vec<ScalarValue>> {
-    use arrow::array::TimestampMillisecondArray;
-    
-    let mut input_values = Vec::new();
-    let input_column_count = input_schema.fields().len();
-    
-    // Create a list of (batch_id, timestamp) pairs sorted by timestamp
-    let mut entries: Vec<(BatchId, Timestamp)> = entry_batch_ids.iter()
-        .zip(entry_timestamps.iter())
-        .map(|(bid, ts)| (*bid, *ts))
-        .collect();
-    entries.sort_by_key(|(_, ts)| *ts);
-    
-    // For each batch, we need to find the rows that match our timestamps
-    // This is a simplified approach - we iterate through sorted entries
-    for (batch_id, target_ts) in entries {
-        if let Some(batch) = batches.get(&batch_id) {
-            let ts_column = batch.column(ts_column_index);
-            let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
-                .expect("Timestamp column should be TimestampMillisecondArray");
-            
-            // Find rows matching this timestamp in this batch
-            for row_idx in 0..batch.num_rows() {
-                if ts_array.value(row_idx) == target_ts {
-                    let mut row_input_values = Vec::new();
-                    for col_idx in 0..input_column_count {
-                        let array = batch.column(col_idx);
-                        let scalar_value = datafusion::common::ScalarValue::try_from_array(array, row_idx)
-                            .expect("Should be able to extract scalar value");
-                        row_input_values.push(scalar_value);
-                    }
-                    input_values.push(row_input_values);
-                    break; // Found matching row, move to next entry
-                }
-            }
-        }
-    }
-    
-    input_values
 }
 
 // creates a record batch by vertically stacking input_values and aggregated_values

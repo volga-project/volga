@@ -7,7 +7,7 @@ use arrow::array::{RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
-use futures::StreamExt;
+use futures::{future, StreamExt};
 use indexmap::IndexMap;
 
 use datafusion::scalar::ScalarValue;
@@ -18,12 +18,12 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType};
 use crate::runtime::operators::window::aggregates::VirtualPoint;
 use crate::runtime::operators::window::aggregates::{Aggregation, plain::PlainAggregation, retractable::RetractableAggregation};
-use crate::runtime::operators::window::window_operator_state::{WindowOperatorState, WindowId};
-use crate::runtime::operators::window::{AggregatorType, TileConfig};
+use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
+use crate::runtime::operators::window::{AggregatorType, Cursor, TileConfig, Tiles};
 use crate::runtime::operators::window::window_operator::{
     init, stack_concat_results, WindowConfig, WindowOperatorConfig
 };
-use crate::runtime::operators::window::data_loader::load_sorted_ranges_view;
+use crate::runtime::operators::window::data_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
 use tokio_rayon::rayon::ThreadPool;
@@ -188,27 +188,55 @@ impl WindowRequestOperator {
             return RecordBatch::new_empty(self.output_schema.clone());
         }
 
-        // Always provide window exprs for bucket arg evaluation, even if we don't execute an agg for that window.
-        let window_exprs_for_args: Vec<(WindowId, Arc<dyn WindowExpr>)> = self
-            .window_configs
-            .iter()
-            .map(|(id, cfg)| (*id, cfg.window_expr.clone()))
-            .collect();
-
         // Drop guard before IO / expensive work.
         drop(windows_state_guard);
 
         // Compute window results per window_id, keeping original request row order.
-        let mut aggregated_values: Vec<Vec<ScalarValue>> = Vec::new();
+        let windows_state_guard = self
+            .get_state()
+            .get_windows_state(key)
+            .await
+            .expect("Windows state should exist");
+        let windows_state = windows_state_guard.value();
+        let bucket_index = windows_state.bucket_index.clone();
+
+        #[derive(Clone)]
+        struct WindowSnap {
+            tiles: Option<Tiles>,
+            processed_until: Option<Cursor>,
+            accumulator_state: Option<AccumulatorState>,
+        }
+
+        let mut window_snaps: BTreeMap<WindowId, WindowSnap> = BTreeMap::new();
+        for (window_id, window_state) in &windows_state.window_states {
+            window_snaps.insert(
+                *window_id,
+                WindowSnap {
+                    tiles: window_state.tiles.clone(),
+                    processed_until: window_state.processed_until,
+                    accumulator_state: window_state.accumulator_state.clone(),
+                },
+            );
+        }
+        drop(windows_state_guard);
+
+        enum ExecKind {
+            Full,
+            Slots(Vec<usize>),
+        }
+        struct Exec {
+            window_id: WindowId,
+            agg_idx: usize,
+            kind: ExecKind,
+        }
+
+        let mut aggs: Vec<Box<dyn Aggregation>> = Vec::new();
+        let mut agg_exclude: Vec<Option<bool>> = Vec::new();
+        let mut load_plans: Vec<RangesLoadPlan> = Vec::new();
+        let mut execs: Vec<Exec> = Vec::new();
+
         for (window_id, window_config) in &self.window_configs {
-            let windows_state_guard = self
-                .get_state()
-                .get_windows_state(key)
-                .await
-                .expect("Windows state should exist");
-            let windows_state = windows_state_guard.value();
-            let window_state = windows_state
-                .window_states
+            let snap = window_snaps
                 .get(window_id)
                 .expect("Window state should exist");
 
@@ -234,44 +262,37 @@ impl WindowRequestOperator {
                 })
                 .collect();
 
-            let values = match window_config.aggregator_type {
+            match window_config.aggregator_type {
                 AggregatorType::PlainAccumulator => {
                     let agg = PlainAggregation::for_points(
                         points,
-                        &windows_state.bucket_index,
+                        &bucket_index,
                         window_config.window_expr.clone(),
-                        window_state.tiles.clone(),
-                        self.ts_column_index,
-                        *window_id as usize,
+                        snap.tiles.clone(),
                     );
                     let requests = agg.get_data_requests(exclude_current_row_opt);
-                    let views = load_sorted_ranges_view(
-                        self.get_state(),
-                        key,
-                        self.ts_column_index,
-                        &requests,
-                        agg.window_expr(),
-                    )
-                    .await;
-                    let (vals, _) = agg
-                        .produce_aggregates_from_ranges(
-                            &views,
-                            self.thread_pool.as_ref(),
-                            exclude_current_row_opt,
-                        )
-                        .await;
-                    vals
+                    let idx = aggs.len();
+                    load_plans.push(RangesLoadPlan {
+                        requests,
+                        window_expr_for_args: agg.window_expr().clone(),
+                    });
+                    agg_exclude.push(exclude_current_row_opt);
+                    aggs.push(Box::new(agg));
+                    execs.push(Exec {
+                        window_id: *window_id,
+                        agg_idx: idx,
+                        kind: ExecKind::Full,
+                    });
                 }
                 AggregatorType::RetractableAccumulator => {
-                    let processed_until = window_state
+                    let processed_until = snap
                         .processed_until
                         .expect("Retractable request points require processed_until");
-                    let base_state = window_state
+                    let base_state = snap
                         .accumulator_state
                         .clone()
                         .expect("Retractable request points require accumulator_state");
 
-                    let mut out: Vec<ScalarValue> = vec![ScalarValue::Null; points.len()];
                     let mut late_points: Vec<VirtualPoint> = Vec::new();
                     let mut late_pos: Vec<usize> = Vec::new();
                     let mut normal_points: Vec<VirtualPoint> = Vec::new();
@@ -290,73 +311,95 @@ impl WindowRequestOperator {
                     if !late_points.is_empty() {
                         let agg = PlainAggregation::for_points(
                             late_points,
-                            &windows_state.bucket_index,
+                            &bucket_index,
                             window_config.window_expr.clone(),
-                            window_state.tiles.clone(),
-                            self.ts_column_index,
-                            *window_id as usize,
+                            snap.tiles.clone(),
                         );
                         let requests = agg.get_data_requests(exclude_current_row_opt);
-                        let views = load_sorted_ranges_view(
-                            self.get_state(),
-                            key,
-                            self.ts_column_index,
-                            &requests,
-                            agg.window_expr(),
-                        )
-                        .await;
-                        let (vals, _) = agg
-                            .produce_aggregates_from_ranges(
-                                &views,
-                                self.thread_pool.as_ref(),
-                                exclude_current_row_opt,
-                            )
-                            .await;
-                        for (slot, v) in late_pos.into_iter().zip(vals.into_iter()) {
-                            out[slot] = v;
-                        }
+                        let idx = aggs.len();
+                        load_plans.push(RangesLoadPlan {
+                            requests,
+                            window_expr_for_args: agg.window_expr().clone(),
+                        });
+                        agg_exclude.push(exclude_current_row_opt);
+                        aggs.push(Box::new(agg));
+                        execs.push(Exec {
+                            window_id: *window_id,
+                            agg_idx: idx,
+                            kind: ExecKind::Slots(late_pos),
+                        });
                     }
 
                     if !normal_points.is_empty() {
                         let agg = RetractableAggregation::for_points(
                             normal_points,
-                            &windows_state.bucket_index,
+                            &bucket_index,
                             window_config.window_expr.clone(),
                             self.ts_column_index,
                             *window_id as usize,
                             Some(processed_until),
-                            Some(base_state.clone()),
+                            Some(base_state),
                         );
                         let requests = agg.get_data_requests(exclude_current_row_opt);
-                        let views = load_sorted_ranges_view(
-                            self.get_state(),
-                            key,
-                            self.ts_column_index,
-                            &requests,
-                            agg.window_expr(),
-                        )
-                        .await;
-                        let (vals, _) = agg
-                            .produce_aggregates_from_ranges(
-                                &views,
-                                self.thread_pool.as_ref(),
-                                exclude_current_row_opt,
-                            )
-                            .await;
-                        for (slot, v) in normal_pos.into_iter().zip(vals.into_iter()) {
+                        let idx = aggs.len();
+                        load_plans.push(RangesLoadPlan {
+                            requests,
+                            window_expr_for_args: agg.window_expr().clone(),
+                        });
+                        agg_exclude.push(exclude_current_row_opt);
+                        aggs.push(Box::new(agg));
+                        execs.push(Exec {
+                            window_id: *window_id,
+                            agg_idx: idx,
+                            kind: ExecKind::Slots(normal_pos),
+                        });
+                    }
+                }
+                AggregatorType::Evaluator => {}
+            }
+        }
+
+        let views_by_agg =
+            load_sorted_ranges_views(self.get_state(), key, self.ts_column_index, &load_plans).await;
+
+        let futs: Vec<_> = aggs
+            .iter()
+            .zip(views_by_agg.iter())
+            .zip(agg_exclude.iter())
+            .map(|((agg, views), exclude)| async move {
+                let (vals, _) = agg
+                    .produce_aggregates_from_ranges(views, self.thread_pool.as_ref(), *exclude)
+                    .await;
+                vals
+            })
+            .collect();
+        let vals_by_agg: Vec<Vec<ScalarValue>> = future::join_all(futs).await;
+
+        let mut aggregated_values: Vec<Vec<ScalarValue>> = Vec::with_capacity(self.window_configs.len());
+        for (window_id, window_config) in &self.window_configs {
+            if matches!(window_config.aggregator_type, AggregatorType::Evaluator) {
+                aggregated_values.push(vec![ScalarValue::Null; kept_rows.len()]);
+                continue;
+            }
+
+            let mut out: Vec<ScalarValue> = vec![ScalarValue::Null; kept_rows.len()];
+            for e in execs.iter().filter(|e| e.window_id == *window_id) {
+                let vals = vals_by_agg
+                    .get(e.agg_idx)
+                    .cloned()
+                    .unwrap_or_else(|| vec![ScalarValue::Null; kept_rows.len()]);
+                match &e.kind {
+                    ExecKind::Full => {
+                        out = vals;
+                    }
+                    ExecKind::Slots(slots) => {
+                        for (slot, v) in slots.iter().copied().zip(vals.into_iter()) {
                             out[slot] = v;
                         }
                     }
-
-                    out
                 }
-                AggregatorType::Evaluator => {
-                    // Not supported in request mode yet.
-                    vec![ScalarValue::Null; kept_rows.len()]
-                }
-            };
-
-            aggregated_values.push(values);
+            }
+            aggregated_values.push(out);
         }
 
         let input_values = get_input_values_for_rows(record_batch, &self.input_schema, &kept_rows);

@@ -17,9 +17,6 @@ enum SeekBound {
 }
 
 /// A lightweight index over a single `SortedRangeView`.
-///
-/// This mirrors the old `RowIndex` API but operates directly over `SortedRangeView`
-/// (no `SortedBucketView`, no `RowIndex`).
 pub struct SortedRangeIndex<'a> {
     bucket_range: BucketRange,
     start: Cursor,
@@ -75,10 +72,16 @@ impl<'a> SortedRangeIndex<'a> {
 
     fn last_pos_opt(&self) -> Option<RowPtr> {
         let after = self.seek_rowpos_gt(self.end);
-        let candidate = match after {
+        let mut candidate = match after {
             Some(p) => self.prev_pos(p)?,
             None => self.last_pos_in_range()?,
         };
+
+        // Clamp to `end` (we want the last row with Cursor <= end).
+        while self.get_row_pos(&candidate) > self.end {
+            candidate = self.prev_pos(candidate)?;
+        }
+
         (self.get_row_pos(&candidate) >= self.start).then_some(candidate)
     }
 
@@ -253,12 +256,15 @@ impl<'a> SortedRangeIndex<'a> {
         while bucket_ts <= self.bucket_range.end {
             if let Some(b) = self.bucket_opt(bucket_ts) {
                 if b.size() > 0 {
-                    let pos = if bucket_ts == target_bucket {
-                        self.seek_in_bucket(bucket_ts, cursor, SeekBound::Ge)?
+                    let pos_opt = if bucket_ts == target_bucket {
+                        self.seek_in_bucket(bucket_ts, cursor, SeekBound::Ge)
                     } else {
-                        RowPtr::new(bucket_ts, 0)
+                        Some(RowPtr::new(bucket_ts, 0))
                     };
-                    return (self.get_row_pos(&pos) <= self.end).then_some(pos);
+                    if let Some(pos) = pos_opt {
+                        return (self.get_row_pos(&pos) <= self.end).then_some(pos);
+                    }
+                    // No row >= cursor in this bucket; continue to next bucket.
                 }
             }
             bucket_ts = self.bucket_granularity.next_start(bucket_ts);
@@ -276,12 +282,15 @@ impl<'a> SortedRangeIndex<'a> {
         while bucket_ts <= self.bucket_range.end {
             if let Some(b) = self.bucket_opt(bucket_ts) {
                 if b.size() > 0 {
-                    let pos = if bucket_ts == target_bucket {
-                        self.seek_in_bucket(bucket_ts, cursor, SeekBound::Gt)?
+                    let pos_opt = if bucket_ts == target_bucket {
+                        self.seek_in_bucket(bucket_ts, cursor, SeekBound::Gt)
                     } else {
-                        RowPtr::new(bucket_ts, 0)
+                        Some(RowPtr::new(bucket_ts, 0))
                     };
-                    return (self.get_row_pos(&pos) <= self.end).then_some(pos);
+                    if let Some(pos) = pos_opt {
+                        return (self.get_row_pos(&pos) <= self.end).then_some(pos);
+                    }
+                    // No row > cursor in this bucket; continue to next bucket.
                 }
             }
             bucket_ts = self.bucket_granularity.next_start(bucket_ts);
@@ -371,9 +380,15 @@ impl<'a> SortedRangeIndex<'a> {
         let mut remaining = n;
         while remaining > 0 {
             cur = if back {
-                self.prev_pos(cur).expect("pos_n_rows underflow")
+                match self.prev_pos(cur) {
+                    Some(p) => p,
+                    None => return self.first_pos(),
+                }
             } else {
-                self.next_pos(cur).expect("pos_n_rows overflow")
+                match self.next_pos(cur) {
+                    Some(p) => p,
+                    None => return self.last_pos(),
+                }
             };
             remaining -= 1;
         }
@@ -385,10 +400,182 @@ impl<'a> SortedRangeIndex<'a> {
         let mut pos = self.last_pos();
         let mut remaining = offset;
         while remaining > 0 {
-            pos = self.prev_pos(pos).expect("pos_from_end underflow");
+            match self.prev_pos(pos) {
+                Some(p) => pos = p,
+                None => return self.first_pos(),
+            }
             remaining -= 1;
         }
         pos
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+
+    use crate::runtime::operators::window::aggregates::BucketRange;
+    use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeBucket, SortedRangeView};
+    use crate::runtime::operators::window::tiles::TimeGranularity;
+    use crate::runtime::operators::window::Cursor;
+    use crate::runtime::operators::window::RowPtr;
+    use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
+
+    use super::SortedRangeIndex;
+
+    fn batch_ts_seq(rows: &[(i64, u64)]) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("partition_key", DataType::Utf8, false),
+            Field::new(SEQ_NO_COLUMN_NAME, DataType::UInt64, false),
+        ]));
+
+        let ts = Arc::new(TimestampMillisecondArray::from(
+            rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+        ));
+        let v = Arc::new(Float64Array::from(vec![0.0; rows.len()]));
+        let pk = Arc::new(StringArray::from(vec!["A"; rows.len()]));
+        let seq = Arc::new(UInt64Array::from(
+            rows.iter().map(|r| r.1).collect::<Vec<_>>(),
+        ));
+
+        RecordBatch::try_new(schema, vec![ts, v, pk, seq]).expect("test batch")
+    }
+
+    fn view(
+        gran: TimeGranularity,
+        bucket_range: BucketRange,
+        start: Cursor,
+        end: Cursor,
+        buckets: Vec<(i64, Vec<(i64, u64)>)>,
+    ) -> SortedRangeView {
+        let request = DataRequest {
+            bucket_range,
+            bounds: DataBounds::All,
+        };
+        let mut map: HashMap<i64, SortedRangeBucket> = HashMap::new();
+        for (bucket_ts, rows) in buckets {
+            let b = batch_ts_seq(&rows);
+            map.insert(bucket_ts, SortedRangeBucket::new(bucket_ts, b, 0, 3, Arc::new(vec![])));
+        }
+        SortedRangeView::new(request, gran, start, end, map)
+    }
+
+    #[test]
+    fn seek_rowpos_ge_scans_forward_across_buckets() {
+        let gran = TimeGranularity::Seconds(1);
+        let v = view(
+            gran,
+            BucketRange::new(1000, 3000),
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            vec![
+                (1000, vec![]),
+                (2000, vec![(2000, 0)]),
+                (3000, vec![(3000, 0)]),
+            ],
+        );
+        let idx = SortedRangeIndex::new(&v);
+
+        let p = idx.seek_rowpos_ge(Cursor::new(1500, 0)).expect("should find");
+        assert_eq!(p, RowPtr::new(2000, 0));
+    }
+
+    #[test]
+    fn seek_rowpos_eq_is_strict_to_target_bucket() {
+        let gran = TimeGranularity::Seconds(1);
+        let v = view(
+            gran,
+            BucketRange::new(1000, 3000),
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            vec![(1000, vec![(1000, 0)]), (2000, vec![(2000, 0)]), (3000, vec![(3000, 0)])],
+        );
+        let idx = SortedRangeIndex::new(&v);
+
+        // Cursor maps to bucket 1000, but isn't present there.
+        assert!(idx.seek_rowpos_eq(Cursor::new(1500, 0)).is_none());
+    }
+
+    #[test]
+    fn next_prev_cross_bucket_boundaries() {
+        let gran = TimeGranularity::Seconds(1);
+        let v = view(
+            gran,
+            BucketRange::new(1000, 3000),
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            vec![
+                (1000, vec![(1000, 0), (1100, 1)]),
+                (2000, vec![(2000, 2)]),
+                (3000, vec![]),
+            ],
+        );
+        let idx = SortedRangeIndex::new(&v);
+
+        let last_in_1000 = RowPtr::new(1000, 1);
+        assert_eq!(idx.next_pos(last_in_1000), Some(RowPtr::new(2000, 0)));
+        assert_eq!(idx.prev_pos(RowPtr::new(2000, 0)), Some(last_in_1000));
+    }
+
+    #[test]
+    fn pos_n_rows_clamps_instead_of_panicking() {
+        let gran = TimeGranularity::Seconds(1);
+        let v = view(
+            gran,
+            BucketRange::new(1000, 1000),
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            vec![(1000, vec![(1000, 0), (1100, 1)])],
+        );
+        let idx = SortedRangeIndex::new(&v);
+
+        let first = idx.first_pos();
+        let last = idx.last_pos();
+        assert_eq!(idx.pos_n_rows(&first, 10, true), first);
+        assert_eq!(idx.pos_n_rows(&last, 10, false), last);
+    }
+
+    #[test]
+    fn pos_from_end_clamps_instead_of_panicking() {
+        let gran = TimeGranularity::Seconds(1);
+        let v = view(
+            gran,
+            BucketRange::new(1000, 1000),
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            vec![(1000, vec![(1000, 0), (1100, 1)])],
+        );
+        let idx = SortedRangeIndex::new(&v);
+
+        assert_eq!(idx.pos_from_end(0), idx.last_pos());
+        assert_eq!(idx.pos_from_end(999), idx.first_pos());
+    }
+
+    #[test]
+    fn first_last_respect_cursor_bounds() {
+        let gran = TimeGranularity::Seconds(1);
+        let v = view(
+            gran,
+            BucketRange::new(1000, 3000),
+            Cursor::new(1500, 0),
+            Cursor::new(2500, u64::MAX),
+            vec![
+                (1000, vec![(1000, 0)]),
+                (2000, vec![(2000, 0)]),
+                (3000, vec![(3000, 0)]),
+            ],
+        );
+        let idx = SortedRangeIndex::new(&v);
+
+        assert_eq!(idx.first_pos(), RowPtr::new(2000, 0));
+        assert_eq!(idx.last_pos(), RowPtr::new(2000, 0));
     }
 }
 
