@@ -358,7 +358,10 @@ impl BucketIndex {
             update_buckets.last().unwrap().timestamp,
         ));
 
-        let retract_range = if retract_buckets.is_empty() {
+        let retract_range = if prev.ts == i64::MIN {
+            // First run: retract happens within the update stream itself.
+            update_range
+        } else if retract_buckets.is_empty() {
             None
         } else {
             Some(BucketRange::new(
@@ -449,13 +452,16 @@ impl BucketIndex {
             update_buckets.last().unwrap().timestamp,
         ));
 
-        let retract_range = if retract_buckets.is_empty() {
+        let retract_range = if prev.ts == i64::MIN {
+            // First run: retract happens within the update stream itself.
+            update_range
+        } else if retract_buckets.is_empty() {
             None
         } else {
             Some(BucketRange::new(
                 retract_buckets.first().unwrap().timestamp,
                 retract_buckets.last().unwrap().timestamp,
-            ))
+                ))
         };
 
         SlideRangeInfo {

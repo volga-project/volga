@@ -115,10 +115,11 @@ impl WindowOperatorState {
             .saturating_add(record_batch_with_seq.num_rows() as u64);
 
         // Drop rows according to watermark-based policy:
-        // - If watermark is known, drop anything older than (watermark - lateness).
+        // - If watermark is known, drop anything with ts <= watermark (already finalized).
+        //   (We currently don't support late-event recomputation.)
         // - Otherwise: keep all rows (can't classify lateness yet).
-        let (record_batch, dropped_rows) = if let (Some(lateness_ms), Some(wm)) = (lateness, watermark_ts) {
-            drop_too_late_entries(&record_batch_with_seq, ts_column_index, lateness_ms, wm)
+        let (record_batch, dropped_rows) = if let Some(wm) = watermark_ts {
+            drop_too_late_entries(&record_batch_with_seq, ts_column_index, 0, wm)
         } else {
             (record_batch_with_seq.clone(), 0)
         };
@@ -272,21 +273,6 @@ pub fn create_empty_windows_state(window_ids: &[WindowId], tiling_configs: &[Opt
     }
 }
 
-/// Get min and max timestamps from a batch
-fn get_batch_timestamp_range(batch: &RecordBatch, ts_column_index: usize) -> (Timestamp, Timestamp) {
-    use arrow::array::TimestampMillisecondArray;
-    use arrow::compute::kernels::aggregate::{min, max};
-    
-    let ts_column = batch.column(ts_column_index);
-    let ts_array = ts_column.as_any().downcast_ref::<TimestampMillisecondArray>()
-        .expect("Timestamp column should be TimestampMillisecondArray");
-    
-    let min_ts = min(ts_array).expect("Should have min timestamp");
-    let max_ts = max(ts_array).expect("Should have max timestamp");
-    
-    (min_ts, max_ts)
-}
-
 fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
     use arrow::array::UInt64Array;
 
@@ -346,9 +332,9 @@ fn get_batch_rowpos_range(
     (min_pos, max_pos)
 }
 
-/// Drop entries that are too late based on lateness configuration.
+/// Drop entries that are too late based on a watermark cutoff.
 ///
-/// Drops rows where `ts < (watermark_ts - lateness_ms)`.
+/// Drops rows where `ts <= (watermark_ts - lateness_ms)`.
 pub fn drop_too_late_entries(
     record_batch: &RecordBatch,
     ts_column_index: usize,
@@ -356,7 +342,7 @@ pub fn drop_too_late_entries(
     watermark_ts: Timestamp,
 ) -> (RecordBatch, usize) {
     use arrow::compute::filter_record_batch;
-    use arrow::compute::kernels::cmp::gt_eq;
+    use arrow::compute::kernels::cmp::gt;
     use arrow::array::{TimestampMillisecondArray, Scalar};
     
     let ts_column = record_batch.column(ts_column_index);
@@ -367,7 +353,7 @@ pub fn drop_too_late_entries(
     let cutoff_array = TimestampMillisecondArray::from_value(cutoff_timestamp, 1);
     let cutoff_scalar = Scalar::new(&cutoff_array);
     
-    let keep_mask = gt_eq(ts_column, &cutoff_scalar)
+    let keep_mask = gt(ts_column, &cutoff_scalar)
         .expect("Should be able to compare with cutoff timestamp");
     
     if keep_mask.true_count() == record_batch.num_rows() {

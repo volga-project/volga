@@ -8,7 +8,7 @@ use tokio_rayon::rayon::ThreadPool;
 use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
 use crate::runtime::operators::window::index::{BucketIndex, get_window_length_ms, get_window_size_rows};
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::runtime::operators::window::{RowPtr, Tiles, TimeGranularity, WindowAggregator, create_window_aggregator};
+use crate::runtime::operators::window::{RowPtr, Tiles, WindowAggregator, create_window_aggregator};
 use crate::storage::batch_store::Timestamp;
 
 use crate::runtime::operators::window::aggregates::VirtualPoint;

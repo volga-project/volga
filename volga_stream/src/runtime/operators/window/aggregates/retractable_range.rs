@@ -126,7 +126,7 @@ impl Aggregation for RetractableRangeAggregation {
             .retract_range
             .map(|r| SortedRangeIndex::new_in_bucket_range(view, r));
 
-        let (aggs, state) = run_retractable_accumulator_from_indices(
+        let (aggs, state) = run_retractable_accumulator(
             &self.window_expr,
             &updates,
             retracts.as_ref(),
@@ -142,7 +142,7 @@ impl Aggregation for RetractableRangeAggregation {
     }
 }
 
-fn run_retractable_accumulator_from_indices(
+fn run_retractable_accumulator(
     window_expr: &Arc<dyn WindowExpr>,
     updates: &SortedRangeIndex<'_>,
     retracts: Option<&SortedRangeIndex<'_>>,
@@ -216,24 +216,42 @@ fn run_retractable_accumulator_from_indices(
 
     let num_updates = updates.count_between(&update_pos, &end_pos);
 
-    let mut retract_pos = match (retracts, is_rows_window) {
-        (None, _) => RowPtr::new(0, 0),
-        (Some(retracts), true) => window_logic::initial_retract_pos_rows(
-            retracts,
-            updates,
-            update_pos,
-            window_size,
-            row_distance,
-            num_updates,
-        ),
-        (Some(retracts), false) => window_logic::initial_retract_pos_range(
-            retracts,
-            prev_processed_until.expect("Should have previous processed until"),
-            window_length,
-        ),
-    };
-
     let mut results = Vec::with_capacity(num_updates);
+
+    let first_run = prev_processed_until.is_none();
+
+    // Retract pointers (when a retracts index exists).
+    // For first-run we retract within the same range as updates (planning sets retract_range=update_range).
+    let mut rows_retract_pos: Option<RowPtr> = None;
+    let mut rows_seen: usize = 0;
+    let mut range_retract_pos: Option<RowPtr> = None;
+
+    if let Some(retracts) = retracts {
+        if is_rows_window {
+            rows_retract_pos = if first_run {
+                Some(retracts.first_pos())
+            } else {
+                Some(window_logic::initial_retract_pos_rows(
+                    retracts,
+                    updates,
+                    update_pos,
+                    window_size,
+                    row_distance,
+                    num_updates,
+                ))
+            };
+        } else {
+            range_retract_pos = if first_run {
+                Some(retracts.first_pos())
+            } else {
+                Some(window_logic::initial_retract_pos_range(
+                    retracts,
+                    prev_processed_until.expect("Should have previous processed until"),
+                    window_length,
+                ))
+            };
+        }
+    }
 
     loop {
         let update_args = updates.get_row_args(&update_pos);
@@ -243,15 +261,29 @@ fn run_retractable_accumulator_from_indices(
 
         if is_rows_window {
             if let Some(retracts) = retracts {
-                let retract_args = retracts.get_row_args(&retract_pos);
-                accumulator
-                    .retract_batch(&retract_args)
-                    .expect("Should be able to retract from accumulator");
-
-                if update_pos != end_pos {
-                    retract_pos = retracts
-                        .next_pos(retract_pos)
-                        .expect("Retracts should have a next position for each update");
+                if first_run {
+                    // First run: retract within the same stream once the ROWS window is full.
+                    rows_seen += 1;
+                    if rows_seen > window_size {
+                        if let Some(rp) = rows_retract_pos {
+                            let retract_args = retracts.get_row_args(&rp);
+                            accumulator
+                                .retract_batch(&retract_args)
+                                .expect("Should be able to retract from accumulator");
+                            rows_retract_pos = retracts.next_pos(rp);
+                        }
+                    }
+                } else {
+                    // Normal case: exactly one retract per update, from the precomputed retract range.
+                    let rp = rows_retract_pos.expect("rows retract_pos must be set");
+                    let retract_args = retracts.get_row_args(&rp);
+                    accumulator
+                        .retract_batch(&retract_args)
+                        .expect("Should be able to retract from accumulator");
+                    if update_pos != end_pos {
+                        rows_retract_pos =
+                            Some(retracts.next_pos(rp).expect("must have next retract pos"));
+                    }
                 }
             }
         } else {
@@ -259,18 +291,22 @@ fn run_retractable_accumulator_from_indices(
             let window_start = update_ts - window_length;
 
             if let Some(retracts) = retracts {
-                loop {
-                    let retract_ts = retracts.get_timestamp(&retract_pos);
-                    if retract_ts < window_start {
-                        let retract_args = retracts.get_row_args(&retract_pos);
-                        accumulator
-                            .retract_batch(&retract_args)
-                            .expect("Should be able to retract from accumulator");
-                        let Some(next) = retracts.next_pos(retract_pos) else { break };
-                        retract_pos = next;
-                    } else {
+                // Retract all rows strictly before the current window start.
+                //
+                // On first run `retracts` is the same range as `updates`, so we must not retract the
+                // current row (it has just been updated into the accumulator).
+                while let Some(rp) = range_retract_pos {
+                    if first_run && rp == update_pos {
                         break;
                     }
+                    if retracts.get_timestamp(&rp) >= window_start {
+                        break;
+                    }
+                    let retract_args = retracts.get_row_args(&rp);
+                    accumulator
+                        .retract_batch(&retract_args)
+                        .expect("Should be able to retract from accumulator");
+                    range_retract_pos = retracts.next_pos(rp);
                 }
             }
         }

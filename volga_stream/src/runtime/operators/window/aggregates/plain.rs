@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::ArrayRef;
@@ -179,16 +178,4 @@ fn window_slices(
     (row_index.get_args_in_range(&start, &end), vec![], vec![])
 }
 
-pub(super) fn last_row_le_ts(idx: &SortedRangeIndex, ts: Timestamp) -> Option<RowPtr> {
-    if idx.is_empty() {
-        return None;
-    }
-    let first_ts = idx.get_timestamp(&idx.first_pos());
-    if first_ts > ts {
-        return None;
-    }
-    match idx.seek_rowpos_gt(Cursor::new(ts, u64::MAX)) {
-        Some(after) => idx.prev_pos(after),
-        None => Some(idx.last_pos()),
-    }
-}
+// (helper removed; points impl uses a local version)

@@ -8,7 +8,6 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use futures::{future, StreamExt};
-use indexmap::IndexMap;
 
 use datafusion::scalar::ScalarValue;
 
@@ -28,7 +27,6 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
 use tokio_rayon::rayon::ThreadPool;
 use tokio::time::{sleep, Duration, Instant};
-use datafusion::physical_plan::WindowExpr;
 
 #[derive(Debug, Clone)]
 pub struct WindowRequestOperatorConfig {
