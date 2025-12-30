@@ -101,21 +101,6 @@ pub fn first_update_pos(idx: &SortedRangeIndex, prev_processed_until: Option<Cur
     }
 }
 
-/// ROWS retract start position logic extracted from `retractable.rs`.
-pub fn initial_retract_pos_rows(
-    retracts: &SortedRangeIndex,
-    updates: &SortedRangeIndex,
-    update_pos: RowPtr,
-    window_size: usize,
-    row_distance: usize,
-    num_updates: usize,
-) -> RowPtr {
-    let update_start_offset = updates.count_between(&updates.first_pos(), &update_pos) - 1;
-    let retract_end_offset = window_size.saturating_sub(row_distance + update_start_offset);
-    let retract_start_offset = retract_end_offset + num_updates;
-    retracts.pos_from_end(retract_start_offset)
-}
-
 /// RANGE retract start position logic extracted from `retractable.rs`.
 pub fn initial_retract_pos_range(
     retracts: &SortedRangeIndex,

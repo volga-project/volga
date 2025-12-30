@@ -340,10 +340,12 @@ impl Tiles {
             if num_tiles > 0 {
                 for i in 0..num_tiles {
                     let tile_start = first_tile_ts + i * tile_duration;
-                    let tile = tiles_for_granularity.get(&tile_start)
-                        .expect("Tile should exist for covered range");
-                    // TODO return refs instead of cloning
-                    selected_tiles.push(tile.clone());
+                    // Tiles are materialized only for intervals that have data. Gaps are allowed,
+                    // so a fully-covered time range may still have missing tiles (empty intervals).
+                    if let Some(tile) = tiles_for_granularity.get(&tile_start) {
+                        // TODO return refs instead of cloning
+                        selected_tiles.push(tile.clone());
+                    }
                 }
 
                 range_start = first_tile_ts + num_tiles * tile_duration;

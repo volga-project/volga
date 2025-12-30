@@ -188,6 +188,7 @@ impl Aggregation for PlainPointsAggregation {
         crate::runtime::operators::window::AggregatorType::PlainAccumulator
     }
 
+    // TODO move data requests gen logic here, not need to have self.data_requests
     fn get_data_requests(&self, _exclude_current_row: Option<bool>) -> Vec<DataRequest> {
         self.data_requests.clone()
     }

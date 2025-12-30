@@ -60,9 +60,6 @@ pub struct SlideRangeInfo {
     pub update_range: Option<BucketRange>,
     pub retract_range: Option<BucketRange>,
     pub new_processed_until: Cursor,
-    /// Number of rows between retract's last bucket end and update's first bucket start.
-    /// Used for ROWS window exact retract calculation at aggregation layer.
-    pub row_distance: usize,
 }
 
 /// Bucket-level index using bucket timestamps.
@@ -317,7 +314,6 @@ impl BucketIndex {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
-                row_distance: 0,
             };
         }
 
@@ -337,7 +333,6 @@ impl BucketIndex {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
-                row_distance: 0,
             };
         }
 
@@ -374,7 +369,6 @@ impl BucketIndex {
             update_range,
             retract_range,
             new_processed_until: new_end,
-            row_distance: 0,
         }
     }
 
@@ -385,7 +379,6 @@ impl BucketIndex {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
-                row_distance: 0,
             };
         }
 
@@ -405,47 +398,10 @@ impl BucketIndex {
                 update_range: None,
                 retract_range: None,
                 new_processed_until: prev,
-                row_distance: 0,
             };
         }
 
-        let (retract_buckets, row_distance) = if prev.ts > i64::MIN && self.total_rows > window_size {
-            let new_start_bucket_ts = update_buckets.first().unwrap().timestamp;
-
-            let mut rows_counted = 0;
-            let mut old_end_bucket_ts: Option<Timestamp> = None;
-            let mut old_start_bucket_ts: Option<Timestamp> = None;
-
-            for (&bucket_ts, bucket) in self.buckets.range(..new_start_bucket_ts).rev() {
-                if old_end_bucket_ts.is_none() {
-                    old_end_bucket_ts = Some(bucket_ts);
-                }
-                old_start_bucket_ts = Some(bucket_ts);
-                rows_counted += bucket.row_count;
-                if rows_counted >= window_size {
-                    break;
-                }
-            }
-
-            match (old_start_bucket_ts, old_end_bucket_ts) {
-                (Some(old_start), Some(old_end)) => {
-                    let retract_buckets: Vec<&Bucket> = self.buckets
-                        .range(old_start..=old_end)
-                        .map(|(_, b)| b)
-                        .collect();
-
-                    let row_distance: usize = self.buckets
-                        .range((old_end + 1)..new_start_bucket_ts)
-                        .map(|(_, b)| b.row_count)
-                        .sum();
-
-                    (retract_buckets, row_distance)
-                }
-                _ => (vec![], 0),
-            }
-        } else {
-            (vec![], 0)
-        };
+        let new_start_bucket_ts = update_buckets.first().unwrap().timestamp;
 
         let update_range = Some(BucketRange::new(
             update_buckets.first().unwrap().timestamp,
@@ -455,20 +411,26 @@ impl BucketIndex {
         let retract_range = if prev.ts == i64::MIN {
             // First run: retract happens within the update stream itself.
             update_range
-        } else if retract_buckets.is_empty() {
-            None
         } else {
-            Some(BucketRange::new(
-                retract_buckets.first().unwrap().timestamp,
-                retract_buckets.last().unwrap().timestamp,
-                ))
+            // Candidate retract span for ROWS: walk backwards (bucket-level) to cover `window_size`
+            // rows, but always include the first update bucket (so we can locate prev_processed_until)
+            // and all update buckets (so retractions can move into updates on large steps).
+            let mut rows_counted = 0usize;
+            let mut start_ts = new_start_bucket_ts;
+            for (&bucket_ts, bucket) in self.buckets.range(..=new_start_bucket_ts).rev() {
+                start_ts = bucket_ts;
+                rows_counted += bucket.row_count;
+                if rows_counted >= window_size {
+                    break;
+                }
+            }
+            Some(BucketRange::new(start_ts, update_buckets.last().unwrap().timestamp))
         };
 
         SlideRangeInfo {
             update_range,
             retract_range,
             new_processed_until: new_end,
-            row_distance,
         }
     }
 }
@@ -576,7 +538,9 @@ mod tests {
         let result = index.slide_range_window(window_length, prev_end, index.max_pos_seen());
         let update_r = result.update_range.unwrap();
         assert_range(update_r, 1000, 2000);
-        assert!(result.retract_range.is_none());
+        // First run (prev == MIN): retract happens within the update stream itself.
+        let retract_r = result.retract_range.unwrap();
+        assert_range(retract_r, 1000, 2000);
         assert_eq!(result.new_processed_until.ts, 2500);
         prev_end = result.new_processed_until;
 
@@ -613,7 +577,9 @@ mod tests {
         let result = index.slide_rows_window(window_size, prev_end, index.max_pos_seen());
         let update_r = result.update_range.unwrap();
         assert_range(update_r, 1000, 2000);
-        assert!(result.retract_range.is_none());
+        // First run (prev == MIN): retract happens within the update stream itself.
+        let retract_r = result.retract_range.unwrap();
+        assert_range(retract_r, 1000, 2000);
         assert_eq!(result.new_processed_until.ts, 2500);
         prev_end = result.new_processed_until;
 
@@ -627,9 +593,72 @@ mod tests {
         assert_range(update_r, 2000, 4000);
 
         let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1000, 1500);
+        assert_range(retract_r, 1500, 4000);
 
         assert_eq!(result.new_processed_until.ts, 4500);
+    }
+
+    #[test]
+    fn test_slide_rows_window_same_bucket_step_keeps_ranges_in_bucket() {
+        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
+
+        index.insert_batch(make_batch_id(1000, 1), make_pos(1100, 0), make_pos(1900, 9), 10);
+
+        // A step that stays within the same bucket timestamp.
+        let prev = make_pos(1200, 1);
+        let new_end = make_pos(1800, 8);
+        let result = index.slide_rows_window(3, prev, new_end);
+
+        let update_r = result.update_range.unwrap();
+        assert_range(update_r, 1000, 1000);
+
+        let retract_r = result.retract_range.unwrap();
+        assert_range(retract_r, 1000, 1000);
+        assert_eq!(result.new_processed_until, new_end);
+    }
+
+    #[test]
+    fn test_slide_rows_window_window_bigger_than_total_rows_clamps_to_first_bucket() {
+        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
+
+        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 0), make_pos(1500, 1), 2);
+        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 2), make_pos(2000, 2), 1);
+
+        let prev = make_pos(1500, 1);
+        let new_end = make_pos(2000, 2);
+        let result = index.slide_rows_window(10, prev, new_end);
+
+        let update_r = result.update_range.unwrap();
+        assert_range(update_r, 1000, 2000);
+
+        let retract_r = result.retract_range.unwrap();
+        assert_range(retract_r, 1000, 2000);
+    }
+
+    #[test]
+    fn test_slide_rows_window_retract_range_includes_update_buckets_for_large_steps() {
+        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
+
+        // Build history: bucket 1000 has many rows, bucket 2000 one row.
+        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 0), make_pos(1900, 4), 5);
+        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 5), make_pos(2000, 5), 1);
+
+        // First run to establish a prev_processed_until.
+        let first = index.slide_rows_window(3, Cursor::new(i64::MIN, 0), index.max_pos_seen());
+        let prev = first.new_processed_until;
+
+        // Large step adds more buckets, update starts at bucket 2000 and spans to 4000.
+        index.insert_batch(make_batch_id(3000, 3), make_pos(3000, 6), make_pos(3000, 6), 1);
+        index.insert_batch(make_batch_id(4000, 4), make_pos(4000, 7), make_pos(4000, 7), 1);
+
+        let result = index.slide_rows_window(3, prev, index.max_pos_seen());
+
+        let update_r = result.update_range.unwrap();
+        assert_range(update_r, 2000, 4000);
+
+        // Retract range must include all update buckets so retract can move into updates.
+        let retract_r = result.retract_range.unwrap();
+        assert_range(retract_r, 1000, 4000);
     }
 
     #[test]

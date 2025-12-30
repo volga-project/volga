@@ -14,7 +14,6 @@ use super::super::{create_window_aggregator, merge_accumulator_state, WindowAggr
 use super::VirtualPoint;
 use super::BucketRange;
 use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
-use crate::runtime::operators::window::RowPtr;
 
 #[derive(Debug)]
 pub struct RetractablePointsAggregation {
@@ -80,6 +79,7 @@ impl RetractablePointsAggregation {
         &self.window_expr
     }
 
+    // we should only load retratcs range, not whole base window range
     pub(super) fn get_data_requests(&self, exclude_current_row: Option<bool>) -> Vec<DataRequest> {
         let processed_until = self.processed_until;
         let base_window_range = self.base_window_range;
@@ -103,14 +103,11 @@ impl RetractablePointsAggregation {
 
         let max_point_ts = self.points.iter().map(|p| p.ts).max().unwrap_or(processed_until.ts);
         let bounds = if window_frame.units == WindowFrameUnits::Range {
-            let min_start_ts = self
-                .points
-                .iter()
-                .map(|p| p.ts.saturating_sub(wl))
-                .min()
-                .unwrap_or(i64::MIN);
             DataBounds::Time {
-                start_ts: min_start_ts,
+                // We must load enough history to be able to retract rows that are already included
+                // in the stored accumulator state when sliding from `processed_until` to points.
+                // That history starts at the base window start at `processed_until`.
+                start_ts: processed_until.ts.saturating_sub(wl),
                 end_ts: max_point_ts,
             }
         } else if window_frame.units == WindowFrameUnits::Rows && ws > 0 {
@@ -180,7 +177,7 @@ impl RetractablePointsAggregation {
             WindowFrameUnits::Rows => {
                 let window_size = get_window_size_rows(window_frame);
                 let total_stored = idx.count_between(&idx.first_pos(), &processed_pos);
-                let mut base_window_stored = total_stored.min(window_size);
+                let base_window_stored = total_stored.min(window_size);
 
                 // Oldest row currently in the base window state.
                 let base_window_start = if base_window_stored > 0 {
@@ -230,11 +227,8 @@ impl RetractablePointsAggregation {
                             if window_size > 0 && window_count == window_size {
                                 let args = idx.get_row_args(&window_start);
                                 acc.retract_batch(&args).expect("retract_batch failed");
-                                window_start = idx
-                                    .next_pos(window_start)
-                                    .unwrap_or_else(|| window_start);
                             } else {
-                                window_count += 1;
+                                // window not full; no retract needed
                             }
 
                             if let Some(args) = &p.args {

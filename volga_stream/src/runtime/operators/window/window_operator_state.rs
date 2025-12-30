@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::common::Key;
 use crate::runtime::operators::window::window_operator::WindowConfig;
+use crate::runtime::operators::window::aggregates::BucketRange;
 use crate::runtime::operators::window::{BucketIndex, Cursor, SEQ_NO_COLUMN_NAME, TileConfig, Tiles, TimeGranularity};
 use crate::runtime::operators::window::index::SortedBucketBatch;
 use crate::runtime::state::OperatorState;
@@ -83,7 +84,7 @@ impl WindowOperatorState {
         window_configs: &BTreeMap<WindowId, WindowConfig>,
         tiling_configs: &Vec<Option<TileConfig>>,
         ts_column_index: usize,
-        lateness: Option<i64>,
+        _lateness: Option<i64>,
         watermark_ts: Option<Timestamp>,
         batch: RecordBatch,
     ) -> usize {
@@ -156,6 +157,8 @@ impl WindowOperatorState {
 
     pub async fn prune(&self, key: &Key, lateness: i64, window_configs: &BTreeMap<WindowId, WindowConfig>) {
         use crate::runtime::operators::window::index::get_window_length_ms;
+        use crate::runtime::operators::window::index::get_window_size_rows;
+        use datafusion::logical_expr::WindowFrameUnits;
         
         let arc_rwlock = self.window_states.get(key).expect("Windows state should exist").value().clone();
         let mut windows_state = arc_rwlock.write().await;
@@ -168,10 +171,40 @@ impl WindowOperatorState {
             let window_frame = window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(&window_id).expect("Window state should exist");
             
-            // Calculate cutoff: processed_until.ts - window_length - lateness
-            let window_length = get_window_length_ms(window_frame);
             let window_end_ts = window_state.processed_until.map(|p| p.ts).unwrap_or(i64::MIN);
-            let window_cutoff = window_end_ts - window_length - lateness;
+            let window_cutoff = match window_frame.units {
+                WindowFrameUnits::Rows => {
+                    // ROWS windows are count-based (last N rows), so pruning must also be count-based.
+                    // We keep enough buckets to cover the last `window_size` rows ending at roughly
+                    // `processed_until.ts - lateness`.
+                    let window_size = get_window_size_rows(window_frame);
+                    if window_size == 0 || window_end_ts == i64::MIN {
+                        0
+                    } else if windows_state.bucket_index.is_empty() {
+                        0
+                    } else {
+                        let search_ts = window_end_ts.saturating_sub(lateness);
+                        let end_bucket_ts = windows_state
+                            .bucket_index
+                            .bucket_granularity()
+                            .start(search_ts);
+                        let all_ts = windows_state.bucket_index.bucket_timestamps();
+                        let first_ts = all_ts.first().copied().unwrap_or(0);
+                        let last_ts = all_ts.last().copied().unwrap_or(first_ts);
+                        let within = BucketRange::new(first_ts, end_bucket_ts.min(last_ts));
+                        windows_state
+                            .bucket_index
+                            .plan_rows_tail(search_ts, window_size, within)
+                            .unwrap_or(within)
+                            .start
+                    }
+                }
+                _ => {
+                    // RANGE windows: cutoff = processed_until.ts - window_length - lateness
+                    let window_length = get_window_length_ms(window_frame);
+                    window_end_ts - window_length - lateness
+                }
+            };
 
             min_cutoff_timestamp = min_cutoff_timestamp.min(window_cutoff);
             
