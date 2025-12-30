@@ -355,6 +355,47 @@ impl Tiles {
         selected_tiles
     }
 
+    /// Compute tiles that are fully inside the requested range and the raw-data gaps that remain.
+    ///
+    /// The returned gaps are timestamp ranges that may still include tile boundaries (i.e. they can
+    /// overlap tiles by timestamp). This is intentional: it keeps the API simple and safe with
+    /// duplicate timestamps at boundaries; the compute path (`tiled_split`) is responsible for
+    /// avoiding double-counting.
+    pub fn coverage_gaps(
+        &self,
+        start_ts: Timestamp,
+        end_ts: Timestamp,
+    ) -> (Vec<Tile>, Vec<(Timestamp, Timestamp)>) {
+        if start_ts > end_ts {
+            return (Vec::new(), Vec::new());
+        }
+
+        // We treat the window request as inclusive at both ends. `get_tiles_for_range` works with
+        // half-open tile semantics, but we can still use it to find candidate tiles and then
+        // enforce "strictly inside" constraints.
+        let mut tiles = self.get_tiles_for_range(start_ts, end_ts);
+        tiles.retain(|t| t.tile_start > start_ts && t.tile_end <= end_ts);
+        tiles.sort_by_key(|t| (t.tile_start, t.tile_end));
+
+        if tiles.is_empty() {
+            return (Vec::new(), vec![(start_ts, end_ts)]);
+        }
+
+        let mut gaps: Vec<(Timestamp, Timestamp)> = Vec::new();
+        let mut cur = start_ts;
+        for t in &tiles {
+            if cur < t.tile_start {
+                gaps.push((cur, t.tile_start));
+            }
+            cur = cur.max(t.tile_end);
+        }
+        if cur < end_ts {
+            gaps.push((cur, end_ts));
+        }
+
+        (tiles, gaps)
+    }
+
     pub fn compute_aggregate_for_range(&self, start_time: Timestamp, end_time: Timestamp) -> ScalarValue {
         let tiles = self.get_tiles_for_range(start_time, end_time);
         

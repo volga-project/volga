@@ -229,7 +229,6 @@ impl WindowRequestOperator {
         }
 
         let mut aggs: Vec<Box<dyn Aggregation>> = Vec::new();
-        let mut agg_exclude: Vec<Option<bool>> = Vec::new();
         let mut load_plans: Vec<RangesLoadPlan> = Vec::new();
         let mut execs: Vec<Exec> = Vec::new();
 
@@ -239,7 +238,6 @@ impl WindowRequestOperator {
                 .expect("Window state should exist");
 
             let exclude_current_row = window_config.exclude_current_row.unwrap_or(false);
-            let exclude_current_row_opt = Some(exclude_current_row);
 
             // Build points with per-row args (only if we might include current row).
             let points: Vec<VirtualPoint> = kept_rows
@@ -267,14 +265,14 @@ impl WindowRequestOperator {
                         &bucket_index,
                         window_config.window_expr.clone(),
                         snap.tiles.clone(),
+                        exclude_current_row,
                     );
-                    let requests = agg.get_data_requests(exclude_current_row_opt);
+                    let requests = agg.get_data_requests();
                     let idx = aggs.len();
                     load_plans.push(RangesLoadPlan {
                         requests,
                         window_expr_for_args: agg.window_expr().clone(),
                     });
-                    agg_exclude.push(exclude_current_row_opt);
                     aggs.push(Box::new(agg));
                     execs.push(Exec {
                         window_id: *window_id,
@@ -312,14 +310,14 @@ impl WindowRequestOperator {
                             &bucket_index,
                             window_config.window_expr.clone(),
                             snap.tiles.clone(),
+                            exclude_current_row,
                         );
-                        let requests = agg.get_data_requests(exclude_current_row_opt);
+                        let requests = agg.get_data_requests();
                         let idx = aggs.len();
                         load_plans.push(RangesLoadPlan {
                             requests,
                             window_expr_for_args: agg.window_expr().clone(),
                         });
-                        agg_exclude.push(exclude_current_row_opt);
                         aggs.push(Box::new(agg));
                         execs.push(Exec {
                             window_id: *window_id,
@@ -333,18 +331,16 @@ impl WindowRequestOperator {
                             normal_points,
                             &bucket_index,
                             window_config.window_expr.clone(),
-                            self.ts_column_index,
-                            *window_id as usize,
                             Some(processed_until),
                             Some(base_state),
+                            exclude_current_row,
                         );
-                        let requests = agg.get_data_requests(exclude_current_row_opt);
+                        let requests = agg.get_data_requests();
                         let idx = aggs.len();
                         load_plans.push(RangesLoadPlan {
                             requests,
                             window_expr_for_args: agg.window_expr().clone(),
                         });
-                        agg_exclude.push(exclude_current_row_opt);
                         aggs.push(Box::new(agg));
                         execs.push(Exec {
                             window_id: *window_id,
@@ -363,10 +359,9 @@ impl WindowRequestOperator {
         let futs: Vec<_> = aggs
             .iter()
             .zip(views_by_agg.iter())
-            .zip(agg_exclude.iter())
-            .map(|((agg, views), exclude)| async move {
+            .map(|(agg, views)| async move {
                 let (vals, _) = agg
-                    .produce_aggregates_from_ranges(views, self.thread_pool.as_ref(), *exclude)
+                    .produce_aggregates_from_ranges(views, self.thread_pool.as_ref())
                     .await;
                 vals
             })
@@ -529,7 +524,9 @@ mod tests {
     use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::operators::operator::OperatorConfig;
-    use crate::runtime::operators::window::window_operator::{ExecutionMode, WindowOperator, WindowOperatorConfig};
+    use crate::runtime::operators::window::window_operator::{
+        ExecutionMode, RequestAdvancePolicy, WindowOperator, WindowOperatorConfig,
+    };
     use crate::common::message::Message;
     use crate::runtime::runtime_context::RuntimeContext;
     use crate::runtime::state::OperatorStates;
@@ -584,7 +581,7 @@ mod tests {
         let key = create_test_key(partition_key);
         Message::new_keyed(None, batch, key, None, None)
     }
-
+    
     #[tokio::test]
     async fn test_window_request_operator() {
         let sql = "SELECT 
@@ -604,6 +601,7 @@ mod tests {
         window_config.execution_mode = ExecutionMode::Request;
         window_config.parallelize = true;
         window_config.lateness = Some(2000); // 2 seconds lateness tolerance
+        window_config.request_advance_policy = RequestAdvancePolicy::OnIngest;
 
         let operator_states = Arc::new(OperatorStates::new());
         let window_operator_vertex_id = "window_op".to_string();
@@ -671,8 +669,8 @@ mod tests {
         window_operator.set_input(Some(input_stream));
 
         // Process messages to populate state
-        window_operator.poll_next().await;
-        window_operator.poll_next().await;
+        window_operator.poll_next().await; // msg1 buffered
+        window_operator.poll_next().await; // msg2 buffered
 
         // Create request batch with multiple entries:
         // - Regular entry: 3500 (on time, > latest entry 3000, within window)

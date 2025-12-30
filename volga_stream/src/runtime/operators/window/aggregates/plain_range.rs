@@ -5,20 +5,22 @@ use datafusion::logical_expr::WindowFrameUnits;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
+use std::collections::HashMap;
+
 use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
-use crate::runtime::operators::window::index::{BucketIndex, DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, get_window_length_ms, get_window_size_rows};
-use crate::runtime::operators::window::index::window_logic;
+use crate::runtime::operators::window::index::{
+    BucketIndex, DataBounds, DataRequest, SortedRangeBucket, SortedRangeIndex, SortedRangeView,
+    get_window_length_ms, get_window_size_rows, window_logic,
+};
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::runtime::operators::window::{RowPtr, Tiles, TimeGranularity};
-use crate::runtime::operators::window::Cursor;
+use crate::runtime::operators::window::{Cursor, Tiles, TimeGranularity};
 
 use super::{CursorBounds, eval_stored_window};
 
 #[derive(Debug)]
 pub struct PlainRangeAggregation {
-    entry_range: BucketRange,
-    window_range: BucketRange,
-    bounds: Option<CursorBounds>,
+    bucket_index: BucketIndex,
+    bounds: CursorBounds,
     window_expr: Arc<dyn WindowExpr>,
     tiles: Option<Tiles>,
     #[allow(dead_code)]
@@ -28,30 +30,15 @@ pub struct PlainRangeAggregation {
 
 impl PlainRangeAggregation {
     pub fn new(
-        entry_range: BucketRange,
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         tiles: Option<Tiles>,
         _ts_column_index: usize,
         window_id: usize,
-        bounds: Option<CursorBounds>,
+        bounds: CursorBounds,
     ) -> Self {
-        let window_frame = window_expr.get_window_frame();
-        let window_range = match window_frame.units {
-            WindowFrameUnits::Range => {
-                let wl = get_window_length_ms(window_frame);
-                bucket_index.get_relevant_range_for_range_windows(entry_range, wl)
-            }
-            WindowFrameUnits::Rows => {
-                let ws = get_window_size_rows(window_frame);
-                bucket_index.get_relevant_range_for_rows_windows(entry_range, ws)
-            }
-            _ => entry_range,
-        };
-
         Self {
-            entry_range,
-            window_range,
+            bucket_index: bucket_index.clone(),
             bounds,
             window_expr,
             tiles,
@@ -71,8 +58,12 @@ impl Aggregation for PlainRangeAggregation {
         crate::runtime::operators::window::AggregatorType::PlainAccumulator
     }
 
-    // TODO if we use tiles we should exclude data covered by them
-    fn get_data_requests(&self, _exclude_current_row: Option<bool>) -> Vec<DataRequest> {
+    fn get_data_requests(&self) -> Vec<DataRequest> {
+        let CursorBounds { prev, new } = self.bounds;
+        let Some(entry_span) = self.bucket_index.delta_span(prev, new) else {
+            return vec![];
+        };
+
         let window_frame = self.window_expr.get_window_frame();
         let wl = if window_frame.units == WindowFrameUnits::Range {
             get_window_length_ms(window_frame)
@@ -85,154 +76,161 @@ impl Aggregation for PlainRangeAggregation {
             0
         };
 
-        let bounds = match self.bounds {
-            None => DataBounds::All,
-            Some(CursorBounds { prev, new }) => {
-                if window_frame.units == WindowFrameUnits::Range {
-                    let start_ts = prev
-                        .map(|p| p.ts.saturating_sub(wl))
-                        .unwrap_or(i64::MIN);
-                    DataBounds::Time {
-                        start_ts,
-                        end_ts: new.ts,
-                    }
-                } else if window_frame.units == WindowFrameUnits::Rows && ws > 0 {
-                    DataBounds::All
-                } else {
-                    DataBounds::All
-                }
-            }
+        let window_span = match window_frame.units {
+            WindowFrameUnits::Range => self.bucket_index.bucket_span_for_range_window(entry_span, wl),
+            WindowFrameUnits::Rows => self.bucket_index.bucket_span_for_rows_window(entry_span, ws),
+            _ => entry_span,
         };
 
-        vec![DataRequest {
-            bucket_range: self.window_range,
-            bounds,
-        }]
+        let bounds = if window_frame.units == WindowFrameUnits::Range {
+            let start_ts = prev.map(|p| p.ts.saturating_sub(wl)).unwrap_or(i64::MIN);
+            DataBounds::Time {
+                start_ts,
+                end_ts: new.ts,
+            }
+        } else {
+            DataBounds::All
+        };
+
+        if window_frame.units == WindowFrameUnits::Range {
+            if let (DataBounds::Time { start_ts, end_ts }, Some(tiles)) = (bounds, self.tiles.as_ref()) {
+                // For streaming plain range we must *always* load the update span buckets to emit per-row outputs.
+                // Tiles can only reduce history IO, not the update buckets themselves.
+                let mut reqs: Vec<DataRequest> = vec![DataRequest {
+                    bucket_range: entry_span,
+                    bounds: DataBounds::All,
+                }];
+
+                if start_ts != i64::MIN {
+                    let (_tiles_inside, gaps) = tiles.coverage_gaps(start_ts, end_ts);
+                    for (gs, ge) in gaps {
+                        if gs >= ge {
+                            continue;
+                        }
+                        let br_start = self.bucket_granularity.start(gs);
+                        let br_end = self.bucket_granularity.start(ge);
+                        let br = BucketRange::new(
+                            br_start.max(window_span.start),
+                            br_end.min(window_span.end),
+                        );
+                        if br.start <= br.end {
+                            reqs.push(DataRequest {
+                                bucket_range: br,
+                                bounds: DataBounds::Time {
+                                    start_ts: gs,
+                                    end_ts: ge,
+                                },
+                            });
+                        }
+                    }
+                }
+
+                // De-duplicate in case gap planning overlaps the update span buckets.
+                reqs.sort_by_key(|r| (r.bucket_range.start, r.bucket_range.end));
+                reqs.dedup_by_key(|r| (r.bucket_range.start, r.bucket_range.end));
+                return reqs;
+            }
+        }
+
+        vec![DataRequest { bucket_range: window_span, bounds }]
     }
 
     async fn produce_aggregates_from_ranges(
         &self,
         sorted_ranges: &[SortedRangeView],
         _thread_pool: Option<&tokio_rayon::rayon::ThreadPool>,
-        exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
-        let exclude_current_row = exclude_current_row.unwrap_or(false);
-        let Some(view) = sorted_ranges.first() else {
+        let Some(first_view) = sorted_ranges.first() else {
             return (vec![], None);
         };
-        let idx = SortedRangeIndex::new(view);
-        (
-            run_range(
-                &idx,
-                self.entry_range,
-                self.window_range,
-                self.bounds,
-                &self.window_expr,
-                self.tiles.as_ref(),
-                self.bucket_granularity,
-                exclude_current_row,
-            ),
-            None,
-        )
-    }
-}
 
-fn run_range(
-    idx: &SortedRangeIndex<'_>,
-    entry_range: BucketRange,
-    window_range: BucketRange,
-    bounds: Option<CursorBounds>,
-    window_expr: &Arc<dyn WindowExpr>,
-    tiles: Option<&Tiles>,
-    bucket_granularity: TimeGranularity,
-    _exclude_current_row: bool,
-) -> Vec<ScalarValue> {
-    if idx.is_empty() {
-        return vec![];
-    }
-
-    let window_frame = window_expr.get_window_frame();
-    let is_rows = window_frame.units == WindowFrameUnits::Rows;
-    let window_length = get_window_length_ms(window_frame);
-    let window_size = if is_rows { get_window_size_rows(window_frame) } else { 0 };
-    let spec = if is_rows {
-        window_logic::WindowSpec::Rows { size: window_size }
-    } else {
-        window_logic::WindowSpec::Range { length_ms: window_length }
-    };
-
-    let mut out: Vec<ScalarValue> = Vec::new();
-
-    let mut emit = |window_end: RowPtr| {
-        // Only emit for entry buckets.
-        if window_end.bucket_ts < entry_range.start || window_end.bucket_ts > entry_range.end {
-            return;
-        }
-
-        let unclamped_start = window_logic::window_start_unclamped(idx, window_end, spec);
-        let window_start = if unclamped_start.bucket_ts < window_range.start {
-            RowPtr::new(window_range.start, 0)
+        let view = if sorted_ranges.len() == 1 {
+            first_view.clone()
         } else {
-            unclamped_start
+            // Merge buckets from multiple views (update span + raw gaps) into a single logical view.
+            let mut buckets: HashMap<i64, SortedRangeBucket> = HashMap::new();
+            let mut min_ts: Option<i64> = None;
+            let mut max_ts: Option<i64> = None;
+            for v in sorted_ranges {
+                for (ts, b) in v.buckets().iter() {
+                    min_ts = Some(min_ts.map(|m| m.min(*ts)).unwrap_or(*ts));
+                    max_ts = Some(max_ts.map(|m| m.max(*ts)).unwrap_or(*ts));
+                    buckets.insert(*ts, b.clone());
+                }
+            }
+
+            let req = DataRequest {
+                bucket_range: BucketRange::new(
+                    min_ts.unwrap_or(first_view.bucket_range().start),
+                    max_ts.unwrap_or(first_view.bucket_range().end),
+                ),
+                bounds: DataBounds::All,
+            };
+            SortedRangeView::new(
+                req,
+                first_view.bucket_granularity(),
+                Cursor::new(i64::MIN, 0),
+                Cursor::new(i64::MAX, u64::MAX),
+                buckets,
+            )
         };
-        out.push(eval_stored_window(window_expr, idx, window_start, window_end, tiles));
-    };
 
-    match bounds {
-        None => {
-            for_each_rowptr_in_range(idx, entry_range, bucket_granularity, |p| emit(p));
+        let idx = SortedRangeIndex::new(&view);
+        if idx.is_empty() {
+            return (vec![], None);
         }
-        Some(CursorBounds { prev, new }) => {
-            for_each_rowptr_in_cursor_delta(idx, prev, new, |p| emit(p));
+
+        let CursorBounds { prev, new } = self.bounds;
+        let Some(mut pos) = window_logic::first_update_pos(&idx, prev) else {
+            return (vec![], None);
+        };
+
+        let end_pos = {
+            let first_row_pos = idx.get_row_pos(&idx.first_pos());
+            if new < first_row_pos {
+                return (vec![], None);
+            }
+            match idx.seek_rowpos_gt(new) {
+                Some(after_end) => idx
+                    .prev_pos(after_end)
+                    .expect("seek_rowpos_gt returned first row; guarded above"),
+                None => idx.last_pos(),
+            }
+        };
+
+        if end_pos < pos {
+            return (vec![], None);
         }
-    }
 
-    out
-}
+        let window_frame = self.window_expr.get_window_frame();
+        let is_rows = window_frame.units == WindowFrameUnits::Rows;
+        let window_length = get_window_length_ms(window_frame);
+        let window_size = if is_rows { get_window_size_rows(window_frame) } else { 0 };
+        let spec = if is_rows {
+            window_logic::WindowSpec::Rows { size: window_size }
+        } else {
+            window_logic::WindowSpec::Range { length_ms: window_length }
+        };
 
-fn for_each_rowptr_in_range(
-    idx: &SortedRangeIndex<'_>,
-    entry_range: BucketRange,
-    bucket_granularity: TimeGranularity,
-    mut f: impl FnMut(RowPtr),
-) {
-    let mut bucket_ts = entry_range.start;
-    while bucket_ts <= entry_range.end {
-        let rows = idx.bucket_size(bucket_ts);
-        for row in 0..rows {
-            f(RowPtr::new(bucket_ts, row));
+        let mut out: Vec<ScalarValue> = Vec::new();
+        loop {
+            let start = window_logic::window_start_unclamped(&idx, pos, spec);
+            let v = eval_stored_window(
+                &self.window_expr,
+                &idx,
+                start,
+                pos,
+                self.tiles.as_ref(),
+            );
+            out.push(v);
+
+            if pos == end_pos {
+                break;
+            }
+            pos = idx.next_pos(pos).expect("end_pos should be reachable");
         }
-        bucket_ts = bucket_granularity.next_start(bucket_ts);
-    }
-}
 
-fn for_each_rowptr_in_cursor_delta(
-    row_index: &SortedRangeIndex<'_>,
-    prev: Option<Cursor>,
-    new: Cursor,
-    mut f: impl FnMut(RowPtr),
-) {
-    let Some(mut pos) = window_logic::first_update_pos(row_index, prev) else {
-        return;
-    };
-
-    let end = match row_index.seek_rowpos_gt(new) {
-        Some(after) => match row_index.prev_pos(after) {
-            Some(p) => p,
-            None => return,
-        },
-        None => row_index.last_pos(),
-    };
-
-    if end < pos {
-        return;
-    }
-    loop {
-        f(pos);
-        if pos == end {
-            break;
-        }
-        pos = row_index.next_pos(pos).expect("end should be reachable");
+        (out, None)
     }
 }
 
@@ -241,6 +239,7 @@ mod tests {
     use arrow::array::RecordBatch;
 
     use super::*;
+    use crate::runtime::operators::window::Cursor;
     use crate::runtime::operators::window::aggregates::test_utils;
     use crate::runtime::operators::window::index::BucketIndex;
     use crate::runtime::operators::window::index::SortedRangeView;
@@ -288,15 +287,18 @@ WINDOW w AS (
             1,
         );
 
-        let entry_range = BucketRange::new(1000, 2000);
-        let agg = PlainAggregation::for_range(entry_range, &bucket_index, window_expr.clone(), None, 0, 0, None);
-        let requests = agg.get_data_requests(None);
+        let bounds = crate::runtime::operators::window::aggregates::plain::CursorBounds {
+            prev: None,
+            new: Cursor::new(2000, 2),
+        };
+        let agg = PlainAggregation::for_range(&bucket_index, window_expr.clone(), None, 0, 0, bounds);
+        let requests = agg.get_data_requests();
         assert_eq!(requests.len(), 1);
 
         let view: SortedRangeView =
             test_utils::make_view(gran, requests[0], vec![(1000, b1), (2000, b2)], &window_expr);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&[view], None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&[view], None).await;
         assert_f64s(&vals, &[10.0, 40.0, 60.0]);
     }
 
@@ -344,32 +346,29 @@ WINDOW w AS (
         );
         tiles.add_batch(&all, 0);
 
-        // Only emit for entry buckets [4000..6000].
-        let entry_range = BucketRange::new(4000, 6000);
+        let bounds = crate::runtime::operators::window::aggregates::plain::CursorBounds {
+            prev: Some(Cursor::new(3000, 3)),
+            new: Cursor::new(6000, 6),
+        };
 
         let agg_no_tiles =
-            PlainAggregation::for_range(entry_range, &bucket_index, window_expr.clone(), None, 0, 0, None);
-        let agg_tiles = PlainAggregation::for_range(
-            entry_range,
-            &bucket_index,
-            window_expr.clone(),
-            Some(tiles),
-            0,
-            0,
-            None,
-        );
+            PlainAggregation::for_range(&bucket_index, window_expr.clone(), None, 0, 0, bounds);
+        let agg_tiles =
+            PlainAggregation::for_range(&bucket_index, window_expr.clone(), Some(tiles), 0, 0, bounds);
 
-        let req1 = agg_no_tiles.get_data_requests(None);
+        let req1 = agg_no_tiles.get_data_requests();
         assert_eq!(req1.len(), 1);
         let view1: SortedRangeView =
             test_utils::make_view(gran, req1[0], buckets.clone(), &window_expr);
-        let (vals1, _) = agg_no_tiles.produce_aggregates_from_ranges(&[view1], None, Some(false)).await;
+        let (vals1, _) = agg_no_tiles.produce_aggregates_from_ranges(&[view1], None).await;
 
-        let req2 = agg_tiles.get_data_requests(None);
-        assert_eq!(req2.len(), 1);
-        let view2: SortedRangeView =
-            test_utils::make_view(gran, req2[0], buckets.clone(), &window_expr);
-        let (vals2, _) = agg_tiles.produce_aggregates_from_ranges(&[view2], None, Some(false)).await;
+        let req2 = agg_tiles.get_data_requests();
+        assert_eq!(req2.len(), 2, "tiles should reduce history IO into separate requests");
+        let views2: Vec<SortedRangeView> = req2
+            .iter()
+            .map(|r| test_utils::make_view(gran, *r, buckets.clone(), &window_expr))
+            .collect();
+        let (vals2, _) = agg_tiles.produce_aggregates_from_ranges(&views2, None).await;
 
         // At ends 4000/5000/6000 with 4s range:
         // - 4000: 0..4000 => 1+2+3+4+5=15

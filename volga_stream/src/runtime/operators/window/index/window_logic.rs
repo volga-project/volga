@@ -50,14 +50,11 @@ pub fn tiled_split(
     let start_ts = idx.get_timestamp(&start);
     let end_ts = idx.get_timestamp(&end);
 
-    // Avoid boundary timestamps because duplicates may exist at start/end.
-    let tiles_start_ts = start_ts + 1;
-    let tiles_end_ts = end_ts - 1;
-    if tiles_start_ts > tiles_end_ts {
-        return None;
-    }
-
-    let tiles_mid = tiles.get_tiles_for_range(tiles_start_ts, tiles_end_ts);
+    // Tiles are safe to use only when they are strictly inside the window by timestamp:
+    // - first tile must start strictly after the window start timestamp (duplicates may exist at start)
+    // - last tile may end at the window end timestamp (tiles are half-open [start,end))
+    let mut tiles_mid = tiles.get_tiles_for_range(start_ts, end_ts);
+    tiles_mid.retain(|t| t.tile_start > start_ts && t.tile_end <= end_ts);
     if tiles_mid.is_empty() {
         return None;
     }
@@ -157,8 +154,8 @@ mod tiled_split_tests {
         // so `back_start` must use `>= tile_end`, not `> tile_end`.
         //
         // With 1s tiles and a window [0..5000] (inclusive), the mid tiles selected are:
-        // [1000..2000), [2000..3000), [3000..4000), so last_tile_end_ts == 4000.
-        // back_start must point to the row at ts=4000 (not 5000).
+        // [1000..2000), [2000..3000), [3000..4000), [4000..5000), so last_tile_end_ts == 5000.
+        // back_start must point to the row at ts=5000 (not None / beyond end).
 
         let sql = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
 FROM test_table
@@ -201,11 +198,12 @@ WINDOW w AS (
         let split = tiled_split(&idx, start, end, &tiles).expect("should split");
 
         assert_eq!(split.front_end, RowPtr::new(0, 0));
-        assert_eq!(split.back_start, RowPtr::new(4000, 0));
-        assert_eq!(split.tiles.len(), 3);
+        assert_eq!(split.back_start, RowPtr::new(5000, 0));
+        assert_eq!(split.tiles.len(), 4);
         assert_eq!(split.tiles[0].tile_start, 1000);
         assert_eq!(split.tiles[1].tile_start, 2000);
         assert_eq!(split.tiles[2].tile_start, 3000);
+        assert_eq!(split.tiles[3].tile_start, 4000);
     }
 }
 

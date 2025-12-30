@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, PipelineContextBuilder, ExecutionMode},
+    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
     executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
@@ -117,7 +117,7 @@ fn create_payload_generator(
 // TODO make single hot key test case to make sure no deadlocks occur
 
 
-// TODO this test fails when running with others via 'cargo test' - "Time entries should exist" - why?
+// TODO this test fails when running with others via 'cargo test' - why?
 #[tokio::test]
 async fn test_request_execution_mode() {
     let parallelism = 4;
@@ -256,7 +256,7 @@ async fn test_request_execution_mode() {
                     failed_requests += 1;
                 }
             }
-            Err(e) => {
+            Err(_e) => {
                 // println!("❌ Request {}: Error: {}", result.request_id, e);
                 failed_requests += 1;
             }

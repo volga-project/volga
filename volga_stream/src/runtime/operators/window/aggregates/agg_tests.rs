@@ -7,7 +7,8 @@ use datafusion::scalar::ScalarValue;
 use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
 use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
 use crate::runtime::operators::window::aggregates::test_utils;
-use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange, VirtualPoint};
+use crate::runtime::operators::window::aggregates::plain::CursorBounds;
+use crate::runtime::operators::window::aggregates::{Aggregation, VirtualPoint};
 use crate::runtime::operators::window::index::{BucketIndex, SortedRangeView};
 use crate::runtime::operators::window::{Cursor, TimeGranularity};
 use crate::storage::batch_store::BatchId;
@@ -212,23 +213,30 @@ async fn plain_range_rows_and_range_multi_bucket() {
 
     for win in [Win::Range { length_ms: 2000 }, Win::Rows { preceding: 2 }] {
         let window_expr = test_utils::window_expr_from_sql(&win_sql_sum(win)).await;
-        let entry_range = BucketRange::new(1000, 5000); // should include 1000,2000,3000 buckets; exclude 5200
+        // Emit only rows up to (ts=3200, seq=3) -> excludes the last stored row at 5200.
+        let bounds = CursorBounds {
+            prev: None,
+            new: Cursor::new(3200, 3),
+        };
 
-        // Entry rows are those stored rows whose bucket is within entry_range.
         let entry_rows: Vec<Row> = stored
             .iter()
             .copied()
-            .filter(|r| {
-                let b = gran.start(r.ts);
-                b >= entry_range.start && b <= entry_range.end
-            })
+            .filter(|r| Cursor::new(r.ts, r.seq) <= bounds.new)
             .collect();
         let expected = expected_sum_for_entry_rows(&stored, win, &entry_rows);
 
-        let agg = PlainAggregation::for_range(entry_range, &bucket_index, window_expr.clone(), None, 0, 0, None);
-        let requests = agg.get_data_requests(None);
+        let agg = PlainAggregation::for_range(
+            &bucket_index,
+            window_expr.clone(),
+            None,
+            0,
+            0,
+            bounds,
+        );
+        let requests = agg.get_data_requests();
         let views = build_views_for_requests(gran, &requests, &buckets, &window_expr);
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
         assert_f64s(&vals, &expected);
     }
 }
@@ -258,9 +266,10 @@ async fn plain_points_overlaps_merge_range_and_rows() {
             &bucket_index,
             window_expr.clone(),
             None,
+            false,
         );
 
-        let requests = agg.get_data_requests(Some(false));
+        let requests = agg.get_data_requests();
         assert_eq!(requests.len(), 1, "overlapping points should merge requests");
         let views = build_views_for_requests(gran, &requests, &buckets, &window_expr);
 
@@ -268,7 +277,7 @@ async fn plain_points_overlaps_merge_range_and_rows() {
         let expected_points: Vec<(Row, bool)> = points.iter().copied().map(|p| (p, include_virtual)).collect();
         let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
         assert_f64s(&vals, &expected);
     }
 }
@@ -296,9 +305,10 @@ async fn plain_points_disjoint_ranges_produce_multiple_requests() {
         &bucket_index,
         window_expr.clone(),
         None,
+        false,
     );
 
-    let requests = agg.get_data_requests(Some(false));
+    let requests = agg.get_data_requests();
     assert_eq!(requests.len(), 2, "far points should not be merged");
     let views = build_views_for_requests(gran, &requests, &buckets, &window_expr);
 
@@ -306,7 +316,7 @@ async fn plain_points_disjoint_ranges_produce_multiple_requests() {
     let expected_points: Vec<(Row, bool)> = points.iter().copied().map(|p| (p, include_virtual)).collect();
     let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-    let (vals, _) = agg.produce_aggregates_from_ranges(&views, None, Some(false)).await;
+    let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
     assert_f64s(&vals, &expected);
 }
 
@@ -324,14 +334,15 @@ async fn plain_points_empty_storage_returns_virtual_only() {
             &bucket_index,
             window_expr.clone(),
             None,
+            false,
         );
-        let requests = agg.get_data_requests(Some(false));
+        let requests = agg.get_data_requests();
         let views = build_views_for_requests(gran, &requests, &buckets, &window_expr);
 
         let expected_points = vec![(points[0], true)];
         let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
         assert_f64s(&vals, &expected);
     }
 }
@@ -342,7 +353,6 @@ async fn retractable_range_matches_bruteforce_for_updates() {
     let gran = TimeGranularity::Seconds(1);
     for win in [Win::Range { length_ms: 2000 }, Win::Rows { preceding: 2 }] {
         let window_expr = test_utils::window_expr_from_sql(&win_sql_sum(win)).await;
-        let window_frame = window_expr.get_window_frame().clone();
 
         // Step1 stored rows.
         let step1 = vec![
@@ -352,28 +362,25 @@ async fn retractable_range_matches_bruteforce_for_updates() {
         ];
         let (mut bucket_index, buckets1) = bucketize(gran, &step1);
 
-        let slide1 = bucket_index.slide_window(&window_frame, None).expect("slide1");
+        let new1 = bucket_index.max_pos_seen();
         let agg1 = RetractableAggregation::from_range(
             0,
-            &slide1,
             None,
+            new1,
+            &bucket_index,
             window_expr.clone(),
             None,
             0,
             gran,
         );
-        let reqs1 = agg1.get_data_requests(None);
+        let reqs1 = agg1.get_data_requests();
         let views1 = build_views_for_requests(gran, &reqs1, &buckets1, &window_expr);
-        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&views1, None, None).await;
+        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&views1, None).await;
 
-        let entry_range1 = slide1.update_range.expect("update_range");
         let entry_rows1: Vec<Row> = step1
             .iter()
             .copied()
-            .filter(|r| {
-                let b = gran.start(r.ts);
-                b >= entry_range1.start && b <= entry_range1.end
-            })
+            .filter(|r| Cursor::new(r.ts, r.seq) <= new1)
             .collect();
         let expected1 = expected_sum_for_entry_rows(&step1, win, &entry_rows1);
         assert_f64s(&vals1, &expected1);
@@ -395,30 +402,27 @@ async fn retractable_range_matches_bruteforce_for_updates() {
         let all2: Vec<Row> = step1.iter().copied().chain(step2_new.iter().copied()).collect();
         let (_idx2, buckets2) = bucketize(gran, &all2);
 
-        let prev = Some(slide1.new_processed_until);
-        let slide2 = bucket_index.slide_window(&window_frame, prev).expect("slide2");
+        let prev = Some(new1);
+        let new2 = bucket_index.max_pos_seen();
         let agg2 = RetractableAggregation::from_range(
             0,
-            &slide2,
             prev,
+            new2,
+            &bucket_index,
             window_expr.clone(),
             state1,
             0,
             gran,
         );
-        let reqs2 = agg2.get_data_requests(None);
+        let reqs2 = agg2.get_data_requests();
         let views2 = build_views_for_requests(gran, &reqs2, &buckets2, &window_expr);
-        let (vals2, _state2) = agg2.produce_aggregates_from_ranges(&views2, None, None).await;
+        let (vals2, _state2) = agg2.produce_aggregates_from_ranges(&views2, None).await;
 
-        let entry_range2 = slide2.update_range.expect("update_range");
         let entry_rows2: Vec<Row> = all2
             .iter()
             .copied()
-            .filter(|r| {
-                let b = gran.start(r.ts);
-                b >= entry_range2.start && b <= entry_range2.end
-            })
-            .filter(|r| (r.ts, r.seq) > (prev.unwrap().ts, prev.unwrap().seq_no))
+            .filter(|r| Cursor::new(r.ts, r.seq) > prev.unwrap())
+            .filter(|r| Cursor::new(r.ts, r.seq) <= new2)
             .collect();
         let expected2 = expected_sum_for_entry_rows(&all2, win, &entry_rows2);
         assert_f64s(&vals2, &expected2);
@@ -464,13 +468,12 @@ async fn retractable_points_matches_bruteforce_rows_and_range() {
             points_with_args(&window_expr, &points),
             &bucket_index,
             window_expr.clone(),
-            0,
-            0,
             Some(processed_until),
             Some(base_state.clone()),
+            false,
         );
 
-        let requests = agg.get_data_requests(Some(false));
+        let requests = agg.get_data_requests();
         // Retractable points loads one base view.
         assert_eq!(requests.len(), 1);
         let views = build_views_for_requests(gran, &requests, &buckets, &window_expr);
@@ -478,7 +481,7 @@ async fn retractable_points_matches_bruteforce_rows_and_range() {
         let expected_points: Vec<(Row, bool)> = points.iter().copied().map(|p| (p, true)).collect();
         let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
         assert_f64s(&vals, &expected);
     }
 }

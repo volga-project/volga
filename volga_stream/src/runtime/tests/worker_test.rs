@@ -1,5 +1,7 @@
+#![cfg(test)]
+
 use crate::{
-    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
+    api::pipeline_context::PipelineContextBuilder,
     common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
     executor::local_executor::LocalExecutor,
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},

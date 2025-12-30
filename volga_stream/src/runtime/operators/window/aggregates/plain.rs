@@ -38,16 +38,14 @@ pub enum PlainAggregation {
 
 impl PlainAggregation {
     pub fn for_range(
-        entry_range: BucketRange,
         batch_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         tiles: Option<Tiles>,
         ts_column_index: usize,
         window_id: usize,
-        bounds: Option<CursorBounds>,
+        bounds: CursorBounds,
     ) -> Self {
         Self::Range(plain_range::PlainRangeAggregation::new(
-            entry_range,
             batch_index,
             window_expr,
             tiles,
@@ -62,12 +60,14 @@ impl PlainAggregation {
         batch_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         tiles: Option<Tiles>,
+        exclude_current_row: bool,
     ) -> Self {
         Self::Points(plain_points::PlainPointsAggregation::new(
             points,
             batch_index,
             window_expr,
             tiles,
+            exclude_current_row,
         ))
     }
 }
@@ -85,13 +85,10 @@ impl Aggregation for PlainAggregation {
         AggregatorType::PlainAccumulator
     }
 
-    fn get_data_requests(
-        &self,
-        exclude_current_row: Option<bool>,
-    ) -> Vec<crate::runtime::operators::window::index::DataRequest> {
+    fn get_data_requests(&self) -> Vec<crate::runtime::operators::window::index::DataRequest> {
         match self {
-            PlainAggregation::Range(r) => r.get_data_requests(exclude_current_row),
-            PlainAggregation::Points(p) => p.get_data_requests(exclude_current_row),
+            PlainAggregation::Range(r) => r.get_data_requests(),
+            PlainAggregation::Points(p) => p.get_data_requests(),
         }
     }
 
@@ -99,15 +96,14 @@ impl Aggregation for PlainAggregation {
         &self,
         sorted_ranges: &[crate::runtime::operators::window::index::SortedRangeView],
         thread_pool: Option<&ThreadPool>,
-        exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         match self {
             PlainAggregation::Range(r) => {
-                r.produce_aggregates_from_ranges(sorted_ranges, thread_pool, exclude_current_row)
+                r.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
                     .await
             }
             PlainAggregation::Points(p) => {
-                p.produce_aggregates_from_ranges(sorted_ranges, thread_pool, exclude_current_row)
+                p.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
                     .await
             }
         }

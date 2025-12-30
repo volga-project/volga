@@ -14,6 +14,7 @@ use crate::storage::batch_store::Timestamp;
 use crate::runtime::operators::window::aggregates::VirtualPoint;
 use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
 use crate::runtime::operators::window::Cursor;
+use crate::runtime::operators::window::aggregates::point_request_merge::{merge_planned_ranges, PlannedRange};
 
 #[derive(Debug, Clone)]
 struct PointPlan {
@@ -27,6 +28,7 @@ pub struct PlainPointsAggregation {
     data_requests: Vec<DataRequest>,
     window_expr: Arc<dyn WindowExpr>,
     tiles: Option<Tiles>,
+    exclude_current_row: bool,
 }
 
 impl PlainPointsAggregation {
@@ -37,6 +39,7 @@ impl PlainPointsAggregation {
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         tiles: Option<Tiles>,
+        exclude_current_row: bool,
     ) -> Self {
         let window_frame = window_expr.get_window_frame();
         let bucket_granularity = bucket_index.bucket_granularity();
@@ -48,125 +51,59 @@ impl PlainPointsAggregation {
         };
 
         #[derive(Clone)]
-        struct Tmp {
-            orig_idx: usize,
+        struct TmpByOrig {
             window_range: BucketRange,
             bounds: DataBounds,
             point: VirtualPoint,
         }
-        let mut tmp: Vec<Tmp> = Vec::with_capacity(points.len());
-        for (orig_idx, p) in points.into_iter().enumerate() {
+        let mut tmp_by_orig: Vec<TmpByOrig> = Vec::with_capacity(points.len());
+        for p in points.into_iter() {
             let bucket_ts = bucket_granularity.start(p.ts);
             let update = BucketRange::new(bucket_ts, bucket_ts);
             let (window_range, bounds) = match window_frame.units {
                 WindowFrameUnits::Range => (
-                    bucket_index.get_relevant_range_for_range_windows(update, wl),
+                    bucket_index.bucket_span_for_range_window(update, wl),
                     DataBounds::Time {
                         start_ts: p.ts.saturating_sub(wl),
                         end_ts: p.ts,
                     },
                 ),
                 WindowFrameUnits::Rows => (
-                    bucket_index.get_relevant_range_for_rows_windows(update, ws),
+                    bucket_index.bucket_span_for_rows_window(update, ws),
                     DataBounds::All,
                 ),
                 _ => (update, DataBounds::All),
             };
 
-            tmp.push(Tmp {
-                orig_idx,
+            tmp_by_orig.push(TmpByOrig {
                 window_range,
                 bounds,
                 point: p,
             });
         }
 
-        // Sort by bucket_range, then by bounds.
-        tmp.sort_by_key(|t| (t.window_range.start, t.window_range.end, t.point.ts));
-
-        let mut data_requests: Vec<DataRequest> = Vec::new();
-        let mut plans_by_orig: Vec<Option<PointPlan>> = vec![None; tmp.len()];
-
-        let mut cur_req: Option<DataRequest> = None;
-        let mut cur_idx: usize = 0;
-
-        for t in tmp {
-            match cur_req {
-                None => {
-                    let req = DataRequest {
-                        bucket_range: t.window_range,
-                        bounds: t.bounds,
-                    };
-                    data_requests.push(req);
-                    cur_idx = data_requests.len() - 1;
-                    cur_req = Some(req);
-                    plans_by_orig[t.orig_idx] = Some(PointPlan {
-                        point: t.point,
-                        req_idx: cur_idx,
-                    });
-                }
-                Some(mut req) => {
-                    let bucket_adjacent_or_overlap =
-                        t.window_range.start <= bucket_granularity.next_start(req.bucket_range.end);
-                    let can_merge = match (req.bounds, t.bounds) {
-                        (DataBounds::All, DataBounds::All) => bucket_adjacent_or_overlap,
-                        (
-                            DataBounds::Time {
-                                start_ts: _a_s,
-                                end_ts: a_e,
-                            },
-                            DataBounds::Time {
-                                start_ts: b_s,
-                                end_ts: _b_e,
-                            },
-                        ) => bucket_adjacent_or_overlap && b_s <= a_e,
-                        _ => false,
-                    };
-
-                    if can_merge {
-                        req.bucket_range.end = req.bucket_range.end.max(t.window_range.end);
-                        req.bounds = match (req.bounds, t.bounds) {
-                            (
-                                DataBounds::Time {
-                                    start_ts: a_s,
-                                    end_ts: a_e,
-                                },
-                                DataBounds::Time {
-                                    start_ts: b_s,
-                                    end_ts: b_e,
-                                },
-                            ) => DataBounds::Time {
-                                start_ts: a_s.min(b_s),
-                                end_ts: a_e.max(b_e),
-                            },
-                            (b, _) => b,
-                        };
-                        cur_req = Some(req);
-                        *data_requests.last_mut().expect("must exist") = req;
-                        plans_by_orig[t.orig_idx] = Some(PointPlan {
-                            point: t.point,
-                            req_idx: cur_idx,
-                        });
-                    } else {
-                        let req2 = DataRequest {
-                            bucket_range: t.window_range,
-                            bounds: t.bounds,
-                        };
-                        data_requests.push(req2);
-                        cur_idx = data_requests.len() - 1;
-                        cur_req = Some(req2);
-                        plans_by_orig[t.orig_idx] = Some(PointPlan {
-                            point: t.point,
-                            req_idx: cur_idx,
-                        });
-                    }
-                }
-            }
-        }
-
-        let plans: Vec<PointPlan> = plans_by_orig
+        let planned: Vec<PlannedRange> = tmp_by_orig
+            .iter()
+            .enumerate()
+            .map(|(orig_idx, t)| PlannedRange {
+                orig_idx,
+                bucket_range: t.window_range,
+                bounds: t.bounds,
+                sort_ts: t.point.ts,
+            })
+            .collect();
+        let (data_requests, req_idx_by_orig) =
+            merge_planned_ranges(bucket_granularity, tmp_by_orig.len(), planned);
+        let plans: Vec<PointPlan> = tmp_by_orig
             .into_iter()
-            .map(|p| p.expect("plan must be set"))
+            .enumerate()
+            .map(|(orig_idx, t)| {
+                let req_idx = req_idx_by_orig[orig_idx].expect("req idx must exist");
+                PointPlan {
+                    point: t.point,
+                    req_idx,
+                }
+            })
             .collect();
 
         Self {
@@ -174,6 +111,7 @@ impl PlainPointsAggregation {
             data_requests,
             window_expr,
             tiles,
+            exclude_current_row,
         }
     }
 }
@@ -189,7 +127,7 @@ impl Aggregation for PlainPointsAggregation {
     }
 
     // TODO move data requests gen logic here, not need to have self.data_requests
-    fn get_data_requests(&self, _exclude_current_row: Option<bool>) -> Vec<DataRequest> {
+    fn get_data_requests(&self) -> Vec<DataRequest> {
         self.data_requests.clone()
     }
 
@@ -197,10 +135,8 @@ impl Aggregation for PlainPointsAggregation {
         &self,
         sorted_ranges: &[SortedRangeView],
         _thread_pool: Option<&ThreadPool>,
-        exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
-        let exclude_current_row = exclude_current_row.unwrap_or(false);
-        let include_virtual = !exclude_current_row;
+        let include_virtual = !self.exclude_current_row;
 
         let window_frame = self.window_expr.get_window_frame();
         let window_length = get_window_length_ms(window_frame);
@@ -358,14 +294,15 @@ WINDOW w AS (
             &bucket_index,
             window_expr.clone(),
             None,
+            false,
         );
-        let requests = agg.get_data_requests(Some(false));
+        let requests = agg.get_data_requests();
         let views: Vec<_> = requests
             .iter()
             .map(|r| test_utils::make_view(gran, *r, vec![(1000, stored.clone())], &window_expr))
             .collect();
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
         assert_f64s(&vals, &[40.0, 30.0]);
     }
 
@@ -401,14 +338,15 @@ WINDOW w AS (
             &bucket_index,
             window_expr.clone(),
             None,
+            false,
         );
-        let requests = agg.get_data_requests(Some(false));
+        let requests = agg.get_data_requests();
         let views: Vec<_> = requests
             .iter()
             .map(|r| test_utils::make_view(gran, *r, vec![(1000, stored.clone())], &window_expr))
             .collect();
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
         assert_f64s(&vals, &[60.0]);
     }
 
@@ -469,32 +407,34 @@ WINDOW w AS (
             &bucket_index,
             window_expr.clone(),
             None,
+            false,
         );
         let agg_tiles = crate::runtime::operators::window::aggregates::plain::PlainAggregation::for_points(
             points,
             &bucket_index,
             window_expr.clone(),
             Some(tiles),
+            false,
         );
 
-        let reqs1 = agg_no_tiles.get_data_requests(Some(false));
+        let reqs1 = agg_no_tiles.get_data_requests();
         assert_eq!(reqs1.len(), 1);
         let views1: Vec<_> = reqs1
             .iter()
             .map(|r| test_utils::make_view(gran, *r, buckets.clone(), &window_expr))
             .collect();
         let (vals1, _) = agg_no_tiles
-            .produce_aggregates_from_ranges(&views1, None, Some(false))
+            .produce_aggregates_from_ranges(&views1, None)
             .await;
 
-        let reqs2 = agg_tiles.get_data_requests(Some(false));
+        let reqs2 = agg_tiles.get_data_requests();
         assert_eq!(reqs2.len(), 1);
         let views2: Vec<_> = reqs2
             .iter()
             .map(|r| test_utils::make_view(gran, *r, buckets.clone(), &window_expr))
             .collect();
         let (vals2, _) = agg_tiles
-            .produce_aggregates_from_ranges(&views2, None, Some(false))
+            .produce_aggregates_from_ranges(&views2, None)
             .await;
 
         // Stored rows in [2500..6500] are ts=3000,4000,5000,6000 => 4+5+6+7=22; plus virtual 10 => 32.

@@ -6,7 +6,6 @@ use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::index::{get_window_length_ms, get_window_size_rows, BucketIndex};
-use crate::runtime::operators::window::tiles::TimeGranularity;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::Cursor;
 
@@ -14,18 +13,17 @@ use super::super::{create_window_aggregator, merge_accumulator_state, WindowAggr
 use super::VirtualPoint;
 use super::BucketRange;
 use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
+use crate::runtime::operators::window::aggregates::point_request_merge::{merge_planned_ranges, PlannedRange};
 
 #[derive(Debug)]
 pub struct RetractablePointsAggregation {
     window_expr: Arc<dyn WindowExpr>,
-    #[allow(dead_code)]
-    window_id: usize,
-    #[allow(dead_code)]
-    bucket_granularity: TimeGranularity,
-    base_window_range: BucketRange,
     processed_until: Cursor,
     base_accumulator_state: AccumulatorState,
     points: Vec<VirtualPoint>,
+    exclude_current_row: bool,
+    data_requests: Vec<DataRequest>,
+    req_idx_by_point: Vec<usize>,
 }
 
 impl RetractablePointsAggregation {
@@ -33,12 +31,10 @@ impl RetractablePointsAggregation {
         points: Vec<VirtualPoint>,
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
-        ts_column_index: usize,
-        window_id: usize,
         processed_until: Option<Cursor>,
         accumulator_state: Option<AccumulatorState>,
+        exclude_current_row: bool,
     ) -> Self {
-        let _ = ts_column_index;
         let bucket_granularity = bucket_index.bucket_granularity();
         let processed_until = processed_until.expect("Retractable points require processed_until");
         let base_accumulator_state =
@@ -49,47 +45,6 @@ impl RetractablePointsAggregation {
         }
 
         let window_frame = window_expr.get_window_frame();
-        let base_bucket_ts = bucket_granularity.start(processed_until.ts);
-        let base_update = BucketRange::new(base_bucket_ts, base_bucket_ts);
-        let base_window_range = match window_frame.units {
-            WindowFrameUnits::Range => {
-                let wl = get_window_length_ms(window_frame);
-                Some(bucket_index.get_relevant_range_for_range_windows(base_update, wl))
-            }
-            WindowFrameUnits::Rows => {
-                let ws = get_window_size_rows(window_frame);
-                Some(bucket_index.get_relevant_range_for_rows_windows(base_update, ws))
-            }
-            _ => Some(base_update),
-        };
-        let base_window_range = base_window_range.expect("base_window_range should exist");
-
-        Self {
-            window_expr,
-            window_id,
-            bucket_granularity,
-            base_window_range,
-            processed_until,
-            base_accumulator_state,
-            points,
-        }
-    }
-
-    pub(super) fn window_expr(&self) -> &Arc<dyn WindowExpr> {
-        &self.window_expr
-    }
-
-    // we should only load retratcs range, not whole base window range
-    pub(super) fn get_data_requests(&self, exclude_current_row: Option<bool>) -> Vec<DataRequest> {
-        let processed_until = self.processed_until;
-        let base_window_range = self.base_window_range;
-        let include_virtual = !exclude_current_row.expect("exclude_current_row should exist");
-
-        if !include_virtual {
-            return vec![];
-        }
-
-        let window_frame = self.window_expr.get_window_frame();
         let wl = if window_frame.units == WindowFrameUnits::Range {
             get_window_length_ms(window_frame)
         } else {
@@ -101,56 +56,80 @@ impl RetractablePointsAggregation {
             0
         };
 
-        let max_point_ts = self.points.iter().map(|p| p.ts).max().unwrap_or(processed_until.ts);
-        let bounds = if window_frame.units == WindowFrameUnits::Range {
-            DataBounds::Time {
-                // We must load enough history to be able to retract rows that are already included
-                // in the stored accumulator state when sliding from `processed_until` to points.
-                // That history starts at the base window start at `processed_until`.
-                start_ts: processed_until.ts.saturating_sub(wl),
-                end_ts: max_point_ts,
-            }
-        } else if window_frame.units == WindowFrameUnits::Rows && ws > 0 {
-            // We need the full base-window span and all rows until the farthest point,
-            // because we apply stored updates between processed_until and each point.
-            DataBounds::All
-        } else {
-            DataBounds::All
-        };
+        let mut data_requests: Vec<DataRequest> = Vec::new();
+        let mut req_idx_by_point: Vec<usize> = Vec::new();
+        // Even when exclude_current_row=true we still need stored rows to "advance" the base accumulator
+        // from processed_until to each point (and perform time-based retractions for RANGE windows).
+        //
+        // Base "retract span" starts at the base window range for processed_until.
+        let base_bucket_ts = bucket_granularity.start(processed_until.ts);
+        let base_update = BucketRange::new(base_bucket_ts, base_bucket_ts);
+        let base_window_range = match window_frame.units {
+            WindowFrameUnits::Range => Some(bucket_index.bucket_span_for_range_window(base_update, wl)),
+            WindowFrameUnits::Rows => Some(bucket_index.bucket_span_for_rows_window(base_update, ws)),
+            _ => Some(base_update),
+        }
+        .expect("base_window_range should exist");
 
-        vec![DataRequest {
-            bucket_range: base_window_range,
-            bounds,
-        }]
+        let planned: Vec<PlannedRange> = points
+            .iter()
+            .enumerate()
+            .map(|(orig_idx, p)| {
+                let end_bucket_ts = bucket_granularity.start(p.ts);
+                PlannedRange {
+                    orig_idx,
+                    bucket_range: BucketRange::new(base_window_range.start, end_bucket_ts),
+                    bounds: if window_frame.units == WindowFrameUnits::Range {
+                        DataBounds::Time {
+                            start_ts: processed_until.ts.saturating_sub(wl),
+                            end_ts: p.ts,
+                        }
+                    } else {
+                        DataBounds::All
+                    },
+                    sort_ts: p.ts,
+                }
+            })
+            .collect();
+
+        let (reqs, req_idx_opt) = merge_planned_ranges(bucket_granularity, points.len(), planned);
+        data_requests = reqs;
+        req_idx_by_point = req_idx_opt
+            .into_iter()
+            .map(|o| o.expect("req idx must exist"))
+            .collect();
+
+        Self {
+            window_expr,
+            processed_until,
+            base_accumulator_state,
+            points,
+            exclude_current_row,
+            data_requests,
+            req_idx_by_point,
+        }
+    }
+
+    pub(super) fn window_expr(&self) -> &Arc<dyn WindowExpr> {
+        &self.window_expr
+    }
+
+    pub(super) fn get_data_requests(&self) -> Vec<DataRequest> {
+        self.data_requests.clone()
     }
 
     pub(super) async fn produce_aggregates_from_ranges(
         &self,
         sorted_ranges: &[SortedRangeView],
         _thread_pool: Option<&ThreadPool>,
-        exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         let processed_until = self.processed_until;
         let base_state = &self.base_accumulator_state;
-        let include_virtual = !exclude_current_row.expect("exclude_current_row should exist");
+        let include_virtual = !self.exclude_current_row;
         let window_frame = self.window_expr.get_window_frame();
 
-        if !include_virtual {
-            let mut acc = match create_window_aggregator(&self.window_expr) {
-                WindowAggregator::Accumulator(accumulator) => accumulator,
-                WindowAggregator::Evaluator(_) => panic!("Evaluator not supported"),
-            };
-            merge_accumulator_state(acc.as_mut(), base_state);
-            let v = acc.evaluate().expect("evaluate failed");
-            return (vec![v; self.points.len()], None);
-        }
-
-        if sorted_ranges.len() != 1 {
-            panic!("RetractablePointsAggregation expects exactly one SortedRangeView");
-        }
-        let idx = SortedRangeIndex::new(&sorted_ranges[0]);
-
-        if idx.is_empty() {
+        if sorted_ranges.is_empty() {
+            // No stored rows were loaded; evaluate using base state + (optional) virtual rows only.
             let vals = self
                 .points
                 .iter()
@@ -169,27 +148,42 @@ impl RetractablePointsAggregation {
             return (vals, None);
         }
 
-        let processed_pos = idx
-            .seek_rowpos_eq(processed_until)
-            .unwrap_or_else(|| idx.last_pos());
+        let indices: Vec<SortedRangeIndex<'_>> = sorted_ranges.iter().map(SortedRangeIndex::new).collect();
 
         match window_frame.units {
             WindowFrameUnits::Rows => {
                 let window_size = get_window_size_rows(window_frame);
-                let total_stored = idx.count_between(&idx.first_pos(), &processed_pos);
-                let base_window_stored = total_stored.min(window_size);
-
-                // Oldest row currently in the base window state.
-                let base_window_start = if base_window_stored > 0 {
-                    idx.pos_n_rows(&processed_pos, base_window_stored - 1, true)
-                } else {
-                    idx.first_pos()
-                };
-
                 let vals = self
                     .points
                     .iter()
+                    .enumerate()
                     .map(|p| {
+                        let idx = &indices[self.req_idx_by_point[p.0]];
+                        if idx.is_empty() {
+                            let mut acc = match create_window_aggregator(&self.window_expr) {
+                                WindowAggregator::Accumulator(accumulator) => accumulator,
+                                WindowAggregator::Evaluator(_) => panic!("Evaluator not supported"),
+                            };
+                            merge_accumulator_state(acc.as_mut(), base_state);
+                            if let Some(args) = &p.1.args {
+                                acc.update_batch(args.as_ref()).expect("update_batch failed");
+                            }
+                            return acc.evaluate().expect("evaluate failed");
+                        }
+
+                        let processed_pos = idx
+                            .seek_rowpos_eq(processed_until)
+                            .unwrap_or_else(|| idx.last_pos());
+                        let total_stored = idx.count_between(&idx.first_pos(), &processed_pos);
+                        let base_window_stored = total_stored.min(window_size);
+
+                        // Oldest row currently in the base window state.
+                        let base_window_start = if base_window_stored > 0 {
+                            idx.pos_n_rows(&processed_pos, base_window_stored - 1, true)
+                        } else {
+                            idx.first_pos()
+                        };
+
                         let mut acc = match create_window_aggregator(&self.window_expr) {
                             WindowAggregator::Accumulator(accumulator) => accumulator,
                             WindowAggregator::Evaluator(_) => panic!("Evaluator not supported"),
@@ -202,7 +196,7 @@ impl RetractablePointsAggregation {
                         // Apply real stored rows between processed_until and this point.
                         let mut pos_opt = idx.next_pos(processed_pos);
                         while let Some(pos) = pos_opt {
-                            if idx.get_timestamp(&pos) > p.ts {
+                            if idx.get_timestamp(&pos) > p.1.ts {
                                 break;
                             }
 
@@ -231,7 +225,7 @@ impl RetractablePointsAggregation {
                                 // window not full; no retract needed
                             }
 
-                            if let Some(args) = &p.args {
+                            if let Some(args) = &p.1.args {
                                 acc.update_batch(args.as_ref()).expect("update_batch failed");
                             }
                         }
@@ -243,13 +237,33 @@ impl RetractablePointsAggregation {
             }
             WindowFrameUnits::Range => {
                 let window_length = get_window_length_ms(window_frame);
-                let base_start = processed_until.ts.saturating_sub(window_length);
-                let base_retract_start = idx.seek_ts_ge(base_start).unwrap_or_else(|| idx.first_pos());
-
                 let vals = self
                     .points
                     .iter()
+                    .enumerate()
                     .map(|p| {
+                        let idx = &indices[self.req_idx_by_point[p.0]];
+                        if idx.is_empty() {
+                            let mut acc = match create_window_aggregator(&self.window_expr) {
+                                WindowAggregator::Accumulator(accumulator) => accumulator,
+                                WindowAggregator::Evaluator(_) => panic!("Evaluator not supported"),
+                            };
+                            merge_accumulator_state(acc.as_mut(), base_state);
+                            if include_virtual {
+                                if let Some(args) = &p.1.args {
+                                    acc.update_batch(args.as_ref()).expect("update_batch failed");
+                                }
+                            }
+                            return acc.evaluate().expect("evaluate failed");
+                        }
+
+                        let processed_pos = idx
+                            .seek_rowpos_eq(processed_until)
+                            .unwrap_or_else(|| idx.last_pos());
+                        let base_start = processed_until.ts.saturating_sub(window_length);
+                        let base_retract_start =
+                            idx.seek_ts_ge(base_start).unwrap_or_else(|| idx.first_pos());
+
                         let mut acc = match create_window_aggregator(&self.window_expr) {
                             WindowAggregator::Accumulator(accumulator) => accumulator,
                             WindowAggregator::Evaluator(_) => panic!("Evaluator not supported"),
@@ -262,7 +276,7 @@ impl RetractablePointsAggregation {
                         let mut pos_opt = idx.next_pos(processed_pos);
                         while let Some(pos) = pos_opt {
                             let ts = idx.get_timestamp(&pos);
-                            if ts > p.ts {
+                            if ts > p.1.ts {
                                 break;
                             }
 
@@ -283,20 +297,22 @@ impl RetractablePointsAggregation {
                             pos_opt = idx.next_pos(pos);
                         }
 
-                        // Apply virtual point.
-                        if include_virtual {
-                            let new_start = p.ts.saturating_sub(window_length);
-                            loop {
-                                if idx.get_timestamp(&retract_pos) >= new_start {
-                                    break;
-                                }
-                                let args = idx.get_row_args(&retract_pos);
-                                acc.retract_batch(&args).expect("retract_batch failed");
-                                let Some(next) = idx.next_pos(retract_pos) else { break };
-                                retract_pos = next;
+                        // Final retract to align the base window state to this point timestamp.
+                        // This must run even when exclude_current_row=true (we're excluding the point row,
+                        // but the RANGE window end still shifts, which may retract old rows).
+                        let new_start = p.1.ts.saturating_sub(window_length);
+                        loop {
+                            if idx.get_timestamp(&retract_pos) >= new_start {
+                                break;
                             }
+                            let args = idx.get_row_args(&retract_pos);
+                            acc.retract_batch(&args).expect("retract_batch failed");
+                            let Some(next) = idx.next_pos(retract_pos) else { break };
+                            retract_pos = next;
+                        }
 
-                            if let Some(args) = &p.args {
+                        if include_virtual {
+                            if let Some(args) = &p.1.args {
                                 acc.update_batch(args.as_ref()).expect("update_batch failed");
                             }
                         }
@@ -379,12 +395,11 @@ WINDOW w AS (
             points,
             &bucket_index,
             window_expr.clone(),
-            0,
-            0,
             Some(processed_until),
             Some(base_state.clone()),
+            false,
         );
-        let requests = agg.get_data_requests(Some(false));
+        let requests = agg.get_data_requests();
         assert_eq!(requests.len(), 1);
         let view = test_utils::make_view(
             gran,
@@ -396,7 +411,7 @@ WINDOW w AS (
             &window_expr,
         );
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&[view], None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&[view], None).await;
         assert_f64s(&vals, &[55.0]);
     }
 
@@ -440,12 +455,11 @@ WINDOW w AS (
             points,
             &bucket_index,
             window_expr.clone(),
-            0,
-            0,
             Some(processed_until),
             Some(base_state.clone()),
+            false,
         );
-        let requests = agg.get_data_requests(Some(false));
+        let requests = agg.get_data_requests();
         assert_eq!(requests.len(), 1);
         let view = test_utils::make_view(
             gran,
@@ -457,7 +471,7 @@ WINDOW w AS (
             &window_expr,
         );
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&[view], None, Some(false)).await;
+        let (vals, _) = agg.produce_aggregates_from_ranges(&[view], None).await;
         assert_f64s(&vals, &[55.0]);
     }
 }

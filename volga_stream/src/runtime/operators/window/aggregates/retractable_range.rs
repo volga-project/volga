@@ -8,9 +8,9 @@ use datafusion::scalar::ScalarValue;
 use crate::runtime::operators::window::index::{get_window_size_rows, window_logic};
 use crate::runtime::operators::window::index::{
     get_window_length_ms,
+    BucketIndex,
     DataBounds,
     DataRequest,
-    SlideRangeInfo,
     SortedRangeIndex,
     SortedRangeView,
 };
@@ -23,6 +23,7 @@ use super::{Aggregation, AggregatorType, BucketRange};
 
 #[derive(Debug)]
 pub struct RetractableRangeAggregation {
+    pub bucket_index: BucketIndex,
     pub update_range: Option<BucketRange>,
     pub retract_range: Option<BucketRange>,
     pub prev_processed_until: Option<Cursor>,
@@ -37,18 +38,92 @@ pub struct RetractableRangeAggregation {
 impl RetractableRangeAggregation {
     pub fn new(
         window_id: usize,
-        slide_info: &SlideRangeInfo,
         prev_processed_until: Option<Cursor>,
+        new_processed_until: Cursor,
+        bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         accumulator_state: Option<AccumulatorState>,
         ts_column_index: usize,
         bucket_granularity: TimeGranularity,
     ) -> Self {
+        let window_frame = window_expr.get_window_frame();
+        let wl = if window_frame.units == WindowFrameUnits::Range {
+            get_window_length_ms(window_frame)
+        } else {
+            0
+        };
+        let ws = if window_frame.units == WindowFrameUnits::Rows {
+            get_window_size_rows(window_frame)
+        } else {
+            0
+        };
+
+        let update_range = bucket_index.delta_span(prev_processed_until, new_processed_until);
+        let retract_range = match update_range {
+            None => None,
+            Some(update_range) => {
+                let prev = prev_processed_until.unwrap_or(Cursor::new(i64::MIN, 0));
+                if prev.ts == i64::MIN {
+                    Some(update_range)
+                } else {
+                    match window_frame.units {
+                        WindowFrameUnits::Range => {
+                            let prev_start_ts = prev.ts.saturating_sub(wl);
+                            let new_start_ts = new_processed_until.ts.saturating_sub(wl);
+                            if new_start_ts <= prev_start_ts {
+                                None
+                            } else {
+                                let start_bucket_ts = bucket_granularity.start(prev_start_ts);
+                                let end_bucket_ts =
+                                    bucket_granularity.start(new_start_ts.saturating_sub(1));
+                                if end_bucket_ts < start_bucket_ts {
+                                    None
+                                } else {
+                                    let buckets =
+                                        bucket_index.query_buckets_in_range(start_bucket_ts, end_bucket_ts);
+                                    if buckets.is_empty() {
+                                        None
+                                    } else {
+                                        Some(BucketRange::new(
+                                            buckets.first().unwrap().timestamp,
+                                            buckets.last().unwrap().timestamp,
+                                        ))
+                                    }
+                                }
+                            }
+                        }
+                        WindowFrameUnits::Rows => {
+                            let new_start_bucket_ts = update_range.start;
+                            let all_ts = bucket_index.bucket_timestamps();
+                            let first_ts = all_ts.first().copied().unwrap_or(new_start_bucket_ts);
+                            let buckets = bucket_index.query_buckets_in_range(first_ts, new_start_bucket_ts);
+                            if buckets.is_empty() {
+                                None
+                            } else {
+                                let mut rows_counted = 0usize;
+                                let mut start_ts = new_start_bucket_ts;
+                                for b in buckets.iter().rev() {
+                                    start_ts = b.timestamp;
+                                    rows_counted += b.row_count;
+                                    if rows_counted >= ws {
+                                        break;
+                                    }
+                                }
+                                Some(BucketRange::new(start_ts, update_range.end))
+                            }
+                        }
+                        _ => Some(update_range),
+                    }
+                }
+            }
+        };
+
         Self {
-            update_range: slide_info.update_range,
-            retract_range: slide_info.retract_range,
+            bucket_index: bucket_index.clone(),
+            update_range,
+            retract_range,
             prev_processed_until,
-            new_processed_until: slide_info.new_processed_until,
+            new_processed_until,
             window_expr,
             accumulator_state,
             ts_column_index,
@@ -68,7 +143,7 @@ impl Aggregation for RetractableRangeAggregation {
         AggregatorType::RetractableAccumulator
     }
 
-    fn get_data_requests(&self, _exclude_current_row: Option<bool>) -> Vec<DataRequest> {
+    fn get_data_requests(&self) -> Vec<DataRequest> {
         let Some(update) = self.update_range else {
             return vec![];
         };
@@ -129,7 +204,6 @@ impl Aggregation for RetractableRangeAggregation {
         &self,
         sorted_ranges: &[SortedRangeView],
         _thread_pool: Option<&tokio_rayon::rayon::ThreadPool>,
-        _exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         let window_frame = self.window_expr.get_window_frame();
         let is_rows_window = window_frame.units == WindowFrameUnits::Rows;
@@ -392,7 +466,6 @@ WINDOW w AS (
   ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
 )"#;
         let window_expr = test_utils::window_expr_from_sql(sql).await;
-        let window_frame = window_expr.get_window_frame().clone();
         let gran = TimeGranularity::Seconds(1);
 
         let b1000 = test_utils::batch(&[
@@ -410,14 +483,23 @@ WINDOW w AS (
             4,
         );
 
-        let slide = bucket_index.slide_window(&window_frame, None).expect("slide");
-        let agg = RetractableRangeAggregation::new(0, &slide, None, window_expr.clone(), None, 0, gran);
+        let new_pos = bucket_index.max_pos_seen();
+        let agg = RetractableRangeAggregation::new(
+            0,
+            None,
+            new_pos,
+            &bucket_index,
+            window_expr.clone(),
+            None,
+            0,
+            gran,
+        );
 
-        let reqs = agg.get_data_requests(None);
+        let reqs = agg.get_data_requests();
         assert_eq!(reqs.len(), 1);
         let view = test_utils::make_view(gran, reqs[0], vec![(1000, b1000)], &window_expr);
 
-        let (vals, state) = agg.produce_aggregates_from_ranges(&[view], None, None).await;
+        let (vals, state) = agg.produce_aggregates_from_ranges(&[view], None).await;
         assert_f64s(&vals, &[10.0, 30.0, 60.0, 90.0]);
         let state = state.expect("state");
         assert!((eval_state(&window_expr, &state) - 90.0).abs() < 1e-9);
@@ -433,7 +515,6 @@ WINDOW w AS (
   ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
 )"#;
         let window_expr = test_utils::window_expr_from_sql(sql).await;
-        let window_frame = window_expr.get_window_frame().clone();
         let gran = TimeGranularity::Seconds(1);
 
         let mut bucket_index = BucketIndex::new(gran);
@@ -455,14 +536,22 @@ WINDOW w AS (
         let b1000 = test_utils::batch(&[(1000, 10.0, "A", 0), (1500, 20.0, "A", 1)]);
         let b2000 = test_utils::batch(&[(2000, 30.0, "A", 2)]);
 
-        let slide1 = bucket_index.slide_window(&window_frame, None).expect("slide1");
-        let agg1 =
-            RetractableRangeAggregation::new(0, &slide1, None, window_expr.clone(), None, 0, gran);
-        let reqs1 = agg1.get_data_requests(None);
+        let new1 = bucket_index.max_pos_seen();
+        let agg1 = RetractableRangeAggregation::new(
+            0,
+            None,
+            new1,
+            &bucket_index,
+            window_expr.clone(),
+            None,
+            0,
+            gran,
+        );
+        let reqs1 = agg1.get_data_requests();
         assert_eq!(reqs1.len(), 1);
         let view1 = test_utils::make_view(gran, reqs1[0], vec![(1000, b1000), (2000, b2000)], &window_expr);
 
-        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&[view1], None, None).await;
+        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&[view1], None).await;
         assert_f64s(&vals1, &[10.0, 30.0, 60.0]);
         let state1 = state1.expect("state1");
 
@@ -490,12 +579,13 @@ WINDOW w AS (
         let b3000 = test_utils::batch(&[(3000, 50.0, "A", 4), (3500, 60.0, "A", 5)]);
         let b4000 = test_utils::batch(&[(4000, 70.0, "A", 6)]);
 
-        let prev = Some(slide1.new_processed_until);
-        let slide2 = bucket_index.slide_window(&window_frame, prev).expect("slide2");
+        let prev = Some(new1);
+        let new2 = bucket_index.max_pos_seen();
         let agg2 = RetractableRangeAggregation::new(
             0,
-            &slide2,
             prev,
+            new2,
+            &bucket_index,
             window_expr.clone(),
             Some(state1.clone()),
             0,
@@ -504,7 +594,7 @@ WINDOW w AS (
 
         // For ROWS our planning creates overlapping retract/update candidate spans, so we should
         // still get a single request (union).
-        let reqs2 = agg2.get_data_requests(None);
+        let reqs2 = agg2.get_data_requests();
         assert_eq!(reqs2.len(), 1);
 
         let view2 = test_utils::make_view(
@@ -519,7 +609,7 @@ WINDOW w AS (
             &window_expr,
         );
 
-        let (vals2, state2) = agg2.produce_aggregates_from_ranges(&[view2], None, None).await;
+        let (vals2, state2) = agg2.produce_aggregates_from_ranges(&[view2], None).await;
         assert_f64s(&vals2, &[90.0, 120.0, 150.0, 180.0]);
         let state2 = state2.expect("state2");
         assert!((eval_state(&window_expr, &state2) - 180.0).abs() < 1e-9);
@@ -535,7 +625,6 @@ WINDOW w AS (
   RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW
 )"#;
         let window_expr = test_utils::window_expr_from_sql(sql).await;
-        let window_frame = window_expr.get_window_frame().clone();
         let gran = TimeGranularity::Seconds(1);
 
         // Step 1: rows up to t=2000.
@@ -556,23 +645,22 @@ WINDOW w AS (
             1,
         );
 
-        let slide1 = bucket_index.slide_window(&window_frame, None).expect("slide1");
+        let new1 = bucket_index.max_pos_seen();
         let agg1 = RetractableRangeAggregation::new(
             0,
-            &slide1,
             None,
+            new1,
+            &bucket_index,
             window_expr.clone(),
             None,
             0,
             gran,
         );
-        let reqs1 = agg1.get_data_requests(None);
+        let reqs1 = agg1.get_data_requests();
         assert_eq!(reqs1.len(), 1);
         let view1 =
             test_utils::make_view(gran, reqs1[0], vec![(1000, b1000), (2000, b2000)], &window_expr);
-        let (vals1, state1) = agg1
-            .produce_aggregates_from_ranges(&[view1], None, None)
-            .await;
+        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&[view1], None).await;
         assert_f64s(&vals1, &[10.0, 40.0, 60.0]);
         let state1 = state1.expect("state1");
         assert!((eval_state(&window_expr, &state1) - 60.0).abs() < 1e-9);
@@ -586,18 +674,19 @@ WINDOW w AS (
             1,
         );
 
-        let prev = Some(slide1.new_processed_until);
-        let slide2 = bucket_index.slide_window(&window_frame, prev).expect("slide2");
+        let prev = Some(new1);
+        let new2 = bucket_index.max_pos_seen();
         let agg2 = RetractableRangeAggregation::new(
             0,
-            &slide2,
             prev,
+            new2,
+            &bucket_index,
             window_expr.clone(),
             Some(state1.clone()),
             0,
             gran,
         );
-        let reqs2 = agg2.get_data_requests(None);
+        let reqs2 = agg2.get_data_requests();
         assert_eq!(reqs2.len(), 2, "expected edge loading (retract + update)");
         let view2_retract = test_utils::make_view(
             gran,
@@ -615,7 +704,7 @@ WINDOW w AS (
             test_utils::make_view(gran, reqs2[1], vec![(3000, b3000)], &window_expr);
 
         let (vals2, state2) = agg2
-            .produce_aggregates_from_ranges(&[view2_retract, view2_update], None, None)
+            .produce_aggregates_from_ranges(&[view2_retract, view2_update], None)
             .await;
         assert_f64s(&vals2, &[55.0]);
         let state2 = state2.expect("state2");

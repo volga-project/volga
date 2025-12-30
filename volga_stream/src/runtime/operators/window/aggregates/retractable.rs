@@ -6,7 +6,7 @@ use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
-use crate::runtime::operators::window::index::{BucketIndex, SlideRangeInfo};
+use crate::runtime::operators::window::index::BucketIndex;
 use crate::runtime::operators::window::tiles::TimeGranularity;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, Tiles};
@@ -32,8 +32,9 @@ pub enum RetractableAggregation {
 impl RetractableAggregation {
     pub fn from_range(
         window_id: usize,
-        slide_info: &SlideRangeInfo,
         prev_processed_until: Option<Cursor>,
+        new_processed_until: Cursor,
+        bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         accumulator_state: Option<AccumulatorState>,
         ts_column_index: usize,
@@ -41,8 +42,9 @@ impl RetractableAggregation {
     ) -> Self {
         Self::Range(RetractableRangeAggregation::new(
             window_id,
-            slide_info,
             prev_processed_until,
+            new_processed_until,
+            bucket_index,
             window_expr,
             accumulator_state,
             ts_column_index,
@@ -54,19 +56,17 @@ impl RetractableAggregation {
         points: Vec<VirtualPoint>,
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
-        ts_column_index: usize,
-        window_id: usize,
         processed_until: Option<Cursor>,
         accumulator_state: Option<AccumulatorState>,
+        exclude_current_row: bool,
     ) -> Self {
         Self::Points(RetractablePointsAggregation::new(
             points,
             bucket_index,
             window_expr,
-            ts_column_index,
-            window_id,
             processed_until,
             accumulator_state,
+            exclude_current_row,
         ))
     }
 }
@@ -84,13 +84,10 @@ impl Aggregation for RetractableAggregation {
         AggregatorType::RetractableAccumulator
     }
 
-    fn get_data_requests(
-        &self,
-        exclude_current_row: Option<bool>,
-    ) -> Vec<crate::runtime::operators::window::index::DataRequest> {
+    fn get_data_requests(&self) -> Vec<crate::runtime::operators::window::index::DataRequest> {
         match self {
-            RetractableAggregation::Range(r) => r.get_data_requests(exclude_current_row),
-            RetractableAggregation::Points(p) => p.get_data_requests(exclude_current_row),
+            RetractableAggregation::Range(r) => r.get_data_requests(),
+            RetractableAggregation::Points(p) => p.get_data_requests(),
         }
     }
 
@@ -98,15 +95,14 @@ impl Aggregation for RetractableAggregation {
         &self,
         sorted_ranges: &[crate::runtime::operators::window::index::SortedRangeView],
         thread_pool: Option<&ThreadPool>,
-        exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         match self {
             RetractableAggregation::Range(r) => {
-                r.produce_aggregates_from_ranges(sorted_ranges, thread_pool, exclude_current_row)
+                r.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
                     .await
             }
             RetractableAggregation::Points(p) => {
-                p.produce_aggregates_from_ranges(sorted_ranges, thread_pool, exclude_current_row)
+                p.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
                     .await
             }
         }

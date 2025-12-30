@@ -10,7 +10,7 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::operators::window::window_operator::ExecutionMode;
+use crate::runtime::operators::window::window_operator::{ExecutionMode, RequestAdvancePolicy};
 use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
@@ -291,6 +291,7 @@ impl LogicalGraph {
         if let Some(node) = self.graph.node_weight_mut(top_window_node) {
             if let OperatorConfig::WindowConfig(ref mut config) = node.operator_config {
                 config.execution_mode = ExecutionMode::Request;
+                config.request_advance_policy = RequestAdvancePolicy::OnIngest;
             }
         }
         

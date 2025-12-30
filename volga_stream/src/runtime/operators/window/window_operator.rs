@@ -34,6 +34,14 @@ pub enum ExecutionMode {
     Request, // operator only updates state, produces no messages
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum RequestAdvancePolicy {
+    /// Advance windows only when watermark is received (default, supports complex DAGs).
+    OnWatermark,
+    /// Advance windows on every keyed message (for simple ingest+request topologies; max freshness).
+    OnIngest,
+}
+
 #[derive(Debug, Clone)]
 pub struct WindowConfig {
     pub window_id: WindowId,
@@ -50,6 +58,7 @@ pub struct WindowOperatorConfig {
     pub parallelize: bool,
     pub tiling_configs: Vec<Option<TileConfig>>,
     pub lateness: Option<i64>,
+    pub request_advance_policy: RequestAdvancePolicy,
 }
 
 impl WindowOperatorConfig {
@@ -59,7 +68,8 @@ impl WindowOperatorConfig {
             execution_mode: ExecutionMode::Regular,
             parallelize: false,
             tiling_configs: Vec::new(),
-            lateness: None
+            lateness: None,
+            request_advance_policy: RequestAdvancePolicy::OnWatermark,
         }
     }
 }
@@ -71,6 +81,7 @@ pub struct WindowOperator {
     ts_column_index: usize,
     buffered_keys: HashSet<Key>,
     execution_mode: ExecutionMode,
+    request_advance_policy: RequestAdvancePolicy,
     parallelize: bool,
     thread_pool: Option<ThreadPool>,
     output_schema: SchemaRef,
@@ -146,6 +157,16 @@ impl WindowOperator {
             _ => panic!("Expected WindowConfig, got {:?}", config),
         };
 
+        if matches!(
+            window_operator_config.request_advance_policy,
+            RequestAdvancePolicy::OnIngest
+        ) && window_operator_config.execution_mode != ExecutionMode::Request
+        {
+            panic!(
+                "RequestAdvancePolicy::OnIngest is only valid for ExecutionMode::Request"
+            );
+        }
+
         let (ts_column_index, windows, input_schema, output_schema, thread_pool) = init(
             false, &window_operator_config.window_exec, &window_operator_config.tiling_configs, window_operator_config.parallelize
         );
@@ -157,6 +178,7 @@ impl WindowOperator {
             ts_column_index,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
+            request_advance_policy: window_operator_config.request_advance_policy,
             parallelize: window_operator_config.parallelize,
             thread_pool,
             output_schema,
@@ -228,32 +250,23 @@ impl WindowOperator {
             .expect("window_configs must be non-empty");
         let mut entry_delta: Option<(Option<Cursor>, Cursor, BucketRange)> = None;
         
-        for (window_id, window_config) in &self.window_configs {
-            let window_frame = window_config.window_expr.get_window_frame();
+        for (window_id, _window_config) in &self.window_configs {
+            let window_frame = _window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
-            let aggregator_type = self.window_configs[window_id].aggregator_type;
+            let aggregator_type = _window_config.aggregator_type;
             let tiles_owned = window_state.tiles.clone();
             let accumulator_state_owned = window_state.accumulator_state.clone();
             let prev_processed_until = window_state.processed_until;
-            
-            // Get slide info from batch index (optionally capped by watermark).
-            let slide_info = match process_until {
-                Some(until) => batch_index.slide_window_until(window_frame, prev_processed_until, until),
-                None => batch_index.slide_window(window_frame, prev_processed_until),
-            };
-            
-            let new_pos = slide_info
-                .as_ref()
-                .map(|s| s.new_processed_until)
-                .unwrap_or_else(|| prev_processed_until.unwrap_or(Cursor::new(i64::MIN, 0)));
+
+            // Determine progress cap for this step.
+            let until = process_until.unwrap_or_else(|| batch_index.max_pos_seen());
+            let new_pos = until.min(batch_index.max_pos_seen());
             
             new_processed_until.insert(*window_id, new_pos);
 
             if *window_id == ref_window_id {
-                if let Some(ref slide) = slide_info {
-                    if let Some(update_range) = slide.update_range {
-                        entry_delta = Some((prev_processed_until, new_pos, update_range));
-                    }
+                if let Some(update_range) = batch_index.delta_span(prev_processed_until, new_pos) {
+                    entry_delta = Some((prev_processed_until, new_pos, update_range));
                 }
             }
 
@@ -262,38 +275,34 @@ impl WindowOperator {
             if self.execution_mode == ExecutionMode::Regular {
                 match aggregator_type {
                     AggregatorType::RetractableAccumulator => {
-                        // Simplified: retractable aggregates only advance in-order; out-of-order rows
+                        // Retractable aggregates only advance in-order; out-of-order rows
                         // are dropped on ingest (see WindowOperatorState::insert_batch).
-                        if let Some(ref slide) = slide_info {
-                            if slide.update_range.is_some() {
-                                aggs.push(Box::new(RetractableAggregation::from_range(
-                                    *window_id,
-                                    slide,
-                                    prev_processed_until,
-                                    window_config.window_expr.clone(),
-                                    accumulator_state_owned.clone(),
-                                    self.ts_column_index,
-                                    batch_index.bucket_granularity(),
-                                )));
-                            }
+                        if batch_index.delta_span(prev_processed_until, new_pos).is_some() {
+                            aggs.push(Box::new(RetractableAggregation::from_range(
+                                *window_id,
+                                prev_processed_until,
+                                new_pos,
+                                batch_index,
+                                _window_config.window_expr.clone(),
+                                accumulator_state_owned.clone(),
+                                self.ts_column_index,
+                                batch_index.bucket_granularity(),
+                            )));
                         }
                     }
                     AggregatorType::PlainAccumulator => {
-                        if let Some(ref slide) = slide_info {
-                            if slide.update_range.is_some() {
-                                aggs.push(Box::new(PlainAggregation::for_range(
-                                    slide.update_range.expect("checked above"),
-                                    batch_index,
-                                    window_config.window_expr.clone(),
-                                    tiles_owned.clone(),
-                                    self.ts_column_index,
-                                    *window_id,
-                                    Some(crate::runtime::operators::window::aggregates::plain::CursorBounds {
-                                        prev: prev_processed_until,
-                                        new: slide.new_processed_until,
-                                    }),
-                                )));
-                            }
+                        if batch_index.delta_span(prev_processed_until, new_pos).is_some() {
+                            aggs.push(Box::new(PlainAggregation::for_range(
+                                batch_index,
+                                _window_config.window_expr.clone(),
+                                tiles_owned.clone(),
+                                self.ts_column_index,
+                                *window_id,
+                                crate::runtime::operators::window::aggregates::plain::CursorBounds {
+                                    prev: prev_processed_until,
+                                    new: new_pos,
+                                },
+                            )));
                         }
                     }
                     AggregatorType::Evaluator => {
@@ -301,24 +310,28 @@ impl WindowOperator {
                     }
                 }
             } else {
-                // Request mode handles only retractable aggs
+                // Request mode: update state (processed_until + retractable accumulator_state),
+                // but produce no output messages (handled in `poll_next`).
                 match aggregator_type {
                     AggregatorType::RetractableAccumulator => {
-                        if let Some(ref slide) = slide_info {
-                            if slide.update_range.is_some() || slide.retract_range.is_some() {
-                                aggs.push(Box::new(RetractableAggregation::from_range(
-                                    *window_id,
-                                    slide,
-                                    prev_processed_until,
-                                    window_config.window_expr.clone(),
-                                    accumulator_state_owned.clone(),
-                                    self.ts_column_index,
-                                    batch_index.bucket_granularity(),
-                                )));
-                            }
+                        if batch_index.delta_span(prev_processed_until, new_pos).is_some() {
+                            aggs.push(Box::new(RetractableAggregation::from_range(
+                                *window_id,
+                                prev_processed_until,
+                                new_pos,
+                                batch_index,
+                                _window_config.window_expr.clone(),
+                                accumulator_state_owned.clone(),
+                                self.ts_column_index,
+                                batch_index.bucket_granularity(),
+                            )));
                         }
                     }
-                    _ => {}
+                    // Plain accumulators are not materialized in request mode; their tiles are updated on ingest.
+                    _ => {
+                        let _ = window_frame;
+                        let _ = tiles_owned;
+                    }
                 }
             }
             if !aggs.is_empty() {
@@ -347,27 +360,20 @@ impl WindowOperator {
         
         struct Exec<'a> {
             window_id: WindowId,
-            exclude_current_row: Option<bool>,
             agg: &'a dyn Aggregation,
         }
 
         let mut execs: Vec<Exec<'_>> = Vec::new();
         let mut load_plans: Vec<RangesLoadPlan> = Vec::new();
         for (window_id, aggs) in &aggregations {
-            let window_config = self
-                .window_configs
-                .get(window_id)
-                .expect("Window config should exist");
-            let exclude_current_row = window_config.exclude_current_row;
             for agg in aggs {
-                let requests = agg.get_data_requests(exclude_current_row);
+                let requests = agg.get_data_requests();
                 load_plans.push(RangesLoadPlan {
                     requests,
                     window_expr_for_args: agg.window_expr().clone(),
                 });
                 execs.push(Exec {
                     window_id: *window_id,
-                    exclude_current_row,
                     agg: agg.as_ref(),
                 });
             }
@@ -384,7 +390,6 @@ impl WindowOperator {
                     .produce_aggregates_from_ranges(
                         views,
                         self.thread_pool.as_ref(),
-                        exec.exclude_current_row,
                     )
                     .await;
                 (exec.window_id, result)
@@ -577,9 +582,16 @@ impl OperatorTrait for WindowOperator {
                                 keyed_message.base.record_batch.clone(),
                             )
                             .await;
-                        // Always buffer and wait for watermark to emit.
                         if _dropped_rows < input_rows {
-                            self.buffered_keys.insert(key.clone());
+                            if self.execution_mode == ExecutionMode::Request
+                                && matches!(self.request_advance_policy, RequestAdvancePolicy::OnIngest)
+                            {
+                                // Request mode, ingest-driven: advance state immediately, produce no outputs.
+                                let _ = self.process_key(key, None).await;
+                            } else {
+                                // Default: buffer and wait for watermark to emit.
+                                self.buffered_keys.insert(key.clone());
+                            }
                         }
                         return OperatorPollResult::Continue;
                     }

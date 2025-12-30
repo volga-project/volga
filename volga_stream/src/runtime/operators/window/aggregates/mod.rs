@@ -19,6 +19,7 @@ pub mod arrow_utils;
 pub mod evaluator;
 pub mod plain;
 pub mod retractable;
+pub mod point_request_merge;
 
 /// A logical bucket interval in bucket timestamp space (inclusive).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,18 +48,16 @@ pub trait Aggregation: Send + Sync {
     fn aggregator_type(&self) -> AggregatorType;
 
     /// Row-level data requests for request-mode (range views).
-    fn get_data_requests(&self, exclude_current_row: Option<bool>) -> Vec<DataRequest>;
+    fn get_data_requests(&self) -> Vec<DataRequest>;
 
     /// Produce aggregates from preloaded `SortedRangeView`s corresponding to `get_data_requests(...)`.
     async fn produce_aggregates_from_ranges(
         &self,
         sorted_ranges: &[SortedRangeView],
         thread_pool: Option<&ThreadPool>,
-        exclude_current_row: Option<bool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         let _ = sorted_ranges;
         let _ = thread_pool;
-        let _ = exclude_current_row;
         panic!("Aggregation must implement produce_aggregates_from_ranges")
     }
 }

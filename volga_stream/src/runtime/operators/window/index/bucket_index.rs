@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use datafusion::logical_expr::{WindowFrame, WindowFrameUnits};
+use datafusion::logical_expr::WindowFrame;
 
 use crate::runtime::operators::window::TimeGranularity;
 use crate::runtime::operators::window::aggregates::BucketRange;
@@ -52,14 +52,6 @@ impl Bucket {
         self.batches.push(metadata);
         self.version = self.version.wrapping_add(1);
     }
-}
-
-/// Result of sliding the window - returns buckets for aggregation layer.
-#[derive(Debug, Clone)]
-pub struct SlideRangeInfo {
-    pub update_range: Option<BucketRange>,
-    pub retract_range: Option<BucketRange>,
-    pub new_processed_until: Cursor,
 }
 
 /// Bucket-level index using bucket timestamps.
@@ -115,6 +107,87 @@ impl BucketIndex {
         self.buckets.range(start..=end).map(|(_, b)| b).collect()
     }
 
+    /// Bucket-level span that may contain rows in (prev, new] (by cursor order).
+    ///
+    /// This is used to plan "entry buckets" for plain and retractable streaming aggregates.
+    pub fn delta_span(&self, prev: Option<Cursor>, new: Cursor) -> Option<BucketRange> {
+        if self.buckets.is_empty() {
+            return None;
+        }
+        let prev = prev.unwrap_or(Cursor::new(i64::MIN, 0));
+        if new <= prev {
+            return None;
+        }
+
+        let end_bucket_ts = self.bucket_granularity.start(new.ts);
+        let start_bucket_ts = if prev.ts == i64::MIN {
+            self.buckets.keys().next().copied().unwrap_or(end_bucket_ts)
+        } else {
+            self.bucket_granularity.start(prev.ts)
+        };
+
+        let mut iter = self.buckets.range(start_bucket_ts..=end_bucket_ts);
+        let first = iter.next().map(|(k, _)| *k)?;
+        let last = self
+            .buckets
+            .range(start_bucket_ts..=end_bucket_ts)
+            .next_back()
+            .map(|(k, _)| *k)?;
+        Some(BucketRange::new(first, last))
+    }
+
+    /// Bucket range that covers the full time window context needed for RANGE windows.
+    pub fn bucket_span_for_range_window(&self, end_span: BucketRange, window_length_ms: i64) -> BucketRange {
+        if self.buckets.is_empty() {
+            return end_span;
+        }
+        let start_unaligned = end_span.start.saturating_sub(window_length_ms);
+        let start = self.bucket_granularity.start(start_unaligned);
+        let end = end_span.end;
+
+        let mut iter = self.buckets.range(start..=end);
+        let first = iter.next().map(|(k, _)| *k);
+        let last = self.buckets.range(start..=end).next_back().map(|(k, _)| *k);
+        match (first, last) {
+            (Some(s), Some(e)) => BucketRange::new(s, e),
+            _ => end_span,
+        }
+    }
+
+    /// Bucket range that covers the full context needed for ROWS windows (bucket-count approximation).
+    pub fn bucket_span_for_rows_window(&self, end_span: BucketRange, window_size: usize) -> BucketRange {
+        if self.buckets.is_empty() {
+            return end_span;
+        }
+
+        // Include all buckets in [start,end]
+        let mut rows_in_range: usize = 0;
+        for (_, bucket) in self.buckets.range(end_span.start..=end_span.end) {
+            rows_in_range += bucket.row_count;
+        }
+
+        let mut start = end_span.start;
+        if rows_in_range < window_size {
+            let mut rows_needed = window_size - rows_in_range;
+            for (&bucket_ts, bucket) in self.buckets.range(..end_span.start).rev() {
+                start = bucket_ts;
+                if rows_needed <= bucket.row_count {
+                    break;
+                }
+                rows_needed -= bucket.row_count;
+            }
+        }
+
+        // Clamp start/end to existing buckets (defensive).
+        let end = end_span.end;
+        let first = self.buckets.range(start..=end).next().map(|(k, _)| *k);
+        let last = self.buckets.range(start..=end).next_back().map(|(k, _)| *k);
+        match (first, last) {
+            (Some(s), Some(e)) => BucketRange::new(s, e),
+            _ => end_span,
+        }
+    }
+
     pub fn plan_rows_tail(
         &self,
         end_ts: Timestamp,
@@ -156,70 +229,6 @@ impl BucketIndex {
         }
 
         Some(BucketRange::new(start_bucket_ts, end_bucket_ts))
-    }
-
-    /// Get buckets for RANGE windows given update bucket timestamps.
-    /// For update range `[start,end]`, returns a bucket range covering
-    /// `[start - window_length_ms, end]` (clamped to existing buckets).
-    pub fn get_relevant_range_for_range_windows(
-        &self,
-        update_range: BucketRange,
-        window_length_ms: i64,
-    ) -> BucketRange {
-        if self.buckets.is_empty() {
-            return update_range;
-        }
-        let start_unaligned = update_range.start.saturating_sub(window_length_ms);
-        let start = self.bucket_granularity.start(start_unaligned);
-        let end = update_range.end;
-
-        let mut iter = self.buckets.range(start..=end);
-        let first = iter.next().map(|(k, _)| *k);
-        let last = self.buckets.range(start..=end).next_back().map(|(k, _)| *k);
-        match (first, last) {
-            (Some(s), Some(e)) => BucketRange::new(s, e),
-            _ => update_range,
-        }
-    }
-
-    /// Get buckets for ROWS windows given update bucket timestamps.
-    /// Returns a bucket range that contains `[start,end]` and additionally walks backwards from `start`
-    /// collecting at least `window_size` rows (clamped to existing buckets).
-    pub fn get_relevant_range_for_rows_windows(
-        &self,
-        update_range: BucketRange,
-        window_size: usize,
-    ) -> BucketRange {
-        if self.buckets.is_empty() {
-            return update_range;
-        }
-
-        // Include all buckets in [start,end]
-        let mut rows_in_range: usize = 0;
-        for (_, bucket) in self.buckets.range(update_range.start..=update_range.end) {
-            rows_in_range += bucket.row_count;
-        }
-
-        let mut start = update_range.start;
-        if rows_in_range < window_size {
-            let mut rows_needed = window_size - rows_in_range;
-            for (&bucket_ts, bucket) in self.buckets.range(..update_range.start).rev() {
-                start = bucket_ts;
-                if rows_needed <= bucket.row_count {
-                    break;
-                }
-                rows_needed -= bucket.row_count;
-            }
-        }
-
-        // Clamp start/end to existing buckets (defensive).
-        let end = update_range.end;
-        let first = self.buckets.range(start..=end).next().map(|(k, _)| *k);
-        let last = self.buckets.range(start..=end).next_back().map(|(k, _)| *k);
-        match (first, last) {
-            (Some(s), Some(e)) => BucketRange::new(s, e),
-            _ => update_range,
-        }
     }
 
     pub fn total_rows(&self) -> usize {
@@ -267,171 +276,6 @@ impl BucketIndex {
         }
 
         pruned_ids
-    }
-
-    /// Slide window for retractable aggregations.
-    pub fn slide_window(
-        &self,
-        window_frame: &WindowFrame,
-        previous_processed_until: Option<Cursor>,
-    ) -> Option<SlideRangeInfo> {
-        self.slide_window_until(window_frame, previous_processed_until, self.max_pos_seen)
-    }
-
-    /// Slide window but cap progress at `until` (typically watermark).
-    ///
-    /// Note: if `until` is ahead of what we have ingested (`max_pos_seen`), we clamp to `max_pos_seen`.
-    pub fn slide_window_until(
-        &self,
-        window_frame: &WindowFrame,
-        previous_processed_until: Option<Cursor>,
-        until: Cursor,
-    ) -> Option<SlideRangeInfo> {
-        if self.buckets.is_empty() {
-            return None;
-        }
-
-        let prev = previous_processed_until.unwrap_or(Cursor::new(i64::MIN, 0));
-        let until = until.min(self.max_pos_seen);
-
-        match window_frame.units {
-            WindowFrameUnits::Range => {
-                let window_length_ms = get_window_length_ms(window_frame);
-                Some(self.slide_range_window(window_length_ms, prev, until))
-            }
-            WindowFrameUnits::Rows => {
-                let window_size = get_window_size_rows(window_frame);
-                Some(self.slide_rows_window(window_size, prev, until))
-            }
-            WindowFrameUnits::Groups => panic!("Groups window frame not supported"),
-        }
-    }
-
-    fn slide_range_window(&self, window_length_ms: i64, prev: Cursor, new_end: Cursor) -> SlideRangeInfo {
-
-        if new_end <= prev {
-            return SlideRangeInfo {
-                update_range: None,
-                retract_range: None,
-                new_processed_until: prev,
-            };
-        }
-
-        let new_bucket_ts = self.bucket_granularity.start(new_end.ts);
-        let update_buckets: Vec<&Bucket> = if prev.ts == i64::MIN {
-            self.buckets.range(..=new_bucket_ts).map(|(_, b)| b).collect()
-        } else {
-            let prev_bucket_ts = self.bucket_granularity.start(prev.ts);
-            self.buckets
-                .range(prev_bucket_ts..=new_bucket_ts)
-                .map(|(_, b)| b)
-                .collect()
-        };
-
-        if update_buckets.is_empty() {
-            return SlideRangeInfo {
-                update_range: None,
-                retract_range: None,
-                new_processed_until: prev,
-            };
-        }
-
-        let prev_start_ts = prev.ts.saturating_sub(window_length_ms);
-        let new_start_ts = new_end.ts.saturating_sub(window_length_ms);
-
-        let retract_buckets = if new_start_ts > prev_start_ts && prev.ts > i64::MIN {
-            self.buckets
-                .range(prev_start_ts..new_start_ts)
-                .map(|(_, b)| b)
-                .collect()
-        } else {
-            vec![]
-        };
-
-        let update_range = Some(BucketRange::new(
-            update_buckets.first().unwrap().timestamp,
-            update_buckets.last().unwrap().timestamp,
-        ));
-
-        let retract_range = if prev.ts == i64::MIN {
-            // First run: retract happens within the update stream itself.
-            update_range
-        } else if retract_buckets.is_empty() {
-            None
-        } else {
-            Some(BucketRange::new(
-                retract_buckets.first().unwrap().timestamp,
-                retract_buckets.last().unwrap().timestamp,
-            ))
-        };
-
-        SlideRangeInfo {
-            update_range,
-            retract_range,
-            new_processed_until: new_end,
-        }
-    }
-
-    fn slide_rows_window(&self, window_size: usize, prev: Cursor, new_end: Cursor) -> SlideRangeInfo {
-
-        if new_end <= prev {
-            return SlideRangeInfo {
-                update_range: None,
-                retract_range: None,
-                new_processed_until: prev,
-            };
-        }
-
-        let new_bucket_ts = self.bucket_granularity.start(new_end.ts);
-        let update_buckets: Vec<&Bucket> = if prev.ts == i64::MIN {
-            self.buckets.range(..=new_bucket_ts).map(|(_, b)| b).collect()
-        } else {
-            let prev_bucket_ts = self.bucket_granularity.start(prev.ts);
-            self.buckets
-                .range(prev_bucket_ts..=new_bucket_ts)
-                .map(|(_, b)| b)
-                .collect()
-        };
-
-        if update_buckets.is_empty() {
-            return SlideRangeInfo {
-                update_range: None,
-                retract_range: None,
-                new_processed_until: prev,
-            };
-        }
-
-        let new_start_bucket_ts = update_buckets.first().unwrap().timestamp;
-
-        let update_range = Some(BucketRange::new(
-            update_buckets.first().unwrap().timestamp,
-            update_buckets.last().unwrap().timestamp,
-        ));
-
-        let retract_range = if prev.ts == i64::MIN {
-            // First run: retract happens within the update stream itself.
-            update_range
-        } else {
-            // Candidate retract span for ROWS: walk backwards (bucket-level) to cover `window_size`
-            // rows, but always include the first update bucket (so we can locate prev_processed_until)
-            // and all update buckets (so retractions can move into updates on large steps).
-            let mut rows_counted = 0usize;
-            let mut start_ts = new_start_bucket_ts;
-            for (&bucket_ts, bucket) in self.buckets.range(..=new_start_bucket_ts).rev() {
-                start_ts = bucket_ts;
-                rows_counted += bucket.row_count;
-                if rows_counted >= window_size {
-                    break;
-                }
-            }
-            Some(BucketRange::new(start_ts, update_buckets.last().unwrap().timestamp))
-        };
-
-        SlideRangeInfo {
-            update_range,
-            retract_range,
-            new_processed_until: new_end,
-        }
     }
 }
 
@@ -518,197 +362,6 @@ mod tests {
         let bucket = buckets[0];
         assert_eq!(bucket.row_count, 150);
         assert_eq!(bucket.batches.len(), 2);
-    }
-
-    #[test]
-    fn test_slide_range_window() {
-        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
-        let window_length = 1000;
-
-        // Step 1: initial slide on empty index
-        let result = index.slide_range_window(window_length, Cursor::new(i64::MIN, 0), index.max_pos_seen());
-        assert!(result.update_range.is_none());
-        assert!(result.retract_range.is_none());
-        let mut prev_end = result.new_processed_until;
-
-        // Step 2: add data, slide
-        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 1), make_pos(1500, 100), 100);
-        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 101), make_pos(2500, 150), 50);
-
-        let result = index.slide_range_window(window_length, prev_end, index.max_pos_seen());
-        let update_r = result.update_range.unwrap();
-        assert_range(update_r, 1000, 2000);
-        // First run (prev == MIN): retract happens within the update stream itself.
-        let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1000, 2000);
-        assert_eq!(result.new_processed_until.ts, 2500);
-        prev_end = result.new_processed_until;
-
-        // Step 3: add more data (including out-of-order), slide
-        index.insert_batch(make_batch_id(4000, 3), make_pos(4000, 151), make_pos(4500, 225), 75);
-        index.insert_batch(make_batch_id(1500, 4), make_pos(1500, 226), make_pos(1800, 255), 30); // out-of-order
-        index.insert_batch(make_batch_id(3000, 5), make_pos(3000, 256), make_pos(3500, 315), 60);
-
-        let result = index.slide_range_window(window_length, prev_end, index.max_pos_seen());
-        let update_r = result.update_range.unwrap();
-        assert_range(update_r, 2000, 4000);
-
-        let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1500, 3000);
-
-        assert_eq!(result.new_processed_until.ts, 4500);
-    }
-
-    #[test]
-    fn test_slide_rows_window() {
-        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
-        let window_size = 150;
-
-        // Step 1: initial slide on empty index
-        let result = index.slide_rows_window(window_size, Cursor::new(i64::MIN, 0), index.max_pos_seen());
-        assert!(result.update_range.is_none());
-        assert!(result.retract_range.is_none());
-        let mut prev_end = result.new_processed_until;
-
-        // Step 2: add data, slide (200 rows total, window=150, no retracts yet)
-        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 1), make_pos(1500, 100), 100);
-        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 101), make_pos(2500, 200), 100);
-
-        let result = index.slide_rows_window(window_size, prev_end, index.max_pos_seen());
-        let update_r = result.update_range.unwrap();
-        assert_range(update_r, 1000, 2000);
-        // First run (prev == MIN): retract happens within the update stream itself.
-        let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1000, 2000);
-        assert_eq!(result.new_processed_until.ts, 2500);
-        prev_end = result.new_processed_until;
-
-        // Step 3: add more data (including out-of-order)
-        index.insert_batch(make_batch_id(4000, 3), make_pos(4000, 201), make_pos(4500, 300), 100);
-        index.insert_batch(make_batch_id(1500, 4), make_pos(1500, 301), make_pos(1800, 350), 50); // out-of-order
-        index.insert_batch(make_batch_id(3000, 5), make_pos(3000, 351), make_pos(3500, 450), 100);
-
-        let result = index.slide_rows_window(window_size, prev_end, index.max_pos_seen());
-        let update_r = result.update_range.unwrap();
-        assert_range(update_r, 2000, 4000);
-
-        let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1500, 4000);
-
-        assert_eq!(result.new_processed_until.ts, 4500);
-    }
-
-    #[test]
-    fn test_slide_rows_window_same_bucket_step_keeps_ranges_in_bucket() {
-        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
-
-        index.insert_batch(make_batch_id(1000, 1), make_pos(1100, 0), make_pos(1900, 9), 10);
-
-        // A step that stays within the same bucket timestamp.
-        let prev = make_pos(1200, 1);
-        let new_end = make_pos(1800, 8);
-        let result = index.slide_rows_window(3, prev, new_end);
-
-        let update_r = result.update_range.unwrap();
-        assert_range(update_r, 1000, 1000);
-
-        let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1000, 1000);
-        assert_eq!(result.new_processed_until, new_end);
-    }
-
-    #[test]
-    fn test_slide_rows_window_window_bigger_than_total_rows_clamps_to_first_bucket() {
-        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
-
-        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 0), make_pos(1500, 1), 2);
-        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 2), make_pos(2000, 2), 1);
-
-        let prev = make_pos(1500, 1);
-        let new_end = make_pos(2000, 2);
-        let result = index.slide_rows_window(10, prev, new_end);
-
-        let update_r = result.update_range.unwrap();
-        assert_range(update_r, 1000, 2000);
-
-        let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1000, 2000);
-    }
-
-    #[test]
-    fn test_slide_rows_window_retract_range_includes_update_buckets_for_large_steps() {
-        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
-
-        // Build history: bucket 1000 has many rows, bucket 2000 one row.
-        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 0), make_pos(1900, 4), 5);
-        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 5), make_pos(2000, 5), 1);
-
-        // First run to establish a prev_processed_until.
-        let first = index.slide_rows_window(3, Cursor::new(i64::MIN, 0), index.max_pos_seen());
-        let prev = first.new_processed_until;
-
-        // Large step adds more buckets, update starts at bucket 2000 and spans to 4000.
-        index.insert_batch(make_batch_id(3000, 3), make_pos(3000, 6), make_pos(3000, 6), 1);
-        index.insert_batch(make_batch_id(4000, 4), make_pos(4000, 7), make_pos(4000, 7), 1);
-
-        let result = index.slide_rows_window(3, prev, index.max_pos_seen());
-
-        let update_r = result.update_range.unwrap();
-        assert_range(update_r, 2000, 4000);
-
-        // Retract range must include all update buckets so retract can move into updates.
-        let retract_r = result.retract_range.unwrap();
-        assert_range(retract_r, 1000, 4000);
-    }
-
-    #[test]
-    fn test_get_relevant_buckets_for_range_windows() {
-        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
-
-        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 1), make_pos(1500, 100), 100);
-        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 101), make_pos(2500, 150), 50);
-        index.insert_batch(make_batch_id(3000, 3), make_pos(3000, 151), make_pos(3500, 225), 75);
-        index.insert_batch(make_batch_id(5000, 4), make_pos(5000, 226), make_pos(5500, 285), 60);
-
-        // Update at 3000, window=1000 -> [2000, 3000]
-        let update = BucketRange::new(3000, 3000);
-        let r = index.get_relevant_range_for_range_windows(update, 1000);
-        assert_range(r, 2000, 3000);
-
-        // Update at 5000, window=1000 -> [4000, 5000] (only 5000 exists)
-        let update = BucketRange::new(5000, 5000);
-        let r = index.get_relevant_range_for_range_windows(update, 1000);
-        assert_range(r, 5000, 5000);
-    }
-
-    #[test]
-    fn test_get_relevant_buckets_for_rows_windows() {
-        let mut index = BucketIndex::new(TimeGranularity::Seconds(1));
-
-        index.insert_batch(make_batch_id(1000, 1), make_pos(1000, 1), make_pos(1500, 100), 100);
-        index.insert_batch(make_batch_id(2000, 2), make_pos(2000, 101), make_pos(2500, 200), 100);
-        index.insert_batch(make_batch_id(3000, 3), make_pos(3000, 201), make_pos(3500, 300), 100);
-        index.insert_batch(make_batch_id(4000, 4), make_pos(4000, 301), make_pos(4500, 400), 100);
-
-        // window=50 -> only bucket 4000 (100 rows > 50)
-        let update = BucketRange::new(4000, 4000);
-        let r = index.get_relevant_range_for_rows_windows(update, 50);
-        assert_range(r, 4000, 4000);
-
-        // window=150 -> buckets 3000 + 4000
-        let update = BucketRange::new(4000, 4000);
-        let r = index.get_relevant_range_for_rows_windows(update, 150);
-        assert_range(r, 3000, 4000);
-
-        // window=350 -> all
-        let update = BucketRange::new(4000, 4000);
-        let r = index.get_relevant_range_for_rows_windows(update, 350);
-        assert_range(r, 1000, 4000);
-
-        // window bigger than all data -> all
-        let update = BucketRange::new(4000, 4000);
-        let r = index.get_relevant_range_for_rows_windows(update, 1000);
-        assert_range(r, 1000, 4000);
     }
 
     #[test]
