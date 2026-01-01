@@ -17,15 +17,97 @@ use crate::runtime::operators::window::{Cursor, Tiles, TimeGranularity};
 
 use super::{CursorBounds, eval_stored_window};
 
+fn build_data_requests(
+    bucket_index: &BucketIndex,
+    window_expr: &Arc<dyn WindowExpr>,
+    tiles: Option<&Tiles>,
+    bounds: CursorBounds,
+    bucket_granularity: TimeGranularity,
+) -> Vec<DataRequest> {
+    let CursorBounds { prev, new } = bounds;
+    let Some(entry_span) = bucket_index.delta_span(prev, new) else {
+        return vec![];
+    };
+
+    let window_frame = window_expr.get_window_frame();
+    let wl = if window_frame.units == WindowFrameUnits::Range {
+        get_window_length_ms(window_frame)
+    } else {
+        0
+    };
+    let ws = if window_frame.units == WindowFrameUnits::Rows {
+        get_window_size_rows(window_frame)
+    } else {
+        0
+    };
+
+    let window_span = match window_frame.units {
+        WindowFrameUnits::Range => bucket_index.bucket_span_for_range_window(entry_span, wl),
+        WindowFrameUnits::Rows => bucket_index.bucket_span_for_rows_window(entry_span, ws),
+        _ => entry_span,
+    };
+
+    let req_bounds = if window_frame.units == WindowFrameUnits::Range {
+        let start_ts = prev.map(|p| p.ts.saturating_sub(wl)).unwrap_or(i64::MIN);
+        DataBounds::Time {
+            start_ts,
+            end_ts: new.ts,
+        }
+    } else {
+        DataBounds::All
+    };
+
+    if window_frame.units == WindowFrameUnits::Range {
+        if let (DataBounds::Time { start_ts, end_ts }, Some(tiles)) = (req_bounds, tiles) {
+            // For streaming plain range we must *always* load the update span buckets to emit per-row outputs.
+            // Tiles can only reduce history IO, not the update buckets themselves.
+            let mut reqs: Vec<DataRequest> = vec![DataRequest {
+                bucket_range: entry_span,
+                bounds: DataBounds::All,
+            }];
+
+            if start_ts != i64::MIN {
+                let (_tiles_inside, gaps) = tiles.coverage_gaps(start_ts, end_ts);
+                for (gs, ge) in gaps {
+                    if gs >= ge {
+                        continue;
+                    }
+                    let br_start = bucket_granularity.start(gs);
+                    let br_end = bucket_granularity.start(ge);
+                    let br = BucketRange::new(br_start.max(window_span.start), br_end.min(window_span.end));
+                    if br.start <= br.end {
+                        reqs.push(DataRequest {
+                            bucket_range: br,
+                            bounds: DataBounds::Time {
+                                start_ts: gs,
+                                end_ts: ge,
+                            },
+                        });
+                    }
+                }
+            }
+
+            reqs.sort_by_key(|r| (r.bucket_range.start, r.bucket_range.end));
+            reqs.dedup_by_key(|r| (r.bucket_range.start, r.bucket_range.end));
+            return reqs;
+        }
+    }
+
+    vec![DataRequest {
+        bucket_range: window_span,
+        bounds: req_bounds,
+    }]
+}
+
 #[derive(Debug)]
 pub struct PlainRangeAggregation {
-    bucket_index: BucketIndex,
     bounds: CursorBounds,
     window_expr: Arc<dyn WindowExpr>,
     tiles: Option<Tiles>,
     #[allow(dead_code)]
     window_id: usize,
     bucket_granularity: TimeGranularity,
+    data_requests: Vec<DataRequest>,
 }
 
 impl PlainRangeAggregation {
@@ -37,13 +119,15 @@ impl PlainRangeAggregation {
         window_id: usize,
         bounds: CursorBounds,
     ) -> Self {
+        let bucket_granularity = bucket_index.bucket_granularity();
+        let data_requests = build_data_requests(bucket_index, &window_expr, tiles.as_ref(), bounds, bucket_granularity);
         Self {
-            bucket_index: bucket_index.clone(),
             bounds,
             window_expr,
             tiles,
             window_id,
-            bucket_granularity: bucket_index.bucket_granularity(),
+            bucket_granularity,
+            data_requests,
         }
     }
 }
@@ -59,80 +143,7 @@ impl Aggregation for PlainRangeAggregation {
     }
 
     fn get_data_requests(&self) -> Vec<DataRequest> {
-        let CursorBounds { prev, new } = self.bounds;
-        let Some(entry_span) = self.bucket_index.delta_span(prev, new) else {
-            return vec![];
-        };
-
-        let window_frame = self.window_expr.get_window_frame();
-        let wl = if window_frame.units == WindowFrameUnits::Range {
-            get_window_length_ms(window_frame)
-        } else {
-            0
-        };
-        let ws = if window_frame.units == WindowFrameUnits::Rows {
-            get_window_size_rows(window_frame)
-        } else {
-            0
-        };
-
-        let window_span = match window_frame.units {
-            WindowFrameUnits::Range => self.bucket_index.bucket_span_for_range_window(entry_span, wl),
-            WindowFrameUnits::Rows => self.bucket_index.bucket_span_for_rows_window(entry_span, ws),
-            _ => entry_span,
-        };
-
-        let bounds = if window_frame.units == WindowFrameUnits::Range {
-            let start_ts = prev.map(|p| p.ts.saturating_sub(wl)).unwrap_or(i64::MIN);
-            DataBounds::Time {
-                start_ts,
-                end_ts: new.ts,
-            }
-        } else {
-            DataBounds::All
-        };
-
-        if window_frame.units == WindowFrameUnits::Range {
-            if let (DataBounds::Time { start_ts, end_ts }, Some(tiles)) = (bounds, self.tiles.as_ref()) {
-                // For streaming plain range we must *always* load the update span buckets to emit per-row outputs.
-                // Tiles can only reduce history IO, not the update buckets themselves.
-                let mut reqs: Vec<DataRequest> = vec![DataRequest {
-                    bucket_range: entry_span,
-                    bounds: DataBounds::All,
-                }];
-
-                if start_ts != i64::MIN {
-                    let (_tiles_inside, gaps) = tiles.coverage_gaps(start_ts, end_ts);
-                    for (gs, ge) in gaps {
-                        if gs >= ge {
-                            continue;
-                        }
-                        let br_start = self.bucket_granularity.start(gs);
-                        let br_end = self.bucket_granularity.start(ge);
-                        let br = BucketRange::new(
-                            br_start.max(window_span.start),
-                            br_end.min(window_span.end),
-                        );
-                        if br.start <= br.end {
-                            reqs.push(DataRequest {
-                                bucket_range: br,
-                                bounds: DataBounds::Time {
-                                    start_ts: gs,
-                                    end_ts: ge,
-                                },
-                            });
-                        }
-                    }
-                }
-
-                // De-duplicate in case gap planning overlaps the update span buckets.
-                reqs.sort_by_key(|r| (r.bucket_range.start, r.bucket_range.end));
-                reqs.dedup_by_key(|r| (r.bucket_range.start, r.bucket_range.end));
-                return reqs;
-            }
-        }
-
-        vec![DataRequest { bucket_range: window_span, bounds }]
+        self.data_requests.clone()
     }
 
     async fn produce_aggregates_from_ranges(

@@ -23,7 +23,6 @@ use super::{Aggregation, AggregatorType, BucketRange};
 
 #[derive(Debug)]
 pub struct RetractableRangeAggregation {
-    pub bucket_index: BucketIndex,
     pub update_range: Option<BucketRange>,
     pub retract_range: Option<BucketRange>,
     pub prev_processed_until: Option<Cursor>,
@@ -119,7 +118,6 @@ impl RetractableRangeAggregation {
         };
 
         Self {
-            bucket_index: bucket_index.clone(),
             update_range,
             retract_range,
             prev_processed_until,
