@@ -1,10 +1,8 @@
-use std::sync::Arc;
 use std::fmt;
 
 use crate::{common::Message, runtime::{operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use async_trait::async_trait;
 use anyhow::Result;
-use futures::StreamExt;
 
 pub struct JoinOperator {
     base: OperatorBase,
@@ -50,12 +48,14 @@ impl OperatorTrait for JoinOperator {
         self.base.set_input(input);
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
-        let input_stream = self.base.input.as_mut().expect("input stream not set");
-        match input_stream.next().await {
-            Some(Message::Watermark(watermark)) => {
-                OperatorPollResult::Ready(Message::Watermark(watermark))
-            }
+        match self.base.next_input().await {
+            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
+            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
             Some(message) => {
                 // TODO proper lookup for upstream_vertex_id position (left or right)
                 if let Some(upstream_id) = message.upstream_vertex_id() {

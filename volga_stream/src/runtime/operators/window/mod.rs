@@ -1,6 +1,6 @@
 pub mod window_operator;
 pub mod window_request_operator;
-pub mod time_entries;
+// pub mod time_entries;
 pub mod tiles;
 pub mod aggregates;
 pub mod window_operator_state;

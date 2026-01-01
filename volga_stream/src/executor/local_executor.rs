@@ -1,5 +1,5 @@
 use crate::runtime::{
-    execution_graph::ExecutionGraph, master::PipelineState, worker::{Worker, WorkerConfig, WorkerState}
+    execution_graph::ExecutionGraph, master::PipelineState, master_server::MasterServer, worker::{Worker, WorkerConfig, WorkerState}
 };
 use crate::transport::transport_backend_actor::TransportBackendType;
 use anyhow::Result;
@@ -7,6 +7,9 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use super::executor::Executor;
+use crate::common::test_utils::gen_unique_grpc_port;
+use crate::runtime::master_server::TaskKey;
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 /// Executes the job locally in a single process using a Worker instance
 pub struct LocalExecutor;
@@ -32,13 +35,27 @@ impl Executor for LocalExecutor {
 
         // Create worker config
         let worker_id = "local_worker".to_string();
+
+        // Start master service server (task -> master communication)
+        let master_port = gen_unique_grpc_port();
+        let master_addr = format!("127.0.0.1:{}", master_port);
+        let mut master_server = MasterServer::new();
+        let expected_tasks = execution_graph
+            .get_vertices()
+            .values()
+            .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
+            .map(|v| TaskKey { vertex_id: v.vertex_id.clone(), task_index: v.task_index })
+            .collect::<Vec<_>>();
+        master_server.set_checkpointable_tasks(expected_tasks).await;
+        master_server.start(&master_addr).await?;
+
         let worker_config = WorkerConfig::new(
             worker_id.clone(),
             execution_graph,
             vertex_ids,
             4,
             TransportBackendType::InMemory,
-        );
+        ).with_master_addr(master_addr);
 
         // Create worker
         let mut worker = Worker::new(worker_config);
@@ -72,6 +89,7 @@ impl Executor for LocalExecutor {
         // Create PipelineState from worker state
         let mut worker_states = HashMap::new();
         worker_states.insert(worker_id, worker_state);
+        master_server.stop().await;
         Ok(PipelineState::new(worker_states))
     }
 }

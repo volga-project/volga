@@ -14,6 +14,14 @@ use super::datagen_source::DatagenSourceFunction;
 #[async_trait]
 pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
     async fn fetch(&mut self) -> Option<Message>;
+
+    async fn snapshot_position(&self) -> Result<Vec<u8>> {
+        Ok(vec![])
+    }
+
+    async fn restore_position(&mut self, _bytes: &[u8]) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -43,6 +51,24 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::WordCount(f) => f.fetch().await,
             SourceFunction::Datagen(f) => f.fetch().await,
             SourceFunction::HttpRequest(f) => f.fetch().await,
+        }
+    }
+
+    async fn snapshot_position(&self) -> Result<Vec<u8>> {
+        match self {
+            SourceFunction::Vector(f) => f.snapshot_position().await,
+            SourceFunction::WordCount(f) => f.snapshot_position().await,
+            SourceFunction::Datagen(f) => f.snapshot_position().await,
+            SourceFunction::HttpRequest(f) => f.snapshot_position().await,
+        }
+    }
+
+    async fn restore_position(&mut self, bytes: &[u8]) -> Result<()> {
+        match self {
+            SourceFunction::Vector(f) => f.restore_position(bytes).await,
+            SourceFunction::WordCount(f) => f.restore_position(bytes).await,
+            SourceFunction::Datagen(f) => f.restore_position(bytes).await,
+            SourceFunction::HttpRequest(f) => f.restore_position(bytes).await,
         }
     }
 }

@@ -4,7 +4,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, Field, Schema};
 use dashmap::DashMap;
 use datafusion::common::ScalarValue;
-use datafusion::physical_plan::WindowExpr;
+use serde::{Deserialize, Serialize};
+use serde_with::serde_as;
 use tokio::sync::RwLock;
 
 use crate::common::Key;
@@ -17,6 +18,7 @@ use crate::storage::batch_store::{
     BatchStore,
     Timestamp,
 };
+use crate::runtime::utils;
 
 pub type WindowId = usize;
 
@@ -33,14 +35,17 @@ impl WindowsStateGuard {
     }
 }
 
-#[derive(Debug)]
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WindowState {
     pub tiles: Option<Tiles>,
+    #[serde_as(as = "Option<Vec<utils::ScalarValueAsBytes>>")]
     pub accumulator_state: Option<AccumulatorState>,
     pub processed_until: Option<Cursor>,
 }
 
-#[derive(Debug)]
+#[serde_as]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct WindowsState {
     pub window_states: HashMap<WindowId, WindowState>,
     pub bucket_index: BucketIndex,
@@ -58,6 +63,11 @@ pub struct WindowOperatorState {
     bucket_granularity: TimeGranularity,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowOperatorStateCheckpoint {
+    pub keys: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
 impl WindowOperatorState {
     pub fn new(batch_store: Arc<BatchStore>) -> Self {
         let bucket_granularity = batch_store.bucket_granularity();
@@ -66,6 +76,36 @@ impl WindowOperatorState {
             batch_store,
             sorted_bucket_cache: DashMap::new(),
             bucket_granularity,
+        }
+    }
+
+    pub fn to_checkpoint(&self) -> WindowOperatorStateCheckpoint {
+        let mut keys = Vec::new();
+        for entry in self.window_states.iter() {
+            let key = entry.key().clone();
+            let arc = entry.value().clone();
+            let windows_state = arc.try_read().expect("Failed to read windows state for checkpoint");
+
+            let windows_state_bytes =
+                bincode::serialize(&*windows_state).expect("Failed to serialize WindowsState checkpoint");
+
+            keys.push((key.to_bytes(), windows_state_bytes));
+        }
+        WindowOperatorStateCheckpoint { keys }
+    }
+
+    pub fn apply_checkpoint(
+        &self,
+        checkpoint: WindowOperatorStateCheckpoint,
+    ) {
+        self.window_states.clear();
+        for (key_bytes, windows_state_bytes) in checkpoint.keys {
+            let key = Key::from_bytes(&key_bytes);
+            let windows_state: WindowsState =
+                bincode::deserialize(&windows_state_bytes).expect("Failed to deserialize WindowsState checkpoint");
+
+            let arc = Arc::new(RwLock::new(windows_state));
+            self.window_states.insert(key, arc);
         }
     }
     
@@ -89,13 +129,13 @@ impl WindowOperatorState {
         batch: RecordBatch,
     ) -> usize {
         let window_ids: Vec<_> = window_configs.keys().cloned().collect();
-        let window_exprs: Vec<_> = window_configs.values().map(|window| window.window_expr.clone()).collect();
+        // let window_exprs: Vec<_> = window_configs.values().map(|window| window.window_expr.clone()).collect();
         
         // Get or create windows_state
         let arc_rwlock = if let Some(entry) = self.window_states.get(key) {
             entry.value().clone()
         } else {
-            let windows_state = create_empty_windows_state(&window_ids, tiling_configs, &window_exprs, self.bucket_granularity);
+            let windows_state = create_empty_windows_state(&window_ids, tiling_configs, self.bucket_granularity);
             let arc_rwlock = Arc::new(RwLock::new(windows_state));
             self.window_states.insert(key.clone(), arc_rwlock.clone());
             arc_rwlock
@@ -130,9 +170,10 @@ impl WindowOperatorState {
         }
 
         // Calculate pre-aggregated tiles if needed
-        for (_, window_state) in windows_state.window_states.iter_mut() {
+        for (window_id, window_state) in windows_state.window_states.iter_mut() {
             if let Some(ref mut tiles) = window_state.tiles {
-                tiles.add_batch(&record_batch, ts_column_index);
+                let window_expr = &window_configs.get(&window_id).expect("Window config should exist").window_expr;
+                tiles.add_batch(&record_batch, window_expr, ts_column_index);
             }
         }
 
@@ -292,11 +333,11 @@ impl OperatorState for WindowOperatorState {
     }
 }
 
-pub fn create_empty_windows_state(window_ids: &[WindowId], tiling_configs: &[Option<TileConfig>], window_exprs: &[Arc<dyn WindowExpr>], bucket_granularity: TimeGranularity) -> WindowsState {
+pub fn create_empty_windows_state(window_ids: &[WindowId], tiling_configs: &[Option<TileConfig>], bucket_granularity: TimeGranularity) -> WindowsState {
     WindowsState {
         window_states: window_ids.iter().map(|&window_id| {
             (window_id, WindowState {
-                tiles: tiling_configs.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone(), window_exprs[window_id].clone()))),
+                tiles: tiling_configs.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone()))),
                 accumulator_state: None,
                 processed_until: None,
             })

@@ -16,6 +16,8 @@ use in_memory_storage_service::{
     InsertKeyedManyRequest, InsertKeyedManyResponse,
     GetVectorRequest, GetVectorResponse,
     GetMapRequest, GetMapResponse,
+    DrainVectorRequest, DrainVectorResponse,
+    DrainMapRequest, DrainMapResponse,
 };
 
 /// Server implementation of the InMemoryStorageService
@@ -148,6 +150,44 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
         }
         
         Ok(Response::new(GetMapResponse {
+            success: true,
+            error_message: String::new(),
+            keyed_messages,
+        }))
+    }
+
+    async fn drain_vector(
+        &self,
+        _request: Request<DrainVectorRequest>,
+    ) -> Result<Response<DrainVectorResponse>, Status> {
+        let mut storage_guard = self.vector_storage.lock().await;
+        let drained: Vec<Message> = std::mem::take(&mut *storage_guard);
+
+        let mut messages_bytes = Vec::with_capacity(drained.len());
+        for message in drained {
+            messages_bytes.push(message.to_bytes());
+        }
+
+        Ok(Response::new(DrainVectorResponse {
+            success: true,
+            error_message: String::new(),
+            messages_bytes,
+        }))
+    }
+
+    async fn drain_map(
+        &self,
+        _request: Request<DrainMapRequest>,
+    ) -> Result<Response<DrainMapResponse>, Status> {
+        let mut storage_guard = self.map_storage.lock().await;
+        let drained: HashMap<String, Message> = std::mem::take(&mut *storage_guard);
+
+        let mut keyed_messages = HashMap::with_capacity(drained.len());
+        for (key, message) in drained {
+            keyed_messages.insert(key, message.to_bytes());
+        }
+
+        Ok(Response::new(DrainMapResponse {
             success: true,
             error_message: String::new(),
             keyed_messages,

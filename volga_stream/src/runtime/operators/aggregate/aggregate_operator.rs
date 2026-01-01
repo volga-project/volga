@@ -8,7 +8,6 @@ use datafusion::physical_plan::{Accumulator, ExecutionPlan};
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::physical_plan::PhysicalExpr;
 use async_trait::async_trait;
-use futures::StreamExt;
 use anyhow::Result as AnyhowResult;
 use crate::runtime::operators::operator::{OperatorTrait, OperatorBase, OperatorType, OperatorConfig, OperatorPollResult, MessageStream};
 use crate::runtime::runtime_context::RuntimeContext;
@@ -193,16 +192,16 @@ impl OperatorTrait for AggregateOperator {
         self.base.operator_type()
     }
 
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
-        // First, return any buffered messages
-        if let Some(msg) = self.base.pending_messages.pop() {
+        if let Some(msg) = self.base.pop_pending_output() {
             return OperatorPollResult::Ready(msg);
         }
-        
-        // Then process input stream
-        let input_stream = self.base.input.as_mut().expect("input should exist");
-            
-        match input_stream.next().await {
+
+        match self.base.next_input().await {
             Some(message) => {
                 match message {
                     Message::Keyed(keyed_message) => {
@@ -267,6 +266,9 @@ impl OperatorTrait for AggregateOperator {
                         // Always pass through watermarks (if no result was emitted)
                         OperatorPollResult::Ready(Message::Watermark(watermark))
                     }
+                    Message::CheckpointBarrier(barrier) => {
+                        OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+                    }
                     _ => {
                         panic!("Aggregate operator expects keyed messages or watermarks");
                     }
@@ -280,7 +282,6 @@ impl OperatorTrait for AggregateOperator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::StreamExt;
 
     #[tokio::test]
     async fn test_aggregate_operator() {
@@ -378,14 +379,10 @@ mod tests {
         operator.set_input(Some(input_stream));
         let mut final_result = Vec::new();
         
-        while let result = operator.poll_next().await {
-            match result {
-                OperatorPollResult::None => {
-                    break;
-                }
-                OperatorPollResult::Continue => {
-                    continue;
-                }
+        loop {
+            match operator.poll_next().await {
+                OperatorPollResult::None => break,
+                OperatorPollResult::Continue => continue,
                 OperatorPollResult::Ready(message) => {
                     if !matches!(message, Message::Watermark(_)) {
                         final_result.push(message);

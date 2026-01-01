@@ -1,12 +1,13 @@
 use std::collections::BTreeMap;
 
 use datafusion::logical_expr::WindowFrame;
+use serde::{Deserialize, Serialize};
 
 use crate::runtime::operators::window::TimeGranularity;
 use crate::runtime::operators::window::aggregates::BucketRange;
 use crate::storage::batch_store::{BatchId, Timestamp};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Cursor {
     pub ts: Timestamp,
     pub seq_no: u64,
@@ -19,7 +20,7 @@ impl Cursor {
 }
 
 /// Metadata stored per run/segment (immutable batch).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RunMeta {
     pub batch_id: BatchId,
     pub bucket_timestamp: Timestamp,
@@ -29,7 +30,7 @@ pub struct RunMeta {
 }
 
 /// A bucket containing runs with the same bucket timestamp.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Bucket {
     pub timestamp: Timestamp,
     pub batches: Vec<RunMeta>,
@@ -55,7 +56,7 @@ impl Bucket {
 }
 
 /// Bucket-level index using bucket timestamps.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketIndex {
     buckets: BTreeMap<Timestamp, Bucket>, // TODO this can be hashmap for better performance
     total_rows: usize,

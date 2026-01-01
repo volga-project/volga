@@ -353,9 +353,8 @@ WINDOW w AS (
 
         let mut tiles = Tiles::new(
             TileConfig::new(vec![TimeGranularity::Seconds(1)]).expect("tile config"),
-            window_expr.clone(),
         );
-        tiles.add_batch(&all, 0);
+        tiles.add_batch(&all, &window_expr,0);
 
         let bounds = crate::runtime::operators::window::aggregates::plain::CursorBounds {
             prev: Some(Cursor::new(3000, 3)),

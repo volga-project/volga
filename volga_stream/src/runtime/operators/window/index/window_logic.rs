@@ -181,9 +181,8 @@ WINDOW w AS (
         let all = test_utils::batch(&rows);
         let mut tiles = Tiles::new(
             TileConfig::new(vec![TileGranularity::Seconds(1)]).expect("tile config"),
-            window_expr,
         );
-        tiles.add_batch(&all, 0);
+        tiles.add_batch(&all, &window_expr, 0);
 
         // Build a view with one row per bucket (bucket_ts == ts for 1s granularity).
         let buckets: Vec<(i64, RecordBatch)> = rows

@@ -8,7 +8,7 @@ use std::time::{SystemTime, Duration, UNIX_EPOCH};
 use super::source_function::SourceFunctionTrait;
 use arrow::array::ArrayRef;
 use arrow::array::builder::{Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use std::collections::HashMap;
@@ -16,6 +16,9 @@ use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
 use rand::distributions::Alphanumeric;
 use datafusion::common::ScalarValue;
+use serde::{Serialize, Deserialize};
+use crate::runtime::utils;
+use serde_with::serde_as;
 
 /// Configuration for datagen source
 #[derive(Debug, Clone)]
@@ -28,11 +31,12 @@ pub struct DatagenSourceConfig {
     pub fields: HashMap<String, FieldGenerator>,
     pub projection: Option<Vec<usize>>,
     pub projected_schema: Option<SchemaRef>,
+    pub replayable: bool,
 }
 
 impl DatagenSourceConfig {
     pub fn new(schema: Arc<Schema>, rate: Option<f32>, limit: Option<usize>, run_for_s: Option<f64>, batch_size: usize, fields: HashMap<String, FieldGenerator>) -> Self {
-        Self { schema, rate, limit, run_for_s, batch_size, fields, projection: None, projected_schema: None }
+        Self { schema, rate, limit, run_for_s, batch_size, fields, projection: None, projected_schema: None, replayable: false }
     }
 
     pub fn get_projection(&self) -> (Option<Vec<usize>>, Option<SchemaRef>) {
@@ -42,6 +46,10 @@ impl DatagenSourceConfig {
     pub fn set_projection(&mut self, projection: Vec<usize>, schema: SchemaRef) {
         self.projection = Some(projection);
         self.projected_schema = Some(schema);
+    }
+
+    pub fn set_replayable(&mut self, replayable: bool) {
+        self.replayable = replayable;
     }
 }
 
@@ -55,6 +63,20 @@ pub enum FieldGenerator {
     Increment { start: ScalarValue, step: ScalarValue },
     Uniform { min: ScalarValue, max: ScalarValue },
     Values { values: Vec<ScalarValue> }, // Round-robin through provided values
+}
+
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DatagenSourcePosition {
+    records_generated: usize,
+    max_watermark_sent: bool,
+    current_key_index: usize,
+    task_records_limit: Option<usize>,
+    key_values: Vec<String>,
+    per_key_timestamps: HashMap<String, i64>,
+    #[serde_as(as = "HashMap<_, HashMap<_, utils::ScalarValueAsBytes>>")]
+    per_key_increments: HashMap<String, HashMap<usize, ScalarValue>>,
+    per_key_values_indices: HashMap<String, HashMap<usize, usize>>,
 }
 
 /// Datagen source function with deterministic rate coordination
@@ -108,6 +130,28 @@ impl DatagenSourceFunction {
             per_key_timestamps: HashMap::new(),
             per_key_increments: HashMap::new(),
             per_key_values_indices: HashMap::new(),
+        }
+    }
+
+    fn validate_replayable_config(&self) {
+        if !self.config.replayable {
+            return;
+        }
+
+        for (field_name, gen) in &self.config.fields {
+            let ok = matches!(
+                gen,
+                FieldGenerator::IncrementalTimestamp { .. }
+                    | FieldGenerator::Key { .. }
+                    | FieldGenerator::Increment { .. }
+                    | FieldGenerator::Values { .. }
+            );
+            if !ok {
+                panic!(
+                    "Datagen replayable mode requires deterministic generators only; field '{}' has {:?}",
+                    field_name, gen
+                );
+            }
         }
     }
 
@@ -498,11 +542,49 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             }
         }
     }
+
+    async fn snapshot_position(&self) -> Result<Vec<u8>> {
+        if !self.config.replayable {
+            return Ok(vec![]);
+        }
+
+        let pos = DatagenSourcePosition {
+            records_generated: self.records_generated,
+            max_watermark_sent: self.max_watermark_sent,
+            current_key_index: self.current_key_index,
+            task_records_limit: self.task_records_limit,
+            key_values: self.key_values.clone(),
+            per_key_timestamps: self.per_key_timestamps.clone(),
+            per_key_increments: self.per_key_increments.clone(),
+            per_key_values_indices: self.per_key_values_indices.clone(),
+        };
+        Ok(bincode::serialize(&pos)?)
+    }
+
+    async fn restore_position(&mut self, bytes: &[u8]) -> Result<()> {
+        if !self.config.replayable {
+            return Ok(());
+        }
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let pos: DatagenSourcePosition = bincode::deserialize(bytes)?;
+        self.records_generated = pos.records_generated;
+        self.max_watermark_sent = pos.max_watermark_sent;
+        self.current_key_index = pos.current_key_index;
+        self.task_records_limit = pos.task_records_limit;
+        self.key_values = pos.key_values;
+        self.per_key_timestamps = pos.per_key_timestamps;
+        self.per_key_increments = pos.per_key_increments;
+        self.per_key_values_indices = pos.per_key_values_indices;
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl FunctionTrait for DatagenSourceFunction {
     async fn open(&mut self, ctx: &RuntimeContext) -> Result<()> {
+        self.validate_replayable_config();
         // Set runtime context
         self.task_index = Some(ctx.task_index());
         self.parallelism = Some(ctx.parallelism());
@@ -563,6 +645,8 @@ mod tests {
     use crate::runtime::runtime_context::RuntimeContext;
     use std::collections::HashSet;
     use arrow::array::{Array, StringArray, Int64Array, Float64Array, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType, Field, TimeUnit};
+    use crate::common::message::Message;
 
     fn create_test_config() -> DatagenSourceConfig {
         let schema = Arc::new(Schema::new(vec![
@@ -658,6 +742,7 @@ mod tests {
                         panic!("Unexpected keyed message");
                     },
                     Some(Message::Watermark(_)) => break,
+                    Some(Message::CheckpointBarrier(_)) => break,
                     None => break,
                 }
                 
@@ -813,5 +898,166 @@ mod tests {
                 interval, tolerance, expected_interval_ms
             );
          }
+    }
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Row {
+        ts: i64,
+        key: String,
+        value: f64,
+    }
+
+    fn create_replayable_checkpoint_test_config(total_records: usize, batch_size: usize, num_unique_keys: usize) -> DatagenSourceConfig {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new("key", DataType::Utf8, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+
+        let mut fields = HashMap::new();
+        fields.insert(
+            "timestamp".to_string(),
+            FieldGenerator::IncrementalTimestamp {
+                start_ms: 1000,
+                step_ms: 1,
+            },
+        );
+        fields.insert(
+            "key".to_string(),
+            FieldGenerator::Key {
+                num_unique: num_unique_keys,
+            },
+        );
+        fields.insert(
+            "value".to_string(),
+            FieldGenerator::Values {
+                values: vec![
+                    ScalarValue::Float64(Some(1.0)),
+                    ScalarValue::Float64(Some(2.0)),
+                ],
+            },
+        );
+
+        let mut cfg = DatagenSourceConfig::new(schema, None, Some(total_records), None, batch_size, fields);
+        cfg.set_replayable(true);
+        cfg
+    }
+
+    async fn collect_all_rows(source: &mut DatagenSourceFunction) -> Vec<Row> {
+        collect_rows(source, None).await
+    }
+
+    async fn collect_rows(source: &mut DatagenSourceFunction, target_rows: Option<usize>) -> Vec<Row> {
+        let mut out = Vec::new();
+        loop {
+            if let Some(n) = target_rows {
+                if out.len() >= n {
+                    break;
+                }
+            }
+
+            match source.fetch().await {
+                Some(Message::Regular(base_msg)) => {
+                    let batch = &base_msg.record_batch;
+                    let ts = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<TimestampMillisecondArray>()
+                        .expect("timestamp col");
+                    let key = batch
+                        .column(1)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .expect("key col");
+                    let value = batch
+                        .column(2)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .expect("value col");
+
+                    for i in 0..batch.num_rows() {
+                        out.push(Row {
+                            ts: ts.value(i),
+                            key: key.value(i).to_string(),
+                            value: value.value(i),
+                        });
+                        if let Some(n) = target_rows {
+                            if out.len() >= n {
+                                break;
+                            }
+                        }
+                    }
+                }
+                Some(Message::Watermark(_)) => break,
+                Some(Message::CheckpointBarrier(_)) => break,
+                Some(Message::Keyed(_)) => panic!("Unexpected keyed message from datagen"),
+                None => break,
+            }
+        }
+
+        if let Some(n) = target_rows {
+            assert_eq!(out.len(), n, "test expects aligned checkpoint after full batches");
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn test_datagen_checkpoint_restore_matches_uninterrupted() {
+        let parallelism = 4;
+        let batch_size = 50;
+        let total_records = 1000;
+        let checkpoint_after = 200; // must be multiple of batch_size
+        assert_eq!(checkpoint_after % batch_size, 0);
+
+        let cfg = create_replayable_checkpoint_test_config(total_records, batch_size, 8);
+
+        for task_index in 0..parallelism {
+            // Baseline: uninterrupted run
+            let mut baseline = DatagenSourceFunction::new(cfg.clone());
+            let ctx = RuntimeContext::new(
+                "test".to_string(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            baseline.open(&ctx).await.unwrap();
+            let baseline_rows = collect_all_rows(&mut baseline).await;
+
+            // Interrupted: run until checkpoint, snapshot, restart, restore, continue
+            let mut first = DatagenSourceFunction::new(cfg.clone());
+            let ctx_first = RuntimeContext::new(
+                "test".to_string(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            first.open(&ctx_first).await.unwrap();
+            let mut resumed_rows = collect_rows(&mut first, Some(checkpoint_after)).await;
+            let snapshot = first.snapshot_position().await.unwrap();
+
+            let mut second = DatagenSourceFunction::new(cfg.clone());
+            let ctx_second = RuntimeContext::new(
+                "test".to_string(),
+                task_index,
+                parallelism,
+                None,
+                None,
+                None,
+            );
+            second.open(&ctx_second).await.unwrap();
+            second.restore_position(&snapshot).await.unwrap();
+            resumed_rows.extend(collect_rows(&mut second, None).await);
+
+            assert_eq!(
+                baseline_rows,
+                resumed_rows,
+                "checkpoint+restore must produce identical rows for task_index={}",
+                task_index
+            );
+        }
     }
 }

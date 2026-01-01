@@ -5,10 +5,13 @@ use crate::{
     }, common::test_utils::gen_unique_grpc_port, runtime::{
         execution_graph::ExecutionGraph,
         master::{Master, PipelineState},
-        worker::{WorkerConfig, WorkerState},
+        master_server::MasterServer,
+        master_server::TaskKey,
+        worker::WorkerConfig,
         worker_server::WorkerServer,
     }, transport::transport_backend_actor::TransportBackendType
 };
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::{collections::HashMap, sync::Arc};
@@ -39,6 +42,7 @@ impl FakeDistributedExecutor {
         &self,
         execution_graph: ExecutionGraph,
         vertex_to_node: ExecutionVertexNodeMapping,
+        master_addr: String,
     ) -> Result<Vec<String>> {
         let mut worker_servers = Vec::new();
         let mut worker_addresses = Vec::new();
@@ -59,7 +63,7 @@ impl FakeDistributedExecutor {
                 vertex_ids,
                 1,
                 TransportBackendType::Grpc,
-            );
+            ).with_master_addr(master_addr.clone());
             let mut worker_server = WorkerServer::new(worker_config);
             worker_server.start(&addr).await?;
             
@@ -96,8 +100,21 @@ impl Executor for FakeDistributedExecutor {
         // Configure channels with node mapping for distributed execution
         execution_graph.update_channels_with_node_mapping(Some(&vertex_to_node));
 
+        // Start master service server (task -> master communication)
+        let master_port = gen_unique_grpc_port();
+        let master_addr = format!("127.0.0.1:{}", master_port);
+        let mut master_server = MasterServer::new();
+        let expected_tasks = execution_graph
+            .get_vertices()
+            .values()
+            .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
+            .map(|v| TaskKey { vertex_id: v.vertex_id.clone(), task_index: v.task_index })
+            .collect::<Vec<_>>();
+        master_server.set_checkpointable_tasks(expected_tasks).await;
+        master_server.start(&master_addr).await?;
+
         // Start worker servers
-        let worker_addresses = self.start_worker_servers(execution_graph, vertex_to_node).await?;
+        let worker_addresses = self.start_worker_servers(execution_graph, vertex_to_node, master_addr.clone()).await?;
 
         // Wait a bit for servers to start
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -105,6 +122,8 @@ impl Executor for FakeDistributedExecutor {
         // Create and execute master
         let mut master = Master::new();
         master.execute(worker_addresses).await?;
+
+        master_server.stop().await;
 
         // For now, we don't have a way to get worker states from distributed execution
         // This would need to be implemented in the master/worker communication

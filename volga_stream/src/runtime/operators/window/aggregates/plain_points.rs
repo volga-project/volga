@@ -390,9 +390,8 @@ WINDOW w AS (
 
         let mut tiles = Tiles::new(
             TileConfig::new(vec![TimeGranularity::Seconds(1)]).expect("tile config"),
-            window_expr.clone(),
         );
-        tiles.add_batch(&all, 0);
+        tiles.add_batch(&all, &window_expr, 0);
 
         let p_args = window_expr
             .evaluate_args(&test_utils::one_row_batch(6500, 10.0, "A", 99))

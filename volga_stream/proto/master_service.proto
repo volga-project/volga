@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+package master_service;
+
+service MasterService {
+  rpc ReportCheckpoint(ReportCheckpointRequest) returns (ReportCheckpointResponse);
+  rpc GetTaskCheckpoint(GetTaskCheckpointRequest) returns (GetTaskCheckpointResponse);
+  rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
+}
+
+message StateBlob {
+  string name = 1;
+  bytes bytes = 2;
+}
+
+message ReportCheckpointRequest {
+  uint64 checkpoint_id = 1;
+  string vertex_id = 2;
+  int32 task_index = 3;
+  repeated StateBlob blobs = 4;
+}
+
+message ReportCheckpointResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message GetTaskCheckpointRequest {
+  uint64 checkpoint_id = 1;
+  string vertex_id = 2;
+  int32 task_index = 3;
+}
+
+message GetTaskCheckpointResponse {
+  bool success = 1;
+  string error_message = 2;
+  repeated StateBlob blobs = 3;
+}
+
+message GetLatestCompleteCheckpointRequest {
+}
+
+message GetLatestCompleteCheckpointResponse {
+  bool success = 1;
+  string error_message = 2;
+  bool has_checkpoint = 3;
+  uint64 checkpoint_id = 4;
+}
+
+

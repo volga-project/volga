@@ -11,7 +11,6 @@ use async_trait::async_trait;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::runtime::operators::window::time_entries::TimeIdx;
 use crate::storage::batch_store::Timestamp;
 use crate::runtime::operators::window::index::{DataRequest, SortedRangeView};
 
@@ -214,45 +213,45 @@ pub fn get_aggregate_type(window_expr: &Arc<dyn WindowExpr>) -> AggregatorType {
 // optimization - plain aggregator and evaluators produce aggregation results
 // by running nested for loop for each entry.
 // we split entries where possible, so that nested loops can run on different threads
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AggParallelismSplit {
-    None,
-    CpuBased,
-    PerEvent,
-}
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// pub enum AggParallelismSplit {
+//     None,
+//     CpuBased,
+//     PerEvent,
+// }
 
 // default to CPU-based splitting
-const AGG_PARALLELISM_SPLIT: AggParallelismSplit = AggParallelismSplit::CpuBased;
+// const AGG_PARALLELISM_SPLIT: AggParallelismSplit = AggParallelismSplit::CpuBased;
 
-pub fn split_entries_for_parallelism(entries: &Vec<TimeIdx>) -> Vec<Vec<TimeIdx>> {
-    if entries.is_empty() {
-        return vec![];
-    }
+// pub fn split_entries_for_parallelism(entries: &Vec<TimeIdx>) -> Vec<Vec<TimeIdx>> {
+//     if entries.is_empty() {
+//         return vec![];
+//     }
     
-    match AGG_PARALLELISM_SPLIT {
-        AggParallelismSplit::None => {
-            vec![entries.clone()]
-        }
-        AggParallelismSplit::CpuBased => {
-            let num_threads = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .max(1);
+//     match AGG_PARALLELISM_SPLIT {
+//         AggParallelismSplit::None => {
+//             vec![entries.clone()]
+//         }
+//         AggParallelismSplit::CpuBased => {
+//             let num_threads = std::thread::available_parallelism()
+//                 .map(|n| n.get())
+//                 .unwrap_or(4)
+//                 .max(1);
             
-            // For small number of entries, don't split (overhead not worth it)
-            if entries.len() < num_threads * 2 {
-                return vec![entries.clone()];
-            }
+//             // For small number of entries, don't split (overhead not worth it)
+//             if entries.len() < num_threads * 2 {
+//                 return vec![entries.clone()];
+//             }
             
-            // Split into chunks of roughly equal size
-            let chunk_size = (entries.len() + num_threads - 1) / num_threads;
-            entries.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect()
-        }
-        AggParallelismSplit::PerEvent => {
-            entries.iter().map(|entry| vec![*entry]).collect()
-        }
-    }
-}
+//             // Split into chunks of roughly equal size
+//             let chunk_size = (entries.len() + num_threads - 1) / num_threads;
+//             entries.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect()
+//         }
+//         AggParallelismSplit::PerEvent => {
+//             entries.iter().map(|entry| vec![*entry]).collect()
+//         }
+//     }
+// }
 
 #[cfg(test)]
 pub(crate) mod test_utils {

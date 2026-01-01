@@ -18,6 +18,9 @@ service WorkerService {
   
   // Close the worker and cleanup all resources
   rpc CloseWorker(CloseWorkerRequest) returns (CloseWorkerResponse);
+
+  // Trigger a checkpoint. Only source tasks should inject barriers.
+  rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
 }
 
 // Request message for GetWorkerState
@@ -72,4 +75,13 @@ message CloseWorkerRequest {
 message CloseWorkerResponse {
   bool success = 1;
   string error_message = 2;
-} 
+}
+
+message TriggerCheckpointRequest {
+  uint64 checkpoint_id = 1;
+}
+
+message TriggerCheckpointResponse {
+  bool success = 1;
+  string error_message = 2;
+}

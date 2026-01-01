@@ -332,6 +332,9 @@ async fn test_word_count_source(
                 assert_eq!(watermark.watermark_value, MAX_WATERMARK_VALUE, "Watermark should have max value");
                 watermark_received = true;
             }
+            Message::CheckpointBarrier(_) => {
+                // not expected in this test
+            }
         }
     }
 
