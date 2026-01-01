@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::RecordBatch;
+use arrow::array::ArrayRef;
 use datafusion::logical_expr::Accumulator;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;
@@ -11,31 +11,54 @@ use async_trait::async_trait;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::runtime::operators::window::time_entries::TimeIdx;
-use crate::runtime::operators::window::Tiles;
-use crate::storage::batch_store::BatchId;
-use indexmap::IndexSet;
+use crate::storage::batch_store::Timestamp;
+use crate::runtime::operators::window::index::{DataRequest, SortedRangeView};
 
 pub mod arrow_utils;
 pub mod evaluator;
 pub mod plain;
 pub mod retractable;
+pub mod point_request_merge;
+
+/// A logical bucket interval in bucket timestamp space (inclusive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BucketRange {
+    pub start: Timestamp,
+    pub end: Timestamp,
+}
+
+impl BucketRange {
+    pub fn new(start: Timestamp, end: Timestamp) -> Self {
+        Self { start, end }
+    }
+}
+
+/// A single "virtual" point for request-mode window evaluation.
+#[derive(Debug, Clone)]
+pub struct VirtualPoint {
+    pub ts: Timestamp,
+    /// Optional pre-evaluated args for this single row (length=1 arrays).
+    pub args: Option<Arc<Vec<ArrayRef>>>,
+}
 
 #[async_trait]
 pub trait Aggregation: Send + Sync {
-    async fn produce_aggregates(
-        &self,
-        batches: &HashMap<BatchId, RecordBatch>,
-        thread_pool: Option<&ThreadPool>,
-        exclude_current_row: Option<bool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>);
-    
-    fn entries(&self) -> &[TimeIdx];
     fn window_expr(&self) -> &Arc<dyn WindowExpr>;
-    fn tiles(&self) -> Option<&Tiles>;
     fn aggregator_type(&self) -> AggregatorType;
-    
-    fn get_batches_to_load(&self) -> IndexSet<BatchId>;
+
+    /// Row-level data requests for request-mode (range views).
+    fn get_data_requests(&self) -> Vec<DataRequest>;
+
+    /// Produce aggregates from preloaded `SortedRangeView`s corresponding to `get_data_requests(...)`.
+    async fn produce_aggregates_from_ranges(
+        &self,
+        sorted_ranges: &[SortedRangeView],
+        thread_pool: Option<&ThreadPool>,
+    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+        let _ = sorted_ranges;
+        let _ = thread_pool;
+        panic!("Aggregation must implement produce_aggregates_from_ranges")
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,42 +213,131 @@ pub fn get_aggregate_type(window_expr: &Arc<dyn WindowExpr>) -> AggregatorType {
 // optimization - plain aggregator and evaluators produce aggregation results
 // by running nested for loop for each entry.
 // we split entries where possible, so that nested loops can run on different threads
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AggParallelismSplit {
-    None,
-    CpuBased,
-    PerEvent,
-}
+// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+// pub enum AggParallelismSplit {
+//     None,
+//     CpuBased,
+//     PerEvent,
+// }
 
 // default to CPU-based splitting
-const AGG_PARALLELISM_SPLIT: AggParallelismSplit = AggParallelismSplit::CpuBased;
+// const AGG_PARALLELISM_SPLIT: AggParallelismSplit = AggParallelismSplit::CpuBased;
 
-pub fn split_entries_for_parallelism(entries: &Vec<TimeIdx>) -> Vec<Vec<TimeIdx>> {
-    if entries.is_empty() {
-        return vec![];
-    }
+// pub fn split_entries_for_parallelism(entries: &Vec<TimeIdx>) -> Vec<Vec<TimeIdx>> {
+//     if entries.is_empty() {
+//         return vec![];
+//     }
     
-    match AGG_PARALLELISM_SPLIT {
-        AggParallelismSplit::None => {
-            vec![entries.clone()]
-        }
-        AggParallelismSplit::CpuBased => {
-            let num_threads = std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(4)
-                .max(1);
+//     match AGG_PARALLELISM_SPLIT {
+//         AggParallelismSplit::None => {
+//             vec![entries.clone()]
+//         }
+//         AggParallelismSplit::CpuBased => {
+//             let num_threads = std::thread::available_parallelism()
+//                 .map(|n| n.get())
+//                 .unwrap_or(4)
+//                 .max(1);
             
-            // For small number of entries, don't split (overhead not worth it)
-            if entries.len() < num_threads * 2 {
-                return vec![entries.clone()];
+//             // For small number of entries, don't split (overhead not worth it)
+//             if entries.len() < num_threads * 2 {
+//                 return vec![entries.clone()];
+//             }
+            
+//             // Split into chunks of roughly equal size
+//             let chunk_size = (entries.len() + num_threads - 1) / num_threads;
+//             entries.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect()
+//         }
+//         AggParallelismSplit::PerEvent => {
+//             entries.iter().map(|entry| vec![*entry]).collect()
+//         }
+//     }
+// }
+
+#[cfg(test)]
+pub(crate) mod test_utils {
+    use std::sync::Arc;
+    use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt64Array};
+    use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+    use arrow::record_batch::RecordBatch;
+    use datafusion::physical_plan::windows::BoundedWindowAggExec;
+    use datafusion::physical_plan::WindowExpr;
+    use datafusion::prelude::SessionContext;
+
+    use crate::api::planner::{Planner, PlanningContext};
+    use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
+    use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
+    use crate::runtime::operators::window::index::{DataRequest, SortedRangeBucket, SortedRangeView};
+    use crate::runtime::operators::window::{Cursor, TimeGranularity, SEQ_NO_COLUMN_NAME};
+    use crate::storage::batch_store::Timestamp;
+
+    pub fn test_schema_with_seq() -> SchemaRef {
+        Arc::new(Schema::new(vec![
+            Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+            Field::new("value", DataType::Float64, false),
+            Field::new("partition_key", DataType::Utf8, false),
+            Field::new(SEQ_NO_COLUMN_NAME, DataType::UInt64, false),
+        ]))
+    }
+
+    pub fn batch(rows: &[(Timestamp, f64, &str, u64)]) -> RecordBatch {
+        let schema = test_schema_with_seq();
+        let ts = Arc::new(TimestampMillisecondArray::from(rows.iter().map(|r| r.0).collect::<Vec<_>>()));
+        let v = Arc::new(Float64Array::from(rows.iter().map(|r| r.1).collect::<Vec<_>>()));
+        let pk = Arc::new(StringArray::from(rows.iter().map(|r| r.2).collect::<Vec<_>>()));
+        let seq = Arc::new(UInt64Array::from(rows.iter().map(|r| r.3).collect::<Vec<_>>()));
+        RecordBatch::try_new(schema, vec![ts, v, pk, seq]).expect("test batch")
+    }
+
+    pub fn one_row_batch(ts: Timestamp, value: f64, pk: &str, seq: u64) -> RecordBatch {
+        batch(&[(ts, value, pk, seq)])
+    }
+
+    pub async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
+        let ctx = SessionContext::new();
+        let mut planner = Planner::new(PlanningContext::new(ctx));
+        planner.register_source(
+            "test_table".to_string(),
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+            test_schema_with_seq(),
+        );
+        extract_datafusion_window_exec(sql, &mut planner).await
+    }
+
+    pub async fn window_expr_from_sql(sql: &str) -> Arc<dyn WindowExpr> {
+        let exec = window_exec_from_sql(sql).await;
+        exec.window_expr()[0].clone()
+    }
+
+    pub fn make_view(
+        granularity: TimeGranularity,
+        request: DataRequest,
+        buckets: Vec<(Timestamp, RecordBatch)>,
+        window_expr_for_args: &Arc<dyn WindowExpr>,
+    ) -> SortedRangeView {
+        use std::collections::HashMap;
+        let (start, end) = match request.bounds {
+            crate::runtime::operators::window::index::DataBounds::All => {
+                (Cursor::new(i64::MIN, 0), Cursor::new(i64::MAX, u64::MAX))
             }
-            
-            // Split into chunks of roughly equal size
-            let chunk_size = (entries.len() + num_threads - 1) / num_threads;
-            entries.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect()
+            crate::runtime::operators::window::index::DataBounds::Time { start_ts, end_ts } => {
+                (Cursor::new(start_ts, 0), Cursor::new(end_ts, u64::MAX))
+            }
+            crate::runtime::operators::window::index::DataBounds::RowsTail { end_ts, .. } => {
+                (Cursor::new(i64::MIN, 0), Cursor::new(end_ts, u64::MAX))
+            }
+        };
+
+        let mut out: HashMap<Timestamp, SortedRangeBucket> = HashMap::new();
+        for (bucket_ts, b) in buckets {
+            let args = window_expr_for_args.evaluate_args(&b).expect("eval args");
+            out.insert(
+                bucket_ts,
+                SortedRangeBucket::new(bucket_ts, b, 0, 3, Arc::new(args)),
+            );
         }
-        AggParallelismSplit::PerEvent => {
-            entries.iter().map(|entry| vec![*entry]).collect()
-        }
+        SortedRangeView::new(request, granularity, start, end, out)
     }
 }
+
+#[cfg(test)]
+mod agg_tests;

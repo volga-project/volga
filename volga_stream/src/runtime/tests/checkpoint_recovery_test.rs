@@ -121,6 +121,8 @@ fn rows_from_messages(messages: Vec<crate::common::message::Message>) -> Vec<Out
     out
 }
 
+// TODO this fails because we rely on watermarks to updates state now
+// we need to have proper watermark generator on source here
 #[tokio::test]
 async fn test_manual_checkpoint_and_restore() -> Result<()> {
     crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
