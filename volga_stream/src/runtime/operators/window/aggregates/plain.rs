@@ -1,26 +1,22 @@
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
 use async_trait::async_trait;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::state::index::BucketIndex;
-use crate::runtime::operators::window::state::index::window_logic;
-use crate::runtime::operators::window::state::tiles::Tile;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, Tiles};
-use crate::storage::batch_store::Timestamp;
 
 use super::{Aggregation, AggregatorType, BucketRange};
-use super::{WindowAggregator, create_window_aggregator, merge_accumulator_state};
-use crate::runtime::operators::window::state::index::{RowPtr, SortedRangeIndex};
 
 #[path = "plain_range.rs"]
 mod plain_range;
 #[path = "plain_points.rs"]
 mod plain_points;
+#[path = "plain_range_cache.rs"]
+mod plain_range_cache;
 
 pub use super::VirtualPoint;
 
@@ -106,68 +102,3 @@ impl Aggregation for PlainAggregation {
     }
 }
 
-// ----------------- shared helpers (range + points) -----------------
-
-fn eval_stored_window(
-    window_expr: &Arc<dyn WindowExpr>,
-    row_index: &SortedRangeIndex,
-    start: RowPtr,
-    end: RowPtr,
-    tiles: Option<&Tiles>,
-) -> ScalarValue {
-    let mut accumulator = match create_window_aggregator(window_expr) {
-        WindowAggregator::Accumulator(accumulator) => accumulator,
-        WindowAggregator::Evaluator(_) => panic!("PlainAggregation should not use evaluator"),
-    };
-    apply_stored_window(accumulator.as_mut(), row_index, start, end, tiles);
-    accumulator.evaluate().expect("evaluate failed")
-}
-
-fn apply_stored_window(
-    accumulator: &mut dyn datafusion::logical_expr::Accumulator,
-    row_index: &SortedRangeIndex,
-    start: RowPtr,
-    end: RowPtr,
-    tiles: Option<&Tiles>,
-) {
-    let (front_args, middle_tiles, back_args) = window_slices(row_index, start, end, tiles);
-
-    if !front_args.is_empty() {
-        accumulator.update_batch(&front_args).expect("update_batch failed");
-    }
-    for tile in middle_tiles {
-        if let Some(tile_state) = tile.accumulator_state {
-            merge_accumulator_state(accumulator, tile_state.as_ref());
-        }
-    }
-    if !back_args.is_empty() {
-        accumulator.update_batch(&back_args).expect("update_batch failed");
-    }
-}
-
-// TODO we should avoid calling tiled_split on each iteration
-fn window_slices(
-    row_index: &SortedRangeIndex,
-    start: RowPtr,
-    end: RowPtr,
-    tiles: Option<&Tiles>,
-) -> (Vec<ArrayRef>, Vec<Tile>, Vec<ArrayRef>) {
-    if let Some(tiles) = tiles {
-        if let Some(split) = window_logic::tiled_split(row_index, start, end, tiles) {
-            let front_args = if split.front_end >= start {
-                row_index.get_args_in_range(&start, &split.front_end)
-            } else {
-                vec![]
-            };
-            let back_args = if split.back_start <= end {
-                row_index.get_args_in_range(&split.back_start, &end)
-            } else {
-                vec![]
-            };
-            return (front_args, split.tiles, back_args);
-        }
-    }
-    (row_index.get_args_in_range(&start, &end), vec![], vec![])
-}
-
-// (helper removed; points impl uses a local version)

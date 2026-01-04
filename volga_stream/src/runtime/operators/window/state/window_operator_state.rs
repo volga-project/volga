@@ -9,6 +9,7 @@ use datafusion::common::ScalarValue;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 use tokio::sync::RwLock;
+use tokio::task::JoinHandle;
 
 use crate::common::Key;
 use crate::runtime::operators::window::window_operator::WindowConfig;
@@ -67,6 +68,9 @@ pub struct WindowOperatorState {
     batch_retirement: Arc<BatchRetirementQueue>,
     batch_reclaimer_started: AtomicBool,
     background_tasks_started: AtomicBool,
+    batch_reclaimer_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
+    compaction_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
+    dump_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 
     // In-memory batches referenced by `BatchRef::InMem`.
     in_mem_batches: Arc<InMemBatchCache>,
@@ -105,22 +109,13 @@ impl WindowOperatorState {
             batch_retirement,
             batch_reclaimer_started: AtomicBool::new(false),
             background_tasks_started: AtomicBool::new(false),
+            batch_reclaimer_handle: std::sync::Mutex::new(None),
+            compaction_handle: std::sync::Mutex::new(None),
+            dump_handle: std::sync::Mutex::new(None),
             in_mem_batches,
             compactor,
             bucket_granularity,
         }
-    }
-
-    pub fn put_in_mem_run(&self, batch: RecordBatch) -> InMemBatchId {
-        self.in_mem_batches.put(batch)
-    }
-
-    pub fn get_in_mem_run(&self, id: InMemBatchId) -> Option<Arc<RecordBatch>> {
-        self.in_mem_batches.get(id)
-    }
-
-    pub fn remove_in_mem_runs(&self, ids: &[InMemBatchId]) {
-        self.in_mem_batches.remove(ids)
     }
 
     pub fn in_mem_batch_cache(&self) -> &InMemBatchCache {
@@ -142,8 +137,8 @@ impl WindowOperatorState {
         let retired = self.batch_retirement.clone();
         let store = self.batch_store.clone();
         let pins = self.batch_pins.clone();
-        let _handle = retired.spawn_reclaimer(store, pins, interval, batch_budget_per_tick);
-        // Intentionally detached: state is long-lived and this is best-effort cleanup.
+        let handle = retired.spawn_reclaimer(store, pins, interval, batch_budget_per_tick);
+        *self.batch_reclaimer_handle.lock().expect("batch_reclaimer_handle") = Some(handle);
     }
 
     pub fn start_background_tasks(
@@ -166,14 +161,41 @@ impl WindowOperatorState {
 
         let compactor = Arc::new(self.compactor.clone());
         let window_states = Arc::new(self.window_states.clone());
-        let _handles = compactor.spawn_background_tasks(
+        let (compact_handle, dump_handle) = compactor.spawn_background_tasks(
             window_states,
             ts_column_index,
             hot_bucket_count,
             compaction_interval,
             dump_interval,
         );
-        // Detached: best-effort maintenance loops.
+        *self.compaction_handle.lock().expect("compaction_handle") = Some(compact_handle);
+        *self.dump_handle.lock().expect("dump_handle") = Some(dump_handle);
+    }
+
+    pub async fn stop_background_tasks(&self) {
+        let compact = self.compaction_handle.lock().expect("compaction_handle").take();
+        let dump = self.dump_handle.lock().expect("dump_handle").take();
+        let reclaim = self
+            .batch_reclaimer_handle
+            .lock()
+            .expect("batch_reclaimer_handle")
+            .take();
+
+        if let Some(h) = compact {
+            h.abort();
+            let _ = h.await;
+        }
+        if let Some(h) = dump {
+            h.abort();
+            let _ = h.await;
+        }
+        if let Some(h) = reclaim {
+            h.abort();
+            let _ = h.await;
+        }
+
+        self.background_tasks_started.store(false, Ordering::Release);
+        self.batch_reclaimer_started.store(false, Ordering::Release);
     }
 
     pub async fn periodic_dump_to_store(
@@ -196,11 +218,11 @@ impl WindowOperatorState {
             return;
         };
         self.compactor
-            .compact_bucket_on_read(key, &arc, bucket_ts, ts_column_index)
+            .compact_bucket(key, &arc, bucket_ts, ts_column_index)
             .await;
     }
 
-    pub async fn rehydrate_bucket_on_read(
+    pub async fn rehydrate_bucket(
         &self,
         key: &Key,
         bucket_ts: Timestamp,
@@ -211,7 +233,7 @@ impl WindowOperatorState {
         };
         let _ = ts_column_index;
         self.compactor
-            .rehydrate_bucket_on_read(key, &arc, bucket_ts)
+            .rehydrate_bucket(key, &arc, bucket_ts)
             .await;
     }
 
@@ -280,7 +302,6 @@ impl WindowOperatorState {
         batch: RecordBatch,
     ) -> usize {
         let window_ids: Vec<_> = window_configs.keys().cloned().collect();
-        // let window_exprs: Vec<_> = window_configs.values().map(|window| window.window_expr.clone()).collect();
         
         // Get or create windows_state
         let arc_rwlock = if let Some(entry) = self.window_states.get(key) {
@@ -345,7 +366,7 @@ impl WindowOperatorState {
             let (min_pos, max_pos) = get_batch_rowpos_range(&batch, ts_column_index, seq_column_index);
             let row_count = batch.num_rows();
 
-            let id = self.put_in_mem_run(batch);
+            let id = self.in_mem_batches.put(batch);
             windows_state
                 .bucket_index
                 .insert_batch_ref(bucket_ts, BatchRef::InMem(id), min_pos, max_pos, row_count);
@@ -424,7 +445,7 @@ impl WindowOperatorState {
                 self.batch_retirement.retire(key, &pruned.stored);
             }
             if !pruned.inmem.is_empty() {
-                self.remove_in_mem_runs(&pruned.inmem);
+                self.in_mem_batches.remove(&pruned.inmem);
             }
         }
     }

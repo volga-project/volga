@@ -500,11 +500,6 @@ mod tests {
         Cursor::new(ts, seq)
     }
 
-    fn assert_range(r: BucketRange, start: Timestamp, end: Timestamp) {
-        assert_eq!(r.start, start);
-        assert_eq!(r.end, end);
-    }
-
     #[test]
     fn test_insert_and_query() {
         let mut index = BucketIndex::new(TimeGranularity::Seconds(1));

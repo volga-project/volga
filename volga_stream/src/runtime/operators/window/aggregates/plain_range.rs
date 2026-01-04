@@ -15,7 +15,8 @@ use crate::runtime::operators::window::state::index::{
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, Tiles, TimeGranularity};
 
-use super::{CursorBounds, eval_stored_window};
+use super::{CursorBounds};
+use super::plain_range_cache::{eval_stored_window_cached, WindowSlicesCache};
 
 fn build_data_requests(
     bucket_index: &BucketIndex,
@@ -220,14 +221,16 @@ impl Aggregation for PlainRangeAggregation {
         };
 
         let mut out: Vec<ScalarValue> = Vec::new();
+        let mut cache = WindowSlicesCache::default();
         loop {
             let start = window_logic::window_start_unclamped(&idx, pos, spec);
-            let v = eval_stored_window(
+            let v = eval_stored_window_cached(
                 &self.window_expr,
                 &idx,
                 start,
                 pos,
                 self.tiles.as_ref(),
+                &mut cache,
             );
             out.push(v);
 

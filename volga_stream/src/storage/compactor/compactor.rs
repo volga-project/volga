@@ -122,7 +122,7 @@ impl Compactor {
         lock
     }
 
-    pub async fn rehydrate_bucket_on_read(
+    pub async fn rehydrate_bucket(
         &self,
         key: &Key,
         arc: &Arc<RwLock<WindowsState>>,
@@ -131,11 +131,11 @@ impl Compactor {
         let lock = self.get_bucket_lock(key.hash(), bucket_ts);
         let _guard = lock.lock().await;
         let _ = self
-            .rehydrate_bucket_in_mem(key, arc, bucket_ts)
+            ._rehydrate_bucket(key, arc, bucket_ts)
             .await;
     }
 
-    async fn rehydrate_bucket_in_mem(
+    async fn _rehydrate_bucket(
         &self,
         key: &Key,
         arc: &Arc<RwLock<WindowsState>>,
@@ -212,7 +212,7 @@ impl Compactor {
         Ok(true)
     }
 
-    pub async fn compact_bucket_on_read(
+    pub async fn compact_bucket(
         &self,
         key: &Key,
         arc: &Arc<RwLock<WindowsState>>,
@@ -222,11 +222,11 @@ impl Compactor {
         let lock = self.get_bucket_lock(key.hash(), bucket_ts);
         let _guard = lock.lock().await;
         let _ = self
-            .compact_bucket_in_mem(key, arc, bucket_ts, ts_column_index)
+            ._compact_bucket(key, arc, bucket_ts, ts_column_index)
             .await;
     }
 
-    async fn compact_bucket_in_mem(
+    async fn _compact_bucket(
         &self,
         key: &Key,
         arc: &Arc<RwLock<WindowsState>>,
@@ -376,7 +376,7 @@ impl Compactor {
         Ok(true)
     }
 
-    async fn dump_bucket_to_store(
+    async fn dump_bucket(
         &self,
         key: &Key,
         arc: &Arc<RwLock<WindowsState>>,
@@ -549,28 +549,6 @@ impl Compactor {
         Ok(true)
     }
 
-    pub async fn checkpoint_dump(
-        &self,
-        key: &Key,
-        arc: &Arc<RwLock<WindowsState>>,
-        bucket_ts: Timestamp,
-        ts_column_index: usize,
-    ) -> anyhow::Result<bool> {
-        self.dump_bucket_to_store(key, arc, bucket_ts, ts_column_index, DumpMode::KeepHot)
-            .await
-    }
-
-    pub async fn periodic_dump_bucket(
-        &self,
-        key: &Key,
-        arc: &Arc<RwLock<WindowsState>>,
-        bucket_ts: Timestamp,
-        ts_column_index: usize,
-    ) -> anyhow::Result<bool> {
-        self.dump_bucket_to_store(key, arc, bucket_ts, ts_column_index, DumpMode::EvictHot)
-            .await
-    }
-
     pub async fn periodic_dump_to_store(
         &self,
         window_states: &DashMap<Key, Arc<RwLock<WindowsState>>>,
@@ -639,7 +617,7 @@ impl Compactor {
                 }
 
                 let published = self
-                    .periodic_dump_bucket(&key, &arc, bucket_ts, ts_column_index)
+                    .dump_bucket(&key, &arc, bucket_ts, ts_column_index, DumpMode::EvictHot)
                     .await?;
                 if published {
                     self.last_dumped_version
@@ -689,7 +667,7 @@ impl Compactor {
             };
 
             for bucket_ts in to_compact {
-                self.compact_bucket_on_read(&key, &arc, bucket_ts, ts_column_index)
+                self.compact_bucket(&key, &arc, bucket_ts, ts_column_index)
                     .await;
             }
         }
@@ -714,7 +692,7 @@ impl Compactor {
                 let lock = self.get_bucket_lock(key.hash(), bucket_ts);
                 let _guard = lock.lock().await;
                 let _ = self
-                    .checkpoint_dump(&key, &arc, bucket_ts, ts_column_index)
+                    .dump_bucket(&key, &arc, bucket_ts, ts_column_index, DumpMode::KeepHot)
                     .await?;
             }
         }
@@ -789,7 +767,7 @@ mod tests {
 
         let arc = Arc::new(RwLock::new(ws));
         compactor
-            .compact_bucket_on_read(&key, &arc, bucket_ts, 0)
+            .compact_bucket(&key, &arc, bucket_ts, 0)
             .await;
 
         assert!(in_mem.get(old_id1).is_none());
@@ -830,7 +808,7 @@ mod tests {
 
         let arc = Arc::new(RwLock::new(ws));
         let published = compactor
-            .checkpoint_dump(&key, &arc, bucket_ts, 0)
+            .dump_bucket(&key, &arc, bucket_ts, 0, DumpMode::KeepHot)
             .await
             .unwrap();
         assert!(published);

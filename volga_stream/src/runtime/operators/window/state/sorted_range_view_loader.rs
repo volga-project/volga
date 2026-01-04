@@ -75,7 +75,7 @@ pub async fn load_sorted_ranges_views(
     drop(windows_state_guard);
 
     for bucket_ts in buckets_to_rehydrate {
-        state.rehydrate_bucket_on_read(key, bucket_ts, ts_column_index).await;
+        state.rehydrate_bucket(key, bucket_ts, ts_column_index).await;
     }
     for bucket_ts in buckets_to_compact {
         state.compact_bucket_on_read(key, bucket_ts, ts_column_index).await;

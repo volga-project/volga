@@ -47,6 +47,7 @@ impl InMemBatchCache {
         limit != 0 && self.bytes() > limit
     }
 
+    // TODO we should backpressure and dump to store if over limit
     pub fn put(&self, batch: RecordBatch) -> InMemBatchId {
         let id = InMemBatchId(self.next_id.fetch_add(1, Ordering::Relaxed));
         let arc = Arc::new(batch);

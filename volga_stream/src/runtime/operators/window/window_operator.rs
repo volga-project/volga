@@ -548,6 +548,7 @@ impl OperatorTrait for WindowOperator {
     }
 
     async fn close(&mut self) -> Result<()> {
+        self.state.stop_background_tasks().await;
         self.base.close().await
     }
 

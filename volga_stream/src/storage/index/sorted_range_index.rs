@@ -400,7 +400,6 @@ impl<'a> SortedRangeIndex<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt64Array};

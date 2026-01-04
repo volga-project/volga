@@ -438,6 +438,14 @@ impl Tiles {
         selected_tiles
     }
 
+    pub fn min_granularity_ms(&self) -> i64 {
+        self.config
+            .granularities
+            .first()
+            .expect("Tiles must have at least one granularity")
+            .to_millis()
+    }
+
     /// Compute tiles that are fully inside the requested range and the raw-data gaps that remain.
     ///
     /// The returned gaps are timestamp ranges that may still include tile boundaries (i.e. they can
