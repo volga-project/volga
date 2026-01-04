@@ -12,7 +12,7 @@ use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::storage::batch_store::Timestamp;
-use crate::runtime::operators::window::index::{DataRequest, SortedRangeView};
+use crate::runtime::operators::window::state::index::{DataRequest, SortedRangeView};
 
 pub mod arrow_utils;
 pub mod evaluator;
@@ -210,49 +210,6 @@ pub fn get_aggregate_type(window_expr: &Arc<dyn WindowExpr>) -> AggregatorType {
     registry.get_aggregator_type(&agg_name).expect(&format!("Unsupported aggregate function: {}", agg_name))
 }
 
-// optimization - plain aggregator and evaluators produce aggregation results
-// by running nested for loop for each entry.
-// we split entries where possible, so that nested loops can run on different threads
-// #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-// pub enum AggParallelismSplit {
-//     None,
-//     CpuBased,
-//     PerEvent,
-// }
-
-// default to CPU-based splitting
-// const AGG_PARALLELISM_SPLIT: AggParallelismSplit = AggParallelismSplit::CpuBased;
-
-// pub fn split_entries_for_parallelism(entries: &Vec<TimeIdx>) -> Vec<Vec<TimeIdx>> {
-//     if entries.is_empty() {
-//         return vec![];
-//     }
-    
-//     match AGG_PARALLELISM_SPLIT {
-//         AggParallelismSplit::None => {
-//             vec![entries.clone()]
-//         }
-//         AggParallelismSplit::CpuBased => {
-//             let num_threads = std::thread::available_parallelism()
-//                 .map(|n| n.get())
-//                 .unwrap_or(4)
-//                 .max(1);
-            
-//             // For small number of entries, don't split (overhead not worth it)
-//             if entries.len() < num_threads * 2 {
-//                 return vec![entries.clone()];
-//             }
-            
-//             // Split into chunks of roughly equal size
-//             let chunk_size = (entries.len() + num_threads - 1) / num_threads;
-//             entries.chunks(chunk_size).map(|chunk| chunk.to_vec()).collect()
-//         }
-//         AggParallelismSplit::PerEvent => {
-//             entries.iter().map(|entry| vec![*entry]).collect()
-//         }
-//     }
-// }
-
 #[cfg(test)]
 pub(crate) mod test_utils {
     use std::sync::Arc;
@@ -266,7 +223,7 @@ pub(crate) mod test_utils {
     use crate::api::planner::{Planner, PlanningContext};
     use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-    use crate::runtime::operators::window::index::{DataRequest, SortedRangeBucket, SortedRangeView};
+    use crate::runtime::operators::window::state::index::{DataRequest, SortedRangeView, SortedSegment};
     use crate::runtime::operators::window::{Cursor, TimeGranularity, SEQ_NO_COLUMN_NAME};
     use crate::storage::batch_store::Timestamp;
 
@@ -314,27 +271,24 @@ pub(crate) mod test_utils {
         buckets: Vec<(Timestamp, RecordBatch)>,
         window_expr_for_args: &Arc<dyn WindowExpr>,
     ) -> SortedRangeView {
-        use std::collections::HashMap;
         let (start, end) = match request.bounds {
-            crate::runtime::operators::window::index::DataBounds::All => {
+            crate::runtime::operators::window::state::index::DataBounds::All => {
                 (Cursor::new(i64::MIN, 0), Cursor::new(i64::MAX, u64::MAX))
             }
-            crate::runtime::operators::window::index::DataBounds::Time { start_ts, end_ts } => {
+            crate::runtime::operators::window::state::index::DataBounds::Time { start_ts, end_ts } => {
                 (Cursor::new(start_ts, 0), Cursor::new(end_ts, u64::MAX))
             }
-            crate::runtime::operators::window::index::DataBounds::RowsTail { end_ts, .. } => {
+            crate::runtime::operators::window::state::index::DataBounds::RowsTail { end_ts, .. } => {
                 (Cursor::new(i64::MIN, 0), Cursor::new(end_ts, u64::MAX))
             }
         };
 
-        let mut out: HashMap<Timestamp, SortedRangeBucket> = HashMap::new();
+        let mut out: Vec<SortedSegment> = Vec::new();
         for (bucket_ts, b) in buckets {
             let args = window_expr_for_args.evaluate_args(&b).expect("eval args");
-            out.insert(
-                bucket_ts,
-                SortedRangeBucket::new(bucket_ts, b, 0, 3, Arc::new(args)),
-            );
+            out.push(SortedSegment::new(bucket_ts, b, 0, 3, Arc::new(args)));
         }
+        out.sort_by_key(|b| b.bucket_ts());
         SortedRangeView::new(request, granularity, start, end, out)
     }
 }

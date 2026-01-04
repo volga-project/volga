@@ -1,5 +1,5 @@
 use crate::runtime::operators::window::aggregates::BucketRange;
-use crate::runtime::operators::window::index::{DataBounds, DataRequest};
+use crate::runtime::operators::window::state::index::{DataBounds, DataRequest};
 use crate::runtime::operators::window::TimeGranularity;
 
 #[derive(Debug, Clone)]

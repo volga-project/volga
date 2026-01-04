@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use arrow::array::Array;
@@ -23,6 +25,10 @@ pub struct BatchId {
 impl BatchId {
     pub fn new(partition_key_hash: u64, time_bucket: Timestamp, uid: u64) -> Self {
         Self { partition_key_hash, time_bucket, uid }
+    }
+
+    pub fn partition_key_hash(&self) -> u64 {
+        self.partition_key_hash
     }
 
     pub fn to_string(&self) -> String {
@@ -72,8 +78,33 @@ pub struct BatchStoreStats {
     pub memory_usage_bytes: usize,
 }
 
+pub type BoxFut<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait BatchStore: Send + Sync + std::fmt::Debug {
+    fn bucket_granularity(&self) -> TimeGranularity;
+    fn max_batch_size(&self) -> usize;
+
+    fn partition_records(
+        &self,
+        batch: &RecordBatch,
+        partition_key: &Key,
+        ts_column_index: usize,
+    ) -> Vec<(Timestamp, RecordBatch)>;
+
+    fn load_batches<'a>(&'a self, batch_ids: Vec<BatchId>, partition_key: &'a Key)
+        -> BoxFut<'a, HashMap<BatchId, RecordBatch>>;
+    fn remove_batches<'a>(&'a self, batch_ids: &'a [BatchId], partition_key: &'a Key) -> BoxFut<'a, ()>;
+    
+    // TODO we should put many 
+    fn put_batch_with_id<'a>(&'a self, batch_id: BatchId, batch: RecordBatch, partition_key: &'a Key)
+        -> BoxFut<'a, ()>;
+
+    fn to_checkpoint(&self) -> BatchStoreCheckpoint;
+    fn apply_checkpoint(&self, cp: BatchStoreCheckpoint);
+}
+
 #[derive(Debug)]
-pub struct BatchStore {
+pub struct InMemBatchStore {
     // Global lock for exclusive operations (stats, pruning, cleanup, rebalance)
     global_lock: Arc<RwLock<()>>,
     
@@ -82,13 +113,13 @@ pub struct BatchStore {
     
     // In-memory storage
     batch_store: Arc<DashMap<BatchId, RecordBatch>>, // TODO use foyer
-    
+
     // Time partitioning configuration
     bucket_granularity: TimeGranularity,
     max_batch_size: usize,
 }
 
-impl BatchStore {
+impl InMemBatchStore {
     
     pub fn new(lock_pool_size: usize, bucket_granularity: TimeGranularity, max_batch_size: usize) -> Self {
         let lock_pool = (0..lock_pool_size)
@@ -108,6 +139,10 @@ impl BatchStore {
         self.bucket_granularity
     }
 
+    pub fn max_batch_size(&self) -> usize {
+        self.max_batch_size
+    }
+
     fn get_key_lock(&self, key: &Key) -> Arc<RwLock<()>> {
         let hash = key.hash();
         let lock_index = (hash as usize) % self.lock_pool.len();
@@ -115,13 +150,24 @@ impl BatchStore {
         self.lock_pool[lock_index].clone()
     }
 
-    pub async fn append_records(&self, batch: RecordBatch, partition_key: &Key, ts_column_index: usize) -> Vec<(BatchId, RecordBatch)> {
-        // Partition batch by time granularity and get batch ids and keys
-        let time_partitioned_batches = Self::time_partition_batch(&batch, &partition_key, ts_column_index, self.bucket_granularity, self.max_batch_size);
-        
-        self.store_batches(partition_key, &time_partitioned_batches).await;
-        
-        time_partitioned_batches
+    /// Partition a batch into bucket-local batches (no ids, no storage write).
+    ///
+    /// This is used by the hot write path so it can keep hot buckets store-agnostic.
+    pub fn partition_records(
+        &self,
+        batch: &RecordBatch,
+        partition_key: &Key,
+        ts_column_index: usize,
+    ) -> Vec<(Timestamp, RecordBatch)> {
+        let out: Vec<(BatchId, RecordBatch)> = Self::time_partition_batch(
+            batch,
+            partition_key,
+            ts_column_index,
+            self.bucket_granularity,
+            self.max_batch_size,
+        );
+
+        out.into_iter().map(|(id, b)| (id.time_bucket(), b)).collect()
     }
 
     fn time_partition_batch(
@@ -151,9 +197,9 @@ impl BatchStore {
         // Use Arrow's cast to preserve nulls properly
         use arrow::compute::kernels::cast::cast;
         use arrow::datatypes::DataType;
-        let ts_int64_array = cast(ts_array, &DataType::Int64)
+        let ts_int64_array_owned = cast(ts_array, &DataType::Int64)
             .expect("Should be able to cast TimestampMillisecondArray to Int64Array");
-        let ts_int64_array = ts_int64_array.as_any().downcast_ref::<Int64Array>()
+        let ts_int64_array = ts_int64_array_owned.as_any().downcast_ref::<Int64Array>()
             .expect("Cast result should be Int64Array");
         
         // Create a constant array filled with granularity_ms for vectorized operations
@@ -175,9 +221,15 @@ impl BatchStore {
         // Create original index array for stable sorting (preserve order within buckets)
         let original_indices = Int64Array::from_iter((0..num_rows).map(|i| i as i64));
         
-        // Sort by (bucket, original_index) to group consecutive rows with same bucket
+        // Sort by (bucket, ts, __seq_no, original_index) so per-bucket batches are already sorted by rowpos.
         use arrow::compute::kernels::sort::{lexsort_to_indices, SortColumn, SortOptions};
-        let sort_columns = vec![
+        let seq_column_index = batch
+            .schema()
+            .fields()
+            .iter()
+            .position(|f| f.name() == "__seq_no");
+
+        let mut sort_columns = vec![
             SortColumn {
                 values: Arc::new(bucket_array.clone()) as Arc<dyn Array>,
                 options: Some(SortOptions {
@@ -186,16 +238,34 @@ impl BatchStore {
                 }),
             },
             SortColumn {
-                values: Arc::new(original_indices) as Arc<dyn Array>,
+                values: Arc::new(ts_int64_array_owned) as Arc<dyn Array>,
                 options: Some(SortOptions {
                     nulls_first: false,
                     descending: false,
                 }),
             },
         ];
+
+        if let Some(seq_column_index) = seq_column_index {
+            sort_columns.push(SortColumn {
+                values: Arc::clone(batch.column(seq_column_index)) as Arc<dyn Array>,
+                options: Some(SortOptions {
+                    nulls_first: false,
+                    descending: false,
+                }),
+            });
+        }
+
+        sort_columns.push(SortColumn {
+            values: Arc::new(original_indices) as Arc<dyn Array>,
+            options: Some(SortOptions {
+                nulls_first: false,
+                descending: false,
+            }),
+        });
         
         let sort_indices = lexsort_to_indices(&sort_columns, None)
-            .expect("Should be able to sort by bucket and original index");
+            .expect("Should be able to sort by bucket and rowpos");
         
         // Apply sort to all columns
         use arrow::compute::take;
@@ -244,21 +314,6 @@ impl BatchStore {
     }
 
 
-    // Store a batch with per-partition locking
-    async fn store_batches(&self, partition_key: &Key, batches: &Vec<(BatchId, RecordBatch)>) {
-        // Acquire global read lock (allows concurrent operations unless global exclusive is held)
-        let _global_guard = self.global_lock.read().await;
-        
-        let partition_lock = self.get_key_lock(&partition_key);
-        let _partition_guard = partition_lock.write().await;
-        for (batch_id, batch) in batches {
-            self.batch_store.insert(batch_id.clone(), batch.clone());
-        }
-
-        // TODO put to slatedb and store write handle
-    }
-
-
     // Get multiple batches from storage
     // TODO should this be an iterator?
     pub async fn load_batches(&self, batch_ids: Vec<BatchId>, partition_key: &Key) -> HashMap<BatchId, RecordBatch> {
@@ -291,6 +346,17 @@ impl BatchStore {
         for batch_id in batch_ids {
             self.batch_store.remove(batch_id);
         }
+    }
+
+    /// Store a single batch under an explicit `BatchId`.
+    ///
+    /// Used for read-driven compaction materialization (base batches).
+    pub async fn put_batch_with_id(&self, batch_id: BatchId, batch: RecordBatch, partition_key: &Key) {
+        // Acquire global read lock
+        let _global_guard = self.global_lock.read().await;
+        let partition_lock = self.get_key_lock(partition_key);
+        let _partition_guard = partition_lock.write().await;
+        self.batch_store.insert(batch_id, batch);
     }
 
     // Get storage statistics with global exclusive lock
@@ -366,5 +432,53 @@ impl BatchStore {
             let batch = Self::record_batch_from_ipc_bytes(&bytes);
             self.batch_store.insert(batch_id, batch);
         }
+    }
+}
+
+impl BatchStore for InMemBatchStore {
+    fn bucket_granularity(&self) -> TimeGranularity {
+        InMemBatchStore::bucket_granularity(self)
+    }
+
+    fn max_batch_size(&self) -> usize {
+        InMemBatchStore::max_batch_size(self)
+    }
+
+    fn partition_records(
+        &self,
+        batch: &RecordBatch,
+        partition_key: &Key,
+        ts_column_index: usize,
+    ) -> Vec<(Timestamp, RecordBatch)> {
+        InMemBatchStore::partition_records(self, batch, partition_key, ts_column_index)
+    }
+
+    fn load_batches<'a>(
+        &'a self,
+        batch_ids: Vec<BatchId>,
+        partition_key: &'a Key,
+    ) -> BoxFut<'a, HashMap<BatchId, RecordBatch>> {
+        Box::pin(async move { InMemBatchStore::load_batches(self, batch_ids, partition_key).await })
+    }
+
+    fn remove_batches<'a>(&'a self, batch_ids: &'a [BatchId], partition_key: &'a Key) -> BoxFut<'a, ()> {
+        Box::pin(async move { InMemBatchStore::remove_batches(self, batch_ids, partition_key).await })
+    }
+
+    fn put_batch_with_id<'a>(
+        &'a self,
+        batch_id: BatchId,
+        batch: RecordBatch,
+        partition_key: &'a Key,
+    ) -> BoxFut<'a, ()> {
+        Box::pin(async move { InMemBatchStore::put_batch_with_id(self, batch_id, batch, partition_key).await })
+    }
+
+    fn to_checkpoint(&self) -> BatchStoreCheckpoint {
+        InMemBatchStore::to_checkpoint(self)
+    }
+
+    fn apply_checkpoint(&self, cp: BatchStoreCheckpoint) {
+        InMemBatchStore::apply_checkpoint(self, cp)
     }
 }

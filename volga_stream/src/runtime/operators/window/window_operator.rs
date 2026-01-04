@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::fmt;
+use std::time::Duration;
 
 use anyhow::Result;
 use arrow::array::{ArrayRef, RecordBatch};
 use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
 use async_trait::async_trait;
-use futures::{future, StreamExt};
+use futures::future;
 use indexmap::IndexMap;
 use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 
@@ -20,13 +21,13 @@ use crate::runtime::operators::operator::{MessageStream, OperatorBase, OperatorC
 use crate::runtime::operators::window::aggregates::{get_aggregate_type, Aggregation, BucketRange};
 use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
 use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
-use crate::runtime::operators::window::data_loader::{load_sorted_ranges_views, RangesLoadPlan};
+use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
 use crate::runtime::operators::window::{AggregatorType, TileConfig, TimeGranularity};
 use crate::runtime::operators::window::Cursor;
-use crate::runtime::operators::window::index::{window_logic, SortedRangeIndex, SortedRangeView};
+use crate::runtime::operators::window::state::index::{window_logic, SortedRangeIndex, SortedRangeView};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::storage::batch_store::BatchStore;
+use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -59,6 +60,9 @@ pub struct WindowOperatorConfig {
     pub tiling_configs: Vec<Option<TileConfig>>,
     pub lateness: Option<i64>,
     pub request_advance_policy: RequestAdvancePolicy,
+    pub compaction_interval_ms: u64,
+    pub dump_interval_ms: u64,
+    pub dump_hot_bucket_count: usize,
 }
 
 impl WindowOperatorConfig {
@@ -70,6 +74,9 @@ impl WindowOperatorConfig {
             tiling_configs: Vec::new(),
             lateness: None,
             request_advance_policy: RequestAdvancePolicy::OnWatermark,
+            compaction_interval_ms: 250,
+            dump_interval_ms: 1000,
+            dump_hot_bucket_count: 2,
         }
     }
 }
@@ -89,6 +96,9 @@ pub struct WindowOperator {
     tiling_configs: Vec<Option<TileConfig>>,
     lateness: Option<i64>,
     current_watermark: Option<u64>,
+    compaction_interval: Duration,
+    dump_interval: Duration,
+    dump_hot_bucket_count: usize,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -174,7 +184,10 @@ impl WindowOperator {
         Self {
             base: OperatorBase::new(config),
             window_configs: windows,
-            state: Arc::new(WindowOperatorState::new(Arc::new(BatchStore::new(4096, TimeGranularity::Seconds(1), 1024)))),
+            state: Arc::new(WindowOperatorState::new(
+                Arc::new(InMemBatchStore::new(4096, TimeGranularity::Seconds(1), 1024))
+                    as Arc<dyn BatchStore>,
+            )),
             ts_column_index,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
@@ -186,6 +199,9 @@ impl WindowOperator {
             tiling_configs: window_operator_config.tiling_configs,
             lateness: window_operator_config.lateness,
             current_watermark: None,
+            compaction_interval: Duration::from_millis(window_operator_config.compaction_interval_ms.max(1)),
+            dump_interval: Duration::from_millis(window_operator_config.dump_interval_ms.max(1)),
+            dump_hot_bucket_count: window_operator_config.dump_hot_bucket_count,
         }
     }
 
@@ -296,8 +312,6 @@ impl WindowOperator {
                                 batch_index,
                                 _window_config.window_expr.clone(),
                                 tiles_owned.clone(),
-                                self.ts_column_index,
-                                *window_id,
                                 crate::runtime::operators::window::aggregates::plain::CursorBounds {
                                     prev: prev_processed_until,
                                     new: new_pos,
@@ -491,8 +505,9 @@ fn extract_input_values_for_output(
     let input_cols = input_schema.fields().len();
     let mut out: Vec<Vec<ScalarValue>> = Vec::new();
     loop {
-        if pos.bucket_ts >= entry_range.start && pos.bucket_ts <= entry_range.end {
-            let b = view.buckets().get(&pos.bucket_ts).expect("bucket must exist");
+        let bucket_ts = idx.bucket_ts(&pos);
+        if bucket_ts >= entry_range.start && bucket_ts <= entry_range.end {
+            let b = &view.segments()[pos.segment];
             let batch = b.batch();
             let mut row_vals = Vec::with_capacity(input_cols);
             for col_idx in 0..input_cols {
@@ -511,19 +526,6 @@ fn extract_input_values_for_output(
     out
 }
 
-// pub async fn load_batches(storage: &BatchStore, key: &Key, aggregations: &IndexMap<WindowId, Vec<Box<dyn Aggregation>>>) -> HashMap<BatchId, RecordBatch> {
-//     let mut batches_to_load = IndexSet::new(); // preserve insertion order
-//     for (_window_id, aggs) in aggregations.iter() {
-//         for agg in aggs {
-//             let agg_batches = agg.get_batches_to_load();
-//             for batch_id in agg_batches {
-//                 batches_to_load.insert(batch_id);
-//             }
-//         }
-//     }
-    
-//     storage.load_batches(batches_to_load.into_iter().collect(), key).await
-// }
 
 #[async_trait]
 impl OperatorTrait for WindowOperator {
@@ -534,6 +536,13 @@ impl OperatorTrait for WindowOperator {
         let operator_states = context.operator_states();
 
         operator_states.insert_operator_state(vertex_id, self.state.clone());
+        // Start background compaction + dump (separate intervals), plus retirement cleanup.
+        self.state.start_background_tasks(
+            self.ts_column_index,
+            self.dump_hot_bucket_count,
+            self.compaction_interval,
+            self.dump_interval,
+        );
         
         Ok(())
     }
@@ -634,6 +643,10 @@ impl OperatorTrait for WindowOperator {
     }
 
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+        // Ensure checkpoint depends only on the store: flush hot in-memory runs to `BatchStore`
+        // and update the bucket index to reference `BatchRef::Stored`.
+        self.state.flush_in_mem_runs_to_store(self.ts_column_index).await?;
+
         let state_cp = self.state.to_checkpoint();
         let batch_store_cp = self.state.get_batch_store().to_checkpoint();
 
@@ -1392,7 +1405,7 @@ mod tests {
         window_config.parallelize = true;
         
         // Set up tiling configs for all three aggregates
-        use crate::runtime::operators::window::tiles::{TileConfig, TimeGranularity};
+        use crate::runtime::operators::window::state::tiles::{TileConfig, TimeGranularity};
         let tile_config = TileConfig::new(vec![
             TimeGranularity::Minutes(1),
             TimeGranularity::Minutes(5),
@@ -1753,7 +1766,7 @@ mod tests {
         window_config.parallelize = true;
         
         // Set up tiling configs for MIN and MAX (plain aggregates)
-        use crate::runtime::operators::window::tiles::{TileConfig, TimeGranularity};
+        use crate::runtime::operators::window::state::tiles::{TileConfig, TimeGranularity};
         let tile_config = TileConfig::new(vec![
             TimeGranularity::Minutes(1),
             TimeGranularity::Minutes(5),

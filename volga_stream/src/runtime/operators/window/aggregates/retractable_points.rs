@@ -5,14 +5,14 @@ use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
-use crate::runtime::operators::window::index::{get_window_length_ms, get_window_size_rows, BucketIndex};
+use crate::runtime::operators::window::state::index::{get_window_length_ms, get_window_size_rows, BucketIndex};
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::Cursor;
 
 use super::super::{create_window_aggregator, merge_accumulator_state, WindowAggregator};
 use super::VirtualPoint;
 use super::BucketRange;
-use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
+use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
 use crate::runtime::operators::window::aggregates::point_request_merge::{merge_planned_ranges, PlannedRange};
 
 #[derive(Debug)]
@@ -56,8 +56,8 @@ impl RetractablePointsAggregation {
             0
         };
 
-        let mut data_requests: Vec<DataRequest> = Vec::new();
-        let mut req_idx_by_point: Vec<usize> = Vec::new();
+        let data_requests: Vec<DataRequest>;
+        let req_idx_by_point: Vec<usize>;
         // Even when exclude_current_row=true we still need stored rows to "advance" the base accumulator
         // from processed_until to each point (and perform time-based retractions for RANGE windows).
         //
@@ -331,7 +331,7 @@ impl RetractablePointsAggregation {
 mod tests {
     use super::*;
     use crate::runtime::operators::window::aggregates::test_utils;
-    use crate::runtime::operators::window::index::BucketIndex;
+    use crate::runtime::operators::window::state::index::BucketIndex;
     use crate::runtime::operators::window::TimeGranularity;
     use crate::storage::batch_store::BatchId;
 

@@ -1,6 +1,6 @@
-use crate::runtime::operators::window::index::SortedRangeIndex;
-use crate::runtime::operators::window::index::RowPtr;
-use crate::runtime::operators::window::tiles::{Tile, Tiles};
+use crate::runtime::operators::window::state::index::SortedRangeIndex;
+use crate::runtime::operators::window::state::index::RowPtr;
+use crate::runtime::operators::window::state::tiles::{Tile, Tiles};
 use crate::runtime::operators::window::Cursor;
 use crate::storage::batch_store::Timestamp;
 
@@ -30,9 +30,9 @@ pub fn window_start_unclamped(idx: &SortedRangeIndex, end: RowPtr, spec: WindowS
 }
 
 /// Clamp a start position to be within the window bucket range.
-pub fn clamp_start_to_bucket(start: RowPtr, min_bucket_ts: Timestamp) -> RowPtr {
-    if start.bucket_ts < min_bucket_ts {
-        RowPtr::new(min_bucket_ts, 0)
+pub fn clamp_start_to_bucket(idx: &SortedRangeIndex, start: RowPtr, min_bucket_ts: Timestamp) -> RowPtr {
+    if idx.bucket_ts(&start) < min_bucket_ts {
+        idx.seek_bucket_ts_ge(min_bucket_ts).unwrap_or_else(|| idx.first_pos())
     } else {
         start
     }
@@ -112,7 +112,6 @@ pub fn initial_retract_pos_range(
 
 #[cfg(test)]
 mod tiled_split_tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use arrow::record_batch::RecordBatch;
@@ -120,8 +119,8 @@ mod tiled_split_tests {
 
     use crate::runtime::operators::window::aggregates::test_utils;
     use crate::runtime::operators::window::aggregates::BucketRange;
-    use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeBucket, SortedRangeIndex, SortedRangeView};
-    use crate::runtime::operators::window::tiles::{TileConfig, TimeGranularity as TileGranularity, Tiles};
+    use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment};
+    use crate::runtime::operators::window::state::tiles::{TileConfig, TimeGranularity as TileGranularity, Tiles};
     use crate::runtime::operators::window::{Cursor, RowPtr};
 
     use super::tiled_split;
@@ -135,10 +134,11 @@ mod tiled_split_tests {
             bucket_range,
             bounds: DataBounds::All,
         };
-        let mut out: HashMap<i64, SortedRangeBucket> = HashMap::new();
+        let mut out: Vec<SortedSegment> = Vec::new();
         for (bucket_ts, b) in buckets {
-            out.insert(bucket_ts, SortedRangeBucket::new(bucket_ts, b, 0, 3, Arc::new(vec![])));
+            out.push(SortedSegment::new(bucket_ts, b, 0, 3, Arc::new(vec![])));
         }
+        out.sort_by_key(|b| b.bucket_ts());
         SortedRangeView::new(
             request,
             gran,
@@ -193,11 +193,11 @@ WINDOW w AS (
         let idx = SortedRangeIndex::new(&view);
 
         let start = RowPtr::new(0, 0);
-        let end = RowPtr::new(5000, 0);
+        let end = RowPtr::new(5, 0);
         let split = tiled_split(&idx, start, end, &tiles).expect("should split");
 
         assert_eq!(split.front_end, RowPtr::new(0, 0));
-        assert_eq!(split.back_start, RowPtr::new(5000, 0));
+        assert_eq!(split.back_start, RowPtr::new(5, 0));
         assert_eq!(split.tiles.len(), 4);
         assert_eq!(split.tiles[0].tile_start, 1000);
         assert_eq!(split.tiles[1].tile_start, 2000);
@@ -208,20 +208,19 @@ WINDOW w AS (
 
 #[cfg(test)]
 mod window_logic_tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use arrow::array::{ArrayRef, Int64Array, TimestampMillisecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
 
-    use crate::runtime::operators::window::tiles::TimeGranularity;
-    use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeBucket, SortedRangeIndex, SortedRangeView};
+    use crate::runtime::operators::window::state::tiles::TimeGranularity;
+    use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment};
     use crate::runtime::operators::window::Cursor;
 
     use super::*;
 
-    fn make_bucket(bucket_ts: i64, rows: &[(i64, u64, i64)]) -> SortedRangeBucket {
+    fn make_bucket(bucket_ts: i64, rows: &[(i64, u64, i64)]) -> SortedSegment {
         let ts: TimestampMillisecondArray =
             rows.iter().map(|(ts, _, _)| *ts).collect::<Vec<_>>().into();
         let seq: UInt64Array = rows.iter().map(|(_, seq, _)| *seq).collect::<Vec<_>>().into();
@@ -244,14 +243,15 @@ mod window_logic_tests {
         .expect("record batch");
 
         let args = Arc::new(vec![Arc::new(val) as ArrayRef]);
-        SortedRangeBucket::new(bucket_ts, batch, 0, 1, args)
+        SortedSegment::new(bucket_ts, batch, 0, 1, args)
     }
 
     #[test]
     fn test_window_start_unclamped_rows() {
-        let mut buckets = HashMap::new();
-        buckets.insert(1000, make_bucket(1000, &[(1000, 1, 10), (1500, 2, 11)]));
-        buckets.insert(2000, make_bucket(2000, &[(2000, 1, 20), (2500, 2, 21)]));
+        let buckets = vec![
+            make_bucket(1000, &[(1000, 1, 10), (1500, 2, 11)]),
+            make_bucket(2000, &[(2000, 1, 20), (2500, 2, 21)]),
+        ];
 
         let req = DataRequest {
             bucket_range: crate::runtime::operators::window::aggregates::BucketRange::new(1000, 2000),
@@ -266,18 +266,35 @@ mod window_logic_tests {
         );
         let idx = SortedRangeIndex::new(&view);
 
-        let end = RowPtr::new(2000, 0);
+        let end = RowPtr::new(1, 0);
         let start = window_start_unclamped(&idx, end, WindowSpec::Rows { size: 2 });
-        assert_eq!(start.bucket_ts, 1000);
+        assert_eq!(idx.bucket_ts(&start), 1000);
         assert_eq!(start.row, 1);
     }
 
     #[test]
     fn test_clamp_start_to_bucket() {
-        let s = RowPtr::new(1000, 1);
-        let clamped = clamp_start_to_bucket(s, 2000);
-        assert_eq!(clamped.bucket_ts, 2000);
-        assert_eq!(clamped.row, 0);
+        let buckets = vec![
+            make_bucket(1000, &[(1000, 1, 10), (1500, 2, 11)]),
+            make_bucket(2000, &[(2000, 1, 20), (2500, 2, 21)]),
+        ];
+        let req = DataRequest {
+            bucket_range: crate::runtime::operators::window::aggregates::BucketRange::new(1000, 2000),
+            bounds: DataBounds::All,
+        };
+        let view = SortedRangeView::new(
+            req,
+            TimeGranularity::Seconds(1),
+            Cursor::new(i64::MIN, 0),
+            Cursor::new(i64::MAX, u64::MAX),
+            buckets,
+        );
+        let idx = SortedRangeIndex::new(&view);
+
+        let s = RowPtr::new(0, 1);
+        let clamped = clamp_start_to_bucket(&idx, s, 2000);
+        assert_eq!(idx.bucket_ts(&clamped), 2000);
+        assert_eq!(clamped, RowPtr::new(1, 0));
     }
 
     // Note: `tiled_split` is tested indirectly in `Tiles` module tests; creating a `Tiles`

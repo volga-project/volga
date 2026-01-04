@@ -9,7 +9,7 @@ use crate::runtime::operators::window::aggregates::retractable::RetractableAggre
 use crate::runtime::operators::window::aggregates::test_utils;
 use crate::runtime::operators::window::aggregates::plain::CursorBounds;
 use crate::runtime::operators::window::aggregates::{Aggregation, VirtualPoint};
-use crate::runtime::operators::window::index::{BucketIndex, SortedRangeView};
+use crate::runtime::operators::window::state::index::{BucketIndex, SortedRangeView};
 use crate::runtime::operators::window::{Cursor, TimeGranularity};
 use crate::storage::batch_store::BatchId;
 
@@ -165,7 +165,7 @@ fn expected_sum_for_points(all_rows: &[Row], win: Win, points: &[(Row, bool)]) -
 
 fn build_views_for_requests(
     gran: TimeGranularity,
-    requests: &[crate::runtime::operators::window::index::DataRequest],
+    requests: &[crate::runtime::operators::window::state::index::DataRequest],
     buckets: &[(i64, arrow::record_batch::RecordBatch)],
     window_expr_for_args: &Arc<dyn WindowExpr>,
 ) -> Vec<SortedRangeView> {
@@ -230,8 +230,6 @@ async fn plain_range_rows_and_range_multi_bucket() {
             &bucket_index,
             window_expr.clone(),
             None,
-            0,
-            0,
             bounds,
         );
         let requests = agg.get_data_requests();

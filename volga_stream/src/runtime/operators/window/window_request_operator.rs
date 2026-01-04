@@ -7,7 +7,7 @@ use arrow::array::{RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
-use futures::{future, StreamExt};
+use futures::future;
 
 use datafusion::scalar::ScalarValue;
 
@@ -22,7 +22,7 @@ use crate::runtime::operators::window::{AggregatorType, Cursor, TileConfig, Tile
 use crate::runtime::operators::window::window_operator::{
     init, stack_concat_results, WindowConfig, WindowOperatorConfig
 };
-use crate::runtime::operators::window::data_loader::{load_sorted_ranges_views, RangesLoadPlan};
+use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
 use tokio_rayon::rayon::ThreadPool;
@@ -484,11 +484,9 @@ impl OperatorTrait for WindowRequestOperator {
                         // read-only access to windows state
                         // let state = self.get_state();
 
-                        // TODO we have a race condition here:
-                        // getting state copy is ok even if winow operator updates previous version of it
-                        // The problem is that window operator may prune batches (they are not part of the state, we only have references to them) that are still used by request operator for this version of state.
-                        // We need to somehow sync this or add a flag to state to indicate which batches are still used by request operator
-                        // eg similar to mvcc pattern
+                        // Note: reads may race with pruning/compaction. The loader pins planned batches
+                        // (MVCC-style) while building `SortedRangeView`s, so physical deletion is deferred
+                        // until readers finish.
                             
                         // let result = if let Some(windows_state) = windows_state {
                         //     self.process_key(&key, &windows_state, &keyed_message.base.record_batch.clone()).await

@@ -3,11 +3,10 @@ use std::cmp::Ordering;
 use arrow::array::{Array, ArrayRef};
 
 use crate::runtime::operators::window::aggregates::BucketRange;
-use crate::runtime::operators::window::tiles::TimeGranularity;
 use crate::runtime::operators::window::{Cursor, RowPtr};
 use crate::storage::batch_store::Timestamp;
 
-use super::sorted_range_view::{SortedRangeBucket, SortedRangeView};
+use super::sorted_range_view::{SortedRangeView, SortedSegment};
 
 #[derive(Clone, Copy, Debug)]
 enum SeekBound {
@@ -21,8 +20,7 @@ pub struct SortedRangeIndex<'a> {
     bucket_range: BucketRange,
     start: Cursor,
     end: Cursor,
-    bucket_granularity: TimeGranularity,
-    buckets: &'a std::collections::HashMap<Timestamp, SortedRangeBucket>,
+    segments: &'a [SortedSegment],
 }
 
 impl<'a> SortedRangeIndex<'a> {
@@ -31,8 +29,7 @@ impl<'a> SortedRangeIndex<'a> {
             bucket_range: view.bucket_range(),
             start: view.start(),
             end: view.end(),
-            bucket_granularity: view.bucket_granularity(),
-            buckets: view.buckets(),
+            segments: view.segments(),
         }
     }
 
@@ -41,17 +38,33 @@ impl<'a> SortedRangeIndex<'a> {
             bucket_range,
             start: view.start(),
             end: view.end(),
-            bucket_granularity: view.bucket_granularity(),
-            buckets: view.buckets(),
+            segments: view.segments(),
         }
     }
 
-    fn bucket_opt(&self, bucket_ts: Timestamp) -> Option<&SortedRangeBucket> {
-        self.buckets.get(&bucket_ts)
+    fn segment_opt(&self, seg: usize) -> Option<&SortedSegment> {
+        self.segments.get(seg)
     }
 
-    pub fn bucket_size(&self, bucket_ts: Timestamp) -> usize {
-        self.bucket_opt(bucket_ts).map(|b| b.size()).unwrap_or(0)
+    pub fn bucket_ts(&self, pos: &RowPtr) -> Timestamp {
+        self.segment_opt(pos.segment)
+            .expect("segment must exist")
+            .bucket_ts()
+    }
+
+    pub fn seek_bucket_ts_ge(&self, bucket_ts: Timestamp) -> Option<RowPtr> {
+        for (seg_idx, seg) in self.segments.iter().enumerate() {
+            let ts = seg.bucket_ts();
+            if ts < self.bucket_range.start || ts > self.bucket_range.end {
+                continue;
+            }
+            if ts >= bucket_ts && seg.size() > 0 {
+                let pos = RowPtr::new(seg_idx, 0);
+                return (self.get_row_pos(&pos) >= self.start && self.get_row_pos(&pos) <= self.end)
+                    .then_some(pos);
+            }
+        }
+        None
     }
 
     pub fn is_empty(&self) -> bool {
@@ -86,29 +99,27 @@ impl<'a> SortedRangeIndex<'a> {
     }
 
     fn last_pos_in_range(&self) -> Option<RowPtr> {
-        let mut bucket_ts = self.bucket_range.end;
-        loop {
-            if let Some(b) = self.bucket_opt(bucket_ts) {
-                if b.size() > 0 {
-                    return Some(RowPtr::new(bucket_ts, b.size() - 1));
-                }
+        for (seg_idx, seg) in self.segments.iter().enumerate().rev() {
+            let ts = seg.bucket_ts();
+            if ts < self.bucket_range.start || ts > self.bucket_range.end {
+                continue;
             }
-            if bucket_ts == self.bucket_range.start {
-                return None;
+            if seg.size() > 0 {
+                return Some(RowPtr::new(seg_idx, seg.size() - 1));
             }
-            bucket_ts = self.bucket_granularity.prev_start(bucket_ts);
         }
+        None
     }
 
     pub fn get_timestamp(&self, pos: &RowPtr) -> Timestamp {
-        self.bucket_opt(pos.bucket_ts)
-            .expect("bucket must exist")
+        self.segment_opt(pos.segment)
+            .expect("segment must exist")
             .timestamp(pos.row)
     }
 
     pub fn get_cursor(&self, pos: &RowPtr) -> Cursor {
-        self.bucket_opt(pos.bucket_ts)
-            .expect("bucket must exist")
+        self.segment_opt(pos.segment)
+            .expect("segment must exist")
             .row_pos(pos.row)
     }
 
@@ -117,19 +128,18 @@ impl<'a> SortedRangeIndex<'a> {
     }
 
     pub fn get_row_args(&self, pos: &RowPtr) -> Vec<ArrayRef> {
-        let b = self.bucket_opt(pos.bucket_ts).expect("bucket must exist");
+        let b = self.segment_opt(pos.segment).expect("segment must exist");
         b.args().iter().map(|a| a.slice(pos.row, 1)).collect()
     }
 
     pub fn get_args_in_range(&self, start: &RowPtr, end: &RowPtr) -> Vec<ArrayRef> {
-        if start.bucket_ts > end.bucket_ts || (start.bucket_ts == end.bucket_ts && start.row > end.row) {
+        if start.segment > end.segment || (start.segment == end.segment && start.row > end.row) {
             return vec![];
         }
 
         let num_args = self
-            .buckets
-            .values()
-            .next()
+            .segments
+            .first()
             .map(|b| b.args().len())
             .unwrap_or(0);
         if num_args == 0 {
@@ -138,39 +148,33 @@ impl<'a> SortedRangeIndex<'a> {
 
         let mut per_arg_slices: Vec<Vec<ArrayRef>> = vec![Vec::new(); num_args];
 
-        let mut bucket_ts = start.bucket_ts;
-        while bucket_ts <= end.bucket_ts {
-            let Some(bucket) = self.bucket_opt(bucket_ts) else {
-                bucket_ts = self.bucket_granularity.next_start(bucket_ts);
+        for seg_idx in start.segment..=end.segment {
+            let Some(seg) = self.segment_opt(seg_idx) else {
                 continue;
             };
-            let bucket_rows = bucket.size();
-            if bucket_rows == 0 {
-                bucket_ts = self.bucket_granularity.next_start(bucket_ts);
+            let seg_rows = seg.size();
+            if seg_rows == 0 {
                 continue;
             }
 
-            let (slice_start, slice_len) = if bucket_ts == start.bucket_ts && bucket_ts == end.bucket_ts {
+            let (slice_start, slice_len) = if seg_idx == start.segment && seg_idx == end.segment {
                 (start.row, end.row - start.row + 1)
-            } else if bucket_ts == start.bucket_ts {
-                (start.row, bucket_rows.saturating_sub(start.row))
-            } else if bucket_ts == end.bucket_ts {
+            } else if seg_idx == start.segment {
+                (start.row, seg_rows.saturating_sub(start.row))
+            } else if seg_idx == end.segment {
                 (0, end.row + 1)
             } else {
-                (0, bucket_rows)
+                (0, seg_rows)
             };
 
             if slice_len == 0 {
-                bucket_ts = self.bucket_granularity.next_start(bucket_ts);
                 continue;
             }
 
-            let args = bucket.args();
+            let args = seg.args();
             for arg_idx in 0..num_args {
                 per_arg_slices[arg_idx].push(args[arg_idx].slice(slice_start, slice_len));
             }
-
-            bucket_ts = self.bucket_granularity.next_start(bucket_ts);
         }
 
         let mut out: Vec<ArrayRef> = Vec::with_capacity(num_args);
@@ -189,15 +193,15 @@ impl<'a> SortedRangeIndex<'a> {
         out
     }
 
-    fn seek_in_bucket(&self, bucket_ts: Timestamp, cursor: Cursor, bound: SeekBound) -> Option<RowPtr> {
-        let bucket = self.bucket_opt(bucket_ts)?;
-        let n = bucket.size();
+    fn seek_in_segment(&self, segment: usize, cursor: Cursor, bound: SeekBound) -> Option<RowPtr> {
+        let seg = self.segment_opt(segment)?;
+        let n = seg.size();
         if n == 0 {
             return None;
         }
 
-        let ts_arr = bucket.timestamps();
-        let seq_arr = bucket.seq_nos();
+        let ts_arr = seg.timestamps();
+        let seq_arr = seg.seq_nos();
 
         let mut lo = 0usize;
         let mut hi = n;
@@ -226,7 +230,7 @@ impl<'a> SortedRangeIndex<'a> {
                     } else if cmp == Ordering::Greater {
                         hi = mid;
                     } else {
-                        return Some(RowPtr::new(bucket_ts, mid));
+                        return Some(RowPtr::new(segment, mid));
                     }
                 }
             }
@@ -234,7 +238,7 @@ impl<'a> SortedRangeIndex<'a> {
 
         match bound {
             SeekBound::Eq => None,
-            _ => (lo < n).then_some(RowPtr::new(bucket_ts, lo)),
+            _ => (lo < n).then_some(RowPtr::new(segment, lo)),
         }
     }
 
@@ -242,32 +246,28 @@ impl<'a> SortedRangeIndex<'a> {
         if cursor < self.start || cursor > self.end {
             return None;
         }
-        let bucket_ts = self.bucket_granularity.start(cursor.ts);
-        if bucket_ts < self.bucket_range.start || bucket_ts > self.bucket_range.end {
-            return None;
+        for (seg_idx, seg) in self.segments.iter().enumerate() {
+            let ts = seg.bucket_ts();
+            if ts < self.bucket_range.start || ts > self.bucket_range.end {
+                continue;
+            }
+            if let Some(p) = self.seek_in_segment(seg_idx, cursor, SeekBound::Eq) {
+                return Some(p);
+            }
         }
-        self.seek_in_bucket(bucket_ts, cursor, SeekBound::Eq)
+        None
     }
 
     pub fn seek_rowpos_ge(&self, cursor: Cursor) -> Option<RowPtr> {
         let cursor = cursor.max(self.start);
-        let target_bucket = self.bucket_granularity.start(cursor.ts);
-        let mut bucket_ts = target_bucket.max(self.bucket_range.start);
-        while bucket_ts <= self.bucket_range.end {
-            if let Some(b) = self.bucket_opt(bucket_ts) {
-                if b.size() > 0 {
-                    let pos_opt = if bucket_ts == target_bucket {
-                        self.seek_in_bucket(bucket_ts, cursor, SeekBound::Ge)
-                    } else {
-                        Some(RowPtr::new(bucket_ts, 0))
-                    };
-                    if let Some(pos) = pos_opt {
-                        return (self.get_row_pos(&pos) <= self.end).then_some(pos);
-                    }
-                    // No row >= cursor in this bucket; continue to next bucket.
-                }
+        for (seg_idx, seg) in self.segments.iter().enumerate() {
+            let ts = seg.bucket_ts();
+            if ts < self.bucket_range.start || ts > self.bucket_range.end {
+                continue;
             }
-            bucket_ts = self.bucket_granularity.next_start(bucket_ts);
+            if let Some(pos) = self.seek_in_segment(seg_idx, cursor, SeekBound::Ge) {
+                return (self.get_row_pos(&pos) <= self.end).then_some(pos);
+            }
         }
         None
     }
@@ -277,23 +277,14 @@ impl<'a> SortedRangeIndex<'a> {
             return None;
         }
         let cursor = cursor.max(self.start);
-        let target_bucket = self.bucket_granularity.start(cursor.ts);
-        let mut bucket_ts = target_bucket.max(self.bucket_range.start);
-        while bucket_ts <= self.bucket_range.end {
-            if let Some(b) = self.bucket_opt(bucket_ts) {
-                if b.size() > 0 {
-                    let pos_opt = if bucket_ts == target_bucket {
-                        self.seek_in_bucket(bucket_ts, cursor, SeekBound::Gt)
-                    } else {
-                        Some(RowPtr::new(bucket_ts, 0))
-                    };
-                    if let Some(pos) = pos_opt {
-                        return (self.get_row_pos(&pos) <= self.end).then_some(pos);
-                    }
-                    // No row > cursor in this bucket; continue to next bucket.
-                }
+        for (seg_idx, seg) in self.segments.iter().enumerate() {
+            let ts = seg.bucket_ts();
+            if ts < self.bucket_range.start || ts > self.bucket_range.end {
+                continue;
             }
-            bucket_ts = self.bucket_granularity.next_start(bucket_ts);
+            if let Some(pos) = self.seek_in_segment(seg_idx, cursor, SeekBound::Gt) {
+                return (self.get_row_pos(&pos) <= self.end).then_some(pos);
+            }
         }
         None
     }
@@ -307,66 +298,63 @@ impl<'a> SortedRangeIndex<'a> {
     }
 
     pub fn next_pos(&self, pos: RowPtr) -> Option<RowPtr> {
-        let b = self.bucket_opt(pos.bucket_ts)?;
-        if pos.row + 1 < b.size() {
-            let next = RowPtr::new(pos.bucket_ts, pos.row + 1);
+        let seg = self.segment_opt(pos.segment)?;
+        if pos.row + 1 < seg.size() {
+            let next = RowPtr::new(pos.segment, pos.row + 1);
             return (self.get_row_pos(&next) <= self.end).then_some(next);
         }
-
-        let mut bucket_ts = self.bucket_granularity.next_start(pos.bucket_ts);
-        while bucket_ts <= self.bucket_range.end {
-            if let Some(b) = self.bucket_opt(bucket_ts) {
-                if b.size() > 0 {
-                    let next = RowPtr::new(bucket_ts, 0);
-                    return (self.get_row_pos(&next) <= self.end).then_some(next);
-                }
+        let mut seg_idx = pos.segment + 1;
+        while seg_idx < self.segments.len() {
+            let seg = self.segment_opt(seg_idx)?;
+            let ts = seg.bucket_ts();
+            if ts < self.bucket_range.start || ts > self.bucket_range.end || seg.size() == 0 {
+                seg_idx += 1;
+                continue;
             }
-            bucket_ts = self.bucket_granularity.next_start(bucket_ts);
+            let next = RowPtr::new(seg_idx, 0);
+            return (self.get_row_pos(&next) <= self.end).then_some(next);
         }
         None
     }
 
     pub fn prev_pos(&self, pos: RowPtr) -> Option<RowPtr> {
-        if pos.bucket_ts == self.bucket_range.start && pos.row == 0 {
-            return None;
-        }
         if pos.row > 0 {
-            let prev = RowPtr::new(pos.bucket_ts, pos.row - 1);
+            let prev = RowPtr::new(pos.segment, pos.row - 1);
             return (self.get_row_pos(&prev) >= self.start).then_some(prev);
         }
-
-        let mut bucket_ts = pos.bucket_ts;
+        if pos.segment == 0 {
+            return None;
+        }
+        let mut seg_idx = pos.segment - 1;
         loop {
-            if bucket_ts == self.bucket_range.start {
+            let seg = self.segment_opt(seg_idx)?;
+            let ts = seg.bucket_ts();
+            if ts >= self.bucket_range.start && ts <= self.bucket_range.end && seg.size() > 0 {
+                let prev = RowPtr::new(seg_idx, seg.size() - 1);
+                return (self.get_row_pos(&prev) >= self.start).then_some(prev);
+            }
+            if seg_idx == 0 {
                 return None;
             }
-            bucket_ts = self.bucket_granularity.prev_start(bucket_ts);
-            if let Some(b) = self.bucket_opt(bucket_ts) {
-                if b.size() > 0 {
-                    let prev = RowPtr::new(bucket_ts, b.size() - 1);
-                    return (self.get_row_pos(&prev) >= self.start).then_some(prev);
-                }
-            }
+            seg_idx -= 1;
         }
     }
 
     pub fn count_between(&self, start: &RowPtr, end: &RowPtr) -> usize {
-        if start.bucket_ts == end.bucket_ts {
+        if start.segment == end.segment {
             return end.row - start.row + 1;
         }
 
         let mut count = self
-            .bucket_opt(start.bucket_ts)
-            .expect("bucket must exist")
+            .segment_opt(start.segment)
+            .expect("segment must exist")
             .size()
             .saturating_sub(start.row);
 
-        let mut bucket_ts = self.bucket_granularity.next_start(start.bucket_ts);
-        while bucket_ts < end.bucket_ts {
-            if let Some(b) = self.bucket_opt(bucket_ts) {
-                count += b.size();
+        for seg_idx in (start.segment + 1)..end.segment {
+            if let Some(seg) = self.segment_opt(seg_idx) {
+                count += seg.size();
             }
-            bucket_ts = self.bucket_granularity.next_start(bucket_ts);
         }
         count += end.row + 1;
         count
@@ -420,8 +408,8 @@ mod tests {
     use arrow::record_batch::RecordBatch;
 
     use crate::runtime::operators::window::aggregates::BucketRange;
-    use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeBucket, SortedRangeView};
-    use crate::runtime::operators::window::tiles::TimeGranularity;
+    use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeView, SortedSegment};
+    use crate::runtime::operators::window::state::tiles::TimeGranularity;
     use crate::runtime::operators::window::Cursor;
     use crate::runtime::operators::window::RowPtr;
     use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
@@ -459,12 +447,19 @@ mod tests {
             bucket_range,
             bounds: DataBounds::All,
         };
-        let mut map: HashMap<i64, SortedRangeBucket> = HashMap::new();
+        let mut segments: Vec<SortedSegment> = Vec::new();
         for (bucket_ts, rows) in buckets {
             let b = batch_ts_seq(&rows);
-            map.insert(bucket_ts, SortedRangeBucket::new(bucket_ts, b, 0, 3, Arc::new(vec![])));
+            segments.push(SortedSegment::new(
+                bucket_ts,
+                b,
+                0,
+                3,
+                Arc::new(vec![]),
+            ));
         }
-        SortedRangeView::new(request, gran, start, end, map)
+        segments.sort_by_key(|b| b.bucket_ts());
+        SortedRangeView::new(request, gran, start, end, segments)
     }
 
     #[test]
@@ -484,7 +479,7 @@ mod tests {
         let idx = SortedRangeIndex::new(&v);
 
         let p = idx.seek_rowpos_ge(Cursor::new(1500, 0)).expect("should find");
-        assert_eq!(p, RowPtr::new(2000, 0));
+        assert_eq!(p, RowPtr::new(1, 0));
     }
 
     #[test]
@@ -519,9 +514,9 @@ mod tests {
         );
         let idx = SortedRangeIndex::new(&v);
 
-        let last_in_1000 = RowPtr::new(1000, 1);
-        assert_eq!(idx.next_pos(last_in_1000), Some(RowPtr::new(2000, 0)));
-        assert_eq!(idx.prev_pos(RowPtr::new(2000, 0)), Some(last_in_1000));
+        let last_in_1000 = RowPtr::new(0, 1);
+        assert_eq!(idx.next_pos(last_in_1000), Some(RowPtr::new(1, 0)));
+        assert_eq!(idx.prev_pos(RowPtr::new(1, 0)), Some(last_in_1000));
     }
 
     #[test]
@@ -574,8 +569,8 @@ mod tests {
         );
         let idx = SortedRangeIndex::new(&v);
 
-        assert_eq!(idx.first_pos(), RowPtr::new(2000, 0));
-        assert_eq!(idx.last_pos(), RowPtr::new(2000, 0));
+        assert_eq!(idx.first_pos(), RowPtr::new(1, 0));
+        assert_eq!(idx.last_pos(), RowPtr::new(1, 0));
     }
 }
 

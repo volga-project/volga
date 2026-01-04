@@ -6,13 +6,13 @@ use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
-use crate::runtime::operators::window::index::{BucketIndex, get_window_length_ms, get_window_size_rows};
+use crate::runtime::operators::window::state::index::{BucketIndex, get_window_length_ms, get_window_size_rows};
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{RowPtr, Tiles, WindowAggregator, create_window_aggregator};
 use crate::storage::batch_store::Timestamp;
 
 use crate::runtime::operators::window::aggregates::VirtualPoint;
-use crate::runtime::operators::window::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
+use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
 use crate::runtime::operators::window::Cursor;
 use crate::runtime::operators::window::aggregates::point_request_merge::{merge_planned_ranges, PlannedRange};
 
@@ -241,8 +241,8 @@ mod tests {
 
     use super::*;
     use crate::runtime::operators::window::aggregates::test_utils;
-    use crate::runtime::operators::window::index::BucketIndex;
-    use crate::runtime::operators::window::tiles::TileConfig;
+    use crate::runtime::operators::window::state::index::BucketIndex;
+    use crate::runtime::operators::window::state::tiles::TileConfig;
     use crate::runtime::operators::window::TimeGranularity;
     use crate::storage::batch_store::BatchId;
 

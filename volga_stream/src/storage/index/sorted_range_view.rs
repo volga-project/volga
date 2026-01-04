@@ -1,10 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::array::{ArrayRef, RecordBatch, TimestampMillisecondArray, UInt64Array};
 
 use crate::runtime::operators::window::aggregates::BucketRange;
-use crate::runtime::operators::window::tiles::TimeGranularity;
+use crate::runtime::operators::window::state::tiles::TimeGranularity;
 use crate::runtime::operators::window::Cursor;
 use crate::storage::batch_store::Timestamp;
 
@@ -27,72 +26,11 @@ pub struct DataRequest {
     pub bounds: DataBounds,
 }
 
-/// Cached per-bucket sorted data (no args; args depend on WindowExpr).
-#[derive(Debug, Clone)]
-pub struct SortedBucketBatch {
-    bucket_ts: Timestamp,
-    batch: RecordBatch,
-    ts_column_index: usize,
-    seq_column_index: usize,
-}
-
-impl SortedBucketBatch {
-    pub fn new(
-        bucket_ts: Timestamp,
-        batch: RecordBatch,
-        ts_column_index: usize,
-        seq_column_index: usize,
-    ) -> Self {
-        Self {
-            bucket_ts,
-            batch,
-            ts_column_index,
-            seq_column_index,
-        }
-    }
-
-    pub fn bucket_ts(&self) -> Timestamp {
-        self.bucket_ts
-    }
-
-    pub fn ts_column_index(&self) -> usize {
-        self.ts_column_index
-    }
-
-    pub fn seq_column_index(&self) -> usize {
-        self.seq_column_index
-    }
-
-    pub fn batch(&self) -> &RecordBatch {
-        &self.batch
-    }
-
-    pub fn size(&self) -> usize {
-        self.batch.num_rows()
-    }
-
-    pub fn timestamps(&self) -> &TimestampMillisecondArray {
-        self.batch
-            .column(self.ts_column_index)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("Timestamp column should be TimestampMillisecondArray")
-    }
-
-    pub fn seq_nos(&self) -> &UInt64Array {
-        self.batch
-            .column(self.seq_column_index)
-            .as_any()
-            .downcast_ref::<UInt64Array>()
-            .expect("__seq_no column should be UInt64Array")
-    }
-}
-
-/// Bucket-local sorted data + pre-evaluated args for range-view execution.
+/// A sorted run/segment + pre-evaluated args for range-view execution.
 ///
-/// Range views standardize args under window_id=0, so buckets store a single args vector.
+/// Range views standardize args under window_id=0, so segments store a single args vector.
 #[derive(Debug, Clone)]
-pub struct SortedRangeBucket {
+pub struct SortedSegment {
     bucket_ts: Timestamp,
     batch: RecordBatch,
     ts_column_index: usize,
@@ -100,7 +38,7 @@ pub struct SortedRangeBucket {
     args: Arc<Vec<ArrayRef>>,
 }
 
-impl SortedRangeBucket {
+impl SortedSegment {
     pub fn new(
         bucket_ts: Timestamp,
         batch: RecordBatch,
@@ -167,7 +105,7 @@ pub struct SortedRangeView {
     bucket_granularity: TimeGranularity,
     start: Cursor,
     end: Cursor,
-    buckets: HashMap<Timestamp, SortedRangeBucket>,
+    segments: Vec<SortedSegment>,
 }
 
 impl SortedRangeView {
@@ -176,14 +114,14 @@ impl SortedRangeView {
         bucket_granularity: TimeGranularity,
         start: Cursor,
         end: Cursor,
-        buckets: HashMap<Timestamp, SortedRangeBucket>,
+        segments: Vec<SortedSegment>,
     ) -> Self {
         Self {
             request,
             bucket_granularity,
             start,
             end,
-            buckets,
+            segments,
         }
     }
 
@@ -207,8 +145,8 @@ impl SortedRangeView {
         self.bucket_granularity
     }
 
-    pub(crate) fn buckets(&self) -> &HashMap<Timestamp, SortedRangeBucket> {
-        &self.buckets
+    pub(crate) fn segments(&self) -> &[SortedSegment] {
+        &self.segments
     }
 }
 

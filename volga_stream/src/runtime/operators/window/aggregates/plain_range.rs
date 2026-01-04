@@ -8,8 +8,8 @@ use datafusion::scalar::ScalarValue;
 use std::collections::HashMap;
 
 use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
-use crate::runtime::operators::window::index::{
-    BucketIndex, DataBounds, DataRequest, SortedRangeBucket, SortedRangeIndex, SortedRangeView,
+use crate::runtime::operators::window::state::index::{
+    BucketIndex, DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment,
     get_window_length_ms, get_window_size_rows, window_logic,
 };
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
@@ -104,9 +104,6 @@ pub struct PlainRangeAggregation {
     bounds: CursorBounds,
     window_expr: Arc<dyn WindowExpr>,
     tiles: Option<Tiles>,
-    #[allow(dead_code)]
-    window_id: usize,
-    bucket_granularity: TimeGranularity,
     data_requests: Vec<DataRequest>,
 }
 
@@ -115,8 +112,6 @@ impl PlainRangeAggregation {
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         tiles: Option<Tiles>,
-        _ts_column_index: usize,
-        window_id: usize,
         bounds: CursorBounds,
     ) -> Self {
         let bucket_granularity = bucket_index.bucket_granularity();
@@ -125,8 +120,6 @@ impl PlainRangeAggregation {
             bounds,
             window_expr,
             tiles,
-            window_id,
-            bucket_granularity,
             data_requests,
         }
     }
@@ -159,14 +152,15 @@ impl Aggregation for PlainRangeAggregation {
             first_view.clone()
         } else {
             // Merge buckets from multiple views (update span + raw gaps) into a single logical view.
-            let mut buckets: HashMap<i64, SortedRangeBucket> = HashMap::new();
+            let mut buckets: HashMap<i64, SortedSegment> = HashMap::new();
             let mut min_ts: Option<i64> = None;
             let mut max_ts: Option<i64> = None;
             for v in sorted_ranges {
-                for (ts, b) in v.buckets().iter() {
-                    min_ts = Some(min_ts.map(|m| m.min(*ts)).unwrap_or(*ts));
-                    max_ts = Some(max_ts.map(|m| m.max(*ts)).unwrap_or(*ts));
-                    buckets.insert(*ts, b.clone());
+                for b in v.segments().iter() {
+                    let ts = b.bucket_ts();
+                    min_ts = Some(min_ts.map(|m| m.min(ts)).unwrap_or(ts));
+                    max_ts = Some(max_ts.map(|m| m.max(ts)).unwrap_or(ts));
+                    buckets.insert(ts, b.clone());
                 }
             }
 
@@ -177,12 +171,14 @@ impl Aggregation for PlainRangeAggregation {
                 ),
                 bounds: DataBounds::All,
             };
+            let mut merged: Vec<SortedSegment> = buckets.into_values().collect();
+            merged.sort_by_key(|b| b.bucket_ts());
             SortedRangeView::new(
                 req,
                 first_view.bucket_granularity(),
                 Cursor::new(i64::MIN, 0),
                 Cursor::new(i64::MAX, u64::MAX),
-                buckets,
+                merged,
             )
         };
 
@@ -252,10 +248,10 @@ mod tests {
     use super::*;
     use crate::runtime::operators::window::Cursor;
     use crate::runtime::operators::window::aggregates::test_utils;
-    use crate::runtime::operators::window::index::BucketIndex;
-    use crate::runtime::operators::window::index::SortedRangeView;
+    use crate::runtime::operators::window::state::index::BucketIndex;
+    use crate::runtime::operators::window::state::index::SortedRangeView;
     use crate::runtime::operators::window::PlainAggregation;
-    use crate::runtime::operators::window::tiles::TileConfig;
+    use crate::runtime::operators::window::state::tiles::TileConfig;
     use crate::runtime::operators::window::TimeGranularity;
     use crate::storage::batch_store::BatchId;
 
@@ -302,7 +298,7 @@ WINDOW w AS (
             prev: None,
             new: Cursor::new(2000, 2),
         };
-        let agg = PlainAggregation::for_range(&bucket_index, window_expr.clone(), None, 0, 0, bounds);
+        let agg = PlainAggregation::for_range(&bucket_index, window_expr.clone(), None, bounds);
         let requests = agg.get_data_requests();
         assert_eq!(requests.len(), 1);
 
@@ -362,9 +358,9 @@ WINDOW w AS (
         };
 
         let agg_no_tiles =
-            PlainAggregation::for_range(&bucket_index, window_expr.clone(), None, 0, 0, bounds);
+            PlainAggregation::for_range(&bucket_index, window_expr.clone(), None, bounds);
         let agg_tiles =
-            PlainAggregation::for_range(&bucket_index, window_expr.clone(), Some(tiles), 0, 0, bounds);
+            PlainAggregation::for_range(&bucket_index, window_expr.clone(), Some(tiles), bounds);
 
         let req1 = agg_no_tiles.get_data_requests();
         assert_eq!(req1.len(), 1);

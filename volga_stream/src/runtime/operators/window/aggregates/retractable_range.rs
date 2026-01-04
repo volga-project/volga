@@ -5,8 +5,8 @@ use datafusion::logical_expr::WindowFrameUnits;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::index::{get_window_size_rows, window_logic};
-use crate::runtime::operators::window::index::{
+use crate::runtime::operators::window::state::index::{get_window_size_rows, window_logic};
+use crate::runtime::operators::window::state::index::{
     get_window_length_ms,
     BucketIndex,
     DataBounds,
@@ -14,7 +14,7 @@ use crate::runtime::operators::window::index::{
     SortedRangeIndex,
     SortedRangeView,
 };
-use crate::runtime::operators::window::tiles::TimeGranularity;
+use crate::runtime::operators::window::state::tiles::TimeGranularity;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, RowPtr};
 
@@ -428,7 +428,7 @@ fn run_retractable_accumulator(
 mod tests {
     use super::*;
     use crate::runtime::operators::window::aggregates::test_utils;
-    use crate::runtime::operators::window::index::BucketIndex;
+    use crate::runtime::operators::window::state::index::BucketIndex;
     use crate::runtime::operators::window::TimeGranularity;
     use crate::storage::batch_store::BatchId;
 

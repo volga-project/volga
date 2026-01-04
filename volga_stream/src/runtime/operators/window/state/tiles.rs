@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use arrow::array::RecordBatch;
 use datafusion::physical_plan::WindowExpr;
@@ -167,6 +167,47 @@ impl Tiles {
             );
         }
     }
+
+    /// Like `add_batch`, but assumes `batch` is already sorted by timestamp (and optionally `__seq_no`).
+    pub fn add_sorted_batch(
+        &mut self,
+        batch: &RecordBatch,
+        window_expr: &Arc<dyn WindowExpr>,
+        ts_column_index: usize,
+    ) {
+        use arrow::array::{Int64Array, TimestampMillisecondArray};
+
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return;
+        }
+
+        let ts_column = batch.column(ts_column_index);
+        let ts_array = ts_column
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("Timestamp column should be TimestampMillisecondArray");
+
+        use arrow::compute::kernels::cast::cast;
+        use arrow::datatypes::DataType;
+        let ts_int64_array_owned = cast(ts_array, &DataType::Int64)
+            .expect("Should be able to cast TimestampMillisecondArray to Int64Array");
+        let ts_int64_array = ts_int64_array_owned
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("Cast result should be Int64Array");
+
+        let granularities: Vec<TimeGranularity> = self.config.granularities.iter().copied().collect();
+        for granularity in granularities {
+            Self::add_sorted_batch_for_granularity(
+                &mut self.tiles,
+                window_expr,
+                batch,
+                ts_int64_array,
+                granularity,
+            );
+        }
+    }
     
     fn add_batch_for_granularity(
         tiles: &mut BTreeMap<TimeGranularity, BTreeMap<Timestamp, Tile>>,
@@ -261,6 +302,46 @@ impl Tiles {
             // Update tile with consecutive rows
             Self::update_tile_with_batch(window_expr, tile, &tile_batch);
         }
+    }
+
+    fn add_sorted_batch_for_granularity(
+        tiles: &mut BTreeMap<TimeGranularity, BTreeMap<Timestamp, Tile>>,
+        window_expr: &Arc<dyn WindowExpr>,
+        batch: &RecordBatch,
+        ts_int64_array: &arrow::array::Int64Array,
+        granularity: TimeGranularity,
+    ) {
+        let num_rows = batch.num_rows();
+        if num_rows == 0 {
+            return;
+        }
+
+        let tiles_for_granularity = tiles
+            .get_mut(&granularity)
+            .expect(&format!("No tiles found for granularity {:?}", granularity));
+
+        let mut start = 0usize;
+        let mut current_tile_start = granularity.start(ts_int64_array.value(0));
+        for i in 1..num_rows {
+            let ts = ts_int64_array.value(i);
+            let tile_start = granularity.start(ts);
+            if tile_start != current_tile_start {
+                let tile_batch = batch.slice(start, i - start);
+                let tile = tiles_for_granularity
+                    .entry(current_tile_start)
+                    .or_insert_with(|| Tile::new(current_tile_start, granularity));
+                Self::update_tile_with_batch(window_expr, tile, &tile_batch);
+
+                start = i;
+                current_tile_start = tile_start;
+            }
+        }
+
+        let tile_batch = batch.slice(start, num_rows - start);
+        let tile = tiles_for_granularity
+            .entry(current_tile_start)
+            .or_insert_with(|| Tile::new(current_tile_start, granularity));
+        Self::update_tile_with_batch(window_expr, tile, &tile_batch);
     }
 
     fn update_tile_with_batch(

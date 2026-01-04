@@ -19,22 +19,83 @@ impl Cursor {
     }
 }
 
-/// Metadata stored per run/segment (immutable batch).
+/// Opaque identifier for an in-memory (hot) batch.
+///
+/// This is intentionally *not* a `BatchId` and is store-agnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct InMemBatchId(pub u64);
+
+/// A reference to an immutable sorted batch/segment.
+///
+/// Batches can be either:
+/// - `InMem`: hot in-memory batches, referenced by an opaque id resolved by the window state
+/// - `Stored`: persisted batches, referenced by the storage backend id (currently `BatchId`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum BatchRef {
+    InMem(InMemBatchId),
+    Stored(BatchId),
+}
+
+impl BatchRef {
+    pub fn stored_batch_id(&self) -> Option<BatchId> {
+        match self {
+            BatchRef::Stored(id) => Some(*id),
+            BatchRef::InMem(_) => None,
+        }
+    }
+
+    pub fn inmem_id(&self) -> Option<InMemBatchId> {
+        match self {
+            BatchRef::InMem(id) => Some(*id),
+            BatchRef::Stored(_) => None,
+        }
+    }
+}
+
+/// Metadata stored per batch/segment.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunMeta {
-    pub batch_id: BatchId,
+pub struct BatchMeta {
+    pub run: BatchRef,
     pub bucket_timestamp: Timestamp,
     pub min_pos: Cursor,
     pub max_pos: Cursor,
     pub row_count: usize,
 }
 
-/// A bucket containing runs with the same bucket timestamp.
+#[derive(Debug, Clone, Default)]
+pub struct PrunedBatches {
+    pub stored: Vec<BatchId>,
+    pub inmem: Vec<InMemBatchId>,
+}
+
+/// A bucket containing batches with the same bucket timestamp.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Bucket {
     pub timestamp: Timestamp,
-    pub batches: Vec<RunMeta>,
+    /// Hot, in-memory base segments for fast reads.
+    ///
+    /// Invariant: these runs are `BatchRef::InMem` only.
+    #[serde(skip)]
+    pub hot_base_segments: Vec<BatchMeta>,
+    /// Hot, in-memory delta batches appended on ingest.
+    ///
+    /// Invariant: these runs are `BatchRef::InMem` only.
+    #[serde(skip)]
+    pub hot_deltas: Vec<BatchMeta>,
+    /// Persisted, store-backed layout for this bucket.
+    ///
+    /// This is updated by the dumper/checkpoint path.
+    #[serde(default)]
+    pub persisted_segments: Vec<BatchMeta>,
+    /// Stored runs that became unreachable due to publishing an in-mem layout.
+    ///
+    /// These must be deleted by the dumper/pruner path (read-compaction intentionally doesn't touch the store).
+    #[serde(default)]
+    pub pending_delete_stored: Vec<BatchId>,
     pub row_count: usize,
+    /// Version that bumps when new data arrives or old data is pruned.
+    ///
+    /// Kept as `version` for backward compatibility with existing cache keys/tests.
     pub version: u64,
 }
 
@@ -42,19 +103,54 @@ impl Bucket {
     pub fn new(timestamp: Timestamp) -> Self {
         Self {
             timestamp,
-            batches: Vec::new(),
+            hot_base_segments: Vec::new(),
+            hot_deltas: Vec::new(),
+            persisted_segments: Vec::new(),
+            pending_delete_stored: Vec::new(),
             row_count: 0,
             version: 0,
         }
     }
 
-    pub fn push(&mut self, metadata: RunMeta) {
+    pub fn push_hot_delta(&mut self, metadata: BatchMeta) {
+        debug_assert!(metadata.run.inmem_id().is_some(), "hot runs must be in-mem");
         self.row_count += metadata.row_count;
-        self.batches.push(metadata);
+        self.hot_deltas.push(metadata);
         self.version = self.version.wrapping_add(1);
+    }
+
+    /// Predicate used by the read path to decide whether it should compact this bucket
+    /// before building a `SortedRangeView`.
+    pub fn should_compact(&self) -> bool {
+        const MAX_DELTA_RUNS_BEFORE_COMPACT: usize = 8;
+
+        if self.hot_deltas.is_empty() {
+            return false;
+        }
+        if self.hot_deltas.len() > MAX_DELTA_RUNS_BEFORE_COMPACT {
+            return true;
+        }
+
+        let mut metas: Vec<&BatchMeta> = self
+            .hot_base_segments
+            .iter()
+            .chain(self.hot_deltas.iter())
+            .collect();
+        if metas.len() <= 1 {
+            return false;
+        }
+        metas.sort_by(|a, b| a.min_pos.cmp(&b.min_pos));
+        for w in metas.windows(2) {
+            if w[1].min_pos <= w[0].max_pos {
+                return true;
+            }
+        }
+        false
     }
 }
 
+
+// TODO this should not be clonable?
 /// Bucket-level index using bucket timestamps.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BucketIndex {
@@ -87,18 +183,42 @@ impl BucketIndex {
     ) {
         let bucket_ts = batch_id.time_bucket() as Timestamp;
 
-        let metadata = RunMeta {
-            batch_id,
+        self.insert_batch_ref(bucket_ts, BatchRef::Stored(batch_id), min_pos, max_pos, row_count);
+    }
+
+    pub fn insert_batch_ref(
+        &mut self,
+        bucket_ts: Timestamp,
+        run: BatchRef,
+        min_pos: Cursor,
+        max_pos: Cursor,
+        row_count: usize,
+    ) {
+        let metadata = BatchMeta {
+            run,
             bucket_timestamp: bucket_ts,
             min_pos,
             max_pos,
             row_count,
         };
 
-        self.buckets
+        let b = self
+            .buckets
             .entry(bucket_ts)
-            .or_insert_with(|| Bucket::new(bucket_ts))
-            .push(metadata);
+            .or_insert_with(|| Bucket::new(bucket_ts));
+
+        match metadata.run {
+            BatchRef::InMem(_) => {
+                b.push_hot_delta(metadata);
+            }
+            BatchRef::Stored(_) => {
+                // Treat as canonical persisted data insertion (mostly used by tests).
+                b.row_count += metadata.row_count;
+                b.persisted_segments.push(metadata);
+                b.version = b.version.wrapping_add(1);
+            }
+        }
+
         self.total_rows += row_count;
         self.max_pos_seen = self.max_pos_seen.max(max_pos);
     }
@@ -106,6 +226,14 @@ impl BucketIndex {
     /// Query buckets with bucket_timestamp in range [start, end]
     pub fn query_buckets_in_range(&self, start: Timestamp, end: Timestamp) -> Vec<&Bucket> {
         self.buckets.range(start..=end).map(|(_, b)| b).collect()
+    }
+
+    pub fn bucket(&self, bucket_ts: Timestamp) -> Option<&Bucket> {
+        self.buckets.get(&bucket_ts)
+    }
+
+    pub fn bucket_mut(&mut self, bucket_ts: Timestamp) -> Option<&mut Bucket> {
+        self.buckets.get_mut(&bucket_ts)
     }
 
     /// Bucket-level span that may contain rows in (prev, new] (by cursor order).
@@ -248,15 +376,18 @@ impl BucketIndex {
         self.buckets.keys().copied().collect()
     }
 
-    pub fn prune(&mut self, cutoff_timestamp: Timestamp) -> Vec<BatchId> {
-        let mut pruned_ids = Vec::new();
+    pub fn prune(&mut self, cutoff_timestamp: Timestamp) -> PrunedBatches {
+        let mut pruned = PrunedBatches::default();
         let mut empty_buckets = Vec::new();
 
         for (&bucket_ts, bucket) in self.buckets.iter_mut() {
-            let before_len = bucket.batches.len();
-            bucket.batches.retain(|b| {
+            // Prune hot in-mem base (counts towards logical rows when it exists).
+            let before_base_len = bucket.hot_base_segments.len();
+            bucket.hot_base_segments.retain(|b| {
                 if b.max_pos.ts < cutoff_timestamp {
-                    pruned_ids.push(b.batch_id);
+                    if let Some(id) = b.run.inmem_id() {
+                        pruned.inmem.push(id);
+                    }
                     self.total_rows -= b.row_count;
                     bucket.row_count -= b.row_count;
                     false
@@ -264,10 +395,52 @@ impl BucketIndex {
                     true
                 }
             });
-            if bucket.batches.len() != before_len {
+            let hot_base_pruned = bucket.hot_base_segments.len() != before_base_len;
+
+            // Prune hot deltas (always counted).
+            let before_len = bucket.hot_deltas.len();
+            bucket.hot_deltas.retain(|b| {
+                if b.max_pos.ts < cutoff_timestamp {
+                    if let Some(id) = b.run.inmem_id() {
+                        pruned.inmem.push(id);
+                    }
+                    self.total_rows -= b.row_count;
+                    bucket.row_count -= b.row_count;
+                    false
+                } else {
+                    true
+                }
+            });
+            if bucket.hot_deltas.len() != before_len || hot_base_pruned {
                 bucket.version = bucket.version.wrapping_add(1);
             }
-            if bucket.batches.is_empty() {
+
+            // Always prune persisted store-backed segments (do NOT double-decrement row_count if hot base exists).
+            let before_persisted = bucket.persisted_segments.len();
+            bucket.persisted_segments.retain(|m| {
+                if m.max_pos.ts < cutoff_timestamp {
+                    if let Some(id) = m.run.stored_batch_id() {
+                        pruned.stored.push(id);
+                    }
+                    if !hot_base_pruned && bucket.hot_base_segments.is_empty() {
+                        // Only adjust counts if persisted is the canonical representation.
+                        self.total_rows -= m.row_count;
+                        bucket.row_count -= m.row_count;
+                    }
+                    false
+                } else {
+                    true
+                }
+            });
+            if bucket.persisted_segments.len() != before_persisted && bucket.hot_base_segments.is_empty() {
+                bucket.version = bucket.version.wrapping_add(1);
+            }
+
+            if bucket.hot_deltas.is_empty() && bucket.hot_base_segments.is_empty() && bucket.persisted_segments.is_empty() {
+                // If the bucket is becoming empty, also retire any pending stored ids.
+                if !bucket.pending_delete_stored.is_empty() {
+                    pruned.stored.extend(bucket.pending_delete_stored.drain(..));
+                }
                 empty_buckets.push(bucket_ts);
             }
         }
@@ -276,7 +449,7 @@ impl BucketIndex {
             self.buckets.remove(&bucket_ts);
         }
 
-        pruned_ids
+        pruned
     }
 }
 
@@ -362,7 +535,8 @@ mod tests {
         assert_eq!(buckets.len(), 1);
         let bucket = buckets[0];
         assert_eq!(bucket.row_count, 150);
-        assert_eq!(bucket.batches.len(), 2);
+        // Stored inserts are not hot; they land in persisted layout.
+        assert_eq!(bucket.persisted_segments.len(), 2);
     }
 
     #[test]
@@ -374,7 +548,8 @@ mod tests {
         index.insert_batch(make_batch_id(3000, 3), make_pos(3000, 151), make_pos(3500, 225), 75);
 
         let pruned = index.prune(2000);
-        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned.stored.len(), 1);
+        assert!(pruned.inmem.is_empty());
         assert_eq!(index.total_rows(), 125);
         assert_eq!(index.bucket_timestamps(), vec![2000, 3000]);
     }
