@@ -198,6 +198,7 @@ impl WindowOperatorState {
             self.ts_column_index,
             self.dump_hot_bucket_count,
             self.in_mem_dump_parallelism,
+            self.in_mem_low_watermark_per_mille,
             compaction_interval,
             dump_interval,
         );
@@ -256,6 +257,21 @@ impl WindowOperatorState {
             .compactor
             .compact_bucket(key, &arc, self.task_id.clone(), bucket_ts, self.ts_column_index)
             .await;
+
+        if self.storage.in_mem.is_over_limit() {
+            let _ = self
+                .storage
+                .compactor
+                .relieve_in_mem_pressure(
+                    &self.window_states,
+                    self.task_id.clone(),
+                    self.ts_column_index,
+                    self.dump_hot_bucket_count,
+                    self.in_mem_low_watermark_per_mille,
+                    self.in_mem_dump_parallelism,
+                )
+                .await;
+        }
     }
 
     pub async fn rehydrate_bucket(
@@ -270,6 +286,21 @@ impl WindowOperatorState {
             .compactor
             .rehydrate_bucket(key, &arc, self.task_id.clone(), bucket_ts)
             .await;
+
+        if self.storage.in_mem.is_over_limit() {
+            let _ = self
+                .storage
+                .compactor
+                .relieve_in_mem_pressure(
+                    &self.window_states,
+                    self.task_id.clone(),
+                    self.ts_column_index,
+                    self.dump_hot_bucket_count,
+                    self.in_mem_low_watermark_per_mille,
+                    self.in_mem_dump_parallelism,
+                )
+                .await;
+        }
     }
 
     /// Flush all in-memory runs into the store for checkpointing.
@@ -696,6 +727,98 @@ pub fn drop_too_late_entries(
         .expect("Should be able to filter record batch");
     let dropped = record_batch.num_rows() - kept.num_rows();
     (kept, dropped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::collections::BTreeMap;
+
+    use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+    use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+
+    use crate::storage::StorageBudgetConfig;
+    use crate::storage::StorageStats;
+    use crate::storage::batch_store::InMemBatchStore;
+
+    fn make_key(s: &str) -> Key {
+        let schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Utf8, false)]));
+        let arr = StringArray::from(vec![s]);
+        let rb = RecordBatch::try_new(schema, vec![Arc::new(arr)]).unwrap();
+        Key::new(rb).unwrap()
+    }
+
+    fn make_ingest_batch(rows: usize) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new(
+                "timestamp",
+                DataType::Timestamp(TimeUnit::Millisecond, None),
+                false,
+            ),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let ts: Vec<i64> = (0..rows as i64).collect();
+        let ts_arr = TimestampMillisecondArray::from(ts);
+        let val_arr = Float64Array::from(vec![1.0; rows]);
+        RecordBatch::try_new(schema, vec![Arc::new(ts_arr), Arc::new(val_arr)]).unwrap()
+    }
+
+    #[tokio::test]
+    async fn ingest_triggers_pressure_relief_when_in_mem_over_limit() {
+        let stats_before = StorageStats::global().snapshot();
+
+        let budgets = StorageBudgetConfig {
+            in_mem_limit_bytes: 1024,
+            in_mem_low_watermark_per_mille: 500,
+            work_limit_bytes: 1024 * 1024,
+            max_inflight_keys: 1,
+            load_io_parallelism: 1,
+        };
+
+        let store: Arc<dyn BatchStore> = Arc::new(InMemBatchStore::new(
+            4,
+            TimeGranularity::Seconds(1),
+            256,
+        ));
+        let storage = WorkerStorageContext::new(store, budgets.clone()).unwrap();
+
+        let state = WindowOperatorState::new(
+            storage,
+            Arc::<str>::from("t"),
+            0, // timestamp column index
+            Arc::new(BTreeMap::new()),
+            Vec::new(),
+            None,
+            0, // dump_hot_bucket_count: treat everything as cold for eviction
+            budgets.in_mem_low_watermark_per_mille,
+            4, // in_mem_dump_parallelism
+        );
+
+        let key = make_key("A");
+        let batch = make_ingest_batch(4096);
+
+        let _ = state.insert_batch(&key, None, batch).await;
+
+        let limit = state.in_mem_batch_cache().limit_bytes();
+        let low = (limit.saturating_mul(budgets.in_mem_low_watermark_per_mille as usize)) / 1000;
+        assert!(
+            state.in_mem_batch_cache().bytes() <= low,
+            "expected eviction down to low watermark (<= {}), got {}",
+            low,
+            state.in_mem_batch_cache().bytes()
+        );
+
+        let stats_after = StorageStats::global().snapshot();
+        assert!(
+            stats_after.pressure_relief_runs > stats_before.pressure_relief_runs,
+            "expected at least one pressure relief run"
+        );
+        assert!(
+            stats_after.pressure_dumped_buckets > stats_before.pressure_dumped_buckets,
+            "expected at least one bucket dumped during pressure relief"
+        );
+    }
 }
 
 

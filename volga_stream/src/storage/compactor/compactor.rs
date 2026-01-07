@@ -101,6 +101,7 @@ impl Compactor {
         ts_column_index: usize,
         hot_bucket_count: usize,
         dump_parallelism: usize,
+        low_watermark_per_mille: u32,
         compaction_interval: Duration,
         dump_interval: Duration,
     ) -> (JoinHandle<()>, JoinHandle<()>) {
@@ -119,6 +120,19 @@ impl Compactor {
                         hot_bucket_count,
                     )
                     .await;
+
+                if compactor_for_compact.in_mem.is_over_limit() {
+                    let _ = compactor_for_compact
+                        .relieve_in_mem_pressure(
+                            &ws_for_compact,
+                            task_id_for_compact.clone(),
+                            ts_column_index,
+                            hot_bucket_count,
+                            low_watermark_per_mille,
+                            dump_parallelism,
+                        )
+                        .await;
+                }
             }
         });
 
