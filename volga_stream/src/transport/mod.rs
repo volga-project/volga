@@ -3,6 +3,7 @@ pub mod channel;
 pub mod transport_client;
 pub mod in_memory_transport_backend;
 pub mod transport_backend_actor;
+#[cfg(test)]
 pub mod tests;
 pub mod test_utils;
 pub mod grpc;

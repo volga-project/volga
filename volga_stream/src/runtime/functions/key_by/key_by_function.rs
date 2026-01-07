@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use datafusion::functions::core::planner;
 use crate::api::Planner;
 use crate::common::message::{Message, KeyedMessage, BaseMessage};
 use crate::common::Key;
@@ -18,7 +17,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use datafusion::physical_plan::aggregates::AggregateExec;
-use datafusion::physical_plan::windows::{BoundedWindowAggExec, WindowAggExec};
+use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::ExecutionPlan;
 use datafusion::common::hash_utils::create_hashes;
 use ahash::RandomState;

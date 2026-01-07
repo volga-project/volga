@@ -12,9 +12,9 @@ use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
 use arrow::array::StringArray;
-use anyhow::Result;
-use kameo::{Actor, spawn};
+use kameo::spawn;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // TODO test ordered delivery
 #[tokio::test]
@@ -64,7 +64,11 @@ async fn test_actor_transport() {
     }
 
     let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
-    let all_vertex_ids = writer_vertex_ids.clone().into_iter().chain(reader_vertex_ids.clone()).collect::<Vec<_>>();
+    let all_vertex_ids = writer_vertex_ids
+        .iter()
+        .chain(reader_vertex_ids.iter())
+        .map(|s| Arc::<str>::from(s.as_str()))
+        .collect::<Vec<_>>();
     let mut configs = backend.init_channels(&graph, all_vertex_ids);
     
 
@@ -75,7 +79,10 @@ async fn test_actor_transport() {
     // Create and start writer actors
     let mut writer_refs = Vec::new();
     for vertex_id in &writer_vertex_ids {
-        let writer_actor = TestDataWriterActor::new(vertex_id.clone(), configs.remove(&vertex_id.clone()).unwrap());
+        let writer_actor = TestDataWriterActor::new(
+            Arc::<str>::from(vertex_id.as_str()),
+            configs.remove(vertex_id.as_str()).unwrap(),
+        );
         let writer_ref = spawn(writer_actor);
         writer_refs.push(writer_ref.clone());
     }
@@ -83,7 +90,10 @@ async fn test_actor_transport() {
     // Create reader actors
     let mut reader_refs = Vec::new();
     for vertex_id in &reader_vertex_ids {
-        let reader_actor = TestDataReaderActor::new(vertex_id.clone(), configs.remove(&vertex_id.clone()).unwrap());
+        let reader_actor = TestDataReaderActor::new(
+            Arc::<str>::from(vertex_id.as_str()),
+            configs.remove(vertex_id.as_str()).unwrap(),
+        );
         let reader_ref = spawn(reader_actor);
         reader_refs.push(reader_ref.clone());
     }

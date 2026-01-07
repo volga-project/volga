@@ -1,5 +1,6 @@
 pub mod logical_graph;
 pub mod planner;
+#[cfg(test)]
 pub mod logical_optimizer_examples;
 pub mod pipeline_context;
 

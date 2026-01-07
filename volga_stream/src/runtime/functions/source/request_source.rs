@@ -438,6 +438,7 @@ mod tests {
     use tokio::time::{sleep, Duration};
     use futures::FutureExt;
     use rand;
+    use std::sync::Arc;
 
     
     fn create_test_config(schema: SchemaRef) -> RequestSourceConfig {
@@ -454,7 +455,7 @@ mod tests {
     }
 
     fn create_test_runtime_context() -> RuntimeContext {
-        RuntimeContext::new("test_vertex".to_string(), 0, 1, None, None, None)
+        RuntimeContext::new(Arc::<str>::from("test_vertex"), 0, 1, None, None, None)
     }
     
     async fn create_test_processor_and_source(schema: SchemaRef) -> (RequestSourceProcessor, HttpRequestSourceFunction) {

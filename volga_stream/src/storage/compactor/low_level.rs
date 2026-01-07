@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
-use std::sync::Arc;
 
 use arrow::array::{ArrayRef, TimestampMillisecondArray, UInt32Array, UInt64Array};
 use arrow::compute::take;
@@ -191,6 +190,8 @@ fn k_way_merge_to_batch(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use arrow::array::{TimestampMillisecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
@@ -232,6 +233,9 @@ mod tests {
         }
     }
 }
+
+
+
 
 
 

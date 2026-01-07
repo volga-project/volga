@@ -1,5 +1,5 @@
-use crate::runtime::operators::window::state::index::SortedRangeIndex;
-use crate::runtime::operators::window::state::index::RowPtr;
+use crate::storage::index::SortedRangeIndex;
+use crate::storage::index::RowPtr;
 use crate::runtime::operators::window::state::tiles::{Tile, Tiles};
 use crate::runtime::operators::window::Cursor;
 use crate::storage::batch_store::Timestamp;
@@ -119,7 +119,7 @@ mod tiled_split_tests {
 
     use crate::runtime::operators::window::aggregates::test_utils;
     use crate::runtime::operators::window::aggregates::BucketRange;
-    use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment};
+    use crate::storage::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment};
     use crate::runtime::operators::window::state::tiles::{TileConfig, TimeGranularity as TileGranularity, Tiles};
     use crate::runtime::operators::window::{Cursor, RowPtr};
 
@@ -145,6 +145,7 @@ mod tiled_split_tests {
             Cursor::new(i64::MIN, 0),
             Cursor::new(i64::MAX, u64::MAX),
             out,
+            None,
         )
     }
 
@@ -215,7 +216,7 @@ mod window_logic_tests {
     use arrow::record_batch::RecordBatch;
 
     use crate::runtime::operators::window::state::tiles::TimeGranularity;
-    use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment};
+    use crate::storage::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment};
     use crate::runtime::operators::window::Cursor;
 
     use super::*;
@@ -263,6 +264,7 @@ mod window_logic_tests {
             Cursor::new(i64::MIN, 0),
             Cursor::new(i64::MAX, u64::MAX),
             buckets,
+            None,
         );
         let idx = SortedRangeIndex::new(&view);
 
@@ -288,6 +290,7 @@ mod window_logic_tests {
             Cursor::new(i64::MIN, 0),
             Cursor::new(i64::MAX, u64::MAX),
             buckets,
+            None,
         );
         let idx = SortedRangeIndex::new(&view);
 

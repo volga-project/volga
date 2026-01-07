@@ -1,9 +1,7 @@
 use tonic::{Request, Response, Status};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::{runtime::worker::{Worker, WorkerConfig}, transport::transport_backend_actor::TransportBackendType};
-use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::stream_task::StreamTaskStatus;
+use crate::runtime::worker::{Worker, WorkerConfig};
 
 pub mod worker_service {
     tonic::include_proto!("worker_service");

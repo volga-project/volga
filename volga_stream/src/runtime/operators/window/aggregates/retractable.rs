@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -6,11 +5,10 @@ use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
-use crate::runtime::operators::window::state::index::BucketIndex;
+use crate::storage::index::{BucketIndex, DataRequest, SortedRangeView};
 use crate::runtime::operators::window::state::tiles::TimeGranularity;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::runtime::operators::window::{Cursor, Tiles};
-use crate::storage::batch_store::Timestamp;
+use crate::runtime::operators::window::Cursor;
 
 use super::VirtualPoint;
 use super::{Aggregation, AggregatorType, BucketRange};
@@ -84,7 +82,7 @@ impl Aggregation for RetractableAggregation {
         AggregatorType::RetractableAccumulator
     }
 
-    fn get_data_requests(&self) -> Vec<crate::runtime::operators::window::state::index::DataRequest> {
+    fn get_data_requests(&self) -> Vec<DataRequest> {
         match self {
             RetractableAggregation::Range(r) => r.get_data_requests(),
             RetractableAggregation::Points(p) => p.get_data_requests(),
@@ -93,7 +91,7 @@ impl Aggregation for RetractableAggregation {
 
     async fn produce_aggregates_from_ranges(
         &self,
-        sorted_ranges: &[crate::runtime::operators::window::state::index::SortedRangeView],
+        sorted_ranges: &[SortedRangeView],
         thread_pool: Option<&ThreadPool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         match self {

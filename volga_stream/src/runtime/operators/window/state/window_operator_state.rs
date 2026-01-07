@@ -15,12 +15,11 @@ use crate::common::Key;
 use crate::runtime::operators::window::window_operator::WindowConfig;
 use crate::runtime::operators::window::aggregates::BucketRange;
 use crate::runtime::operators::window::{BucketIndex, Cursor, SEQ_NO_COLUMN_NAME, TileConfig, Tiles, TimeGranularity};
-use crate::runtime::operators::window::state::index::InMemBatchId;
-use crate::runtime::operators::window::state::index::bucket_index::BatchRef;
+use crate::storage::index::bucket_index::BatchRef;
 use crate::runtime::state::OperatorState;
-use crate::storage::Compactor;
 use crate::storage::InMemBatchCache;
-use crate::storage::{BatchPins, BatchRetirementQueue};
+use crate::runtime::TaskId;
+use crate::storage::{BatchPins, StorageStatsSnapshot, WorkerStorageContext};
 use crate::storage::batch_store::{
     BatchStore,
     Timestamp,
@@ -63,22 +62,27 @@ pub struct WindowsState {
 pub struct WindowOperatorState {
     window_states: DashMap<Key, Arc<RwLock<WindowsState>>>,
 
-    batch_store: Arc<dyn BatchStore>,
-    batch_pins: Arc<BatchPins>,
-    batch_retirement: Arc<BatchRetirementQueue>,
+    storage: Arc<WorkerStorageContext>,
+    task_id: TaskId,
     batch_reclaimer_started: AtomicBool,
     background_tasks_started: AtomicBool,
     batch_reclaimer_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
     compaction_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
     dump_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
 
-    // In-memory batches referenced by `BatchRef::InMem`.
-    in_mem_batches: Arc<InMemBatchCache>,
-
-    // Compaction/dump orchestration.
-    compactor: Compactor,
-
     bucket_granularity: TimeGranularity,
+
+    // -------- stable operator config (owned by state) --------
+    ts_column_index: usize,
+    window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+    window_ids: Vec<WindowId>,
+    tiling_configs: Vec<Option<TileConfig>>,
+    lateness: Option<i64>,
+
+    // Backpressure / dump policy knobs.
+    dump_hot_bucket_count: usize,
+    in_mem_low_watermark_per_mille: u32,
+    in_mem_dump_parallelism: usize,
 }
 
 // Compaction and dumping are intentionally split:
@@ -91,39 +95,62 @@ pub struct WindowOperatorStateCheckpoint {
 }
 
 impl WindowOperatorState {
-    pub fn new(batch_store: Arc<dyn BatchStore>) -> Self {
-        let bucket_granularity = batch_store.bucket_granularity();
-        let in_mem_batches = Arc::new(InMemBatchCache::new());
-        let batch_pins = Arc::new(BatchPins::new());
-        let batch_retirement = Arc::new(BatchRetirementQueue::new());
-        let compactor = Compactor::new(
-            batch_store.clone(),
-            batch_pins.clone(),
-            batch_retirement.clone(),
-            in_mem_batches.clone(),
-        );
+    pub fn new(
+        storage: Arc<WorkerStorageContext>,
+        task_id: TaskId,
+        ts_column_index: usize,
+        window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+        tiling_configs: Vec<Option<TileConfig>>,
+        lateness: Option<i64>,
+        dump_hot_bucket_count: usize,
+        in_mem_low_watermark_per_mille: u32,
+        in_mem_dump_parallelism: usize,
+    ) -> Self {
+        let bucket_granularity = storage.batch_store.bucket_granularity();
+        let window_ids: Vec<WindowId> = window_configs.keys().cloned().collect();
         Self {
             window_states: DashMap::new(),
-            batch_store,
-            batch_pins,
-            batch_retirement,
+            storage,
+            task_id,
             batch_reclaimer_started: AtomicBool::new(false),
             background_tasks_started: AtomicBool::new(false),
             batch_reclaimer_handle: std::sync::Mutex::new(None),
             compaction_handle: std::sync::Mutex::new(None),
             dump_handle: std::sync::Mutex::new(None),
-            in_mem_batches,
-            compactor,
             bucket_granularity,
+            ts_column_index,
+            window_configs,
+            window_ids,
+            tiling_configs,
+            lateness,
+            dump_hot_bucket_count,
+            in_mem_low_watermark_per_mille,
+            in_mem_dump_parallelism,
         }
     }
 
+    pub fn storage(&self) -> &Arc<WorkerStorageContext> {
+        &self.storage
+    }
+
+    pub fn task_id(&self) -> TaskId {
+        self.task_id.clone()
+    }
+
     pub fn in_mem_batch_cache(&self) -> &InMemBatchCache {
-        &self.in_mem_batches
+        &self.storage.in_mem
+    }
+
+    pub fn storage_stats_snapshot(&self) -> StorageStatsSnapshot {
+        self.storage.in_mem.stats().snapshot()
+    }
+
+    pub fn ts_column_index(&self) -> usize {
+        self.ts_column_index
     }
 
     pub fn batch_pins(&self) -> &Arc<BatchPins> {
-        &self.batch_pins
+        &self.storage.batch_pins
     }
 
     pub fn start_batch_reclaimer(&self, interval: Duration, batch_budget_per_tick: usize) {
@@ -134,17 +161,21 @@ impl WindowOperatorState {
         {
             return;
         }
-        let retired = self.batch_retirement.clone();
-        let store = self.batch_store.clone();
-        let pins = self.batch_pins.clone();
-        let handle = retired.spawn_reclaimer(store, pins, interval, batch_budget_per_tick);
+        let retired = self.storage.batch_retirement.clone();
+        let store = self.storage.batch_store.clone();
+        let pins = self.storage.batch_pins.clone();
+        let handle = retired.spawn_reclaimer(
+            store,
+            pins,
+            self.task_id.clone(),
+            interval,
+            batch_budget_per_tick,
+        );
         *self.batch_reclaimer_handle.lock().expect("batch_reclaimer_handle") = Some(handle);
     }
 
     pub fn start_background_tasks(
         &self,
-        ts_column_index: usize,
-        hot_bucket_count: usize,
         compaction_interval: Duration,
         dump_interval: Duration,
     ) {
@@ -159,12 +190,14 @@ impl WindowOperatorState {
             return;
         }
 
-        let compactor = Arc::new(self.compactor.clone());
+        let compactor = Arc::new(self.storage.compactor.clone());
         let window_states = Arc::new(self.window_states.clone());
         let (compact_handle, dump_handle) = compactor.spawn_background_tasks(
             window_states,
-            ts_column_index,
-            hot_bucket_count,
+            self.task_id.clone(),
+            self.ts_column_index,
+            self.dump_hot_bucket_count,
+            self.in_mem_dump_parallelism,
             compaction_interval,
             dump_interval,
         );
@@ -198,13 +231,16 @@ impl WindowOperatorState {
         self.batch_reclaimer_started.store(false, Ordering::Release);
     }
 
-    pub async fn periodic_dump_to_store(
-        &self,
-        ts_column_index: usize,
-        hot_bucket_count: usize,
-    ) -> anyhow::Result<()> {
-        self.compactor
-            .periodic_dump_to_store(&self.window_states, ts_column_index, hot_bucket_count)
+    pub async fn periodic_dump_to_store(&self) -> anyhow::Result<()> {
+        self.storage
+            .compactor
+            .periodic_dump_to_store(
+                &self.window_states,
+                self.task_id.clone(),
+                self.ts_column_index,
+                self.dump_hot_bucket_count,
+                self.in_mem_dump_parallelism,
+            )
             .await
     }
 
@@ -212,13 +248,13 @@ impl WindowOperatorState {
         &self,
         key: &Key,
         bucket_ts: Timestamp,
-        ts_column_index: usize,
     ) {
         let Some(arc) = self.get_windows_state_arc(key) else {
             return;
         };
-        self.compactor
-            .compact_bucket(key, &arc, bucket_ts, ts_column_index)
+        self.storage
+            .compactor
+            .compact_bucket(key, &arc, self.task_id.clone(), bucket_ts, self.ts_column_index)
             .await;
     }
 
@@ -226,24 +262,37 @@ impl WindowOperatorState {
         &self,
         key: &Key,
         bucket_ts: Timestamp,
-        ts_column_index: usize,
     ) {
         let Some(arc) = self.get_windows_state_arc(key) else {
             return;
         };
-        let _ = ts_column_index;
-        self.compactor
-            .rehydrate_bucket(key, &arc, bucket_ts)
+        self.storage
+            .compactor
+            .rehydrate_bucket(key, &arc, self.task_id.clone(), bucket_ts)
             .await;
     }
 
     /// Flush all in-memory runs into the store for checkpointing.
     ///
     /// This makes checkpoints depend only on the store snapshot (plus logical metadata).
-    pub async fn flush_in_mem_runs_to_store(&self, ts_column_index: usize) -> anyhow::Result<()> {
-        self.compactor
-            .checkpoint_flush_to_store(&self.window_states, ts_column_index)
+    pub async fn flush_in_mem_runs_to_store(&self) -> anyhow::Result<()> {
+        self.storage
+            .compactor
+            .checkpoint_flush_to_store(
+                &self.window_states,
+                self.task_id.clone(),
+                self.ts_column_index,
+                self.in_mem_dump_parallelism,
+            )
             .await
+    }
+
+    /// Checkpoint/batch-finalization durability barrier.
+    ///
+    /// For remote-backed stores (e.g. SlateDB), this waits for pending writes to be persisted.
+    /// For purely in-memory stores, it is a no-op.
+    pub async fn await_store_persisted(&self) -> anyhow::Result<()> {
+        self.storage.batch_store.await_persisted().await
     }
 
     pub fn to_checkpoint(&self) -> WindowOperatorStateCheckpoint {
@@ -266,8 +315,8 @@ impl WindowOperatorState {
         checkpoint: WindowOperatorStateCheckpoint,
     ) {
         self.window_states.clear();
-        self.in_mem_batches.clear();
-        self.compactor.clear_dump_state();
+        self.storage.in_mem.clear();
+        self.storage.compactor.clear_dump_state();
         for (key_bytes, windows_state_bytes) in checkpoint.keys {
             let key = Key::from_bytes(&key_bytes);
             let windows_state: WindowsState =
@@ -294,20 +343,18 @@ impl WindowOperatorState {
     pub async fn insert_batch(
         &self,
         key: &Key,
-        window_configs: &BTreeMap<WindowId, WindowConfig>,
-        tiling_configs: &Vec<Option<TileConfig>>,
-        ts_column_index: usize,
-        _lateness: Option<i64>,
         watermark_ts: Option<Timestamp>,
         batch: RecordBatch,
     ) -> usize {
-        let window_ids: Vec<_> = window_configs.keys().cloned().collect();
-        
         // Get or create windows_state
         let arc_rwlock = if let Some(entry) = self.window_states.get(key) {
             entry.value().clone()
         } else {
-            let windows_state = create_empty_windows_state(&window_ids, tiling_configs, self.bucket_granularity);
+            let windows_state = create_empty_windows_state(
+                &self.window_ids,
+                &self.tiling_configs,
+                self.bucket_granularity,
+            );
             let arc_rwlock = Arc::new(RwLock::new(windows_state));
             self.window_states.insert(key.clone(), arc_rwlock.clone());
             arc_rwlock
@@ -332,7 +379,7 @@ impl WindowOperatorState {
         //   (We currently don't support late-event recomputation.)
         // - Otherwise: keep all rows (can't classify lateness yet).
         let (record_batch, dropped_rows) = if let Some(wm) = watermark_ts {
-            drop_too_late_entries(&record_batch_with_seq, ts_column_index, 0, wm)
+            drop_too_late_entries(&record_batch_with_seq, self.ts_column_index, 0, wm)
         } else {
             (record_batch_with_seq.clone(), 0)
         };
@@ -342,17 +389,21 @@ impl WindowOperatorState {
         }
 
         // Hot write path: partition into per-bucket batches (sorted by rowpos) and keep them in-memory (no BatchId).
-        let batches = self.batch_store.partition_records(&record_batch, key, ts_column_index);
+        let batches = self
+            .storage
+            .batch_store
+            .partition_records(&record_batch, key, self.ts_column_index);
 
         // Calculate pre-aggregated tiles if needed (use already-sorted batches).
         for (window_id, window_state) in windows_state.window_states.iter_mut() {
             if let Some(ref mut tiles) = window_state.tiles {
-                let window_expr = &window_configs
+                let window_expr = &self
+                    .window_configs
                     .get(&window_id)
                     .expect("Window config should exist")
                     .window_expr;
                 for (_bucket_ts, b) in batches.iter() {
-                    tiles.add_sorted_batch(b, window_expr, ts_column_index);
+                    tiles.add_sorted_batch(b, window_expr, self.ts_column_index);
                 }
             }
         }
@@ -363,22 +414,45 @@ impl WindowOperatorState {
             }
             let seq_column_index = get_seq_no_column_index(&batch)
                 .expect("Expected __seq_no column to exist in hot runs");
-            let (min_pos, max_pos) = get_batch_rowpos_range(&batch, ts_column_index, seq_column_index);
+            let (min_pos, max_pos) =
+                get_batch_rowpos_range(&batch, self.ts_column_index, seq_column_index);
             let row_count = batch.num_rows();
+            let bytes_estimate = batch.get_array_memory_size();
 
-            let id = self.in_mem_batches.put(batch);
+            let id = self.storage.in_mem.put(batch);
             windows_state
                 .bucket_index
-                .insert_batch_ref(bucket_ts, BatchRef::InMem(id), min_pos, max_pos, row_count);
+                .insert_batch_ref(bucket_ts, BatchRef::InMem(id), min_pos, max_pos, row_count, bytes_estimate);
+        }
+
+        let over_limit = self.storage.in_mem.is_over_limit();
+        drop(windows_state); // release per-key lock before doing IO
+
+        if over_limit {
+            let _ = self
+                .storage
+                .compactor
+                .relieve_in_mem_pressure(
+                    &self.window_states,
+                    self.task_id.clone(),
+                    self.ts_column_index,
+                    self.dump_hot_bucket_count,
+                    self.in_mem_low_watermark_per_mille,
+                    self.in_mem_dump_parallelism,
+                )
+                .await;
         }
 
         // TODO(metrics): report dropped_rows and per-key drops.
         dropped_rows
     }
 
-    pub async fn prune(&self, key: &Key, lateness: i64, window_configs: &BTreeMap<WindowId, WindowConfig>) {
-        use crate::runtime::operators::window::state::index::get_window_length_ms;
-        use crate::runtime::operators::window::state::index::get_window_size_rows;
+    pub async fn prune_if_needed(&self, key: &Key) {
+        let Some(lateness) = self.lateness else {
+            return;
+        };
+        use crate::storage::index::get_window_length_ms;
+        use crate::storage::index::get_window_size_rows;
         use datafusion::logical_expr::WindowFrameUnits;
         
         let arc_rwlock = self.window_states.get(key).expect("Windows state should exist").value().clone();
@@ -388,7 +462,10 @@ impl WindowOperatorState {
         // For each window state, calculate its specific cutoff and prune tiles
         let window_ids: Vec<WindowId> = windows_state.window_states.keys().cloned().collect();
         for window_id in window_ids {
-            let window_config = window_configs.get(&window_id).expect("Window config should exist");
+            let window_config = self
+                .window_configs
+                .get(&window_id)
+                .expect("Window config should exist");
             let window_frame = window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(&window_id).expect("Window state should exist");
             
@@ -442,10 +519,12 @@ impl WindowOperatorState {
             let pruned = windows_state.bucket_index.prune(min_cutoff_timestamp);
 
             if !pruned.stored.is_empty() {
-                self.batch_retirement.retire(key, &pruned.stored);
+                self.storage
+                    .batch_retirement
+                    .retire(self.task_id.clone(), key, &pruned.stored);
             }
             if !pruned.inmem.is_empty() {
-                self.in_mem_batches.remove(&pruned.inmem);
+                self.storage.in_mem.remove(&pruned.inmem);
             }
         }
     }
@@ -498,7 +577,7 @@ impl WindowOperatorState {
     }
 
     pub fn get_batch_store(&self) -> &Arc<dyn BatchStore> {
-        &self.batch_store
+        &self.storage.batch_store
     }
 }
 
@@ -618,3 +697,5 @@ pub fn drop_too_late_entries(
     let dropped = record_batch.num_rows() - kept.num_rows();
     (kept, dropped)
 }
+
+

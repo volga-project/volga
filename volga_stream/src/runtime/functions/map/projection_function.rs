@@ -1,11 +1,9 @@
 use std::sync::Arc;
 use async_trait::async_trait;
-use datafusion::common::{DFSchemaRef, Result as DFResult};
-use datafusion::physical_plan::projection::ProjectionExec;
+use datafusion::common::DFSchemaRef;
 use datafusion::physical_plan::PhysicalExpr;
 use crate::common::message::Message;
 use anyhow::Result;
-use std::fmt;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::functions::map::MapFunctionTrait;
@@ -18,11 +16,11 @@ use arrow::record_batch::RecordBatch;
 // TODO use Datafusion's ProjectionExec
 #[derive(Clone)]
 pub struct ProjectionFunction {
-    in_schema: DFSchemaRef,
+    _in_schema: DFSchemaRef,
     out_schema: DFSchemaRef,
     exprs: Vec<Expr>,
     physical_exprs: Vec<Arc<dyn PhysicalExpr>>,
-    session_context: SessionContext,
+    _session_context: SessionContext,
 }
 
 impl std::fmt::Debug for ProjectionFunction {
@@ -48,11 +46,11 @@ impl ProjectionFunction {
             .collect::<Vec<_>>();
         
         Self { 
-            in_schema,
+            _in_schema: in_schema,
             out_schema,
             exprs, 
             physical_exprs,
-            session_context,
+            _session_context: session_context,
         }
     }
 

@@ -3,10 +3,8 @@ use arrow::record_batch::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use arrow_json::writer::LineDelimitedWriter;
 use arrow_json::{ReaderBuilder};
-use arrow_json::reader::infer_json_schema;
 use serde_json::Value;
 use std::io::Cursor;
-use std::sync::Arc;
 
 pub fn record_batch_to_json(record_batch: &RecordBatch) -> Result<Value> {
     let mut buffer = Vec::new();

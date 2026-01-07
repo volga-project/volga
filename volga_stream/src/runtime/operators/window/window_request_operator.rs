@@ -26,7 +26,7 @@ use crate::runtime::operators::window::state::sorted_range_view_loader::{load_so
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
 use tokio_rayon::rayon::ThreadPool;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::Duration;
 
 #[derive(Debug, Clone)]
 pub struct WindowRequestOperatorConfig {
@@ -134,12 +134,12 @@ impl WindowRequestOperator {
 
         // Find the window operator vertex with the same task_index
         for (vid, vertex) in window_vertices {
-            if vid == vertex_id {
+            if vid.as_ref() == vertex_id.as_str() {
                 continue;
             }
             
             if vertex.task_index == task_index {
-                return vid;
+                return vid.as_ref().to_string();
             }
         }
 
@@ -354,7 +354,7 @@ impl WindowRequestOperator {
         }
 
         let views_by_agg =
-            load_sorted_ranges_views(self.get_state(), key, self.ts_column_index, &load_plans).await;
+            load_sorted_ranges_views(self.get_state(), key, &load_plans).await;
 
         let futs: Vec<_> = aggs
             .iter()
@@ -434,23 +434,20 @@ impl OperatorTrait for WindowRequestOperator {
         let vertex_id = context.vertex_id().to_string();
         let operator_states = context.operator_states();
         let window_operator_vertex_id = self.get_peer_window_operator_vertex_id(vertex_id.clone(), context.execution_graph());
-        
+
         let timeout = Duration::from_secs(2);
-        let retry_interval = Duration::from_millis(100);
-        let start = Instant::now();
-        
-        loop {
-            if let Some(state_arc) = operator_states.get_operator_state(&window_operator_vertex_id) {
-                self.state = Some(state_arc);
-                break;
-            }
-            
-            if start.elapsed() >= timeout {
-                panic!("Timeout waiting for window operator state for vertex_id: {}", window_operator_vertex_id);
-            }
-            
-            sleep(retry_interval).await;
-        }
+        let state_arc = tokio::time::timeout(
+            timeout,
+            operator_states.wait_for_operator_state(&window_operator_vertex_id),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "Timeout waiting for window operator state for vertex_id: {}",
+                window_operator_vertex_id
+            )
+        });
+        self.state = Some(state_arc);
 
         return Ok(());
     }
@@ -607,12 +604,21 @@ mod tests {
         window_config.request_advance_policy = RequestAdvancePolicy::OnIngest;
 
         let operator_states = Arc::new(OperatorStates::new());
-        let window_operator_vertex_id = "window_op".to_string();
-        let request_operator_vertex_id = "window_request_op".to_string();
+        let window_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_op");
+        let request_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_request_op");
+
+        let budgets = crate::storage::StorageBudgetConfig::default();
+        let store = Arc::new(crate::storage::batch_store::InMemBatchStore::new(
+            64,
+            crate::runtime::operators::window::TimeGranularity::Seconds(1),
+            128,
+        )) as Arc<dyn crate::storage::batch_store::BatchStore>;
+        let shared =
+            crate::storage::WorkerStorageContext::new(store, budgets).expect("ctx");
 
         // Create and set up window operator
         let mut window_operator = WindowOperator::new(OperatorConfig::WindowConfig(window_config.clone()));
-        let window_context = RuntimeContext::new(
+        let mut window_context = RuntimeContext::new(
             window_operator_vertex_id.clone(),
             0,
             1,
@@ -620,6 +626,7 @@ mod tests {
             Some(operator_states.clone()),
             None,
         );
+        window_context.set_worker_storage_context(shared.clone());
         window_operator.open(&window_context).await.expect("Should be able to open window operator");
 
         // Create request operator
@@ -633,7 +640,7 @@ mod tests {
         let mut execution_graph = ExecutionGraph::new();
         
         let window_vertex = ExecutionVertex::new(
-            window_operator_vertex_id.clone(),
+            window_operator_vertex_id.as_ref().to_string(),
             "window_op".to_string(),
             OperatorConfig::WindowConfig(window_config),
             1,
@@ -642,7 +649,7 @@ mod tests {
         execution_graph.add_vertex(window_vertex);
         
         let request_vertex = ExecutionVertex::new(
-            request_operator_vertex_id.clone(),
+            request_operator_vertex_id.as_ref().to_string(),
             "window_request_op".to_string(),
             OperatorConfig::WindowRequestConfig(request_config),
             1,
@@ -650,7 +657,7 @@ mod tests {
         );
         execution_graph.add_vertex(request_vertex);
 
-        let request_context = RuntimeContext::new(
+        let mut request_context = RuntimeContext::new(
             request_operator_vertex_id.clone(),
             0,
             1,
@@ -658,6 +665,7 @@ mod tests {
             Some(operator_states.clone()),
             Some(execution_graph),
         );
+        request_context.set_worker_storage_context(shared.clone());
 
         // Open request operator - it will find the peer window operator vertex from the execution graph
         request_operator.open(&request_context).await.expect("Should open");

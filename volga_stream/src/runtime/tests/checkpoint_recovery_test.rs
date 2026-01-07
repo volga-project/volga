@@ -179,12 +179,12 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut exec_graph1 = logical_graph.to_execution_graph();
     exec_graph1.update_channels_with_node_mapping(None);
 
-    let vertex_ids_1: Vec<String> = exec_graph1.get_vertices().keys().cloned().collect();
+    let vertex_ids_1 = exec_graph1.get_vertices().keys().cloned().collect();
     let expected_tasks = exec_graph1
         .get_vertices()
         .values()
         .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
-        .map(|v| TaskKey { vertex_id: v.vertex_id.clone(), task_index: v.task_index })
+        .map(|v| TaskKey { vertex_id: v.vertex_id.as_ref().to_string(), task_index: v.task_index })
         .collect::<Vec<_>>();
     master_server
         .set_checkpointable_tasks(expected_tasks.clone())
@@ -196,7 +196,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         .get_vertices()
         .values()
         .filter(|v| matches!(v.operator_config, OperatorConfig::WindowConfig(_)))
-        .map(|v| v.vertex_id.clone())
+        .map(|v| v.vertex_id.as_ref().to_string())
         .collect();
 
     // Start worker #1
@@ -290,7 +290,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     // Worker #2 uses fresh channels
     let mut exec_graph2 = logical_graph.to_execution_graph();
     exec_graph2.update_channels_with_node_mapping(None);
-    let vertex_ids_2: Vec<String> = exec_graph2.get_vertices().keys().cloned().collect();
+    let vertex_ids_2 = exec_graph2.get_vertices().keys().cloned().collect();
 
     let mut worker2 = Worker::new(
         WorkerConfig::new(

@@ -8,7 +8,7 @@ use tokio_stream::wrappers::ReceiverStream;
 #[derive(Debug)]
 pub struct ChainedOperator {
     base: OperatorBase,
-    chain_senders: Vec<Option<Sender<Message>>>,
+    _chain_senders: Vec<Option<Sender<Message>>>,
     operators: Vec<Operator>,
 }
 
@@ -40,7 +40,7 @@ impl ChainedOperator {
         
         Self { 
             base: OperatorBase::new(config), 
-            chain_senders,
+            _chain_senders: chain_senders,
             operators,
         }
     }

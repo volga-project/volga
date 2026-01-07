@@ -11,7 +11,7 @@ pub use state::window_operator_state;
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";
 
-pub use state::index::{BucketIndex, Cursor, RowPtr};
+pub use crate::storage::index::{BucketIndex, Cursor, RowPtr};
 
 pub use aggregates::{AggregatorType, Evaluator, AggregateRegistry, WindowAggregator, create_window_aggregator, get_aggregate_registry, Aggregation};
 pub use aggregates::plain::PlainAggregation;

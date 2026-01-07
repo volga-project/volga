@@ -12,9 +12,9 @@ use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::{GrpcTransportBackend, TransportBackend};
 use arrow::array::StringArray;
-use anyhow::Result;
-use kameo::{Actor, spawn};
+use kameo::spawn;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
 #[tokio::test]
@@ -113,6 +113,7 @@ async fn test_grpc_transport_backend() {
         let mut backend: Box<dyn TransportBackend> = Box::new(GrpcTransportBackend::new());
         let vertex_ids = (0..num_writers_per_node)
             .map(|writer_idx| format!("writer_node_{}_writer_{}", node_idx, writer_idx))
+            .map(|s| Arc::<str>::from(s))
             .collect::<Vec<_>>();
         
         let configs = backend.init_channels(&graph, vertex_ids);
@@ -124,6 +125,7 @@ async fn test_grpc_transport_backend() {
         let mut backend: Box<dyn TransportBackend> = Box::new(GrpcTransportBackend::new());
         let vertex_ids = (0..num_readers_per_node)
             .map(|reader_idx| format!("reader_node_{}_reader_{}", node_idx, reader_idx))
+            .map(|s| Arc::<str>::from(s))
             .collect::<Vec<_>>();
         
         let configs = backend.init_channels(&graph, vertex_ids);
@@ -177,7 +179,7 @@ async fn test_grpc_transport_backend() {
     for writer_idx in 0..writer_vertex_ids.len() {
         // Start writer
         let writer_vertex_id = &writer_vertex_ids[writer_idx];
-        let writer_ref = writer_refs.get(writer_vertex_id).unwrap();
+        let writer_ref = writer_refs.get(writer_vertex_id.as_str()).unwrap();
         writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::Start).await.unwrap();
         
         for message_idx in 0..messages_per_writer {
@@ -208,7 +210,7 @@ async fn test_grpc_transport_backend() {
     // Verify data received by each reader
     for reader_idx in 0..reader_vertex_ids.len() {
         let reader_vertex_id = &reader_vertex_ids[reader_idx];
-        let reader_ref = reader_refs.get(reader_vertex_id).unwrap();
+        let reader_ref = reader_refs.get(reader_vertex_id.as_str()).unwrap();
         let mut received_messages = Vec::new();
         
         // Read all expected batches

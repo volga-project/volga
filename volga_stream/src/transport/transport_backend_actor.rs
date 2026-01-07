@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::VertexId;
 use crate::transport::transport_client::TransportClientConfig;
 use kameo::Actor;
 use kameo::message::{Context, Message};
@@ -11,7 +12,11 @@ use tonic::async_trait;
 pub trait TransportBackend: Send + Sync {
     async fn start(&mut self);
     async fn close(&mut self);
-    fn init_channels(&mut self, execution_graph: &ExecutionGraph, vertex_ids: Vec<String>) -> HashMap<String, TransportClientConfig>;
+    fn init_channels(
+        &mut self,
+        execution_graph: &ExecutionGraph,
+        vertex_ids: Vec<VertexId>,
+    ) -> HashMap<VertexId, TransportClientConfig>;
 }
 
 #[derive(Debug)]

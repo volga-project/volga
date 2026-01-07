@@ -4,7 +4,7 @@ use std::sync::Arc;
 use datafusion::physical_plan::WindowExpr;
 
 use crate::common::Key;
-use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeView};
+use crate::storage::index::{DataBounds, DataRequest, SortedRangeView};
 use crate::runtime::operators::window::window_operator_state::WindowOperatorState;
 use crate::storage::batch_store::Timestamp;
 pub use crate::storage::sorted_range_view_loader::RangesLoadPlan;
@@ -14,7 +14,6 @@ use crate::storage::sorted_range_view_loader::{execute_planned_load, plan_load_f
 pub async fn load_sorted_ranges_view(
     state: &WindowOperatorState,
     key: &Key,
-    ts_column_index: usize,
     requests: &[DataRequest],
     window_expr_for_args: &Arc<dyn WindowExpr>,
 ) -> Vec<SortedRangeView> {
@@ -22,7 +21,7 @@ pub async fn load_sorted_ranges_view(
         requests: requests.to_vec(),
         window_expr_for_args: window_expr_for_args.clone(),
     }];
-    load_sorted_ranges_views(state, key, ts_column_index, &plans)
+    load_sorted_ranges_views(state, key, &plans)
         .await
         .into_iter()
         .next()
@@ -33,7 +32,6 @@ pub async fn load_sorted_ranges_view(
 pub async fn load_sorted_ranges_views(
     state: &WindowOperatorState,
     key: &Key,
-    ts_column_index: usize,
     plans: &[RangesLoadPlan],
 ) -> Vec<Vec<SortedRangeView>> {
     if plans.is_empty() {
@@ -75,10 +73,10 @@ pub async fn load_sorted_ranges_views(
     drop(windows_state_guard);
 
     for bucket_ts in buckets_to_rehydrate {
-        state.rehydrate_bucket(key, bucket_ts, ts_column_index).await;
+        state.rehydrate_bucket(key, bucket_ts).await;
     }
     for bucket_ts in buckets_to_compact {
-        state.compact_bucket_on_read(key, bucket_ts, ts_column_index).await;
+        state.compact_bucket_on_read(key, bucket_ts).await;
     }
 
     // Snapshot only lightweight bucket metadata under the lock (no awaiting while holding it).
@@ -92,11 +90,17 @@ pub async fn load_sorted_ranges_views(
         planned,
         state.get_batch_store().clone(),
         state.batch_pins().clone(),
+        state.storage().work_budget.clone(),
         state.in_mem_batch_cache(),
+        state.task_id(),
         key,
-        ts_column_index,
+        state.ts_column_index(),
+        state.storage().load_io_parallelism,
         plans,
     )
     .await
 }
+
+
+
 

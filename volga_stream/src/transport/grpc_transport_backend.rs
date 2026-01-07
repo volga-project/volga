@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::VertexId;
 use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
 use crate::transport::grpc::grpc_streaming_service::{
@@ -304,12 +305,16 @@ impl TransportBackend for GrpcTransportBackend {
         println!("[GRPC_BACKEND] All tasks completed");
     }
 
-    fn init_channels(&mut self, execution_graph: &ExecutionGraph, vertex_ids: Vec<String>) -> HashMap<String, TransportClientConfig> {
+    fn init_channels(
+        &mut self,
+        execution_graph: &ExecutionGraph,
+        vertex_ids: Vec<VertexId>,
+    ) -> HashMap<VertexId, TransportClientConfig> {
         let mut all_input_edges = Vec::new();
         let mut all_output_edges = Vec::new();
         
         for vertex_id in &vertex_ids {
-            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id).unwrap();
+            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()).unwrap();
             all_input_edges.extend(input_edges);
             all_output_edges.extend(output_edges);
         }
@@ -349,12 +354,14 @@ impl TransportBackend for GrpcTransportBackend {
             writer_receivers.insert(channel_id.clone(), rx);
         }
 
-        let mut transport_client_configs: HashMap<String, TransportClientConfig> = HashMap::new();
+        let mut transport_client_configs: HashMap<VertexId, TransportClientConfig> = HashMap::new();
         
         for vertex_id in vertex_ids {
-            let config = transport_client_configs.entry(vertex_id.clone()).or_insert(TransportClientConfig::new(vertex_id.clone()));
+            let config = transport_client_configs
+                .entry(vertex_id.clone())
+                .or_insert(TransportClientConfig::new(vertex_id.clone()));
             
-            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
+            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()).unwrap();
             
             for edge in input_edges {
                 let channel = edge.get_channel();

@@ -1,12 +1,11 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use std::fmt;
 use crate::common::message::Message;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use tokio::sync::mpsc::{self, Sender, Receiver};
-use tokio::time::{sleep, timeout, Duration};
+use tokio::time::{timeout, Duration};
 use super::source_function::SourceFunctionTrait;
 
 #[derive(Debug)]

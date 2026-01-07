@@ -1,6 +1,8 @@
 use crate::runtime::{
     execution_graph::ExecutionGraph, functions::source::request_source::{extract_request_source_config, RequestSourceProcessor}, metrics::WorkerMetrics, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}, state::OperatorStates
 };
+use crate::runtime::VertexId;
+use crate::runtime::metrics::StreamTaskMetrics;
 use crate::transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
@@ -14,6 +16,9 @@ use anyhow::Result;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
+use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
+use crate::storage::batch_store::{BatchStore, InMemBatchStore};
+use crate::runtime::operators::window::TimeGranularity;
 
 use tokio::sync::mpsc;
 
@@ -21,7 +26,7 @@ use tokio::sync::mpsc;
 pub struct WorkerConfig {
     pub worker_id: String,
     pub graph: ExecutionGraph,
-    pub vertex_ids: Vec<String>,
+    pub vertex_ids: Vec<VertexId>,
     pub num_threads_per_task: usize,
     pub transport_backend_type: TransportBackendType,
     pub master_addr: Option<String>,
@@ -32,7 +37,7 @@ impl WorkerConfig {
     pub fn new(
         worker_id: String,
         graph: ExecutionGraph,
-        vertex_ids: Vec<String>,
+        vertex_ids: Vec<VertexId>,
         num_threads_per_task: usize,
         transport_backend_type: TransportBackendType,
     ) -> Self {
@@ -60,7 +65,7 @@ impl WorkerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerState {
-    pub task_statuses: HashMap<String, StreamTaskStatus>,
+    pub task_statuses: HashMap<VertexId, StreamTaskStatus>,
     pub worker_metrics: Option<WorkerMetrics>,
 }
 
@@ -92,13 +97,13 @@ impl WorkerState {
 pub struct Worker {
     worker_id: String,
     graph: ExecutionGraph,
-    vertex_ids: Vec<String>,
+    vertex_ids: Vec<VertexId>,
     transport_backend_type: TransportBackendType,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
-    task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
+    task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
-    task_runtimes: HashMap<String, Runtime>,
+    task_runtimes: HashMap<VertexId, Runtime>,
     transport_backend_runtime: Option<Runtime>,
     worker_state: Arc<tokio::sync::Mutex<WorkerState>>,
     operator_states: Arc<OperatorStates>,
@@ -164,8 +169,8 @@ impl Worker {
 
     async fn poll_and_update_tasks_state(
         worker_id: String,
-        task_runtimes: HashMap<String, Handle>,
-        task_actors: HashMap<String, ActorRef<StreamTaskActor>>,
+        task_runtimes: HashMap<VertexId, Handle>,
+        task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
         state: Arc<tokio::sync::Mutex<WorkerState>>,
         state_update_sender: Option<mpsc::Sender<WorkerState>>
@@ -183,8 +188,8 @@ impl Worker {
         }
         let task_results = join_all(task_futures).await;
 
-        let mut task_statuses = HashMap::new();
-        let mut task_metrics = HashMap::new();
+        let mut task_statuses: HashMap<VertexId, StreamTaskStatus> = HashMap::new();
+        let mut task_metrics: HashMap<VertexId, StreamTaskMetrics> = HashMap::new();
 
         for result in task_results {
             if let Ok((vertex_id, state)) = result {
@@ -193,7 +198,11 @@ impl Worker {
             }
         }
 
-        let worker_metrics = WorkerMetrics::new(worker_id, task_metrics, &graph);
+        let task_metrics_str: HashMap<String, StreamTaskMetrics> = task_metrics
+            .into_iter()
+            .map(|(k, v)| (k.as_ref().to_string(), v))
+            .collect();
+        let worker_metrics = WorkerMetrics::new(worker_id, task_metrics_str, &graph);
         worker_metrics.record();
 
         // Update shared WorkerState
@@ -258,6 +267,13 @@ impl Worker {
     pub async fn spawn_actors(&mut self) {
         println!("[WORKER] Spawning actors");
 
+        // Worker-level shared storage context (used by window/request operators).
+        // TODO: plumb real config + backend selection (SlateDB) here.
+        let budgets = StorageBudgetConfig::default();
+        let store =
+            Arc::new(InMemBatchStore::new(4096, TimeGranularity::Seconds(1), 1024)) as Arc<dyn BatchStore>;
+        let worker_storage = WorkerStorageContext::new(store, budgets).expect("worker storage ctx");
+
         let mut backend: Box<dyn TransportBackend> = match self.transport_backend_type {
             TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new()),
             TransportBackendType::InMemory => Box::new(InMemoryTransportBackend::new()),
@@ -272,7 +288,10 @@ impl Worker {
 
         let vertex_ids = self.vertex_ids.clone();
         for vertex_id in &vertex_ids {
-            let vertex = self.graph.get_vertex(vertex_id).expect("Vertex should exist");
+            let vertex = self
+                .graph
+                .get_vertex(vertex_id.as_ref())
+                .expect("Vertex should exist");
             let task_runtime = self.task_runtimes.get(vertex_id).expect("Task runtime should exist");
 
             // Create runtime context for the vertex
@@ -297,12 +316,13 @@ impl Worker {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
                 runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
             }
+            runtime_context.set_worker_storage_context(worker_storage.clone());
 
             // Create the task and its actor in the task's runtime
             let task = StreamTask::new(
                 vertex_id.clone(),
                 vertex.operator_config.clone(),
-                transport_client_configs.remove(&vertex_id.clone()).unwrap(),
+                transport_client_configs.remove(vertex_id).unwrap(),
                 runtime_context,
                 self.graph.clone(),
             );
@@ -350,7 +370,7 @@ impl Worker {
         let state = self.worker_state.clone();
         let worker_id = self.worker_id.clone();
         
-        let task_runtime_handles: HashMap<String, Handle> = self.task_runtimes.iter()
+        let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
             .map(|(k, v)| (k.clone(), v.handle().clone()))
             .collect();
         
@@ -434,7 +454,7 @@ impl Worker {
 
     pub async fn get_state(&self) -> WorkerState {
         if self.running.load(Ordering::SeqCst) {
-            let task_runtime_handles: HashMap<String, Handle> = self.task_runtimes.iter()
+        let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
                 .map(|(k, v)| (k.clone(), v.handle().clone()))
                 .collect();
             let task_actors = self.task_actors.clone();
@@ -500,13 +520,13 @@ impl Worker {
         println!("[WORKER] Triggering checkpoint {} on source tasks", checkpoint_id);
         for (vertex_id, runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
-            let vertex_type = self.graph.get_vertex_type(&vertex_id);
+            let vertex_type = self.graph.get_vertex_type(vertex_id.as_ref());
             if vertex_type != OperatorType::Source && vertex_type != OperatorType::ChainedSourceSink {
                 continue;
             }
 
             // Only trigger sources that actually participate in checkpointing.
-            if let Some(v) = self.graph.get_vertices().get(&vertex_id) {
+            if let Some(v) = self.graph.get_vertices().get(vertex_id.as_ref()) {
                 if !operator_config_requires_checkpoint(&v.operator_config) {
                     continue;
                 }

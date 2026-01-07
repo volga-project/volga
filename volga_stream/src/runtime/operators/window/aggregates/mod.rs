@@ -12,7 +12,7 @@ use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::storage::batch_store::Timestamp;
-use crate::runtime::operators::window::state::index::{DataRequest, SortedRangeView};
+use crate::storage::index::{DataRequest, SortedRangeView};
 
 pub mod arrow_utils;
 pub mod evaluator;
@@ -223,7 +223,7 @@ pub(crate) mod test_utils {
     use crate::api::planner::{Planner, PlanningContext};
     use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-    use crate::runtime::operators::window::state::index::{DataRequest, SortedRangeView, SortedSegment};
+    use crate::storage::index::{DataRequest, SortedRangeView, SortedSegment};
     use crate::runtime::operators::window::{Cursor, TimeGranularity, SEQ_NO_COLUMN_NAME};
     use crate::storage::batch_store::Timestamp;
 
@@ -272,13 +272,13 @@ pub(crate) mod test_utils {
         window_expr_for_args: &Arc<dyn WindowExpr>,
     ) -> SortedRangeView {
         let (start, end) = match request.bounds {
-            crate::runtime::operators::window::state::index::DataBounds::All => {
+            crate::storage::index::DataBounds::All => {
                 (Cursor::new(i64::MIN, 0), Cursor::new(i64::MAX, u64::MAX))
             }
-            crate::runtime::operators::window::state::index::DataBounds::Time { start_ts, end_ts } => {
+            crate::storage::index::DataBounds::Time { start_ts, end_ts } => {
                 (Cursor::new(start_ts, 0), Cursor::new(end_ts, u64::MAX))
             }
-            crate::runtime::operators::window::state::index::DataBounds::RowsTail { end_ts, .. } => {
+            crate::storage::index::DataBounds::RowsTail { end_ts, .. } => {
                 (Cursor::new(i64::MIN, 0), Cursor::new(end_ts, u64::MAX))
             }
         };
@@ -289,7 +289,7 @@ pub(crate) mod test_utils {
             out.push(SortedSegment::new(bucket_ts, b, 0, 3, Arc::new(args)));
         }
         out.sort_by_key(|b| b.bucket_ts());
-        SortedRangeView::new(request, granularity, start, end, out)
+        SortedRangeView::new(request, granularity, start, end, out, None)
     }
 }
 

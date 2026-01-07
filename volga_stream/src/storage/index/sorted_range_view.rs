@@ -6,6 +6,7 @@ use crate::runtime::operators::window::aggregates::BucketRange;
 use crate::runtime::operators::window::state::tiles::TimeGranularity;
 use crate::runtime::operators::window::Cursor;
 use crate::storage::batch_store::Timestamp;
+use crate::storage::WorkLease;
 
 #[derive(Debug, Clone, Copy)]
 pub enum DataBounds {
@@ -106,6 +107,9 @@ pub struct SortedRangeView {
     start: Cursor,
     end: Cursor,
     segments: Vec<SortedSegment>,
+    // Keeps work-memory permit alive for the lifetime of this view.
+    #[allow(dead_code)]
+    work_lease: Option<WorkLease>,
 }
 
 impl SortedRangeView {
@@ -115,6 +119,7 @@ impl SortedRangeView {
         start: Cursor,
         end: Cursor,
         segments: Vec<SortedSegment>,
+        work_lease: Option<WorkLease>,
     ) -> Self {
         Self {
             request,
@@ -122,6 +127,7 @@ impl SortedRangeView {
             start,
             end,
             segments,
+            work_lease,
         }
     }
 

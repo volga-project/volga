@@ -60,7 +60,7 @@ impl FakeDistributedExecutor {
             let worker_config = WorkerConfig::new(
                 node_id.clone(),
                 execution_graph.clone(),
-                vertex_ids,
+                vertex_ids.into_iter().map(|v| std::sync::Arc::<str>::from(v)).collect(),
                 1,
                 TransportBackendType::Grpc,
             ).with_master_addr(master_addr.clone());
@@ -108,7 +108,7 @@ impl Executor for FakeDistributedExecutor {
             .get_vertices()
             .values()
             .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
-            .map(|v| TaskKey { vertex_id: v.vertex_id.clone(), task_index: v.task_index })
+            .map(|v| TaskKey { vertex_id: v.vertex_id.as_ref().to_string(), task_index: v.task_index })
             .collect::<Vec<_>>();
         master_server.set_checkpointable_tasks(expected_tasks).await;
         master_server.start(&master_addr).await?;

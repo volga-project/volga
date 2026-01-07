@@ -1,11 +1,9 @@
 use std::sync::Arc;
-use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use datafusion::common::DFSchemaRef;
 use datafusion::physical_plan::PhysicalExpr;
 use crate::common::message::Message;
 use anyhow::Result;
-use std::fmt;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::functions::map::MapFunctionTrait;
@@ -13,16 +11,15 @@ use std::any::Any;
 
 use datafusion::logical_expr::Expr;
 use datafusion::execution::context::SessionContext;
-use arrow::record_batch::RecordBatch;
 use arrow::compute::filter_record_batch;
 use arrow::array::BooleanArray;
 
 // TODO use Datafusion's FilterExec
 #[derive(Clone)]
 pub struct FilterFunction {
-    schema: DFSchemaRef,
+    _schema: DFSchemaRef,
     predicate: Expr,
-    session_context: SessionContext,
+    _session_context: SessionContext,
     physical_expr: Arc<dyn PhysicalExpr>,
 }
 
@@ -43,9 +40,9 @@ impl FilterFunction {
         let physical_expr = session_context.create_physical_expr(predicate.clone(), &schema).unwrap();
         
         Self { 
-            schema,
+            _schema: schema,
             predicate, 
-            session_context,
+            _session_context: session_context,
             physical_expr,
         }
     }

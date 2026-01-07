@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -11,6 +10,7 @@ use dashmap::DashMap;
 use std::hash::{Hash, Hasher};
 
 use crate::{common::Key, runtime::operators::window::TimeGranularity};
+use crate::runtime::TaskId;
 
 pub type Timestamp = i64;
 pub type RowIdx = usize; // row index within a batch
@@ -91,16 +91,34 @@ pub trait BatchStore: Send + Sync + std::fmt::Debug {
         ts_column_index: usize,
     ) -> Vec<(Timestamp, RecordBatch)>;
 
-    fn load_batches<'a>(&'a self, batch_ids: Vec<BatchId>, partition_key: &'a Key)
-        -> BoxFut<'a, HashMap<BatchId, RecordBatch>>;
-    fn remove_batches<'a>(&'a self, batch_ids: &'a [BatchId], partition_key: &'a Key) -> BoxFut<'a, ()>;
+    fn load_batch<'a>(&'a self, task_id: TaskId, batch_id: BatchId, partition_key: &'a Key)
+        -> BoxFut<'a, Option<RecordBatch>>;
+    fn remove_batch<'a>(&'a self, task_id: TaskId, batch_id: BatchId, partition_key: &'a Key) -> BoxFut<'a, ()>;
+
+    /// Best-effort stored batch size estimate in bytes (metadata-only if possible).
+    ///
+    /// Used for "work memory" admission control before hydration. Implementations should keep
+    /// this cheap; returning `None` is allowed but reduces admission accuracy.
+    fn batch_bytes_estimate<'a>(
+        &'a self,
+        _task_id: TaskId,
+        _batch_id: BatchId,
+        _partition_key: &'a Key,
+    ) -> BoxFut<'a, Option<usize>> {
+        Box::pin(async move { None })
+    }
     
     // TODO we should put many 
-    fn put_batch_with_id<'a>(&'a self, batch_id: BatchId, batch: RecordBatch, partition_key: &'a Key)
+    fn put_batch_with_id<'a>(&'a self, task_id: TaskId, batch_id: BatchId, batch: RecordBatch, partition_key: &'a Key)
         -> BoxFut<'a, ()>;
 
-    fn to_checkpoint(&self) -> BatchStoreCheckpoint;
-    fn apply_checkpoint(&self, cp: BatchStoreCheckpoint);
+    /// Wait until all previously issued puts are durably persisted.
+    ///
+    /// For in-memory stores this is a no-op. For SlateDB this maps to `flush()`.
+    fn await_persisted<'a>(&'a self) -> BoxFut<'a, anyhow::Result<()>>;
+
+    fn to_checkpoint(&self, task_id: TaskId) -> BatchStoreCheckpoint;
+    fn apply_checkpoint(&self, task_id: TaskId, cp: BatchStoreCheckpoint);
 }
 
 #[derive(Debug)]
@@ -112,7 +130,8 @@ pub struct InMemBatchStore {
     lock_pool: Vec<Arc<RwLock<()>>>,
     
     // In-memory storage
-    batch_store: Arc<DashMap<BatchId, RecordBatch>>, // TODO use foyer
+    // (task_id, batch_id) -> batch
+    batch_store: Arc<DashMap<(TaskId, BatchId), RecordBatch>>, // TODO use foyer
 
     // Time partitioning configuration
     bucket_granularity: TimeGranularity,
@@ -314,49 +333,45 @@ impl InMemBatchStore {
     }
 
 
-    // Get multiple batches from storage
-    // TODO should this be an iterator?
-    pub async fn load_batches(&self, batch_ids: Vec<BatchId>, partition_key: &Key) -> HashMap<BatchId, RecordBatch> {
+    // (legacy multi-load removed; callers fan out with bounded concurrency)
+
+    pub async fn load_batch(&self, task_id: TaskId, batch_id: BatchId, partition_key: &Key) -> Option<RecordBatch> {
         // Acquire global read lock
         let _global_guard = self.global_lock.read().await;
-        
+
         // Acquire per-partition read lock
         let partition_lock = self.get_key_lock(partition_key);
         let _partition_guard = partition_lock.read().await;
 
-        let mut result = HashMap::new();
-        for batch_id in batch_ids {
-            if let Some(batch) = self.batch_store.get(&batch_id) {
-                result.insert(batch_id, batch.clone());
-            }
-        }
-        
-        result
+        self.batch_store.get(&(task_id, batch_id)).map(|b| b.clone())
     }
 
-    // Remove multiple batches from storage
-    pub async fn remove_batches(&self, batch_ids: &[BatchId], partition_key: &Key) {
+    // (legacy multi-delete removed; callers fan out with bounded concurrency)
+
+    pub async fn remove_batch(&self, task_id: TaskId, batch_id: BatchId, partition_key: &Key) {
         // Acquire global read lock
         let _global_guard = self.global_lock.read().await;
-        
+
         // Acquire per-partition write lock
         let partition_lock = self.get_key_lock(partition_key);
         let _partition_guard = partition_lock.write().await;
 
-        for batch_id in batch_ids {
-            self.batch_store.remove(batch_id);
-        }
+        self.batch_store.remove(&(task_id, batch_id));
     }
 
     /// Store a single batch under an explicit `BatchId`.
     ///
     /// Used for read-driven compaction materialization (base batches).
-    pub async fn put_batch_with_id(&self, batch_id: BatchId, batch: RecordBatch, partition_key: &Key) {
+    pub async fn put_batch_with_id(&self, task_id: TaskId, batch_id: BatchId, batch: RecordBatch, partition_key: &Key) {
         // Acquire global read lock
         let _global_guard = self.global_lock.read().await;
         let partition_lock = self.get_key_lock(partition_key);
         let _partition_guard = partition_lock.write().await;
-        self.batch_store.insert(batch_id, batch);
+        self.batch_store.insert((task_id, batch_id), batch);
+    }
+
+    pub async fn await_persisted(&self) -> anyhow::Result<()> {
+        Ok(())
     }
 
     // Get storage statistics with global exclusive lock
@@ -410,11 +425,14 @@ impl InMemBatchStore {
         }
     }
 
-    pub fn to_checkpoint(&self) -> BatchStoreCheckpoint {
+    pub fn to_checkpoint(&self, task_id: TaskId) -> BatchStoreCheckpoint {
         let batches = self
             .batch_store
             .iter()
-            .map(|entry| (*entry.key(), Self::record_batch_to_ipc_bytes(entry.value())))
+            .filter_map(|entry| {
+                let (t, id) = entry.key().clone();
+                (t == task_id).then_some((id, Self::record_batch_to_ipc_bytes(entry.value())))
+            })
             .collect::<Vec<_>>();
 
         BatchStoreCheckpoint {
@@ -424,13 +442,13 @@ impl InMemBatchStore {
         }
     }
 
-    pub fn apply_checkpoint(&self, cp: BatchStoreCheckpoint) {
+    pub fn apply_checkpoint(&self, task_id: TaskId, cp: BatchStoreCheckpoint) {
         // We assume time_granularity/max_batch_size match for now (same job).
-        // Clear and repopulate the in-memory store.
-        self.batch_store.clear();
+        // Clear and repopulate the in-memory store for this namespace only.
+        self.batch_store.retain(|(t, _), _| *t != task_id);
         for (batch_id, bytes) in cp.batches {
             let batch = Self::record_batch_from_ipc_bytes(&bytes);
-            self.batch_store.insert(batch_id, batch);
+            self.batch_store.insert((task_id.clone(), batch_id), batch);
         }
     }
 }
@@ -453,32 +471,58 @@ impl BatchStore for InMemBatchStore {
         InMemBatchStore::partition_records(self, batch, partition_key, ts_column_index)
     }
 
-    fn load_batches<'a>(
+    fn load_batch<'a>(
         &'a self,
-        batch_ids: Vec<BatchId>,
+        task_id: TaskId,
+        batch_id: BatchId,
         partition_key: &'a Key,
-    ) -> BoxFut<'a, HashMap<BatchId, RecordBatch>> {
-        Box::pin(async move { InMemBatchStore::load_batches(self, batch_ids, partition_key).await })
+    ) -> BoxFut<'a, Option<RecordBatch>> {
+        Box::pin(async move { InMemBatchStore::load_batch(self, task_id, batch_id, partition_key).await })
     }
 
-    fn remove_batches<'a>(&'a self, batch_ids: &'a [BatchId], partition_key: &'a Key) -> BoxFut<'a, ()> {
-        Box::pin(async move { InMemBatchStore::remove_batches(self, batch_ids, partition_key).await })
+    fn remove_batch<'a>(
+        &'a self,
+        task_id: TaskId,
+        batch_id: BatchId,
+        partition_key: &'a Key,
+    ) -> BoxFut<'a, ()> {
+        Box::pin(async move { InMemBatchStore::remove_batch(self, task_id, batch_id, partition_key).await })
+    }
+
+    fn batch_bytes_estimate<'a>(
+        &'a self,
+        task_id: TaskId,
+        batch_id: BatchId,
+        _partition_key: &'a Key,
+    ) -> BoxFut<'a, Option<usize>> {
+        Box::pin(async move {
+            self.batch_store
+                .get(&(task_id, batch_id))
+                .map(|b| b.value().get_array_memory_size())
+        })
     }
 
     fn put_batch_with_id<'a>(
         &'a self,
+        task_id: TaskId,
         batch_id: BatchId,
         batch: RecordBatch,
         partition_key: &'a Key,
     ) -> BoxFut<'a, ()> {
-        Box::pin(async move { InMemBatchStore::put_batch_with_id(self, batch_id, batch, partition_key).await })
+        Box::pin(async move {
+            InMemBatchStore::put_batch_with_id(self, task_id, batch_id, batch, partition_key).await
+        })
     }
 
-    fn to_checkpoint(&self) -> BatchStoreCheckpoint {
-        InMemBatchStore::to_checkpoint(self)
+    fn await_persisted<'a>(&'a self) -> BoxFut<'a, anyhow::Result<()>> {
+        Box::pin(async move { InMemBatchStore::await_persisted(self).await })
     }
 
-    fn apply_checkpoint(&self, cp: BatchStoreCheckpoint) {
-        InMemBatchStore::apply_checkpoint(self, cp)
+    fn to_checkpoint(&self, task_id: TaskId) -> BatchStoreCheckpoint {
+        InMemBatchStore::to_checkpoint(self, task_id)
+    }
+
+    fn apply_checkpoint(&self, task_id: TaskId, cp: BatchStoreCheckpoint) {
+        InMemBatchStore::apply_checkpoint(self, task_id, cp)
     }
 }

@@ -8,9 +8,10 @@ use datafusion::scalar::ScalarValue;
 use std::collections::HashMap;
 
 use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
-use crate::runtime::operators::window::state::index::{
+use crate::runtime::operators::window::state::window_logic;
+use crate::storage::index::{
     BucketIndex, DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment,
-    get_window_length_ms, get_window_size_rows, window_logic,
+    get_window_length_ms, get_window_size_rows,
 };
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, Tiles, TimeGranularity};
@@ -180,6 +181,7 @@ impl Aggregation for PlainRangeAggregation {
                 Cursor::new(i64::MIN, 0),
                 Cursor::new(i64::MAX, u64::MAX),
                 merged,
+                None,
             )
         };
 
@@ -251,8 +253,8 @@ mod tests {
     use super::*;
     use crate::runtime::operators::window::Cursor;
     use crate::runtime::operators::window::aggregates::test_utils;
-    use crate::runtime::operators::window::state::index::BucketIndex;
-    use crate::runtime::operators::window::state::index::SortedRangeView;
+    use crate::storage::index::BucketIndex;
+    use crate::storage::index::SortedRangeView;
     use crate::runtime::operators::window::PlainAggregation;
     use crate::runtime::operators::window::state::tiles::TileConfig;
     use crate::runtime::operators::window::TimeGranularity;

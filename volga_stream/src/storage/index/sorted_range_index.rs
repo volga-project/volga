@@ -407,7 +407,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
 
     use crate::runtime::operators::window::aggregates::BucketRange;
-    use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeView, SortedSegment};
+    use crate::storage::index::{DataBounds, DataRequest, SortedRangeView, SortedSegment};
     use crate::runtime::operators::window::state::tiles::TimeGranularity;
     use crate::runtime::operators::window::Cursor;
     use crate::runtime::operators::window::RowPtr;
@@ -458,7 +458,7 @@ mod tests {
             ));
         }
         segments.sort_by_key(|b| b.bucket_ts());
-        SortedRangeView::new(request, gran, start, end, segments)
+        SortedRangeView::new(request, gran, start, end, segments, None)
     }
 
     #[test]

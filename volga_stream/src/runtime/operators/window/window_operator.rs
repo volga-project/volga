@@ -23,11 +23,14 @@ use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
 use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
 use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
-use crate::runtime::operators::window::{AggregatorType, TileConfig, TimeGranularity};
+use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::operators::window::Cursor;
-use crate::runtime::operators::window::state::index::{window_logic, SortedRangeIndex, SortedRangeView};
+use crate::runtime::operators::window::state::window_logic;
+use crate::storage::index::SortedRangeIndex;
+use crate::storage::index::SortedRangeView;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::storage::batch_store::{BatchStore, InMemBatchStore};
+use crate::storage::StorageBudgetConfig;
+use crate::storage::StorageStatsSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -63,6 +66,12 @@ pub struct WindowOperatorConfig {
     pub compaction_interval_ms: u64,
     pub dump_interval_ms: u64,
     pub dump_hot_bucket_count: usize,
+    pub in_mem_limit_bytes: usize,
+    pub in_mem_low_watermark_per_mille: u32,
+    pub in_mem_dump_parallelism: usize,
+    pub max_inflight_keys: usize,
+    pub load_io_parallelism: usize,
+    pub work_limit_bytes: usize,
 }
 
 impl WindowOperatorConfig {
@@ -77,15 +86,20 @@ impl WindowOperatorConfig {
             compaction_interval_ms: 250,
             dump_interval_ms: 1000,
             dump_hot_bucket_count: 2,
+            in_mem_limit_bytes: 0,
+            in_mem_low_watermark_per_mille: 700,
+            in_mem_dump_parallelism: 4,
+            max_inflight_keys: 1,
+            load_io_parallelism: 16,
+            work_limit_bytes: 256 * 1024 * 1024,
         }
     }
 }
 
 pub struct WindowOperator {
     base: OperatorBase,
-    window_configs: BTreeMap<WindowId, WindowConfig>,
-    state: Arc<WindowOperatorState>,
-    ts_column_index: usize,
+    window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+    state: Option<Arc<WindowOperatorState>>,
     buffered_keys: HashSet<Key>,
     execution_mode: ExecutionMode,
     request_advance_policy: RequestAdvancePolicy,
@@ -93,12 +107,15 @@ pub struct WindowOperator {
     thread_pool: Option<ThreadPool>,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
-    tiling_configs: Vec<Option<TileConfig>>,
-    lateness: Option<i64>,
     current_watermark: Option<u64>,
     compaction_interval: Duration,
     dump_interval: Duration,
+    storage_budgets: StorageBudgetConfig,
+    ts_column_index: usize,
+    tiling_configs: Vec<Option<TileConfig>>,
+    lateness: Option<i64>,
     dump_hot_bucket_count: usize,
+    in_mem_dump_parallelism: usize,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -107,15 +124,12 @@ impl fmt::Debug for WindowOperator {
             .field("base", &self.base)
             .field("windows", &self.window_configs)
             .field("state", &self.state)
-            .field("ts_column_index", &self.ts_column_index)
             .field("buffered_keys", &self.buffered_keys)
             .field("execution_mode", &self.execution_mode)
             .field("parallelize", &self.parallelize)
             .field("thread_pool", &self.thread_pool)
             .field("output_schema", &self.output_schema)
             .field("input_schema", &self.input_schema)
-            .field("tiling_configs", &self.tiling_configs)
-            .field("lateness", &self.lateness)
             .finish()
     }
 }
@@ -181,14 +195,20 @@ impl WindowOperator {
             false, &window_operator_config.window_exec, &window_operator_config.tiling_configs, window_operator_config.parallelize
         );
 
+        let window_configs = Arc::new(windows);
+        let storage_budgets = StorageBudgetConfig {
+            // Keep these in operator config until we move this into worker-level config plumbing.
+            in_mem_limit_bytes: window_operator_config.in_mem_limit_bytes.max(1),
+            in_mem_low_watermark_per_mille: window_operator_config.in_mem_low_watermark_per_mille,
+            work_limit_bytes: window_operator_config.work_limit_bytes.max(1),
+            max_inflight_keys: window_operator_config.max_inflight_keys.max(1),
+            load_io_parallelism: window_operator_config.load_io_parallelism.max(1),
+        };
+
         Self {
             base: OperatorBase::new(config),
-            window_configs: windows,
-            state: Arc::new(WindowOperatorState::new(
-                Arc::new(InMemBatchStore::new(4096, TimeGranularity::Seconds(1), 1024))
-                    as Arc<dyn BatchStore>,
-            )),
-            ts_column_index,
+            window_configs,
+            state: None,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
             request_advance_policy: window_operator_config.request_advance_policy,
@@ -196,13 +216,24 @@ impl WindowOperator {
             thread_pool,
             output_schema,
             input_schema,
-            tiling_configs: window_operator_config.tiling_configs,
-            lateness: window_operator_config.lateness,
             current_watermark: None,
             compaction_interval: Duration::from_millis(window_operator_config.compaction_interval_ms.max(1)),
             dump_interval: Duration::from_millis(window_operator_config.dump_interval_ms.max(1)),
+            storage_budgets,
+            ts_column_index,
+            tiling_configs: window_operator_config.tiling_configs.clone(),
+            lateness: window_operator_config.lateness,
             dump_hot_bucket_count: window_operator_config.dump_hot_bucket_count,
+            in_mem_dump_parallelism: window_operator_config.in_mem_dump_parallelism,
         }
+    }
+
+    fn state_ref(&self) -> &Arc<WindowOperatorState> {
+        self.state.as_ref().expect("WindowOperator must be opened first")
+    }
+
+    pub fn storage_stats_snapshot(&self) -> StorageStatsSnapshot {
+        self.state_ref().storage_stats_snapshot()
     }
 
     async fn process_key(
@@ -210,25 +241,35 @@ impl WindowOperator {
         key: &Key,
         process_until: Option<Cursor>,
     ) -> RecordBatch {
-        
+        let _permit = self
+            .state_ref()
+            .storage()
+            .inflight_keys
+            .clone()
+            .acquire_owned()
+            .await
+            .expect("inflight_keys semaphore");
+
         let result = self.advance_windows(key, process_until).await;
 
-        if self.lateness.is_some() {
-            self.state.prune(key, self.lateness.unwrap(), &self.window_configs).await;
-        }
+        self.state_ref().prune_if_needed(key).await;
         result
     }
 
     pub fn get_state(&self) -> &WindowOperatorState {
-        &self.state
+        self.state_ref()
+    }
+
+    #[cfg(test)]
+    fn storage_ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(self.get_state().storage(), other.get_state().storage())
     }
 
     async fn process_buffered(&self, process_until: Option<Cursor>) -> RecordBatch {
-        // TODO limit number of concurrent keys to process
-        let futures: Vec<_> = self.buffered_keys.iter()
-            .map(|key| async move {
-                self.process_key(key, process_until).await
-            })
+        let keys: Vec<Key> = self.buffered_keys.iter().cloned().collect();
+        let futures: Vec<_> = keys
+            .iter()
+            .map(|key| async move { self.process_key(key, process_until).await })
             .collect();
         
         let results = future::join_all(futures).await;
@@ -251,7 +292,7 @@ impl WindowOperator {
         HashMap<WindowId, Cursor>,
         Option<(Option<Cursor>, Cursor, BucketRange)>,
     ) {
-        let windows_state_guard = self.state.get_windows_state(key).await
+        let windows_state_guard = self.state_ref().get_windows_state(key).await
             .expect("Windows state should exist - insert_batch should have created it");
         let windows_state = windows_state_guard.value();
         
@@ -266,7 +307,7 @@ impl WindowOperator {
             .expect("window_configs must be non-empty");
         let mut entry_delta: Option<(Option<Cursor>, Cursor, BucketRange)> = None;
         
-        for (window_id, _window_config) in &self.window_configs {
+        for (window_id, _window_config) in self.window_configs.iter() {
             let window_frame = _window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
             let aggregator_type = _window_config.aggregator_type;
@@ -301,7 +342,7 @@ impl WindowOperator {
                                 batch_index,
                                 _window_config.window_expr.clone(),
                                 accumulator_state_owned.clone(),
-                                self.ts_column_index,
+                                self.state_ref().ts_column_index(),
                                 batch_index.bucket_granularity(),
                             )));
                         }
@@ -336,7 +377,7 @@ impl WindowOperator {
                                 batch_index,
                                 _window_config.window_expr.clone(),
                                 accumulator_state_owned.clone(),
-                                self.ts_column_index,
+                                self.state_ref().ts_column_index(),
                                 batch_index.bucket_granularity(),
                             )));
                         }
@@ -393,7 +434,7 @@ impl WindowOperator {
             }
         }
 
-        let views_by_agg = load_sorted_ranges_views(&self.state, key, self.ts_column_index, &load_plans).await;
+        let views_by_agg = load_sorted_ranges_views(self.state_ref(), key, &load_plans).await;
 
         let futures: Vec<_> = execs
             .iter()
@@ -431,7 +472,7 @@ impl WindowOperator {
         drop(aggregations);
         
         // Update window state positions and accumulator states
-        self.state
+        self.state_ref()
             .update_window_positions_and_accumulators(key, &new_processed_until, &accumulator_states)
             .await;
 
@@ -532,14 +573,31 @@ impl OperatorTrait for WindowOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await?;
         
-        let vertex_id = context.vertex_id().to_string();
+        let vertex_id = context.vertex_id_arc();
         let operator_states = context.operator_states();
 
-        operator_states.insert_operator_state(vertex_id, self.state.clone());
+        if self.state.is_none() {
+            let storage = context
+                .worker_storage_context()
+                .expect("WorkerStorageContext must be provided by RuntimeContext");
+
+            let task_id: crate::runtime::TaskId = context.vertex_id_arc();
+            self.state = Some(Arc::new(WindowOperatorState::new(
+                storage,
+                task_id,
+                self.ts_column_index,
+                self.window_configs.clone(),
+                self.tiling_configs.clone(),
+                self.lateness,
+                self.dump_hot_bucket_count,
+                self.storage_budgets.in_mem_low_watermark_per_mille,
+                self.in_mem_dump_parallelism,
+            )));
+        }
+
+        operator_states.insert_operator_state(vertex_id, self.state_ref().clone());
         // Start background compaction + dump (separate intervals), plus retirement cleanup.
-        self.state.start_background_tasks(
-            self.ts_column_index,
-            self.dump_hot_bucket_count,
+        self.state_ref().start_background_tasks(
             self.compaction_interval,
             self.dump_interval,
         );
@@ -548,7 +606,9 @@ impl OperatorTrait for WindowOperator {
     }
 
     async fn close(&mut self) -> Result<()> {
-        self.state.stop_background_tasks().await;
+        if let Some(state) = &self.state {
+            state.stop_background_tasks().await;
+        }
         self.base.close().await
     }
 
@@ -582,13 +642,9 @@ impl OperatorTrait for WindowOperator {
                         let watermark_ts = self.current_watermark.map(|v| v as i64);
                         let input_rows = keyed_message.base.record_batch.num_rows();
                         let _dropped_rows = self
-                            .state
+                            .state_ref()
                             .insert_batch(
                                 key,
-                                &self.window_configs,
-                                &self.tiling_configs,
-                                self.ts_column_index,
-                                self.lateness,
                                 watermark_ts,
                                 keyed_message.base.record_batch.clone(),
                             )
@@ -646,10 +702,14 @@ impl OperatorTrait for WindowOperator {
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
         // Ensure checkpoint depends only on the store: flush hot in-memory runs to `BatchStore`
         // and update the bucket index to reference `BatchRef::Stored`.
-        self.state.flush_in_mem_runs_to_store(self.ts_column_index).await?;
+        self.state_ref().flush_in_mem_runs_to_store().await?;
+        self.state_ref().await_store_persisted().await?;
 
-        let state_cp = self.state.to_checkpoint();
-        let batch_store_cp = self.state.get_batch_store().to_checkpoint();
+        let state_cp = self.state_ref().to_checkpoint();
+        let batch_store_cp = self
+            .state_ref()
+            .get_batch_store()
+            .to_checkpoint(self.state_ref().task_id());
 
         Ok(vec![
             ("window_operator_state".to_string(), bincode::serialize(&state_cp)?),
@@ -673,7 +733,9 @@ impl OperatorTrait for WindowOperator {
 
         if let Some(bytes) = batch_store_bytes {
             let cp: crate::storage::batch_store::BatchStoreCheckpoint = bincode::deserialize(bytes)?;
-            self.state.get_batch_store().apply_checkpoint(cp);
+            self.state_ref()
+                .get_batch_store()
+                .apply_checkpoint(self.state_ref().task_id(), cp);
         } else {
             panic!("Batch store bytes are missing");
         }
@@ -681,8 +743,8 @@ impl OperatorTrait for WindowOperator {
         if let Some(bytes) = state_bytes {
             let cp: crate::runtime::operators::window::window_operator_state::WindowOperatorStateCheckpoint =
                 bincode::deserialize(bytes)?;
-            // Important: do not replace self.state Arc (it is registered in OperatorStates in open()).
-            self.state.apply_checkpoint(cp);
+            // Important: do not replace the state Arc (it is registered in OperatorStates in open()).
+            self.state_ref().apply_checkpoint(cp);
         } else {
             panic!("Window operator state bytes are missing");
         }
@@ -812,6 +874,9 @@ mod tests {
     use crate::runtime::runtime_context::RuntimeContext;
     use crate::runtime::state::OperatorStates;
     use crate::common::Key;
+    use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
+    use crate::storage::batch_store::{BatchStore, InMemBatchStore};
+    use crate::runtime::operators::window::TimeGranularity;
 
     fn create_test_schema() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -908,6 +973,61 @@ mod tests {
         extract_datafusion_window_exec(sql, &mut planner).await
     }
 
+    #[tokio::test]
+    async fn worker_storage_is_shared_via_runtime_context() {
+        let sql = "SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
+        FROM test_table
+        WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW)";
+
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut cfg1 = WindowOperatorConfig::new(window_exec.clone());
+        cfg1.in_mem_limit_bytes = 64 * 1024 * 1024;
+        cfg1.work_limit_bytes = 64 * 1024 * 1024;
+        cfg1.max_inflight_keys = 2;
+
+        let cfg2 = cfg1.clone();
+
+        let budgets = StorageBudgetConfig {
+            in_mem_limit_bytes: 64 * 1024 * 1024,
+            in_mem_low_watermark_per_mille: 700,
+            work_limit_bytes: 64 * 1024 * 1024,
+            max_inflight_keys: 2,
+            load_io_parallelism: 4,
+        };
+        let store =
+            Arc::new(InMemBatchStore::new(64, TimeGranularity::Seconds(1), 128)) as Arc<dyn BatchStore>;
+        let shared = WorkerStorageContext::new(store, budgets).expect("ctx");
+
+        let operator_states = Arc::new(OperatorStates::new());
+        let mut ctx1 = RuntimeContext::new(
+            "w1".to_string().into(),
+            0,
+            1,
+            None,
+            Some(operator_states.clone()),
+            None,
+        );
+        ctx1.set_worker_storage_context(shared.clone());
+        let mut ctx2 = RuntimeContext::new(
+            "w2".to_string().into(),
+            0,
+            1,
+            None,
+            Some(operator_states.clone()),
+            None,
+        );
+        ctx2.set_worker_storage_context(shared.clone());
+
+        let mut op1 = WindowOperator::new(OperatorConfig::WindowConfig(cfg1));
+        let mut op2 = WindowOperator::new(OperatorConfig::WindowConfig(cfg2));
+        op1.open(&ctx1).await.expect("open op1");
+        op2.open(&ctx2).await.expect("open op2");
+
+        assert!(op1.storage_ptr_eq(&op2), "operators should share worker storage context");
+        assert!(Arc::ptr_eq(op1.get_state().storage(), &shared));
+        assert!(Arc::ptr_eq(op2.get_state().storage(), &shared));
+    }
+
     fn create_keyed_message(batch: RecordBatch, partition_key: &str) -> Message {
         let key = create_test_key(partition_key);
         Message::new_keyed(None, batch, key, None, None)
@@ -927,14 +1047,24 @@ mod tests {
     }
 
     fn create_test_runtime_context() -> RuntimeContext {
-        RuntimeContext::new(
-            "test_vertex".to_string(),
+        use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
+        use crate::storage::batch_store::{BatchStore, InMemBatchStore};
+        use crate::runtime::operators::window::TimeGranularity;
+
+        let store =
+            Arc::new(InMemBatchStore::new(64, TimeGranularity::Seconds(1), 128)) as Arc<dyn BatchStore>;
+        let shared = WorkerStorageContext::new(store, StorageBudgetConfig::default()).expect("ctx");
+
+        let mut ctx = RuntimeContext::new(
+            "test_vertex".to_string().into(),
             0,
             1,
             None,
             Some(Arc::new(OperatorStates::new())),
             None
-        )
+        );
+        ctx.set_worker_storage_context(shared);
+        ctx
     }
 
     async fn collect_regular_output_rows(window_operator: &mut WindowOperator) -> Vec<(i64, f64, String, f64, i64, f64)> {
@@ -1803,7 +1933,10 @@ mod tests {
         drain_one_pending_message(&mut window_operator).await;
     
         // Verify state was updated
-        let state1_guard = window_operator.state.get_windows_state(&partition_key).await
+        let state1_guard = window_operator
+            .get_state()
+            .get_windows_state(&partition_key)
+            .await
             .expect("State should exist");
         let state1 = state1_guard.value();
         assert_eq!(state1.bucket_index.total_rows(), 3, "Should have 3 rows");
@@ -1832,7 +1965,10 @@ mod tests {
         drain_one_pending_message(&mut window_operator).await;
         
         // Verify late entry was dropped
-        let state2_guard = window_operator.state.get_windows_state(&partition_key).await
+        let state2_guard = window_operator
+            .get_state()
+            .get_windows_state(&partition_key)
+            .await
             .expect("State should exist");
         let state2 = state2_guard.value();
         assert_eq!(state2.bucket_index.total_rows(), 3, "Should still have 3 rows after dropping late entry");
@@ -1857,7 +1993,10 @@ mod tests {
         drain_one_pending_message(&mut window_operator).await;
         
         // Verify state was updated
-        let state3_guard = window_operator.state.get_windows_state(&partition_key).await
+        let state3_guard = window_operator
+            .get_state()
+            .get_windows_state(&partition_key)
+            .await
             .expect("State should exist");
         let state3 = state3_guard.value();
         assert_eq!(state3.bucket_index.total_rows(), 5, "Should have 5 rows");

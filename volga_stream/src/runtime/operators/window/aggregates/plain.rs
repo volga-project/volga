@@ -5,11 +5,11 @@ use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
-use crate::runtime::operators::window::state::index::BucketIndex;
+use crate::storage::index::{BucketIndex, DataRequest, SortedRangeView};
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, Tiles};
 
-use super::{Aggregation, AggregatorType, BucketRange};
+use super::{Aggregation, AggregatorType};
 
 #[path = "plain_range.rs"]
 mod plain_range;
@@ -77,7 +77,7 @@ impl Aggregation for PlainAggregation {
         AggregatorType::PlainAccumulator
     }
 
-    fn get_data_requests(&self) -> Vec<crate::runtime::operators::window::state::index::DataRequest> {
+    fn get_data_requests(&self) -> Vec<DataRequest> {
         match self {
             PlainAggregation::Range(r) => r.get_data_requests(),
             PlainAggregation::Points(p) => p.get_data_requests(),
@@ -86,7 +86,7 @@ impl Aggregation for PlainAggregation {
 
     async fn produce_aggregates_from_ranges(
         &self,
-        sorted_ranges: &[crate::runtime::operators::window::state::index::SortedRangeView],
+        sorted_ranges: &[SortedRangeView],
         thread_pool: Option<&ThreadPool>,
     ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
         match self {

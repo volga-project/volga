@@ -60,6 +60,8 @@ pub struct BatchMeta {
     pub min_pos: Cursor,
     pub max_pos: Cursor,
     pub row_count: usize,
+    #[serde(default)]
+    pub bytes_estimate: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -183,7 +185,7 @@ impl BucketIndex {
     ) {
         let bucket_ts = batch_id.time_bucket() as Timestamp;
 
-        self.insert_batch_ref(bucket_ts, BatchRef::Stored(batch_id), min_pos, max_pos, row_count);
+        self.insert_batch_ref(bucket_ts, BatchRef::Stored(batch_id), min_pos, max_pos, row_count, 0);
     }
 
     pub fn insert_batch_ref(
@@ -193,6 +195,7 @@ impl BucketIndex {
         min_pos: Cursor,
         max_pos: Cursor,
         row_count: usize,
+        bytes_estimate: usize,
     ) {
         let metadata = BatchMeta {
             run,
@@ -200,6 +203,7 @@ impl BucketIndex {
             min_pos,
             max_pos,
             row_count,
+            bytes_estimate,
         };
 
         let b = self

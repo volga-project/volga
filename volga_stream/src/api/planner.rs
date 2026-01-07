@@ -27,7 +27,6 @@ use datafusion::sql::TableReference;
 use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
-use petgraph::Direction;
 
 use super::logical_graph::{LogicalNode, LogicalGraph};
 use crate::api::pipeline_context::ExecutionMode;
@@ -40,20 +39,19 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
-use crate::runtime::partition::PartitionType;
 
 // pub static REQUEST_SOURCE_NAME: &str = "request_source";
 
 /// Custom table provider creating dummy tables with no execution logic
 #[derive(Debug, Clone)]
 pub struct VolgaTableProvider {
-    table_name: String,
+    _table_name: String,
     schema: SchemaRef,
 }
 
 impl VolgaTableProvider {
     pub fn new(table_name: String, schema: SchemaRef) -> Self {
-        Self { table_name, schema }
+        Self { _table_name: table_name, schema }
     }
 }
 
@@ -84,7 +82,7 @@ impl TableProvider for VolgaTableProvider {
         // Simple generator that produces no batches
         #[derive(Debug)]
         struct EmptyBatchGenerator {
-            schema: SchemaRef,
+            _schema: SchemaRef,
         }
         
         impl fmt::Display for EmptyBatchGenerator {
@@ -100,7 +98,7 @@ impl TableProvider for VolgaTableProvider {
         }
         
         let generator = StdArc::new(RwLock::new(EmptyBatchGenerator {
-            schema: self.schema.clone(),
+            _schema: self.schema.clone(),
         }));
         
         Ok(Arc::new(LazyMemoryExec::try_new(self.schema.clone(), vec![generator])?))
@@ -549,10 +547,11 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
 
 #[cfg(test)]
 mod tests {
-    use crate::runtime::{functions::source::RequestSourceConfig, operators::source::source_operator::VectorSourceConfig};
+    use crate::runtime::{functions::source::RequestSourceConfig, operators::source::source_operator::VectorSourceConfig, partition::PartitionType};
 
     use super::*;
     use arrow::datatypes::{Schema, Field, DataType};
+    use petgraph::Direction;
     use std::sync::Arc;
     use crate::runtime::operators::sink::sink_operator::SinkConfig;
     /// Node type enum for logical graph nodes (used in planner tests)

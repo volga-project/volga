@@ -14,6 +14,7 @@ use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, 
 use serde::{Serialize, Deserialize};
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
+use crate::runtime::VertexId;
 
 pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -85,7 +86,7 @@ pub enum StreamTaskStatus {
 
 #[derive(Debug, Clone)]
 pub struct StreamTaskState {
-    pub vertex_id: String,
+    pub vertex_id: VertexId,
     pub status: StreamTaskStatus,
     pub metrics: StreamTaskMetrics,
 }
@@ -105,7 +106,7 @@ impl From<u8> for StreamTaskStatus {
 
 #[derive(Debug)]
 pub struct StreamTask {
-    vertex_id: String,
+    vertex_id: VertexId,
     runtime_context: RuntimeContext,
     status: Arc<AtomicU8>,
     run_loop_handle: Option<JoinHandle<Result<()>>>,
@@ -123,7 +124,7 @@ pub struct StreamTask {
 
 impl StreamTask {
     pub fn new(
-        vertex_id: String,
+        vertex_id: VertexId,
         operator_config: OperatorConfig,
         transport_client_config: TransportClientConfig,
         runtime_context: RuntimeContext,
@@ -262,7 +263,7 @@ impl StreamTask {
     }
 
     fn record_metrics(
-        vertex_id: String,
+        vertex_id: VertexId,
         message: &Message,
         recv_or_send: bool,
     ) {
@@ -294,7 +295,7 @@ impl StreamTask {
     // It never yields checkpoint barriers to the operator; instead it notifies the run loop via `aligned_checkpoint_sender`.
     fn create_preprocessed_input_stream(
         input_stream: MessageStream,
-        vertex_id: String,
+        vertex_id: VertexId,
         upstream_vertices: Vec<String>,
         upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
         current_watermark: Arc<AtomicU64>,
@@ -318,7 +319,7 @@ impl StreamTask {
                         ).await {
                             let mut wm = watermark.clone();
                             wm.watermark_value = new_watermark;
-                            wm.metadata.upstream_vertex_id = Some(vertex_id.clone());
+                            wm.metadata.upstream_vertex_id = Some(vertex_id.as_ref().to_string());
                             yield Message::Watermark(wm);
                         }
                     }
@@ -327,7 +328,7 @@ impl StreamTask {
                             // Once fully aligned, yield a single barrier downstream through the operator.
                             // StreamTask will intercept this barrier, do synchronous checkpointing, and forward it.
                             yield Message::CheckpointBarrier(crate::common::message::CheckpointBarrierMessage::new(
-                                vertex_id.clone(),
+                                vertex_id.as_ref().to_string(),
                                 checkpoint_id,
                                 None,
                             ));
@@ -345,7 +346,7 @@ impl StreamTask {
     async fn send_to_collectors_if_needed(
         mut collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,
-        vertex_id: String,
+        vertex_id: VertexId,
         status: Arc<AtomicU8>
     ) {
         if collectors_per_target_operator.is_empty() {
@@ -411,8 +412,14 @@ impl StreamTask {
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
         
-        let upstream_vertices: Vec<String> = execution_graph.get_edges_for_vertex(&vertex_id)
-            .map(|(input_edges, _)| input_edges.iter().map(|e| e.source_vertex_id.clone()).collect())
+        let upstream_vertices: Vec<String> = execution_graph
+            .get_edges_for_vertex(vertex_id.as_ref())
+            .map(|(input_edges, _)| {
+                input_edges
+                    .iter()
+                    .map(|e| e.source_vertex_id.as_ref().to_string())
+                    .collect()
+            })
             .unwrap_or_default();
 
         let transport_client_config = self.transport_client_config.take().unwrap();
@@ -542,7 +549,7 @@ impl StreamTask {
                             );
                             Some(Message::CheckpointBarrier(
                                 crate::common::message::CheckpointBarrierMessage::new(
-                                    vertex_id.clone(),
+                                    vertex_id.as_ref().to_string(),
                                     checkpoint_id,
                                     None,
                                 ),
@@ -584,7 +591,7 @@ impl StreamTask {
                                     .report_checkpoint(tonic::Request::new(
                                         crate::runtime::master_server::master_service::ReportCheckpointRequest {
                                             checkpoint_id,
-                                            vertex_id: vertex_id.clone(),
+                                            vertex_id: vertex_id.as_ref().to_string(),
                                             task_index: runtime_context.task_index(),
                                             blobs: blobs
                                                 .into_iter()
@@ -638,7 +645,7 @@ impl StreamTask {
                         }
 
                         // Set upstream vertex id for all messages before sending downstream
-                        message.set_upstream_vertex_id(vertex_id.clone());
+                        message.set_upstream_vertex_id(vertex_id.as_ref().to_string());
                         Self::record_metrics(vertex_id.clone(), &message, false);
 
                         // Send to collectors

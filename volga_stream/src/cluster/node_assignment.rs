@@ -36,7 +36,10 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
         for vertex_id in execution_graph.get_vertices().keys() {
             let vertex = execution_graph.get_vertices().get(vertex_id).expect("vertex should exist");
             let operator_id = vertex.operator_id.clone();
-            operator_to_vertices.entry(operator_id).or_insert_with(Vec::new).push(vertex_id.clone());
+            operator_to_vertices
+                .entry(operator_id)
+                .or_insert_with(Vec::new)
+                .push(vertex_id.as_ref().to_string());
         }
 
         // Check if we have enough nodes for all operators
@@ -46,7 +49,7 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
 
         // Assign each operator group to a cluster node
         let mut node_index = 0;
-        for (operator_id, vertex_ids) in operator_to_vertices {
+        for (_operator_id, vertex_ids) in operator_to_vertices {
             let cluster_node = &cluster_nodes[node_index % cluster_nodes.len()];
             
             // Assign all vertices of this operator to the same node
@@ -105,7 +108,7 @@ mod tests {
             operator_to_vertices
                 .entry(vertex.operator_id.clone())
                 .or_insert_with(Vec::new)
-                .push(vertex_id.clone());
+                .push(vertex_id.as_ref().to_string());
         }
 
         let num_operators = operator_to_vertices.len();
@@ -131,7 +134,7 @@ mod tests {
         for (node_id, vertex_ids) in &node_to_vertices {
             let mut operator_ids = std::collections::HashSet::new();
             for vertex_id in vertex_ids {
-                let vertex = execution_graph.get_vertices().get(vertex_id).unwrap();
+                let vertex = execution_graph.get_vertices().get(vertex_id.as_str()).unwrap();
                 operator_ids.insert(vertex.operator_id.clone());
             }
             // All vertices on the same node should have the same operator_id
@@ -141,7 +144,7 @@ mod tests {
         // Verify that each operator_id maps to exactly one node
         let mut operator_to_node: HashMap<String, String> = HashMap::new();
         for (vertex_id, cluster_node) in &mapping {
-            let vertex = execution_graph.get_vertices().get(vertex_id).unwrap();
+            let vertex = execution_graph.get_vertices().get(vertex_id.as_str()).unwrap();
             let operator_id = &vertex.operator_id;
             
             if let Some(existing_node) = operator_to_node.get(operator_id) {

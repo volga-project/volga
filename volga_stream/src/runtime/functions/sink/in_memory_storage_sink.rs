@@ -197,7 +197,7 @@ mod tests {
 
             // Open sink function
             let context = RuntimeContext::new(
-                "test_sink".to_string(),
+                "test_sink".to_string().into(),
                 0,
                 1,
                 None,

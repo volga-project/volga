@@ -13,7 +13,6 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::window_operator::{ExecutionMode, RequestAdvancePolicy};
 use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
 use crate::runtime::partition::PartitionType;
-use crate::transport::channel::Channel;
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
@@ -513,6 +512,7 @@ mod tests {
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::functions::map::{MapFunction, ProjectionFunction};
     use crate::runtime::functions::map::filter_function::FilterFunction;
+    use crate::transport::channel::Channel;
     use datafusion::common::{DFSchema, DFSchemaRef};
     use datafusion::execution::context::SessionContext;
     use arrow::datatypes::{Schema, Field, DataType};
@@ -658,8 +658,8 @@ mod tests {
         // Verify that edges between different nodes use remote channels
         for edge in edges.values() {
             // Get source and target nodes from the mapping
-            let source_node = vertex_to_node.get(&edge.source_vertex_id).expect("Source vertex should be mapped");
-            let target_node = vertex_to_node.get(&edge.target_vertex_id).expect("Target vertex should be mapped");
+            let source_node = vertex_to_node.get(edge.source_vertex_id.as_ref()).expect("Source vertex should be mapped");
+            let target_node = vertex_to_node.get(edge.target_vertex_id.as_ref()).expect("Target vertex should be mapped");
             
             // Check if vertices are on different nodes
             if source_node.node_id != target_node.node_id {

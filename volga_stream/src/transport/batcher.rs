@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, AtomicU64};
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use arrow::compute::concat_batches;
 use std::collections::HashSet;
 use tokio_util::sync::CancellationToken;
@@ -194,11 +194,11 @@ impl Batcher {
     }
 
     // TODO fix memory tracking
-    fn inc_memory_usage(size: usize, current_memory_bytes: Arc<AtomicUsize>) {
+    fn inc_memory_usage(_size: usize, _current_memory_bytes: Arc<AtomicUsize>) {
         // current_memory_bytes.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
     }
 
-    fn dec_memory_usage(size: usize, current_memory_bytes: Arc<AtomicUsize>) {
+    fn dec_memory_usage(_size: usize, _current_memory_bytes: Arc<AtomicUsize>) {
         // current_memory_bytes.fetch_sub(size, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -258,10 +258,10 @@ impl Batcher {
 
     pub async fn flush_channel(&mut self, channel_id: &String) -> Result<(), mpsc::error::SendError<Message>> {
         let sender = self.senders.get(channel_id).unwrap();
-        let mut num_flushed = 0;
+        let mut _num_flushed = 0;
         if let Some(regular_queue) = self.regular_queues.get(channel_id) {
             let mut regular_queue_guard = regular_queue.lock().await;
-            num_flushed += regular_queue_guard.len();
+            _num_flushed += regular_queue_guard.len();
             if !regular_queue_guard.is_empty() {
                 Self::batch_and_flush(regular_queue_guard.as_mut(), self.config.batch_size, sender, self.current_memory_bytes.clone(), self.config.send_timeout_ms).await?;
             }
@@ -273,11 +273,11 @@ impl Batcher {
         if let Some(keyed_queues) = self.keyed_queues.get_mut(channel_id) {
             let mut keyed_queues_guard = keyed_queues.lock().await;
             // println!("flush_channel: found {} keyed queues for channel {}", keyed_queues_guard.len(), channel_id);
-            for (hash, queue) in keyed_queues_guard.iter_mut() {
+            for (_hash, queue) in keyed_queues_guard.iter_mut() {
                 // println!("flush_channel: checking keyed queue with hash {}, address {:p}", hash, queue.as_ref());
                 let mut keyed_queue_guard = queue.lock().await;
                 // println!("flush_channel: keyed queue hash {} length = {}", hash, keyed_queue_guard.len());
-                num_flushed += keyed_queue_guard.len();
+                _num_flushed += keyed_queue_guard.len();
             
                 if !keyed_queue_guard.is_empty() {
                     // println!("flush_channel: flushing keyed queue hash {} with {} messages", hash, keyed_queue_guard.len());
@@ -448,6 +448,7 @@ mod tests {
     use arrow::datatypes::{Schema, Field, DataType};
     use rand::{random, Rng};
     use std::sync::Arc;
+    use std::time::Instant;
     use crate::common::{Key, MAX_WATERMARK_VALUE};
 
     fn create_test_record_batch(rows: usize) -> arrow::record_batch::RecordBatch {

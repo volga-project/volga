@@ -55,7 +55,7 @@ fn test_stream_task_actor() -> Result<()> {
         let mut graph = logical_graph.to_execution_graph();
         graph.update_channels_with_node_mapping(None);
 
-        let mut vertex_ids = graph.get_vertices().keys().cloned().collect::<Vec<String>>();
+        let mut vertex_ids = graph.get_vertices().keys().cloned().collect::<Vec<crate::runtime::VertexId>>();
         vertex_ids.sort();
 
         let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
@@ -69,7 +69,7 @@ fn test_stream_task_actor() -> Result<()> {
         let task = StreamTask::new(
             task_vertex_id.clone(),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            configs.remove(&task_vertex_id).unwrap(),
+            configs.remove(task_vertex_id.as_ref()).unwrap(),
             RuntimeContext::new(
                 task_vertex_id.clone(),
                 0,
@@ -86,8 +86,8 @@ fn test_stream_task_actor() -> Result<()> {
         let backend_ref = spawn(backend_actor);
 
         // Create external writer and reader actors
-        let input_actor = TestDataWriterActor::new(input_vertex_id.clone(), configs.remove(&input_vertex_id).unwrap());
-        let output_actor = TestDataReaderActor::new(output_vertex_id.clone(), configs.remove(&output_vertex_id).unwrap());
+        let input_actor = TestDataWriterActor::new(input_vertex_id.clone(), configs.remove(input_vertex_id.as_ref()).unwrap());
+        let output_actor = TestDataReaderActor::new(output_vertex_id.clone(), configs.remove(output_vertex_id.as_ref()).unwrap());
         let task_actor = StreamTaskActor::new(task);
 
         let input_ref = spawn(input_actor);
@@ -106,7 +106,11 @@ fn test_stream_task_actor() -> Result<()> {
         // Write test data using external writer
         for message in &test_messages {
             // let channel_id = gen_channel_id(&input_vertex_id, &task_vertex_id);
-            let channel = Channel::new_local(input_vertex_id.clone(), task_vertex_id.clone());
+            // Channel ids are protocol strings.
+            let channel = Channel::new_local(
+                input_vertex_id.as_ref().to_string(),
+                task_vertex_id.as_ref().to_string(),
+            );
             input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                 channel,
                 message: message.clone(),

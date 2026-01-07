@@ -31,7 +31,7 @@ impl fmt::Display for JoinFunction {
 
 impl JoinFunctionTrait for JoinFunction {
 
-    fn join(&self, message: Message) -> Result<Message> {
+    fn join(&self, _message: Message) -> Result<Message> {
         panic!("Not implemented")
     }
 }

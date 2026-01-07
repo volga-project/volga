@@ -253,7 +253,7 @@ impl FunctionTrait for WordCountSourceFunction {
     }
     
     async fn close(&mut self) -> Result<()> {
-        let n = self.copies_sent_per_word.clone();
+        let _n = self.copies_sent_per_word.clone();
         // println!("WordCountSourceFunction {:?} close, words_sent_per_word {:?}", self.runtime_context.as_ref().unwrap().vertex_id(), n);
         Ok(())
     }
@@ -283,6 +283,7 @@ impl SourceFunctionTrait for WordCountSourceFunction {
     }
 }
 
+#[cfg(test)]
 async fn test_word_count_source(
     word_length: usize,
     dictionary_size: usize,
@@ -302,7 +303,7 @@ async fn test_word_count_source(
         batching_mode,
     );
 
-    source.open(&RuntimeContext::new("test".to_string(), 0, 1, None, None, None)).await.unwrap();
+    source.open(&RuntimeContext::new(Arc::<str>::from("test"), 0, 1, None, None, None)).await.unwrap();
 
     let mut word_counts = HashMap::new();
     let mut watermark_received = false;
@@ -316,6 +317,7 @@ async fn test_word_count_source(
                 
                 if batching_mode == BatchingMode::SameWord {
                     // Verify all words in batch are the same
+
                     let first_word = word_array.value(0).to_string();
                     for i in 1..word_array.len() {
                         assert_eq!(word_array.value(i), first_word, "All words in batch should be identical");

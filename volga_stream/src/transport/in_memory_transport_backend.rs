@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::VertexId;
 use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
 use crate::transport::TransportBackend;
@@ -24,8 +25,8 @@ impl InMemoryTransportBackend {
 
     fn register_local_channel(
         &mut self,
-        transport_client_configs: &mut HashMap<String, TransportClientConfig>, 
-        vertex_id: String, 
+        transport_client_configs: &mut HashMap<VertexId, TransportClientConfig>,
+        vertex_id: VertexId,
         channel: Channel, 
         is_in: bool
     ) {
@@ -43,7 +44,9 @@ impl InMemoryTransportBackend {
             self.receivers.insert(channel_id.clone(), rx);
         }
 
-        let config = transport_client_configs.entry(vertex_id.clone()).or_insert(TransportClientConfig::new(vertex_id.clone()));
+        let config = transport_client_configs
+            .entry(vertex_id.clone())
+            .or_insert(TransportClientConfig::new(vertex_id.clone()));
 
         if is_in {
             // For readers, we need to move the receiver since it can't be cloned
@@ -67,11 +70,15 @@ impl TransportBackend for InMemoryTransportBackend {
     async fn close(&mut self) {
     }
 
-    fn init_channels(&mut self, execution_graph: &ExecutionGraph, vertex_ids: Vec<String>) -> HashMap<String, TransportClientConfig> {
-        let mut transport_client_configs: HashMap<String, TransportClientConfig> = HashMap::new();
+    fn init_channels(
+        &mut self,
+        execution_graph: &ExecutionGraph,
+        vertex_ids: Vec<VertexId>,
+    ) -> HashMap<VertexId, TransportClientConfig> {
+        let mut transport_client_configs: HashMap<VertexId, TransportClientConfig> = HashMap::new();
         
         for vertex_id in vertex_ids {
-            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
+            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()).unwrap();
             for edge in input_edges {
                 let channel = edge.get_channel();
                 self.register_local_channel(

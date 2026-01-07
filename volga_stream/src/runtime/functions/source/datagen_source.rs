@@ -698,7 +698,7 @@ mod tests {
             let mut source = DatagenSourceFunction::new(config.clone());
             
             let ctx = RuntimeContext::new(
-                "test".to_string(),
+                "test".to_string().into(),
                 task_index,
                 parallelism,
                 None,
@@ -831,7 +831,7 @@ mod tests {
                 let mut source = DatagenSourceFunction::new(config_clone);
                 
                 let ctx = RuntimeContext::new(
-                    "test".to_string(),
+                    "test".to_string().into(),
                     task_index,
                     parallelism,
                     None,
@@ -1015,7 +1015,7 @@ mod tests {
             // Baseline: uninterrupted run
             let mut baseline = DatagenSourceFunction::new(cfg.clone());
             let ctx = RuntimeContext::new(
-                "test".to_string(),
+                "test".to_string().into(),
                 task_index,
                 parallelism,
                 None,
@@ -1028,7 +1028,7 @@ mod tests {
             // Interrupted: run until checkpoint, snapshot, restart, restore, continue
             let mut first = DatagenSourceFunction::new(cfg.clone());
             let ctx_first = RuntimeContext::new(
-                "test".to_string(),
+                "test".to_string().into(),
                 task_index,
                 parallelism,
                 None,
@@ -1041,7 +1041,7 @@ mod tests {
 
             let mut second = DatagenSourceFunction::new(cfg.clone());
             let ctx_second = RuntimeContext::new(
-                "test".to_string(),
+                "test".to_string().into(),
                 task_index,
                 parallelism,
                 None,

@@ -4,8 +4,8 @@ use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::{create_window_aggregator, merge_accumulator_state, WindowAggregator};
-use crate::runtime::operators::window::state::index::{RowPtr, SortedRangeIndex};
-use crate::runtime::operators::window::state::index::window_logic;
+use crate::storage::index::{RowPtr, SortedRangeIndex};
+use crate::runtime::operators::window::state::window_logic;
 use crate::runtime::operators::window::state::tiles::Tile;
 use crate::runtime::operators::window::Tiles;
 use crate::storage::batch_store::Timestamp;
@@ -234,7 +234,7 @@ mod tests {
 
     use crate::runtime::operators::window::aggregates::test_utils;
     use crate::runtime::operators::window::aggregates::BucketRange;
-    use crate::runtime::operators::window::state::index::{DataBounds, DataRequest, SortedRangeIndex};
+    use crate::storage::index::{DataBounds, DataRequest, SortedRangeIndex};
     use crate::runtime::operators::window::state::tiles::TileConfig;
     use crate::runtime::operators::window::{Tiles, TimeGranularity};
 
@@ -309,4 +309,7 @@ mod tests {
         assert!(stats.front_drops > 0);
     }
 }
+
+
+
 

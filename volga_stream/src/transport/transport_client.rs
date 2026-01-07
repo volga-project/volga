@@ -5,22 +5,22 @@ use crate::{common::message::Message, runtime::{metrics::{LABEL_TARGET_VERTEX_ID
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
-use futures::stream::StreamExt;
 use futures::stream;
 use crate::transport::batcher::BatcherConfig;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use crate::runtime::VertexId;
 
 // pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 
 #[derive(Debug)]
 pub struct TransportClientConfig {
-    pub vertex_id: String,
+    pub vertex_id: VertexId,
     pub reader_receivers: Option<HashMap<String, BatchReceiver>>,
     pub writer_senders: Option<HashMap<String, BatchSender>>,
 }
 
 impl TransportClientConfig {
-    pub fn new(vertex_id: String) -> Self {
+    pub fn new(vertex_id: VertexId) -> Self {
         Self {
             vertex_id,
             reader_receivers: None,
@@ -45,7 +45,7 @@ impl TransportClientConfig {
 
 #[derive(Debug)]
 pub struct DataReader {
-    vertex_id: String,
+    _vertex_id: VertexId,
     receivers: HashMap<String, BatchReceiver>,
 }
 
@@ -100,9 +100,9 @@ impl DataReaderControl {
 }
 
 impl DataReader {
-    pub fn new(vertex_id: String, receivers: HashMap<String, BatchReceiver>) -> Self {
+    pub fn new(vertex_id: VertexId, receivers: HashMap<String, BatchReceiver>) -> Self {
         Self {
-            vertex_id,
+            _vertex_id: vertex_id,
             receivers,
         }
     }
@@ -166,16 +166,16 @@ impl DataReader {
 
 #[derive(Debug, Clone)]
 pub struct DataWriter {
-    pub vertex_id: String,
+    pub vertex_id: VertexId,
     pub senders: HashMap<String, BatchSender>,
     // batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
-    batching_config: BatcherConfig,
+    _batching_config: BatcherConfig,
 }
 
 impl DataWriter {
-    pub fn new(vertex_id: String, senders: HashMap<String, BatchSender>) -> Self {
+    pub fn new(vertex_id: VertexId, senders: HashMap<String, BatchSender>) -> Self {
         let batching_config = BatcherConfig::default();
         // let batcher = Batcher::new(batching_config.clone(), senders.clone());
         
@@ -185,7 +185,7 @@ impl DataWriter {
             // batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
-            batching_config,
+            _batching_config: batching_config,
         }
     }
 
@@ -258,13 +258,13 @@ impl DataWriter {
 
 #[derive(Debug)]
 pub struct TransportClient {
-    vertex_id: String,
+    vertex_id: VertexId,
     pub reader: Option<DataReader>,
     pub writer: Option<DataWriter>,
 }
 
 impl TransportClient {
-    pub fn new(vertex_id: String, config: TransportClientConfig) -> Self {
+    pub fn new(vertex_id: VertexId, config: TransportClientConfig) -> Self {
         let mut reader: Option<DataReader> = None;
         let mut writer: Option<DataWriter> = None;
 
@@ -283,6 +283,6 @@ impl TransportClient {
     }
 
     pub fn vertex_id(&self) -> &str {
-        &self.vertex_id
+        self.vertex_id.as_ref()
     }
 }

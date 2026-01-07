@@ -3,6 +3,7 @@ use futures::StreamExt;
 use kameo::Actor;
 use kameo::message::Context;
 use crate::common::message::Message;
+use crate::runtime::VertexId;
 use crate::runtime::operators::operator::MessageStream;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client::{DataReader, DataWriter};
@@ -20,7 +21,7 @@ pub struct TestDataReaderActor {
 }
 
 impl TestDataReaderActor {
-    pub fn new(vertex_id: String, transport_client_config: TransportClientConfig) -> Self {
+    pub fn new(vertex_id: VertexId, transport_client_config: TransportClientConfig) -> Self {
         let reader = DataReader::new(vertex_id, transport_client_config.reader_receivers.unwrap());
         let (reader_message_stream, _control) = reader.message_stream_with_control();
         Self {
@@ -57,7 +58,7 @@ pub struct TestDataWriterActor {
 }
 
 impl TestDataWriterActor {
-    pub fn new(vertex_id: String, transport_client_config: TransportClientConfig) -> Self {
+    pub fn new(vertex_id: VertexId, transport_client_config: TransportClientConfig) -> Self {
         Self {
             writer: DataWriter::new(vertex_id, transport_client_config.writer_senders.unwrap()),
         }

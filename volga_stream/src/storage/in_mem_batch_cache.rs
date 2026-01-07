@@ -4,7 +4,14 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use dashmap::DashMap;
 
-use crate::runtime::operators::window::state::index::InMemBatchId;
+use crate::storage::index::InMemBatchId;
+use crate::storage::stats::StorageStats;
+
+#[derive(Debug, Clone)]
+struct Entry {
+    batch: Arc<RecordBatch>,
+    bytes: usize,
+}
 
 /// Cache for in-memory `RecordBatch`es referenced by `BatchRef::InMem`.
 ///
@@ -14,10 +21,11 @@ use crate::runtime::operators::window::state::index::InMemBatchId;
 /// - basic memory accounting and a soft limit signal
 #[derive(Debug)]
 pub struct InMemBatchCache {
-    batches: DashMap<InMemBatchId, Arc<RecordBatch>>,
+    batches: DashMap<InMemBatchId, Entry>,
     next_id: AtomicU64,
     bytes: AtomicUsize,
     limit_bytes: AtomicUsize, // 0 = unlimited
+    stats: Arc<StorageStats>,
 }
 
 impl InMemBatchCache {
@@ -27,7 +35,22 @@ impl InMemBatchCache {
             next_id: AtomicU64::new(1),
             bytes: AtomicUsize::new(0),
             limit_bytes: AtomicUsize::new(0),
+            stats: StorageStats::global(),
         }
+    }
+
+    pub fn new_with_stats(stats: Arc<StorageStats>) -> Self {
+        Self {
+            batches: DashMap::new(),
+            next_id: AtomicU64::new(1),
+            bytes: AtomicUsize::new(0),
+            limit_bytes: AtomicUsize::new(0),
+            stats,
+        }
+    }
+
+    pub fn stats(&self) -> &Arc<StorageStats> {
+        &self.stats
     }
 
     pub fn set_limit_bytes(&self, limit_bytes: usize) {
@@ -47,25 +70,29 @@ impl InMemBatchCache {
         limit != 0 && self.bytes() > limit
     }
 
-    // TODO we should backpressure and dump to store if over limit
     pub fn put(&self, batch: RecordBatch) -> InMemBatchId {
         let id = InMemBatchId(self.next_id.fetch_add(1, Ordering::Relaxed));
-        let arc = Arc::new(batch);
-        let sz = arc.get_array_memory_size();
-        self.batches.insert(id, arc);
-        self.bytes.fetch_add(sz, Ordering::Relaxed);
+        let batch = Arc::new(batch);
+        let bytes = batch.get_array_memory_size();
+        self.batches.insert(id, Entry { batch, bytes });
+        self.bytes.fetch_add(bytes, Ordering::Relaxed);
+        self.stats.on_inmem_put(bytes);
         id
     }
 
     pub fn get(&self, id: InMemBatchId) -> Option<Arc<RecordBatch>> {
-        self.batches.get(&id).map(|e| e.value().clone())
+        self.batches.get(&id).map(|e| e.value().batch.clone())
+    }
+
+    pub fn get_bytes(&self, id: InMemBatchId) -> Option<usize> {
+        self.batches.get(&id).map(|e| e.value().bytes)
     }
 
     pub fn remove(&self, ids: &[InMemBatchId]) {
         for id in ids {
-            if let Some((_, b)) = self.batches.remove(id) {
-                let sz = b.get_array_memory_size();
-                self.bytes.fetch_sub(sz, Ordering::Relaxed);
+            if let Some((_, e)) = self.batches.remove(id) {
+                self.bytes.fetch_sub(e.bytes, Ordering::Relaxed);
+                self.stats.on_inmem_remove(e.bytes);
             }
         }
     }
@@ -75,6 +102,7 @@ impl InMemBatchCache {
         self.batches.clear();
         self.bytes.store(0, Ordering::Relaxed);
         self.next_id.store(1, Ordering::Relaxed);
+        self.stats.on_inmem_clear();
     }
 }
 
@@ -132,6 +160,9 @@ mod tests {
         assert!(cache.is_over_limit());
     }
 }
+
+
+
 
 
 

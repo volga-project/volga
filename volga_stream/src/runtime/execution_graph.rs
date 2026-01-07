@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use crate::runtime::operators::operator::OperatorType;
+use crate::runtime::VertexId;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionEdge {
-    pub source_vertex_id: String,
-    pub target_vertex_id: String,
+    pub source_vertex_id: VertexId,
+    pub target_vertex_id: VertexId,
     pub edge_id: String,
     pub target_operator_id: String,
     pub partition_type: PartitionType,
@@ -24,8 +26,8 @@ impl ExecutionEdge {
         channel: Option<Channel>,
     ) -> Self {
         Self {
-            source_vertex_id: source_vertex_id.clone(),
-            target_vertex_id: target_vertex_id.clone(),
+            source_vertex_id: Arc::<str>::from(source_vertex_id.as_str()),
+            target_vertex_id: Arc::<str>::from(target_vertex_id.as_str()),
             edge_id: gen_edge_id(&source_vertex_id, &target_vertex_id),
             target_operator_id: target_operator_id.clone(),
             partition_type,
@@ -44,7 +46,7 @@ pub fn gen_edge_id(source_vertex_id: &str, target_vertex_id: &str) -> String {
 
 #[derive(Debug, Clone)]
 pub struct ExecutionVertex {
-    pub vertex_id: String,
+    pub vertex_id: VertexId,
     pub operator_id: String,
     pub operator_config: OperatorConfig,
     pub input_edges: Vec<String>,
@@ -62,7 +64,7 @@ impl ExecutionVertex {
         task_index: i32,
     ) -> Self {
         Self {
-            vertex_id,
+            vertex_id: Arc::<str>::from(vertex_id),
             operator_id,
             operator_config,
             input_edges: Vec::new(),
@@ -83,7 +85,7 @@ impl ExecutionVertex {
 
 #[derive(Debug, Clone)]
 pub struct ExecutionGraph {
-    vertices: HashMap<String, ExecutionVertex>,
+    vertices: HashMap<VertexId, ExecutionVertex>,
     edges: HashMap<String, ExecutionEdge>,
 }
 
@@ -132,7 +134,7 @@ impl ExecutionGraph {
         self.edges.get(edge_id)
     }
 
-    pub fn get_vertices(&self) -> &HashMap<String, ExecutionVertex> {
+    pub fn get_vertices(&self) -> &HashMap<VertexId, ExecutionVertex> {
         &self.vertices
     }
 
@@ -172,7 +174,7 @@ impl ExecutionGraph {
         self.vertices.iter()
             .filter_map(|(id, vertex)| {
                 match &vertex.operator_config {
-                    OperatorConfig::SinkConfig(_) => Some(id.clone()),
+                    OperatorConfig::SinkConfig(_) => Some(id.as_ref().to_string()),
                     _ => None,
                 }
             })
@@ -191,14 +193,18 @@ impl ExecutionGraph {
         for edge in self.edges.values_mut() {
             let channel = if let Some(vertex_to_node) = execution_vertex_to_cluster_node {
                 // Check if vertices are on different nodes
-                let source_node = vertex_to_node.get(&edge.source_vertex_id).expect(&format!("Node with id {} expected", edge.source_vertex_id));
-                let target_node = vertex_to_node.get(&edge.target_vertex_id).expect(&format!("Node with id {} expected", edge.target_vertex_id));
+                let source_node = vertex_to_node
+                    .get(edge.source_vertex_id.as_ref())
+                    .expect(&format!("Node with id {} expected", edge.source_vertex_id));
+                let target_node = vertex_to_node
+                    .get(edge.target_vertex_id.as_ref())
+                    .expect(&format!("Node with id {} expected", edge.target_vertex_id));
                 
                 if source_node.node_id != target_node.node_id {
                     // Vertices are on different nodes, create remote channel
                     Channel::new_remote(
-                        edge.source_vertex_id.clone(), 
-                        edge.target_vertex_id.clone(), 
+                        edge.source_vertex_id.as_ref().to_string(),
+                        edge.target_vertex_id.as_ref().to_string(),
                         source_node.node_ip.clone(), 
                         source_node.node_id.clone(), 
                         target_node.node_ip.clone(), 
@@ -208,15 +214,15 @@ impl ExecutionGraph {
                 } else {
                     // Vertices are on same node, use local channel
                     Channel::new_local(
-                        edge.source_vertex_id.clone(), 
-                        edge.target_vertex_id.clone()
+                        edge.source_vertex_id.as_ref().to_string(),
+                        edge.target_vertex_id.as_ref().to_string()
                     )
                 }
             } else {
                 // No cluster mapping provided, use local channels
                 Channel::new_local(
-                    edge.source_vertex_id.clone(), 
-                    edge.target_vertex_id.clone()
+                    edge.source_vertex_id.as_ref().to_string(),
+                    edge.target_vertex_id.as_ref().to_string()
                 )
             };
 

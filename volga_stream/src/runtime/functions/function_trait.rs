@@ -6,7 +6,7 @@ use std::any::Any;
 
 #[async_trait]
 pub trait FunctionTrait: Send + Sync + fmt::Debug + Any {
-    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+    async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
         Ok(())
     }
     

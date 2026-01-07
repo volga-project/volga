@@ -6,6 +6,7 @@ use metrics_util::layers::FanoutBuilder;
 use prometheus_parse::{Scrape, Value, HistogramCount};
 use std::{collections::HashMap, sync::{Once, OnceLock}};
 
+use crate::runtime::VertexId;
 use crate::runtime::execution_graph::ExecutionGraph;
 
 // Global Prometheus handle for programmatic access
@@ -585,11 +586,11 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 
-pub fn get_stream_task_metrics(vertex_id: String) -> StreamTaskMetrics {
+pub fn get_stream_task_metrics(vertex_id: VertexId) -> StreamTaskMetrics {
     let handle = PROMETHEUS_HANDLE.get().expect("Metrics not initialized");
     let prometheus_text = handle.render();
     
-    parse_stream_task_metrics(&prometheus_text, &vertex_id)
+    parse_stream_task_metrics(&prometheus_text, vertex_id.as_ref())
 }
 
 fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str) -> StreamTaskMetrics {
@@ -665,6 +666,8 @@ fn convert_histogram_counts_to_buckets(histogram_counts: &[HistogramCount]) -> V
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use metrics::{counter, histogram};
 
@@ -712,7 +715,7 @@ mod tests {
         // Build expected histogram manually
         let expected_histogram = build_expected_histogram(&latency_measurements, &LATENCY_BUCKET_BOUNDARIES);
         
-        let parsed_metrics = get_stream_task_metrics(vertex_id.clone());
+        let parsed_metrics = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()));
         
         // Verify the parsed stream task metrics
         assert_eq!(parsed_metrics.vertex_id, vertex_id);
@@ -751,7 +754,7 @@ mod tests {
         counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_b.clone()).increment(1);
         counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_b.clone()).increment(50);
         
-        let metrics_b = get_stream_task_metrics(vertex_b.clone());
+        let metrics_b = get_stream_task_metrics(Arc::<str>::from(vertex_b.clone()));
         
         // Verify isolation - vertex B should only see its own metrics
         assert_eq!(metrics_b.vertex_id, vertex_b);
@@ -760,7 +763,7 @@ mod tests {
         assert_eq!(metrics_b.throughput_stast.messages_recv, 0); // Not set for vertex B
         
         // Verify original vertex still has correct metrics
-        let metrics_a_again = get_stream_task_metrics(vertex_id.clone());
+        let metrics_a_again = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()));
         assert_eq!(metrics_a_again.throughput_stast.messages_sent, 5);
         assert_eq!(metrics_a_again.throughput_stast.records_sent, 25);
     }
