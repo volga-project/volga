@@ -31,6 +31,10 @@ pub struct WorkerConfig {
     pub transport_backend_type: TransportBackendType,
     pub master_addr: Option<String>,
     pub restore_checkpoint_id: Option<u64>,
+    pub storage_budgets: StorageBudgetConfig,
+    pub inmem_store_lock_pool_size: usize,
+    pub inmem_store_bucket_granularity: TimeGranularity,
+    pub inmem_store_max_batch_size: usize,
 }
 
 impl WorkerConfig {
@@ -49,6 +53,10 @@ impl WorkerConfig {
             transport_backend_type,
             master_addr: None,
             restore_checkpoint_id: None,
+            storage_budgets: StorageBudgetConfig::default(),
+            inmem_store_lock_pool_size: 4096,
+            inmem_store_bucket_granularity: TimeGranularity::Seconds(1),
+            inmem_store_max_batch_size: 1024,
         }
     }
 
@@ -101,6 +109,10 @@ pub struct Worker {
     transport_backend_type: TransportBackendType,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
+    storage_budgets: StorageBudgetConfig,
+    inmem_store_lock_pool_size: usize,
+    inmem_store_bucket_granularity: TimeGranularity,
+    inmem_store_max_batch_size: usize,
     task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<VertexId, Runtime>,
@@ -150,6 +162,10 @@ impl Worker {
             transport_backend_type: config.transport_backend_type,
             master_addr: config.master_addr.clone(),
             restore_checkpoint_id: config.restore_checkpoint_id,
+            storage_budgets: config.storage_budgets,
+            inmem_store_lock_pool_size: config.inmem_store_lock_pool_size,
+            inmem_store_bucket_granularity: config.inmem_store_bucket_granularity,
+            inmem_store_max_batch_size: config.inmem_store_max_batch_size,
             backend_actor: None,
             task_runtimes,
             transport_backend_runtime: Some(
@@ -268,10 +284,13 @@ impl Worker {
         println!("[WORKER] Spawning actors");
 
         // Worker-level shared storage context (used by window/request operators).
-        // TODO: plumb real config + backend selection (SlateDB) here.
-        let budgets = StorageBudgetConfig::default();
-        let store =
-            Arc::new(InMemBatchStore::new(4096, TimeGranularity::Seconds(1), 1024)) as Arc<dyn BatchStore>;
+        // Backend selection (SlateDB) will be added later; for now use InMemBatchStore.
+        let budgets = self.storage_budgets.clone();
+        let store = Arc::new(InMemBatchStore::new(
+            self.inmem_store_lock_pool_size,
+            self.inmem_store_bucket_granularity,
+            self.inmem_store_max_batch_size,
+        )) as Arc<dyn BatchStore>;
         let worker_storage = WorkerStorageContext::new(store, budgets).expect("worker storage ctx");
 
         let mut backend: Box<dyn TransportBackend> = match self.transport_backend_type {

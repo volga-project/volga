@@ -29,7 +29,6 @@ use crate::runtime::operators::window::state::window_logic;
 use crate::storage::index::SortedRangeIndex;
 use crate::storage::index::SortedRangeView;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::storage::StorageBudgetConfig;
 use crate::storage::StorageStatsSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,12 +65,7 @@ pub struct WindowOperatorConfig {
     pub compaction_interval_ms: u64,
     pub dump_interval_ms: u64,
     pub dump_hot_bucket_count: usize,
-    pub in_mem_limit_bytes: usize,
-    pub in_mem_low_watermark_per_mille: u32,
     pub in_mem_dump_parallelism: usize,
-    pub max_inflight_keys: usize,
-    pub load_io_parallelism: usize,
-    pub work_limit_bytes: usize,
 }
 
 impl WindowOperatorConfig {
@@ -86,12 +80,7 @@ impl WindowOperatorConfig {
             compaction_interval_ms: 250,
             dump_interval_ms: 1000,
             dump_hot_bucket_count: 2,
-            in_mem_limit_bytes: 0,
-            in_mem_low_watermark_per_mille: 700,
             in_mem_dump_parallelism: 4,
-            max_inflight_keys: 1,
-            load_io_parallelism: 16,
-            work_limit_bytes: 256 * 1024 * 1024,
         }
     }
 }
@@ -110,7 +99,6 @@ pub struct WindowOperator {
     current_watermark: Option<u64>,
     compaction_interval: Duration,
     dump_interval: Duration,
-    storage_budgets: StorageBudgetConfig,
     ts_column_index: usize,
     tiling_configs: Vec<Option<TileConfig>>,
     lateness: Option<i64>,
@@ -196,14 +184,6 @@ impl WindowOperator {
         );
 
         let window_configs = Arc::new(windows);
-        let storage_budgets = StorageBudgetConfig {
-            // Keep these in operator config until we move this into worker-level config plumbing.
-            in_mem_limit_bytes: window_operator_config.in_mem_limit_bytes.max(1),
-            in_mem_low_watermark_per_mille: window_operator_config.in_mem_low_watermark_per_mille,
-            work_limit_bytes: window_operator_config.work_limit_bytes.max(1),
-            max_inflight_keys: window_operator_config.max_inflight_keys.max(1),
-            load_io_parallelism: window_operator_config.load_io_parallelism.max(1),
-        };
 
         Self {
             base: OperatorBase::new(config),
@@ -219,7 +199,6 @@ impl WindowOperator {
             current_watermark: None,
             compaction_interval: Duration::from_millis(window_operator_config.compaction_interval_ms.max(1)),
             dump_interval: Duration::from_millis(window_operator_config.dump_interval_ms.max(1)),
-            storage_budgets,
             ts_column_index,
             tiling_configs: window_operator_config.tiling_configs.clone(),
             lateness: window_operator_config.lateness,
@@ -580,6 +559,7 @@ impl OperatorTrait for WindowOperator {
             let storage = context
                 .worker_storage_context()
                 .expect("WorkerStorageContext must be provided by RuntimeContext");
+            let in_mem_low_watermark_per_mille = storage.budgets.in_mem_low_watermark_per_mille;
 
             let task_id: crate::runtime::TaskId = context.vertex_id_arc();
             self.state = Some(Arc::new(WindowOperatorState::new(
@@ -590,7 +570,7 @@ impl OperatorTrait for WindowOperator {
                 self.tiling_configs.clone(),
                 self.lateness,
                 self.dump_hot_bucket_count,
-                self.storage_budgets.in_mem_low_watermark_per_mille,
+                in_mem_low_watermark_per_mille,
                 self.in_mem_dump_parallelism,
             )));
         }
@@ -980,10 +960,7 @@ mod tests {
         WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW)";
 
         let window_exec = extract_window_exec_from_sql(sql).await;
-        let mut cfg1 = WindowOperatorConfig::new(window_exec.clone());
-        cfg1.in_mem_limit_bytes = 64 * 1024 * 1024;
-        cfg1.work_limit_bytes = 64 * 1024 * 1024;
-        cfg1.max_inflight_keys = 2;
+        let cfg1 = WindowOperatorConfig::new(window_exec.clone());
 
         let cfg2 = cfg1.clone();
 
