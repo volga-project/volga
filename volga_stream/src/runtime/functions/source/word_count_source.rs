@@ -1,17 +1,15 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use std::fmt;
 use crate::common::message::{Message, MAX_WATERMARK_VALUE};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
-use tokio::time::{timeout, Duration, Instant};
-use rand::{thread_rng, Rng, distributions::Alphanumeric, SeedableRng, rngs::StdRng};
+use tokio::time::Instant;
+use rand::{Rng, distributions::Alphanumeric, SeedableRng, rngs::StdRng};
 use std::time::SystemTime;
 use arrow::array::{StringArray, Int64Array};
 use arrow::datatypes::{Field, Schema};
 use std::sync::Arc;
-use arrow::array::Array;
 use super::source_function::SourceFunctionTrait;
 use std::collections::HashMap;
 
@@ -292,6 +290,8 @@ async fn test_word_count_source(
     batch_size: usize,
     batching_mode: BatchingMode,
 ) {
+    use arrow::array::Array;
+
     let is_fixed_size = num_to_send_per_word.is_some();
     
     let mut source = WordCountSourceFunction::new(

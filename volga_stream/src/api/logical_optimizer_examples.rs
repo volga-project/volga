@@ -1,3 +1,5 @@
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 use std::sync::Arc;
 use datafusion::functions_aggregate::count::count;
 use datafusion::functions_aggregate::min_max::max;

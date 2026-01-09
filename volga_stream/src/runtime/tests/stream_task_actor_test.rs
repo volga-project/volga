@@ -1,3 +1,6 @@
+#![cfg(test)]
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 use crate::api::LogicalGraph;
 use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
 use crate::runtime::operators::operator::OperatorConfig;

@@ -94,7 +94,7 @@ impl FunctionTrait for MapFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int32Array, StringArray};
+    use arrow::array::Int32Array;
     use arrow::datatypes::{Field, Schema};
     use std::sync::Arc;
 

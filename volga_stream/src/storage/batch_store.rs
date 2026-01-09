@@ -65,10 +65,24 @@ impl Hash for BatchId {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BatchStoreCheckpoint {
+pub struct InMemBatchStoreCheckpoint {
     pub bucket_granularity: TimeGranularity,
     pub max_batch_size: usize,
     pub batches: Vec<(BatchId, Vec<u8>)>, // RecordBatch serialized as Arrow IPC bytes
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteCheckpointToken {
+    pub parent_db_path: String,
+    pub checkpoint_uuid: String,
+    pub manifest_id: u64,
+    pub lifetime_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BatchStoreCheckpoint {
+    InMem(InMemBatchStoreCheckpoint),
+    Remote(RemoteCheckpointToken),
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +131,8 @@ pub trait BatchStore: Send + Sync + std::fmt::Debug {
     /// For in-memory stores this is a no-op. For SlateDB this maps to `flush()`.
     fn await_persisted<'a>(&'a self) -> BoxFut<'a, anyhow::Result<()>>;
 
-    fn to_checkpoint(&self, task_id: TaskId) -> BatchStoreCheckpoint;
-    fn apply_checkpoint(&self, task_id: TaskId, cp: BatchStoreCheckpoint);
+    fn to_checkpoint<'a>(&'a self, task_id: TaskId) -> BoxFut<'a, anyhow::Result<BatchStoreCheckpoint>>;
+    fn apply_checkpoint<'a>(&'a self, task_id: TaskId, cp: BatchStoreCheckpoint) -> BoxFut<'a, anyhow::Result<()>>;
 }
 
 #[derive(Debug)]
@@ -189,7 +203,7 @@ impl InMemBatchStore {
         out.into_iter().map(|(id, b)| (id.time_bucket(), b)).collect()
     }
 
-    fn time_partition_batch(
+    pub(crate) fn time_partition_batch(
         batch: &RecordBatch, 
         partition_key: &Key, 
         ts_column_index: usize,
@@ -425,7 +439,7 @@ impl InMemBatchStore {
         }
     }
 
-    pub fn to_checkpoint(&self, task_id: TaskId) -> BatchStoreCheckpoint {
+    pub fn to_checkpoint(&self, task_id: TaskId) -> InMemBatchStoreCheckpoint {
         let batches = self
             .batch_store
             .iter()
@@ -435,14 +449,14 @@ impl InMemBatchStore {
             })
             .collect::<Vec<_>>();
 
-        BatchStoreCheckpoint {
+        InMemBatchStoreCheckpoint {
             bucket_granularity: self.bucket_granularity,
             max_batch_size: self.max_batch_size,
             batches,
         }
     }
 
-    pub fn apply_checkpoint(&self, task_id: TaskId, cp: BatchStoreCheckpoint) {
+    pub fn apply_checkpoint(&self, task_id: TaskId, cp: InMemBatchStoreCheckpoint) {
         // We assume time_granularity/max_batch_size match for now (same job).
         // Clear and repopulate the in-memory store for this namespace only.
         self.batch_store.retain(|(t, _), _| *t != task_id);
@@ -518,11 +532,21 @@ impl BatchStore for InMemBatchStore {
         Box::pin(async move { InMemBatchStore::await_persisted(self).await })
     }
 
-    fn to_checkpoint(&self, task_id: TaskId) -> BatchStoreCheckpoint {
-        InMemBatchStore::to_checkpoint(self, task_id)
+    fn to_checkpoint<'a>(&'a self, task_id: TaskId) -> BoxFut<'a, anyhow::Result<BatchStoreCheckpoint>> {
+        Box::pin(async move { Ok(BatchStoreCheckpoint::InMem(InMemBatchStore::to_checkpoint(self, task_id))) })
     }
 
-    fn apply_checkpoint(&self, task_id: TaskId, cp: BatchStoreCheckpoint) {
-        InMemBatchStore::apply_checkpoint(self, task_id, cp)
+    fn apply_checkpoint<'a>(&'a self, task_id: TaskId, cp: BatchStoreCheckpoint) -> BoxFut<'a, anyhow::Result<()>> {
+        Box::pin(async move {
+            match cp {
+                BatchStoreCheckpoint::InMem(inmem) => {
+                    InMemBatchStore::apply_checkpoint(self, task_id, inmem);
+                    Ok(())
+                }
+                BatchStoreCheckpoint::Remote(_) => anyhow::bail!(
+                    "cannot apply remote checkpoint to InMemBatchStore"
+                ),
+            }
+        })
     }
 }

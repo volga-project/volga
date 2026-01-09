@@ -446,7 +446,7 @@ mod tests {
     use super::*;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{Schema, Field, DataType};
-    use rand::{random, Rng};
+    use rand::Rng;
     use std::sync::Arc;
     use std::time::Instant;
     use crate::common::{Key, MAX_WATERMARK_VALUE};
@@ -734,9 +734,9 @@ mod tests {
         assert!(received_keys.contains(&key2));
     }
 
-    // #[tokio::test] TODO fix the test
+    #[allow(dead_code)]
     async fn test_memory_tracking_accuracy() {
-        let (tx, mut rx) = mpsc::channel(100);
+        let (tx, _rx) = mpsc::channel(100);
         let mut senders = HashMap::new();
         senders.insert("test_channel".to_string(), tx);
         

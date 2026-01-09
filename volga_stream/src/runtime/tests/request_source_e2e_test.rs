@@ -1,3 +1,6 @@
+#![cfg(test)]
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 use crate::{
     api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}, planner::{Planner, PlanningContext}},
     common::test_utils::IdentityMapFunction,

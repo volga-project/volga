@@ -6,7 +6,7 @@ use crate::{
         }, operators::{
             chained::chained_operator::ChainedOperator, operator::{OperatorConfig, OperatorTrait, OperatorType}, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}
         }, runtime_context::RuntimeContext},
-    storage::{batch_store::BatchStore, InMemoryStorageClient, InMemoryStorageServer}
+    storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use async_trait::async_trait;
@@ -69,6 +69,7 @@ impl MapFunctionTrait for ToUpperCaseMapFunction {
 // TODO test sink chaining
 
 // #[tokio::test]
+#[allow(dead_code)]
 async fn test_chained_operator_map_map() {
     let configs = vec![
         OperatorConfig::MapConfig(MapFunction::new_custom(AddPrefixMapFunction { prefix: "PREFIX_".to_string() })),
@@ -101,6 +102,7 @@ async fn test_chained_operator_map_map() {
 }
 
 // #[tokio::test]
+#[allow(dead_code)]
 async fn test_chained_operator_source_map() {
     // Create test messages for source
     let test_messages = vec![
@@ -139,6 +141,7 @@ async fn test_chained_operator_source_map() {
 }
 
 // #[tokio::test]
+#[allow(dead_code)]
 async fn test_chained_operator_source_keyby() {
     // Create test data with multiple keys
     let schema = Arc::new(Schema::new(vec![
@@ -204,6 +207,7 @@ async fn test_chained_operator_source_keyby() {
 }
 
 // #[tokio::test]
+#[allow(dead_code)]
 async fn test_chained_operator_source_map_keyby() {
     // Create test data with single column for map function
     let schema = Arc::new(Schema::new(vec![
@@ -311,6 +315,7 @@ async fn test_chained_operator_type() {
 }
 
 // #[tokio::test]
+#[allow(dead_code)]
 async fn test_chained_operator_source_map_sink() {
     // Create test messages for source
     let test_messages = vec![

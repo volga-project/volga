@@ -321,7 +321,7 @@ mod tests {
 
     use crate::runtime::operators::window::TimeGranularity;
     use crate::runtime::operators::window::aggregates::{BucketRange, test_utils};
-    use crate::storage::batch_store::{BatchStore, BatchId, InMemBatchStore};
+    use crate::storage::batch_store::{BatchStore, BatchId, InMemBatchStore, BatchStoreCheckpoint};
     use crate::storage::stats::StorageStats;
     use crate::storage::WorkBudget;
 
@@ -418,12 +418,31 @@ mod tests {
             Box::pin(async move { inner.await_persisted().await })
         }
 
-        fn to_checkpoint(&self, task_id: TaskId) -> crate::storage::batch_store::BatchStoreCheckpoint {
-            self.inner.to_checkpoint(task_id)
+        fn to_checkpoint<'a>(
+            &'a self,
+            task_id: TaskId,
+        ) -> crate::storage::batch_store::BoxFut<'a, anyhow::Result<BatchStoreCheckpoint>> {
+            let inner = self.inner.clone();
+            Box::pin(async move { Ok(BatchStoreCheckpoint::InMem(inner.to_checkpoint(task_id))) })
         }
 
-        fn apply_checkpoint(&self, task_id: TaskId, cp: crate::storage::batch_store::BatchStoreCheckpoint) {
-            self.inner.apply_checkpoint(task_id, cp)
+        fn apply_checkpoint<'a>(
+            &'a self,
+            task_id: TaskId,
+            cp: BatchStoreCheckpoint,
+        ) -> crate::storage::batch_store::BoxFut<'a, anyhow::Result<()>> {
+            let inner = self.inner.clone();
+            Box::pin(async move {
+                match cp {
+                    BatchStoreCheckpoint::InMem(inmem) => {
+                        inner.apply_checkpoint(task_id, inmem);
+                        Ok(())
+                    }
+                    BatchStoreCheckpoint::Remote(_) => {
+                        anyhow::bail!("cannot apply remote checkpoint to CountingStore")
+                    }
+                }
+            })
         }
     }
 

@@ -114,7 +114,7 @@ impl FunctionTrait for ProjectionFunction {
 mod tests {
     use super::*;
     use arrow::array::{Int32Array, StringArray, Float64Array};
-    use arrow::datatypes::{Field, Schema, SchemaRef};
+    use arrow::datatypes::{Field, Schema};
     use datafusion::common::DFSchema;
     use std::sync::Arc;
     use datafusion::execution::context::SessionContext;
