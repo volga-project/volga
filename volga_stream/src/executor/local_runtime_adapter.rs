@@ -1,8 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::cluster::cluster_provider::create_test_cluster_nodes;
-use crate::cluster::node_assignment::{NodeAssignStrategy, OperatorPerNodeStrategy, node_to_vertex_ids};
+use crate::cluster::node_assignment::node_to_vertex_ids;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::master::Master;
@@ -23,12 +22,14 @@ impl LocalRuntimeAdapter {
 #[async_trait]
 impl RuntimeAdapter for LocalRuntimeAdapter {
     async fn start_attempt(&self, mut req: StartAttemptRequest) -> Result<AttemptHandle> {
-        let num_operators = req.execution_graph.get_vertices().len();
-        let num_workers = num_operators * req.num_workers_per_operator.max(1);
-        let cluster_nodes = create_test_cluster_nodes(num_workers);
+        let cluster_nodes = req
+            .cluster_provider
+            .get_all_nodes()
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
 
-        let strategy = OperatorPerNodeStrategy;
-        let vertex_to_node = strategy.assign_nodes(&req.execution_graph, &cluster_nodes);
+        let vertex_to_node = req.node_assign.assign_nodes(&req.execution_graph, &cluster_nodes);
         req.execution_graph.update_channels_with_node_mapping(Some(&vertex_to_node));
 
         let master_port = gen_unique_grpc_port();

@@ -82,7 +82,7 @@ fn test_distributed_execution() -> Result<()> {
         let context = PipelineContextBuilder::new()
             .with_parallelism(total_parallelism) // Total parallelism across all workers
             .with_logical_graph(LogicalGraph::from_linear_operators(operators, total_parallelism, false)) // chained = false for distributed
-            .with_execution_profile(ExecutionProfile::LocalOrchestrated { num_workers_per_operator })
+            .with_execution_profile(ExecutionProfile::LocalOrchestrated)
             .build();
 
         println!("[TEST] Starting distributed execution");

@@ -14,9 +14,44 @@ pub fn node_to_vertex_ids(mapping: &ExecutionVertexNodeMapping) -> HashMap<Strin
 }
 
 /// Strategy for assigning execution vertices to cluster nodes
-pub trait NodeAssignStrategy {
+pub trait NodeAssignStrategy: Send + Sync {
     /// Assign execution vertices to cluster nodes
     fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping;
+}
+
+/// Strategy that assigns all vertices to the first (single) node.
+pub struct SingleNodeStrategy;
+
+impl NodeAssignStrategy for SingleNodeStrategy {
+    fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping {
+        let mut mapping = ExecutionVertexNodeMapping::new();
+        if cluster_nodes.is_empty() {
+            return mapping;
+        }
+        let node = cluster_nodes[0].clone();
+        for vertex_id in execution_graph.get_vertices().keys() {
+            mapping.insert(vertex_id.as_ref().to_string(), node.clone());
+        }
+        mapping
+    }
+}
+
+/// Strategy that uses two nodes: node[0] reserved for master, node[1] for the single worker.
+/// All vertices are assigned to node[1].
+pub struct SingleWorkerStrategy;
+
+impl NodeAssignStrategy for SingleWorkerStrategy {
+    fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping {
+        let mut mapping = ExecutionVertexNodeMapping::new();
+        if cluster_nodes.len() < 2 {
+            panic!("SingleWorkerStrategy requires at least 2 cluster nodes (master + worker)");
+        }
+        let worker_node = cluster_nodes[1].clone();
+        for vertex_id in execution_graph.get_vertices().keys() {
+            mapping.insert(vertex_id.as_ref().to_string(), worker_node.clone());
+        }
+        mapping
+    }
 }
 
 /// Strategy that places all vertices with the same operator_id on a single node

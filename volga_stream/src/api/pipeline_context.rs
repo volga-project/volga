@@ -10,6 +10,8 @@ use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::api::planner::{Planner, PlanningContext};
 use crate::api::logical_graph::LogicalGraph;
 use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::cluster::cluster_provider::LocalMachineClusterProvider;
+use crate::cluster::node_assignment::{SingleNodeStrategy, SingleWorkerStrategy};
 use crate::executor::local_runtime_adapter::LocalRuntimeAdapter;
 use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::worker::{Worker, WorkerConfig, WorkerState};
@@ -31,10 +33,11 @@ pub enum ExecutionProfile {
     /// Intended for unit/integration tests that don't require master-driven coordination.
     SingleWorkerNoMaster { num_threads_per_task: usize },
     /// Full orchestration on one machine using loopback gRPC: Master polls WorkerServer(s).
-    LocalOrchestrated { num_workers_per_operator: usize },
+    LocalOrchestrated,
     /// Full orchestration using a provided RuntimeAdapter (for real distributed environments).
     Orchestrated {
         runtime_adapter: Arc<dyn RuntimeAdapter>,
+        cluster_provider: Arc<dyn crate::cluster::cluster_provider::ClusterProvider>,
         num_workers_per_operator: usize,
     },
 }
@@ -262,13 +265,17 @@ impl PipelineContext {
                 worker_states.insert(worker_id, worker_state);
                 Ok(PipelineState::new(worker_states))
             }
-            ExecutionProfile::LocalOrchestrated { num_workers_per_operator } => {
+            ExecutionProfile::LocalOrchestrated => {
                 let adapter = Arc::new(LocalRuntimeAdapter::new());
+                let cluster_provider = Arc::new(LocalMachineClusterProvider::single_node());
+                let node_assign = Arc::new(SingleNodeStrategy);
                 let handle = adapter
                     .start_attempt(StartAttemptRequest {
                         execution_ids,
                         execution_graph,
-                        num_workers_per_operator,
+                        num_workers_per_operator: 1,
+                        cluster_provider,
+                        node_assign,
                     })
                     .await?;
                 let final_state = handle.wait().await?;
@@ -277,12 +284,15 @@ impl PipelineContext {
                 }
                 Ok(final_state)
             }
-            ExecutionProfile::Orchestrated { runtime_adapter, num_workers_per_operator } => {
+            ExecutionProfile::Orchestrated { runtime_adapter, cluster_provider, num_workers_per_operator } => {
+                let node_assign = Arc::new(SingleWorkerStrategy);
                 let handle = runtime_adapter
                     .start_attempt(StartAttemptRequest {
                         execution_ids,
                         execution_graph,
                         num_workers_per_operator,
+                        cluster_provider,
+                        node_assign,
                     })
                     .await?;
                 let final_state = handle.wait().await?;

@@ -2,15 +2,19 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio::task::JoinHandle;
 
+use crate::cluster::cluster_provider::ClusterProvider;
+use crate::cluster::node_assignment::NodeAssignStrategy;
 use crate::control_plane::types::ExecutionIds;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master::PipelineState;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StartAttemptRequest {
     pub execution_ids: ExecutionIds,
     pub execution_graph: ExecutionGraph,
     pub num_workers_per_operator: usize,
+    pub cluster_provider: std::sync::Arc<dyn ClusterProvider>,
+    pub node_assign: std::sync::Arc<dyn NodeAssignStrategy>,
 }
 
 pub struct AttemptHandle {
