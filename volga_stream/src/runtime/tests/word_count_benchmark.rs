@@ -1,7 +1,6 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
+    api::pipeline_context::{ExecutionProfile, PipelineContext, PipelineContextBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::source::word_count_source::BatchingMode, master::PipelineState, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
     },
@@ -174,7 +173,7 @@ pub async fn run_word_count_benchmark(
         )
         .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
 
     let logical_graph = context.get_logical_graph().unwrap();

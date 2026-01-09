@@ -1,7 +1,6 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
+    api::pipeline_context::{ExecutionProfile, PipelineContext, PipelineContextBuilder},
     common::{message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
-    executor::local_executor::LocalExecutor,
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
@@ -504,7 +503,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
         )
         .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql(test_case.sql)
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
 
     // Start storage server and execute

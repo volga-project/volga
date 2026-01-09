@@ -1,22 +1,20 @@
 use crate::{
-    api::pipeline_context::PipelineContextBuilder,
-    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    executor::local_executor::LocalExecutor,
+    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    common::{test_utils::{gen_unique_grpc_port, print_pipeline_state}, message::Message},
     runtime::{
         functions::{
+            key_by::KeyByFunction,
+            reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
             source::word_count_source::BatchingMode,
         },
-        operators::{
-            sink::sink_operator::SinkConfig,
-            source::source_operator::{SourceConfig, WordCountSourceConfig},
-        },
+        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use std::{collections::HashMap, sync::Arc};
 use tokio::runtime::Runtime;
-use arrow::{array::StringArray, datatypes::{Field, Schema}};
+use arrow::{array::{Float64Array, StringArray}, datatypes::{Field, Schema}};
 
 // TODO: we may have colliding words since each source worker generates it's own
 #[test]
@@ -31,28 +29,31 @@ fn test_word_count() -> Result<()> {
     let num_to_send_per_word = 1000; // Number of copies of each word to send
     let batch_size = 10;
 
-    // Create streaming context with the logical graph and executor
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
-            "word_count_source".to_string(), 
+            "word_count_source".to_string(),
             SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
                 word_length,
                 dictionary_size_per_source,
                 Some(num_to_send_per_word),
-                None, // No time limit
+                None,
                 batch_size,
                 BatchingMode::SameWord,
-            )), 
+            )),
             Arc::new(Schema::new(vec![
                 Field::new("word", arrow::datatypes::DataType::Utf8, false),
                 Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
-            ]))
+            ])),
         )
-        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+            "http://{}",
+            storage_server_addr
+        )))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
+    let context = PipelineContext::new(spec);
 
     let (result_vec, pipeline_state) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();

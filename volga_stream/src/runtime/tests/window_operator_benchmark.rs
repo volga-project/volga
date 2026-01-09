@@ -1,7 +1,6 @@
 use crate::{
-    api::pipeline_context::{ExecutionMode, PipelineContextBuilder},
+    api::pipeline_context::{ExecutionMode, ExecutionProfile, PipelineContextBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
         master::PipelineState,
@@ -250,7 +249,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
             schema
         )
         .sql(&sql)
-        .with_executor(Box::new(LocalExecutor::new()));
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 });
 
     
     // Set execution mode 

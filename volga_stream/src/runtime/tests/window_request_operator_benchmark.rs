@@ -1,8 +1,7 @@
 use crate::{
-    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
+    api::pipeline_context::{ExecutionMode, ExecutionProfile, PipelineContextBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::metrics::PipelineStateHistory,
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
         master::PipelineState,
@@ -171,7 +170,7 @@ pub async fn run_window_request_benchmark(
             Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         )
         .sql(sql)
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .with_execution_mode(ExecutionMode::Request)
         .build();
 

@@ -9,4 +9,4 @@ pub use logical_graph::{
 };
 
 pub use planner::{Planner, PlanningContext};
-pub use pipeline_context::PipelineContext; 
+pub use pipeline_context::{PipelineContext, ExecutionProfile};
