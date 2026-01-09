@@ -80,3 +80,7 @@ volga_stream/Cargo.lock
 volga_stream/arroyo/
 volga_stream/datafusion/
 volga_stream/slatedb/
+volga_stream/OpenMLDB/
+volga_stream/feldera/
+volga_stream/foyer/
+new-worktree.sh

@@ -11,6 +11,7 @@ pub mod compactor;
 pub mod index;
 pub mod sorted_range_view_loader;
 pub mod worker_storage_context;
+pub mod remote_batch_store;
 
 pub use in_memory_storage_grpc_server::{InMemoryStorageServer, InMemoryStorageServiceImpl};
 pub use in_memory_storage_grpc_client::InMemoryStorageClient; 
@@ -22,3 +23,4 @@ pub use compactor::Compactor;
 pub use batch_pins::{BatchPins, BatchLease};
 pub use batch_retirement::BatchRetirementQueue;
 pub use worker_storage_context::WorkerStorageContext;
+pub use remote_batch_store::{RemoteBatchStore, RemoteBatchStoreConfig};

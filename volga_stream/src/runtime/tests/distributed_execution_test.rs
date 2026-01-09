@@ -1,3 +1,6 @@
+#![cfg(test)]
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 use crate::{
     api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}},
     common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::{Message, WatermarkMessage}, MAX_WATERMARK_VALUE},

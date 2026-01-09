@@ -96,7 +96,7 @@ impl FunctionTrait for FilterFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{Int32Array, BooleanArray};
+    use arrow::array::Int32Array;
     use arrow::datatypes::{Field, Schema};
     use datafusion::common::DFSchema;
     use std::sync::Arc;

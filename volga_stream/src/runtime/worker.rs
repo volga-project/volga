@@ -16,11 +16,70 @@ use anyhow::Result;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
-use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
+use crate::storage::{RemoteBatchStore, RemoteBatchStoreConfig, StorageBudgetConfig, WorkerStorageContext};
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 use crate::runtime::operators::window::TimeGranularity;
 
 use tokio::sync::mpsc;
+
+#[derive(Debug, Clone)]
+pub struct RemoteBatchStoreRuntimeConfig {
+    /// SlateDB DB path/prefix (inside the object store prefix).
+    pub db_path: String,
+    /// Object store prefix root (local filesystem for now).
+    pub object_store_root: String,
+    /// Local disk path for Foyer hybrid cache.
+    pub foyer_disk_path: String,
+    pub foyer_memory_bytes: usize,
+    pub foyer_disk_bytes: usize,
+    pub checkpoint_lifetime_secs: u64,
+}
+
+fn parse_remote_batch_store_from_job_config(
+    job_config: &HashMap<String, Value>,
+) -> Option<RemoteBatchStoreRuntimeConfig> {
+    let v = job_config.get("remote_batch_store")?;
+    let obj = v.as_object()?;
+    if obj.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+        return None;
+    }
+
+    Some(RemoteBatchStoreRuntimeConfig {
+        db_path: obj.get("db_path")?.as_str()?.to_string(),
+        object_store_root: obj.get("object_store_root")?.as_str()?.to_string(),
+        foyer_disk_path: obj.get("foyer_disk_path")?.as_str()?.to_string(),
+        foyer_memory_bytes: obj.get("foyer_memory_bytes")?.as_u64()? as usize,
+        foyer_disk_bytes: obj.get("foyer_disk_bytes")?.as_u64()? as usize,
+        checkpoint_lifetime_secs: obj.get("checkpoint_lifetime_secs")?.as_u64()?,
+    })
+}
+
+fn remote_batch_store_to_job_config_value(cfg: &RemoteBatchStoreRuntimeConfig) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert("enabled".to_string(), Value::Bool(true));
+    m.insert("db_path".to_string(), Value::String(cfg.db_path.clone()));
+    m.insert(
+        "object_store_root".to_string(),
+        Value::String(cfg.object_store_root.clone()),
+    );
+    m.insert(
+        "foyer_disk_path".to_string(),
+        Value::String(cfg.foyer_disk_path.clone()),
+    );
+    m.insert(
+        "foyer_memory_bytes".to_string(),
+        Value::from(cfg.foyer_memory_bytes as u64),
+    );
+    m.insert(
+        "foyer_disk_bytes".to_string(),
+        Value::from(cfg.foyer_disk_bytes as u64),
+    );
+    m.insert(
+        "checkpoint_lifetime_secs".to_string(),
+        Value::from(cfg.checkpoint_lifetime_secs),
+    );
+    Value::Object(m)
+}
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -31,7 +90,14 @@ pub struct WorkerConfig {
     pub transport_backend_type: TransportBackendType,
     pub master_addr: Option<String>,
     pub restore_checkpoint_id: Option<u64>,
+    /// Arbitrary job-level configuration key-values for all tasks on this worker.
+    ///
+    /// This is copied into each task `RuntimeContext` and can also be used for worker-level
+    /// configuration like `remote_batch_store`.
+    pub job_config: HashMap<String, Value>,
     pub storage_budgets: StorageBudgetConfig,
+    /// If set, use SlateDB+Foyer RemoteBatchStore. If None, use InMemBatchStore.
+    pub remote_batch_store: Option<RemoteBatchStoreRuntimeConfig>,
     pub inmem_store_lock_pool_size: usize,
     pub inmem_store_bucket_granularity: TimeGranularity,
     pub inmem_store_max_batch_size: usize,
@@ -53,7 +119,9 @@ impl WorkerConfig {
             transport_backend_type,
             master_addr: None,
             restore_checkpoint_id: None,
+            job_config: HashMap::new(),
             storage_budgets: StorageBudgetConfig::default(),
+            remote_batch_store: None,
             inmem_store_lock_pool_size: 4096,
             inmem_store_bucket_granularity: TimeGranularity::Seconds(1),
             inmem_store_max_batch_size: 1024,
@@ -67,6 +135,21 @@ impl WorkerConfig {
 
     pub fn with_restore_checkpoint_id(mut self, checkpoint_id: u64) -> Self {
         self.restore_checkpoint_id = Some(checkpoint_id);
+        self
+    }
+
+    pub fn with_job_config(mut self, job_config: HashMap<String, Value>) -> Self {
+        self.job_config = job_config;
+        self
+    }
+
+    pub fn with_job_config_kv(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.job_config.insert(key.into(), value);
+        self
+    }
+
+    pub fn with_remote_batch_store(mut self, cfg: RemoteBatchStoreRuntimeConfig) -> Self {
+        self.remote_batch_store = Some(cfg);
         self
     }
 }
@@ -109,7 +192,9 @@ pub struct Worker {
     transport_backend_type: TransportBackendType,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
+    job_config: HashMap<String, Value>,
     storage_budgets: StorageBudgetConfig,
+    remote_batch_store: Option<RemoteBatchStoreRuntimeConfig>,
     inmem_store_lock_pool_size: usize,
     inmem_store_bucket_granularity: TimeGranularity,
     inmem_store_max_batch_size: usize,
@@ -163,6 +248,8 @@ impl Worker {
             master_addr: config.master_addr.clone(),
             restore_checkpoint_id: config.restore_checkpoint_id,
             storage_budgets: config.storage_budgets,
+            job_config: config.job_config,
+            remote_batch_store: config.remote_batch_store,
             inmem_store_lock_pool_size: config.inmem_store_lock_pool_size,
             inmem_store_bucket_granularity: config.inmem_store_bucket_granularity,
             inmem_store_max_batch_size: config.inmem_store_max_batch_size,
@@ -284,13 +371,45 @@ impl Worker {
         println!("[WORKER] Spawning actors");
 
         // Worker-level shared storage context (used by window/request operators).
-        // Backend selection (SlateDB) will be added later; for now use InMemBatchStore.
         let budgets = self.storage_budgets.clone();
-        let store = Arc::new(InMemBatchStore::new(
-            self.inmem_store_lock_pool_size,
-            self.inmem_store_bucket_granularity,
-            self.inmem_store_max_batch_size,
-        )) as Arc<dyn BatchStore>;
+        let effective_remote_cfg = self
+            .remote_batch_store
+            .clone()
+            .or_else(|| parse_remote_batch_store_from_job_config(&self.job_config));
+
+        let store: Arc<dyn BatchStore> = if let Some(remote_cfg) = effective_remote_cfg.clone() {
+            // NOTE: We keep object-store wiring local-only initially (LocalFileSystem prefix).
+            // TODO: add S3/MinIO config (and feature-gated deps) when needed.
+            let object_store_root = std::path::PathBuf::from(remote_cfg.object_store_root);
+            std::fs::create_dir_all(&object_store_root)
+                .expect("failed to create object_store_root");
+            let object_store = Arc::new(
+                slatedb::object_store::local::LocalFileSystem::new_with_prefix(object_store_root)
+                    .expect("failed to create LocalFileSystem object store"),
+            ) as Arc<dyn slatedb::object_store::ObjectStore>;
+
+            let cfg = RemoteBatchStoreConfig {
+                db_path: remote_cfg.db_path,
+                checkpoint_lifetime_secs: remote_cfg.checkpoint_lifetime_secs,
+                bucket_granularity: self.inmem_store_bucket_granularity,
+                max_batch_size: self.inmem_store_max_batch_size,
+                foyer_memory_bytes: remote_cfg.foyer_memory_bytes,
+                foyer_disk_bytes: remote_cfg.foyer_disk_bytes,
+                foyer_disk_path: remote_cfg.foyer_disk_path,
+            };
+
+            Arc::new(
+                RemoteBatchStore::open(cfg, object_store)
+                    .await
+                    .expect("failed to open RemoteBatchStore"),
+            ) as Arc<dyn BatchStore>
+        } else {
+            Arc::new(InMemBatchStore::new(
+                self.inmem_store_lock_pool_size,
+                self.inmem_store_bucket_granularity,
+                self.inmem_store_max_batch_size,
+            )) as Arc<dyn BatchStore>
+        };
         let worker_storage = WorkerStorageContext::new(store, budgets).expect("worker storage ctx");
 
         let mut backend: Box<dyn TransportBackend> = match self.transport_backend_type {
@@ -319,12 +438,18 @@ impl Worker {
                 vertex.task_index,
                 vertex.parallelism,
                 {
-                    let mut cfg = HashMap::<String, Value>::new();
+                    let mut cfg = self.job_config.clone();
                     if let Some(master_addr) = &self.master_addr {
                         cfg.insert("master_addr".to_string(), Value::String(master_addr.clone()));
                     }
                     if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
+                    }
+                    if let Some(remote_cfg) = effective_remote_cfg.as_ref() {
+                        cfg.insert(
+                            "remote_batch_store".to_string(),
+                            remote_batch_store_to_job_config_value(remote_cfg),
+                        );
                     }
                     Some(cfg)
                 },

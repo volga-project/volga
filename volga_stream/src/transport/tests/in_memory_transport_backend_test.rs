@@ -3,7 +3,6 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
 use crate::runtime::functions::{
     map::MapFunction,
-    map::MapFunctionTrait,
 };
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::channel::Channel;

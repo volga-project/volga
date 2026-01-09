@@ -1,3 +1,6 @@
+#![cfg(test)]
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 use crate::{
     api::pipeline_context::{PipelineContext, PipelineContextBuilder},
     common::{message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},

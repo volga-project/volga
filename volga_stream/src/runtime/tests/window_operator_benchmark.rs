@@ -1,3 +1,6 @@
+#![cfg(test)]
+#![allow(dead_code, unused_imports, unused_variables, unused_mut)]
+
 use crate::{
     api::pipeline_context::{ExecutionMode, PipelineContextBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},

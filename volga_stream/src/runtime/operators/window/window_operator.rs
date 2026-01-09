@@ -689,7 +689,8 @@ impl OperatorTrait for WindowOperator {
         let batch_store_cp = self
             .state_ref()
             .get_batch_store()
-            .to_checkpoint(self.state_ref().task_id());
+            .to_checkpoint(self.state_ref().task_id())
+            .await?;
 
         Ok(vec![
             ("window_operator_state".to_string(), bincode::serialize(&state_cp)?),
@@ -715,7 +716,8 @@ impl OperatorTrait for WindowOperator {
             let cp: crate::storage::batch_store::BatchStoreCheckpoint = bincode::deserialize(bytes)?;
             self.state_ref()
                 .get_batch_store()
-                .apply_checkpoint(self.state_ref().task_id(), cp);
+                .apply_checkpoint(self.state_ref().task_id(), cp)
+                .await?;
         } else {
             panic!("Batch store bytes are missing");
         }
