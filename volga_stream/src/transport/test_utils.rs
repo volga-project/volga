@@ -60,7 +60,11 @@ pub struct TestDataWriterActor {
 impl TestDataWriterActor {
     pub fn new(vertex_id: VertexId, transport_client_config: TransportClientConfig) -> Self {
         Self {
-            writer: DataWriter::new(vertex_id, transport_client_config.writer_senders.unwrap()),
+            writer: DataWriter::new(
+                vertex_id,
+                transport_client_config.writer_senders.unwrap(),
+                transport_client_config.metrics_labels,
+            ),
         }
     }
 }

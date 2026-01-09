@@ -9,15 +9,43 @@ use crate::runtime::operators::sink::sink_operator::SinkConfig;
 
 use crate::api::planner::{Planner, PlanningContext};
 use crate::api::logical_graph::LogicalGraph;
-use crate::executor::executor::Executor;
+use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::cluster::cluster_provider::LocalMachineClusterProvider;
+use crate::cluster::node_assignment::{SingleNodeStrategy, SingleWorkerStrategy};
+use crate::executor::local_runtime_adapter::LocalRuntimeAdapter;
+use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
+use crate::runtime::worker::{Worker, WorkerConfig, WorkerState};
+use crate::transport::transport_backend_actor::TransportBackendType;
 use tokio::sync::mpsc;
 use anyhow::Result;
+use std::collections::HashMap as StdHashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionMode {
     Request,
     Streaming,
     Batch,
+}
+
+#[derive(Clone)]
+pub enum ExecutionProfile {
+    /// Fast single-process harness: one Worker, no Master orchestration loop.
+    /// Intended for unit/integration tests that don't require master-driven coordination.
+    SingleWorkerNoMaster { num_threads_per_task: usize },
+    /// Full orchestration on one machine using loopback gRPC: Master polls WorkerServer(s).
+    LocalOrchestrated,
+    /// Full orchestration using a provided RuntimeAdapter (for real distributed environments).
+    Orchestrated {
+        runtime_adapter: Arc<dyn RuntimeAdapter>,
+        cluster_provider: Arc<dyn crate::cluster::cluster_provider::ClusterProvider>,
+        num_workers_per_operator: usize,
+    },
+}
+
+impl Default for ExecutionProfile {
+    fn default() -> Self {
+        Self::SingleWorkerNoMaster { num_threads_per_task: 4 }
+    }
 }
 
 /// Context for pipeline execution containing sources, sinks, and execution parameters
@@ -38,10 +66,10 @@ pub struct PipelineContext {
     sql: Option<String>,
     /// Logical graph (set by with_logical_graph() method)
     logical_graph: Option<LogicalGraph>,
-    /// Executor for running the job
-    executor: Arc<Option<Box<dyn Executor>>>,
     /// Execution mode
     execution_mode: ExecutionMode,
+    /// Execution profile (how to run the pipeline)
+    execution_profile: ExecutionProfile,
 }
 
 /// Builder for constructing a PipelineContext
@@ -59,8 +87,8 @@ impl fmt::Debug for PipelineContext {
             .field("sql", &self.sql)
             .field("df_session_context", &"<SessionContext>")
             .field("logical_graph", &self.logical_graph)
-            .field("executor", &"<Executor>")
             .field("execution_mode", &self.execution_mode)
+            .field("execution_profile", &"<ExecutionProfile>")
             .finish()
     }
 }
@@ -85,8 +113,8 @@ impl PipelineContextBuilder {
                 parallelism: 1,
                 sql: None,
                 logical_graph: None,
-                executor: Arc::new(None),
                 execution_mode: ExecutionMode::Streaming,
+                execution_profile: ExecutionProfile::default(),
             },
         }
     }
@@ -126,9 +154,8 @@ impl PipelineContextBuilder {
         self
     }
 
-    /// Set executor for running the job
-    pub fn with_executor(mut self, executor: Box<dyn Executor>) -> Self {
-        self.context.executor = Arc::new(Some(executor));
+    pub fn with_execution_profile(mut self, profile: ExecutionProfile) -> Self {
+        self.context.execution_profile = profile;
         self
     }
 
@@ -192,15 +219,89 @@ impl PipelineContext {
         println!("logical_graph: {:?}", logical_graph.to_dot());
 
         // Convert to execution graph
-        let execution_graph = logical_graph.to_execution_graph();
+        let mut execution_graph = logical_graph.to_execution_graph();
+        let execution_ids = ExecutionIds::fresh(AttemptId(1));
 
-        // Get executor or panic if not set
-        let executor_option = Arc::try_unwrap(self.executor)
-            .map_err(|_| anyhow::anyhow!("PipelineContext is still being referenced elsewhere"))?;
-        let mut executor = executor_option.expect("No executor set. Call with_executor() first.");
-        
-        // Execute using the configured executor
-        executor.execute(execution_graph, state_updates_sender).await
+        match self.execution_profile {
+            ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task } => {
+                execution_graph.update_channels_with_node_mapping(None);
+                let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
+                let worker_id = "single_worker".to_string();
+
+                let worker_config = WorkerConfig::new(
+                    worker_id.clone(),
+                    execution_ids,
+                    execution_graph,
+                    vertex_ids,
+                    num_threads_per_task,
+                    TransportBackendType::InMemory,
+                );
+                let mut worker = Worker::new(worker_config);
+
+                if let Some(pipeline_state_sender) = state_updates_sender {
+                    let (worker_state_sender, mut worker_state_receiver) = mpsc::channel::<WorkerState>(100);
+                    let pipeline_sender = pipeline_state_sender.clone();
+                    let worker_id_clone = worker_id.clone();
+                    tokio::spawn(async move {
+                        while let Some(worker_state) = worker_state_receiver.recv().await {
+                            let mut worker_states = StdHashMap::new();
+                            worker_states.insert(worker_id_clone.clone(), worker_state);
+                            let pipeline_state = PipelineState::new(worker_states);
+                            let _ = pipeline_sender.send(pipeline_state).await;
+                        }
+                    });
+
+                    worker
+                        .execute_worker_lifecycle_for_testing_with_state_updates(worker_state_sender)
+                        .await;
+                } else {
+                    worker.execute_worker_lifecycle_for_testing().await;
+                }
+
+                let worker_state = worker.get_state().await;
+                worker.close().await;
+
+                let mut worker_states = StdHashMap::new();
+                worker_states.insert(worker_id, worker_state);
+                Ok(PipelineState::new(worker_states))
+            }
+            ExecutionProfile::LocalOrchestrated => {
+                let adapter = Arc::new(LocalRuntimeAdapter::new());
+                let cluster_provider = Arc::new(LocalMachineClusterProvider::single_node());
+                let node_assign = Arc::new(SingleNodeStrategy);
+                let handle = adapter
+                    .start_attempt(StartAttemptRequest {
+                        execution_ids,
+                        execution_graph,
+                        num_workers_per_operator: 1,
+                        cluster_provider,
+                        node_assign,
+                    })
+                    .await?;
+                let final_state = handle.wait().await?;
+                if let Some(sender) = state_updates_sender {
+                    let _ = sender.send(final_state.clone()).await;
+                }
+                Ok(final_state)
+            }
+            ExecutionProfile::Orchestrated { runtime_adapter, cluster_provider, num_workers_per_operator } => {
+                let node_assign = Arc::new(SingleWorkerStrategy);
+                let handle = runtime_adapter
+                    .start_attempt(StartAttemptRequest {
+                        execution_ids,
+                        execution_graph,
+                        num_workers_per_operator,
+                        cluster_provider,
+                        node_assign,
+                    })
+                    .await?;
+                let final_state = handle.wait().await?;
+                if let Some(sender) = state_updates_sender {
+                    let _ = sender.send(final_state.clone()).await;
+                }
+                Ok(final_state)
+            }
+        }
     }
 
     /// Execute the job and return only the final execution state

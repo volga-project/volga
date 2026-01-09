@@ -19,6 +19,7 @@ use crate::api::pipeline_context::{ExecutionMode, PipelineContextBuilder};
 use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
+use crate::control_plane::types::{AttemptId, ExecutionIds};
 
 fn create_input_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -200,9 +201,11 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         .collect();
 
     // Start worker #1
+    let execution_ids = ExecutionIds::fresh(AttemptId(1));
     let mut worker = Worker::new(
         WorkerConfig::new(
             "worker1".to_string(),
+            execution_ids.clone(),
             exec_graph1,
             vertex_ids_1,
             2,
@@ -295,6 +298,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut worker2 = Worker::new(
         WorkerConfig::new(
             "worker2".to_string(),
+            execution_ids.clone(),
             exec_graph2,
             vertex_ids_2,
             2,

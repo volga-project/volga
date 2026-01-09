@@ -1,7 +1,6 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}, planner::{Planner, PlanningContext}},
+    api::{logical_graph::LogicalGraph, pipeline_context::{ExecutionProfile, PipelineContextBuilder}, planner::{Planner, PlanningContext}},
     common::test_utils::IdentityMapFunction,
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
             key_by::{KeyByFunction, key_by_function::extract_datafusion_window_exec},
@@ -23,10 +22,10 @@ use futures::future::join_all;
 use tokio::sync::Semaphore;
 use rand;
 use std::collections::HashMap;
+use crate::common::test_utils::gen_unique_grpc_port;
 
 pub fn create_test_config(max_pending_requests: usize, request_timeout_ms: u64) -> RequestSourceConfig {
-    // Use a random high port to avoid conflicts
-    let port = 8000 + (rand::random::<u16>() % 1000);
+    let port = gen_unique_grpc_port();
     
     RequestSourceConfig::new(
         format!("127.0.0.1:{}", port),
@@ -309,12 +308,12 @@ async fn test_request_source_sink_e2e() {
         let context = PipelineContextBuilder::new()
             .with_parallelism(parallelism)
             .with_logical_graph(logical_graph)
-            .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
             .build();
 
         // Start pipeline execution in background
     // TODO implement stop for context
-    let pipeline_handle = tokio::spawn(async move {
+    let _pipeline_handle = tokio::spawn(async move {
         context.execute().await.unwrap();
     });
 

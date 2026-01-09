@@ -1,6 +1,5 @@
 use crate::{
-    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
-    executor::local_executor::LocalExecutor,
+    api::pipeline_context::{ExecutionProfile, PipelineContextBuilder, ExecutionMode},
     runtime::{
         functions::{
             source::{
@@ -171,7 +170,7 @@ async fn test_request_execution_mode() {
             Some(SinkConfig::RequestSinkConfig)
         )
         .sql(sql)
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .with_execution_mode(ExecutionMode::Request)
         .build();
 

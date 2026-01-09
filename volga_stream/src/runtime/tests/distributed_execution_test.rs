@@ -1,7 +1,6 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}},
+    api::{logical_graph::LogicalGraph, pipeline_context::{ExecutionProfile, PipelineContext, PipelineContextBuilder}},
     common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::{Message, WatermarkMessage}, MAX_WATERMARK_VALUE},
-    executor::fake_distributed_executor::FakeDistributedExecutor,
     runtime::{
         functions::{key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}},
         operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
@@ -78,12 +77,12 @@ fn test_distributed_execution() -> Result<()> {
             OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
         ];
 
-        // Create streaming context with FakeDistributedExecutor
+        // Create streaming context with local full orchestration (master + worker servers)
         let total_parallelism = num_workers_per_operator * parallelism_per_worker;
         let context = PipelineContextBuilder::new()
             .with_parallelism(total_parallelism) // Total parallelism across all workers
             .with_logical_graph(LogicalGraph::from_linear_operators(operators, total_parallelism, false)) // chained = false for distributed
-            .with_executor(Box::new(FakeDistributedExecutor::new(num_workers_per_operator)))
+            .with_execution_profile(ExecutionProfile::LocalOrchestrated)
             .build();
 
         println!("[TEST] Starting distributed execution");
