@@ -1,7 +1,6 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}},
+    api::{logical_graph::LogicalGraph, pipeline_context::{ExecutionProfile, PipelineContext, PipelineContextBuilder}},
     common::{test_utils::{gen_unique_grpc_port, print_pipeline_state}, message::Message},
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
             key_by::KeyByFunction,
@@ -50,7 +49,7 @@ fn test_word_count() -> Result<()> {
         )
         .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
 
     let (result_vec, pipeline_state) = runtime.block_on(async {

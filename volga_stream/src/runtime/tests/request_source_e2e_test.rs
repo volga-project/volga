@@ -1,7 +1,6 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::PipelineContextBuilder, planner::{Planner, PlanningContext}},
+    api::{logical_graph::LogicalGraph, pipeline_context::{ExecutionProfile, PipelineContextBuilder}, planner::{Planner, PlanningContext}},
     common::test_utils::IdentityMapFunction,
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
             key_by::{KeyByFunction, key_by_function::extract_datafusion_window_exec},
@@ -309,7 +308,7 @@ async fn test_request_source_sink_e2e() {
         let context = PipelineContextBuilder::new()
             .with_parallelism(parallelism)
             .with_logical_graph(logical_graph)
-            .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
             .build();
 
         // Start pipeline execution in background
