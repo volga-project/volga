@@ -14,6 +14,8 @@ use crate::control_plane::types::{
 };
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::cluster::cluster_provider::LocalMachineClusterProvider;
+use crate::cluster::node_assignment::SingleNodeStrategy;
 
 #[derive(Clone)]
 pub struct ControlPlaneController {
@@ -84,6 +86,8 @@ impl ControlPlaneController {
                             execution_ids: run.execution_ids.clone(),
                             execution_graph: graph,
                             num_workers_per_operator: 1,
+                            cluster_provider: Arc::new(LocalMachineClusterProvider::single_node()),
+                            node_assign: Arc::new(SingleNodeStrategy),
                         })
                         .await?;
 
