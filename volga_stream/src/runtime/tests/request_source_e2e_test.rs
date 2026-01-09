@@ -1,12 +1,12 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContextBuilder}, planner::{Planner, PlanningContext}},
-    common::test_utils::{IdentityMapFunction, gen_unique_grpc_port},
-    executor::local_executor::LocalExecutor,
+    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder, planner::{Planner, PlanningContext}},
+    common::test_utils::IdentityMapFunction,
     runtime::{
         functions::{
             key_by::{KeyByFunction, key_by_function::extract_datafusion_window_exec},
             map::MapFunction,
             source::request_source::RequestSourceConfig,
+            source::RequestSourceSinkSpec,
         },
         operators::{
             operator::OperatorConfig,
@@ -23,14 +23,18 @@ use futures::future::join_all;
 use tokio::sync::Semaphore;
 use rand;
 use std::collections::HashMap;
+use crate::common::test_utils::gen_unique_grpc_port;
 
 pub fn create_test_config(max_pending_requests: usize, request_timeout_ms: u64) -> RequestSourceConfig {
     let port = gen_unique_grpc_port();
-    RequestSourceConfig::new(
-        format!("127.0.0.1:{}", port),
+    
+    RequestSourceConfig::new(RequestSourceSinkSpec {
+        bind_address: format!("127.0.0.1:{}", port),
         max_pending_requests,
         request_timeout_ms,
-    )
+        schema_ipc: vec![],
+        sink: None,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -263,7 +267,7 @@ async fn test_request_source_sink_e2e() {
 
         // Create test configuration
     let config = create_test_config(max_pending_requests, request_timeout_ms);
-    let bind_address = config.bind_address.clone();
+    let bind_address = config.spec.bind_address.clone();
 
     // Create schema that matches our test data
     let schema = Arc::new(Schema::new(vec![
@@ -304,11 +308,12 @@ async fn test_request_source_sink_e2e() {
         let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
 
         // Create pipeline context with LocalExecutor
-        let context = PipelineContextBuilder::new()
+        let spec = PipelineSpecBuilder::new()
             .with_parallelism(parallelism)
             .with_logical_graph(logical_graph)
-            .with_executor(Box::new(LocalExecutor::new()))
+            .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
             .build();
+        let context = PipelineContext::new(spec);
 
         // Start pipeline execution in background
     // TODO implement stop for context

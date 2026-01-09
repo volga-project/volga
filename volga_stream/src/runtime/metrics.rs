@@ -8,6 +8,7 @@ use std::{collections::HashMap, sync::{Once, OnceLock}};
 
 use crate::runtime::VertexId;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::control_plane::types::ExecutionIds;
 
 // Global Prometheus handle for programmatic access
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -52,6 +53,17 @@ pub const LABEL_VERTEX_ID: &str = "vertex_id";
 pub const LABEL_TARGET_VERTEX_ID: &str = "target_vertex_id";
 pub const LABEL_WORKER_ID: &str = "worker_id";
 pub const LABEL_OPERATOR_ID: &str = "operator_id";
+pub const LABEL_PIPELINE_SPEC_ID: &str = "pipeline_spec_id";
+pub const LABEL_PIPELINE_ID: &str = "pipeline_id";
+pub const LABEL_ATTEMPT_ID: &str = "attempt_id";
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricsLabels {
+    pub pipeline_spec_id: String,
+    pub pipeline_id: String,
+    pub attempt_id: u32,
+    pub worker_id: String,
+}
 
 // Histogram bucket boundaries, milliseconds
 pub const LATENCY_BUCKET_BOUNDARIES: [f64; 12] = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0];
@@ -230,13 +242,14 @@ impl OperatorMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerMetrics {
     pub worker_id: String,
+    pub execution_ids: ExecutionIds,
     pub operator_metrics: HashMap<String, OperatorMetrics>,
     pub tasks_metrics: HashMap<String, StreamTaskMetrics>
 }
 
 impl WorkerMetrics {
 
-    pub fn new(worker_id: String, tasks_metrics: HashMap<String, StreamTaskMetrics>, graph: &ExecutionGraph) -> Self {
+    pub fn new(worker_id: String, execution_ids: ExecutionIds, tasks_metrics: HashMap<String, StreamTaskMetrics>, graph: &ExecutionGraph) -> Self {
         let mut metrics_by_operator: HashMap<String, Vec<StreamTaskMetrics>> = HashMap::new();
 
         // Group task metrics by operator_id
@@ -261,34 +274,137 @@ impl WorkerMetrics {
 
         WorkerMetrics {
             worker_id,
+            execution_ids,
             operator_metrics,
             tasks_metrics
         }
     }
 
     pub fn record(&self) {
+        let pipeline_spec_id = self.execution_ids.pipeline_spec_id.0.to_string();
+        let pipeline_id = self.execution_ids.pipeline_id.0.to_string();
+        let attempt_id = self.execution_ids.attempt_id.0.to_string();
+
         for (operator_id, operator_metrics) in self.operator_metrics.iter() {
             // Record throughput metrics
-            counter!(METRIC_OPERATOR_MESSAGES_SENT, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).increment(operator_metrics.throughput_metrics.messages_sent);
-            counter!(METRIC_OPERATOR_MESSAGES_RECV, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).increment(operator_metrics.throughput_metrics.messages_recv);
-            counter!(METRIC_OPERATOR_RECORDS_SENT, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).increment(operator_metrics.throughput_metrics.records_sent);
-            counter!(METRIC_OPERATOR_RECORDS_RECV, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).increment(operator_metrics.throughput_metrics.records_recv);
-            counter!(METRIC_OPERATOR_BYTES_SENT, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).increment(operator_metrics.throughput_metrics.bytes_sent);
-            counter!(METRIC_OPERATOR_BYTES_RECV, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).increment(operator_metrics.throughput_metrics.bytes_recv);
+            counter!(
+                METRIC_OPERATOR_MESSAGES_SENT,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).increment(operator_metrics.throughput_metrics.messages_sent);
+            counter!(
+                METRIC_OPERATOR_MESSAGES_RECV,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).increment(operator_metrics.throughput_metrics.messages_recv);
+            counter!(
+                METRIC_OPERATOR_RECORDS_SENT,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).increment(operator_metrics.throughput_metrics.records_sent);
+            counter!(
+                METRIC_OPERATOR_RECORDS_RECV,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).increment(operator_metrics.throughput_metrics.records_recv);
+            counter!(
+                METRIC_OPERATOR_BYTES_SENT,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).increment(operator_metrics.throughput_metrics.bytes_sent);
+            counter!(
+                METRIC_OPERATOR_BYTES_RECV,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).increment(operator_metrics.throughput_metrics.bytes_recv);
             
             // Record latency metrics
-            gauge!(METRIC_OPERATOR_LATENCY_99, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).set(operator_metrics.latency_metrics.p99);
-            gauge!(METRIC_OPERATOR_LATENCY_95, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).set(operator_metrics.latency_metrics.p95);
-            gauge!(METRIC_OPERATOR_LATENCY_50, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).set(operator_metrics.latency_metrics.p50);
-            gauge!(METRIC_OPERATOR_LATENCY_AVG, LABEL_OPERATOR_ID => operator_id.clone(), LABEL_WORKER_ID => self.worker_id.clone()).set(operator_metrics.latency_metrics.avg);
+            gauge!(
+                METRIC_OPERATOR_LATENCY_99,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(operator_metrics.latency_metrics.p99);
+            gauge!(
+                METRIC_OPERATOR_LATENCY_95,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(operator_metrics.latency_metrics.p95);
+            gauge!(
+                METRIC_OPERATOR_LATENCY_50,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(operator_metrics.latency_metrics.p50);
+            gauge!(
+                METRIC_OPERATOR_LATENCY_AVG,
+                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(operator_metrics.latency_metrics.avg);
         }
         
         // Record stream task latency metrics
         for (vertex_id, task_metrics) in self.tasks_metrics.iter() {
-            gauge!(METRIC_STREAM_TASK_LATENCY_99, LABEL_VERTEX_ID => vertex_id.clone()).set(task_metrics.latency_stats.p99);
-            gauge!(METRIC_STREAM_TASK_LATENCY_95, LABEL_VERTEX_ID => vertex_id.clone()).set(task_metrics.latency_stats.p95);
-            gauge!(METRIC_STREAM_TASK_LATENCY_50, LABEL_VERTEX_ID => vertex_id.clone()).set(task_metrics.latency_stats.p50);
-            gauge!(METRIC_STREAM_TASK_LATENCY_AVG, LABEL_VERTEX_ID => vertex_id.clone()).set(task_metrics.latency_stats.avg);
+            gauge!(
+                METRIC_STREAM_TASK_LATENCY_99,
+                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(task_metrics.latency_stats.p99);
+            gauge!(
+                METRIC_STREAM_TASK_LATENCY_95,
+                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(task_metrics.latency_stats.p95);
+            gauge!(
+                METRIC_STREAM_TASK_LATENCY_50,
+                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(task_metrics.latency_stats.p50);
+            gauge!(
+                METRIC_STREAM_TASK_LATENCY_AVG,
+                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_WORKER_ID => self.worker_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => attempt_id.clone()
+            ).set(task_metrics.latency_stats.avg);
         }
     }
 }
@@ -566,23 +682,17 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     let prometheus_recorder = prometheus_builder.build_recorder();
     let prometheus_handle = prometheus_recorder.handle();
 
-    let tcp_builder = TcpBuilder::new()
-        .listen_address("127.0.0.1:9999".parse::<std::net::SocketAddr>()?);
-    let fanout = match tcp_builder.build() {
-        Ok(tcp_recorder) => {
-            println!("🔍 TCP metrics streaming to 127.0.0.1:9999");
-            FanoutBuilder::default()
-                .add_recorder(prometheus_recorder)
-                .add_recorder(tcp_recorder)
-                .build()
-        }
-        Err(e) => {
-            eprintln!("⚠️  TCP metrics disabled: {}", e);
-            FanoutBuilder::default()
-                .add_recorder(prometheus_recorder)
-                .build()
-        }
-    };
+    let mut tcp_recorder_opt = TcpBuilder::new()
+        .listen_address("127.0.0.1:9999".parse::<std::net::SocketAddr>()?)
+        .build()
+        .ok();
+
+    let mut fanout_builder = FanoutBuilder::default().add_recorder(prometheus_recorder);
+    let tcp_enabled = tcp_recorder_opt.is_some();
+    if let Some(tcp_recorder) = tcp_recorder_opt.take() {
+        fanout_builder = fanout_builder.add_recorder(tcp_recorder);
+    }
+    let fanout = fanout_builder.build();
     
     metrics::set_global_recorder(fanout)?;
     
@@ -590,18 +700,21 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("✅ Volga metrics initialized with Prometheus + TCP fanout");
     println!("📊 Prometheus metrics available via handle");
+    if tcp_enabled {
+        println!("🔍 TCP metrics streaming to 127.0.0.1:9999");
+    }
     Ok(())
 }
 
 
-pub fn get_stream_task_metrics(vertex_id: VertexId) -> StreamTaskMetrics {
+pub fn get_stream_task_metrics(vertex_id: VertexId, labels: Option<&MetricsLabels>) -> StreamTaskMetrics {
     let handle = PROMETHEUS_HANDLE.get().expect("Metrics not initialized");
     let prometheus_text = handle.render();
     
-    parse_stream_task_metrics(&prometheus_text, vertex_id.as_ref())
+    parse_stream_task_metrics(&prometheus_text, vertex_id.as_ref(), labels)
 }
 
-fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str) -> StreamTaskMetrics {
+fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Option<&MetricsLabels>) -> StreamTaskMetrics {
     let scrape = Scrape::parse(prometheus_text.lines().map(|line| Ok(line.to_string())))
         .expect("Failed to parse Prometheus metrics");
     
@@ -622,6 +735,21 @@ fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str) -> StreamTa
             }
         } else {
             continue; // Skip metrics without vertex_id label
+        }
+
+        if let Some(labels) = labels {
+            if sample.labels.get(LABEL_PIPELINE_SPEC_ID) != Some(labels.pipeline_spec_id.as_str()) {
+                continue;
+            }
+            if sample.labels.get(LABEL_PIPELINE_ID) != Some(labels.pipeline_id.as_str()) {
+                continue;
+            }
+            if sample.labels.get(LABEL_ATTEMPT_ID).and_then(|s| s.parse::<u32>().ok()) != Some(labels.attempt_id) {
+                continue;
+            }
+            if sample.labels.get(LABEL_WORKER_ID) != Some(labels.worker_id.as_str()) {
+                continue;
+            }
         }
         
         match sample.value {
@@ -703,27 +831,82 @@ mod tests {
         init_metrics();
         
         let vertex_id = "test_task_123".to_string();
+        let labels = MetricsLabels {
+            pipeline_spec_id: "spec".to_string(),
+            pipeline_id: "pipe".to_string(),
+            attempt_id: 1,
+            worker_id: "worker".to_string(),
+        };
         
         // Record stream task metrics
-        counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(5);
-        counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(3);
-        counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(25);
-        counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(15);
-        counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(1024);
-        counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(512);
+        counter!(
+            METRIC_STREAM_TASK_MESSAGES_SENT,
+            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(5);
+        counter!(
+            METRIC_STREAM_TASK_MESSAGES_RECV,
+            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(3);
+        counter!(
+            METRIC_STREAM_TASK_RECORDS_SENT,
+            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(25);
+        counter!(
+            METRIC_STREAM_TASK_RECORDS_RECV,
+            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(15);
+        counter!(
+            METRIC_STREAM_TASK_BYTES_SENT,
+            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(1024);
+        counter!(
+            METRIC_STREAM_TASK_BYTES_RECV,
+            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(512);
         
         // Define latency measurements to record
         let latency_measurements = [5.0, 25.0, 150.0, 2.5, 75.0];
         
         // Record latencies using metrics
         for &latency in &latency_measurements {
-            histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone()).record(latency);
+            histogram!(
+                METRIC_STREAM_TASK_LATENCY,
+                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+                LABEL_WORKER_ID => labels.worker_id.clone()
+            ).record(latency);
         }
         
         // Build expected histogram manually
         let expected_histogram = build_expected_histogram(&latency_measurements, &LATENCY_BUCKET_BOUNDARIES);
         
-        let parsed_metrics = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()));
+        let parsed_metrics = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
         
         // Verify the parsed stream task metrics
         assert_eq!(parsed_metrics.vertex_id, vertex_id);
@@ -759,10 +942,24 @@ mod tests {
         
         // Test vertex isolation with a second vertex
         let vertex_b = "task_b".to_string();
-        counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_b.clone()).increment(1);
-        counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_b.clone()).increment(50);
+        counter!(
+            METRIC_STREAM_TASK_MESSAGES_SENT,
+            LABEL_VERTEX_ID => vertex_b.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(1);
+        counter!(
+            METRIC_STREAM_TASK_RECORDS_SENT,
+            LABEL_VERTEX_ID => vertex_b.clone(),
+            LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+            LABEL_WORKER_ID => labels.worker_id.clone()
+        ).increment(50);
         
-        let metrics_b = get_stream_task_metrics(Arc::<str>::from(vertex_b.clone()));
+        let metrics_b = get_stream_task_metrics(Arc::<str>::from(vertex_b.clone()), Some(&labels));
         
         // Verify isolation - vertex B should only see its own metrics
         assert_eq!(metrics_b.vertex_id, vertex_b);
@@ -771,7 +968,7 @@ mod tests {
         assert_eq!(metrics_b.throughput_stast.messages_recv, 0); // Not set for vertex B
         
         // Verify original vertex still has correct metrics
-        let metrics_a_again = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()));
+        let metrics_a_again = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
         assert_eq!(metrics_a_again.throughput_stast.messages_sent, 5);
         assert_eq!(metrics_a_again.throughput_stast.records_sent, 25);
     }

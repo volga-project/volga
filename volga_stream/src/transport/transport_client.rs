@@ -1,7 +1,7 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{metrics::{LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{metrics::{MetricsLabels, LABEL_ATTEMPT_ID, LABEL_PIPELINE_ID, LABEL_PIPELINE_SPEC_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
@@ -17,6 +17,7 @@ pub struct TransportClientConfig {
     pub vertex_id: VertexId,
     pub reader_receivers: Option<HashMap<String, BatchReceiver>>,
     pub writer_senders: Option<HashMap<String, BatchSender>>,
+    pub metrics_labels: Option<MetricsLabels>,
 }
 
 impl TransportClientConfig {
@@ -25,6 +26,7 @@ impl TransportClientConfig {
             vertex_id,
             reader_receivers: None,
             writer_senders: None,
+            metrics_labels: None,
         }
     }
 
@@ -40,6 +42,10 @@ impl TransportClientConfig {
             self.writer_senders = Some(HashMap::new());
         }
         self.writer_senders.as_mut().unwrap().insert(channel_id, sender);
+    }
+
+    pub fn set_metrics_labels(&mut self, labels: MetricsLabels) {
+        self.metrics_labels = Some(labels);
     }
 }
 
@@ -173,6 +179,7 @@ impl DataReader {
 pub struct DataWriter {
     pub vertex_id: VertexId,
     pub senders: HashMap<String, BatchSender>,
+    metrics_labels: Option<MetricsLabels>,
     // batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
@@ -180,13 +187,14 @@ pub struct DataWriter {
 }
 
 impl DataWriter {
-    pub fn new(vertex_id: VertexId, senders: HashMap<String, BatchSender>) -> Self {
+    pub fn new(vertex_id: VertexId, senders: HashMap<String, BatchSender>, metrics_labels: Option<MetricsLabels>) -> Self {
         let batching_config = BatcherConfig::default();
         // let batcher = Batcher::new(batching_config.clone(), senders.clone());
         
         Self {
             vertex_id,
             senders,
+            metrics_labels,
             // batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
@@ -230,11 +238,42 @@ impl DataWriter {
                 let queue_size = sender.size();
                 let queue_remaining = sender.capacity();
                 let target_vertex_id = channel.get_target_vertex_id();
-                
-                gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_size);
-                gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_remaining);
-                let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
-                gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(backpressure);
+
+                if let Some(labels) = &self.metrics_labels {
+                    gauge!(
+                        METRIC_STREAM_TASK_TX_QUEUE_SIZE,
+                        LABEL_VERTEX_ID => self.vertex_id.clone(),
+                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                        LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+                        LABEL_WORKER_ID => labels.worker_id.clone()
+                    ).set(queue_size);
+                    gauge!(
+                        METRIC_STREAM_TASK_TX_QUEUE_REM,
+                        LABEL_VERTEX_ID => self.vertex_id.clone(),
+                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                        LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+                        LABEL_WORKER_ID => labels.worker_id.clone()
+                    ).set(queue_remaining);
+                    let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
+                    gauge!(
+                        METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
+                        LABEL_VERTEX_ID => self.vertex_id.clone(),
+                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
+                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                        LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
+                        LABEL_WORKER_ID => labels.worker_id.clone()
+                    ).set(backpressure);
+                } else {
+                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_size);
+                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_remaining);
+                    let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
+                    gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(backpressure);
+                }
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {
                         return (true, start_time.elapsed().as_millis() as u32)
@@ -273,11 +312,13 @@ impl TransportClient {
         let mut reader: Option<DataReader> = None;
         let mut writer: Option<DataWriter> = None;
 
-        if let Some(receivers) = config.reader_receivers {
+        let TransportClientConfig { reader_receivers, writer_senders, metrics_labels, .. } = config;
+
+        if let Some(receivers) = reader_receivers {
             reader = Some(DataReader::new(vertex_id.clone(), receivers));
         }
-        if let Some(senders) = config.writer_senders {
-            writer = Some(DataWriter::new(vertex_id.clone(), senders));
+        if let Some(senders) = writer_senders {
+            writer = Some(DataWriter::new(vertex_id.clone(), senders, metrics_labels));
         }
 
         Self {

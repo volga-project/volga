@@ -434,16 +434,15 @@ impl SourceFunctionTrait for HttpRequestSourceFunction {
 mod tests {
     use super::*;
     use crate::runtime::runtime_context::RuntimeContext;
+    use crate::common::test_utils::gen_unique_grpc_port;
     use arrow::datatypes::{DataType, Field, Schema};
     use tokio::time::{sleep, Duration};
     use futures::FutureExt;
-    use rand;
     use std::sync::Arc;
 
     
     fn create_test_config(schema: SchemaRef) -> RequestSourceConfig {
-        // Use a random high port to avoid conflicts
-        let port = 8000 + (rand::random::<u16>() % 1000);
+        let port = gen_unique_grpc_port();
         
         let mut config = RequestSourceConfig::new(
             format!("127.0.0.1:{}", port),

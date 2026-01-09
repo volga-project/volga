@@ -2,7 +2,7 @@ use crate::runtime::{
     execution_graph::ExecutionGraph, functions::source::request_source::{extract_request_source_config, RequestSourceProcessor}, metrics::WorkerMetrics, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}, state::OperatorStates
 };
 use crate::runtime::VertexId;
-use crate::runtime::metrics::StreamTaskMetrics;
+use crate::runtime::metrics::{MetricsLabels, StreamTaskMetrics};
 use crate::transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
@@ -19,12 +19,14 @@ use serde_json::Value;
 use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 use crate::runtime::operators::window::TimeGranularity;
+use crate::control_plane::types::ExecutionIds;
 
 use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub worker_id: String,
+    pub execution_ids: ExecutionIds,
     pub graph: ExecutionGraph,
     pub vertex_ids: Vec<VertexId>,
     pub num_threads_per_task: usize,
@@ -40,6 +42,7 @@ pub struct WorkerConfig {
 impl WorkerConfig {
     pub fn new(
         worker_id: String,
+        execution_ids: ExecutionIds,
         graph: ExecutionGraph,
         vertex_ids: Vec<VertexId>,
         num_threads_per_task: usize,
@@ -47,6 +50,7 @@ impl WorkerConfig {
     ) -> Self {
         Self {
             worker_id,
+            execution_ids,
             graph,
             vertex_ids,
             num_threads_per_task,
@@ -73,13 +77,17 @@ impl WorkerConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerState {
+    pub execution_ids: ExecutionIds,
+    pub worker_id: String,
     pub task_statuses: HashMap<VertexId, StreamTaskStatus>,
     pub worker_metrics: Option<WorkerMetrics>,
 }
 
 impl WorkerState {
-    pub fn new() -> Self {
+    pub fn new(worker_id: String, execution_ids: ExecutionIds) -> Self {
         Self {
+            execution_ids,
+            worker_id,
             task_statuses: HashMap::new(),
             worker_metrics: None,
         }
@@ -104,6 +112,7 @@ impl WorkerState {
 
 pub struct Worker {
     worker_id: String,
+    execution_ids: ExecutionIds,
     graph: ExecutionGraph,
     vertex_ids: Vec<VertexId>,
     transport_backend_type: TransportBackendType,
@@ -155,7 +164,8 @@ impl Worker {
         };
 
         Self {
-            worker_id: config.worker_id,
+            worker_id: config.worker_id.clone(),
+            execution_ids: config.execution_ids.clone(),
             graph: config.graph,
             vertex_ids: config.vertex_ids.clone(),
             task_actors: HashMap::new(),
@@ -175,7 +185,10 @@ impl Worker {
                 .thread_name("transport-backend-runtime")
                 .build().unwrap()),
             request_source_processor_runtime,
-            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerState::new())),
+            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerState::new(
+                config.worker_id,
+                config.execution_ids,
+            ))),
             operator_states: Arc::new(OperatorStates::new()),
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None,
@@ -185,6 +198,7 @@ impl Worker {
 
     async fn poll_and_update_tasks_state(
         worker_id: String,
+        execution_ids: ExecutionIds,
         task_runtimes: HashMap<VertexId, Handle>,
         task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
@@ -218,7 +232,7 @@ impl Worker {
             .into_iter()
             .map(|(k, v)| (k.as_ref().to_string(), v))
             .collect();
-        let worker_metrics = WorkerMetrics::new(worker_id, task_metrics_str, &graph);
+        let worker_metrics = WorkerMetrics::new(worker_id, execution_ids, task_metrics_str, &graph);
         worker_metrics.record();
 
         // Update shared WorkerState
@@ -326,9 +340,10 @@ impl Worker {
                     if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
                     }
-                    if let Some(mode) = self.graph.execution_mode() {
-                        cfg.insert("execution_mode".to_string(), Value::String(mode.to_string()));
-                    }
+                    cfg.insert("pipeline_spec_id".to_string(), Value::String(self.execution_ids.pipeline_spec_id.0.to_string()));
+                    cfg.insert("pipeline_id".to_string(), Value::String(self.execution_ids.pipeline_id.0.to_string()));
+                    cfg.insert("attempt_id".to_string(), Value::from(self.execution_ids.attempt_id.0));
+                    cfg.insert("worker_id".to_string(), Value::String(self.worker_id.clone()));
                     Some(cfg)
                 },
                 Some(self.operator_states.clone()),
@@ -341,10 +356,17 @@ impl Worker {
             runtime_context.set_worker_storage_context(worker_storage.clone());
 
             // Create the task and its actor in the task's runtime
+            let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();
+            transport_cfg.set_metrics_labels(MetricsLabels {
+                pipeline_spec_id: self.execution_ids.pipeline_spec_id.0.to_string(),
+                pipeline_id: self.execution_ids.pipeline_id.0.to_string(),
+                attempt_id: self.execution_ids.attempt_id.0,
+                worker_id: self.worker_id.clone(),
+            });
             let task = StreamTask::new(
                 vertex_id.clone(),
                 vertex.operator_config.clone(),
-                transport_client_configs.remove(vertex_id).unwrap(),
+                transport_cfg,
                 runtime_context,
                 self.graph.clone(),
             );
@@ -391,6 +413,7 @@ impl Worker {
         let graph = self.graph.clone();
         let state = self.worker_state.clone();
         let worker_id = self.worker_id.clone();
+        let execution_ids = self.execution_ids.clone();
         
         let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
             .map(|(k, v)| (k.clone(), v.handle().clone()))
@@ -398,11 +421,27 @@ impl Worker {
         
         let polling_handle = tokio::spawn(async move { 
             while running.load(Ordering::SeqCst) {
-                Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles.clone(), task_actors.clone(), graph.clone(), state.clone(), state_updates_sender.clone()).await;
+                Self::poll_and_update_tasks_state(
+                    worker_id.clone(),
+                    execution_ids.clone(),
+                    task_runtime_handles.clone(),
+                    task_actors.clone(),
+                    graph.clone(),
+                    state.clone(),
+                    state_updates_sender.clone(),
+                ).await;
                 sleep(Duration::from_millis(100)).await;
             }
             // final poll
-            Self::poll_and_update_tasks_state(worker_id.clone(), task_runtime_handles, task_actors, graph, state, state_updates_sender.clone()).await;
+            Self::poll_and_update_tasks_state(
+                worker_id.clone(),
+                execution_ids.clone(),
+                task_runtime_handles,
+                task_actors,
+                graph,
+                state,
+                state_updates_sender.clone(),
+            ).await;
         });
 
         self.tasks_state_polling_handle = Some(polling_handle);
@@ -482,7 +521,15 @@ impl Worker {
             let task_actors = self.task_actors.clone();
             let graph = self.graph.clone();
             let state = self.worker_state.clone();
-            Self::poll_and_update_tasks_state(self.worker_id.clone(), task_runtime_handles, task_actors, graph, state, None).await;
+            Self::poll_and_update_tasks_state(
+                self.worker_id.clone(),
+                self.execution_ids.clone(),
+                task_runtime_handles,
+                task_actors,
+                graph,
+                state,
+                None,
+            ).await;
         }
         self.worker_state.lock().await.clone()
     }
