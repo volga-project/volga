@@ -10,6 +10,7 @@ use super::executor::Executor;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master_server::TaskKey;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
+use crate::control_plane::types::{AttemptId, ExecutionIds};
 
 /// Executes the job locally in a single process using a Worker instance
 pub struct LocalExecutor;
@@ -35,6 +36,7 @@ impl Executor for LocalExecutor {
 
         // Create worker config
         let worker_id = "local_worker".to_string();
+        let execution_ids = ExecutionIds::fresh(AttemptId(1));
 
         // Start master service server (task -> master communication)
         let master_port = gen_unique_grpc_port();
@@ -51,6 +53,7 @@ impl Executor for LocalExecutor {
 
         let worker_config = WorkerConfig::new(
             worker_id.clone(),
+            execution_ids,
             execution_graph,
             vertex_ids,
             4,

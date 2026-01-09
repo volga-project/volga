@@ -157,6 +157,7 @@ impl WorkerClient {
 pub struct Master {
     worker_clients: Arc<Mutex<HashMap<String, WorkerClient>>>,
     worker_states: Arc<Mutex<HashMap<String, WorkerState>>>,
+    worker_endpoints_by_id: Arc<Mutex<HashMap<String, String>>>,
     state_polling_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<std::sync::atomic::AtomicBool>,
 }
@@ -166,6 +167,7 @@ impl Master {
         Self {
             worker_clients: Arc::new(Mutex::new(HashMap::new())),
             worker_states: Arc::new(Mutex::new(HashMap::new())),
+            worker_endpoints_by_id: Arc::new(Mutex::new(HashMap::new())),
             state_polling_handle: None,
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -244,17 +246,20 @@ impl Master {
         
         let worker_clients = self.worker_clients.clone();
         let worker_states = self.worker_states.clone();
+        let worker_endpoints_by_id = self.worker_endpoints_by_id.clone();
         let running = self.running.clone();
         
         let handle = tokio::spawn(async move {
             while running.load(std::sync::atomic::Ordering::Relaxed) {
-                let mut new_states = HashMap::new();
+                let mut new_states_by_worker_id = HashMap::new();
+                let mut new_endpoints_by_worker_id = HashMap::new();
                 
                 let mut clients_guard = worker_clients.lock().await;
                 for (worker_ip, client) in clients_guard.iter_mut() {
                     match client.get_worker_state().await {
                         Ok(state) => {
-                            new_states.insert(worker_ip.clone(), state);
+                            new_endpoints_by_worker_id.insert(state.worker_id.clone(), worker_ip.clone());
+                            new_states_by_worker_id.insert(state.worker_id.clone(), state);
                         }
                         Err(e) => {
                             println!("[MASTER] Failed to get state from worker {}: {}", worker_ip, e);
@@ -266,7 +271,11 @@ impl Master {
                 // Update shared state
                 {
                     let mut states_guard = worker_states.lock().await;
-                    *states_guard = new_states;
+                    *states_guard = new_states_by_worker_id;
+                }
+                {
+                    let mut endpoints_guard = worker_endpoints_by_id.lock().await;
+                    *endpoints_guard = new_endpoints_by_worker_id;
                 }
                 
                 sleep(Duration::from_millis(100)).await;
