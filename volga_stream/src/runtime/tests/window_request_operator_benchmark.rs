@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::{ExecutionMode, ExecutionProfile, PipelineContextBuilder},
+    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::metrics::PipelineStateHistory,
     runtime::{
@@ -158,14 +158,14 @@ pub async fn run_window_request_benchmark(
 
     let benchmark_start = Instant::now();
 
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
             "events".to_string(),
             SourceConfig::DatagenSourceConfig(query_datagen_config),
             schema.clone()
         )
-        .with_request_source_sink(
+        .with_request_source_sink_inline(
             SourceConfig::DatagenSourceConfig(request_datagen_config),
             Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         )
@@ -173,6 +173,7 @@ pub async fn run_window_request_benchmark(
         .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .with_execution_mode(ExecutionMode::Request)
         .build();
+    let context = PipelineContext::new(spec);
 
     let (state_updates_sender, mut state_updates_receiver) = mpsc::channel(100);
     let running = Arc::new(AtomicBool::new(true));

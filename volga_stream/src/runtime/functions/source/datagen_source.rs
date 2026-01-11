@@ -54,15 +54,29 @@ impl DatagenSourceConfig {
 }
 
 /// Data generation strategies
-#[derive(Debug, Clone)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FieldGenerator {
     IncrementalTimestamp { start_ms: i64, step_ms: i64 },
     ProcessingTimestamp, // Uses current SystemTime
     String { length: usize }, // Simple random string
     Key { num_unique: usize }, // Key field with unique values
-    Increment { start: ScalarValue, step: ScalarValue },
-    Uniform { min: ScalarValue, max: ScalarValue },
-    Values { values: Vec<ScalarValue> }, // Round-robin through provided values
+    Increment {
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        start: ScalarValue,
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        step: ScalarValue,
+    },
+    Uniform {
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        min: ScalarValue,
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        max: ScalarValue,
+    },
+    Values {
+        #[serde_as(as = "Vec<utils::ScalarValueAsBytes>")]
+        values: Vec<ScalarValue>,
+    }, // Round-robin through provided values
 }
 
 #[serde_as]

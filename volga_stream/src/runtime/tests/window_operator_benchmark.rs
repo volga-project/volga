@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::{ExecutionMode, ExecutionProfile, PipelineContextBuilder},
+    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
@@ -240,13 +240,13 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     println!("Query: {}", sql);
 
-    // Create pipeline context builder
-    let mut context_builder = PipelineContextBuilder::new()
+    // Create pipeline spec builder
+    let mut spec_builder = PipelineSpecBuilder::new()
         .with_parallelism(config.parallelism)
         .with_source(
-            "datagen_source".to_string(), 
-            SourceConfig::DatagenSourceConfig(datagen_config), 
-            schema
+            "datagen_source".to_string(),
+            SourceConfig::DatagenSourceConfig(datagen_config),
+            schema,
         )
         .sql(&sql)
         .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 });
@@ -255,20 +255,22 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     // Set execution mode 
     if config.execution_mode == WindowExecutionMode::Request {
         // request mode has no direct sink
-        context_builder = context_builder.with_execution_mode(ExecutionMode::Request);
+        spec_builder = spec_builder.with_execution_mode(ExecutionMode::Request);
     } else {
-        context_builder = context_builder
-            .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        spec_builder = spec_builder
+            .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+                "http://{}",
+                storage_server_addr
+            )))
             .with_execution_mode(ExecutionMode::Streaming);
 
     }
-    
-    let mut context = context_builder.build();
-    
-    // Get logical graph and update window configs
-    if let Some(ref mut logical_graph) = context.get_logical_graph_mut() {
-        update_window_configs_in_graph(logical_graph, &config)?;
-    }
+
+    let mut spec = spec_builder.build();
+    let mut logical_graph = spec.to_logical_graph();
+    update_window_configs_in_graph(&mut logical_graph, &config)?;
+    spec.logical_graph = Some(logical_graph);
+    let context = PipelineContext::new(spec);
 
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();

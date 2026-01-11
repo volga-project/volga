@@ -1,5 +1,5 @@
 use crate::{
-    api::pipeline_context::{ExecutionProfile, PipelineContext, PipelineContextBuilder},
+    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
         functions::source::word_count_source::BatchingMode, master::PipelineState, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
@@ -154,7 +154,7 @@ pub async fn run_word_count_benchmark(
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     // Create streaming context using SQL instead of manual operator configuration
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
             "word_count_source".to_string(), 
@@ -171,12 +171,13 @@ pub async fn run_word_count_benchmark(
                 Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
             ]))
         )
-        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
 
-    let logical_graph = context.get_logical_graph().unwrap();
+    let logical_graph = spec.to_logical_graph();
+    let context = PipelineContext::new(spec);
 
     let source_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SourceConfig(_))).first().unwrap().operator_id.clone();
     let sink_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SinkConfig(_))).first().unwrap().operator_id.clone();

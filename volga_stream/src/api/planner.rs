@@ -29,7 +29,7 @@ use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
 
 use super::logical_graph::{LogicalNode, LogicalGraph};
-use crate::api::pipeline_context::ExecutionMode;
+use crate::api::pipeline_spec::ExecutionMode;
 use crate::runtime::functions::key_by::key_by_function::{DataFusionKeyFunction};
 use crate::runtime::functions::key_by::KeyByFunction;
 use crate::runtime::operators::operator::OperatorConfig;
