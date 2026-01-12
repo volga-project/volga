@@ -4,6 +4,7 @@ use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
+use crate::transport::transport_spec::TransportSpec;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::VertexId;
 use crate::runtime::watermark::WatermarkAssignConfig;
@@ -208,7 +209,40 @@ impl ExecutionGraph {
         &mut self,
         execution_vertex_to_cluster_node: Option<&ExecutionVertexNodeMapping>,
     ) {
+        self.update_channels_with_node_mapping_and_transport(
+            execution_vertex_to_cluster_node,
+            &TransportSpec::default(),
+            &HashMap::new(),
+        );
+    }
+
+    pub fn update_channels_with_node_mapping_and_transport(
+        &mut self,
+        execution_vertex_to_cluster_node: Option<&ExecutionVertexNodeMapping>,
+        transport: &TransportSpec,
+        per_operator_queue_records: &HashMap<String, u32>,
+    ) {
         for edge in self.edges.values_mut() {
+            let source_operator_id = self
+                .vertices
+                .get(&edge.source_vertex_id)
+                .expect("source vertex should exist")
+                .operator_id
+                .clone();
+            let target_operator_id = self
+                .vertices
+                .get(&edge.target_vertex_id)
+                .expect("target vertex should exist")
+                .operator_id
+                .clone();
+            let mut queue_size_records = transport.default_queue_records.max(1);
+            if let Some(v) = per_operator_queue_records.get(&source_operator_id) {
+                queue_size_records = queue_size_records.max((*v).max(1));
+            }
+            if let Some(v) = per_operator_queue_records.get(&target_operator_id) {
+                queue_size_records = queue_size_records.max((*v).max(1));
+            }
+
             let channel = if let Some(vertex_to_node) = execution_vertex_to_cluster_node {
                 // Check if vertices are on different nodes
                 let source_node = vertex_to_node
@@ -220,27 +254,30 @@ impl ExecutionGraph {
                 
                 if source_node.node_id != target_node.node_id {
                     // Vertices are on different nodes, create remote channel
-                    Channel::new_remote(
+                    Channel::new_remote_with_queue(
                         edge.source_vertex_id.as_ref().to_string(),
                         edge.target_vertex_id.as_ref().to_string(),
                         source_node.node_ip.clone(), 
                         source_node.node_id.clone(), 
                         target_node.node_ip.clone(), 
                         target_node.node_id.clone(), 
-                        target_node.node_port as i32
+                        target_node.node_port as i32,
+                        queue_size_records,
                     )
                 } else {
                     // Vertices are on same node, use local channel
-                    Channel::new_local(
+                    Channel::new_local_with_queue(
                         edge.source_vertex_id.as_ref().to_string(),
-                        edge.target_vertex_id.as_ref().to_string()
+                        edge.target_vertex_id.as_ref().to_string(),
+                        queue_size_records,
                     )
                 }
             } else {
                 // No cluster mapping provided, use local channels
-                Channel::new_local(
+                Channel::new_local_with_queue(
                     edge.source_vertex_id.as_ref().to_string(),
-                    edge.target_vertex_id.as_ref().to_string()
+                    edge.target_vertex_id.as_ref().to_string(),
+                    queue_size_records,
                 )
             };
 

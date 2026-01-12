@@ -9,8 +9,10 @@ pub mod test_utils;
 pub mod grpc;
 pub mod grpc_transport_backend;
 pub mod batch_channel;
+pub mod transport_spec;
 
 pub use transport_client::{TransportClient, DataReader, DataWriter};
 pub use in_memory_transport_backend::InMemoryTransportBackend;
 pub use grpc_transport_backend::GrpcTransportBackend;
 pub use transport_backend_actor::{TransportBackend, TransportBackendActor, TransportBackendActorMessage};
+pub use transport_spec::{TransportSpec, OperatorTransportSpec};

@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use base64::{engine::general_purpose, Engine as _};
 
+use crate::api::PipelineSpec as UserPipelineSpec;
+use crate::api::compile_logical_graph;
+use crate::control_plane::controller::ControlPlaneController;
 use crate::control_plane::store::{InMemoryStore, PipelineEventStore, PipelineRunStore, PipelineSpecStore};
 use crate::control_plane::types::{
     AttemptId, ExecutionIds, PipelineDesiredState, PipelineEvent, PipelineEventKind, PipelineId,
@@ -21,12 +24,14 @@ use crate::control_plane::types::{
 #[derive(Clone)]
 pub struct ControlPlaneAppState {
     pub store: Arc<InMemoryStore>,
+    pub controller: Arc<ControlPlaneController>,
 }
 
 impl ControlPlaneAppState {
-    pub fn new(store: InMemoryStore) -> Self {
+    pub fn new(store: InMemoryStore, controller: Arc<ControlPlaneController>) -> Self {
         Self {
             store: Arc::new(store),
+            controller,
         }
     }
 }
@@ -62,6 +67,11 @@ async fn create_pipeline_spec(
     let bytes = general_purpose::STANDARD
         .decode(req.spec_bytes_b64)
         .map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let spec: UserPipelineSpec =
+        serde_json::from_slice(&bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let bytes = serde_json::to_vec(&spec).map_err(|_| StatusCode::BAD_REQUEST)?;
+
     state
         .store
         .put_spec(PipelineSpec {
@@ -91,6 +101,22 @@ async fn start_pipeline(
     let attempt_id = AttemptId(1);
     let execution_ids = ExecutionIds::new(req.pipeline_spec_id, PipelineId(Uuid::new_v4()), attempt_id);
     let pipeline_id = execution_ids.pipeline_id;
+
+    let stored = state
+        .store
+        .get_spec(req.pipeline_spec_id)
+        .await
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let spec: UserPipelineSpec =
+        serde_json::from_slice(&stored.spec_bytes).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let logical = compile_logical_graph(&spec);
+    let execution_graph = logical.to_execution_graph();
+    state
+        .controller
+        .register_execution_graph(pipeline_id, execution_graph)
+        .await;
+    state.controller.register_pipeline_spec(pipeline_id, spec).await;
 
     state.store.put_execution_ids(pipeline_id, execution_ids.clone()).await;
 

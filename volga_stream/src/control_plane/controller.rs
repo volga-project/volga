@@ -16,12 +16,14 @@ use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttem
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::cluster::cluster_provider::LocalMachineClusterProvider;
 use crate::cluster::node_assignment::SingleNodeStrategy;
+use crate::api::PipelineSpec as UserPipelineSpec;
 
 #[derive(Clone)]
 pub struct ControlPlaneController {
     store: Arc<InMemoryStore>,
     adapter: Arc<dyn RuntimeAdapter>,
     graphs: Arc<RwLock<HashMap<PipelineId, ExecutionGraph>>>,
+    specs: Arc<RwLock<HashMap<PipelineId, UserPipelineSpec>>>,
     running: Arc<Mutex<HashMap<PipelineId, AttemptHandle>>>,
 }
 
@@ -31,6 +33,7 @@ impl ControlPlaneController {
             store,
             adapter,
             graphs: Arc::new(RwLock::new(HashMap::new())),
+            specs: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -38,6 +41,11 @@ impl ControlPlaneController {
     pub async fn register_execution_graph(&self, pipeline_id: PipelineId, graph: ExecutionGraph) {
         let mut guard = self.graphs.write().await;
         guard.insert(pipeline_id, graph);
+    }
+
+    pub async fn register_pipeline_spec(&self, pipeline_id: PipelineId, spec: UserPipelineSpec) {
+        let mut guard = self.specs.write().await;
+        guard.insert(pipeline_id, spec);
     }
 
     pub fn start_reconciler(self, poll_interval: Duration) -> JoinHandle<()> {
@@ -54,6 +62,7 @@ impl ControlPlaneController {
     pub async fn reconcile_once(&self) -> Result<()> {
         let runs = self.store.list_runs().await;
         let graphs_guard = self.graphs.read().await;
+        let specs_guard = self.specs.read().await;
 
         for run in runs {
             let pipeline_id = run.execution_ids.pipeline_id;
@@ -80,14 +89,27 @@ impl ControlPlaneController {
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("missing execution graph for pipeline_id={:?}", pipeline_id))?;
 
+                    let spec = specs_guard
+                        .get(&pipeline_id)
+                        .cloned()
+                        .ok_or_else(|| anyhow::anyhow!("missing pipeline spec for pipeline_id={:?}", pipeline_id))?;
+
+                    let num_workers_per_operator = match spec.execution_profile {
+                        crate::api::ExecutionProfile::Orchestrated { num_workers_per_operator } => num_workers_per_operator,
+                        _ => 1,
+                    };
+
                     let handle = self
                         .adapter
                         .start_attempt(StartAttemptRequest {
                             execution_ids: run.execution_ids.clone(),
                             execution_graph: graph,
-                            num_workers_per_operator: 1,
+                            num_workers_per_operator,
                             cluster_provider: Arc::new(LocalMachineClusterProvider::single_node()),
                             node_assign: Arc::new(SingleNodeStrategy),
+                            transport_overrides_queue_records: spec.transport_overrides_queue_records(),
+                            worker_runtime: spec.worker_runtime.clone(),
+                            operator_type_storage_overrides: spec.operator_type_storage_overrides(),
                         })
                         .await?;
 

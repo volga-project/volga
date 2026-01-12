@@ -39,7 +39,6 @@ pub struct GrpcTransportBackend {
 }
 
 impl GrpcTransportBackend {
-    const CHANNEL_QUEUE_SIZE: u32 = 8192; // transport client queue
     const GRPC_SERVER_QUEUE_SIZE: usize = 10; // single mpsc channel reading from grpc server and forwarding to local clients (readers)
     const GRPC_CLIENT_QUEUE_SIZE: usize = 10; // mpsc channel per peer node, reading local client (writers) and forwarding to remote grpc clients
 
@@ -131,7 +130,7 @@ impl TransportBackend for GrpcTransportBackend {
             // Start server
             let port = self.port.expect("Port should be found");
             let (server_tx, mut server_rx) = mpsc::channel(Self::GRPC_SERVER_QUEUE_SIZE);
-            // let (server_tx, mut server_rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
+            // let (server_tx, mut server_rx) = batch_bounded_channel(...);
             let shutdown_rx = self.shutdown_rx.take().unwrap();
             let server_handle = tokio::spawn(async move {
                 let addr = format!("127.0.0.1:{}", port).parse().unwrap();
@@ -338,7 +337,7 @@ impl TransportBackend for GrpcTransportBackend {
         for edge in &all_input_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
-            let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
+            let (tx, rx) = batch_bounded_channel(channel.get_queue_size_records());
             reader_senders.insert(channel_id.clone(), tx);
             reader_receivers.insert(channel_id.clone(), rx);
         }
@@ -349,7 +348,7 @@ impl TransportBackend for GrpcTransportBackend {
         for edge in &all_output_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
-            let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
+            let (tx, rx) = batch_bounded_channel(channel.get_queue_size_records());
             writer_senders.insert(channel_id.clone(), tx);
             writer_receivers.insert(channel_id.clone(), rx);
         }

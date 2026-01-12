@@ -19,8 +19,10 @@ use crate::runtime::operators::window::aggregates::VirtualPoint;
 use crate::runtime::operators::window::aggregates::{Aggregation, plain::PlainAggregation, retractable::RetractableAggregation};
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
 use crate::runtime::operators::window::{AggregatorType, Cursor, TileConfig, Tiles};
-use crate::runtime::operators::window::shared::{WindowConfig, build_window_operator_parts, stack_concat_results};
-use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
+use crate::runtime::operators::window::window_operator::{
+    init, stack_concat_results, WindowConfig, WindowOperatorConfig
+};
+use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
@@ -31,8 +33,7 @@ use tokio::time::Duration;
 pub struct WindowRequestOperatorConfig {
     pub window_exec: Arc<BoundedWindowAggExec>,
     pub tiling_configs: Vec<Option<TileConfig>>,
-    pub parallelize: bool,
-    pub lateness: Option<i64>,
+    pub spec: WindowOperatorSpec,
 }
 
 impl WindowRequestOperatorConfig {
@@ -40,8 +41,7 @@ impl WindowRequestOperatorConfig {
         Self {
             window_exec: window_operator_config.window_exec,
             tiling_configs: window_operator_config.tiling_configs,
-            parallelize: window_operator_config.parallelize,
-            lateness: window_operator_config.lateness
+            spec: window_operator_config.spec,
         }
     }
 }
@@ -80,9 +80,11 @@ impl WindowRequestOperator {
             _ => panic!("Expected WindowRequestConfig, got {:?}", config),
         };
 
-        let (ts_column_index, windows, input_schema, output_schema, thread_pool) =
-            build_window_operator_parts(
-            true, &window_request_operator_config.window_exec, &window_request_operator_config.tiling_configs, window_request_operator_config.parallelize
+        let (ts_column_index, windows, input_schema, output_schema, thread_pool) = init(
+            true,
+            &window_request_operator_config.window_exec,
+            &window_request_operator_config.tiling_configs,
+            window_request_operator_config.spec.parallelize,
         );
 
         Self {
@@ -90,11 +92,11 @@ impl WindowRequestOperator {
             window_configs: windows,
             state: None,
             ts_column_index,
-            parallelize: window_request_operator_config.parallelize,
+            parallelize: window_request_operator_config.spec.parallelize,
             thread_pool,
             output_schema,
             input_schema,
-            lateness: window_request_operator_config.lateness,
+            lateness: window_request_operator_config.spec.lateness,
         }
     }
 
@@ -201,7 +203,7 @@ impl WindowRequestOperator {
         #[derive(Clone)]
         struct WindowSnap {
             tiles: Option<Tiles>,
-            processed_pos: Option<Cursor>,
+            processed_until: Option<Cursor>,
             accumulator_state: Option<AccumulatorState>,
         }
 
@@ -211,7 +213,7 @@ impl WindowRequestOperator {
                 *window_id,
                 WindowSnap {
                     tiles: window_state.tiles.clone(),
-                    processed_pos: window_state.processed_pos,
+                    processed_until: window_state.processed_until,
                     accumulator_state: window_state.accumulator_state.clone(),
                 },
             );
@@ -281,9 +283,9 @@ impl WindowRequestOperator {
                     });
                 }
                 AggregatorType::RetractableAccumulator => {
-                    let processed_pos = snap
-                        .processed_pos
-                        .expect("Retractable request points require processed_pos");
+                    let processed_until = snap
+                        .processed_until
+                        .expect("Retractable request points require processed_until");
                     let base_state = snap
                         .accumulator_state
                         .clone()
@@ -295,7 +297,7 @@ impl WindowRequestOperator {
                     let mut normal_pos: Vec<usize> = Vec::new();
 
                     for (i, p) in points.into_iter().enumerate() {
-                        if p.ts < processed_pos.ts {
+                        if p.ts < processed_until.ts {
                             late_pos.push(i);
                             late_points.push(p);
                         } else {
@@ -331,7 +333,7 @@ impl WindowRequestOperator {
                             normal_points,
                             &bucket_index,
                             window_config.window_expr.clone(),
-                            Some(processed_pos),
+                            Some(processed_until),
                             Some(base_state),
                             exclude_current_row,
                         );
@@ -360,10 +362,10 @@ impl WindowRequestOperator {
             .iter()
             .zip(views_by_agg.iter())
             .map(|(agg, views)| async move {
-                let vals = agg
+                let (vals, _) = agg
                     .produce_aggregates_from_ranges(views, self.thread_pool.as_ref())
                     .await;
-                vals.values
+                vals
             })
             .collect();
         let vals_by_agg: Vec<Vec<ScalarValue>> = future::join_all(futs).await;
@@ -599,9 +601,9 @@ mod tests {
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec.clone());
         window_config.execution_mode = ExecutionMode::Request;
-        window_config.parallelize = true;
-        window_config.lateness = Some(2000); // 2 seconds lateness tolerance
-        window_config.request_advance_policy = RequestAdvancePolicy::OnIngest;
+        window_config.spec.parallelize = true;
+        window_config.spec.lateness = Some(2000); // 2 seconds lateness tolerance
+        window_config.spec.request_advance_policy = RequestAdvancePolicy::OnIngest;
 
         let operator_states = Arc::new(OperatorStates::new());
         let window_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_op");

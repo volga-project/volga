@@ -7,6 +7,8 @@ use crate::cluster::node_assignment::NodeAssignStrategy;
 use crate::control_plane::types::ExecutionIds;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master::PipelineState;
+use crate::api::WorkerRuntimeSpec;
+use crate::api::StorageSpec;
 
 #[derive(Clone)]
 pub struct StartAttemptRequest {
@@ -15,6 +17,9 @@ pub struct StartAttemptRequest {
     pub num_workers_per_operator: usize,
     pub cluster_provider: std::sync::Arc<dyn ClusterProvider>,
     pub node_assign: std::sync::Arc<dyn NodeAssignStrategy>,
+    pub transport_overrides_queue_records: std::collections::HashMap<String, u32>,
+    pub worker_runtime: WorkerRuntimeSpec,
+    pub operator_type_storage_overrides: std::collections::HashMap<String, StorageSpec>,
 }
 
 pub struct AttemptHandle {

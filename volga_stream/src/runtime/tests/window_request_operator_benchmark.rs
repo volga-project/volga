@@ -3,6 +3,7 @@ use crate::{
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::metrics::PipelineStateHistory,
     runtime::{
+        functions::source::DatagenSpec,
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
         master::PipelineState,
         operators::{
@@ -52,7 +53,17 @@ fn create_datagen_config(
         }),
     ]);
 
-    DatagenSourceConfig::new(schema, rate, None, run_for_s, batch_size, fields)
+    DatagenSourceConfig::new(
+        schema,
+        DatagenSpec {
+            rate,
+            limit: None,
+            run_for_s,
+            batch_size,
+            fields,
+            replayable: false,
+        },
+    )
 }
 
 

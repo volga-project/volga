@@ -20,6 +20,8 @@ use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 use crate::runtime::operators::window::TimeGranularity;
 use crate::control_plane::types::ExecutionIds;
+use crate::api::StorageSpec;
+use crate::runtime::operators::operator::operator_storage_key_and_default_spec;
 
 use tokio::sync::mpsc;
 
@@ -37,6 +39,7 @@ pub struct WorkerConfig {
     pub inmem_store_lock_pool_size: usize,
     pub inmem_store_bucket_granularity: TimeGranularity,
     pub inmem_store_max_batch_size: usize,
+    pub operator_type_storage_overrides: HashMap<String, StorageSpec>,
 }
 
 impl WorkerConfig {
@@ -61,6 +64,7 @@ impl WorkerConfig {
             inmem_store_lock_pool_size: 4096,
             inmem_store_bucket_granularity: TimeGranularity::Seconds(1),
             inmem_store_max_batch_size: 1024,
+            operator_type_storage_overrides: HashMap::new(),
         }
     }
 
@@ -122,6 +126,7 @@ pub struct Worker {
     inmem_store_lock_pool_size: usize,
     inmem_store_bucket_granularity: TimeGranularity,
     inmem_store_max_batch_size: usize,
+    operator_type_storage_overrides: HashMap<String, StorageSpec>,
     task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<VertexId, Runtime>,
@@ -176,6 +181,7 @@ impl Worker {
             inmem_store_lock_pool_size: config.inmem_store_lock_pool_size,
             inmem_store_bucket_granularity: config.inmem_store_bucket_granularity,
             inmem_store_max_batch_size: config.inmem_store_max_batch_size,
+            operator_type_storage_overrides: config.operator_type_storage_overrides,
             backend_actor: None,
             task_runtimes,
             transport_backend_runtime: Some(
@@ -297,15 +303,9 @@ impl Worker {
     pub async fn spawn_actors(&mut self) {
         println!("[WORKER] Spawning actors");
 
-        // Worker-level shared storage context (used by window/request operators).
+        // Per-operator-type storage contexts (e.g. separate store+budgets for window operators).
         // Backend selection (SlateDB) will be added later; for now use InMemBatchStore.
-        let budgets = self.storage_budgets.clone();
-        let store = Arc::new(InMemBatchStore::new(
-            self.inmem_store_lock_pool_size,
-            self.inmem_store_bucket_granularity,
-            self.inmem_store_max_batch_size,
-        )) as Arc<dyn BatchStore>;
-        let worker_storage = WorkerStorageContext::new(store, budgets).expect("worker storage ctx");
+        let mut storage_by_type: HashMap<String, Arc<WorkerStorageContext>> = HashMap::new();
 
         let mut backend: Box<dyn TransportBackend> = match self.transport_backend_type {
             TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new()),
@@ -326,6 +326,22 @@ impl Worker {
                 .get_vertex(vertex_id.as_ref())
                 .expect("Vertex should exist");
             let task_runtime = self.task_runtimes.get(vertex_id).expect("Task runtime should exist");
+
+            if let Some((storage_type, default_spec)) = operator_storage_key_and_default_spec(&vertex.operator_config) {
+                let effective = self
+                    .operator_type_storage_overrides
+                    .get(storage_type)
+                    .cloned()
+                    .unwrap_or(default_spec);
+                storage_by_type.entry(storage_type.to_string()).or_insert_with(|| {
+                    let store = Arc::new(InMemBatchStore::new(
+                        effective.inmem_store_lock_pool_size,
+                        effective.inmem_store_bucket_granularity,
+                        effective.inmem_store_max_batch_size,
+                    )) as Arc<dyn BatchStore>;
+                    WorkerStorageContext::new(store, effective.budgets).expect("worker storage ctx")
+                });
+            }
 
             // Create runtime context for the vertex
             let mut runtime_context = RuntimeContext::new(
@@ -353,7 +369,13 @@ impl Worker {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
                 runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
             }
-            runtime_context.set_worker_storage_context(worker_storage.clone());
+            if let Some((storage_type, _)) = operator_storage_key_and_default_spec(&vertex.operator_config) {
+                let ctx = storage_by_type
+                    .get(storage_type)
+                    .cloned()
+                    .expect("storage ctx must exist for operator type");
+                runtime_context.set_worker_storage_context(ctx);
+            }
 
             // Create the task and its actor in the task's runtime
             let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();

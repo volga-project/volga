@@ -30,7 +30,12 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             .collect::<Vec<_>>();
 
         let vertex_to_node = req.node_assign.assign_nodes(&req.execution_graph, &cluster_nodes);
-        req.execution_graph.update_channels_with_node_mapping(Some(&vertex_to_node));
+        req.execution_graph
+            .update_channels_with_node_mapping_and_transport(
+                Some(&vertex_to_node),
+                &req.worker_runtime.transport,
+                &req.transport_overrides_queue_records,
+            );
 
         let master_port = gen_unique_grpc_port();
         let master_addr = format!("127.0.0.1:{}", master_port);
@@ -57,7 +62,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             let addr = format!("127.0.0.1:{}", port);
 
             let vertex_ids = node_to_vertex_ids.get(node_id).unwrap().clone();
-            let worker_config = WorkerConfig::new(
+            let mut worker_config = WorkerConfig::new(
                 node_id.clone(),
                 req.execution_ids.clone(),
                 req.execution_graph.clone(),
@@ -69,6 +74,11 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                 TransportBackendType::Grpc,
             )
             .with_master_addr(master_addr.clone());
+            worker_config.storage_budgets = req.worker_runtime.storage.budgets.clone();
+            worker_config.inmem_store_lock_pool_size = req.worker_runtime.storage.inmem_store_lock_pool_size;
+            worker_config.inmem_store_bucket_granularity = req.worker_runtime.storage.inmem_store_bucket_granularity;
+            worker_config.inmem_store_max_batch_size = req.worker_runtime.storage.inmem_store_max_batch_size;
+            worker_config.operator_type_storage_overrides = req.operator_type_storage_overrides.clone();
 
             let mut worker_server = WorkerServer::new(worker_config);
             worker_server.start(&addr).await?;

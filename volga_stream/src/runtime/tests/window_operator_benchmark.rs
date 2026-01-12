@@ -1,8 +1,10 @@
 use crate::{
     api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    api::compile_logical_graph,
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
+        functions::source::DatagenSpec,
         master::PipelineState,
         metrics::PipelineStateHistory,
         operators::{
@@ -178,8 +180,8 @@ fn update_window_configs_in_graph(
             if let OperatorConfig::WindowConfig(ref mut window_config) = node.operator_config {
                 // Update window config parameters
                 window_config.execution_mode = config.execution_mode.clone();
-                window_config.parallelize = config.parallelize;
-                window_config.lateness = config.lateness;
+                window_config.spec.parallelize = config.parallelize;
+                window_config.spec.lateness = config.lateness;
                 
                 // Set tiling configs if provided
                 if let Some(ref tiling_configs) = config.tiling_configs {
@@ -228,11 +230,14 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     let datagen_config = DatagenSourceConfig::new(
         schema.clone(),
-        config.rate,
-        config.total_records,
-        config.run_for_s,
-        config.batch_size,
-        fields
+        DatagenSpec {
+            rate: config.rate,
+            limit: config.total_records,
+            run_for_s: config.run_for_s,
+            batch_size: config.batch_size,
+            fields,
+            replayable: false,
+        },
     );
 
     // Build SQL query based on config
@@ -267,7 +272,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     }
 
     let mut spec = spec_builder.build();
-    let mut logical_graph = spec.to_logical_graph();
+    let mut logical_graph = compile_logical_graph(&spec);
     update_window_configs_in_graph(&mut logical_graph, &config)?;
     spec.logical_graph = Some(logical_graph);
     let context = PipelineContext::new(spec);

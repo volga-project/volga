@@ -1,5 +1,6 @@
 use crate::{
     api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    api::compile_logical_graph,
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
         functions::source::word_count_source::BatchingMode, master::PipelineState, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
@@ -176,7 +177,7 @@ pub async fn run_word_count_benchmark(
         .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
 
-    let logical_graph = spec.to_logical_graph();
+    let logical_graph = compile_logical_graph(&spec);
     let context = PipelineContext::new(spec);
 
     let source_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SourceConfig(_))).first().unwrap().operator_id.clone();
