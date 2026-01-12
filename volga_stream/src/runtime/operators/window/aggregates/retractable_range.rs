@@ -88,7 +88,8 @@ impl RetractableRangeAggregation {
                             let new_start_bucket_ts = update_range.start;
                             let all_ts = bucket_index.bucket_timestamps();
                             let first_ts = all_ts.first().copied().unwrap_or(new_start_bucket_ts);
-                            let buckets = bucket_index.query_buckets_in_range(first_ts, new_start_bucket_ts);
+                            let buckets =
+                                bucket_index.query_buckets_in_range(first_ts, new_start_bucket_ts);
                             if buckets.is_empty() {
                                 None
                             } else {
@@ -293,7 +294,6 @@ fn run_retractable_accumulator(
                     .expect("Should be able to get accumulator state"),
             );
         }
-
         match updates.seek_rowpos_gt(new_processed_until) {
             Some(after_end) => updates
                 .prev_pos(after_end)
@@ -404,9 +404,7 @@ fn run_retractable_accumulator(
         if update_pos == end_pos {
             break;
         }
-        update_pos = updates
-            .next_pos(update_pos)
-            .expect("end_pos should be reachable from update_pos");
+        update_pos = updates.next_pos(update_pos).expect("end_pos should be reachable from update_pos");
     }
 
     (

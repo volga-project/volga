@@ -172,7 +172,7 @@ impl RetractablePointsAggregation {
                         }
 
                         let processed_pos = idx
-                            .seek_rowpos_eq(processed_until)
+                            .seek_rowpos_le(processed_until)
                             .unwrap_or_else(|| idx.last_pos());
                         let total_stored = idx.count_between(&idx.first_pos(), &processed_pos);
                         let base_window_stored = total_stored.min(window_size);
@@ -258,7 +258,7 @@ impl RetractablePointsAggregation {
                         }
 
                         let processed_pos = idx
-                            .seek_rowpos_eq(processed_until)
+                            .seek_rowpos_le(processed_until)
                             .unwrap_or_else(|| idx.last_pos());
                         let base_start = processed_until.ts.saturating_sub(window_length);
                         let base_retract_start =

@@ -62,6 +62,7 @@ impl PlainAggregation {
             exclude_current_row,
         ))
     }
+
 }
 
 #[async_trait]

@@ -25,6 +25,43 @@ use crate::storage::index::InMemBatchId;
 use arrow::array::{TimestampMillisecondArray, UInt64Array};
 use arrow::record_batch::RecordBatch;
 
+fn debug_assert_metas_disjoint_and_ordered(metas: &[BatchMeta]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    if metas.len() <= 1 {
+        return;
+    }
+    for w in metas.windows(2) {
+        assert!(
+            w[0].min_pos <= w[0].max_pos,
+            "invalid meta bounds: min_pos={:?} max_pos={:?}",
+            w[0].min_pos,
+            w[0].max_pos
+        );
+        assert!(
+            w[1].min_pos <= w[1].max_pos,
+            "invalid meta bounds: min_pos={:?} max_pos={:?}",
+            w[1].min_pos,
+            w[1].max_pos
+        );
+        assert!(
+            w[0].min_pos <= w[1].min_pos,
+            "metas must be ordered by min_pos: prev_min={:?} next_min={:?}",
+            w[0].min_pos,
+            w[1].min_pos
+        );
+        assert!(
+            w[0].max_pos < w[1].min_pos,
+            "metas must be disjoint: prev=[{:?}..{:?}] next=[{:?}..{:?}]",
+            w[0].min_pos,
+            w[0].max_pos,
+            w[1].min_pos,
+            w[1].max_pos
+        );
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DumpMode {
     KeepHot,
@@ -316,6 +353,7 @@ impl Compactor {
                 Some(bucket)
                     if bucket.version == expected_version && bucket.hot_base_segments.is_empty() =>
                 {
+                    debug_assert_metas_disjoint_and_ordered(&new_metas);
                     bucket.hot_base_segments = new_metas;
                     true
                 }
@@ -656,6 +694,7 @@ impl Compactor {
             match state.bucket_index.bucket_mut(bucket_ts) {
                 None => false,
                 Some(bucket) if bucket.version == expected_version => {
+                    debug_assert_metas_disjoint_and_ordered(&new_metas);
                     bucket.persisted_segments = new_metas;
                     bucket.pending_delete_stored.clear();
                     if mode == DumpMode::EvictHot {

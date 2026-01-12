@@ -26,10 +26,10 @@ use crate::runtime::operators::window::window_operator_state::{AccumulatorState,
 use crate::runtime::operators::window::{AggregatorType, TileConfig};
 use crate::runtime::operators::window::Cursor;
 use crate::runtime::operators::window::state::window_logic;
-use crate::storage::index::SortedRangeIndex;
-use crate::storage::index::SortedRangeView;
+use crate::storage::index::{SortedRangeIndex, SortedRangeView};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::StorageStatsSnapshot;
+use crate::common::MAX_WATERMARK_VALUE;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutionMode {
@@ -163,6 +163,7 @@ pub fn init(
 }
 
 impl WindowOperator {
+
     pub fn new(config: OperatorConfig) -> Self {
         let window_operator_config = match config.clone() {
             OperatorConfig::WindowConfig(window_config) => window_config,
@@ -219,7 +220,7 @@ impl WindowOperator {
         &self,
         key: &Key,
         process_until: Option<Cursor>,
-    ) -> RecordBatch {
+    ) -> (RecordBatch, bool) {
         let _permit = self
             .state_ref()
             .storage()
@@ -229,10 +230,11 @@ impl WindowOperator {
             .await
             .expect("inflight_keys semaphore");
 
-        let result = self.advance_windows(key, process_until).await;
+        let (result, still_pending) = self.advance_windows(key, process_until).await;
 
         self.state_ref().prune_if_needed(key).await;
-        result
+
+        (result, still_pending)
     }
 
     pub fn get_state(&self) -> &WindowOperatorState {
@@ -244,32 +246,47 @@ impl WindowOperator {
         Arc::ptr_eq(self.get_state().storage(), other.get_state().storage())
     }
 
-    async fn process_buffered(&self, process_until: Option<Cursor>) -> RecordBatch {
-        let keys: Vec<Key> = self.buffered_keys.iter().cloned().collect();
+    async fn process_buffered(
+        &self,
+        keys: Vec<Key>,
+        process_until: Option<Cursor>,
+    ) -> (RecordBatch, HashSet<Key>) {
+        if keys.is_empty() {
+            return (RecordBatch::new_empty(self.output_schema.clone()), HashSet::new());
+        }
+
+        // Parallelize across keys to overlap storage IO.
         let futures: Vec<_> = keys
             .iter()
-            .map(|key| async move { self.process_key(key, process_until).await })
+            .map(|k| async move { (k.clone(), self.process_key(k, process_until).await) })
             .collect();
-        
         let results = future::join_all(futures).await;
 
-        if results.is_empty() {
-            return RecordBatch::new_empty(self.output_schema.clone());
+        let mut batches: Vec<RecordBatch> = Vec::with_capacity(results.len());
+        let mut pending_keys: HashSet<Key> = HashSet::new();
+        for (k, (batch, pending)) in results {
+            batches.push(batch);
+            if pending {
+                pending_keys.insert(k);
+            }
         }
 
         // TOOO we should return vec instead of concating - separate batch per key
-        arrow::compute::concat_batches(&self.output_schema, &results)
-            .expect("Should be able to concat result batches")
+        let out = arrow::compute::concat_batches(&self.output_schema, &batches)
+            .expect("Should be able to concat result batches");
+        (out, pending_keys)
     }
 
-    async fn configure_aggregations(
-        &self, 
+    async fn configure_aggregations_at_pos(
+        &self,
         key: &Key,
-        process_until: Option<Cursor>,
+        new_pos: Cursor,
     ) -> (
         IndexMap<WindowId, Vec<Box<dyn Aggregation>>>,
         HashMap<WindowId, Cursor>,
         Option<(Option<Cursor>, Cursor, BucketRange)>,
+        Cursor,
+        WindowId,
     ) {
         let windows_state_guard = self.state_ref().get_windows_state(key).await
             .expect("Windows state should exist - insert_batch should have created it");
@@ -278,14 +295,15 @@ impl WindowOperator {
         let batch_index = &windows_state.bucket_index;
 
         let mut aggregations: IndexMap<WindowId, Vec<Box<dyn Aggregation>>> = IndexMap::new();
-        let mut new_processed_until = HashMap::new();
+        let mut new_processed_until: HashMap<WindowId, Cursor> = HashMap::new();
         let ref_window_id = *self
             .window_configs
             .keys()
             .next()
             .expect("window_configs must be non-empty");
         let mut entry_delta: Option<(Option<Cursor>, Cursor, BucketRange)> = None;
-        
+        let max_pos_seen = batch_index.max_pos_seen();
+
         for (window_id, _window_config) in self.window_configs.iter() {
             let window_frame = _window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(window_id).expect("Window state should exist");
@@ -294,10 +312,6 @@ impl WindowOperator {
             let accumulator_state_owned = window_state.accumulator_state.clone();
             let prev_processed_until = window_state.processed_until;
 
-            // Determine progress cap for this step.
-            let until = process_until.unwrap_or_else(|| batch_index.max_pos_seen());
-            let new_pos = until.min(batch_index.max_pos_seen());
-            
             new_processed_until.insert(*window_id, new_pos);
 
             if *window_id == ref_window_id {
@@ -368,42 +382,78 @@ impl WindowOperator {
                     }
                 }
             }
+
             if !aggs.is_empty() {
                 aggregations.insert(*window_id, aggs);
             }
         }
 
         drop(windows_state_guard);
-        (aggregations, new_processed_until, entry_delta)
+        (
+            aggregations,
+            new_processed_until,
+            entry_delta,
+            max_pos_seen,
+            ref_window_id,
+        )
     }
 
     async fn advance_windows(
         &self, 
         key: &Key, 
         process_until: Option<Cursor>,
-    ) -> RecordBatch {
+    ) -> (RecordBatch, bool) {
+        // Read minimal state to compute the desired boundary and detect "no-advance" early.
+        let (max_pos_seen, prev_ref, desired_new_pos) = {
+            let windows_state_guard = self
+                .state_ref()
+                .get_windows_state(key)
+                .await
+                .expect("Windows state should exist - insert_batch should have created it");
+            let windows_state = windows_state_guard.value();
+            let batch_index = &windows_state.bucket_index;
+            let max_pos_seen = batch_index.max_pos_seen();
+            let desired_new_pos = process_until.unwrap_or(max_pos_seen).min(max_pos_seen);
+            let ref_window_id = *self
+                .window_configs
+                .keys()
+                .next()
+                .expect("window_configs must be non-empty");
+            let prev_ref = windows_state
+                .window_states
+                .get(&ref_window_id)
+                .expect("Window state should exist")
+                .processed_until;
+            drop(windows_state_guard);
+            (max_pos_seen, prev_ref, desired_new_pos)
+        };
 
-        let (aggregations, new_processed_until, entry_delta) =
-            self.configure_aggregations(key, process_until).await;
-        
-        if aggregations.is_empty() {
-            return RecordBatch::new_empty(self.output_schema.clone());
+        let prev_ref_cursor = prev_ref.unwrap_or(Cursor::new(i64::MIN, 0));
+        if desired_new_pos <= prev_ref_cursor {
+            let still_pending = max_pos_seen > prev_ref_cursor;
+            return (RecordBatch::new_empty(self.output_schema.clone()), still_pending);
         }
-        
-        // TODO: in the bucket-view design we will derive input values from bucket views.
-        
+
+        // Configure aggregations at the desired boundary (may be a gap cursor).
+        // We'll clamp the *stored* processed_until to an exact existing row after loading data.
+        let (aggregations, mut new_processed_until, entry_delta, max_pos_seen, ref_window_id) =
+            self.configure_aggregations_at_pos(key, desired_new_pos).await;
+        if aggregations.is_empty() {
+            let still_pending = max_pos_seen > prev_ref_cursor;
+            return (RecordBatch::new_empty(self.output_schema.clone()), still_pending);
+        }
+
+        // Build load plans from aggregations.
         struct Exec<'a> {
             window_id: WindowId,
             agg: &'a dyn Aggregation,
         }
-
         let mut execs: Vec<Exec<'_>> = Vec::new();
         let mut load_plans: Vec<RangesLoadPlan> = Vec::new();
         for (window_id, aggs) in &aggregations {
             for agg in aggs {
-                let requests = agg.get_data_requests();
                 load_plans.push(RangesLoadPlan {
-                    requests,
+                    requests: agg.get_data_requests(),
                     window_expr_for_args: agg.window_expr().clone(),
                 });
                 execs.push(Exec {
@@ -412,19 +462,68 @@ impl WindowOperator {
                 });
             }
         }
+        if load_plans.is_empty() {
+            let still_pending = max_pos_seen > prev_ref_cursor;
+            return (RecordBatch::new_empty(self.output_schema.clone()), still_pending);
+        }
 
         let views_by_agg = load_sorted_ranges_views(self.state_ref(), key, &load_plans).await;
 
+        // 2) Clamp desired -> actual using already-loaded views.
+        let mut actual_new_pos = desired_new_pos;
+        if let Some((_, desired, entry_range)) = entry_delta {
+            let view_for_entries = views_by_agg
+                .iter()
+                .flat_map(|g| g.iter())
+                .find(|v| {
+                    let r = v.bucket_range();
+                    r.start <= entry_range.start && r.end >= entry_range.end
+                });
+            if let Some(view) = view_for_entries {
+                let idx = SortedRangeIndex::new(view);
+                if !idx.is_empty() {
+                    if let Some(pos) = idx.seek_rowpos_le(desired) {
+                        actual_new_pos = idx.get_row_pos(&pos);
+                    }
+                }
+            }
+        }
+
+        if actual_new_pos <= prev_ref_cursor {
+            let still_pending = max_pos_seen > prev_ref_cursor;
+            return (RecordBatch::new_empty(self.output_schema.clone()), still_pending);
+        }
+
+        // Clamp stored processed_until to the exact row cursor we actually reached.
+        //
+        // TODO: This is still a "split brain": aggregations are constructed with `desired_new_pos` (can be a gap
+        // cursor from watermark-lateness), but we persist `processed_until=actual_new_pos` (last real row <= desired).
+        // We should make these consistent by constructing aggregations with `actual_new_pos` (or redesign request
+        // planning so we don't need to build aggregations just to compute `DataRequest`s).
+        if actual_new_pos < desired_new_pos {
+            for v in new_processed_until.values_mut() {
+                *v = actual_new_pos;
+            }
+        }
+
+        // Decide if this key still has pending (un-emitted) rows after this advance.
+        let still_pending = new_processed_until
+            .get(&ref_window_id)
+            .is_some_and(|p| max_pos_seen > *p);
+
+        // Execute aggregations in the same order as `load_plans` were built.
+        debug_assert_eq!(
+            execs.len(),
+            views_by_agg.len(),
+            "execs and loaded views must stay aligned"
+        );
         let futures: Vec<_> = execs
             .iter()
             .zip(views_by_agg.iter())
             .map(|(exec, views)| async move {
                 let result = exec
                     .agg
-                    .produce_aggregates_from_ranges(
-                        views,
-                        self.thread_pool.as_ref(),
-                    )
+                    .produce_aggregates_from_ranges(views, self.thread_pool.as_ref())
                     .await;
                 (exec.window_id, result)
             })
@@ -448,15 +547,13 @@ impl WindowOperator {
             })
             .collect();
         
-        drop(aggregations);
-        
         // Update window state positions and accumulator states
         self.state_ref()
             .update_window_positions_and_accumulators(key, &new_processed_until, &accumulator_states)
             .await;
 
         if self.execution_mode == ExecutionMode::Request {
-            return RecordBatch::new_empty(self.output_schema.clone());
+            return (RecordBatch::new_empty(self.output_schema.clone()), still_pending);
         }
 
         let input_values = match entry_delta {
@@ -465,7 +562,7 @@ impl WindowOperator {
         };
 
         if input_values.is_empty() {
-            return RecordBatch::new_empty(self.output_schema.clone());
+            return (RecordBatch::new_empty(self.output_schema.clone()), still_pending);
         }
 
         // Collect aggregated values
@@ -486,7 +583,10 @@ impl WindowOperator {
             "All window result columns must match input row count"
         );
         
-        stack_concat_results(input_values, aggregated_values, &self.output_schema, &self.input_schema)
+        (
+            stack_concat_results(input_values, aggregated_values, &self.output_schema, &self.input_schema),
+            still_pending,
+        )
     }
 }
 
@@ -619,9 +719,18 @@ impl OperatorTrait for WindowOperator {
                     Message::Keyed(keyed_message) => {
                         let key = keyed_message.key();
 
-                        let watermark_ts = self.current_watermark.map(|v| v as i64);
+                        // NOTE: we still drop late rows relative to the *raw watermark*.
+                        // Applying lateness to ingest would allow out-of-order rows for retractable
+                        // accumulators (AVG/SUM/COUNT), which we don't support without retractions.
+                        let watermark_ts = self.current_watermark.map(|v| {
+                            if v == MAX_WATERMARK_VALUE {
+                                i64::MAX
+                            } else {
+                                v as i64
+                            }
+                        });
                         let input_rows = keyed_message.base.record_batch.num_rows();
-                        let _dropped_rows = self
+                        let dropped_rows = self
                             .state_ref()
                             .insert_batch(
                                 key,
@@ -629,7 +738,7 @@ impl OperatorTrait for WindowOperator {
                                 keyed_message.base.record_batch.clone(),
                             )
                             .await;
-                        if _dropped_rows < input_rows {
+                        if dropped_rows < input_rows {
                             if self.execution_mode == ExecutionMode::Request
                                 && matches!(self.request_advance_policy, RequestAdvancePolicy::OnIngest)
                             {
@@ -647,10 +756,26 @@ impl OperatorTrait for WindowOperator {
                         println!("[{}] Window operator received watermark: {:?}", vertex_id, watermark);
 
                         self.current_watermark = Some(watermark.watermark_value);
-                        let process_until = Some(Cursor::new(watermark.watermark_value as i64, u64::MAX));
+                        let wm_ts = if watermark.watermark_value == MAX_WATERMARK_VALUE {
+                            i64::MAX
+                        } else {
+                            watermark.watermark_value as i64
+                        };
 
-                        let result = self.process_buffered(process_until).await;
-                        self.buffered_keys.clear();
+                        // repsect lateness when computing process_until
+                        let process_until_ts = match (wm_ts, self.lateness) {
+                            (ts, Some(lateness_ms)) if ts != i64::MAX => ts.saturating_sub(lateness_ms),
+                            (ts, _) => ts,
+                        };
+                        let process_until = Some(Cursor::new(process_until_ts, u64::MAX));
+
+                        let keys: Vec<Key> = self.buffered_keys.iter().cloned().collect();
+                        let (result, pending_keys) = self.process_buffered(keys, process_until).await;
+                        if watermark.watermark_value == MAX_WATERMARK_VALUE {
+                            self.buffered_keys.clear();
+                        } else {
+                            self.buffered_keys = pending_keys;
+                        }
 
                         // vertex_id will be set by stream task
                         // TODO ingest timestamp and extras?
@@ -839,6 +964,8 @@ pub fn stack_concat_results(
 
 #[cfg(test)]
 mod tests {
+    // TODO: Remove these legacy tests once `window_operator_tests.rs` fully replaces coverage.
+    // Keep them for now during transition to avoid missing regressions.
     use super::*;
     use std::sync::Arc;
     use arrow::array::{Float64Array, Int64Array, TimestampMillisecondArray, StringArray};
@@ -1174,7 +1301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_range_window_watermark_emission() {
+    async fn test_range_window_simple_watermark_emission() {
         // Single window definition with alias and multiple aggregates
         let sql = "SELECT 
             timestamp,
@@ -1313,7 +1440,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rows_window_watermark_emission() {
+    async fn test_rows_window_simple_watermark_emission() {
         // Test ROWS-based window function with alias
         let sql = "SELECT 
             timestamp,
@@ -1735,33 +1862,33 @@ mod tests {
         let result1 = window_operator.poll_next().await;
         let message1_result = result1.get_result_message();
         let result_batch1 = message1_result.record_batch();
-        assert_eq!(result_batch1.num_rows(), 3, "Should have 3 result rows");
+        // With lateness configured, Window processes up to (watermark - lateness).
+        // wm1=20000, lateness=3000 => process_until_ts=17000, so only [10000,15000] are emitted.
+        assert_eq!(result_batch1.num_rows(), 2, "Should have 2 result rows");
         
-        // Verify aggregate calculations for the last event (20000ms)
+        // Verify aggregate calculations for the last emitted event (15000ms)
         let sum_column1 = result_batch1.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         let avg_column1 = result_batch1.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
         let min_column1 = result_batch1.column(5).as_any().downcast_ref::<Float64Array>().unwrap();
         let count_column1 = result_batch1.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
         let max_column1 = result_batch1.column(7).as_any().downcast_ref::<Float64Array>().unwrap();
         
-        // For event at 20000ms:
-        // w1 (2s range): includes 20000ms only -> sum = 200.0
-        // w2 (5s range): includes 15000ms, 20000ms -> avg = (150.0 + 200.0) / 2 = 175.0, min = 150.0
-        // w3 (3 rows): includes all 3 events: 10000ms, 15000ms, 20000ms -> count = 3, max = 200.0
-        assert_eq!(sum_column1.value(2), 200.0, "2s window should include only current event");
-        assert_eq!(avg_column1.value(2), 175.0, "5s window should include 15000ms and 20000ms");
-        assert_eq!(min_column1.value(2), 150.0, "5s window min should be 150.0");
-        assert_eq!(count_column1.value(2), 3, "3-row window should include all 3 events");
-        assert_eq!(max_column1.value(2), 200.0, "3-row window max should be 200.0");
+        // For event at 15000ms:
+        // w1 (2s range): includes 15000ms only -> sum = 150.0
+        // w2 (5s range): includes 10000ms, 15000ms -> avg = 125.0, min = 100.0
+        // w3 (3 rows): includes 2 events so far -> count = 2, max = 150.0
+        assert_eq!(sum_column1.value(1), 150.0, "2s window should include only current event");
+        assert_eq!(avg_column1.value(1), 125.0, "5s window should include 10000ms and 15000ms");
+        assert_eq!(min_column1.value(1), 100.0, "5s window min should be 100.0");
+        assert_eq!(count_column1.value(1), 2, "3-row window should include 2 events");
+        assert_eq!(max_column1.value(1), 150.0, "3-row window max should be 150.0");
         
         // Verify state after step 1 - pruning should occur
-        // w1 (2s range): cutoff = 20000 - (3000 + 2000) = 15000ms
-        // w2 (5s range): cutoff = 20000 - (3000 + 5000) = 12000ms  
-        // w3 (3 rows): Search timestamp = 20000 - 3000 = 17000ms
-        //              Last entry <= 17000ms is 15000ms
-        //              For 3-row window ending at 15000ms, window start is 10000ms (last 3: [10000, 15000] - only 2 entries, so cutoff is 0)
-        //              So w3 cutoff = 10ms
-        // Minimal cutoff = min(15000, 12000, 0) = 0 - no actual pruning
+        // process_until_ts = 17000
+        // w1 (2s range): cutoff = 17000 - (3000 + 2000) = 12000ms
+        // w2 (5s range): cutoff = 17000 - (3000 + 5000) = 9000ms
+        // w3 (3 rows): Search timestamp = 17000 - 3000 = 14000ms (no pruning with 2 rows)
+        // Minimal cutoff = 0 - no actual pruning
         window_operator.get_state().verify_pruning_for_testing(&partition_key, 0).await;
 
         drain_one_pending_message(&mut window_operator).await;
@@ -1775,35 +1902,30 @@ mod tests {
         let result2 = window_operator.poll_next().await;
         let message2_result = result2.get_result_message();
         let result_batch2 = message2_result.record_batch();
-        // Rows with ts <= previously emitted watermark(20000) are dropped; only t=25000 remains.
-        assert_eq!(result_batch2.num_rows(), 1, "Should have 1 result row (2 events dropped)");
+        // Previously processed until 17000, now process_until_ts = 25000 - 3000 = 22000.
+        // Rows with ts <= raw watermark(20000) are dropped on ingest, so [16000,18000] are dropped.
+        // Only the previously buffered row at 20000 becomes eligible to emit here.
+        assert_eq!(result_batch2.num_rows(), 1, "Should have 1 result row");
         
-        // Verify the window calculations for the last event (25000ms)
+        // Verify the window calculations for the last emitted event (20000ms)
         let sum_column = result_batch2.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         let avg_column = result_batch2.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
         let min_column = result_batch2.column(5).as_any().downcast_ref::<Float64Array>().unwrap();
         let count_column = result_batch2.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
         let max_column = result_batch2.column(7).as_any().downcast_ref::<Float64Array>().unwrap();
-        
-        // For event at 25000ms:
-        // w1 (2s range): includes 25000ms only -> sum = 250.0
-        // w2 (5s range): includes 20000ms, 25000ms -> avg = (200.0 + 250.0) / 2 = 225.0, min = 200.0
-        // w3 (3 rows): includes last 3 events: 15000ms, 20000ms, 25000ms -> count = 3, max = 250.0
-        assert_eq!(sum_column.value(0), 250.0, "2s window should include only current event");
-        assert_eq!(avg_column.value(0), 225.0, "5s window should include 20000ms and 25000ms");
-        assert_eq!(min_column.value(0), 200.0, "5s window min should be 200.0");
-        assert_eq!(count_column.value(0), 3, "3-row window should include last 3 events");
-        assert_eq!(max_column.value(0), 250.0, "3-row window max should be 250.0");
+        // For event at 20000ms:
+        // w1 (2s range): includes 20000ms only -> sum = 200.0
+        // w2 (5s range): includes 15000ms, 20000ms -> avg = 175.0, min = 150.0
+        // w3 (3 rows): includes all 3 events: 10000ms, 15000ms, 20000ms -> count = 3, max = 200.0
+        assert_eq!(sum_column.value(0), 200.0, "2s window should include only current event");
+        assert_eq!(avg_column.value(0), 175.0, "5s window should include 15000ms and 20000ms");
+        assert_eq!(min_column.value(0), 150.0, "5s window min should be 150.0");
+        assert_eq!(count_column.value(0), 3, "3-row window should include all 3 events");
+        assert_eq!(max_column.value(0), 200.0, "3-row window max should be 200.0");
         
         // Verify state after step 2 - additional pruning should occur
-        // After step 2, we have entries: [10000, 15000, 20000, 25000] (16000/18000 dropped)
-        // w1 (2s range): cutoff = 25000 - (3000 + 2000) = 20000ms
-        // w2 (5s range): cutoff = 25000 - (3000 + 5000) = 17000ms
-        // w3 (3 rows): Search timestamp = 25000 - 3000 = 22000ms
-        //              Last entry <= 22000ms is 20000ms
-        //              For 3-row window ending at 20000ms, window start is 10000ms (last 3: [10000, 15000, 20000])
-        //              So w3 cutoff = 15000ms  
-        // Minimal cutoff = min(20000, 17000, 10000) = 10000ms
+        // process_until_ts = 22000
+        // Minimal cutoff remains 10000ms
         window_operator.get_state().verify_pruning_for_testing(&partition_key, 10000).await;
 
         drain_one_pending_message(&mut window_operator).await;
@@ -1817,39 +1939,219 @@ mod tests {
         let result3 = window_operator.poll_next().await;
         let message3_result = result3.get_result_message();
         let result_batch3 = message3_result.record_batch();
-        assert_eq!(result_batch3.num_rows(), 5, "Should have 5 result rows");
+        // process_until_ts = 30000 - 3000 = 27000, so [25000,26000,27000] are emitted.
+        assert_eq!(result_batch3.num_rows(), 3, "Should have 3 result rows");
         
-        // Verify aggregate calculations for the last event (30000ms)
+        // Verify aggregate calculations for the last emitted event (27000ms)
         let sum_column3 = result_batch3.column(3).as_any().downcast_ref::<Float64Array>().unwrap();
         let avg_column3 = result_batch3.column(4).as_any().downcast_ref::<Float64Array>().unwrap();
         let min_column3 = result_batch3.column(5).as_any().downcast_ref::<Float64Array>().unwrap();
         let count_column3 = result_batch3.column(6).as_any().downcast_ref::<Int64Array>().unwrap();
         let max_column3 = result_batch3.column(7).as_any().downcast_ref::<Float64Array>().unwrap();
         
-        // For event at 30000ms:
-        // w1 (2s range): window [28000, 30000] includes 28000ms, 29000ms, 30000ms -> sum = 280.0 + 290.0 + 300.0 = 870.0
-        // w2 (5s range): window [25000, 30000] includes 25000ms, 26000ms, 27000ms, 28000ms, 29000ms, 30000ms -> avg = (250+260+270+280+290+300)/6 = 275.0, min = 250.0
-        // w3 (3 rows): includes last 3 events: 28000ms, 29000ms, 30000ms -> count = 3, max = 300.0
-        assert_eq!(sum_column3.value(4), 870.0, "2s window should include 28000ms, 29000ms and 30000ms (exact window boundary)");
-        assert_eq!(avg_column3.value(4), 275.0, "5s window should include events from 25000ms to 30000ms (exact window boundary)");
-        assert_eq!(min_column3.value(4), 250.0, "5s window min should be 250.0 (from 25000ms at exact boundary)");
-        assert_eq!(count_column3.value(4), 3, "3-row window should include last 3 events");
-        assert_eq!(max_column3.value(4), 300.0, "3-row window max should be 300.0");
+        // For event at 27000ms:
+        // w1 (2s range): window [25000, 27000] includes 25000ms, 26000ms, 27000ms -> sum = 780.0
+        // w2 (5s range): window [22000, 27000] includes 25000ms, 26000ms, 27000ms -> avg = 260.0, min = 250.0
+        // w3 (3 rows): includes last 3 events: 25000ms, 26000ms, 27000ms -> count = 3, max = 270.0
+        assert_eq!(sum_column3.value(2), 780.0, "2s window should include 25000ms..27000ms");
+        assert_eq!(avg_column3.value(2), 260.0, "5s window should include 25000ms..27000ms");
+        assert_eq!(min_column3.value(2), 250.0, "5s window min should be 250.0");
+        assert_eq!(count_column3.value(2), 3, "3-row window should include last 3 events");
+        assert_eq!(max_column3.value(2), 270.0, "3-row window max should be 270.0");
         
         // Verify state after step 3 - range window should now be the limiting factor
-        // After step 3, we have entries: [15000, 20000, 25000, 26000, 27000, 28000, 29000, 30000]
-        // w1 (2s range): cutoff = 30000 - (3000 + 2000) = 25000ms
-        // w2 (5s range): cutoff = 30000 - (3000 + 5000) = 22000ms
-        // w3 (3 rows): Search timestamp = 30000 - 3000 = 27000ms
-        //              Last entry <= 27000ms is 27000ms
-        //              For 3-row window ending at 27000ms, window start is 25000ms (last 3: [25000, 26000, 27000])
-        //              So w3 cutoff = 25000ms
-        // Minimal cutoff = min(25000, 22000, 25000) = 22000ms
-        window_operator.get_state().verify_pruning_for_testing(&partition_key, 22000).await;
+        // process_until_ts = 27000
+        // ROWS window keeps the oldest of the last 3 rows <= (processed_until - lateness), which is 10000.
+        // Minimal cutoff becomes 10000ms.
+        window_operator.get_state().verify_pruning_for_testing(&partition_key, 10000).await;
 
         drain_one_pending_message(&mut window_operator).await;
         
         window_operator.close().await.expect("Should be able to close operator");
+    }
+
+    #[tokio::test]
+    async fn test_gap_watermark_lateness_does_not_break_range_window_retractable_and_plain() {
+        // Watermark-lateness can land between rows (e.g. 17000 between 15000 and 20000).
+        // Ensure both retractable (AVG) and plain (MIN) stay correct across multiple watermarks.
+        let sql = "SELECT
+            timestamp,
+            value,
+            partition_key,
+            AVG(value) OVER w as avg_val,
+            MIN(value) OVER w as min_val
+        FROM test_table
+        WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp
+        RANGE BETWEEN INTERVAL '100000' MILLISECOND PRECEDING AND CURRENT ROW)";
+
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut window_config = WindowOperatorConfig::new(window_exec);
+        window_config.parallelize = true;
+        window_config.lateness = Some(3000);
+
+        let operator_config = OperatorConfig::WindowConfig(window_config);
+        let runtime_context = create_test_runtime_context();
+
+        let mut window_operator = WindowOperator::new(operator_config);
+        window_operator
+            .open(&runtime_context)
+            .await
+            .expect("Should be able to open operator");
+
+        let batch = create_test_batch(
+            vec![10000, 15000, 20000],
+            vec![100.0, 150.0, 200.0],
+            vec!["A", "A", "A"],
+        );
+        let msg = create_keyed_message(batch, "A");
+
+        // Step 1: watermark=20000, lateness=3000 => process_until_ts=17000 => emits [10000,15000].
+        let wm1 = create_watermark_message(20000);
+        window_operator.set_input(Some(Box::pin(futures::stream::iter(vec![msg, wm1]))));
+
+        assert!(matches!(
+            window_operator.poll_next().await,
+            OperatorPollResult::Continue
+        ));
+        let m1 = window_operator.poll_next().await.get_result_message();
+        let out1 = m1.record_batch();
+        assert_eq!(out1.num_rows(), 2);
+
+        let avg1 = out1
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let min1 = out1
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
+        assert_eq!(avg1.value(0), 100.0);
+        assert_eq!(min1.value(0), 100.0);
+        assert_eq!(avg1.value(1), 125.0);
+        assert_eq!(min1.value(1), 100.0);
+
+        drain_one_pending_message(&mut window_operator).await;
+
+        // Step 2: watermark=25000 => process_until_ts=22000 => emits remaining [20000] without drift.
+        let wm2 = create_watermark_message(25000);
+        window_operator.set_input(Some(Box::pin(futures::stream::iter(vec![wm2]))));
+        let m2 = window_operator.poll_next().await.get_result_message();
+        let out2 = m2.record_batch();
+        assert_eq!(out2.num_rows(), 1);
+
+        let avg2 = out2
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let min2 = out2
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
+        assert_eq!(avg2.value(0), 150.0);
+        assert_eq!(min2.value(0), 100.0);
+
+        drain_one_pending_message(&mut window_operator).await;
+        window_operator
+            .close()
+            .await
+            .expect("Should be able to close operator");
+    }
+
+    #[tokio::test]
+    async fn test_gap_watermark_lateness_does_not_break_rows_window_retractable_and_plain() {
+        // Same gap-cursor scenario, but with a ROWS window.
+        let sql = "SELECT
+            timestamp,
+            value,
+            partition_key,
+            AVG(value) OVER w as avg_val,
+            MAX(value) OVER w as max_val
+        FROM test_table
+        WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW)";
+
+        let window_exec = extract_window_exec_from_sql(sql).await;
+        let mut window_config = WindowOperatorConfig::new(window_exec);
+        window_config.parallelize = true;
+        window_config.lateness = Some(3000);
+
+        let operator_config = OperatorConfig::WindowConfig(window_config);
+        let runtime_context = create_test_runtime_context();
+
+        let mut window_operator = WindowOperator::new(operator_config);
+        window_operator
+            .open(&runtime_context)
+            .await
+            .expect("Should be able to open operator");
+
+        let batch = create_test_batch(
+            vec![10000, 15000, 20000],
+            vec![100.0, 150.0, 200.0],
+            vec!["A", "A", "A"],
+        );
+        let msg = create_keyed_message(batch, "A");
+
+        // Step 1: watermark=20000, lateness=3000 => process_until_ts=17000 => emits [10000,15000].
+        let wm1 = create_watermark_message(20000);
+        window_operator.set_input(Some(Box::pin(futures::stream::iter(vec![msg, wm1]))));
+        assert!(matches!(
+            window_operator.poll_next().await,
+            OperatorPollResult::Continue
+        ));
+        let m1 = window_operator.poll_next().await.get_result_message();
+        let out1 = m1.record_batch();
+        assert_eq!(out1.num_rows(), 2);
+
+        let avg1 = out1
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let max1 = out1
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
+        assert_eq!(avg1.value(0), 100.0);
+        assert_eq!(max1.value(0), 100.0);
+        assert_eq!(avg1.value(1), 125.0);
+        assert_eq!(max1.value(1), 150.0);
+
+        drain_one_pending_message(&mut window_operator).await;
+
+        // Step 2: watermark=25000 => process_until_ts=22000 => emits [20000] and the ROWS window is consistent.
+        let wm2 = create_watermark_message(25000);
+        window_operator.set_input(Some(Box::pin(futures::stream::iter(vec![wm2]))));
+        let m2 = window_operator.poll_next().await.get_result_message();
+        let out2 = m2.record_batch();
+        assert_eq!(out2.num_rows(), 1);
+
+        let avg2 = out2
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        let max2 = out2
+            .column(4)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+
+        assert_eq!(avg2.value(0), 150.0);
+        assert_eq!(max2.value(0), 200.0);
+
+        drain_one_pending_message(&mut window_operator).await;
+        window_operator
+            .close()
+            .await
+            .expect("Should be able to close operator");
     }
 
     #[tokio::test]
