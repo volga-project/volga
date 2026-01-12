@@ -3,6 +3,9 @@ pub mod sorted_range_view_loader;
 pub mod tiles;
 pub mod window_logic;
 
+#[cfg(test)]
+mod window_operator_state_tests;
+
 
 
 

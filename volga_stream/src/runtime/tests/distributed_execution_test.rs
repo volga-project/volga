@@ -1,6 +1,8 @@
+#![allow(dead_code, unused_imports, unused_variables)]
+
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}},
-    common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::{Message, WatermarkMessage}, MAX_WATERMARK_VALUE},
+    api::{logical_graph::LogicalGraph, pipeline_context::PipelineContextBuilder},
+    common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::Message},
     executor::fake_distributed_executor::FakeDistributedExecutor,
     runtime::{
         functions::{key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}},
@@ -19,7 +21,6 @@ struct KeyedToRegularMapFunction;
 #[async_trait]
 impl MapFunctionTrait for KeyedToRegularMapFunction {
     fn map(&self, message: Message) -> Result<Message> {
-        let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
         let upstream_vertex_id = message.upstream_vertex_id();
         let ingest_ts = message.ingest_timestamp();
         let extras = message.get_extras();
@@ -63,12 +64,7 @@ fn test_distributed_execution() -> Result<()> {
             ));
         }
         
-        // Add max watermark as the last message
-        source_messages.push(Message::Watermark(WatermarkMessage::new(
-            "source".to_string(),
-            MAX_WATERMARK_VALUE,
-            None,
-        )));
+        // Sources emit terminal MAX watermark automatically when exhausted.
 
         // Define operator chain: source -> keyby -> map -> sink
         let operators = vec![

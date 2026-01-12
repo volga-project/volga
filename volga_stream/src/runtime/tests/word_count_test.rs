@@ -1,21 +1,22 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::{PipelineContext, PipelineContextBuilder}},
-    common::{test_utils::{gen_unique_grpc_port, print_pipeline_state}, message::Message},
+    api::pipeline_context::PipelineContextBuilder,
+    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
-            key_by::KeyByFunction,
-            reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
             source::word_count_source::BatchingMode,
         },
-        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
+        operators::{
+            sink::sink_operator::SinkConfig,
+            source::source_operator::{SourceConfig, WordCountSourceConfig},
+        },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use std::{collections::HashMap, sync::Arc};
 use tokio::runtime::Runtime;
-use arrow::{array::{Float64Array, StringArray}, datatypes::{Field, Schema}};
+use arrow::{array::StringArray, datatypes::{Field, Schema}};
 
 // TODO: we may have colliding words since each source worker generates it's own
 #[test]
