@@ -15,11 +15,15 @@ use serde::{Serialize, Deserialize};
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
+use crate::runtime::watermark::WatermarkAssignConfig;
+use crate::runtime::watermark::{advance_watermark_min, WatermarkAssignerState};
 
 pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
+// Watermark assignment + watermark merge/advancement live in `runtime/watermark/`.
+
 #[derive(Debug)]
-struct CheckpointAligner {
+pub(crate) struct CheckpointAligner {
     upstream_count: usize,
     current_checkpoint: Option<u64>,
     seen_upstreams: HashSet<String>,
@@ -27,7 +31,7 @@ struct CheckpointAligner {
 }
 
 impl CheckpointAligner {
-    fn new(upstream_vertices: &[String], reader_control: DataReaderControl) -> Self {
+    pub(crate) fn new(upstream_vertices: &[String], reader_control: DataReaderControl) -> Self {
         Self {
             upstream_count: upstream_vertices.len(),
             current_checkpoint: None,
@@ -210,58 +214,6 @@ impl StreamTask {
         Ok(())
     }
 
-    async fn advance_watermark(
-        watermark: WatermarkMessage,
-        upstream_vertices: &[String],
-        upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
-        current_watermark: Arc<AtomicU64>,
-    ) -> Option<u64> { // Returns new_watermark if advanced
-        // For sources (no incoming edges), always advance
-        if upstream_vertices.is_empty() {
-            let current_wm = current_watermark.load(Ordering::SeqCst);
-            if watermark.watermark_value > current_wm {
-                current_watermark.store(watermark.watermark_value, Ordering::SeqCst);
-                return Some(watermark.watermark_value);
-            }
-            return None;
-        }
-        
-        // For non-sources, handle upstream watermark tracking
-        let upstream_vertex_id = watermark.metadata.upstream_vertex_id.clone()
-            .expect("Non-source tasks must have upstream_vertex_id in watermark metadata");
-        
-        let mut upstream_wms = upstream_watermarks.lock().await;
-        
-        // Assert that watermark increases for given upstream
-        if let Some(&previous_watermark) = upstream_wms.get(&upstream_vertex_id) {
-            assert!(
-                watermark.watermark_value >= previous_watermark,
-                "Watermark must not decrease: received {} but previous was {} from upstream {}",
-                watermark.watermark_value, previous_watermark, upstream_vertex_id
-            );
-        }
-        
-        // Update watermark for this upstream
-        upstream_wms.insert(upstream_vertex_id, watermark.watermark_value);
-        
-        // Only advance when we have watermarks from ALL upstreams
-        if upstream_wms.len() < upstream_vertices.len() {
-            return None; // Haven't received watermarks from all upstreams yet
-        }
-        
-        // Calculate minimum watermark across all upstreams
-        let min_watermark = upstream_wms.values().min().copied().unwrap_or(0);
-        drop(upstream_wms); // Release lock
-        
-        let current_wm = current_watermark.load(Ordering::SeqCst);
-        if min_watermark > current_wm {
-            current_watermark.store(min_watermark, Ordering::SeqCst);
-            Some(min_watermark)
-        } else {
-            None // Watermark didn't advance
-        }
-    }
-
     fn record_metrics(
         vertex_id: VertexId,
         message: &Message,
@@ -275,13 +227,14 @@ impl StreamTask {
                 counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
                 counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
                 
-                let ingest_timestamp= message.ingest_timestamp().unwrap();
-                let current_time = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let latency = current_time.saturating_sub(ingest_timestamp);
-                histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone()).record(latency as f64);
+                if let Some(ingest_timestamp) = message.ingest_timestamp() {
+                    let current_time = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let latency = current_time.saturating_sub(ingest_timestamp);
+                    histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone()).record(latency as f64);
+                }
 
             } else {
                 counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
@@ -293,9 +246,11 @@ impl StreamTask {
 
     // Create preprocessed input stream that handles watermark advancement + barrier alignment (blocks upstreams).
     // It never yields checkpoint barriers to the operator; instead it notifies the run loop via `aligned_checkpoint_sender`.
-    fn create_preprocessed_input_stream(
+    pub(crate) fn create_preprocessed_input_stream(
         input_stream: MessageStream,
         vertex_id: VertexId,
+        operator_config: OperatorConfig,
+        watermark_assign: Option<WatermarkAssignConfig>,
         upstream_vertices: Vec<String>,
         upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
         current_watermark: Arc<AtomicU64>,
@@ -304,14 +259,19 @@ impl StreamTask {
     ) -> MessageStream {
         Box::pin(stream! {
             let mut input_stream = input_stream;
+            let mut watermark_assigner =
+                watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, Some(&operator_config)));
 
             while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true);
 
                 match &message {
                     Message::Watermark(watermark) => {
+                        if watermark_assigner.is_some() && watermark.watermark_value != MAX_WATERMARK_VALUE {
+                            continue;
+                        }
                         // Advance watermark and only forward to operator if advanced.
-                        if let Some(new_watermark) = Self::advance_watermark(
+                        if let Some(new_watermark) = advance_watermark_min(
                             watermark.clone(),
                             &upstream_vertices,
                             upstream_watermarks.clone(),
@@ -335,7 +295,31 @@ impl StreamTask {
                         }
                     }
                     _ => {
+                        // Generate per-upstream watermark from this data message (if enabled),
+                        // then run it through the same min-upstream merge logic.
+                        let upstream_for_msg = message
+                            .upstream_vertex_id()
+                            .unwrap_or_else(|| vertex_id.as_ref().to_string());
+                        let injected = watermark_assigner
+                            .as_mut()
+                            .and_then(|assigner| assigner.on_data_message(&upstream_for_msg, &message));
                         yield message;
+                        if let Some(wm) = injected {
+                            // Treat injected watermark exactly like an upstream watermark: merge and
+                            // emit a task-local watermark only if it advances.
+                            if let Some(new_watermark) = advance_watermark_min(
+                                wm.clone(),
+                                &upstream_vertices,
+                                upstream_watermarks.clone(),
+                                current_watermark.clone(),
+                            ).await {
+                                yield Message::Watermark(WatermarkMessage::new(
+                                    vertex_id.as_ref().to_string(),
+                                    new_watermark,
+                                    None,
+                                ));
+                            }
+                        }
                     }
                 }
             }
@@ -514,6 +498,33 @@ impl StreamTask {
             let operator_type = operator.operator_type();
             let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
             let mut data_reader_control: Option<crate::transport::transport_client::DataReaderControl> = None;
+            let vertex_meta = execution_graph
+                .get_vertex(&vertex_id)
+                .expect("vertex should exist in execution graph");
+            let watermark_assign = vertex_meta.watermark_assign.clone();
+            let vertex_operator_config = vertex_meta.operator_config.clone();
+
+            // Runtime invariant: watermark assigners must not run in Batch mode.
+            // Batch pipelines rely on source completion to emit a terminal MAX_WATERMARK_VALUE.
+            if runtime_context
+                .job_config()
+                .get("execution_mode")
+                .and_then(|v| v.as_str())
+                == Some("Batch")
+            {
+                assert!(
+                    watermark_assign.is_none(),
+                    "StreamTask {}: watermark_assign is not allowed in Batch execution mode",
+                    vertex_id.as_ref()
+                );
+            }
+            let mut source_watermark_assigner = if is_source {
+                watermark_assign
+                    .clone()
+                    .map(|cfg| WatermarkAssignerState::new(cfg, Some(&vertex_operator_config)))
+            } else {
+                None
+            };
             
             if !is_source {
                 // Pre-process input stream for non-source operators
@@ -527,6 +538,8 @@ impl StreamTask {
                 let preprocessed_stream = Self::create_preprocessed_input_stream(
                     input_stream,
                     vertex_id.clone(),
+                    vertex_operator_config.clone(),
+                    watermark_assign.clone(),
                     upstream_vertices.clone(),
                     upstream_watermarks.clone(),
                     current_watermark.clone(),
@@ -570,6 +583,13 @@ impl StreamTask {
 
                 match poll_res {
                     OperatorPollResult::Ready(mut message) => {
+                        let injected_wm = if is_source && matches!(message, Message::Regular(_) | Message::Keyed(_)) {
+                            source_watermark_assigner
+                                .as_mut()
+                                .and_then(|assigner| assigner.on_data_message(vertex_id.as_ref(), &message))
+                        } else {
+                            None
+                        };
                         if let Message::CheckpointBarrier(ref barrier) = message {
                             let checkpoint_id = barrier.checkpoint_id;
 
@@ -625,7 +645,7 @@ impl StreamTask {
                         if let Message::Watermark(ref watermark) = message {
                             if is_source {
                                 // Advance watermark for source, since it does not have preprocessed input like other operators
-                                Self::advance_watermark(
+                                advance_watermark_min(
                                     watermark.clone(),
                                     &upstream_vertices,
                                     upstream_watermarks.clone(),
@@ -655,8 +675,44 @@ impl StreamTask {
                             vertex_id.clone(),
                             status.clone()
                         ).await;
+
+                        if let Some(wm) = injected_wm {
+                            let mut injected = Message::Watermark(wm);
+                            injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
+                            Self::record_metrics(vertex_id.clone(), &injected, false);
+                            Self::send_to_collectors_if_needed(
+                                &mut collectors_per_target_operator,
+                                injected,
+                                vertex_id.clone(),
+                                status.clone(),
+                            )
+                            .await;
+                        }
                     }
-                    OperatorPollResult::None => panic!("Message stream has None"),
+                    OperatorPollResult::None => {
+                        if is_source {
+                            let wm = Message::Watermark(WatermarkMessage::new(
+                                vertex_id.as_ref().to_string(),
+                                MAX_WATERMARK_VALUE,
+                                None,
+                            ));
+                            Self::record_metrics(vertex_id.clone(), &wm, false);
+                            Self::send_to_collectors_if_needed(
+                                &mut collectors_per_target_operator,
+                                wm,
+                                vertex_id.clone(),
+                                status.clone(),
+                            )
+                            .await;
+                            status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+                            break;
+                        } else {
+                            panic!(
+                                "StreamTask {}: upstream ended without terminal watermark",
+                                vertex_id.as_ref()
+                            );
+                        }
+                    }
                     OperatorPollResult::Continue => { /* no output */ }
                 }
             }

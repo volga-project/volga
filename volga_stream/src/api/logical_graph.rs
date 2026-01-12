@@ -13,6 +13,7 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::window_operator::{ExecutionMode, RequestAdvancePolicy};
 use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
 use crate::runtime::partition::PartitionType;
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
@@ -21,6 +22,7 @@ pub struct LogicalNode {
     pub parallelism: usize,
     pub in_schema: Option<Arc<ArrowSchema>>,
     pub out_schema: Option<Arc<ArrowSchema>>,
+    pub watermark_assign: Option<WatermarkAssignConfig>,
 }
 
 impl LogicalNode {
@@ -31,6 +33,7 @@ impl LogicalNode {
             parallelism,
             in_schema,
             out_schema,
+            watermark_assign: None,
         }
     }
 } 
@@ -54,6 +57,7 @@ pub struct LogicalGraph {
     graph: DiGraph<LogicalNode, LogicalEdge>,
     operator_type_counters: HashMap<String, u32>,
     root_node_index: Option<NodeIndex>,
+    watermarks_enabled: bool,
 }
 
 impl LogicalGraph {
@@ -62,7 +66,12 @@ impl LogicalGraph {
             graph: DiGraph::new(),
             operator_type_counters: HashMap::new(),
             root_node_index: None,
+            watermarks_enabled: true,
         }
+    }
+
+    pub fn set_watermarks_enabled(&mut self, enabled: bool) {
+        self.watermarks_enabled = enabled;
     }
     
     pub fn set_root_node(&mut self, node_index: NodeIndex) {
@@ -146,6 +155,70 @@ impl LogicalGraph {
 
     /// Convert logical graph to execution graph using parallelism from each logical node
     pub fn to_execution_graph(&self) -> ExecutionGraph {
+        // Planner-side heuristic watermark assigner placement:
+        // For now, for each Source, find the closest downstream Window operator(s) and attach a watermark assigner there.
+        // This keeps watermark generation as a StreamTask feature (no dedicated operator) while preserving
+        // downstream min-upstream watermark merge semantics.
+        //
+        // TODO: extend placement for joins/unions (multiple-input operators), where "closest window" is ambiguous
+        // and per-input watermark generation needs careful handling.
+        let mut auto_watermark_assign: HashMap<String, WatermarkAssignConfig> = HashMap::new();
+        if self.watermarks_enabled {
+            let source_nodes: Vec<NodeIndex> = self
+                .graph
+                .node_indices()
+                .filter(|&idx| matches!(self.graph[idx].operator_config, OperatorConfig::SourceConfig(_)))
+                .collect();
+
+            for src in source_nodes {
+            // Layered BFS: stop at first layer that contains any window node(s).
+            let mut visited: HashMap<NodeIndex, ()> = HashMap::new();
+            let mut frontier: Vec<NodeIndex> = vec![src];
+            visited.insert(src, ());
+
+            loop {
+                // Next layer
+                let mut next: Vec<NodeIndex> = Vec::new();
+                for &n in &frontier {
+                    for neigh in self.graph.neighbors_directed(n, Direction::Outgoing) {
+                        if visited.contains_key(&neigh) {
+                            continue;
+                        }
+                        visited.insert(neigh, ());
+                        next.push(neigh);
+                    }
+                }
+
+                if next.is_empty() {
+                    break;
+                }
+
+                let windows_at_layer: Vec<NodeIndex> = next
+                    .iter()
+                    .copied()
+                    .filter(|&idx| matches!(self.graph[idx].operator_config, OperatorConfig::WindowConfig(_)))
+                    .collect();
+                if !windows_at_layer.is_empty() {
+                    for w in windows_at_layer {
+                        let op_id = self.graph[w].operator_id.clone();
+                        auto_watermark_assign.entry(op_id).or_insert_with(|| {
+                            WatermarkAssignConfig::new(0, Some(TimeHint::WindowOrderByColumn))
+                        });
+                    }
+                    break;
+                }
+
+                frontier = next;
+            }
+            }
+        } else {
+            // In Batch mode we expect no watermark assignment at all.
+            debug_assert!(
+                self.graph.node_weights().all(|n| n.watermark_assign.is_none()),
+                "watermarks_disabled but some logical nodes have watermark_assign configured"
+            );
+        }
+
         let mut execution_graph = ExecutionGraph::new();
         let mut logical_to_execution_mapping: HashMap<NodeIndex, Vec<String>> = HashMap::new();
 
@@ -169,6 +242,11 @@ impl LogicalGraph {
                     parallelism as i32,
                     i as i32,
                 );
+                let mut execution_vertex = execution_vertex;
+                execution_vertex.watermark_assign = logical_node
+                    .watermark_assign
+                    .clone()
+                    .or_else(|| auto_watermark_assign.get(&logical_node.operator_id).cloned());
 
                 execution_graph.add_vertex(execution_vertex);
                 execution_vertex_ids.push(execution_vertex_id);
@@ -206,6 +284,23 @@ impl LogicalGraph {
 
         execution_graph
     }
+
+    /// Apply a default watermark assignment config to all Window operators in this logical graph.
+    ///
+    /// Note: this is an explicit user/planner configuration that overrides the auto-placement fallback
+    /// in `to_execution_graph()`.
+    ///
+    /// TODO: extend to joins/unions when we add multi-input watermark assignment semantics.
+    pub fn set_window_watermark_assign(&mut self, cfg: WatermarkAssignConfig) {
+        for idx in self.graph.node_indices() {
+            if matches!(self.graph[idx].operator_config, OperatorConfig::WindowConfig(_)) {
+                if let Some(n) = self.get_node_by_index_mut(idx) {
+                    n.watermark_assign = Some(cfg.clone());
+                }
+            }
+        }
+    }
+
 
     pub fn from_linear_operators(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
         // Validate configuration

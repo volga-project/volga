@@ -568,12 +568,21 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
 
     let tcp_builder = TcpBuilder::new()
         .listen_address("127.0.0.1:9999".parse::<std::net::SocketAddr>()?);
-    let tcp_recorder = tcp_builder.build()?;
-    
-    let fanout = FanoutBuilder::default()
-        .add_recorder(prometheus_recorder)
-        .add_recorder(tcp_recorder)
-        .build();
+    let fanout = match tcp_builder.build() {
+        Ok(tcp_recorder) => {
+            println!("🔍 TCP metrics streaming to 127.0.0.1:9999");
+            FanoutBuilder::default()
+                .add_recorder(prometheus_recorder)
+                .add_recorder(tcp_recorder)
+                .build()
+        }
+        Err(e) => {
+            eprintln!("⚠️  TCP metrics disabled: {}", e);
+            FanoutBuilder::default()
+                .add_recorder(prometheus_recorder)
+                .build()
+        }
+    };
     
     metrics::set_global_recorder(fanout)?;
     
@@ -581,7 +590,6 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     
     println!("✅ Volga metrics initialized with Prometheus + TCP fanout");
     println!("📊 Prometheus metrics available via handle");
-    println!("🔍 TCP metrics streaming to 127.0.0.1:9999");
     Ok(())
 }
 
