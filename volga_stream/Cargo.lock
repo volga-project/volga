@@ -5561,6 +5561,7 @@ dependencies = [
  "foyer 0.19.1",
  "futures",
  "hex",
+ "http-body-util",
  "hyper 1.7.0",
  "indexmap 2.11.4",
  "kameo",
@@ -5586,6 +5587,7 @@ dependencies = [
  "tokio-util",
  "tonic",
  "tonic-build",
+ "tower 0.5.2",
  "uuid",
 ]
 

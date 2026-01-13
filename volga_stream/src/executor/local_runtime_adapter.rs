@@ -10,6 +10,7 @@ use crate::runtime::worker::WorkerConfig;
 use crate::runtime::worker_server::WorkerServer;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::transport::transport_backend_actor::TransportBackendType;
+use crate::transport::channel::Channel;
 
 pub struct LocalRuntimeAdapter;
 
@@ -63,6 +64,26 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             let addr = format!("127.0.0.1:{}", port);
 
             let vertex_ids = node_to_vertex_ids.get(node_id).unwrap().clone();
+
+            // Select data-plane transport backend based on actual channels:
+            // - if any edge touching this worker's vertices is remote, use gRPC transport backend
+            // - otherwise, prefer in-memory transport backend (single-node / single-worker fast path)
+            let has_remote_channels = vertex_ids.iter().any(|vertex_id| {
+                if let Some((in_edges, out_edges)) = req.execution_graph.get_edges_for_vertex(vertex_id) {
+                    in_edges
+                        .iter()
+                        .chain(out_edges.iter())
+                        .any(|e| matches!(e.channel.as_ref(), Some(Channel::Remote { .. })))
+                } else {
+                    false
+                }
+            });
+            let transport_backend_type = if has_remote_channels {
+                TransportBackendType::Grpc
+            } else {
+                TransportBackendType::InMemory
+            };
+
             let mut worker_config = WorkerConfig::new(
                 node_id.clone(),
                 req.execution_ids.clone(),
@@ -72,7 +93,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                     .map(|v| std::sync::Arc::<str>::from(v))
                     .collect(),
                 1,
-                TransportBackendType::Grpc,
+                transport_backend_type,
             )
             .with_master_addr(master_addr.clone());
             worker_config.storage_budgets = req.worker_runtime.storage.budgets.clone();
