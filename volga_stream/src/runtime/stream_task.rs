@@ -1,6 +1,24 @@
-use crate::{common::MAX_WATERMARK_VALUE, runtime::{
-    collector::Collector, execution_graph::ExecutionGraph, metrics::{get_stream_task_metrics, init_metrics, MetricsLabels, StreamTaskMetrics, LABEL_ATTEMPT_ID, LABEL_PIPELINE_ID, LABEL_PIPELINE_SPEC_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY, METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT}, operators::operator::{create_operator, OperatorConfig, OperatorTrait, OperatorType, OperatorPollResult, MessageStream}, runtime_context::RuntimeContext
-}, transport::transport_client::TransportClientConfig};
+use crate::{
+    common::MAX_WATERMARK_VALUE,
+    runtime::{
+        collector::Collector,
+        execution_graph::ExecutionGraph,
+        metrics::{
+            get_stream_task_metrics, init_metrics, MetricsLabels, LABEL_ATTEMPT_ID,
+            LABEL_PIPELINE_ID, LABEL_PIPELINE_SPEC_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
+            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY,
+            METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
+            METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
+        },
+        observability::snapshot_types::{TaskSnapshot, StreamTaskStatus},
+        operators::operator::{
+            create_operator, MessageStream, OperatorConfig, OperatorPollResult, OperatorTrait,
+            OperatorType,
+        },
+        runtime_context::RuntimeContext,
+    },
+    transport::transport_client::TransportClientConfig,
+};
 use anyhow::Result;
 use futures::StreamExt;
 use async_stream::stream;
@@ -11,7 +29,7 @@ use std::collections::HashSet;
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
-use serde::{Serialize, Deserialize};
+// serde imports removed; this module does not define serializable DTOs directly.
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
@@ -79,34 +97,7 @@ fn timestamp() -> String {
         .to_string()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum StreamTaskStatus {
-    Created = 0,
-    Opened = 1,
-    Running = 2,
-    Finished = 3,
-    Closed = 4,
-}
-
-#[derive(Debug, Clone)]
-pub struct StreamTaskState {
-    pub vertex_id: VertexId,
-    pub status: StreamTaskStatus,
-    pub metrics: StreamTaskMetrics,
-}
-
-impl From<u8> for StreamTaskStatus {
-    fn from(value: u8) -> Self {
-        match value {
-            0 => StreamTaskStatus::Created,
-            1 => StreamTaskStatus::Opened,
-            2 => StreamTaskStatus::Running,
-            3 => StreamTaskStatus::Finished,
-            4 => StreamTaskStatus::Closed,
-            _ => panic!("Invalid task status value"),
-        }
-    }
-}
+// StreamTaskStatus/StreamTaskState moved to runtime/observability/snapshot_types.rs
 
 #[derive(Debug)]
 pub struct StreamTask {
@@ -837,8 +828,8 @@ impl StreamTask {
         self.run_loop_handle = Some(run_loop_handle);
     }
 
-    pub async fn get_state(&self) -> StreamTaskState {
-        StreamTaskState {
+    pub async fn get_state(&self) -> TaskSnapshot {
+        TaskSnapshot {
             vertex_id: self.vertex_id.clone(),
             status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),
             metrics: get_stream_task_metrics(self.vertex_id.clone(), self.metrics_labels.as_ref()),

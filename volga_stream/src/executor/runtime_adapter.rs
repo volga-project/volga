@@ -6,7 +6,7 @@ use crate::cluster::cluster_provider::ClusterProvider;
 use crate::cluster::node_assignment::NodeAssignStrategy;
 use crate::control_plane::types::ExecutionIds;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::master::PipelineState;
+use crate::runtime::observability::PipelineSnapshot;
 use crate::api::WorkerRuntimeSpec;
 use crate::api::StorageSpec;
 
@@ -26,11 +26,11 @@ pub struct AttemptHandle {
     pub execution_ids: ExecutionIds,
     pub master_addr: String,
     pub worker_addrs: Vec<String>,
-    pub(crate) join: JoinHandle<Result<PipelineState>>,
+    pub(crate) join: JoinHandle<Result<PipelineSnapshot>>,
 }
 
 impl AttemptHandle {
-    pub async fn wait(self) -> Result<PipelineState> {
+    pub async fn wait(self) -> Result<PipelineSnapshot> {
         self.join.await?
     }
 

@@ -15,11 +15,12 @@ use base64::{engine::general_purpose, Engine as _};
 use crate::api::PipelineSpec as UserPipelineSpec;
 use crate::api::compile_logical_graph;
 use crate::control_plane::controller::ControlPlaneController;
-use crate::control_plane::store::{InMemoryStore, PipelineEventStore, PipelineRunStore, PipelineSpecStore};
+use crate::control_plane::store::{InMemoryStore, PipelineEventStore, PipelineRunStore, PipelineSpecStore, PipelineSnapshotStore};
 use crate::control_plane::types::{
     AttemptId, ExecutionIds, PipelineDesiredState, PipelineEvent, PipelineEventKind, PipelineId,
     PipelineLifecycleState, PipelineRun, PipelineSpec, PipelineSpecId, PipelineStatus,
 };
+use crate::runtime::observability::{PipelineDerivedStats, PipelineSnapshotEntry};
 
 #[derive(Clone)]
 pub struct ControlPlaneAppState {
@@ -42,6 +43,9 @@ pub fn router(state: ControlPlaneAppState) -> Router {
         .route("/pipeline_specs", post(create_pipeline_spec))
         .route("/pipelines/start", post(start_pipeline))
         .route("/pipelines/:pipeline_id/status", get(get_status))
+        .route("/pipelines/:pipeline_id/snapshot", get(get_latest_snapshot))
+        .route("/pipelines/:pipeline_id/snapshots", get(get_snapshot_history))
+        .route("/pipelines/:pipeline_id/stats", get(get_snapshot_stats))
         .with_state(state)
 }
 
@@ -171,5 +175,57 @@ async fn get_status(
         .await
         .map(Json)
         .ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn get_latest_snapshot(
+    State(state): State<ControlPlaneAppState>,
+    Path(pipeline_id): Path<String>,
+) -> Result<Json<PipelineSnapshotEntry>, StatusCode> {
+    let pipeline_id =
+        PipelineId(Uuid::parse_str(&pipeline_id).map_err(|_| StatusCode::BAD_REQUEST)?);
+    state
+        .store
+        .latest_snapshot(pipeline_id)
+        .await
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SnapshotHistoryQuery {
+    pub limit: Option<usize>,
+}
+
+async fn get_snapshot_history(
+    State(state): State<ControlPlaneAppState>,
+    Path(pipeline_id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<SnapshotHistoryQuery>,
+) -> Result<Json<Vec<PipelineSnapshotEntry>>, StatusCode> {
+    let pipeline_id =
+        PipelineId(Uuid::parse_str(&pipeline_id).map_err(|_| StatusCode::BAD_REQUEST)?);
+    let mut snaps = state.store.list_snapshots(pipeline_id).await;
+    if let Some(limit) = q.limit {
+        if snaps.len() > limit {
+            snaps = snaps.split_off(snaps.len() - limit);
+        }
+    }
+    Ok(Json(snaps))
+}
+
+async fn get_snapshot_stats(
+    State(state): State<ControlPlaneAppState>,
+    Path(pipeline_id): Path<String>,
+) -> Result<Json<PipelineDerivedStats>, StatusCode> {
+    let pipeline_id =
+        PipelineId(Uuid::parse_str(&pipeline_id).map_err(|_| StatusCode::BAD_REQUEST)?);
+    let snaps = state.store.list_snapshots(pipeline_id).await;
+    if snaps.is_empty() {
+        return Ok(Json(PipelineDerivedStats::default()));
+    }
+    Ok(Json(PipelineDerivedStats {
+        snapshot_count: snaps.len(),
+        first_ts_ms: snaps.first().map(|e| e.ts_ms),
+        last_ts_ms: snaps.last().map(|e| e.ts_ms),
+    }))
 }
 

@@ -52,6 +52,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             .collect::<Vec<_>>();
         master_server.set_checkpointable_tasks(expected_tasks).await;
         master_server.start(&master_addr).await?;
+        let master_snapshot_sink = master_server.snapshot_sink();
 
         let node_to_vertex_ids = node_to_vertex_ids(&vertex_to_node);
         let mut worker_servers = Vec::new();
@@ -91,7 +92,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         let join = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-            let mut master = Master::new();
+            let mut master = Master::new().with_snapshot_sink(master_snapshot_sink);
             master.execute(worker_addrs_for_join.clone()).await?;
 
             let worker_states = master.get_worker_states().await;
@@ -101,7 +102,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             }
             let mut ms = master_server;
             ms.stop().await;
-            Ok(crate::runtime::master::PipelineState::new(worker_states))
+            Ok(crate::runtime::observability::PipelineSnapshot::new(worker_states))
         });
 
         Ok(AttemptHandle {

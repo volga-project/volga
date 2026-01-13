@@ -5,7 +5,7 @@ use crate::{
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
         functions::source::DatagenSpec,
-        master::PipelineState,
+        observability::PipelineSnapshot,
         metrics::PipelineStateHistory,
         operators::{
             sink::sink_operator::SinkConfig,
@@ -102,7 +102,7 @@ impl BenchmarkMetrics {
         }
     }
 
-    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineState) {
+    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineSnapshot) {
         self.history.add_sample(timestamp, pipeline_state);
     }
 }
@@ -284,7 +284,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     let benchmark_metrics = Arc::new(Mutex::new(BenchmarkMetrics::new()));
     let benchmark_metrics_clone = benchmark_metrics.clone();
     
-    let (state_updates_sender, mut state_updates_receiver) = mpsc::channel::<PipelineState>(100);
+    let (state_updates_sender, mut state_updates_receiver) = mpsc::channel::<PipelineSnapshot>(100);
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
     let throughput_window_seconds_clone = config.throughput_window_seconds;

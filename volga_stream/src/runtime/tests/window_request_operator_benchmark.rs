@@ -5,7 +5,7 @@ use crate::{
     runtime::{
         functions::source::DatagenSpec,
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
-        master::PipelineState,
+        observability::PipelineSnapshot,
         operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
@@ -85,15 +85,15 @@ impl BenchmarkMetrics {
         }
     }
 
-    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineState) {
+    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineSnapshot) {
         self.history.add_sample(timestamp, pipeline_state);
     }
 }
 
 async fn poll_pipeline_state_updates(
-    state_updates_receiver: &mut mpsc::Receiver<PipelineState>,
+    state_updates_receiver: &mut mpsc::Receiver<PipelineSnapshot>,
     benchmark_metrics: &mut BenchmarkMetrics,
-) -> Option<PipelineState> {
+) -> Option<PipelineSnapshot> {
     let pipeline_state = match state_updates_receiver.recv().await {
         Some(state) => state,
         None => return None,

@@ -3,7 +3,14 @@ use crate::{
     api::compile_logical_graph,
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
-        functions::source::word_count_source::BatchingMode, master::PipelineState, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}}, worker::WorkerState
+        functions::source::word_count_source::BatchingMode,
+        observability::{PipelineSnapshot, WorkerSnapshot},
+        metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics},
+        operators::{
+            operator::OperatorConfig,
+            sink::sink_operator::SinkConfig,
+            source::source_operator::{SourceConfig, WordCountSourceConfig},
+        },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
@@ -103,13 +110,13 @@ fn calculate_stddev(values: &[f64]) -> f64 {
 }
 
 async fn poll_pipeline_state_updates(
-    state_updates_receiver: &mut mpsc::Receiver<PipelineState>,
+    state_updates_receiver: &mut mpsc::Receiver<PipelineSnapshot>,
     benchmark_metrics: &mut BenchmarkMetrics,
     last_metrics: &mut Option<(u64, u64)>, // (messages, records)
     last_timestamp: &mut Instant,
     source_operator_id: String,
     sink_operator_id: String,
-) -> Option<PipelineState> {
+) -> Option<PipelineSnapshot> {
     let current_time = Instant::now();
     let pipeline_state = match state_updates_receiver.recv().await {
         Some(state) => state,

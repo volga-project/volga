@@ -8,6 +8,8 @@ use crate::control_plane::types::{
     CheckpointMetadata, ExecutionIds, PipelineDesiredState, PipelineEvent, PipelineId, PipelineRun,
     PipelineSpec, PipelineSpecId, PipelineStatus,
 };
+use crate::api::PipelineSpec as UserPipelineSpec;
+use crate::runtime::observability::PipelineSnapshotEntry;
 
 #[async_trait]
 pub trait PipelineSpecStore: Send + Sync {
@@ -42,6 +44,13 @@ pub trait CheckpointMetadataStore: Send + Sync {
     async fn latest_checkpoint(&self, pipeline_id: PipelineId) -> Option<CheckpointMetadata>;
 }
 
+#[async_trait]
+pub trait PipelineSnapshotStore: Send + Sync {
+    async fn append_snapshot(&self, pipeline_id: PipelineId, entry: PipelineSnapshotEntry);
+    async fn list_snapshots(&self, pipeline_id: PipelineId) -> Vec<PipelineSnapshotEntry>;
+    async fn latest_snapshot(&self, pipeline_id: PipelineId) -> Option<PipelineSnapshotEntry>;
+}
+
 #[derive(Debug, Default)]
 struct InMemoryInner {
     specs: HashMap<PipelineSpecId, PipelineSpec>,
@@ -51,6 +60,7 @@ struct InMemoryInner {
     events: HashMap<PipelineId, Vec<PipelineEvent>>,
     checkpoints: HashMap<PipelineId, Vec<CheckpointMetadata>>,
     execution_ids_by_pipeline: HashMap<PipelineId, ExecutionIds>,
+    snapshots: HashMap<PipelineId, Vec<PipelineSnapshotEntry>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -158,6 +168,35 @@ impl CheckpointMetadataStore for InMemoryStore {
     async fn latest_checkpoint(&self, pipeline_id: PipelineId) -> Option<CheckpointMetadata> {
         let guard = self.inner.read().await;
         guard.checkpoints.get(&pipeline_id).and_then(|v| v.last().cloned())
+    }
+}
+
+#[async_trait]
+impl PipelineSnapshotStore for InMemoryStore {
+    async fn append_snapshot(&self, pipeline_id: PipelineId, entry: PipelineSnapshotEntry) {
+        let mut guard = self.inner.write().await;
+        let retention_ms = guard
+            .execution_ids_by_pipeline
+            .get(&pipeline_id)
+            .and_then(|ids| guard.specs.get(&ids.pipeline_spec_id))
+            .and_then(|stored| serde_json::from_slice::<UserPipelineSpec>(&stored.spec_bytes).ok())
+            .map(|spec| spec.worker_runtime.history_retention_window().as_millis() as u64)
+            .unwrap_or(10 * 60 * 1000);
+
+        let min_ts_ms = entry.ts_ms.saturating_sub(retention_ms.max(1));
+        let snaps = guard.snapshots.entry(pipeline_id).or_default();
+        snaps.retain(|e| e.ts_ms >= min_ts_ms);
+        snaps.push(entry);
+    }
+
+    async fn list_snapshots(&self, pipeline_id: PipelineId) -> Vec<PipelineSnapshotEntry> {
+        let guard = self.inner.read().await;
+        guard.snapshots.get(&pipeline_id).cloned().unwrap_or_default()
+    }
+
+    async fn latest_snapshot(&self, pipeline_id: PipelineId) -> Option<PipelineSnapshotEntry> {
+        let guard = self.inner.read().await;
+        guard.snapshots.get(&pipeline_id).and_then(|v| v.last().cloned())
     }
 }
 

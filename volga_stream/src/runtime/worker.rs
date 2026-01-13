@@ -1,8 +1,17 @@
 use crate::runtime::{
-    execution_graph::ExecutionGraph, functions::source::request_source::{extract_request_source_config, RequestSourceProcessor}, metrics::WorkerMetrics, runtime_context::RuntimeContext, stream_task::{StreamTask, StreamTaskStatus}, stream_task_actor::{StreamTaskActor, StreamTaskMessage}, state::OperatorStates
+    execution_graph::ExecutionGraph,
+    functions::source::request_source::{extract_request_source_config, RequestSourceProcessor},
+    metrics::emit_poll_derived_gauges,
+    observability::snapshot_types::WorkerSnapshot,
+    runtime_context::RuntimeContext,
+    stream_task::{StreamTask},
+    stream_task_actor::{StreamTaskActor, StreamTaskMessage},
+    state::OperatorStates,
+    observability::snapshot_types::TaskOperatorMetrics,
 };
 use crate::runtime::VertexId;
-use crate::runtime::metrics::{MetricsLabels, StreamTaskMetrics};
+use crate::runtime::metrics::{MetricsLabels, TaskMetrics, WorkerAggregateMetrics};
+use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
@@ -11,8 +20,7 @@ use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
-use serde::{Serialize, Deserialize};
-use anyhow::Result;
+// (serde/Result imports removed; this module does not serialize Worker directly)
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
@@ -79,40 +87,7 @@ impl WorkerConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WorkerState {
-    pub execution_ids: ExecutionIds,
-    pub worker_id: String,
-    pub task_statuses: HashMap<VertexId, StreamTaskStatus>,
-    pub worker_metrics: Option<WorkerMetrics>,
-}
-
-impl WorkerState {
-    pub fn new(worker_id: String, execution_ids: ExecutionIds) -> Self {
-        Self {
-            execution_ids,
-            worker_id,
-            task_statuses: HashMap::new(),
-            worker_metrics: None,
-        }
-    }
-
-    pub fn all_tasks_have_status(&self, status: StreamTaskStatus) -> bool {
-        self.task_statuses.values().all(|_status| *_status == status)
-    }
-
-    pub fn to_bytes(&self) -> Result<Vec<u8>> {
-        Ok(bincode::serialize(self)?)
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        Ok(bincode::deserialize(bytes)?)
-    }
-
-    pub fn set_metrics(&mut self, worker_metrics: WorkerMetrics) {
-        self.worker_metrics = Some(worker_metrics);
-    }
-}
+// WorkerState moved to runtime/observability/snapshot_types.rs
 
 pub struct Worker {
     worker_id: String,
@@ -131,7 +106,7 @@ pub struct Worker {
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<VertexId, Runtime>,
     transport_backend_runtime: Option<Runtime>,
-    worker_state: Arc<tokio::sync::Mutex<WorkerState>>,
+    worker_state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
     operator_states: Arc<OperatorStates>,
     running: Arc<AtomicBool>,
     tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
@@ -191,7 +166,7 @@ impl Worker {
                 .thread_name("transport-backend-runtime")
                 .build().unwrap()),
             request_source_processor_runtime,
-            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerState::new(
+            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
                 config.worker_id,
                 config.execution_ids,
             ))),
@@ -208,8 +183,9 @@ impl Worker {
         task_runtimes: HashMap<VertexId, Handle>,
         task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
-        state: Arc<tokio::sync::Mutex<WorkerState>>,
-        state_update_sender: Option<mpsc::Sender<WorkerState>>
+        operator_states: Arc<OperatorStates>,
+        state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
+        state_update_sender: Option<mpsc::Sender<WorkerSnapshot>>
     ) {
         let mut task_futures = Vec::new();
         for (vertex_id, runtime) in &task_runtimes {
@@ -225,27 +201,36 @@ impl Worker {
         let task_results = join_all(task_futures).await;
 
         let mut task_statuses: HashMap<VertexId, StreamTaskStatus> = HashMap::new();
-        let mut task_metrics: HashMap<VertexId, StreamTaskMetrics> = HashMap::new();
+        let mut task_metrics: HashMap<VertexId, TaskMetrics> = HashMap::new();
+        let mut task_operator_metrics: HashMap<VertexId, TaskOperatorMetrics> = HashMap::new();
 
         for result in task_results {
             if let Ok((vertex_id, state)) = result {
                 task_statuses.insert(vertex_id.clone(), state.status.clone());
                 task_metrics.insert(vertex_id.clone(), state.metrics.clone());
+
+                if let Some(op_state) = operator_states.get_operator_state(vertex_id.as_ref()) {
+                    if let Some(m) = op_state.task_operator_metrics() {
+                        task_operator_metrics.insert(vertex_id.clone(), m);
+                    }
+                }
             }
         }
 
-        let task_metrics_str: HashMap<String, StreamTaskMetrics> = task_metrics
+        let task_metrics_str: HashMap<String, TaskMetrics> = task_metrics
             .into_iter()
             .map(|(k, v)| (k.as_ref().to_string(), v))
             .collect();
-        let worker_metrics = WorkerMetrics::new(worker_id, execution_ids, task_metrics_str, &graph);
+        let worker_metrics = WorkerAggregateMetrics::new(worker_id, execution_ids, task_metrics_str, &graph);
         worker_metrics.record();
+        emit_poll_derived_gauges(&worker_metrics);
 
         // Update shared WorkerState
         {
             let mut state_guard = state.lock().await;
             state_guard.task_statuses = task_statuses;
             state_guard.set_metrics(worker_metrics);
+            state_guard.task_operator_metrics = task_operator_metrics;
             // state_guard.worker_metrics.set_tasks_metrics(task_metrics.clone());
             if state_update_sender.is_some() {
                 state_update_sender.unwrap().send(state_guard.clone()).await.unwrap();
@@ -254,7 +239,7 @@ impl Worker {
     }
 
     pub async fn wait_for_all_tasks_status(
-        state: Arc<tokio::sync::Mutex<WorkerState>>,
+        state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
         running: Arc<AtomicBool>,
         target_status: StreamTaskStatus,
         timeout_s: Option<u64>
@@ -405,7 +390,7 @@ impl Worker {
 
     async fn start_tasks(
         &mut self, 
-        state_updates_sender: Option<mpsc::Sender<WorkerState>>
+        state_updates_sender: Option<mpsc::Sender<WorkerSnapshot>>
     ) {
         println!("[WORKER] Starting tasks");
 
@@ -434,6 +419,7 @@ impl Worker {
         let task_actors = self.task_actors.clone();
         let graph = self.graph.clone();
         let state = self.worker_state.clone();
+        let operator_states = self.operator_states.clone();
         let worker_id = self.worker_id.clone();
         let execution_ids = self.execution_ids.clone();
         
@@ -449,6 +435,7 @@ impl Worker {
                     task_runtime_handles.clone(),
                     task_actors.clone(),
                     graph.clone(),
+                    operator_states.clone(),
                     state.clone(),
                     state_updates_sender.clone(),
                 ).await;
@@ -461,6 +448,7 @@ impl Worker {
                 task_runtime_handles,
                 task_actors,
                 graph,
+                operator_states.clone(),
                 state,
                 state_updates_sender.clone(),
             ).await;
@@ -535,7 +523,7 @@ impl Worker {
         println!("[WORKER] {:?} signal sent to all task actors", signal);
     }
 
-    pub async fn get_state(&self) -> WorkerState {
+    pub async fn get_state(&self) -> WorkerSnapshot {
         if self.running.load(Ordering::SeqCst) {
         let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
                 .map(|(k, v)| (k.clone(), v.handle().clone()))
@@ -549,6 +537,7 @@ impl Worker {
                 task_runtime_handles,
                 task_actors,
                 graph,
+                self.operator_states.clone(),
                 state,
                 None,
             ).await;
@@ -666,14 +655,14 @@ impl Worker {
 
     pub async fn execute_worker_lifecycle_for_testing_with_state_updates(
         &mut self,
-        state_udpates_sender: mpsc::Sender<WorkerState>
+        state_udpates_sender: mpsc::Sender<WorkerSnapshot>
     ) {
         self._execute_worker_lifecycle_for_testing(Some(state_udpates_sender)).await
     }
 
     async fn _execute_worker_lifecycle_for_testing(
         &mut self,
-        state_updates_sender: Option<mpsc::Sender<WorkerState>>
+        state_updates_sender: Option<mpsc::Sender<WorkerSnapshot>>
     ) {
         println!("[WORKER] Starting worker execution");
         

@@ -122,6 +122,11 @@ impl PipelineSpecBuilder {
         self
     }
 
+    pub fn with_snapshot_history_retention_window_ms(mut self, ms: u64) -> Self {
+        self.spec.worker_runtime.history_retention_window_ms = Some(ms.max(1));
+        self
+    }
+
     pub fn with_inmem_store_lock_pool_size(mut self, size: usize) -> Self {
         self.spec.worker_runtime.storage.inmem_store_lock_pool_size = size;
         self

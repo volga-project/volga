@@ -1,7 +1,8 @@
 use anyhow::Result;
 use kameo::Actor;
 use kameo::message::Context;
-use crate::runtime::stream_task::{StreamTask, StreamTaskState};
+use crate::runtime::observability::TaskSnapshot;
+use crate::runtime::stream_task::StreamTask;
 
 #[derive(Debug, Clone)]
 pub enum StreamTaskMessage {
@@ -24,9 +25,9 @@ impl StreamTaskActor {
 }
 
 impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
-    type Reply = Result<StreamTaskState>;
+    type Reply = Result<TaskSnapshot>;
 
-    async fn handle(&mut self, msg: StreamTaskMessage, _ctx: &mut Context<StreamTaskActor, Result<StreamTaskState>>) -> Self::Reply {
+    async fn handle(&mut self, msg: StreamTaskMessage, _ctx: &mut Context<StreamTaskActor, Result<TaskSnapshot>>) -> Self::Reply {
         match msg {
             StreamTaskMessage::Start => {
                 self.task.start().await;

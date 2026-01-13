@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, Duration};
 
-use crate::control_plane::store::{InMemoryStore, PipelineEventStore, PipelineRunStore};
+use crate::control_plane::store::{InMemoryStore, PipelineEventStore, PipelineRunStore, PipelineSnapshotStore};
 use crate::control_plane::types::{
     PipelineDesiredState, PipelineEvent, PipelineEventKind, PipelineId, PipelineLifecycleState,
     PipelineStatus,
@@ -17,6 +17,9 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::cluster::cluster_provider::LocalMachineClusterProvider;
 use crate::cluster::node_assignment::SingleNodeStrategy;
 use crate::api::PipelineSpec as UserPipelineSpec;
+use crate::runtime::observability::{PipelineSnapshot, PipelineSnapshotEntry};
+use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::master_server::master_service::GetLatestSnapshotRequest;
 
 #[derive(Clone)]
 pub struct ControlPlaneController {
@@ -25,6 +28,7 @@ pub struct ControlPlaneController {
     graphs: Arc<RwLock<HashMap<PipelineId, ExecutionGraph>>>,
     specs: Arc<RwLock<HashMap<PipelineId, UserPipelineSpec>>>,
     running: Arc<Mutex<HashMap<PipelineId, AttemptHandle>>>,
+    snapshot_pollers: Arc<Mutex<HashMap<PipelineId, JoinHandle<()>>>>,
 }
 
 impl ControlPlaneController {
@@ -35,6 +39,7 @@ impl ControlPlaneController {
             graphs: Arc::new(RwLock::new(HashMap::new())),
             specs: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
+            snapshot_pollers: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -73,6 +78,7 @@ impl ControlPlaneController {
                 .unwrap_or(run.desired_state);
 
             let mut running_guard = self.running.lock().await;
+            let mut pollers_guard = self.snapshot_pollers.lock().await;
 
             match desired {
                 PipelineDesiredState::Running => {
@@ -140,10 +146,75 @@ impl ControlPlaneController {
                         .await;
 
                     running_guard.insert(pipeline_id, handle);
+
+                    // Start snapshot polling (CP -> Master) for this pipeline attempt.
+                    if !pollers_guard.contains_key(&pipeline_id) {
+                        let store = self.store.clone();
+                        let master_addr = running_guard
+                            .get(&pipeline_id)
+                            .expect("handle just inserted")
+                            .master_addr
+                            .clone();
+                        let poll_pipeline_id = pipeline_id;
+
+                        let poller = tokio::spawn(async move {
+                            let addr = format!("http://{}", master_addr);
+                            let mut client = match MasterServiceClient::connect(addr).await {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    eprintln!("[CONTROL_PLANE] snapshot poller connect failed: {e:?}");
+                                    return;
+                                }
+                            };
+
+                            loop {
+                                match client
+                                    .get_latest_snapshot(tonic::Request::new(GetLatestSnapshotRequest {}))
+                                    .await
+                                {
+                                    Ok(resp) => {
+                                        let resp = resp.into_inner();
+                                        if !resp.has_snapshot || resp.snapshot_bytes.is_empty() {
+                                            sleep(Duration::from_millis(200)).await;
+                                            continue;
+                                        }
+                                        let snapshot: PipelineSnapshot = match bincode::deserialize(&resp.snapshot_bytes) {
+                                            Ok(s) => s,
+                                            Err(e) => {
+                                                eprintln!("[CONTROL_PLANE] snapshot decode failed: {e:?}");
+                                                sleep(Duration::from_millis(200)).await;
+                                                continue;
+                                            }
+                                        };
+                                        store
+                                            .append_snapshot(
+                                                poll_pipeline_id,
+                                                PipelineSnapshotEntry {
+                                                    ts_ms: resp.ts_ms,
+                                                    seq: resp.seq,
+                                                    snapshot,
+                                                },
+                                            )
+                                            .await;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("[CONTROL_PLANE] snapshot poller rpc failed: {e:?}");
+                                        break;
+                                    }
+                                }
+                                sleep(Duration::from_millis(200)).await;
+                            }
+                        });
+
+                        pollers_guard.insert(pipeline_id, poller);
+                    }
                 }
                 PipelineDesiredState::Stopped | PipelineDesiredState::Paused | PipelineDesiredState::Draining => {
                     if let Some(handle) = running_guard.remove(&pipeline_id) {
                         handle.abort();
+                    }
+                    if let Some(h) = pollers_guard.remove(&pipeline_id) {
+                        h.abort();
                     }
 
                     self.store
