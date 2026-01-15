@@ -90,6 +90,10 @@ impl LogicalGraph {
         self.graph.node_indices()
             .find(|&idx| self.graph[idx].operator_id == *operator_id)
     }
+
+    pub fn get_all_node_indices(&self) -> Vec<NodeIndex> {
+        self.graph.node_indices().collect()
+    }
     
     /// Get neighbors of a node
     pub fn get_neighbors(&self, node_index: NodeIndex, direction: Direction) -> Vec<NodeIndex> {
@@ -385,7 +389,7 @@ impl LogicalGraph {
         if let Some(node) = self.graph.node_weight_mut(top_window_node) {
             if let OperatorConfig::WindowConfig(ref mut config) = node.operator_config {
                 config.execution_mode = ExecutionMode::Request;
-                config.request_advance_policy = RequestAdvancePolicy::OnIngest;
+                config.spec.request_advance_policy = RequestAdvancePolicy::OnIngest;
             }
         }
         

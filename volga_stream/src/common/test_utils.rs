@@ -11,7 +11,7 @@ use async_trait::async_trait;
 
 use crate::common::Message;
 use crate::runtime::functions::map::MapFunctionTrait;
-use crate::runtime::master::PipelineState;
+use crate::runtime::observability::PipelineSnapshot;
 use crate::runtime::metrics::{PipelineStateHistory, ThroughputRates};
 
 pub fn create_test_string_batch(data: Vec<String>) -> RecordBatch {
@@ -44,7 +44,7 @@ pub fn gen_unique_grpc_port() -> u16 {
 
 
 pub fn print_pipeline_state(
-    pipeline_state: &PipelineState,
+    pipeline_state: &PipelineSnapshot,
     operator_ids: Option<&[String]>,
     tasks_only: bool,
     operators_only: bool,

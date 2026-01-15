@@ -1,7 +1,6 @@
 use crate::{
-    api::pipeline_context::{PipelineContext, PipelineContextBuilder},
+    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::{message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
-    executor::local_executor::LocalExecutor,
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
@@ -495,17 +494,18 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     
     // Create streaming context
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(1)
         .with_source(
             "test_table".to_string(),
             SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)),
             test_case.schema.clone()
         )
-        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql(test_case.sql)
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
+    let context = PipelineContext::new(spec);
 
     // Start storage server and execute
     let mut storage_server = InMemoryStorageServer::new();

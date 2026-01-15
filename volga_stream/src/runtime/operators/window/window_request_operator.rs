@@ -21,6 +21,7 @@ use crate::runtime::operators::window::window_operator_state::{AccumulatorState,
 use crate::runtime::operators::window::{AggregatorType, Cursor, TileConfig, Tiles};
 use crate::runtime::operators::window::shared::{WindowConfig, build_window_operator_parts, stack_concat_results};
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
+use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
@@ -31,8 +32,7 @@ use tokio::time::Duration;
 pub struct WindowRequestOperatorConfig {
     pub window_exec: Arc<BoundedWindowAggExec>,
     pub tiling_configs: Vec<Option<TileConfig>>,
-    pub parallelize: bool,
-    pub lateness: Option<i64>,
+    pub spec: WindowOperatorSpec,
 }
 
 impl WindowRequestOperatorConfig {
@@ -40,8 +40,7 @@ impl WindowRequestOperatorConfig {
         Self {
             window_exec: window_operator_config.window_exec,
             tiling_configs: window_operator_config.tiling_configs,
-            parallelize: window_operator_config.parallelize,
-            lateness: window_operator_config.lateness
+            spec: window_operator_config.spec,
         }
     }
 }
@@ -82,7 +81,10 @@ impl WindowRequestOperator {
 
         let (ts_column_index, windows, input_schema, output_schema, thread_pool) =
             build_window_operator_parts(
-            true, &window_request_operator_config.window_exec, &window_request_operator_config.tiling_configs, window_request_operator_config.parallelize
+            true,
+            &window_request_operator_config.window_exec,
+            &window_request_operator_config.tiling_configs,
+            window_request_operator_config.spec.parallelize,
         );
 
         Self {
@@ -90,11 +92,11 @@ impl WindowRequestOperator {
             window_configs: windows,
             state: None,
             ts_column_index,
-            parallelize: window_request_operator_config.parallelize,
+            parallelize: window_request_operator_config.spec.parallelize,
             thread_pool,
             output_schema,
             input_schema,
-            lateness: window_request_operator_config.lateness,
+            lateness: window_request_operator_config.spec.lateness,
         }
     }
 
@@ -599,9 +601,9 @@ mod tests {
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec.clone());
         window_config.execution_mode = ExecutionMode::Request;
-        window_config.parallelize = true;
-        window_config.lateness = Some(2000); // 2 seconds lateness tolerance
-        window_config.request_advance_policy = RequestAdvancePolicy::OnIngest;
+        window_config.spec.parallelize = true;
+        window_config.spec.lateness = Some(2000); // 2 seconds lateness tolerance
+        window_config.spec.request_advance_policy = RequestAdvancePolicy::OnIngest;
 
         let operator_states = Arc::new(OperatorStates::new());
         let window_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_op");

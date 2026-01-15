@@ -8,6 +8,7 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use futures::future;
+use serde::{Deserialize, Serialize};
 use tokio_rayon::rayon::ThreadPool;
 
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
@@ -18,6 +19,7 @@ use crate::runtime::operators::window::window_operator_state::{WindowOperatorSta
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::operators::window::Cursor;
 use crate::runtime::operators::window::shared::{WindowConfig, build_window_operator_parts};
+use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::storage::StorageStatsSnapshot;
 use crate::common::MAX_WATERMARK_VALUE;
@@ -31,7 +33,7 @@ pub enum ExecutionMode {
     Request, // operator only updates state, produces no messages
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum RequestAdvancePolicy {
     /// Advance windows only when watermark is received (default, supports complex DAGs).
     OnWatermark,
@@ -45,30 +47,34 @@ pub enum RequestAdvancePolicy {
 pub struct WindowOperatorConfig {
     pub window_exec: Arc<BoundedWindowAggExec>,
     pub execution_mode: ExecutionMode,
-    pub parallelize: bool,
     pub tiling_configs: Vec<Option<TileConfig>>,
-    pub lateness: Option<i64>,
-    pub request_advance_policy: RequestAdvancePolicy,
-    pub compaction_interval_ms: u64,
-    pub dump_interval_ms: u64,
-    pub dump_hot_bucket_count: usize,
-    pub in_mem_dump_parallelism: usize,
+    pub spec: WindowOperatorSpec,
 }
 
 impl WindowOperatorConfig {
     pub fn new(window_exec: Arc<BoundedWindowAggExec>) -> Self {    
-        Self {
+        let mut cfg = Self {
             window_exec,
             execution_mode: ExecutionMode::Regular,
-            parallelize: false,
             tiling_configs: Vec::new(),
-            lateness: None,
-            request_advance_policy: RequestAdvancePolicy::OnWatermark,
-            compaction_interval_ms: 250,
-            dump_interval_ms: 1000,
-            dump_hot_bucket_count: 2,
-            in_mem_dump_parallelism: 4,
+            spec: WindowOperatorSpec::default(),
+        };
+        // Keep derived fields consistent.
+        cfg.set_spec(cfg.spec.clone());
+        cfg
+    }
+
+    pub fn set_spec(&mut self, spec: WindowOperatorSpec) -> &mut Self {
+        // Apply optional tiling default to any "unset" window tilings.
+        if let Some(default_tiling) = spec.tiling.clone() {
+            for t in self.tiling_configs.iter_mut() {
+                if t.is_none() {
+                    *t = Some(default_tiling.clone());
+                }
+            }
         }
+        self.spec = spec;
+        self
     }
 }
 
@@ -119,7 +125,7 @@ impl WindowOperator {
         };
 
         if matches!(
-            window_operator_config.request_advance_policy,
+            window_operator_config.spec.request_advance_policy,
             RequestAdvancePolicy::OnIngest
         ) && window_operator_config.execution_mode != ExecutionMode::Request
         {
@@ -130,7 +136,10 @@ impl WindowOperator {
 
         let (ts_column_index, windows, input_schema, output_schema, thread_pool) =
             build_window_operator_parts(
-            false, &window_operator_config.window_exec, &window_operator_config.tiling_configs, window_operator_config.parallelize
+            false,
+            &window_operator_config.window_exec,
+            &window_operator_config.tiling_configs,
+            window_operator_config.spec.parallelize,
         );
 
         let window_configs = Arc::new(windows);
@@ -141,19 +150,19 @@ impl WindowOperator {
             state: None,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
-            request_advance_policy: window_operator_config.request_advance_policy,
-            parallelize: window_operator_config.parallelize,
+            request_advance_policy: window_operator_config.spec.request_advance_policy,
+            parallelize: window_operator_config.spec.parallelize,
             thread_pool,
             output_schema,
             input_schema,
             current_watermark: None,
-            compaction_interval: Duration::from_millis(window_operator_config.compaction_interval_ms.max(1)),
-            dump_interval: Duration::from_millis(window_operator_config.dump_interval_ms.max(1)),
+            compaction_interval: Duration::from_millis(window_operator_config.spec.compaction_interval_ms.max(1)),
+            dump_interval: Duration::from_millis(window_operator_config.spec.dump_interval_ms.max(1)),
             ts_column_index,
             tiling_configs: window_operator_config.tiling_configs.clone(),
-            lateness: window_operator_config.lateness,
-            dump_hot_bucket_count: window_operator_config.dump_hot_bucket_count,
-            in_mem_dump_parallelism: window_operator_config.in_mem_dump_parallelism,
+            lateness: window_operator_config.spec.lateness,
+            dump_hot_bucket_count: window_operator_config.spec.dump_hot_bucket_count,
+            in_mem_dump_parallelism: window_operator_config.spec.in_mem_dump_parallelism,
         }
     }
 

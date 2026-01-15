@@ -21,6 +21,7 @@ pub enum Channel {
         channel_id: String,
         source_vertex_id: String,
         target_vertex_id: String,
+        queue_size_records: u32,
     },
     Remote {
         channel_id: String,
@@ -31,13 +32,18 @@ pub enum Channel {
         target_node_ip: String,
         target_node_id: String,
         target_port: i32,
+        queue_size_records: u32,
     }
 }
 
 impl Channel {
     pub fn new_local(source_vertex_id: String, target_vertex_id: String) -> Self {
+        Self::new_local_with_queue(source_vertex_id, target_vertex_id, crate::transport::transport_spec::TransportSpec::DEFAULT_QUEUE_RECORDS)
+    }
+
+    pub fn new_local_with_queue(source_vertex_id: String, target_vertex_id: String, queue_size_records: u32) -> Self {
         let channel_id = gen_channel_id(source_vertex_id.clone(), target_vertex_id.clone());
-        Channel::Local { channel_id, source_vertex_id, target_vertex_id: target_vertex_id }
+        Channel::Local { channel_id, source_vertex_id, target_vertex_id, queue_size_records }
     }
 
     pub fn new_remote(
@@ -49,6 +55,28 @@ impl Channel {
         target_node_id: String,
         target_port: i32,
     ) -> Self {
+        Self::new_remote_with_queue(
+            source_vertex_id,
+            target_vertex_id,
+            source_node_ip,
+            source_node_id,
+            target_node_ip,
+            target_node_id,
+            target_port,
+            crate::transport::transport_spec::TransportSpec::DEFAULT_QUEUE_RECORDS,
+        )
+    }
+
+    pub fn new_remote_with_queue(
+        source_vertex_id: String,
+        target_vertex_id: String,
+        source_node_ip: String,
+        source_node_id: String,
+        target_node_ip: String,
+        target_node_id: String,
+        target_port: i32,
+        queue_size_records: u32,
+    ) -> Self {
         let channel_id = gen_channel_id(source_vertex_id.clone(), target_vertex_id.clone());
         Channel::Remote {
             channel_id,
@@ -59,6 +87,7 @@ impl Channel {
             target_node_ip,
             target_node_id,
             target_port,
+            queue_size_records,
         }
     }
 }
@@ -94,6 +123,13 @@ impl Channel {
             Channel::Remote { target_vertex_id, ..} => {
                 target_vertex_id.clone()
             }
+        }
+    }
+
+    pub fn get_queue_size_records(&self) -> u32 {
+        match &self {
+            Channel::Local { queue_size_records, .. } => *queue_size_records,
+            Channel::Remote { queue_size_records, .. } => *queue_size_records,
         }
     }
 }

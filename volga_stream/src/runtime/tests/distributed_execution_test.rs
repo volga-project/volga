@@ -1,9 +1,6 @@
-#![allow(dead_code, unused_imports, unused_variables)]
-
 use crate::{
-    api::{logical_graph::LogicalGraph, pipeline_context::PipelineContextBuilder},
-    common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::Message},
-    executor::fake_distributed_executor::FakeDistributedExecutor,
+    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::{Message, WatermarkMessage}, MAX_WATERMARK_VALUE},
     runtime::{
         functions::{key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}},
         operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
@@ -21,6 +18,7 @@ struct KeyedToRegularMapFunction;
 #[async_trait]
 impl MapFunctionTrait for KeyedToRegularMapFunction {
     fn map(&self, message: Message) -> Result<Message> {
+        let value = message.record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0);
         let upstream_vertex_id = message.upstream_vertex_id();
         let ingest_ts = message.ingest_timestamp();
         let extras = message.get_extras();
@@ -64,7 +62,12 @@ fn test_distributed_execution() -> Result<()> {
             ));
         }
         
-        // Sources emit terminal MAX watermark automatically when exhausted.
+        // Add max watermark as the last message
+        source_messages.push(Message::Watermark(WatermarkMessage::new(
+            "source".to_string(),
+            MAX_WATERMARK_VALUE,
+            None,
+        )));
 
         // Define operator chain: source -> keyby -> map -> sink
         let operators = vec![
@@ -74,13 +77,14 @@ fn test_distributed_execution() -> Result<()> {
             OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
         ];
 
-        // Create streaming context with FakeDistributedExecutor
+        // Create streaming context with local full orchestration (master + worker servers)
         let total_parallelism = num_workers_per_operator * parallelism_per_worker;
-        let context = PipelineContextBuilder::new()
-            .with_parallelism(total_parallelism) // Total parallelism across all workers
-            .with_logical_graph(LogicalGraph::from_linear_operators(operators, total_parallelism, false)) // chained = false for distributed
-            .with_executor(Box::new(FakeDistributedExecutor::new(num_workers_per_operator)))
+        let spec = PipelineSpecBuilder::new()
+            .with_parallelism(total_parallelism)
+            .with_logical_graph(LogicalGraph::from_linear_operators(operators, total_parallelism, false))
+            .with_execution_profile(ExecutionProfile::LocalOrchestrated)
             .build();
+        let context = PipelineContext::new(spec);
 
         println!("[TEST] Starting distributed execution");
         

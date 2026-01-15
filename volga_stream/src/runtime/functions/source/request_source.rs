@@ -26,26 +26,35 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use super::source_function::SourceFunctionTrait;
+use crate::api::spec::connectors::schema_ipc;
+use crate::api::SinkSpec;
 
 /// Reserved metadata field names
 pub const SOURCE_TASK_INDEX_FIELD: &str = "_source_task_index";
 pub const SOURCE_REQUEST_ID_FIELD: &str = "_source_request_id";
 
-/// Configuration for request source
-#[derive(Debug, Clone)]
-pub struct RequestSourceConfig {
+/// User-facing spec for request source+sink (serializable).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestSourceSinkSpec {
     pub bind_address: String,
     pub max_pending_requests: usize,
     pub request_timeout_ms: u64,
+    #[serde(with = "schema_ipc::b64_bytes")]
+    pub schema_ipc: Vec<u8>,
+    pub sink: Option<SinkSpec>,
+}
+
+/// Configuration for request source
+#[derive(Debug, Clone)]
+pub struct RequestSourceConfig {
+    pub spec: RequestSourceSinkSpec,
     pub schema: Option<SchemaRef>,
 }
 
 impl RequestSourceConfig {
-    pub fn new(bind_address: String, max_pending_requests: usize, request_timeout_ms: u64) -> Self {
+    pub fn new(spec: RequestSourceSinkSpec) -> Self {
         Self {
-            bind_address,
-            max_pending_requests,
-            request_timeout_ms,
+            spec,
             schema: None,
         }
     }
@@ -119,8 +128,8 @@ pub fn extract_request_source_config(graph: &ExecutionGraph) -> Option<RequestSo
 
 impl RequestSourceProcessor {
     pub fn new(config: RequestSourceConfig) -> Self {
-        let (request_tx, request_rx) = mpsc::channel(config.max_pending_requests);
-        let (response_tx, response_rx) = mpsc::channel(config.max_pending_requests);
+        let (request_tx, request_rx) = mpsc::channel(config.spec.max_pending_requests);
+        let (response_tx, response_rx) = mpsc::channel(config.spec.max_pending_requests);
         
         Self {
             config,
@@ -164,9 +173,9 @@ impl RequestSourceProcessor {
     }
     
     async fn start_server(&mut self) -> Result<()> {
-        let bind_address = self.config.bind_address.clone();
-        let max_pending = self.config.max_pending_requests;
-        let request_timeout_ms = self.config.request_timeout_ms;
+        let bind_address = self.config.spec.bind_address.clone();
+        let max_pending = self.config.spec.max_pending_requests;
+        let request_timeout_ms = self.config.spec.request_timeout_ms;
         let pending_requests = self.pending_requests.clone();
         let request_tx = self.request_tx.clone();
         
@@ -434,22 +443,24 @@ impl SourceFunctionTrait for HttpRequestSourceFunction {
 mod tests {
     use super::*;
     use crate::runtime::runtime_context::RuntimeContext;
+    use crate::common::test_utils::gen_unique_grpc_port;
     use arrow::datatypes::{DataType, Field, Schema};
     use tokio::time::{sleep, Duration};
     use futures::FutureExt;
-    use rand;
     use std::sync::Arc;
 
     
     fn create_test_config(schema: SchemaRef) -> RequestSourceConfig {
-        // Use a random high port to avoid conflicts
-        let port = 8000 + (rand::random::<u16>() % 1000);
-        
-        let mut config = RequestSourceConfig::new(
-            format!("127.0.0.1:{}", port),
-            2, // max_pending_requests
-            1000, // request_timeout_ms
-        );
+        let port = gen_unique_grpc_port();
+
+        let spec = RequestSourceSinkSpec {
+            bind_address: format!("127.0.0.1:{}", port),
+            max_pending_requests: 2,
+            request_timeout_ms: 1000,
+            schema_ipc: vec![],
+            sink: None,
+        };
+        let mut config = RequestSourceConfig::new(spec);
         config.schema = Some(schema);
         config
     }
@@ -485,7 +496,7 @@ mod tests {
         // Open the source function
         source.open(&runtime_context).await.unwrap();
         
-        let bind_address = processor.config.bind_address.clone();
+        let bind_address = processor.config.spec.bind_address.clone();
         
         // Wait a bit for server to start
         sleep(Duration::from_millis(50)).await;
@@ -621,8 +632,9 @@ mod tests {
         source.open(&runtime_context).await.unwrap();
         
         // Get the actual bound address after server starts
-        let bind_address = processor.config.bind_address.clone();
-        let max_pending = processor.config.max_pending_requests;
+        let bind_address = processor.config.spec.bind_address.clone();
+        let bind_address = processor.config.spec.bind_address.clone();
+        let max_pending = processor.config.spec.max_pending_requests;
         
         // Wait a bit for server to start
         sleep(Duration::from_millis(100)).await;
@@ -705,7 +717,7 @@ mod tests {
             Field::new("age", DataType::Int64, false),
         ]));
         let mut config = create_test_config(schema.clone());
-        config.request_timeout_ms = 100; // 100ms timeout
+        config.spec.request_timeout_ms = 100; // 100ms timeout
         
         let mut processor = RequestSourceProcessor::new(config);
         processor.start().await.unwrap();
@@ -718,7 +730,7 @@ mod tests {
         // Open the source function
         source.open(&runtime_context).await.unwrap();
         
-        let bind_address = processor.config.bind_address.clone();
+        let bind_address = processor.config.spec.bind_address.clone();
         
         // Wait a bit for server to start
         sleep(Duration::from_millis(50)).await;

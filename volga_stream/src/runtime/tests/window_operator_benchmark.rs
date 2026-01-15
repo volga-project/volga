@@ -1,10 +1,11 @@
 use crate::{
-    api::pipeline_context::{ExecutionMode, PipelineContextBuilder},
+    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    api::compile_logical_graph,
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
-        master::PipelineState,
+        functions::source::DatagenSpec,
+        observability::PipelineSnapshot,
         metrics::PipelineStateHistory,
         operators::{
             sink::sink_operator::SinkConfig,
@@ -101,7 +102,7 @@ impl BenchmarkMetrics {
         }
     }
 
-    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineState) {
+    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineSnapshot) {
         self.history.add_sample(timestamp, pipeline_state);
     }
 }
@@ -179,8 +180,8 @@ fn update_window_configs_in_graph(
             if let OperatorConfig::WindowConfig(ref mut window_config) = node.operator_config {
                 // Update window config parameters
                 window_config.execution_mode = config.execution_mode.clone();
-                window_config.parallelize = config.parallelize;
-                window_config.lateness = config.lateness;
+                window_config.spec.parallelize = config.parallelize;
+                window_config.spec.lateness = config.lateness;
                 
                 // Set tiling configs if provided
                 if let Some(ref tiling_configs) = config.tiling_configs {
@@ -229,11 +230,14 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     let datagen_config = DatagenSourceConfig::new(
         schema.clone(),
-        config.rate,
-        config.total_records,
-        config.run_for_s,
-        config.batch_size,
-        fields
+        DatagenSpec {
+            rate: config.rate,
+            limit: config.total_records,
+            run_for_s: config.run_for_s,
+            batch_size: config.batch_size,
+            fields,
+            replayable: false,
+        },
     );
 
     // Build SQL query based on config
@@ -241,35 +245,37 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     println!("Query: {}", sql);
 
-    // Create pipeline context builder
-    let mut context_builder = PipelineContextBuilder::new()
+    // Create pipeline spec builder
+    let mut spec_builder = PipelineSpecBuilder::new()
         .with_parallelism(config.parallelism)
         .with_source(
-            "datagen_source".to_string(), 
-            SourceConfig::DatagenSourceConfig(datagen_config), 
-            schema
+            "datagen_source".to_string(),
+            SourceConfig::DatagenSourceConfig(datagen_config),
+            schema,
         )
         .sql(&sql)
-        .with_executor(Box::new(LocalExecutor::new()));
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 });
 
     
     // Set execution mode 
     if config.execution_mode == WindowExecutionMode::Request {
         // request mode has no direct sink
-        context_builder = context_builder.with_execution_mode(ExecutionMode::Request);
+        spec_builder = spec_builder.with_execution_mode(ExecutionMode::Request);
     } else {
-        context_builder = context_builder
-            .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        spec_builder = spec_builder
+            .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+                "http://{}",
+                storage_server_addr
+            )))
             .with_execution_mode(ExecutionMode::Streaming);
 
     }
-    
-    let mut context = context_builder.build();
-    
-    // Get logical graph and update window configs
-    if let Some(ref mut logical_graph) = context.get_logical_graph_mut() {
-        update_window_configs_in_graph(logical_graph, &config)?;
-    }
+
+    let mut spec = spec_builder.build();
+    let mut logical_graph = compile_logical_graph(&spec);
+    update_window_configs_in_graph(&mut logical_graph, &config)?;
+    spec.logical_graph = Some(logical_graph);
+    let context = PipelineContext::new(spec);
 
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();
@@ -278,7 +284,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     let benchmark_metrics = Arc::new(Mutex::new(BenchmarkMetrics::new()));
     let benchmark_metrics_clone = benchmark_metrics.clone();
     
-    let (state_updates_sender, mut state_updates_receiver) = mpsc::channel::<PipelineState>(100);
+    let (state_updates_sender, mut state_updates_receiver) = mpsc::channel::<PipelineSnapshot>(100);
     let running = Arc::new(AtomicBool::new(true));
     let running_clone = running.clone();
     let throughput_window_seconds_clone = config.throughput_window_seconds;

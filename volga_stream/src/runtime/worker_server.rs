@@ -152,6 +152,12 @@ impl WorkerServer {
 
     /// Stop the gRPC server
     pub async fn stop(&mut self) {
+        // Ensure we shut down the worker runtimes cleanly; otherwise dropping tokio runtimes
+        // inside async contexts can panic.
+        {
+            let mut worker_guard = self.service.worker.lock().await;
+            worker_guard.close().await;
+        }
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
             let _ = handle.await;

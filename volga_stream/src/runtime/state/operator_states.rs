@@ -4,10 +4,15 @@ use dashmap::DashMap;
 use tokio::sync::Notify;
 
 use crate::runtime::VertexId;
+use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 
 pub trait OperatorState: Send + Sync + std::fmt::Debug {
     fn as_any(&self) -> &dyn Any;
     fn as_any_mut(&mut self) -> &mut dyn Any;
+
+    fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
+        None
+    }
 }
 
 #[derive(Debug)]

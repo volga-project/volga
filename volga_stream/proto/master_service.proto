@@ -6,6 +6,7 @@ service MasterService {
   rpc ReportCheckpoint(ReportCheckpointRequest) returns (ReportCheckpointResponse);
   rpc GetTaskCheckpoint(GetTaskCheckpointRequest) returns (GetTaskCheckpointResponse);
   rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
+  rpc GetLatestSnapshot(GetLatestSnapshotRequest) returns (GetLatestSnapshotResponse);
 }
 
 message StateBlob {
@@ -45,6 +46,16 @@ message GetLatestCompleteCheckpointResponse {
   string error_message = 2;
   bool has_checkpoint = 3;
   uint64 checkpoint_id = 4;
+}
+
+message GetLatestSnapshotRequest {
+}
+
+message GetLatestSnapshotResponse {
+  bool has_snapshot = 1;
+  bytes snapshot_bytes = 2;
+  uint64 ts_ms = 3;
+  uint64 seq = 4;
 }
 
 

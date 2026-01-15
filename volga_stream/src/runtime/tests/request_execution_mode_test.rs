@@ -1,16 +1,17 @@
 use crate::{
-    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
+    api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder},
+    control_plane::types::{AttemptId, ExecutionIds},
     runtime::{
         functions::{
             source::{
-                datagen_source::{DatagenSourceConfig, DatagenSourceFunction, FieldGenerator},
+                datagen_source::{DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator},
             },
         },
         operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
         },
-        stream_task::StreamTaskStatus,
+        observability::snapshot_types::StreamTaskStatus,
         worker::{Worker, WorkerConfig},
         tests::request_source_e2e_test::{create_test_config, run_continuous_requests},
     },
@@ -55,7 +56,17 @@ fn create_datagen_config(
         }),
     ]);
 
-    DatagenSourceConfig::new(schema, rate, limit, None, batch_size, fields)
+    DatagenSourceConfig::new(
+        schema,
+        DatagenSpec {
+            rate,
+            limit,
+            run_for_s: None,
+            batch_size,
+            fields,
+            replayable: false,
+        },
+    )
 }
 
 fn create_payload_generator(
@@ -171,6 +182,7 @@ async fn wait_for_task_prefix_status(
 // TODO this test fails when running with others via 'cargo test' - why?
 #[tokio::test]
 async fn test_request_execution_mode() {
+    // TODO: Passes individually but can fail when running the full suite (likely cross-test interference).
     let parallelism = 4;
     let max_pending_requests = 5000;
     let request_timeout_ms = 100000;
@@ -189,7 +201,16 @@ async fn test_request_execution_mode() {
     let value_start = 10.0;
     let value_step = 10.0;
 
-    let datagen_config = create_datagen_config(rate, num_record_to_gen, batch_size, start_ms, step_ms, num_unique_keys, value_start, value_step);
+    let datagen_config = create_datagen_config(
+        rate,
+        num_record_to_gen,
+        batch_size,
+        start_ms,
+        step_ms,
+        num_unique_keys,
+        value_start,
+        value_step,
+    );
     let schema = datagen_config.schema.clone();
 
     let sql = "SELECT 
@@ -210,22 +231,24 @@ async fn test_request_execution_mode() {
 
     // TODO set window config - tiling, lateness, etc
     
-    let context = PipelineContextBuilder::new()
+    let request_source_config = request_source_config.set_schema(schema.clone());
+
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
+        .with_execution_mode(ExecutionMode::Request)
         .with_source(
             "events".to_string(),
             SourceConfig::DatagenSourceConfig(datagen_config),
-            schema.clone()
+            schema.clone(),
         )
-        .with_request_source_sink(
+        .with_request_source_sink_inline(
             SourceConfig::HttpRequestSourceConfig(request_source_config.clone()),
-            Some(SinkConfig::RequestSinkConfig)
+            Some(SinkConfig::RequestSinkConfig),
         )
         .sql(sql)
-        .with_execution_mode(ExecutionMode::Request)
         .build();
 
-    let logical_graph = context.get_logical_graph().unwrap().clone();
+    let logical_graph = compile_logical_graph(&spec);
     let mut exec_graph = logical_graph.to_execution_graph();
     exec_graph.set_execution_mode(format!("{:?}", ExecutionMode::Request));
     exec_graph.update_channels_with_node_mapping(None);
@@ -233,6 +256,7 @@ async fn test_request_execution_mode() {
 
     let mut worker = Worker::new(WorkerConfig::new(
         "request_mode_worker".to_string(),
+        ExecutionIds::fresh(AttemptId(1)),
         exec_graph,
         vertex_ids,
         2,
@@ -242,7 +266,7 @@ async fn test_request_execution_mode() {
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;
     worker.signal_tasks_run().await;
 
-    wait_for_request_server(&request_source_config.bind_address, Duration::from_secs(5)).await;
+    wait_for_request_server(&request_source_config.spec.bind_address, Duration::from_secs(5)).await;
     wait_for_task_prefix_status(
         &worker,
         "Source(HttpRequest)_1",
@@ -258,7 +282,7 @@ async fn test_request_execution_mode() {
     let payload_generator = create_payload_generator(parallelism, num_unique_keys, start_ms, step_ms);
     let results = run_continuous_requests(
         client,
-        request_source_config.bind_address.clone(),
+        request_source_config.spec.bind_address.clone(),
         rate,
         total_requests,
         Some(max_pending_requests),

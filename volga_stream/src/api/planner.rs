@@ -29,7 +29,7 @@ use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
 
 use super::logical_graph::{LogicalNode, LogicalGraph};
-use crate::api::pipeline_context::ExecutionMode;
+use crate::api::ExecutionMode;
 use crate::runtime::functions::key_by::key_by_function::{DataFusionKeyFunction};
 use crate::runtime::functions::key_by::KeyByFunction;
 use crate::runtime::operators::operator::OperatorConfig;
@@ -127,6 +127,7 @@ pub struct PlanningContext {
 
     // TODO figure out how to set parallelism per node
     pub parallelism: usize,
+
 }
 
 impl PlanningContext {
@@ -152,6 +153,8 @@ impl PlanningContext {
         self.execution_mode = execution_mode;
         self
     }
+
+    
 }
 
 impl Planner {
@@ -408,7 +411,7 @@ impl Planner {
             None,
         );
 
-        // Window operator node using the physical exec
+        // Window operator node using the physical exec.
         let window_node = LogicalNode::new(
             OperatorConfig::WindowConfig(WindowOperatorConfig::new(Arc::new(window_exec.clone()))),
             parallelism,
@@ -953,9 +956,13 @@ mod tests {
             schema.clone()
         );
         let request_source_config = SourceConfig::HttpRequestSourceConfig(RequestSourceConfig::new(
-            "127.0.0.1:8080".to_string(),
-            100,
-            5000
+            crate::runtime::functions::source::RequestSourceSinkSpec {
+                bind_address: "127.0.0.1:8080".to_string(),
+                max_pending_requests: 100,
+                request_timeout_ms: 5000,
+                schema_ipc: vec![],
+                sink: None,
+            }
         ));
         // planner.register_source(
         //     REQUEST_SOURCE_NAME.to_string(), 

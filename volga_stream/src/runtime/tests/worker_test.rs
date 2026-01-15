@@ -1,9 +1,8 @@
 #![cfg(test)]
 
 use crate::{
-    api::pipeline_context::PipelineContextBuilder,
-    common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}},
-    executor::local_executor::LocalExecutor,
+    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
@@ -23,8 +22,12 @@ fn test_worker_execution() -> Result<()> {
         Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None, None),
     ];
 
-    // Sources now emit terminal MAX watermark automatically when the source is exhausted.
-    let test_messages = expected_messages.clone();
+    let mut test_messages = expected_messages.clone();
+    test_messages.push(Message::Watermark(WatermarkMessage::new(
+        "source".to_string(),
+        MAX_WATERMARK_VALUE,
+        None,
+    )));
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     
@@ -34,17 +37,18 @@ fn test_worker_execution() -> Result<()> {
     ]));
     
     // Create streaming context using SQL
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(1)
         .with_source(
             "test_table".to_string(),
             SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages)),
             schema
         )
-        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
+        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT value FROM test_table")
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .build();
+    let context = PipelineContext::new(spec);
 
     let vector_messages = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();

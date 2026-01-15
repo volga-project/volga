@@ -1,23 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
-use crate::runtime::worker::WorkerState;
-use crate::runtime::stream_task::StreamTaskStatus;
+use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
+use crate::runtime::observability::StreamTaskStatus;
+use crate::runtime::master_server::MasterLatestSnapshot;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PipelineState {
-    pub worker_states: HashMap<String, WorkerState>,
-}
-
-impl PipelineState {
-    pub fn new(worker_states: HashMap<String, WorkerState>) -> Self {
-        Self {
-            worker_states,
-        }
-    }
-}
+// PipelineState moved to runtime/observability/snapshot_types.rs
 
 // Include the generated protobuf client code
 pub mod worker_service {
@@ -128,7 +118,7 @@ impl WorkerClient {
         Ok(success)
     }
 
-    pub async fn get_worker_state(&mut self) -> anyhow::Result<WorkerState> {
+    pub async fn get_worker_state(&mut self) -> anyhow::Result<WorkerSnapshot> {
         let request = tonic::Request::new(GetWorkerStateRequest {});
         let response = self.client.get_worker_state(request).await?;
         
@@ -137,7 +127,7 @@ impl WorkerClient {
             return Err(anyhow::anyhow!("Worker state is empty"));
         }
         
-        let worker_state = WorkerState::from_bytes(state_bytes)?;
+        let worker_state = WorkerSnapshot::from_bytes(state_bytes)?;
         Ok(worker_state)
     }
 
@@ -156,9 +146,11 @@ impl WorkerClient {
 /// Master that orchestrates multiple worker servers
 pub struct Master {
     worker_clients: Arc<Mutex<HashMap<String, WorkerClient>>>,
-    worker_states: Arc<Mutex<HashMap<String, WorkerState>>>,
+    worker_states: Arc<Mutex<HashMap<String, WorkerSnapshot>>>,
+    worker_endpoints_by_id: Arc<Mutex<HashMap<String, String>>>,
     state_polling_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<std::sync::atomic::AtomicBool>,
+    snapshot_sink: Option<Arc<Mutex<Option<MasterLatestSnapshot>>>>,
 }
 
 impl Master {
@@ -166,9 +158,16 @@ impl Master {
         Self {
             worker_clients: Arc::new(Mutex::new(HashMap::new())),
             worker_states: Arc::new(Mutex::new(HashMap::new())),
+            worker_endpoints_by_id: Arc::new(Mutex::new(HashMap::new())),
             state_polling_handle: None,
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            snapshot_sink: None,
         }
+    }
+
+    pub fn with_snapshot_sink(mut self, sink: Arc<Mutex<Option<MasterLatestSnapshot>>>) -> Self {
+        self.snapshot_sink = Some(sink);
+        self
     }
 
     /// Connect to all workers
@@ -244,17 +243,22 @@ impl Master {
         
         let worker_clients = self.worker_clients.clone();
         let worker_states = self.worker_states.clone();
+        let worker_endpoints_by_id = self.worker_endpoints_by_id.clone();
         let running = self.running.clone();
+        let snapshot_sink = self.snapshot_sink.clone();
         
         let handle = tokio::spawn(async move {
+            let mut seq: u64 = 1;
             while running.load(std::sync::atomic::Ordering::Relaxed) {
-                let mut new_states = HashMap::new();
+                let mut new_states_by_worker_id = HashMap::new();
+                let mut new_endpoints_by_worker_id = HashMap::new();
                 
                 let mut clients_guard = worker_clients.lock().await;
                 for (worker_ip, client) in clients_guard.iter_mut() {
                     match client.get_worker_state().await {
                         Ok(state) => {
-                            new_states.insert(worker_ip.clone(), state);
+                            new_endpoints_by_worker_id.insert(state.worker_id.clone(), worker_ip.clone());
+                            new_states_by_worker_id.insert(state.worker_id.clone(), state);
                         }
                         Err(e) => {
                             println!("[MASTER] Failed to get state from worker {}: {}", worker_ip, e);
@@ -263,10 +267,33 @@ impl Master {
                 }
                 drop(clients_guard);
                 
+                let snapshot_states = new_states_by_worker_id.clone();
+
                 // Update shared state
                 {
                     let mut states_guard = worker_states.lock().await;
-                    *states_guard = new_states;
+                    *states_guard = new_states_by_worker_id;
+                }
+                {
+                    let mut endpoints_guard = worker_endpoints_by_id.lock().await;
+                    *endpoints_guard = new_endpoints_by_worker_id;
+                }
+
+                if let Some(sink) = snapshot_sink.as_ref() {
+                    let ts_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let snapshot = PipelineSnapshot::new(snapshot_states.clone());
+                    if let Ok(bytes) = bincode::serialize(&snapshot) {
+                        let mut guard = sink.lock().await;
+                        *guard = Some(MasterLatestSnapshot {
+                            ts_ms,
+                            seq,
+                            snapshot_bytes: bytes,
+                        });
+                        seq = seq.saturating_add(1);
+                    }
                 }
                 
                 sleep(Duration::from_millis(100)).await;
@@ -479,7 +506,7 @@ impl Master {
     }
 
     /// Get current worker states
-    pub async fn get_worker_states(&self) -> HashMap<String, WorkerState> {
+    pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
         let states_guard = self.worker_states.lock().await;
         states_guard.clone()
     }

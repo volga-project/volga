@@ -1,11 +1,11 @@
 use crate::{
-    api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
+    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::metrics::PipelineStateHistory,
-    executor::local_executor::LocalExecutor,
     runtime::{
+        functions::source::DatagenSpec,
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
-        master::PipelineState,
+        observability::PipelineSnapshot,
         operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
@@ -53,7 +53,17 @@ fn create_datagen_config(
         }),
     ]);
 
-    DatagenSourceConfig::new(schema, rate, None, run_for_s, batch_size, fields)
+    DatagenSourceConfig::new(
+        schema,
+        DatagenSpec {
+            rate,
+            limit: None,
+            run_for_s,
+            batch_size,
+            fields,
+            replayable: false,
+        },
+    )
 }
 
 
@@ -75,15 +85,15 @@ impl BenchmarkMetrics {
         }
     }
 
-    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineState) {
+    pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineSnapshot) {
         self.history.add_sample(timestamp, pipeline_state);
     }
 }
 
 async fn poll_pipeline_state_updates(
-    state_updates_receiver: &mut mpsc::Receiver<PipelineState>,
+    state_updates_receiver: &mut mpsc::Receiver<PipelineSnapshot>,
     benchmark_metrics: &mut BenchmarkMetrics,
-) -> Option<PipelineState> {
+) -> Option<PipelineSnapshot> {
     let pipeline_state = match state_updates_receiver.recv().await {
         Some(state) => state,
         None => return None,
@@ -159,21 +169,22 @@ pub async fn run_window_request_benchmark(
 
     let benchmark_start = Instant::now();
 
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
             "events".to_string(),
             SourceConfig::DatagenSourceConfig(query_datagen_config),
             schema.clone()
         )
-        .with_request_source_sink(
+        .with_request_source_sink_inline(
             SourceConfig::DatagenSourceConfig(request_datagen_config),
             Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         )
         .sql(sql)
-        .with_executor(Box::new(LocalExecutor::new()))
+        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
         .with_execution_mode(ExecutionMode::Request)
         .build();
+    let context = PipelineContext::new(spec);
 
     let (state_updates_sender, mut state_updates_receiver) = mpsc::channel(100);
     let running = Arc::new(AtomicBool::new(true));

@@ -14,8 +14,6 @@ pub struct InMemoryTransportBackend {
 }
 
 impl InMemoryTransportBackend {
-    const CHANNEL_QUEUE_SIZE: u32 = 8192; // num records queued in channel
-
     pub fn new() -> Self {
         Self {
             senders: HashMap::new(),
@@ -38,8 +36,7 @@ impl InMemoryTransportBackend {
 
         // Create a new channel if it doesn't exist
         if !self.senders.contains_key(&channel_id) {
-            // let (tx, rx) = mpsc::channel(Self::CHANNEL_QUEUE_SIZE);
-            let (tx, rx) = batch_bounded_channel(Self::CHANNEL_QUEUE_SIZE);
+            let (tx, rx) = batch_bounded_channel(channel.get_queue_size_records());
             self.senders.insert(channel_id.clone(), tx);
             self.receivers.insert(channel_id.clone(), rx);
         }

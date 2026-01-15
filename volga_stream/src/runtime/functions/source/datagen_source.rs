@@ -20,23 +20,36 @@ use serde::{Serialize, Deserialize};
 use crate::runtime::utils;
 use serde_with::serde_as;
 
+use std::collections::HashMap as StdHashMap;
+
+/// User-facing spec for datagen source (serializable).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DatagenSpec {
+    pub rate: Option<f32>,
+    pub limit: Option<usize>,
+    pub run_for_s: Option<f64>,
+    pub batch_size: usize,
+    pub fields: StdHashMap<String, FieldGenerator>,
+    pub replayable: bool,
+}
+
 /// Configuration for datagen source
 #[derive(Debug, Clone)]
 pub struct DatagenSourceConfig {
     pub schema: Arc<Schema>, // Arrow schema for the generated data
-    pub rate: Option<f32>, // Events per second (global rate across all tasks), None = as fast as possible
-    pub limit: Option<usize>, // Total number of records to generate (across all tasks)
-    pub run_for_s: Option<f64>, // Run for exactly this duration in seconds, limit must be None if set
-    pub batch_size: usize, // Number of records per batch
-    pub fields: HashMap<String, FieldGenerator>,
+    pub spec: DatagenSpec,
     pub projection: Option<Vec<usize>>,
     pub projected_schema: Option<SchemaRef>,
-    pub replayable: bool,
 }
 
 impl DatagenSourceConfig {
-    pub fn new(schema: Arc<Schema>, rate: Option<f32>, limit: Option<usize>, run_for_s: Option<f64>, batch_size: usize, fields: HashMap<String, FieldGenerator>) -> Self {
-        Self { schema, rate, limit, run_for_s, batch_size, fields, projection: None, projected_schema: None, replayable: false }
+    pub fn new(schema: Arc<Schema>, spec: DatagenSpec) -> Self {
+        Self {
+            schema,
+            spec,
+            projection: None,
+            projected_schema: None,
+        }
     }
 
     pub fn get_projection(&self) -> (Option<Vec<usize>>, Option<SchemaRef>) {
@@ -48,21 +61,33 @@ impl DatagenSourceConfig {
         self.projected_schema = Some(schema);
     }
 
-    pub fn set_replayable(&mut self, replayable: bool) {
-        self.replayable = replayable;
-    }
+    // replayable is part of DatagenSpec
 }
 
 /// Data generation strategies
-#[derive(Debug, Clone)]
+#[serde_as]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum FieldGenerator {
     IncrementalTimestamp { start_ms: i64, step_ms: i64 },
     ProcessingTimestamp, // Uses current SystemTime
     String { length: usize }, // Simple random string
     Key { num_unique: usize }, // Key field with unique values
-    Increment { start: ScalarValue, step: ScalarValue },
-    Uniform { min: ScalarValue, max: ScalarValue },
-    Values { values: Vec<ScalarValue> }, // Round-robin through provided values
+    Increment {
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        start: ScalarValue,
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        step: ScalarValue,
+    },
+    Uniform {
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        min: ScalarValue,
+        #[serde_as(as = "utils::ScalarValueAsBytes")]
+        max: ScalarValue,
+    },
+    Values {
+        #[serde_as(as = "Vec<utils::ScalarValueAsBytes>")]
+        values: Vec<ScalarValue>,
+    }, // Round-robin through provided values
 }
 
 #[serde_as]
@@ -131,11 +156,11 @@ impl DatagenSourceFunction {
     }
 
     fn validate_replayable_config(&self) {
-        if !self.config.replayable {
+        if !self.config.spec.replayable {
             return;
         }
 
-        for (field_name, gen) in &self.config.fields {
+        for (field_name, gen) in &self.config.spec.fields {
             let ok = matches!(
                 gen,
                 FieldGenerator::IncrementalTimestamp { .. }
@@ -154,7 +179,7 @@ impl DatagenSourceFunction {
 
     /// Calculate deterministic timing for this task
     fn calculate_timing(&self) -> Option<(Duration, SystemTime)> {
-        let rate = match self.config.rate {
+        let rate = match self.config.spec.rate {
             Some(rate) => rate,
             None => return None, // No rate limiting
         };
@@ -179,7 +204,7 @@ impl DatagenSourceFunction {
         
         // Find key field
         let key_field_index = self.schema.fields().iter().position(|field| {
-            if let Some(generator) = self.config.fields.get(field.name()) {
+            if let Some(generator) = self.config.spec.fields.get(field.name()) {
                 matches!(generator, FieldGenerator::Key { .. })
             } else {
                 false
@@ -191,7 +216,7 @@ impl DatagenSourceFunction {
         // Initialize key values
         if let Some(key_idx) = key_field_index {
             let key_field_name = self.schema.fields()[key_idx].name();
-            if let Some(FieldGenerator::Key { num_unique }) = self.config.fields.get(key_field_name) {
+            if let Some(FieldGenerator::Key { num_unique }) = self.config.spec.fields.get(key_field_name) {
                 // Distribute unique keys across all tasks
                 self.key_values = Self::gen_key_values_for_task(parallelism as usize, task_index as usize, *num_unique);
                 
@@ -248,7 +273,7 @@ impl DatagenSourceFunction {
         // Iterate over schema fields and get generators by name
         for (field_idx, field) in self.schema.fields().iter().enumerate() {
             let field_name = field.name();
-            let generator = self.config.fields.get(field_name)
+            let generator = self.config.spec.fields.get(field_name)
                 .expect(&format!("No generator found for field: {}", field_name));
             
             let column = match generator {
@@ -468,7 +493,7 @@ impl DatagenSourceFunction {
         }
         
         // Check time limit
-        if let Some(run_for_s) = self.config.run_for_s {
+        if let Some(run_for_s) = self.config.spec.run_for_s {
             if let Some(start_time) = self.start_time {
                 let elapsed = start_time.elapsed().unwrap_or_default();
                 if elapsed.as_secs_f64() >= run_for_s {
@@ -497,9 +522,9 @@ impl SourceFunctionTrait for DatagenSourceFunction {
 
         // Generate batch - adjust size if we're near the limit
         let batch_size = if let Some(limit) = self.task_records_limit {
-            std::cmp::min(self.config.batch_size, limit - self.records_generated)
+            std::cmp::min(self.config.spec.batch_size, limit - self.records_generated)
         } else {
-            self.config.batch_size
+            self.config.spec.batch_size
         };
 
         if batch_size == 0 {
@@ -527,7 +552,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
     }
 
     async fn snapshot_position(&self) -> Result<Vec<u8>> {
-        if !self.config.replayable {
+        if !self.config.spec.replayable {
             return Ok(vec![]);
         }
 
@@ -544,7 +569,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
     }
 
     async fn restore_position(&mut self, bytes: &[u8]) -> Result<()> {
-        if !self.config.replayable {
+        if !self.config.spec.replayable {
             return Ok(());
         }
         if bytes.is_empty() {
@@ -571,7 +596,7 @@ impl FunctionTrait for DatagenSourceFunction {
         self.parallelism = Some(ctx.parallelism());
         self.vertex_id = Some(ctx.vertex_id().to_string());
         // Calculate this task's share of records
-        if let Some(global_limit) = self.config.limit {
+        if let Some(global_limit) = self.config.spec.limit {
             let records_per_task = global_limit / ctx.parallelism() as usize;
             let remainder = global_limit % ctx.parallelism() as usize;
             
@@ -594,7 +619,7 @@ impl FunctionTrait for DatagenSourceFunction {
         self.init_keys();
         
         // Set start time if run_for_s is configured
-        if self.config.run_for_s.is_some() {
+        if self.config.spec.run_for_s.is_some() {
             self.start_time = Some(SystemTime::now());
         }
         
@@ -663,7 +688,15 @@ mod tests {
             }),
         ]);
 
-        DatagenSourceConfig::new(schema, Some(1000.0), Some(121), None, 10, fields)
+        let spec = DatagenSpec {
+            rate: Some(1000.0),
+            limit: Some(121),
+            run_for_s: None,
+            batch_size: 10,
+            fields,
+            replayable: false,
+        };
+        DatagenSourceConfig::new(schema, spec)
     }
 
     #[tokio::test]
@@ -800,7 +833,15 @@ mod tests {
             }),
         ]);
 
-        let config = DatagenSourceConfig::new(schema, Some(10.0), Some(40), None, 1, fields);
+        let spec = DatagenSpec {
+            rate: Some(10.0),
+            limit: Some(40),
+            run_for_s: None,
+            batch_size: 1,
+            fields,
+            replayable: false,
+        };
+        let config = DatagenSourceConfig::new(schema, spec);
 
         let parallelism = 4; // 4 tasks, so each should generate at ~10 events/sec
         // Run tasks concurrently using tokio::spawn
@@ -866,7 +907,7 @@ mod tests {
         // Verify we got the expected number of records
         assert_eq!(all_timestamps.len(), 40, "Should generate exactly 40 records");
         
-        let rate = config.rate.expect("Rate should be set for this test");
+        let rate = config.spec.rate.expect("Rate should be set for this test");
         let expected_interval_ms = 1000.0 / rate; // Global interval: 100ms for 10 events/sec
         let tolerance = expected_interval_ms * 0.5; // ±50% tolerance for timing variations
         
@@ -919,9 +960,15 @@ mod tests {
             },
         );
 
-        let mut cfg = DatagenSourceConfig::new(schema, None, Some(total_records), None, batch_size, fields);
-        cfg.set_replayable(true);
-        cfg
+        let spec = DatagenSpec {
+            rate: None,
+            limit: Some(total_records),
+            run_for_s: None,
+            batch_size,
+            fields,
+            replayable: true,
+        };
+        DatagenSourceConfig::new(schema, spec)
     }
 
     async fn collect_all_rows(source: &mut DatagenSourceFunction) -> Vec<Row> {

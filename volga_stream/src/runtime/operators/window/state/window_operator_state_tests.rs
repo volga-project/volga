@@ -175,8 +175,8 @@ async fn test_pruning_with_lateness_mixed_windows_and_mixed_aggs() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
-    cfg.lateness = Some(3000);
+    cfg.spec.parallelize = true;
+    cfg.spec.lateness = Some(3000);
     let mut h = Harness::new(cfg).await;
 
     let partition_key = key("A");
@@ -240,8 +240,8 @@ async fn test_compaction_persisted_plus_new_deltas_does_not_drop_history() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = false;
-    cfg.dump_hot_bucket_count = 0; // force persisted-only buckets
+    cfg.spec.parallelize = false;
+    cfg.spec.dump_hot_bucket_count = 0; // force persisted-only buckets
     let mut h = Harness::new(cfg).await;
 
     let key_a = key("A");

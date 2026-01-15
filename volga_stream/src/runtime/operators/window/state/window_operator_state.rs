@@ -17,6 +17,7 @@ use crate::runtime::operators::window::aggregates::BucketRange;
 use crate::runtime::operators::window::{BucketIndex, Cursor, SEQ_NO_COLUMN_NAME, TileConfig, Tiles, TimeGranularity};
 use crate::storage::index::bucket_index::BatchRef;
 use crate::runtime::state::OperatorState;
+use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::storage::InMemBatchCache;
 use crate::runtime::TaskId;
 use crate::storage::{BatchPins, StorageStatsSnapshot, WorkerStorageContext};
@@ -636,6 +637,12 @@ impl OperatorState for WindowOperatorState {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
+        Some(TaskOperatorMetrics::Window {
+            storage: self.storage_stats_snapshot(),
+        })
     }
 }
 

@@ -1,255 +1,221 @@
-use std::collections::HashMap;
+use std::collections::HashMap as StdHashMap;
 use std::sync::Arc;
-use std::fmt;
-use datafusion::prelude::SessionContext;
-use arrow::datatypes::Schema;
-use crate::runtime::master::PipelineState;
-use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::operators::sink::sink_operator::SinkConfig;
-use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
-use crate::api::planner::{Planner, PlanningContext};
-use crate::api::logical_graph::LogicalGraph;
-use crate::executor::executor::Executor;
-use tokio::sync::mpsc;
 use anyhow::Result;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio::sync::Mutex;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ExecutionMode {
-    Request,
-    Streaming,
-    Batch,
-}
+use crate::api::{compile_logical_graph, ExecutionProfile, PipelineSpec};
+use crate::cluster::cluster_provider::{ClusterProvider, LocalMachineClusterProvider};
+use crate::cluster::node_assignment::{SingleNodeStrategy, SingleWorkerStrategy};
+use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::executor::local_runtime_adapter::LocalRuntimeAdapter;
+use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
+use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
+use crate::runtime::observability::PipelineSnapshotHistory;
+use crate::runtime::worker::{Worker, WorkerConfig};
+use crate::transport::transport_backend_actor::TransportBackendType;
 
-/// Context for pipeline execution containing sources, sinks, and execution parameters
 #[derive(Clone)]
 pub struct PipelineContext {
-    /// DataFusion session context
-    df_session_context: SessionContext,
-    /// Source table configurations (table_name -> (source_config, schema))
-    sources: HashMap<String, (SourceConfig, Arc<Schema>)>,
-    /// Request source/sink configuration
-    request_source_config: Option<SourceConfig>,
-    request_sink_config: Option<SinkConfig>,
-    /// Optional sink configuration
-    sink_config: Option<SinkConfig>,
-    /// Parallelism level for each operator
-    parallelism: usize,
-    /// Current SQL query (set by sql() method)
-    sql: Option<String>,
-    /// Logical graph (set by with_logical_graph() method)
-    logical_graph: Option<LogicalGraph>,
-    /// Executor for running the job
-    executor: Arc<Option<Box<dyn Executor>>>,
-    /// Execution mode
-    execution_mode: ExecutionMode,
-    /// Optional default watermark assignment config applied to Window operators (planner-side).
-    window_watermark_assign: Option<WatermarkAssignConfig>,
+    pub spec: PipelineSpec,
+    runtime_adapter: Option<Arc<dyn RuntimeAdapter>>,
+    cluster_provider: Option<Arc<dyn ClusterProvider>>,
 }
 
-/// Builder for constructing a PipelineContext
-#[derive(Clone)]
-pub struct PipelineContextBuilder {
-    context: PipelineContext,
+pub struct PipelineContextRunHandle {
+    pub snapshots: mpsc::Receiver<PipelineSnapshot>,
+    pub history: Arc<Mutex<PipelineSnapshotHistory>>,
+    pub join: JoinHandle<Result<PipelineSnapshot>>,
 }
 
-impl fmt::Debug for PipelineContext {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PipelineContext")
-            .field("sources", &self.sources)
-            .field("sink_config", &self.sink_config)
-            .field("parallelism", &self.parallelism)
-            .field("sql", &self.sql)
-            .field("df_session_context", &"<SessionContext>")
-            .field("logical_graph", &self.logical_graph)
-            .field("executor", &"<Executor>")
-            .field("execution_mode", &self.execution_mode)
-            .finish()
-    }
-}
-
-impl fmt::Debug for PipelineContextBuilder {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PipelineContextBuilder")
-            .field("context", &self.context)
-            .finish()
-    }
-}
-
-impl PipelineContextBuilder {
-    pub fn new() -> Self {
-        Self {
-            context: PipelineContext {
-                df_session_context: SessionContext::new(),
-                sources: HashMap::new(),
-                request_source_config: None,
-                request_sink_config: None,
-                sink_config: None,
-                parallelism: 1,
-                sql: None,
-                logical_graph: None,
-                executor: Arc::new(None),
-                execution_mode: ExecutionMode::Streaming,
-                window_watermark_assign: None,
-            },
-        }
-    }
-
-    pub fn with_source(mut self, table_name: String, source_config: SourceConfig, schema: Arc<Schema>) -> Self {
-        self.context.sources.insert(table_name, (source_config, schema));
-        self
-    }
-
-    pub fn with_request_source_sink(mut self, source_config: SourceConfig, sink_config: Option<SinkConfig>) -> Self {
-        self.context.request_source_config = Some(source_config);
-        self.context.request_sink_config = sink_config;
-        self
-    }
-
-    pub fn with_sink(mut self, sink_config: SinkConfig) -> Self {
-        self.context.sink_config = Some(sink_config);
-        self
-    }
-
-    pub fn with_parallelism(mut self, parallelism: usize) -> Self {
-        self.context.parallelism = parallelism;
-        self
-    }
-
-    /// Set SQL query for execution
-    pub fn sql(mut self, sql: &str) -> Self {
-        self.context.sql = Some(sql.to_string());
-        self
-    }
-
-    /// Set logical graph directly
-    pub fn with_logical_graph(mut self, logical_graph: LogicalGraph) -> Self {
-        // Clear SQL since we're setting the graph directly
-        self.context.sql = None;
-        self.context.logical_graph = Some(logical_graph);
-        self
-    }
-
-    /// Set executor for running the job
-    pub fn with_executor(mut self, executor: Box<dyn Executor>) -> Self {
-        self.context.executor = Arc::new(Some(executor));
-        self
-    }
-
-    pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
-        if execution_mode == ExecutionMode::Batch && self.context.window_watermark_assign.is_some() {
-            panic!("Watermark assignment is only supported for Streaming/Request execution modes (Batch mode disables watermarks)");
-        }
-        self.context.execution_mode = execution_mode;
-        self
-    }
-
-    /// Configure event-time watermark generation for the pipeline.
-    ///
-    /// For now this applies to Window operators only (time is resolved from Window ORDER BY).
-    /// TODO: extend to other operators once we implement time column auto-resolve / hints for joins/unions.
-    pub fn with_window_watermark_out_of_orderness_ms(mut self, out_of_orderness_ms: u64) -> Self {
-        if self.context.execution_mode == ExecutionMode::Batch {
-            panic!("Cannot enable watermark assignment in Batch execution mode");
-        }
-        self.context.window_watermark_assign = Some(WatermarkAssignConfig::new(
-            out_of_orderness_ms,
-            Some(TimeHint::WindowOrderByColumn),
-        ));
-        self
-    }
-
-
-    /// Build the final PipelineContext
-    pub fn build(mut self) -> PipelineContext {
-        if self.context.execution_mode == ExecutionMode::Batch && self.context.window_watermark_assign.is_some() {
-            panic!("Watermark assignment is only supported for Streaming/Request execution modes (Batch mode disables watermarks)");
-        }
-        if self.context.sql.is_some() {
-            let logical_graph = self.context.build_logical_graph();
-            self.context.logical_graph = Some(logical_graph);
-        }
-        self.context
+impl PipelineContextRunHandle {
+    pub async fn wait(self) -> Result<PipelineSnapshot> {
+        self.join.await.expect("pipeline join")
     }
 }
 
 impl PipelineContext {
-    pub fn get_logical_graph(&self) -> Option<&LogicalGraph> {
-        self.logical_graph.as_ref()
+    pub fn new(spec: PipelineSpec) -> Self {
+        Self {
+            spec,
+            runtime_adapter: None,
+            cluster_provider: None,
+        }
     }
 
-    pub fn get_logical_graph_mut(&mut self) -> Option<&mut LogicalGraph> {
-        self.logical_graph.as_mut()
+    pub fn with_runtime_adapter(mut self, adapter: Arc<dyn RuntimeAdapter>) -> Self {
+        self.runtime_adapter = Some(adapter);
+        self
     }
 
-    /// Build logical graph from the current SQL query or return existing graph
-    fn build_logical_graph(&self) -> LogicalGraph {
-        if let Some(ref graph) = self.logical_graph {
-            return graph.clone();
-        }
-
-        let sql = self.sql.as_ref().expect("No SQL query or logical graph set. Call sql() or with_logical_graph() first.");
-        
-        let mut planner = Planner::new(PlanningContext::new(self.df_session_context.clone()).with_parallelism(self.parallelism).with_execution_mode(self.execution_mode));
-
-        // Register source tables
-        for (table_name, (source_config, schema)) in &self.sources {
-            planner.register_source(table_name.clone(), source_config.clone(), schema.clone());
-        }
-
-        if let Some(request_source_config) = &self.request_source_config {
-            planner.register_request_source_sink(request_source_config.clone(), self.request_sink_config.clone());
-        }
-
-        // Register sink if provided
-        if let Some(sink_config) = &self.sink_config {
-            planner.register_sink(sink_config.clone());
-        }
-
-        // Convert SQL to logical graph
-        let mut g = planner.sql_to_graph(sql).expect("Failed to create logical graph from SQL");
-
-        // Enable/disable watermarks based on execution mode. Batch mode has no watermark generation
-        // (terminal MAX_WATERMARK_VALUE is emitted by source completion logic instead).
-        g.set_watermarks_enabled(self.execution_mode != ExecutionMode::Batch);
-
-        // Apply optional watermark config at the logical graph level.
-        if let Some(cfg) = &self.window_watermark_assign {
-            g.set_window_watermark_assign(cfg.clone());
-        }
-
-        g
+    pub fn with_cluster_provider(mut self, provider: Arc<dyn ClusterProvider>) -> Self {
+        self.cluster_provider = Some(provider);
+        self
     }
 
-    /// Execute the job with optional state updates broadcasting
-    /// Returns the final execution state
-    pub async fn execute_with_state_updates(self, state_updates_sender: Option<mpsc::Sender<PipelineState>>) -> Result<PipelineState> {
-        let logical_graph = self.logical_graph.expect("Logical graph not set. Call sql() or with_logical_graph() first.");
-        
-        println!("logical_graph: {:?}", logical_graph.to_dot());
-
-        // Convert to execution graph
+    pub async fn execute_with_state_updates(
+        self,
+        state_updates_sender: Option<mpsc::Sender<PipelineSnapshot>>,
+    ) -> Result<PipelineSnapshot> {
+        let logical_graph = compile_logical_graph(&self.spec);
         let mut execution_graph = logical_graph.to_execution_graph();
-        // Propagate execution mode for runtime invariants (e.g. disallowing watermark assigners in Batch).
-        execution_graph.set_execution_mode(format!("{:?}", self.execution_mode));
+        let execution_ids = ExecutionIds::fresh(AttemptId(1));
 
-        // Get executor or panic if not set
-        let executor_option = Arc::try_unwrap(self.executor)
-            .map_err(|_| anyhow::anyhow!("PipelineContext is still being referenced elsewhere"))?;
-        let mut executor = executor_option.expect("No executor set. Call with_executor() first.");
-        
-        // Execute using the configured executor
-        executor.execute(execution_graph, state_updates_sender).await
+        match self.spec.execution_profile.clone() {
+            ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task } => {
+                execution_graph.update_channels_with_node_mapping_and_transport(
+                    None,
+                    &self.spec.worker_runtime.transport,
+                    &self.spec.transport_overrides_queue_records(),
+                );
+                let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
+                let worker_id = "single_worker".to_string();
+
+                let mut worker_config = WorkerConfig::new(
+                    worker_id.clone(),
+                    execution_ids,
+                    execution_graph,
+                    vertex_ids,
+                    num_threads_per_task,
+                    TransportBackendType::InMemory,
+                );
+                worker_config.storage_budgets = self.spec.worker_runtime.storage.budgets.clone();
+                worker_config.inmem_store_lock_pool_size = self.spec.worker_runtime.storage.inmem_store_lock_pool_size;
+                worker_config.inmem_store_bucket_granularity = self.spec.worker_runtime.storage.inmem_store_bucket_granularity;
+                worker_config.inmem_store_max_batch_size = self.spec.worker_runtime.storage.inmem_store_max_batch_size;
+                worker_config.operator_type_storage_overrides = self.spec.operator_type_storage_overrides();
+                let mut worker = Worker::new(worker_config);
+
+                if let Some(pipeline_state_sender) = state_updates_sender {
+                    let (worker_state_sender, mut worker_state_receiver) =
+                        mpsc::channel::<WorkerSnapshot>(100);
+                    let pipeline_sender = pipeline_state_sender.clone();
+                    let worker_id_clone = worker_id.clone();
+                    tokio::spawn(async move {
+                        while let Some(worker_state) = worker_state_receiver.recv().await {
+                            let mut worker_states = StdHashMap::new();
+                            worker_states.insert(worker_id_clone.clone(), worker_state);
+                            let pipeline_state = PipelineSnapshot::new(worker_states);
+                            let _ = pipeline_sender.send(pipeline_state).await;
+                        }
+                    });
+
+                    worker
+                        .execute_worker_lifecycle_for_testing_with_state_updates(
+                            worker_state_sender,
+                        )
+                        .await;
+                } else {
+                    worker.execute_worker_lifecycle_for_testing().await;
+                }
+
+                let worker_state = worker.get_state().await;
+                worker.close().await;
+
+                let mut worker_states = StdHashMap::new();
+                worker_states.insert(worker_id, worker_state);
+                Ok(PipelineSnapshot::new(worker_states))
+            }
+            ExecutionProfile::LocalOrchestrated => {
+                let adapter = Arc::new(LocalRuntimeAdapter::new());
+                let cluster_provider = Arc::new(LocalMachineClusterProvider::single_node());
+                let node_assign = Arc::new(SingleNodeStrategy);
+
+                let handle = adapter
+                    .start_attempt(StartAttemptRequest {
+                        execution_ids,
+                        execution_graph,
+                        num_workers_per_operator: 1,
+                        cluster_provider,
+                        node_assign,
+                        transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
+                        worker_runtime: self.spec.worker_runtime.clone(),
+                        operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
+                    })
+                    .await?;
+
+                let final_state = handle.wait().await?;
+                if let Some(sender) = state_updates_sender {
+                    let _ = sender.send(final_state.clone()).await;
+                }
+                Ok(final_state)
+            }
+            ExecutionProfile::Orchestrated {
+                num_workers_per_operator,
+            } => {
+                let runtime_adapter = self
+                    .runtime_adapter
+                    .expect("Orchestrated profile requires a runtime_adapter");
+                let cluster_provider = self
+                    .cluster_provider
+                    .expect("Orchestrated profile requires a cluster_provider");
+                let node_assign = Arc::new(SingleWorkerStrategy);
+
+                let handle = runtime_adapter
+                    .start_attempt(StartAttemptRequest {
+                        execution_ids,
+                        execution_graph,
+                        num_workers_per_operator,
+                        cluster_provider,
+                        node_assign,
+                        transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
+                        worker_runtime: self.spec.worker_runtime.clone(),
+                        operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
+                    })
+                    .await?;
+
+                let final_state = handle.wait().await?;
+                if let Some(sender) = state_updates_sender {
+                    let _ = sender.send(final_state.clone()).await;
+                }
+                Ok(final_state)
+            }
+        }
     }
 
-    /// Execute the job and return only the final execution state
-    pub async fn execute(self) -> Result<PipelineState> {
+    pub async fn execute(self) -> Result<PipelineSnapshot> {
         self.execute_with_state_updates(None).await
     }
-}
 
-impl Default for PipelineContextBuilder {
-    fn default() -> Self {
-        Self::new()
+    /// Execute the pipeline and stream intermediate snapshots over a channel.
+    ///
+    /// This is primarily for harness/unit/in-proc usage; orchestrated mode should use the Control Plane.
+    pub fn execute_with_snapshot_stream(self, channel_capacity: usize) -> (mpsc::Receiver<PipelineSnapshot>, JoinHandle<Result<PipelineSnapshot>>) {
+        let (tx, rx) = mpsc::channel(channel_capacity.max(1));
+        let handle = tokio::spawn(async move { self.execute_with_state_updates(Some(tx)).await });
+        (rx, handle)
+    }
+
+    /// Execute the pipeline and maintain an in-memory snapshot history (bounded by retention policy).
+    pub fn execute_with_snapshot_history(self, channel_capacity: usize) -> PipelineContextRunHandle {
+        let cap = channel_capacity.max(1);
+
+        let (inner_tx, mut inner_rx) = mpsc::channel::<PipelineSnapshot>(cap);
+        let (outer_tx, outer_rx) = mpsc::channel::<PipelineSnapshot>(cap);
+
+        let retention = self.spec.worker_runtime.history_retention_window();
+        let history = Arc::new(Mutex::new(PipelineSnapshotHistory::new(retention)));
+        let history_for_forwarder = history.clone();
+
+        let forwarder = tokio::spawn(async move {
+            while let Some(snap) = inner_rx.recv().await {
+                history_for_forwarder.lock().await.push_now(snap.clone());
+                let _ = outer_tx.send(snap).await;
+            }
+        });
+
+        let join = tokio::spawn(async move {
+            let res = self.execute_with_state_updates(Some(inner_tx)).await;
+            let _ = forwarder.await;
+            res
+        });
+
+        PipelineContextRunHandle {
+            snapshots: outer_rx,
+            history,
+            join,
+        }
     }
 }

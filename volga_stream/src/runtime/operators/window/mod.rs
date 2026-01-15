@@ -1,5 +1,7 @@
 pub mod window_operator;
 pub mod window_request_operator;
+pub mod window_tuning;
+pub mod window_storage_spec;
 
 pub mod aggregates;
 pub mod shared;

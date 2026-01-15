@@ -13,6 +13,7 @@ use master_service::{
     ReportCheckpointRequest, ReportCheckpointResponse,
     GetTaskCheckpointRequest, GetTaskCheckpointResponse, StateBlob,
     GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
+    GetLatestSnapshotRequest, GetLatestSnapshotResponse,
 };
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -62,17 +63,30 @@ pub struct MasterCheckpointRegistry {
     pub expected_tasks: HashSet<TaskKey>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MasterLatestSnapshot {
+    pub ts_ms: u64,
+    pub seq: u64,
+    pub snapshot_bytes: Vec<u8>,
+}
+
 /// Server implementation of MasterService
 #[derive(Clone)]
 pub struct MasterServiceImpl {
     registry: Arc<Mutex<MasterCheckpointRegistry>>,
+    latest_snapshot: Arc<Mutex<Option<MasterLatestSnapshot>>>,
 }
 
 impl MasterServiceImpl {
     pub fn new() -> Self {
         Self {
             registry: Arc::new(Mutex::new(MasterCheckpointRegistry::default())),
+            latest_snapshot: Arc::new(Mutex::new(None)),
         }
+    }
+
+    pub fn snapshot_sink(&self) -> Arc<Mutex<Option<MasterLatestSnapshot>>> {
+        self.latest_snapshot.clone()
     }
 }
 
@@ -156,6 +170,28 @@ impl MasterService for MasterServiceImpl {
             }))
         }
     }
+
+    async fn get_latest_snapshot(
+        &self,
+        _request: Request<GetLatestSnapshotRequest>,
+    ) -> Result<Response<GetLatestSnapshotResponse>, Status> {
+        let guard = self.latest_snapshot.lock().await;
+        if let Some(s) = guard.as_ref() {
+            Ok(Response::new(GetLatestSnapshotResponse {
+                has_snapshot: true,
+                snapshot_bytes: s.snapshot_bytes.clone(),
+                ts_ms: s.ts_ms,
+                seq: s.seq,
+            }))
+        } else {
+            Ok(Response::new(GetLatestSnapshotResponse {
+                has_snapshot: false,
+                snapshot_bytes: Vec::new(),
+                ts_ms: 0,
+                seq: 0,
+            }))
+        }
+    }
 }
 
 /// Server that hosts MasterService
@@ -172,6 +208,10 @@ impl MasterServer {
             server_handle: None,
             shutdown_sender: None,
         }
+    }
+
+    pub fn snapshot_sink(&self) -> Arc<Mutex<Option<MasterLatestSnapshot>>> {
+        self.service.snapshot_sink()
     }
 
     pub async fn set_checkpointable_tasks(&mut self, tasks: Vec<TaskKey>) {

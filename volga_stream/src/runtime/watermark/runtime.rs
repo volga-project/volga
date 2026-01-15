@@ -234,7 +234,8 @@ mod tests {
     use futures::stream;
     use futures::StreamExt;
 
-    use crate::runtime::stream_task::{CheckpointAligner, StreamTask, StreamTaskStatus};
+        use crate::runtime::observability::snapshot_types::StreamTaskStatus;
+        use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
     use crate::transport::transport_client::DataReaderControl;
     use std::sync::atomic::AtomicU8;
 
@@ -319,6 +320,7 @@ mod tests {
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
             CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
+            None,
         );
 
         let mut seen = Vec::new();
@@ -394,6 +396,7 @@ mod tests {
                 &["u0".to_string(), "u1".to_string()],
                 DataReaderControl::empty_for_test(),
             ),
+            None,
         );
 
         let mut seen = Vec::new();

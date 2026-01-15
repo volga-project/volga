@@ -9,19 +9,22 @@ use crate::runtime::master_server::{MasterServer, TaskKey};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::stream_task::StreamTaskStatus;
+use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
-use crate::api::pipeline_context::{ExecutionMode, PipelineContextBuilder};
-use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator};
+use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
+use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 // Watermark assigner placement is done by the planner (see LogicalGraph::to_execution_graph).
 
 use crate::runtime::tests::test_utils::{create_window_input_schema, wait_for_status, window_rows_from_messages};
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[tokio::test]
 async fn test_manual_checkpoint_and_restore() -> Result<()> {
+    // TODO: This test passes individually but can fail when running the full suite (likely cross-test interference).
     crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
@@ -52,29 +55,41 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     fields.insert("value".to_string(), FieldGenerator::Values { values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))] });
 
     let total_records: usize = 2_000;
-    let mut datagen_cfg = DatagenSourceConfig::new(
+    let datagen_cfg = DatagenSourceConfig::new(
         schema.clone(),
-        Some(1_000.0),
-        Some(total_records),
-        None,
-        256,
-        fields,
+        DatagenSpec {
+            rate: Some(1_000.0),
+            limit: Some(total_records),
+            run_for_s: None,
+            batch_size: 256,
+            fields,
+            replayable: true,
+        },
     );
-    datagen_cfg.set_replayable(true);
 
     let out_of_orderness_ms: u64 = 100;
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
-        // Allow concurrency-induced reordering across tasks without dropping records as "late".
-        // We size this based on records per task (1ms step) + small headroom.
-        .with_window_watermark_out_of_orderness_ms(out_of_orderness_ms)
-        .with_source("datagen_source".to_string(), SourceConfig::DatagenSourceConfig(datagen_cfg), schema.clone())
-        .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .with_execution_mode(ExecutionMode::Streaming)
+        .with_source(
+            "datagen_source".to_string(),
+            SourceConfig::DatagenSourceConfig(datagen_cfg),
+            schema.clone(),
+        )
+        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+            "http://{}",
+            storage_server_addr
+        )))
         .sql(sql)
         .build();
 
-    let logical_graph = context.get_logical_graph().unwrap().clone();
+    let mut logical_graph = compile_logical_graph(&spec);
+    // Allow concurrency-induced reordering across tasks without dropping records as "late".
+    // We size this based on records per task (1ms step) + small headroom.
+    logical_graph.set_window_watermark_assign(WatermarkAssignConfig::new(
+        out_of_orderness_ms,
+        Some(TimeHint::WindowOrderByColumn),
+    ));
 
     let mut exec_graph1 = logical_graph.to_execution_graph();
     // Apply lateness directly to window operators for this test (PipelineContext stays unaware).
@@ -83,7 +98,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     for vid in vertex_ids_snapshot {
         if let Some(v) = exec_graph1.get_vertex_mut(vid.as_ref()) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
-                cfg.lateness = Some(lateness_ms);
+                cfg.spec.lateness = Some(lateness_ms);
             }
         }
     }
@@ -113,6 +128,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut worker = Worker::new(
         WorkerConfig::new(
             "worker1".to_string(),
+            ExecutionIds::fresh(AttemptId(1)),
             exec_graph1,
             vertex_ids_1,
             2,
@@ -201,7 +217,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     for vid in vertex_ids_snapshot {
         if let Some(v) = exec_graph2.get_vertex_mut(vid.as_ref()) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
-                cfg.lateness = Some(lateness_ms);
+                cfg.spec.lateness = Some(lateness_ms);
             }
         }
     }
@@ -211,6 +227,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut worker2 = Worker::new(
         WorkerConfig::new(
             "worker2".to_string(),
+            ExecutionIds::fresh(AttemptId(2)),
             exec_graph2,
             vertex_ids_2,
             2,

@@ -9,6 +9,7 @@ pub mod master;
 pub mod master_server;
 pub mod functions;
 pub mod metrics;
+pub mod observability;
 pub mod state;
 pub mod utils;
 pub mod watermark;
