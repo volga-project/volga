@@ -22,6 +22,7 @@ use crate::runtime::functions::key_by::key_by_function::extract_datafusion_windo
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
 use crate::runtime::operators::window::window_operator::{WindowOperator, WindowOperatorConfig};
+use crate::runtime::operators::window::shared::build_window_operator_parts;
 use crate::runtime::operators::window::TimeGranularity;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorStates;
@@ -198,7 +199,9 @@ async fn test_pruning_with_lateness_mixed_windows_and_mixed_aggs() {
     )
     .await;
     let out2 = h.watermark_output(25000).await;
-    assert_eq!(out2.num_rows(), 1);
+    // With per-key lateness on ingest, 18000 is kept (cutoff=17000),
+    // so watermark=25000 (advance_to=22000) emits [18000, 20000].
+    assert_eq!(out2.num_rows(), 2);
     h.state()
         .verify_pruning_for_testing(&partition_key, 10000)
         .await;
@@ -289,11 +292,20 @@ async fn test_ingest_triggers_pressure_relief_when_in_mem_over_limit() {
     ));
     let storage = WorkerStorageContext::new(store, budgets.clone()).unwrap();
 
+    let sql = "SELECT
+        timestamp, value,
+        COUNT(value) OVER w as cnt
+      FROM test_table
+      WINDOW w AS (PARTITION BY value ORDER BY timestamp
+        RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW)";
+    let window_exec = window_exec_from_sql(sql).await;
+    let (_ts_idx, windows, _in_schema, _out_schema, _tp) =
+        build_window_operator_parts(false, &window_exec, &Vec::new(), false);
     let state = crate::runtime::operators::window::window_operator_state::WindowOperatorState::new(
         storage,
         Arc::<str>::from("t"),
         0, // timestamp column index
-        Arc::new(std::collections::BTreeMap::new()),
+        Arc::new(windows),
         Vec::new(),
         None,
         0, // dump_hot_bucket_count: treat everything as cold for eviction

@@ -7,13 +7,12 @@ use datafusion::scalar::ScalarValue;
 
 use std::collections::HashMap;
 
-use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
+use crate::runtime::operators::window::aggregates::{Aggregation, AggregationExecResult, BucketRange};
 use crate::runtime::operators::window::state::window_logic;
 use crate::storage::index::{
     BucketIndex, DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment,
     get_window_length_ms, get_window_size_rows,
 };
-use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, Tiles, TimeGranularity};
 
 use super::{CursorBounds};
@@ -145,9 +144,13 @@ impl Aggregation for PlainRangeAggregation {
         &self,
         sorted_ranges: &[SortedRangeView],
         _thread_pool: Option<&tokio_rayon::rayon::ThreadPool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+    ) -> AggregationExecResult {
         let Some(first_view) = sorted_ranges.first() else {
-            return (vec![], None);
+            return AggregationExecResult {
+                values: vec![],
+                accumulator_state: None,
+                processed_pos: None,
+            };
         };
 
         let view = if sorted_ranges.len() == 1 {
@@ -187,29 +190,38 @@ impl Aggregation for PlainRangeAggregation {
 
         let idx = SortedRangeIndex::new(&view);
         if idx.is_empty() {
-            return (vec![], None);
+            return AggregationExecResult {
+                values: vec![],
+                accumulator_state: None,
+                processed_pos: None,
+            };
         }
 
         let CursorBounds { prev, new } = self.bounds;
         let Some(mut pos) = window_logic::first_update_pos(&idx, prev) else {
-            return (vec![], None);
+            return AggregationExecResult {
+                values: vec![],
+                accumulator_state: None,
+                processed_pos: None,
+            };
         };
 
-        let end_pos = {
-            let first_row_pos = idx.get_row_pos(&idx.first_pos());
-            if new < first_row_pos {
-                return (vec![], None);
-            }
-            match idx.seek_rowpos_gt(new) {
-                Some(after_end) => idx
-                    .prev_pos(after_end)
-                    .expect("seek_rowpos_gt returned first row; guarded above"),
-                None => idx.last_pos(),
-            }
+        let Some(end_pos) = idx.seek_rowpos_le(new) else {
+            // advance_to is before the first row in this view: nothing to emit.
+            return AggregationExecResult {
+                values: vec![],
+                accumulator_state: None,
+                processed_pos: None,
+            };
         };
+        let processed_pos = idx.get_row_pos(&end_pos);
 
         if end_pos < pos {
-            return (vec![], None);
+            return AggregationExecResult {
+                values: vec![],
+                accumulator_state: None,
+                processed_pos: Some(processed_pos),
+            };
         }
 
         let window_frame = self.window_expr.get_window_frame();
@@ -242,7 +254,11 @@ impl Aggregation for PlainRangeAggregation {
             pos = idx.next_pos(pos).expect("end_pos should be reachable");
         }
 
-        (out, None)
+        AggregationExecResult {
+            values: out,
+            accumulator_state: None,
+            processed_pos: Some(processed_pos),
+        }
     }
 }
 
@@ -310,7 +326,7 @@ WINDOW w AS (
         let view: SortedRangeView =
             test_utils::make_view(gran, requests[0], vec![(1000, b1), (2000, b2)], &window_expr);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&[view], None).await;
+        let vals = agg.produce_aggregates_from_ranges(&[view], None).await.values;
         assert_f64s(&vals, &[10.0, 40.0, 60.0]);
     }
 
@@ -371,7 +387,7 @@ WINDOW w AS (
         assert_eq!(req1.len(), 1);
         let view1: SortedRangeView =
             test_utils::make_view(gran, req1[0], buckets.clone(), &window_expr);
-        let (vals1, _) = agg_no_tiles.produce_aggregates_from_ranges(&[view1], None).await;
+        let vals1 = agg_no_tiles.produce_aggregates_from_ranges(&[view1], None).await.values;
 
         let req2 = agg_tiles.get_data_requests();
         assert_eq!(req2.len(), 2, "tiles should reduce history IO into separate requests");
@@ -379,7 +395,7 @@ WINDOW w AS (
             .iter()
             .map(|r| test_utils::make_view(gran, *r, buckets.clone(), &window_expr))
             .collect();
-        let (vals2, _) = agg_tiles.produce_aggregates_from_ranges(&views2, None).await;
+        let vals2 = agg_tiles.produce_aggregates_from_ranges(&views2, None).await.values;
 
         // At ends 4000/5000/6000 with 4s range:
         // - 4000: 0..4000 => 1+2+3+4+5=15

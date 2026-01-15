@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::physical_plan::WindowExpr;
-use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::storage::index::{BucketIndex, DataRequest, SortedRangeView};
@@ -11,7 +10,7 @@ use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::Cursor;
 
 use super::VirtualPoint;
-use super::{Aggregation, AggregatorType, BucketRange};
+use super::{Aggregation, AggregationExecResult, AggregatorType, BucketRange};
 
 #[path = "retractable_range.rs"]
 mod retractable_range;
@@ -30,8 +29,8 @@ pub enum RetractableAggregation {
 impl RetractableAggregation {
     pub fn from_range(
         window_id: usize,
-        prev_processed_until: Option<Cursor>,
-        new_processed_until: Cursor,
+        prev_processed_pos: Option<Cursor>,
+        advance_to: Cursor,
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         accumulator_state: Option<AccumulatorState>,
@@ -40,8 +39,8 @@ impl RetractableAggregation {
     ) -> Self {
         Self::Range(RetractableRangeAggregation::new(
             window_id,
-            prev_processed_until,
-            new_processed_until,
+            prev_processed_pos,
+            advance_to,
             bucket_index,
             window_expr,
             accumulator_state,
@@ -54,7 +53,7 @@ impl RetractableAggregation {
         points: Vec<VirtualPoint>,
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
-        processed_until: Option<Cursor>,
+        processed_pos: Option<Cursor>,
         accumulator_state: Option<AccumulatorState>,
         exclude_current_row: bool,
     ) -> Self {
@@ -62,7 +61,7 @@ impl RetractableAggregation {
             points,
             bucket_index,
             window_expr,
-            processed_until,
+            processed_pos,
             accumulator_state,
             exclude_current_row,
         ))
@@ -93,16 +92,10 @@ impl Aggregation for RetractableAggregation {
         &self,
         sorted_ranges: &[SortedRangeView],
         thread_pool: Option<&ThreadPool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+    ) -> AggregationExecResult {
         match self {
-            RetractableAggregation::Range(r) => {
-                r.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
-                    .await
-            }
-            RetractableAggregation::Points(p) => {
-                p.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
-                    .await
-            }
+            RetractableAggregation::Range(r) => r.produce_aggregates_from_ranges(sorted_ranges, thread_pool).await,
+            RetractableAggregation::Points(p) => p.produce_aggregates_from_ranges(sorted_ranges, thread_pool).await,
         }
     }
 }

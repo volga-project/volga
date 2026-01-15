@@ -516,6 +516,50 @@ async fn test_watermark_before_any_data_is_noop_and_does_not_panic() {
 }
 
 #[tokio::test]
+async fn test_late_within_lateness_is_kept_on_ingest() {
+    // Late row arrives after watermark but within lateness; should be accepted and emitted later.
+    let sql = "SELECT
+        timestamp, value, partition_key,
+        SUM(value) OVER w as sum_val
+      FROM test_table
+      WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp
+        RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW)";
+
+    let window_exec = window_exec_from_sql(sql).await;
+    let mut cfg = WindowOperatorConfig::new(window_exec);
+    cfg.parallelize = false;
+    cfg.lateness = Some(5000);
+    let mut h = Harness::new(cfg).await;
+
+    // Advance watermark with no data; output batch is empty.
+    let out0 = h
+        .watermark_and_maybe_output(20000)
+        .await
+        .expect("regular output");
+    assert_eq!(out0.num_rows(), 0);
+    assert_eq!(h.drain_passthrough_watermark().await, 20000);
+
+    // Late row at 17000 (> 20000 - 5000) should be accepted on ingest.
+    h.ingest(batch(vec![17000], vec![1.0], vec!["A"]), "A").await;
+
+    // Next watermark advances past 17000; row should be emitted.
+    let out1 = h
+        .watermark_and_maybe_output(25000)
+        .await
+        .expect("regular output");
+    assert_eq!(out1.num_rows(), 1);
+    let ts = out1
+        .column(0)
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .expect("ts col");
+    assert_eq!(ts.value(0), 17000);
+    assert_eq!(h.drain_passthrough_watermark().await, 25000);
+
+    h.close().await;
+}
+
+#[tokio::test]
 async fn test_terminal_max_watermark_flushes_all_buffered_rows_even_with_lateness() {
     // Covers: terminal watermark flush semantics (lateness should not block MAX).
     let sql = "SELECT
@@ -755,7 +799,7 @@ async fn test_multi_window_mixed_aggs_correctness_smoke() {
     cfg.lateness = Some(3000);
     let mut h = Harness::new(cfg).await;
 
-    // Step 1: wm=20000 => process_until=17000 => emits [10000,15000]
+    // Step 1: wm=20000 => advance_to=17000 => emits [10000,15000]
     h.ingest(
         batch(vec![10000, 15000, 20000], vec![100.0, 150.0, 200.0], vec!["A", "A", "A"]),
         "A",
@@ -774,7 +818,7 @@ async fn test_multi_window_mixed_aggs_correctness_smoke() {
     assert_eq!(col_f64(&out1, 7).value(1), 150.0);
     assert_eq!(h.drain_passthrough_watermark().await, 20000);
 
-    // Step 2: wm=25000 => process_until=22000 => emits [20000]
+    // Step 2: wm=25000 => advance_to=22000 => emits [18000, 20000]
     h.ingest(
         batch(vec![16000, 18000, 25000], vec![160.0, 180.0, 250.0], vec!["A", "A", "A"]),
         "A",
@@ -784,12 +828,19 @@ async fn test_multi_window_mixed_aggs_correctness_smoke() {
         .watermark_and_maybe_output(25000)
         .await
         .expect("regular output");
-    assert_eq!(out2.num_rows(), 1);
-    assert_eq!(col_f64(&out2, 3).value(0), 200.0);
-    assert_eq!(col_f64(&out2, 4).value(0), 175.0);
-    assert_eq!(col_f64(&out2, 5).value(0), 150.0);
-    assert_eq!(col_i64(&out2, 6).value(0), 3);
-    assert_eq!(col_f64(&out2, 7).value(0), 200.0);
+    assert_eq!(out2.num_rows(), 2);
+    // Row 0 (ts=18000)
+    assert_eq!(col_f64(&out2, 3).value(0), 180.0); // sum_2s
+    assert!((col_f64(&out2, 4).value(0) - 165.0).abs() < 1e-9); // avg_5s
+    assert_eq!(col_f64(&out2, 5).value(0), 150.0); // min_5s
+    assert_eq!(col_i64(&out2, 6).value(0), 3); // count_3rows
+    assert_eq!(col_f64(&out2, 7).value(0), 180.0); // max_3rows
+    // Row 1 (ts=20000)
+    assert_eq!(col_f64(&out2, 3).value(1), 380.0); // sum_2s
+    assert!((col_f64(&out2, 4).value(1) - 176.66666666666666).abs() < 1e-9); // avg_5s
+    assert_eq!(col_f64(&out2, 5).value(1), 150.0); // min_5s
+    assert_eq!(col_i64(&out2, 6).value(1), 3); // count_3rows
+    assert_eq!(col_f64(&out2, 7).value(1), 200.0); // max_3rows
     assert_eq!(h.drain_passthrough_watermark().await, 25000);
 
     h.close().await;

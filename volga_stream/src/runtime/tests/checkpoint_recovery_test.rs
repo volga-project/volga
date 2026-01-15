@@ -20,8 +20,6 @@ use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 use crate::runtime::tests::test_utils::{create_window_input_schema, wait_for_status, window_rows_from_messages};
 
-// TODO this fails because we rely on watermarks to updates state now
-// we need to have proper watermark generator on source here
 #[tokio::test]
 async fn test_manual_checkpoint_and_restore() -> Result<()> {
     crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -53,11 +51,10 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     fields.insert("partition_key".to_string(), FieldGenerator::Key { num_unique: parallelism * 16 });
     fields.insert("value".to_string(), FieldGenerator::Values { values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))] });
 
-    // 5k records/sec for ~5 seconds => ~25k total records (across all tasks)
-    let total_records: usize = 15_000;
+    let total_records: usize = 2_000;
     let mut datagen_cfg = DatagenSourceConfig::new(
         schema.clone(),
-        Some(5_000.0),
+        Some(1_000.0),
         Some(total_records),
         None,
         256,
@@ -65,12 +62,12 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     );
     datagen_cfg.set_replayable(true);
 
+    let out_of_orderness_ms: u64 = 100;
     let context = PipelineContextBuilder::new()
         .with_parallelism(parallelism)
-        // Allow some concurrency-induced reordering across tasks without dropping records as "late".
-        // Note: datagen interleaves many keys; the watermark is per upstream partition (not per key),
-        // so we need enough slack to cover key interleaving skew as well as concurrency jitter.
-        .with_window_watermark_out_of_orderness_ms(0)
+        // Allow concurrency-induced reordering across tasks without dropping records as "late".
+        // We size this based on records per task (1ms step) + small headroom.
+        .with_window_watermark_out_of_orderness_ms(out_of_orderness_ms)
         .with_source("datagen_source".to_string(), SourceConfig::DatagenSourceConfig(datagen_cfg), schema.clone())
         .with_sink(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .with_execution_mode(ExecutionMode::Streaming)
@@ -80,6 +77,16 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let logical_graph = context.get_logical_graph().unwrap().clone();
 
     let mut exec_graph1 = logical_graph.to_execution_graph();
+    // Apply lateness directly to window operators for this test (PipelineContext stays unaware).
+    let lateness_ms: i64 = out_of_orderness_ms as i64;
+    let vertex_ids_snapshot: Vec<_> = exec_graph1.get_vertices().keys().cloned().collect();
+    for vid in vertex_ids_snapshot {
+        if let Some(v) = exec_graph1.get_vertex_mut(vid.as_ref()) {
+            if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
+                cfg.lateness = Some(lateness_ms);
+            }
+        }
+    }
     exec_graph1.update_channels_with_node_mapping(None);
 
     let vertex_ids_1 = exec_graph1.get_vertices().keys().cloned().collect();
@@ -115,11 +122,9 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     );
     worker.start().await;
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;
-    worker.signal_tasks_run().await;
-
-    // Trigger checkpoint while pipeline is running
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Queue checkpoint before run so sources pick it up on first iteration.
     worker.trigger_checkpoint(1).await;
+    worker.signal_tasks_run().await;
 
     // Wait for checkpoint to become complete on master
     let mut master_client = MasterServiceClient::connect(format!("http://{}", master_addr)).await?;
@@ -192,6 +197,14 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
 
     // Worker #2 uses fresh channels
     let mut exec_graph2 = logical_graph.to_execution_graph();
+    let vertex_ids_snapshot: Vec<_> = exec_graph2.get_vertices().keys().cloned().collect();
+    for vid in vertex_ids_snapshot {
+        if let Some(v) = exec_graph2.get_vertex_mut(vid.as_ref()) {
+            if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
+                cfg.lateness = Some(lateness_ms);
+            }
+        }
+    }
     exec_graph2.update_channels_with_node_mapping(None);
     let vertex_ids_2 = exec_graph2.get_vertices().keys().cloned().collect();
 

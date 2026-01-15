@@ -234,7 +234,7 @@ async fn plain_range_rows_and_range_multi_bucket() {
         );
         let requests = agg.get_data_requests();
         let views = build_views_for_requests(gran, &requests, &buckets, &window_expr);
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
+        let vals = agg.produce_aggregates_from_ranges(&views, None).await.values;
         assert_f64s(&vals, &expected);
     }
 }
@@ -275,7 +275,7 @@ async fn plain_points_overlaps_merge_range_and_rows() {
         let expected_points: Vec<(Row, bool)> = points.iter().copied().map(|p| (p, include_virtual)).collect();
         let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
+        let vals = agg.produce_aggregates_from_ranges(&views, None).await.values;
         assert_f64s(&vals, &expected);
     }
 }
@@ -314,7 +314,7 @@ async fn plain_points_disjoint_ranges_produce_multiple_requests() {
     let expected_points: Vec<(Row, bool)> = points.iter().copied().map(|p| (p, include_virtual)).collect();
     let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-    let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
+    let vals = agg.produce_aggregates_from_ranges(&views, None).await.values;
     assert_f64s(&vals, &expected);
 }
 
@@ -340,7 +340,7 @@ async fn plain_points_empty_storage_returns_virtual_only() {
         let expected_points = vec![(points[0], true)];
         let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
+        let vals = agg.produce_aggregates_from_ranges(&views, None).await.values;
         assert_f64s(&vals, &expected);
     }
 }
@@ -373,7 +373,9 @@ async fn retractable_range_matches_bruteforce_for_updates() {
         );
         let reqs1 = agg1.get_data_requests();
         let views1 = build_views_for_requests(gran, &reqs1, &buckets1, &window_expr);
-        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&views1, None).await;
+        let res1 = agg1.produce_aggregates_from_ranges(&views1, None).await;
+        let vals1 = res1.values;
+        let state1 = res1.accumulator_state;
 
         let entry_rows1: Vec<Row> = step1
             .iter()
@@ -414,7 +416,7 @@ async fn retractable_range_matches_bruteforce_for_updates() {
         );
         let reqs2 = agg2.get_data_requests();
         let views2 = build_views_for_requests(gran, &reqs2, &buckets2, &window_expr);
-        let (vals2, _state2) = agg2.produce_aggregates_from_ranges(&views2, None).await;
+        let vals2 = agg2.produce_aggregates_from_ranges(&views2, None).await.values;
 
         let entry_rows2: Vec<Row> = all2
             .iter()
@@ -438,8 +440,8 @@ async fn retractable_points_matches_bruteforce_rows_and_range() {
     let gran = TimeGranularity::Seconds(1);
     let (bucket_index, buckets) = bucketize(gran, &stored);
 
-    // Base is "as of" processed_until.
-    let processed_until = Cursor::new(2000, 2);
+    // Base is "as of" processed_pos.
+    let processed_pos = Cursor::new(2000, 2);
     let base_batch = test_utils::batch(&[
         (1000, 10.0, "A", 0),
         (1500, 30.0, "A", 1),
@@ -461,12 +463,12 @@ async fn retractable_points_matches_bruteforce_rows_and_range() {
             Row { ts: 3200, seq: 11, value: 5.0 },
         ];
 
-        // Retractable points require non-late points (>= processed_until.ts).
+        // Retractable points require non-late points (>= processed_pos.ts).
         let agg = RetractableAggregation::for_points(
             points_with_args(&window_expr, &points),
             &bucket_index,
             window_expr.clone(),
-            Some(processed_until),
+            Some(processed_pos),
             Some(base_state.clone()),
             false,
         );
@@ -479,7 +481,7 @@ async fn retractable_points_matches_bruteforce_rows_and_range() {
         let expected_points: Vec<(Row, bool)> = points.iter().copied().map(|p| (p, true)).collect();
         let expected = expected_sum_for_points(&stored, win, &expected_points);
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
+        let vals = agg.produce_aggregates_from_ranges(&views, None).await.values;
         assert_f64s(&vals, &expected);
     }
 }

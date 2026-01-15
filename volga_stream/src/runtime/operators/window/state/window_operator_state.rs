@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
 use crate::common::Key;
-use crate::runtime::operators::window::window_operator::WindowConfig;
+use crate::runtime::operators::window::shared::WindowConfig;
 use crate::runtime::operators::window::aggregates::BucketRange;
 use crate::runtime::operators::window::{BucketIndex, Cursor, SEQ_NO_COLUMN_NAME, TileConfig, Tiles, TimeGranularity};
 use crate::storage::index::bucket_index::BatchRef;
@@ -47,7 +47,7 @@ pub struct WindowState {
     pub tiles: Option<Tiles>,
     #[serde_as(as = "Option<Vec<utils::ScalarValueAsBytes>>")]
     pub accumulator_state: Option<AccumulatorState>,
-    pub processed_until: Option<Cursor>,
+    pub processed_pos: Option<Cursor>,
 }
 
 #[serde_as]
@@ -405,15 +405,25 @@ impl WindowOperatorState {
             .next_seq_no
             .saturating_add(record_batch_with_seq.num_rows() as u64);
 
-        // Drop rows according to watermark-based policy:
-        // - If watermark is known, drop anything with ts <= watermark (already finalized).
-        //   (We currently don't support late-event recomputation.)
-        // - Otherwise: keep all rows (can't classify lateness yet).
-        let (record_batch, dropped_rows) = if let Some(wm) = watermark_ts {
-            drop_too_late_entries(&record_batch_with_seq, self.ts_column_index, 0, wm)
-        } else {
-            (record_batch_with_seq.clone(), 0)
-        };
+        // Drop rows at/before the per-key processed cutoff.
+        let ref_window_id = *self
+            .window_ids
+            .first()
+            .expect("window_ids must be non-empty");
+        let processed_pos_ts = windows_state
+            .window_states
+            .get(&ref_window_id)
+            .and_then(|s| s.processed_pos)
+            .map(|p| p.ts)
+            .unwrap_or(i64::MIN);
+        let lateness_ms = self.lateness.unwrap_or(0).max(0);
+        let (record_batch, dropped_rows) = drop_too_late_entries(
+            &record_batch_with_seq,
+            self.ts_column_index,
+            processed_pos_ts,
+            watermark_ts,
+            lateness_ms,
+        );
 
         if record_batch.num_rows() == 0 {
             return dropped_rows;
@@ -500,12 +510,12 @@ impl WindowOperatorState {
             let window_frame = window_config.window_expr.get_window_frame();
             let window_state = windows_state.window_states.get(&window_id).expect("Window state should exist");
             
-            let window_end_ts = window_state.processed_until.map(|p| p.ts).unwrap_or(i64::MIN);
+            let window_end_ts = window_state.processed_pos.map(|p| p.ts).unwrap_or(i64::MIN);
             let window_cutoff = match window_frame.units {
                 WindowFrameUnits::Rows => {
                     // ROWS windows are count-based (last N rows), so pruning must also be count-based.
                     // We keep enough buckets to cover the last `window_size` rows ending at roughly
-                    // `processed_until.ts - lateness`.
+                    // `processed_pos.ts - lateness`.
                     let window_size = get_window_size_rows(window_frame);
                     if window_size == 0 || window_end_ts == i64::MIN {
                         0
@@ -529,7 +539,7 @@ impl WindowOperatorState {
                     }
                 }
                 _ => {
-                    // RANGE windows: cutoff = processed_until.ts - window_length - lateness
+                    // RANGE windows: cutoff = processed_pos.ts - window_length - lateness
                     let window_length = get_window_length_ms(window_frame);
                     if window_end_ts == i64::MIN {
                         0
@@ -570,15 +580,15 @@ impl WindowOperatorState {
     pub async fn update_window_positions_and_accumulators(
         &self,
         key: &Key,
-        new_processed_until: &HashMap<WindowId, Cursor>,
+        processed_pos_by_window: &HashMap<WindowId, Cursor>,
         accumulator_states: &HashMap<WindowId, Option<AccumulatorState>>,
     ) {
         let arc_rwlock = self.window_states.get(key).expect("Windows state should exist").value().clone();
         let mut windows_state = arc_rwlock.write().await;
         
-        for (window_id, new_pos) in new_processed_until {
+        for (window_id, new_pos) in processed_pos_by_window {
             let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
-            window_state.processed_until = Some(*new_pos);
+            window_state.processed_pos = Some(*new_pos);
             
             if let Some(accumulator_state) = accumulator_states.get(window_id) {
                 window_state.accumulator_state = accumulator_state.clone();
@@ -635,7 +645,7 @@ pub fn create_empty_windows_state(window_ids: &[WindowId], tiling_configs: &[Opt
             (window_id, WindowState {
                 tiles: tiling_configs.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone()))),
                 accumulator_state: None,
-                processed_until: None,
+                processed_pos: None,
             })
         }).collect(),
         bucket_index: BucketIndex::new(bucket_granularity),
@@ -702,25 +712,33 @@ fn get_batch_rowpos_range(
     (min_pos, max_pos)
 }
 
-/// Drop entries that are too late based on a watermark cutoff.
+/// Drop entries at or before the per-key processed cutoff.
 ///
-/// Drops rows where `ts <= (watermark_ts - lateness_ms)`.
+/// cutoff_ts = max(processed_pos_ts, watermark_ts - lateness_ms).
+/// Drops rows where `ts <= cutoff_ts`.
 pub fn drop_too_late_entries(
     record_batch: &RecordBatch,
     ts_column_index: usize,
+    processed_pos_ts: Timestamp,
+    watermark_ts: Option<Timestamp>,
     lateness_ms: i64,
-    watermark_ts: Timestamp,
 ) -> (RecordBatch, usize) {
     use arrow::compute::filter_record_batch;
     use arrow::compute::kernels::cmp::gt;
     use arrow::array::{TimestampMillisecondArray, Scalar};
     
     let ts_column = record_batch.column(ts_column_index);
-    
-    // Calculate cutoff timestamp: watermark_ts - lateness_ms
-    let cutoff_timestamp = watermark_ts - lateness_ms;
-    
-    let cutoff_array = TimestampMillisecondArray::from_value(cutoff_timestamp, 1);
+
+    let cutoff_ts = match watermark_ts {
+        Some(wm) => wm.saturating_sub(lateness_ms).max(processed_pos_ts),
+        None => processed_pos_ts,
+    };
+
+    if watermark_ts.is_none() && processed_pos_ts == i64::MIN {
+        return (record_batch.clone(), 0);
+    }
+
+    let cutoff_array = TimestampMillisecondArray::from_value(cutoff_ts, 1);
     let cutoff_scalar = Scalar::new(&cutoff_array);
     
     let keep_mask = gt(ts_column, &cutoff_scalar)

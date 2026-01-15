@@ -84,11 +84,11 @@ pub fn tiled_split(
 }
 
 /// Find the first update position for retractable aggregations.
-pub fn first_update_pos(idx: &SortedRangeIndex, prev_processed_until: Option<Cursor>) -> Option<RowPtr> {
+pub fn first_update_pos(idx: &SortedRangeIndex, prev_processed_pos: Option<Cursor>) -> Option<RowPtr> {
     if idx.is_empty() {
         return None;
     }
-    match prev_processed_until {
+    match prev_processed_pos {
         None => Some(idx.first_pos()),
         Some(p) => {
             let first = idx.get_row_pos(&idx.first_pos());
@@ -104,14 +104,14 @@ pub fn first_update_pos(idx: &SortedRangeIndex, prev_processed_until: Option<Cur
 /// RANGE retract start position logic extracted from `retractable.rs`.
 pub fn initial_retract_pos_range(
     retracts: &SortedRangeIndex,
-    prev_processed_until: Cursor,
+    prev_processed_pos: Cursor,
     window_length_ms: i64,
 ) -> RowPtr {
-    // For RANGE, the accumulator state after a step is anchored at the *timestamp* of `prev_processed_until`.
-    // Importantly, the retracts view might not include rows at/after `prev_processed_until` (e.g. when it only
-    // covers the "retract bucket range"). In that case, clamping `prev_processed_until` to the last row in the
+    // For RANGE, the accumulator state after a step is anchored at the *timestamp* of `prev_processed_pos`.
+    // Importantly, the retracts view might not include rows at/after `prev_processed_pos` (e.g. when it only
+    // covers the "retract bucket range"). In that case, clamping `prev_processed_pos` to the last row in the
     // retracts view would move the retract pointer too far back and cause **double retractions** across steps.
-    let prev_end_ts = prev_processed_until.ts;
+    let prev_end_ts = prev_processed_pos.ts;
     let prev_start_ts = prev_end_ts.saturating_sub(window_length_ms);
     retracts
         .seek_ts_ge(prev_start_ts)

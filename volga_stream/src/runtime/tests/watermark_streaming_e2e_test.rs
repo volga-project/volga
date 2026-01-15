@@ -28,13 +28,14 @@ fn parse_task_index_from_key(key: &str) -> Option<i32> {
     Some(task)
 }
 
-async fn run_watermark_window_pipeline(
+pub(crate) async fn run_watermark_window_pipeline(
     parallelism: usize,
     num_unique_keys: usize,
     total_records: usize,
     out_of_orderness_ms: u64,
     lateness_ms: i64,
     step_ms: i64,
+    rate: Option<f32>,
 ) -> Result<Vec<WindowOutputRow>> {
     crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(
         true,
@@ -55,7 +56,6 @@ async fn run_watermark_window_pipeline(
                RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW)";
 
     let start_ms: i64 = 1000;
-    // let step_ms: i64 = 1;
 
     let mut fields = HashMap::new();
     fields.insert(
@@ -80,7 +80,7 @@ async fn run_watermark_window_pipeline(
 
     let mut datagen_cfg = DatagenSourceConfig::new(
         schema.clone(),
-        None,
+        rate,
         Some(total_records),
         None,
         256,
@@ -160,6 +160,7 @@ async fn run_watermark_window_pipeline(
     Ok(rows)
 }
 
+
 #[tokio::test]
 async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Result<()> {
     let parallelism: usize = 1;
@@ -176,6 +177,7 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
         0,    // no disorder
         250,  // lateness delay (ms) - still expect exact final results after terminal watermark
         step_ms,
+        None,
     )
     .await?;
 
@@ -270,79 +272,7 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
     Ok(())
 }
 
-#[tokio::test]
-async fn test_watermark_streaming_window_e2e_parallel_disorder_bounded_loss() -> Result<()> {
-    let parallelism: usize = 4;
-    let total_records: usize = 12_000;
 
-    // The goal here is not to demand a global ordering guarantee; it’s to ensure:
-    // - no duplicates
-    // - outputs are internally consistent
-    // - loss (late drops) is bounded and visible via diagnostics
-    // KeyBy can reorder across upstream partitions; with our deterministic datagen (step=1ms),
-    // the worst-case skew is on the order of "records per source task".
-    // let records_per_task = total_records / parallelism;
-    // let out_of_orderness_ms: u64 = (records_per_task as u64) + 200; // small headroom
-    // let lateness_ms: i64 = 1_000;
 
-    let out_of_orderness_ms = 100;
-    let lateness_ms = 100;
-    let step_ms = 1;
-
-    let rows = run_watermark_window_pipeline(
-        parallelism,
-        parallelism, // keys per task -> stable distribution but still parallel
-        total_records,
-        out_of_orderness_ms,
-        lateness_ms,
-        step_ms,
-    )
-    .await?;
-
-    // 1) No duplicates by (timestamp, key)
-    let mut counts: BTreeMap<(i64, String), usize> = BTreeMap::new();
-    for r in &rows {
-        let k = (r.timestamp_ms, r.partition_key.clone());
-        *counts.entry(k).or_insert(0) += 1;
-    }
-    let dup = counts.iter().find(|(_, c)| **c != 1);
-    assert!(
-        dup.is_none(),
-        "expected no duplicates; found {:?}",
-        dup
-    );
-
-    // 2) Internal consistency
-    for r in &rows {
-        assert!(r.cnt >= 1, "cnt must be >= 1: {:?}", r);
-        let exp_avg = r.sum / (r.cnt as f64);
-        assert!(
-            (r.avg - exp_avg).abs() < 1e-9,
-            "avg mismatch row={:?}",
-            r
-        );
-    }
-
-    // 3) Diagnostics + bounded loss
-    let missed = total_records.saturating_sub(rows.len());
-    println!(
-        "watermark_parallel: produced={} expected={} missed={} (ooo_ms={} lateness_ms={})",
-        rows.len(),
-        total_records,
-        missed,
-        out_of_orderness_ms,
-        lateness_ms
-    );
-    let allowed_missed = total_records / 20; // 5%
-    assert!(
-        missed <= allowed_missed,
-        "missed too many rows: missed={} allowed={} (produced={} expected={})",
-        missed,
-        allowed_missed,
-        rows.len(),
-        total_records
-    );
-
-    Ok(())
-}
+// parallel bounded-loss scenario moved to `watermark_streaming_benchmark_test.rs`
 

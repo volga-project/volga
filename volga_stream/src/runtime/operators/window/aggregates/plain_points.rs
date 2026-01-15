@@ -6,8 +6,8 @@ use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
+use crate::runtime::operators::window::aggregates::AggregationExecResult;
 use crate::storage::index::{BucketIndex, get_window_length_ms, get_window_size_rows};
-use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{RowPtr, Tiles, WindowAggregator, create_window_aggregator};
 use crate::storage::batch_store::Timestamp;
 
@@ -290,7 +290,7 @@ impl Aggregation for PlainPointsAggregation {
         &self,
         sorted_ranges: &[SortedRangeView],
         _thread_pool: Option<&ThreadPool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+    ) -> AggregationExecResult {
         let include_virtual = !self.exclude_current_row;
 
         let window_frame = self.window_expr.get_window_frame();
@@ -374,7 +374,11 @@ impl Aggregation for PlainPointsAggregation {
             out.push(accumulator.evaluate().expect("evaluate failed"));
         }
 
-        (out, None)
+        AggregationExecResult {
+            values: out,
+            accumulator_state: None,
+            processed_pos: None,
+        }
     }
 }
 
@@ -467,7 +471,7 @@ WINDOW w AS (
             .map(|r| test_utils::make_view(gran, *r, vec![(1000, stored.clone())], &window_expr))
             .collect();
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
+        let vals = agg.produce_aggregates_from_ranges(&views, None).await.values;
         assert_f64s(&vals, &[40.0, 30.0]);
     }
 
@@ -511,7 +515,7 @@ WINDOW w AS (
             .map(|r| test_utils::make_view(gran, *r, vec![(1000, stored.clone())], &window_expr))
             .collect();
 
-        let (vals, _) = agg.produce_aggregates_from_ranges(&views, None).await;
+        let vals = agg.produce_aggregates_from_ranges(&views, None).await.values;
         assert_f64s(&vals, &[60.0]);
     }
 
@@ -587,9 +591,10 @@ WINDOW w AS (
             .iter()
             .map(|r| test_utils::make_view(gran, *r, buckets.clone(), &window_expr))
             .collect();
-        let (vals1, _) = agg_no_tiles
+        let vals1 = agg_no_tiles
             .produce_aggregates_from_ranges(&views1, None)
-            .await;
+            .await
+            .values;
 
         let reqs2 = agg_tiles.get_data_requests();
         // With tiles, we only load raw gaps at the window boundaries.
@@ -598,9 +603,10 @@ WINDOW w AS (
             .iter()
             .map(|r| test_utils::make_view(gran, *r, buckets.clone(), &window_expr))
             .collect();
-        let (vals2, _) = agg_tiles
+        let vals2 = agg_tiles
             .produce_aggregates_from_ranges(&views2, None)
-            .await;
+            .await
+            .values;
 
         // Stored rows in [2500..6500] are ts=3000,4000,5000,6000 => 4+5+6+7=22; plus virtual 10 => 32.
         assert_f64s(&vals1, &[32.0]);
@@ -665,7 +671,7 @@ WINDOW w AS (
             .iter()
             .map(|r| test_utils::make_view(gran, *r, buckets.clone(), &window_expr))
             .collect();
-        let (vals, _) = agg_no_tiles.produce_aggregates_from_ranges(&views, None).await;
+        let vals = agg_no_tiles.produce_aggregates_from_ranges(&views, None).await.values;
 
         // Stored rows in [2500..6500] are ts=3000,6000 => 4+7=11; plus virtual 10 => 21.
         assert_f64s(&vals, &[21.0]);
