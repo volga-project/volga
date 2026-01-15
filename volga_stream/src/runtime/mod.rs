@@ -11,6 +11,7 @@ pub mod functions;
 pub mod metrics;
 pub mod state;
 pub mod utils;
+pub mod watermark;
 
 use std::sync::Arc;
 

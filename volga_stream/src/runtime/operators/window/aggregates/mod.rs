@@ -13,6 +13,7 @@ use tokio_rayon::rayon::ThreadPool;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::storage::batch_store::Timestamp;
 use crate::storage::index::{DataRequest, SortedRangeView};
+use crate::runtime::operators::window::Cursor;
 
 pub mod arrow_utils;
 pub mod evaluator;
@@ -41,6 +42,14 @@ pub struct VirtualPoint {
     pub args: Option<Arc<Vec<ArrayRef>>>,
 }
 
+#[derive(Debug, Clone)]
+pub struct AggregationExecResult {
+    pub values: Vec<ScalarValue>,
+    pub accumulator_state: Option<AccumulatorState>,
+    /// Exact cursor that was actually processed (must point to a real row). Only produced by range aggregations.
+    pub processed_pos: Option<Cursor>,
+}
+
 #[async_trait]
 pub trait Aggregation: Send + Sync {
     fn window_expr(&self) -> &Arc<dyn WindowExpr>;
@@ -54,7 +63,7 @@ pub trait Aggregation: Send + Sync {
         &self,
         sorted_ranges: &[SortedRangeView],
         thread_pool: Option<&ThreadPool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+    ) -> AggregationExecResult {
         let _ = sorted_ranges;
         let _ = thread_pool;
         panic!("Aggregation must implement produce_aggregates_from_ranges")

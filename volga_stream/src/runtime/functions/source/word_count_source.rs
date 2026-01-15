@@ -1,19 +1,20 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use std::fmt;
-use crate::common::message::{Message, MAX_WATERMARK_VALUE};
+use crate::common::message::Message;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
-use tokio::time::{timeout, Duration, Instant};
-use rand::{thread_rng, Rng, distributions::Alphanumeric, SeedableRng, rngs::StdRng};
+use tokio::time::Instant;
+use rand::{Rng, distributions::Alphanumeric, SeedableRng, rngs::StdRng};
 use std::time::SystemTime;
 use arrow::array::{StringArray, Int64Array};
 use arrow::datatypes::{Field, Schema};
 use std::sync::Arc;
-use arrow::array::Array;
 use super::source_function::SourceFunctionTrait;
 use std::collections::HashMap;
+
+#[cfg(test)]
+use arrow::array::Array;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchingMode {
@@ -34,7 +35,6 @@ pub struct WordCountSourceFunction {
     start_time: Option<Instant>,
     copies_sent_per_word: HashMap<String, usize>,
     runtime_context: Option<RuntimeContext>,
-    max_watermark_sent: bool,
 }
 
 impl WordCountSourceFunction {
@@ -58,7 +58,6 @@ impl WordCountSourceFunction {
             start_time: None,
             copies_sent_per_word: HashMap::new(),
             runtime_context: None,
-            max_watermark_sent: false,
         }
     }
 
@@ -223,22 +222,6 @@ impl WordCountSourceFunction {
         None
     }
 
-    fn send_max_watermark_if_needed(&mut self) -> Option<Message> {
-        if !self.max_watermark_sent {
-            self.max_watermark_sent = true;
-            let vertex_id = self.runtime_context.as_ref().unwrap().vertex_id().to_string();
-            let watermark = Message::Watermark(crate::common::message::WatermarkMessage::new(
-                vertex_id,
-                MAX_WATERMARK_VALUE,
-                Some(SystemTime::now()
-                    .duration_since(SystemTime::UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as u64)
-            ));
-            return Some(watermark);
-        }
-        None
-    }   
 }
 
 #[async_trait]
@@ -277,7 +260,7 @@ impl SourceFunctionTrait for WordCountSourceFunction {
                 Some(self.create_batch(&words))
             },
             None => {
-                self.send_max_watermark_if_needed()
+                None
             }
         }
     }
@@ -306,7 +289,6 @@ async fn test_word_count_source(
     source.open(&RuntimeContext::new(Arc::<str>::from("test"), 0, 1, None, None, None)).await.unwrap();
 
     let mut word_counts = HashMap::new();
-    let mut watermark_received = false;
     
     let start_time = std::time::Instant::now();
     while let Some(message) = source.fetch().await {
@@ -330,10 +312,7 @@ async fn test_word_count_source(
                     *word_counts.entry(word).or_insert(0) += 1;
                 }
             }
-            Message::Watermark(watermark) => {
-                assert_eq!(watermark.watermark_value, MAX_WATERMARK_VALUE, "Watermark should have max value");
-                watermark_received = true;
-            }
+            Message::Watermark(_) => panic!("WordCountSourceFunction should not emit watermarks directly"),
             Message::CheckpointBarrier(_) => {
                 // not expected in this test
             }
@@ -357,8 +336,7 @@ async fn test_word_count_source(
         assert!(elapsed_time <= run_for_s.unwrap() + 1, "Source should not have run much longer than {} seconds, but ran for {}", run_for_s.unwrap(), elapsed_time);
     }
 
-    // Verify we received a watermark at the end
-    assert!(watermark_received, "Should have received a watermark message at the end");
+    // End-of-input is indicated by fetch() returning None; StreamTask emits terminal MAX watermark.
 }
 
 #[cfg(test)]

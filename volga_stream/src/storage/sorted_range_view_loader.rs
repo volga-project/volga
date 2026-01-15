@@ -6,6 +6,7 @@ use datafusion::physical_plan::WindowExpr;
 use futures::stream::{FuturesUnordered, StreamExt};
 use indexmap::IndexSet;
 use tokio::sync::Semaphore;
+use std::collections::HashSet;
 
 use crate::common::Key;
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
@@ -80,13 +81,14 @@ pub fn plan_load_from_index(bucket_index: &BucketIndex, plans: &[RangesLoadPlan]
             };
 
             let mut metas: Vec<MetaSnap> = Vec::new();
+            let mut seen_runs: HashSet<(Timestamp, BatchRef)> = HashSet::new();
             for bucket in bucket_index.query_buckets_in_range(effective_bucket_range.start, effective_bucket_range.end) {
-                for meta in bucket
-                    .hot_base_segments
-                    .iter()
-                    .chain(bucket.hot_deltas.iter())
-                    .chain(bucket.persisted_segments.iter())
-                {
+                let base = if !bucket.hot_base_segments.is_empty() {
+                    &bucket.hot_base_segments
+                } else {
+                    &bucket.persisted_segments
+                };
+                for meta in base.iter().chain(bucket.hot_deltas.iter()) {
                     match req.bounds {
                         DataBounds::Time { start_ts, end_ts } => {
                             if meta.max_pos.ts < start_ts || meta.min_pos.ts > end_ts {
@@ -117,7 +119,6 @@ pub fn plan_load_from_index(bucket_index: &BucketIndex, plans: &[RangesLoadPlan]
                             inmem_to_load.insert(id);
                         }
                     }
-
                     metas.push(MetaSnap {
                         bucket_ts: bucket.timestamp,
                         min_pos: meta.min_pos,
@@ -292,6 +293,7 @@ pub async fn execute_planned_load(
             segments_with_sort.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
             let segments: Vec<SortedSegment> = segments_with_sort.into_iter().map(|(_, _, s)| s).collect();
 
+            debug_assert_segments_disjoint_and_ordered(&segments);
             views.push(SortedRangeView::new(
                 r.view_req,
                 planned.bucket_granularity,
@@ -305,6 +307,35 @@ pub async fn execute_planned_load(
     }
 
     out
+}
+
+fn debug_assert_segments_disjoint_and_ordered(segments: &[SortedSegment]) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    if segments.len() <= 1 {
+        return;
+    }
+
+    let mut prev: Option<(Cursor, Cursor, Timestamp)> = None;
+    for seg in segments {
+        if seg.size() == 0 {
+            continue;
+        }
+        let min = seg.row_pos(0);
+        let max = seg.row_pos(seg.size() - 1);
+        let ts = seg.bucket_ts();
+
+        if let Some((pmin, pmax, pts)) = prev {
+            if min <= pmax {
+                panic!(
+                    "SortedRangeView segments are not globally disjoint/ordered by cursor: \
+prev_bucket_ts={pts} prev=[{pmin:?}..{pmax:?}] next_bucket_ts={ts} next=[{min:?}..{max:?}]"
+                );
+            }
+        }
+        prev = Some((min, max, ts));
+    }
 }
 
 #[cfg(test)]

@@ -1,29 +1,21 @@
 use crate::api::LogicalGraph;
 use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
 use crate::runtime::operators::operator::OperatorConfig;
-use crate::runtime::partition::PartitionType;
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::runtime::stream_task::StreamTask;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::common::message::Message;
 use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
-use crate::storage::batch_store::BatchStore;
 use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::runtime::functions::{
     map::MapFunction,
-    map::MapFunctionTrait,
 };
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
 use anyhow::Result;
-use kameo::{Actor, spawn};
+use kameo::spawn;
 use tokio::runtime::Runtime;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::time::Duration;
-use async_trait::async_trait;
 
 #[test]
 fn test_stream_task_actor() -> Result<()> {
@@ -37,12 +29,6 @@ fn test_stream_task_actor() -> Result<()> {
         ];
 
         let num_messages = test_messages.len();
-
-        test_messages.push(Message::Watermark(WatermarkMessage::new(
-            "source".to_string(),
-            MAX_WATERMARK_VALUE,
-            None,
-        )));
 
         // Define operator chain: input -> task -> output
         let operators = vec![
@@ -64,6 +50,14 @@ fn test_stream_task_actor() -> Result<()> {
         let input_vertex_id = vertex_ids[0].clone();
         let task_vertex_id = vertex_ids[1].clone();
         let output_vertex_id = vertex_ids[2].clone();
+
+        // Non-source tasks only finish when they receive a terminal watermark from upstream.
+        // With strict upstream tracking, the watermark must carry the true upstream vertex id.
+        test_messages.push(Message::Watermark(WatermarkMessage::new(
+            input_vertex_id.as_ref().to_string(),
+            MAX_WATERMARK_VALUE,
+            None,
+        )));
 
         // Create task with MapOperator
         let task = StreamTask::new(
@@ -125,8 +119,6 @@ fn test_stream_task_actor() -> Result<()> {
                 received_messages.push(message);
             }
         }
-
-        println!("received_messages {:?}", received_messages);
 
         // Filter out watermarks from received messages
         received_messages.retain(|msg| !matches!(msg, Message::Watermark(_)));

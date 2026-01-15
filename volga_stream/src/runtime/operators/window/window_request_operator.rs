@@ -19,9 +19,8 @@ use crate::runtime::operators::window::aggregates::VirtualPoint;
 use crate::runtime::operators::window::aggregates::{Aggregation, plain::PlainAggregation, retractable::RetractableAggregation};
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowOperatorState, WindowId};
 use crate::runtime::operators::window::{AggregatorType, Cursor, TileConfig, Tiles};
-use crate::runtime::operators::window::window_operator::{
-    init, stack_concat_results, WindowConfig, WindowOperatorConfig
-};
+use crate::runtime::operators::window::shared::{WindowConfig, build_window_operator_parts, stack_concat_results};
+use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
@@ -81,7 +80,8 @@ impl WindowRequestOperator {
             _ => panic!("Expected WindowRequestConfig, got {:?}", config),
         };
 
-        let (ts_column_index, windows, input_schema, output_schema, thread_pool) = init(
+        let (ts_column_index, windows, input_schema, output_schema, thread_pool) =
+            build_window_operator_parts(
             true, &window_request_operator_config.window_exec, &window_request_operator_config.tiling_configs, window_request_operator_config.parallelize
         );
 
@@ -201,7 +201,7 @@ impl WindowRequestOperator {
         #[derive(Clone)]
         struct WindowSnap {
             tiles: Option<Tiles>,
-            processed_until: Option<Cursor>,
+            processed_pos: Option<Cursor>,
             accumulator_state: Option<AccumulatorState>,
         }
 
@@ -211,7 +211,7 @@ impl WindowRequestOperator {
                 *window_id,
                 WindowSnap {
                     tiles: window_state.tiles.clone(),
-                    processed_until: window_state.processed_until,
+                    processed_pos: window_state.processed_pos,
                     accumulator_state: window_state.accumulator_state.clone(),
                 },
             );
@@ -281,9 +281,9 @@ impl WindowRequestOperator {
                     });
                 }
                 AggregatorType::RetractableAccumulator => {
-                    let processed_until = snap
-                        .processed_until
-                        .expect("Retractable request points require processed_until");
+                    let processed_pos = snap
+                        .processed_pos
+                        .expect("Retractable request points require processed_pos");
                     let base_state = snap
                         .accumulator_state
                         .clone()
@@ -295,7 +295,7 @@ impl WindowRequestOperator {
                     let mut normal_pos: Vec<usize> = Vec::new();
 
                     for (i, p) in points.into_iter().enumerate() {
-                        if p.ts < processed_until.ts {
+                        if p.ts < processed_pos.ts {
                             late_pos.push(i);
                             late_points.push(p);
                         } else {
@@ -331,7 +331,7 @@ impl WindowRequestOperator {
                             normal_points,
                             &bucket_index,
                             window_config.window_expr.clone(),
-                            Some(processed_until),
+                            Some(processed_pos),
                             Some(base_state),
                             exclude_current_row,
                         );
@@ -360,10 +360,10 @@ impl WindowRequestOperator {
             .iter()
             .zip(views_by_agg.iter())
             .map(|(agg, views)| async move {
-                let (vals, _) = agg
+                let vals = agg
                     .produce_aggregates_from_ranges(views, self.thread_pool.as_ref())
                     .await;
-                vals
+                vals.values
             })
             .collect();
         let vals_by_agg: Vec<Vec<ScalarValue>> = future::join_all(futs).await;

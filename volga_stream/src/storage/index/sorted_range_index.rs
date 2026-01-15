@@ -258,6 +258,23 @@ impl<'a> SortedRangeIndex<'a> {
         None
     }
 
+    /// Find the last position with row_pos <= `cursor` within this view.
+    pub fn seek_rowpos_le(&self, cursor: Cursor) -> Option<RowPtr> {
+        if self.is_empty() {
+            return None;
+        }
+        if cursor < self.start {
+            return None;
+        }
+        if cursor >= self.end {
+            return Some(self.last_pos());
+        }
+        match self.seek_rowpos_gt(cursor) {
+            Some(after) => self.prev_pos(after),
+            None => Some(self.last_pos()),
+        }
+    }
+
     pub fn seek_rowpos_ge(&self, cursor: Cursor) -> Option<RowPtr> {
         let cursor = cursor.max(self.start);
         for (seg_idx, seg) in self.segments.iter().enumerate() {

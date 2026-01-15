@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use crate::common::message::{Message, MAX_WATERMARK_VALUE};
+use crate::common::message::Message;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
@@ -69,7 +69,6 @@ pub enum FieldGenerator {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DatagenSourcePosition {
     records_generated: usize,
-    max_watermark_sent: bool,
     current_key_index: usize,
     task_records_limit: Option<usize>,
     key_values: Vec<String>,
@@ -88,7 +87,6 @@ pub struct DatagenSourceFunction {
     task_index: Option<i32>,
     parallelism: Option<i32>,
     vertex_id: Option<String>,
-    max_watermark_sent: bool,
     
     // Rate coordination state
     next_gen_time: Option<SystemTime>,
@@ -117,7 +115,6 @@ impl DatagenSourceFunction {
             task_index: None,
             parallelism: None,
             vertex_id: None,
-            max_watermark_sent: false,
             next_gen_time: None,
             gen_interval: None,
             records_generated: 0,
@@ -483,20 +480,6 @@ impl DatagenSourceFunction {
         true
     }
 
-    /// Send max watermark if needed
-    fn send_max_watermark_if_needed(&mut self) -> Option<Message> {
-        if !self.max_watermark_sent {
-            self.max_watermark_sent = true;
-            Some(Message::Watermark(crate::common::message::WatermarkMessage::new(
-                self.vertex_id.clone().unwrap(),
-                MAX_WATERMARK_VALUE,
-                None
-            )))
-        } else {
-            None
-        }
-    }
-
 }
 
 #[async_trait]
@@ -504,12 +487,12 @@ impl SourceFunctionTrait for DatagenSourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
         // If this task has no keys assigned, don't produce anything
         if self.key_values.is_empty() {
-            return self.send_max_watermark_if_needed();
+            return None;
         }
 
         // Check if we should continue generating
         if !self.should_continue() {
-            return self.send_max_watermark_if_needed();
+            return None;
         }
 
         // Generate batch - adjust size if we're near the limit
@@ -520,7 +503,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         };
 
         if batch_size == 0 {
-            return self.send_max_watermark_if_needed();
+            return None;
         }
 
         // Wait for next gen time if rate limiting is enabled
@@ -550,7 +533,6 @@ impl SourceFunctionTrait for DatagenSourceFunction {
 
         let pos = DatagenSourcePosition {
             records_generated: self.records_generated,
-            max_watermark_sent: self.max_watermark_sent,
             current_key_index: self.current_key_index,
             task_records_limit: self.task_records_limit,
             key_values: self.key_values.clone(),
@@ -570,7 +552,6 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         }
         let pos: DatagenSourcePosition = bincode::deserialize(bytes)?;
         self.records_generated = pos.records_generated;
-        self.max_watermark_sent = pos.max_watermark_sent;
         self.current_key_index = pos.current_key_index;
         self.task_records_limit = pos.task_records_limit;
         self.key_values = pos.key_values;
@@ -741,7 +722,7 @@ mod tests {
                     Some(Message::Keyed(_)) => {
                         panic!("Unexpected keyed message");
                     },
-                    Some(Message::Watermark(_)) => break,
+                    Some(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
                     Some(Message::CheckpointBarrier(_)) => break,
                     None => break,
                 }
@@ -856,7 +837,7 @@ mod tests {
                             
                             batch_count += 1;
                         },
-                        Some(Message::Watermark(_)) => break,
+                        Some(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
                         None => break,
                         _ => {}
                     }
@@ -988,7 +969,7 @@ mod tests {
                         }
                     }
                 }
-                Some(Message::Watermark(_)) => break,
+                Some(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
                 Some(Message::CheckpointBarrier(_)) => break,
                 Some(Message::Keyed(_)) => panic!("Unexpected keyed message from datagen"),
                 None => break,

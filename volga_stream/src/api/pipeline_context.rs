@@ -6,6 +6,7 @@ use arrow::datatypes::Schema;
 use crate::runtime::master::PipelineState;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 use crate::api::planner::{Planner, PlanningContext};
 use crate::api::logical_graph::LogicalGraph;
@@ -42,6 +43,8 @@ pub struct PipelineContext {
     executor: Arc<Option<Box<dyn Executor>>>,
     /// Execution mode
     execution_mode: ExecutionMode,
+    /// Optional default watermark assignment config applied to Window operators (planner-side).
+    window_watermark_assign: Option<WatermarkAssignConfig>,
 }
 
 /// Builder for constructing a PipelineContext
@@ -87,6 +90,7 @@ impl PipelineContextBuilder {
                 logical_graph: None,
                 executor: Arc::new(None),
                 execution_mode: ExecutionMode::Streaming,
+                window_watermark_assign: None,
             },
         }
     }
@@ -133,12 +137,34 @@ impl PipelineContextBuilder {
     }
 
     pub fn with_execution_mode(mut self, execution_mode: ExecutionMode) -> Self {
+        if execution_mode == ExecutionMode::Batch && self.context.window_watermark_assign.is_some() {
+            panic!("Watermark assignment is only supported for Streaming/Request execution modes (Batch mode disables watermarks)");
+        }
         self.context.execution_mode = execution_mode;
         self
     }
 
+    /// Configure event-time watermark generation for the pipeline.
+    ///
+    /// For now this applies to Window operators only (time is resolved from Window ORDER BY).
+    /// TODO: extend to other operators once we implement time column auto-resolve / hints for joins/unions.
+    pub fn with_window_watermark_out_of_orderness_ms(mut self, out_of_orderness_ms: u64) -> Self {
+        if self.context.execution_mode == ExecutionMode::Batch {
+            panic!("Cannot enable watermark assignment in Batch execution mode");
+        }
+        self.context.window_watermark_assign = Some(WatermarkAssignConfig::new(
+            out_of_orderness_ms,
+            Some(TimeHint::WindowOrderByColumn),
+        ));
+        self
+    }
+
+
     /// Build the final PipelineContext
     pub fn build(mut self) -> PipelineContext {
+        if self.context.execution_mode == ExecutionMode::Batch && self.context.window_watermark_assign.is_some() {
+            panic!("Watermark assignment is only supported for Streaming/Request execution modes (Batch mode disables watermarks)");
+        }
         if self.context.sql.is_some() {
             let logical_graph = self.context.build_logical_graph();
             self.context.logical_graph = Some(logical_graph);
@@ -181,7 +207,18 @@ impl PipelineContext {
         }
 
         // Convert SQL to logical graph
-        planner.sql_to_graph(sql).expect("Failed to create logical graph from SQL")
+        let mut g = planner.sql_to_graph(sql).expect("Failed to create logical graph from SQL");
+
+        // Enable/disable watermarks based on execution mode. Batch mode has no watermark generation
+        // (terminal MAX_WATERMARK_VALUE is emitted by source completion logic instead).
+        g.set_watermarks_enabled(self.execution_mode != ExecutionMode::Batch);
+
+        // Apply optional watermark config at the logical graph level.
+        if let Some(cfg) = &self.window_watermark_assign {
+            g.set_window_watermark_assign(cfg.clone());
+        }
+
+        g
     }
 
     /// Execute the job with optional state updates broadcasting
@@ -192,7 +229,9 @@ impl PipelineContext {
         println!("logical_graph: {:?}", logical_graph.to_dot());
 
         // Convert to execution graph
-        let execution_graph = logical_graph.to_execution_graph();
+        let mut execution_graph = logical_graph.to_execution_graph();
+        // Propagate execution mode for runtime invariants (e.g. disallowing watermark assigners in Batch).
+        execution_graph.set_execution_mode(format!("{:?}", self.execution_mode));
 
         // Get executor or panic if not set
         let executor_option = Arc::try_unwrap(self.executor)

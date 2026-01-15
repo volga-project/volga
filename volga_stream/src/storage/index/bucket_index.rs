@@ -259,6 +259,12 @@ impl BucketIndex {
             self.bucket_granularity.start(prev.ts)
         };
 
+        // Watermark can be earlier than the first seen bucket (e.g. out_of_orderness on the first batch).
+        // In that case there is no delta to process.
+        if start_bucket_ts > end_bucket_ts {
+            return None;
+        }
+
         let mut iter = self.buckets.range(start_bucket_ts..=end_bucket_ts);
         let first = iter.next().map(|(k, _)| *k)?;
         let last = self

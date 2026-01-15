@@ -326,6 +326,9 @@ impl Worker {
                     if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
                     }
+                    if let Some(mode) = self.graph.execution_mode() {
+                        cfg.insert("execution_mode".to_string(), Value::String(mode.to_string()));
+                    }
                     Some(cfg)
                 },
                 Some(self.operator_states.clone()),

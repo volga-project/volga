@@ -6,6 +6,7 @@ use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::VertexId;
+use crate::runtime::watermark::WatermarkAssignConfig;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionEdge {
@@ -53,6 +54,7 @@ pub struct ExecutionVertex {
     pub output_edges: Vec<String>,
     pub parallelism: i32,
     pub task_index: i32,
+    pub watermark_assign: Option<WatermarkAssignConfig>,
 }
 
 impl ExecutionVertex {
@@ -71,6 +73,7 @@ impl ExecutionVertex {
             output_edges: Vec::new(),
             parallelism,
             task_index,
+            watermark_assign: None,
         }
     }
 
@@ -87,6 +90,8 @@ impl ExecutionVertex {
 pub struct ExecutionGraph {
     vertices: HashMap<VertexId, ExecutionVertex>,
     edges: HashMap<String, ExecutionEdge>,
+    // Optional pipeline execution mode. Used for runtime invariants (e.g. disabling watermark assigners in Batch).
+    execution_mode: Option<String>,
 }
 
 impl ExecutionGraph {
@@ -94,7 +99,16 @@ impl ExecutionGraph {
         Self {
             vertices: HashMap::new(),
             edges: HashMap::new(),
+            execution_mode: None,
         }
+    }
+
+    pub fn set_execution_mode(&mut self, mode: impl Into<String>) {
+        self.execution_mode = Some(mode.into());
+    }
+
+    pub fn execution_mode(&self) -> Option<&str> {
+        self.execution_mode.as_deref()
     }
 
     pub fn add_vertex(&mut self, vertex: ExecutionVertex) {
@@ -128,6 +142,10 @@ impl ExecutionGraph {
 
     pub fn get_vertex(&self, vertex_id: &str) -> Option<&ExecutionVertex> {
         self.vertices.get(vertex_id)
+    }
+
+    pub fn get_vertex_mut(&mut self, vertex_id: &str) -> Option<&mut ExecutionVertex> {
+        self.vertices.get_mut(vertex_id)
     }
 
     pub fn get_edge(&self, edge_id: &str) -> Option<&ExecutionEdge> {

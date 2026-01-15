@@ -2,7 +2,7 @@
 
 use crate::{
     api::pipeline_context::PipelineContextBuilder,
-    common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
+    common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}},
     executor::local_executor::LocalExecutor,
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -23,12 +23,8 @@ fn test_worker_execution() -> Result<()> {
         Message::new(None, create_test_string_batch(vec!["test3".to_string()]), None, None),
     ];
 
-    let mut test_messages = expected_messages.clone();
-    test_messages.push(Message::Watermark(WatermarkMessage::new(
-        "source".to_string(),
-        MAX_WATERMARK_VALUE,
-        None,
-    )));
+    // Sources now emit terminal MAX watermark automatically when the source is exhausted.
+    let test_messages = expected_messages.clone();
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     

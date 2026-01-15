@@ -1,6 +1,5 @@
 use crate::{
     api::pipeline_context::{PipelineContextBuilder, ExecutionMode},
-    executor::local_executor::LocalExecutor,
     runtime::{
         functions::{
             source::{
@@ -11,15 +10,20 @@ use crate::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
         },
+        stream_task::StreamTaskStatus,
+        worker::{Worker, WorkerConfig},
         tests::request_source_e2e_test::{create_test_config, run_continuous_requests},
     },
 };
+use crate::runtime::tests::test_utils::wait_for_status;
+use crate::transport::transport_backend_actor::TransportBackendType;
 use datafusion::scalar::ScalarValue;
 use arrow::datatypes::{Schema, Field, DataType, TimeUnit};
 use rand::Rng;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
+use tokio::net::TcpStream;
 
 fn create_datagen_config(
     rate: Option<f32>,
@@ -113,6 +117,53 @@ fn create_payload_generator(
     }
 }
 
+async fn wait_for_request_server(bind_address: &str, timeout: Duration) {
+    let start = Instant::now();
+    loop {
+        if TcpStream::connect(bind_address).await.is_ok() {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("Request server did not become ready within {:?}", timeout);
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_task_prefix_status(
+    worker: &Worker,
+    prefix: &str,
+    status: StreamTaskStatus,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    loop {
+        let st = worker.get_state().await;
+        let mut matched = false;
+        let mut all_match = true;
+
+        for (vertex_id, task_status) in &st.task_statuses {
+            if vertex_id.starts_with(prefix) {
+                matched = true;
+                if *task_status != status {
+                    all_match = false;
+                }
+            }
+        }
+
+        if matched && all_match {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "Timeout waiting for tasks with prefix {} to reach {:?}, state = {:?}",
+                prefix, status, st.task_statuses
+            );
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 
 // TODO make single hot key test case to make sure no deadlocks occur
 
@@ -171,15 +222,34 @@ async fn test_request_execution_mode() {
             Some(SinkConfig::RequestSinkConfig)
         )
         .sql(sql)
-        .with_executor(Box::new(LocalExecutor::new()))
         .with_execution_mode(ExecutionMode::Request)
         .build();
 
-    let pipeline_handle = tokio::spawn(async move {
-        context.execute().await.unwrap();
-    });
+    let logical_graph = context.get_logical_graph().unwrap().clone();
+    let mut exec_graph = logical_graph.to_execution_graph();
+    exec_graph.set_execution_mode(format!("{:?}", ExecutionMode::Request));
+    exec_graph.update_channels_with_node_mapping(None);
+    let vertex_ids = exec_graph.get_vertices().keys().cloned().collect();
 
-    sleep(Duration::from_millis(1000)).await;
+    let mut worker = Worker::new(WorkerConfig::new(
+        "request_mode_worker".to_string(),
+        exec_graph,
+        vertex_ids,
+        2,
+        TransportBackendType::InMemory,
+    ));
+    worker.start().await;
+    wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;
+    worker.signal_tasks_run().await;
+
+    wait_for_request_server(&request_source_config.bind_address, Duration::from_secs(5)).await;
+    wait_for_task_prefix_status(
+        &worker,
+        "Source(HttpRequest)_1",
+        StreamTaskStatus::Running,
+        Duration::from_secs(5),
+    )
+    .await;
 
     let client = reqwest::Client::new();
 
@@ -295,6 +365,7 @@ async fn test_request_execution_mode() {
     // assert!(successful_requests > 0, "Should have at least some successful requests");
     assert_eq!(successful_requests, total_requests, "Should complete all requests");
 
-    pipeline_handle.abort();
+    worker.signal_tasks_close().await;
+    worker.close().await;
 }
 

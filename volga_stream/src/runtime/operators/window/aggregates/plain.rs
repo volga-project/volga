@@ -2,14 +2,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use datafusion::physical_plan::WindowExpr;
-use datafusion::scalar::ScalarValue;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::storage::index::{BucketIndex, DataRequest, SortedRangeView};
-use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, Tiles};
 
-use super::{Aggregation, AggregatorType};
+use super::{Aggregation, AggregationExecResult, AggregatorType};
 
 #[path = "plain_range.rs"]
 mod plain_range;
@@ -62,6 +60,7 @@ impl PlainAggregation {
             exclude_current_row,
         ))
     }
+
 }
 
 #[async_trait]
@@ -88,16 +87,10 @@ impl Aggregation for PlainAggregation {
         &self,
         sorted_ranges: &[SortedRangeView],
         thread_pool: Option<&ThreadPool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+    ) -> AggregationExecResult {
         match self {
-            PlainAggregation::Range(r) => {
-                r.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
-                    .await
-            }
-            PlainAggregation::Points(p) => {
-                p.produce_aggregates_from_ranges(sorted_ranges, thread_pool)
-                    .await
-            }
+            PlainAggregation::Range(r) => r.produce_aggregates_from_ranges(sorted_ranges, thread_pool).await,
+            PlainAggregation::Points(p) => p.produce_aggregates_from_ranges(sorted_ranges, thread_pool).await,
         }
     }
 }

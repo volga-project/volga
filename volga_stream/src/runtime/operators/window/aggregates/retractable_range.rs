@@ -12,14 +12,14 @@ use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, RowPtr};
 
 use super::super::{create_window_aggregator, merge_accumulator_state, WindowAggregator};
-use super::{Aggregation, AggregatorType, BucketRange};
+use super::{Aggregation, AggregationExecResult, AggregatorType, BucketRange};
 
 #[derive(Debug)]
 pub struct RetractableRangeAggregation {
     pub update_range: Option<BucketRange>,
     pub retract_range: Option<BucketRange>,
-    pub prev_processed_until: Option<Cursor>,
-    pub new_processed_until: Cursor,
+    pub prev_processed_pos: Option<Cursor>,
+    pub advance_to: Cursor,
     pub window_expr: Arc<dyn WindowExpr>,
     pub accumulator_state: Option<AccumulatorState>,
     pub ts_column_index: usize,
@@ -30,8 +30,8 @@ pub struct RetractableRangeAggregation {
 impl RetractableRangeAggregation {
     pub fn new(
         window_id: usize,
-        prev_processed_until: Option<Cursor>,
-        new_processed_until: Cursor,
+        prev_processed_pos: Option<Cursor>,
+        advance_to: Cursor,
         bucket_index: &BucketIndex,
         window_expr: Arc<dyn WindowExpr>,
         accumulator_state: Option<AccumulatorState>,
@@ -50,18 +50,18 @@ impl RetractableRangeAggregation {
             0
         };
 
-        let update_range = bucket_index.delta_span(prev_processed_until, new_processed_until);
+        let update_range = bucket_index.delta_span(prev_processed_pos, advance_to);
         let retract_range = match update_range {
             None => None,
             Some(update_range) => {
-                let prev = prev_processed_until.unwrap_or(Cursor::new(i64::MIN, 0));
+                let prev = prev_processed_pos.unwrap_or(Cursor::new(i64::MIN, 0));
                 if prev.ts == i64::MIN {
                     Some(update_range)
                 } else {
                     match window_frame.units {
                         WindowFrameUnits::Range => {
                             let prev_start_ts = prev.ts.saturating_sub(wl);
-                            let new_start_ts = new_processed_until.ts.saturating_sub(wl);
+                            let new_start_ts = advance_to.ts.saturating_sub(wl);
                             if new_start_ts <= prev_start_ts {
                                 None
                             } else {
@@ -88,7 +88,8 @@ impl RetractableRangeAggregation {
                             let new_start_bucket_ts = update_range.start;
                             let all_ts = bucket_index.bucket_timestamps();
                             let first_ts = all_ts.first().copied().unwrap_or(new_start_bucket_ts);
-                            let buckets = bucket_index.query_buckets_in_range(first_ts, new_start_bucket_ts);
+                            let buckets =
+                                bucket_index.query_buckets_in_range(first_ts, new_start_bucket_ts);
                             if buckets.is_empty() {
                                 None
                             } else {
@@ -113,8 +114,8 @@ impl RetractableRangeAggregation {
         Self {
             update_range,
             retract_range,
-            prev_processed_until,
-            new_processed_until,
+            prev_processed_pos,
+            advance_to,
             window_expr,
             accumulator_state,
             ts_column_index,
@@ -148,12 +149,12 @@ impl Aggregation for RetractableRangeAggregation {
 
         let bounds = if is_range_window {
             let start_ts = self
-                .prev_processed_until
+                .prev_processed_pos
                 .map(|p| p.ts.saturating_sub(wl))
                 .unwrap_or(i64::MIN);
             DataBounds::Time {
                 start_ts,
-                end_ts: self.new_processed_until.ts,
+                end_ts: self.advance_to.ts,
             }
         } else {
             // Streaming ROWS needs all data in the update/retract span (per-row evaluation).
@@ -195,17 +196,25 @@ impl Aggregation for RetractableRangeAggregation {
         &self,
         sorted_ranges: &[SortedRangeView],
         _thread_pool: Option<&tokio_rayon::rayon::ThreadPool>,
-    ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
+    ) -> AggregationExecResult {
         let window_frame = self.window_expr.get_window_frame();
         let is_rows_window = window_frame.units == WindowFrameUnits::Rows;
         let window_length = get_window_length_ms(window_frame);
         let window_size = if is_rows_window { get_window_size_rows(window_frame) } else { 0 };
 
         let Some(update_range) = self.update_range else {
-            return (vec![], self.accumulator_state.clone());
+            return AggregationExecResult {
+                values: vec![],
+                accumulator_state: self.accumulator_state.clone(),
+                processed_pos: None,
+            };
         };
         if sorted_ranges.is_empty() {
-            return (vec![], self.accumulator_state.clone());
+            return AggregationExecResult {
+                values: vec![],
+                accumulator_state: self.accumulator_state.clone(),
+                processed_pos: None,
+            };
         }
 
         let find_view = |r: BucketRange| -> &SortedRangeView {
@@ -225,18 +234,26 @@ impl Aggregation for RetractableRangeAggregation {
             SortedRangeIndex::new_in_bucket_range(v, r)
         });
 
+        let actual_processed_pos = updates
+            .seek_rowpos_le(self.advance_to)
+            .map(|p| updates.get_row_pos(&p));
+
         let (aggs, state) = run_retractable_accumulator(
             &self.window_expr,
             &updates,
             retracts.as_ref(),
-            self.prev_processed_until,
-            self.new_processed_until,
+            self.prev_processed_pos,
+            actual_processed_pos.unwrap_or(self.advance_to),
             self.accumulator_state.as_ref(),
             is_rows_window,
             window_length,
             window_size,
         );
-        (aggs, Some(state))
+        AggregationExecResult {
+            values: aggs,
+            accumulator_state: Some(state),
+            processed_pos: actual_processed_pos,
+        }
     }
 }
 
@@ -244,8 +261,8 @@ fn run_retractable_accumulator(
     window_expr: &Arc<dyn WindowExpr>,
     updates: &SortedRangeIndex<'_>,
     retracts: Option<&SortedRangeIndex<'_>>,
-    prev_processed_until: Option<Cursor>,
-    new_processed_until: Cursor,
+    prev_processed_pos: Option<Cursor>,
+    advance_to: Cursor,
     accumulator_state: Option<&AccumulatorState>,
     is_rows_window: bool,
     window_length: i64,
@@ -271,8 +288,8 @@ fn run_retractable_accumulator(
         );
     }
 
-    // Find update start (first row with Cursor > prev_processed_until).
-    let update_pos = window_logic::first_update_pos(updates, prev_processed_until);
+    // Find update start (first row with Cursor > prev_processed_pos).
+    let update_pos = window_logic::first_update_pos(updates, prev_processed_pos);
     let Some(mut update_pos) = update_pos else {
         return (
             vec![],
@@ -282,10 +299,10 @@ fn run_retractable_accumulator(
         );
     };
 
-    // Cap updates by `new_processed_until` (Cursor boundary), not by `updates.last_pos()`.
+    // Cap updates by `advance_to` (Cursor boundary), not by `updates.last_pos()`.
     let end_pos = {
         let first_row_pos = updates.get_row_pos(&updates.first_pos());
-        if new_processed_until < first_row_pos {
+        if advance_to < first_row_pos {
             return (
                 vec![],
                 accumulator
@@ -293,8 +310,7 @@ fn run_retractable_accumulator(
                     .expect("Should be able to get accumulator state"),
             );
         }
-
-        match updates.seek_rowpos_gt(new_processed_until) {
+        match updates.seek_rowpos_gt(advance_to) {
             Some(after_end) => updates
                 .prev_pos(after_end)
                 .expect("seek_rowpos_gt returned first row; guarded above"),
@@ -315,7 +331,7 @@ fn run_retractable_accumulator(
 
     let mut results = Vec::with_capacity(num_updates);
 
-    let first_run = prev_processed_until.is_none();
+    let first_run = prev_processed_pos.is_none();
 
     // RANGE retract pointer.
     let mut range_retract_pos: Option<RowPtr> = None;
@@ -326,7 +342,7 @@ fn run_retractable_accumulator(
             } else {
                 Some(window_logic::initial_retract_pos_range(
                     retracts,
-                    prev_processed_until.expect("Should have previous processed until"),
+                    prev_processed_pos.expect("Should have previous processed pos"),
                     window_length,
                 ))
             };
@@ -338,7 +354,7 @@ fn run_retractable_accumulator(
     let mut rows_retract_pos: Option<RowPtr> = None;
     if is_rows_window && window_size > 0 {
         rows_retract_pos = Some(update_pos);
-        if let (Some(prev), Some(retracts)) = (prev_processed_until, retracts) {
+        if let (Some(prev), Some(retracts)) = (prev_processed_pos, retracts) {
             if let Some(processed_pos) = retracts.seek_rowpos_eq(prev) {
                 let total_stored = retracts.count_between(&retracts.first_pos(), &processed_pos);
                 rows_window_count = total_stored.min(window_size);
@@ -404,9 +420,7 @@ fn run_retractable_accumulator(
         if update_pos == end_pos {
             break;
         }
-        update_pos = updates
-            .next_pos(update_pos)
-            .expect("end_pos should be reachable from update_pos");
+        update_pos = updates.next_pos(update_pos).expect("end_pos should be reachable from update_pos");
     }
 
     (
@@ -490,7 +504,9 @@ WINDOW w AS (
         assert_eq!(reqs.len(), 1);
         let view = test_utils::make_view(gran, reqs[0], vec![(1000, b1000)], &window_expr);
 
-        let (vals, state) = agg.produce_aggregates_from_ranges(&[view], None).await;
+        let res = agg.produce_aggregates_from_ranges(&[view], None).await;
+        let vals = res.values;
+        let state = res.accumulator_state;
         assert_f64s(&vals, &[10.0, 30.0, 60.0, 90.0]);
         let state = state.expect("state");
         assert!((eval_state(&window_expr, &state) - 90.0).abs() < 1e-9);
@@ -542,7 +558,9 @@ WINDOW w AS (
         assert_eq!(reqs1.len(), 1);
         let view1 = test_utils::make_view(gran, reqs1[0], vec![(1000, b1000), (2000, b2000)], &window_expr);
 
-        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&[view1], None).await;
+        let res1 = agg1.produce_aggregates_from_ranges(&[view1], None).await;
+        let vals1 = res1.values;
+        let state1 = res1.accumulator_state;
         assert_f64s(&vals1, &[10.0, 30.0, 60.0]);
         let state1 = state1.expect("state1");
 
@@ -600,7 +618,9 @@ WINDOW w AS (
             &window_expr,
         );
 
-        let (vals2, state2) = agg2.produce_aggregates_from_ranges(&[view2], None).await;
+        let res2 = agg2.produce_aggregates_from_ranges(&[view2], None).await;
+        let vals2 = res2.values;
+        let state2 = res2.accumulator_state;
         assert_f64s(&vals2, &[90.0, 120.0, 150.0, 180.0]);
         let state2 = state2.expect("state2");
         assert!((eval_state(&window_expr, &state2) - 180.0).abs() < 1e-9);
@@ -651,7 +671,9 @@ WINDOW w AS (
         assert_eq!(reqs1.len(), 1);
         let view1 =
             test_utils::make_view(gran, reqs1[0], vec![(1000, b1000), (2000, b2000)], &window_expr);
-        let (vals1, state1) = agg1.produce_aggregates_from_ranges(&[view1], None).await;
+        let res1 = agg1.produce_aggregates_from_ranges(&[view1], None).await;
+        let vals1 = res1.values;
+        let state1 = res1.accumulator_state;
         assert_f64s(&vals1, &[10.0, 40.0, 60.0]);
         let state1 = state1.expect("state1");
         assert!((eval_state(&window_expr, &state1) - 60.0).abs() < 1e-9);
@@ -694,9 +716,11 @@ WINDOW w AS (
         let view2_update =
             test_utils::make_view(gran, reqs2[1], vec![(3000, b3000)], &window_expr);
 
-        let (vals2, state2) = agg2
+        let res2 = agg2
             .produce_aggregates_from_ranges(&[view2_retract, view2_update], None)
             .await;
+        let vals2 = res2.values;
+        let state2 = res2.accumulator_state;
         assert_f64s(&vals2, &[55.0]);
         let state2 = state2.expect("state2");
         assert!((eval_state(&window_expr, &state2) - 55.0).abs() < 1e-9);

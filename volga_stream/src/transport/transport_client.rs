@@ -97,6 +97,11 @@ impl DataReaderControl {
             gate.unblock();
         }
     }
+
+    #[cfg(test)]
+    pub fn empty_for_test() -> Self {
+        Self { gates: HashMap::new() }
+    }
 }
 
 impl DataReader {
