@@ -863,23 +863,31 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     let prometheus_recorder = prometheus_builder.build_recorder();
     let prometheus_handle = prometheus_recorder.handle();
 
-    let mut tcp_recorder_opt = TcpBuilder::new()
-        .listen_address("127.0.0.1:9999".parse::<std::net::SocketAddr>()?)
-        .build()
-        .ok();
+    let tcp_enabled = std::env::var("VOLGA_ENABLE_TCP_METRICS")
+        .ok()
+        .as_deref()
+        == Some("1");
 
     let mut fanout_builder = FanoutBuilder::default().add_recorder(prometheus_recorder);
-    let tcp_enabled = tcp_recorder_opt.is_some();
-    if let Some(tcp_recorder) = tcp_recorder_opt.take() {
-        fanout_builder = fanout_builder.add_recorder(tcp_recorder);
+
+    if tcp_enabled {
+        if let Ok(tcp_recorder) = TcpBuilder::new()
+            .listen_address("127.0.0.1:9999".parse::<std::net::SocketAddr>()?)
+            .build()
+        {
+            fanout_builder = fanout_builder.add_recorder(tcp_recorder);
+        } else {
+            eprintln!("⚠️  VOLGA_ENABLE_TCP_METRICS=1 but failed to bind 127.0.0.1:9999; TCP metrics disabled");
+        }
     }
+
     let fanout = fanout_builder.build();
     
     metrics::set_global_recorder(fanout)?;
     
     PROMETHEUS_HANDLE.set(prometheus_handle).map_err(|_| "Metrics already initialized")?;
     
-    println!("✅ Volga metrics initialized with Prometheus + TCP fanout");
+    println!("✅ Volga metrics initialized with Prometheus");
     println!("📊 Prometheus metrics available via handle");
     if tcp_enabled {
         println!("🔍 TCP metrics streaming to 127.0.0.1:9999");

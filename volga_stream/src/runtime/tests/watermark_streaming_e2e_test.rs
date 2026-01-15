@@ -4,17 +4,19 @@ use std::time::Duration;
 use anyhow::Result;
 use datafusion::common::ScalarValue;
 
-use crate::api::pipeline_context::{ExecutionMode, PipelineContextBuilder};
+use crate::api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
 use crate::common::test_utils::gen_unique_grpc_port;
-use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator};
+use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
 use crate::runtime::operators::operator::OperatorConfig;
-use crate::runtime::stream_task::StreamTaskStatus;
+use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::runtime::tests::test_utils::{
     create_window_input_schema, wait_for_status, window_rows_from_messages, WindowOutputRow,
 };
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
+use crate::control_plane::types::{AttemptId, ExecutionIds};
 
 fn parse_task_index_from_key(key: &str) -> Option<i32> {
     // Keys come from datagen as "key-{task_index}-{key_id}" when using FieldGenerator::Key.
@@ -78,36 +80,41 @@ pub(crate) async fn run_watermark_window_pipeline(
         },
     );
 
-    let mut datagen_cfg = DatagenSourceConfig::new(
+    let datagen_cfg = DatagenSourceConfig::new(
         schema.clone(),
-        rate,
-        Some(total_records),
-        None,
-        256,
-        fields,
+        DatagenSpec {
+            rate,
+            limit: Some(total_records),
+            run_for_s: None,
+            batch_size: 256,
+            fields,
+            replayable: true,
+        },
     );
-    datagen_cfg.set_replayable(true);
 
-    let context = PipelineContextBuilder::new()
+    let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
-        .with_window_watermark_out_of_orderness_ms(out_of_orderness_ms)
+        .with_execution_mode(ExecutionMode::Streaming)
         .with_source(
             "datagen_source".to_string(),
-            crate::runtime::operators::source::source_operator::SourceConfig::DatagenSourceConfig(
-                datagen_cfg,
-            ),
+            crate::runtime::operators::source::source_operator::SourceConfig::DatagenSourceConfig(datagen_cfg),
             schema.clone(),
         )
-        .with_sink(
+        .with_sink_inline(
             crate::runtime::operators::sink::sink_operator::SinkConfig::InMemoryStorageGrpcSinkConfig(
                 format!("http://{}", storage_server_addr),
             ),
         )
-        .with_execution_mode(ExecutionMode::Streaming)
         .sql(sql)
         .build();
 
-    let logical_graph = context.get_logical_graph().unwrap().clone();
+    let mut logical_graph = compile_logical_graph(&spec);
+    // Explicitly configure watermark out-of-orderness for all window operators.
+    logical_graph.set_window_watermark_assign(WatermarkAssignConfig::new(
+        out_of_orderness_ms,
+        Some(TimeHint::WindowOrderByColumn),
+    ));
+
     let mut exec_graph = logical_graph.to_execution_graph();
 
     if lateness_ms < 0 {
@@ -118,7 +125,7 @@ pub(crate) async fn run_watermark_window_pipeline(
     for vid in vertex_ids_snapshot {
         if let Some(v) = exec_graph.get_vertex_mut(vid.as_ref()) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
-                cfg.lateness = Some(lateness_ms);
+                cfg.spec.lateness = Some(lateness_ms);
             }
         }
     }
@@ -137,6 +144,7 @@ pub(crate) async fn run_watermark_window_pipeline(
 
     let mut worker = Worker::new(WorkerConfig::new(
         "wm-e2e-worker".to_string(),
+        ExecutionIds::fresh(AttemptId(1)),
         exec_graph,
         vertex_ids,
         2,

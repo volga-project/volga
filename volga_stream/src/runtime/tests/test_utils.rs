@@ -4,7 +4,7 @@ use std::time::Duration;
 use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
-use crate::runtime::stream_task::StreamTaskStatus;
+use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::Worker;
 
 pub fn create_window_input_schema() -> Arc<Schema> {

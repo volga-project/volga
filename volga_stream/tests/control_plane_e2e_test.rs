@@ -32,7 +32,7 @@ struct StartPipelineResponse {
     execution_ids: volga_stream::control_plane::types::ExecutionIds,
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 async fn test_control_plane_e2e_snapshots_and_metrics() {
     // Start sink target (in-memory storage gRPC server).
     let storage_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
@@ -68,7 +68,7 @@ async fn test_control_plane_e2e_snapshots_and_metrics() {
     );
 
     let datagen = DatagenSpec {
-        rate: None,
+        rate: None, // TODO should use real rate, this is prone to races
         limit: Some(500),
         run_for_s: None,
         batch_size: 50,

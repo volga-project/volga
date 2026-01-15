@@ -1,6 +1,7 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder, planner::{Planner, PlanningContext}},
-    common::test_utils::IdentityMapFunction,
+    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    common::test_utils::{IdentityMapFunction, gen_unique_grpc_port},
+    api::{Planner, PlanningContext},
     runtime::{
         functions::{
             key_by::{KeyByFunction, key_by_function::extract_datafusion_window_exec},
@@ -23,11 +24,9 @@ use futures::future::join_all;
 use tokio::sync::Semaphore;
 use rand;
 use std::collections::HashMap;
-use crate::common::test_utils::gen_unique_grpc_port;
 
 pub fn create_test_config(max_pending_requests: usize, request_timeout_ms: u64) -> RequestSourceConfig {
     let port = gen_unique_grpc_port();
-    
     RequestSourceConfig::new(RequestSourceSinkSpec {
         bind_address: format!("127.0.0.1:{}", port),
         max_pending_requests,
@@ -257,6 +256,7 @@ pub fn verify_employee_request_response_match(request_result: &RequestResult) ->
 
 #[tokio::test]
 async fn test_request_source_sink_e2e() {
+    // TODO: Passes individually but can fail when running the full suite (likely cross-test interference).
     // Operator config
     let max_pending_requests = 100;
     let request_timeout_ms = 5000;
@@ -307,12 +307,13 @@ async fn test_request_source_sink_e2e() {
     // Create logical graph, no chaining
         let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
 
-        // Create pipeline context with LocalExecutor
+        // Build PipelineSpec with the pre-constructed logical graph (keep upstream test structure).
         let spec = PipelineSpecBuilder::new()
             .with_parallelism(parallelism)
-            .with_logical_graph(logical_graph)
             .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+            .with_logical_graph(logical_graph)
             .build();
+
         let context = PipelineContext::new(spec);
 
         // Start pipeline execution in background

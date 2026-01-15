@@ -1,25 +1,30 @@
 use crate::{
-    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder},
+    control_plane::types::{AttemptId, ExecutionIds},
     runtime::{
         functions::{
             source::{
-                datagen_source::{DatagenSourceConfig, DatagenSourceFunction, FieldGenerator},
-                DatagenSpec,
+                datagen_source::{DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator},
             },
         },
         operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
         },
+        observability::snapshot_types::StreamTaskStatus,
+        worker::{Worker, WorkerConfig},
         tests::request_source_e2e_test::{create_test_config, run_continuous_requests},
     },
 };
+use crate::runtime::tests::test_utils::wait_for_status;
+use crate::transport::transport_backend_actor::TransportBackendType;
 use datafusion::scalar::ScalarValue;
 use arrow::datatypes::{Schema, Field, DataType, TimeUnit};
 use rand::Rng;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration, Instant};
+use tokio::net::TcpStream;
 
 fn create_datagen_config(
     rate: Option<f32>,
@@ -123,6 +128,53 @@ fn create_payload_generator(
     }
 }
 
+async fn wait_for_request_server(bind_address: &str, timeout: Duration) {
+    let start = Instant::now();
+    loop {
+        if TcpStream::connect(bind_address).await.is_ok() {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!("Request server did not become ready within {:?}", timeout);
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_task_prefix_status(
+    worker: &Worker,
+    prefix: &str,
+    status: StreamTaskStatus,
+    timeout: Duration,
+) {
+    let start = Instant::now();
+    loop {
+        let st = worker.get_state().await;
+        let mut matched = false;
+        let mut all_match = true;
+
+        for (vertex_id, task_status) in &st.task_statuses {
+            if vertex_id.starts_with(prefix) {
+                matched = true;
+                if *task_status != status {
+                    all_match = false;
+                }
+            }
+        }
+
+        if matched && all_match {
+            return;
+        }
+        if start.elapsed() > timeout {
+            panic!(
+                "Timeout waiting for tasks with prefix {} to reach {:?}, state = {:?}",
+                prefix, status, st.task_statuses
+            );
+        }
+        sleep(Duration::from_millis(20)).await;
+    }
+}
+
 
 // TODO make single hot key test case to make sure no deadlocks occur
 
@@ -130,6 +182,7 @@ fn create_payload_generator(
 // TODO this test fails when running with others via 'cargo test' - why?
 #[tokio::test]
 async fn test_request_execution_mode() {
+    // TODO: Passes individually but can fail when running the full suite (likely cross-test interference).
     let parallelism = 4;
     let max_pending_requests = 5000;
     let request_timeout_ms = 100000;
@@ -148,7 +201,16 @@ async fn test_request_execution_mode() {
     let value_start = 10.0;
     let value_step = 10.0;
 
-    let datagen_config = create_datagen_config(rate, num_record_to_gen, batch_size, start_ms, step_ms, num_unique_keys, value_start, value_step);
+    let datagen_config = create_datagen_config(
+        rate,
+        num_record_to_gen,
+        batch_size,
+        start_ms,
+        step_ms,
+        num_unique_keys,
+        value_start,
+        value_step,
+    );
     let schema = datagen_config.schema.clone();
 
     let sql = "SELECT 
@@ -169,28 +231,49 @@ async fn test_request_execution_mode() {
 
     // TODO set window config - tiling, lateness, etc
     
+    let request_source_config = request_source_config.set_schema(schema.clone());
+
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
+        .with_execution_mode(ExecutionMode::Request)
         .with_source(
             "events".to_string(),
             SourceConfig::DatagenSourceConfig(datagen_config),
-            schema.clone()
+            schema.clone(),
         )
         .with_request_source_sink_inline(
             SourceConfig::HttpRequestSourceConfig(request_source_config.clone()),
-            Some(SinkConfig::RequestSinkConfig)
+            Some(SinkConfig::RequestSinkConfig),
         )
         .sql(sql)
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
-        .with_execution_mode(ExecutionMode::Request)
         .build();
-    let context = PipelineContext::new(spec);
 
-    let pipeline_handle = tokio::spawn(async move {
-        context.execute().await.unwrap();
-    });
+    let logical_graph = compile_logical_graph(&spec);
+    let mut exec_graph = logical_graph.to_execution_graph();
+    exec_graph.set_execution_mode(format!("{:?}", ExecutionMode::Request));
+    exec_graph.update_channels_with_node_mapping(None);
+    let vertex_ids = exec_graph.get_vertices().keys().cloned().collect();
 
-    sleep(Duration::from_millis(1000)).await;
+    let mut worker = Worker::new(WorkerConfig::new(
+        "request_mode_worker".to_string(),
+        ExecutionIds::fresh(AttemptId(1)),
+        exec_graph,
+        vertex_ids,
+        2,
+        TransportBackendType::InMemory,
+    ));
+    worker.start().await;
+    wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;
+    worker.signal_tasks_run().await;
+
+    wait_for_request_server(&request_source_config.spec.bind_address, Duration::from_secs(5)).await;
+    wait_for_task_prefix_status(
+        &worker,
+        "Source(HttpRequest)_1",
+        StreamTaskStatus::Running,
+        Duration::from_secs(5),
+    )
+    .await;
 
     let client = reqwest::Client::new();
 
@@ -306,6 +389,7 @@ async fn test_request_execution_mode() {
     // assert!(successful_requests > 0, "Should have at least some successful requests");
     assert_eq!(successful_requests, total_requests, "Should complete all requests");
 
-    pipeline_handle.abort();
+    worker.signal_tasks_close().await;
+    worker.close().await;
 }
 

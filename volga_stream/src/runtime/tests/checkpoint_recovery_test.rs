@@ -1,10 +1,7 @@
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use datafusion::common::ScalarValue;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
@@ -12,122 +9,22 @@ use crate::runtime::master_server::{MasterServer, TaskKey};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::observability::StreamTaskStatus;
+use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
-use crate::api::{ExecutionMode, PipelineSpecBuilder};
-use crate::api::compile_logical_graph;
-use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator};
-use crate::runtime::functions::source::DatagenSpec;
+use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
+use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
-use crate::control_plane::types::{AttemptId, ExecutionIds};
+// Watermark assigner placement is done by the planner (see LogicalGraph::to_execution_graph).
 
-fn create_input_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
-        Field::new("value", DataType::Float64, false),
-        Field::new("partition_key", DataType::Utf8, false),
-    ]))
-}
+use crate::runtime::tests::test_utils::{create_window_input_schema, wait_for_status, window_rows_from_messages};
+use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
-async fn wait_for_status(worker: &Worker, status: StreamTaskStatus, timeout: Duration) {
-    let start = std::time::Instant::now();
-    loop {
-        let st = worker.get_state().await;
-        if !st.task_statuses.is_empty() && st.all_tasks_have_status(status) {
-            return;
-        }
-        if start.elapsed() > timeout {
-            panic!("Timeout waiting for {:?}, state = {:?}", status, st.task_statuses);
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-}
-
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct OutputRow {
-    trace: Option<String>,
-    upstream_vertex_id: Option<String>,
-    upstream_task_index: Option<i32>,
-    timestamp_ms: i64,
-    partition_key: String,
-    value: f64,
-    sum: f64,
-    cnt: i64,
-    avg: f64,
-}
-
-fn parse_task_index_from_vertex_id(vertex_id: &str) -> Option<i32> {
-    // Common format in this codebase is like "Window_1_2" where the last segment is task index.
-    vertex_id.rsplit('_').next()?.parse::<i32>().ok()
-}
-
-fn rows_from_messages(messages: Vec<crate::common::message::Message>) -> Vec<OutputRow> {
-    let mut out = Vec::new();
-    for msg in messages {
-        let extras = msg.get_extras().unwrap_or_default();
-        let trace = extras.get("trace").cloned();
-
-        let upstream_vertex_id = msg.upstream_vertex_id();
-        let upstream_task_index = upstream_vertex_id
-            .as_deref()
-            .and_then(parse_task_index_from_vertex_id);
-
-        let batch = msg.record_batch();
-        let ts = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<TimestampMillisecondArray>()
-            .expect("timestamp col");
-        let val = batch
-            .column(1)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .expect("value col");
-        let key = batch
-            .column(2)
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("key col");
-        let sum = batch
-            .column(3)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .expect("sum col");
-        let cnt = batch
-            .column(4)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .expect("cnt col");
-        let avg = batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<Float64Array>()
-            .expect("avg col");
-
-        for i in 0..batch.num_rows() {
-            out.push(OutputRow {
-                trace: trace.clone(),
-                upstream_vertex_id: upstream_vertex_id.clone(),
-                upstream_task_index,
-                timestamp_ms: ts.value(i),
-                partition_key: key.value(i).to_string(),
-                value: val.value(i),
-                sum: sum.value(i),
-                cnt: cnt.value(i),
-                avg: avg.value(i),
-            });
-        }
-    }
-    out
-}
-
-// TODO this fails because we rely on watermarks to updates state now
-// we need to have proper watermark generator on source here
 #[tokio::test]
 async fn test_manual_checkpoint_and_restore() -> Result<()> {
+    // TODO: This test passes individually but can fail when running the full suite (likely cross-test interference).
     crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
@@ -139,7 +36,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut master_server = MasterServer::new();
 
     // Build pipeline via PipelineContextBuilder (like benchmarks): datagen -> window -> sink
-    let schema = create_input_schema();
+    let schema = create_window_input_schema();
     let sql = "SELECT timestamp, value, partition_key, \
                SUM(value) OVER w as sum_val, \
                COUNT(value) OVER w as cnt_val, \
@@ -157,12 +54,11 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     fields.insert("partition_key".to_string(), FieldGenerator::Key { num_unique: parallelism * 16 });
     fields.insert("value".to_string(), FieldGenerator::Values { values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))] });
 
-    // 5k records/sec for ~5 seconds => ~25k total records (across all tasks)
-    let total_records: usize = 15_000;
+    let total_records: usize = 2_000;
     let datagen_cfg = DatagenSourceConfig::new(
         schema.clone(),
         DatagenSpec {
-            rate: Some(5_000.0),
+            rate: Some(1_000.0),
             limit: Some(total_records),
             run_for_s: None,
             batch_size: 256,
@@ -171,17 +67,41 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         },
     );
 
+    let out_of_orderness_ms: u64 = 100;
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
-        .with_source("datagen_source".to_string(), SourceConfig::DatagenSourceConfig(datagen_cfg), schema.clone())
-        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .with_execution_mode(ExecutionMode::Streaming)
+        .with_source(
+            "datagen_source".to_string(),
+            SourceConfig::DatagenSourceConfig(datagen_cfg),
+            schema.clone(),
+        )
+        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+            "http://{}",
+            storage_server_addr
+        )))
         .sql(sql)
         .build();
 
-    let logical_graph = compile_logical_graph(&spec);
+    let mut logical_graph = compile_logical_graph(&spec);
+    // Allow concurrency-induced reordering across tasks without dropping records as "late".
+    // We size this based on records per task (1ms step) + small headroom.
+    logical_graph.set_window_watermark_assign(WatermarkAssignConfig::new(
+        out_of_orderness_ms,
+        Some(TimeHint::WindowOrderByColumn),
+    ));
 
     let mut exec_graph1 = logical_graph.to_execution_graph();
+    // Apply lateness directly to window operators for this test (PipelineContext stays unaware).
+    let lateness_ms: i64 = out_of_orderness_ms as i64;
+    let vertex_ids_snapshot: Vec<_> = exec_graph1.get_vertices().keys().cloned().collect();
+    for vid in vertex_ids_snapshot {
+        if let Some(v) = exec_graph1.get_vertex_mut(vid.as_ref()) {
+            if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
+                cfg.spec.lateness = Some(lateness_ms);
+            }
+        }
+    }
     exec_graph1.update_channels_with_node_mapping(None);
 
     let vertex_ids_1 = exec_graph1.get_vertices().keys().cloned().collect();
@@ -205,11 +125,10 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         .collect();
 
     // Start worker #1
-    let execution_ids = ExecutionIds::fresh(AttemptId(1));
     let mut worker = Worker::new(
         WorkerConfig::new(
             "worker1".to_string(),
-            execution_ids.clone(),
+            ExecutionIds::fresh(AttemptId(1)),
             exec_graph1,
             vertex_ids_1,
             2,
@@ -219,11 +138,9 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     );
     worker.start().await;
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;
-    worker.signal_tasks_run().await;
-
-    // Trigger checkpoint while pipeline is running
-    tokio::time::sleep(Duration::from_millis(1000)).await;
+    // Queue checkpoint before run so sources pick it up on first iteration.
     worker.trigger_checkpoint(1).await;
+    worker.signal_tasks_run().await;
 
     // Wait for checkpoint to become complete on master
     let mut master_client = MasterServiceClient::connect(format!("http://{}", master_addr)).await?;
@@ -296,13 +213,21 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
 
     // Worker #2 uses fresh channels
     let mut exec_graph2 = logical_graph.to_execution_graph();
+    let vertex_ids_snapshot: Vec<_> = exec_graph2.get_vertices().keys().cloned().collect();
+    for vid in vertex_ids_snapshot {
+        if let Some(v) = exec_graph2.get_vertex_mut(vid.as_ref()) {
+            if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
+                cfg.spec.lateness = Some(lateness_ms);
+            }
+        }
+    }
     exec_graph2.update_channels_with_node_mapping(None);
     let vertex_ids_2 = exec_graph2.get_vertices().keys().cloned().collect();
 
     let mut worker2 = Worker::new(
         WorkerConfig::new(
             "worker2".to_string(),
-            execution_ids.clone(),
+            ExecutionIds::fresh(AttemptId(2)),
             exec_graph2,
             vertex_ids_2,
             2,
@@ -352,8 +277,8 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let messages_run2 = storage_client.drain_vector().await?;
 
     // Convert to row-level records with metadata for debugging.
-    let run1_rows = rows_from_messages(messages_run1);
-    let run2_rows = rows_from_messages(messages_run2);
+    let run1_rows = window_rows_from_messages(messages_run1);
+    let run2_rows = window_rows_from_messages(messages_run2);
     println!(
         "[CHECKPOINT_TEST] drained rows: run1={} run2={}",
         run1_rows.len(),

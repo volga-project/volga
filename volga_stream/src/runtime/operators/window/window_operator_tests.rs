@@ -184,7 +184,7 @@ async fn test_range_mixed_aggs_emits_on_watermark_across_steps() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
+    cfg.spec.parallelize = true;
     let mut h = Harness::new(cfg).await;
 
     h.ingest(batch(vec![1000], vec![10.0], vec!["A"]), "A").await;
@@ -249,7 +249,7 @@ async fn test_rows_sum_3rows_emits_on_watermark() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
+    cfg.spec.parallelize = true;
     let mut h = Harness::new(cfg).await;
 
     h.ingest(
@@ -293,7 +293,7 @@ async fn test_multi_window_sizes_and_strict_late_drop_on_ingest() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
+    cfg.spec.parallelize = true;
     let mut h = Harness::new(cfg).await;
 
     h.ingest(
@@ -346,7 +346,7 @@ async fn test_tiling_min_max_and_avg_smoke_and_strict_late_drop() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
+    cfg.spec.parallelize = true;
 
     use crate::runtime::operators::window::state::tiles::{TileConfig, TimeGranularity as Tg};
     let tile_config = TileConfig::new(vec![Tg::Minutes(1), Tg::Minutes(5)]).expect("tile cfg");
@@ -402,8 +402,8 @@ async fn test_gap_cursor_range_watermark_minus_lateness_between_rows_mixed_aggs(
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
-    cfg.lateness = Some(3000);
+    cfg.spec.parallelize = true;
+    cfg.spec.lateness = Some(3000);
     let mut h = Harness::new(cfg).await;
 
     h.ingest(
@@ -448,8 +448,8 @@ async fn test_gap_cursor_rows_watermark_minus_lateness_between_rows_mixed_aggs()
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
-    cfg.lateness = Some(3000);
+    cfg.spec.parallelize = true;
+    cfg.spec.lateness = Some(3000);
     let mut h = Harness::new(cfg).await;
 
     h.ingest(
@@ -493,7 +493,7 @@ async fn test_watermark_before_any_data_is_noop_and_does_not_panic() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = false;
+    cfg.spec.parallelize = false;
     let mut h = Harness::new(cfg).await;
 
     let out0 = h
@@ -527,8 +527,8 @@ async fn test_late_within_lateness_is_kept_on_ingest() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = false;
-    cfg.lateness = Some(5000);
+    cfg.spec.parallelize = false;
+    cfg.spec.lateness = Some(5000);
     let mut h = Harness::new(cfg).await;
 
     // Advance watermark with no data; output batch is empty.
@@ -571,8 +571,8 @@ async fn test_terminal_max_watermark_flushes_all_buffered_rows_even_with_latenes
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = true;
-    cfg.lateness = Some(3000);
+    cfg.spec.parallelize = true;
+    cfg.spec.lateness = Some(3000);
     let mut h = Harness::new(cfg).await;
 
     h.ingest(
@@ -604,8 +604,8 @@ async fn test_request_mode_emits_no_regular_batches_but_passthroughs_watermarks(
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
     cfg.execution_mode = ExecutionMode::Request;
-    cfg.request_advance_policy = RequestAdvancePolicy::OnWatermark;
-    cfg.parallelize = false;
+    cfg.spec.request_advance_policy = RequestAdvancePolicy::OnWatermark;
+    cfg.spec.parallelize = false;
 
     let mut h = Harness::new(cfg).await;
     assert!(matches!(h.mode, ExecutionMode::Request));
@@ -742,8 +742,8 @@ async fn test_matrix_smoke_window_kind_x_agg_kind_x_lateness() {
     for c in cases {
         let window_exec = window_exec_from_sql(c.sql).await;
         let mut cfg = WindowOperatorConfig::new(window_exec);
-        cfg.parallelize = false;
-        cfg.lateness = c.lateness_ms;
+        cfg.spec.parallelize = false;
+        cfg.spec.lateness = c.lateness_ms;
         let mut h = Harness::new(cfg).await;
 
         h.ingest(
@@ -795,8 +795,8 @@ async fn test_multi_window_mixed_aggs_correctness_smoke() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = false;
-    cfg.lateness = Some(3000);
+    cfg.spec.parallelize = false;
+    cfg.spec.lateness = Some(3000);
     let mut h = Harness::new(cfg).await;
 
     // Step 1: wm=20000 => advance_to=17000 => emits [10000,15000]
@@ -861,8 +861,8 @@ async fn test_watermark_inside_single_run_advances_and_emits() {
 
     let window_exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = false;
-    cfg.lateness = None;
+    cfg.spec.parallelize = false;
+    cfg.spec.lateness = None;
     let mut h = Harness::new(cfg).await;
 
     // One big batch in a single bucket.
@@ -915,8 +915,8 @@ async fn run_range_window_reference_model(batch_size: usize) {
     let wl = crate::storage::index::get_window_length_ms(window_frame);
     assert_eq!(wl, 2000, "expected window length to be 2000ms");
     let mut cfg = WindowOperatorConfig::new(window_exec);
-    cfg.parallelize = false;
-    cfg.lateness = Some(250);
+    cfg.spec.parallelize = false;
+    cfg.spec.lateness = Some(250);
 
     let mut h = Harness::new(cfg).await;
 

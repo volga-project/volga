@@ -770,7 +770,12 @@ impl StreamTask {
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);
                             injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
-                            Self::record_metrics(vertex_id.clone(), &injected, false);
+                            Self::record_metrics(
+                                vertex_id.clone(),
+                                &injected,
+                                false,
+                                metrics_labels.as_ref(),
+                            );
                             Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 injected,
@@ -787,7 +792,7 @@ impl StreamTask {
                                 MAX_WATERMARK_VALUE,
                                 None,
                             ));
-                            Self::record_metrics(vertex_id.clone(), &wm, false);
+                            Self::record_metrics(vertex_id.clone(), &wm, false, metrics_labels.as_ref());
                             Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 wm,
