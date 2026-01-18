@@ -115,31 +115,6 @@ impl AggregateRegistry {
         self.register_aggregate("sum", AggregatorType::RetractableAccumulator);
         self.register_aggregate("avg", AggregatorType::RetractableAccumulator);
 
-        for name in [
-            "min_where",
-            "max_where",
-            "min_cate",
-            "max_cate",
-            "min_cate_where",
-            "max_cate_where",
-        ] {
-            self.register_aggregate(name, AggregatorType::PlainAccumulator);
-        }
-
-        for name in [
-            "count_where",
-            "sum_where",
-            "avg_where",
-            "count_cate",
-            "sum_cate",
-            "avg_cate",
-            "count_cate_where",
-            "sum_cate_where",
-            "avg_cate_where",
-        ] {
-            self.register_aggregate(name, AggregatorType::RetractableAccumulator);
-        }
-
         self.register_aggregate("stddev", AggregatorType::RetractableAccumulator);
         self.register_aggregate("stddev_pop", AggregatorType::RetractableAccumulator);
         self.register_aggregate("stddev_samp", AggregatorType::RetractableAccumulator);

@@ -12,7 +12,6 @@ use crate::runtime::operators::window::aggregates::{Aggregation, VirtualPoint};
 use crate::storage::index::{BucketIndex, DataRequest, SortedRangeView};
 use crate::runtime::operators::window::{Cursor, TimeGranularity};
 use crate::storage::batch_store::BatchId;
-use arrow::array::BooleanArray;
 
 #[derive(Debug, Clone, Copy)]
 struct Row {
