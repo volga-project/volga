@@ -1,15 +1,15 @@
 use std::any::Any;
 use std::collections::HashMap;
-use std::hash::Hash;
+use std::hash::{Hash, Hasher};
 use std::mem::size_of_val;
 use std::sync::Arc;
 
-use arrow::array::{
-    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int32Array, Int64Array, StringArray,
-    UInt32Array, UInt64Array,
-};
+use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
+use arrow::compute::{filter, is_not_null, take};
+use arrow::compute::kernels::boolean::and_kleene;
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::{exec_err, Result};
+use datafusion::common::hash_utils::create_hashes;
 use datafusion::logical_expr::function::{AccumulatorArgs, StateFieldsArgs};
 use datafusion::logical_expr::{
     Accumulator, AggregateUDF, AggregateUDFImpl, GroupsAccumulator, ReversedUDAF, Signature,
@@ -20,6 +20,7 @@ use datafusion::physical_expr::PhysicalExpr;
 use datafusion::scalar::ScalarValue;
 use datafusion::physical_expr::expressions::Column;
 use datafusion::prelude::SessionContext;
+use ahash::RandomState;
 use datafusion::functions_aggregate::{
     average::avg_udaf,
     count::count_udaf,
@@ -76,7 +77,20 @@ impl CateUdfSpec {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EncodedStateBytes {
     single: Option<Vec<Vec<u8>>>,
-    cate: Option<HashMap<String, Vec<Vec<u8>>>>,
+    cate: Option<Vec<(Vec<u8>, Vec<Vec<u8>>)>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CateKey {
+    hash: u64,
+    value: ScalarValue,
+}
+
+impl Hash for CateKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // Use the precomputed hash for fast lookup; ScalarValue is used to disambiguate collisions.
+        self.hash.hash(state);
+    }
 }
 
 #[derive(Debug)]
@@ -87,7 +101,7 @@ struct CateAccumulator {
     base_udaf: Arc<AggregateUDF>,
     value_type: Option<DataType>,
     single: Option<Box<dyn Accumulator>>,
-    cate: HashMap<String, Box<dyn Accumulator>>,
+    cate: HashMap<CateKey, Box<dyn Accumulator>>,
 }
 
 impl CateAccumulator {
@@ -144,55 +158,38 @@ impl CateAccumulator {
         }
     }
 
-    fn update_one(acc: &mut dyn Accumulator, value_array: &ArrayRef, row: usize) -> Result<()> {
-        let slice = value_array.slice(row, 1);
-        acc.update_batch(&[slice])
+    fn build_mask(
+        cond_array: Option<&BooleanArray>,
+        cate_array: Option<&ArrayRef>,
+    ) -> Result<Option<BooleanArray>> {
+        let mut mask = cond_array.cloned();
+        if let Some(cate_array) = cate_array {
+            let not_null = is_not_null(cate_array.as_ref())?;
+            mask = Some(if let Some(existing) = mask {
+                and_kleene(&existing, &not_null)?
+            } else {
+                not_null
+            });
+        }
+        Ok(mask)
     }
 
-    fn retract_one(acc: &mut dyn Accumulator, value_array: &ArrayRef, row: usize) -> Result<()> {
-        let slice = value_array.slice(row, 1);
-        acc.retract_batch(&[slice])
+    fn hash_categories(cate_array: &ArrayRef) -> Result<Vec<u64>> {
+        let mut hashes = vec![0u64; cate_array.len()];
+        let random_state = RandomState::with_seeds(0, 0, 0, 0);
+        create_hashes(&[cate_array.clone()], &random_state, &mut hashes)?;
+        Ok(hashes)
     }
 
-    fn category_to_string(array: &ArrayRef, row: usize) -> Result<Option<String>> {
-        if array.is_null(row) {
-            return Ok(None);
-        }
-        match array.data_type() {
-            DataType::Utf8 => {
-                let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                Ok(Some(a.value(row).to_string()))
-            }
-            DataType::Int64 => {
-                let a = array.as_any().downcast_ref::<Int64Array>().unwrap();
-                Ok(Some(a.value(row).to_string()))
-            }
-            DataType::Int32 => {
-                let a = array.as_any().downcast_ref::<Int32Array>().unwrap();
-                Ok(Some(a.value(row).to_string()))
-            }
-            DataType::UInt64 => {
-                let a = array.as_any().downcast_ref::<UInt64Array>().unwrap();
-                Ok(Some(a.value(row).to_string()))
-            }
-            DataType::UInt32 => {
-                let a = array.as_any().downcast_ref::<UInt32Array>().unwrap();
-                Ok(Some(a.value(row).to_string()))
-            }
-            DataType::Float64 => {
-                let a = array.as_any().downcast_ref::<Float64Array>().unwrap();
-                Ok(Some(format_float(a.value(row))))
-            }
-            DataType::Float32 => {
-                let a = array.as_any().downcast_ref::<Float32Array>().unwrap();
-                Ok(Some(format_float(a.value(row) as f64)))
-            }
-            DataType::Boolean => {
-                let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                Ok(Some(a.value(row).to_string()))
-            }
-            other => exec_err!("unsupported category type {}", other),
-        }
+    fn key_from_value(value: ScalarValue) -> Result<CateKey> {
+        let array = value
+            .to_array_of_size(1)
+            .map_err(|e| df_error(format!("hash value to array failed: {e}")))?;
+        let hashes = Self::hash_categories(&array)?;
+        Ok(CateKey {
+            hash: hashes[0],
+            value,
+        })
     }
 }
 
@@ -226,33 +223,57 @@ impl Accumulator for CateAccumulator {
                 self.single = Some(self.build_accumulator(&value_type)?);
             }
             let acc = self.single.as_mut().expect("single accumulator exists");
-            for row in 0..value_array.len() {
-                if let Some(cond) = cond_array {
-                    if cond.is_null(row) || !cond.value(row) {
-                        continue;
-                    }
+            if let Some(mask) = Self::build_mask(cond_array, None)? {
+                let filtered = filter(value_array.as_ref(), &mask)
+                    .map_err(|e| df_error(format!("filter values failed: {e}")))?;
+                if filtered.len() == 0 {
+                    return Ok(());
                 }
-                Self::update_one(acc.as_mut(), value_array, row)?;
+                acc.update_batch(&[filtered])?;
+            } else {
+                acc.update_batch(&[value_array.clone()])?;
             }
             return Ok(());
         }
 
         let cate_array = cate_array.expect("category array must exist");
-        for row in 0..value_array.len() {
-            if let Some(cond) = cond_array {
-                if cond.is_null(row) || !cond.value(row) {
-                    continue;
-                }
-            }
-            let Some(cate) = Self::category_to_string(cate_array, row)? else {
-                continue;
+        let mask = Self::build_mask(cond_array, Some(cate_array))?;
+        let (value_array, cate_array) = if let Some(mask) = mask {
+            let filtered_values = filter(value_array.as_ref(), &mask)
+                .map_err(|e| df_error(format!("filter values failed: {e}")))?;
+            let filtered_cates = filter(cate_array.as_ref(), &mask)
+                .map_err(|e| df_error(format!("filter categories failed: {e}")))?;
+            (filtered_values, filtered_cates)
+        } else {
+            (value_array.clone(), cate_array.clone())
+        };
+
+        if value_array.len() == 0 {
+            return Ok(());
+        }
+
+        let hashes = Self::hash_categories(&cate_array)?;
+        let mut grouped: HashMap<CateKey, Vec<u32>> = HashMap::new();
+        for row in 0..cate_array.len() {
+            let value = ScalarValue::try_from_array(cate_array.as_ref(), row)
+                .map_err(|e| df_error(format!("category value decode failed: {e}")))?;
+            let key = CateKey {
+                hash: hashes[row],
+                value,
             };
-            if !self.cate.contains_key(&cate) {
+            grouped.entry(key).or_default().push(row as u32);
+        }
+
+        for (key, indices) in grouped {
+            if !self.cate.contains_key(&key) {
                 let acc = self.build_accumulator(&value_type)?;
-                self.cate.insert(cate.clone(), acc);
+                self.cate.insert(key.clone(), acc);
             }
-            let acc = self.cate.get_mut(&cate).expect("acc exists");
-            Self::update_one(acc.as_mut(), value_array, row)?;
+            let acc = self.cate.get_mut(&key).expect("acc exists");
+            let indices = UInt32Array::from(indices);
+            let group_values = take(value_array.as_ref(), &indices, None)
+                .map_err(|e| df_error(format!("take values failed: {e}")))?;
+            acc.update_batch(&[group_values])?;
         }
         Ok(())
     }
@@ -290,37 +311,61 @@ impl Accumulator for CateAccumulator {
                 self.single = Some(self.build_accumulator(&value_type)?);
             }
             let acc = self.single.as_mut().expect("single accumulator exists");
-            for row in 0..value_array.len() {
-                if let Some(cond) = cond_array {
-                    if cond.is_null(row) || !cond.value(row) {
-                        continue;
-                    }
+            if let Some(mask) = Self::build_mask(cond_array, None)? {
+                let filtered = filter(value_array.as_ref(), &mask)
+                    .map_err(|e| df_error(format!("filter values failed: {e}")))?;
+                if filtered.len() == 0 {
+                    return Ok(());
                 }
-                Self::retract_one(acc.as_mut(), value_array, row)?;
+                acc.retract_batch(&[filtered])?;
+            } else {
+                acc.retract_batch(&[value_array.clone()])?;
             }
             return Ok(());
         }
 
         let cate_array = cate_array.expect("category array must exist");
-        let mut to_remove: Vec<String> = Vec::new();
-        for row in 0..value_array.len() {
-            if let Some(cond) = cond_array {
-                if cond.is_null(row) || !cond.value(row) {
-                    continue;
-                }
-            }
-            let Some(cate) = Self::category_to_string(cate_array, row)? else {
-                continue;
+        let mask = Self::build_mask(cond_array, Some(cate_array))?;
+        let (value_array, cate_array) = if let Some(mask) = mask {
+            let filtered_values = filter(value_array.as_ref(), &mask)
+                .map_err(|e| df_error(format!("filter values failed: {e}")))?;
+            let filtered_cates = filter(cate_array.as_ref(), &mask)
+                .map_err(|e| df_error(format!("filter categories failed: {e}")))?;
+            (filtered_values, filtered_cates)
+        } else {
+            (value_array.clone(), cate_array.clone())
+        };
+
+        if value_array.len() == 0 {
+            return Ok(());
+        }
+
+        let hashes = Self::hash_categories(&cate_array)?;
+        let mut grouped: HashMap<CateKey, Vec<u32>> = HashMap::new();
+        for row in 0..cate_array.len() {
+            let value = ScalarValue::try_from_array(cate_array.as_ref(), row)
+                .map_err(|e| df_error(format!("category value decode failed: {e}")))?;
+            let key = CateKey {
+                hash: hashes[row],
+                value,
             };
-            if !self.cate.contains_key(&cate) {
+            grouped.entry(key).or_default().push(row as u32);
+        }
+
+        let mut to_remove: Vec<CateKey> = Vec::new();
+        for (key, indices) in grouped {
+            if !self.cate.contains_key(&key) {
                 let acc = self.build_accumulator(&value_type)?;
-                self.cate.insert(cate.clone(), acc);
+                self.cate.insert(key.clone(), acc);
             }
-            let acc = self.cate.get_mut(&cate).expect("acc exists");
-            Self::retract_one(acc.as_mut(), value_array, row)?;
+            let acc = self.cate.get_mut(&key).expect("acc exists");
+            let indices = UInt32Array::from(indices);
+            let group_values = take(value_array.as_ref(), &indices, None)
+                .map_err(|e| df_error(format!("take values failed: {e}")))?;
+            acc.retract_batch(&[group_values])?;
             let empty = acc.state()?.iter().all(|s| s.is_null());
             if empty {
-                to_remove.push(cate);
+                to_remove.push(key);
             }
         }
         for k in to_remove {
@@ -338,15 +383,18 @@ impl Accumulator for CateAccumulator {
         if self.cate.is_empty() {
             return Ok(ScalarValue::Utf8(Some(String::new())));
         }
-        let mut entries: Vec<_> = self.cate.iter_mut().collect();
-        entries.sort_by_key(|(k, _)| (*k).clone());
-        let mut parts: Vec<String> = Vec::with_capacity(entries.len());
-        for (k, acc) in entries {
+        let mut parts: Vec<String> = Vec::with_capacity(self.cate.len());
+        for (k, acc) in self.cate.iter_mut() {
+            let cate_str = match scalar_to_string(&k.value) {
+                Some(s) => s,
+                None => continue,
+            };
             let val = acc.evaluate()?;
             if let Some(s) = scalar_to_string(&val) {
-                parts.push(format!("{k}:{s}"));
+                parts.push(format!("{cate_str}:{s}"));
             }
         }
+        parts.sort();
         Ok(ScalarValue::Utf8(Some(parts.join(","))))
     }
 
@@ -362,9 +410,11 @@ impl Accumulator for CateAccumulator {
                 cate: None,
             }
         } else {
-            let mut cate: HashMap<String, Vec<Vec<u8>>> = HashMap::new();
+            let mut cate: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(self.cate.len());
             for (k, acc) in self.cate.iter_mut() {
-                cate.insert(k.clone(), acc_state_to_bytes(acc.as_mut())?);
+                let key_bytes = scalar_value_to_bytes(&k.value)
+                    .map_err(|e| df_error(format!("state key encode failed: {e}")))?;
+                cate.push((key_bytes, acc_state_to_bytes(acc.as_mut())?));
             }
             EncodedStateBytes {
                 single: None,
@@ -401,13 +451,16 @@ impl Accumulator for CateAccumulator {
                 merge_state_bytes(acc.as_mut(), &single)?;
             }
             if let Some(cate) = decoded.cate {
-                for (k, state_bytes) in cate {
+                for (key_bytes, state_bytes) in cate {
                     let value_type = infer_value_type(self.kind, &state_bytes)?;
-                    if !self.cate.contains_key(&k) {
+                    let key_value = scalar_value_from_bytes(&key_bytes)
+                        .map_err(|e| df_error(format!("state key decode failed: {e}")))?;
+                    let key = Self::key_from_value(key_value)?;
+                    if !self.cate.contains_key(&key) {
                         let acc = self.build_accumulator(&value_type)?;
-                        self.cate.insert(k.clone(), acc);
+                        self.cate.insert(key.clone(), acc);
                     }
-                    let acc = self.cate.get_mut(&k).expect("acc exists");
+                    let acc = self.cate.get_mut(&key).expect("acc exists");
                     merge_state_bytes(acc.as_mut(), &state_bytes)?;
                 }
             }
