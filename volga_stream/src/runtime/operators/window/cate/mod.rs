@@ -1,5 +1,5 @@
 mod accumulator;
-mod types;
+pub(crate) mod types;
 mod udf;
 mod utils;
 

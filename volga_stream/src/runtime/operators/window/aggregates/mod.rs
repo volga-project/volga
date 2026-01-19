@@ -14,6 +14,7 @@ use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::storage::batch_store::Timestamp;
 use crate::storage::index::{DataRequest, SortedRangeView};
 use crate::runtime::operators::window::Cursor;
+use crate::runtime::operators::window::cate::types::{AggFlavor, CATE_KINDS};
 
 pub mod arrow_utils;
 pub mod evaluator;
@@ -77,6 +78,60 @@ pub enum AggregatorType {
     Evaluator, // evaluates whole window
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AggKind {
+    Sum,
+    Avg,
+    Count,
+    Min,
+    Max,
+    Stddev,
+    StddevPop,
+    StddevSamp,
+    VarPop,
+    VarSamp,
+    Variance,
+}
+
+impl AggKind {
+    pub const ALL: [AggKind; 11] = [
+        AggKind::Sum,
+        AggKind::Avg,
+        AggKind::Count,
+        AggKind::Min,
+        AggKind::Max,
+        AggKind::Stddev,
+        AggKind::StddevPop,
+        AggKind::StddevSamp,
+        AggKind::VarPop,
+        AggKind::VarSamp,
+        AggKind::Variance,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            AggKind::Sum => "sum",
+            AggKind::Avg => "avg",
+            AggKind::Count => "count",
+            AggKind::Min => "min",
+            AggKind::Max => "max",
+            AggKind::Stddev => "stddev",
+            AggKind::StddevPop => "stddev_pop",
+            AggKind::StddevSamp => "stddev_samp",
+            AggKind::VarPop => "var_pop",
+            AggKind::VarSamp => "var_samp",
+            AggKind::Variance => "variance",
+        }
+    }
+
+    pub fn aggregator_type(&self) -> AggregatorType {
+        match self {
+            AggKind::Min | AggKind::Max => AggregatorType::PlainAccumulator,
+            _ => AggregatorType::RetractableAccumulator,
+        }
+    }
+}
+
 pub trait Evaluator: Send + Sync {
     fn evaluate(&self, values: &[ScalarValue]) -> ScalarValue;
     fn name(&self) -> &str;
@@ -108,44 +163,16 @@ impl AggregateRegistry {
     }
     
     fn register_supported_aggregates(&mut self) {
-        self.register_aggregate("min", AggregatorType::PlainAccumulator);
-        self.register_aggregate("max", AggregatorType::PlainAccumulator);
-
-        self.register_aggregate("count", AggregatorType::RetractableAccumulator);
-        self.register_aggregate("sum", AggregatorType::RetractableAccumulator);
-        self.register_aggregate("avg", AggregatorType::RetractableAccumulator);
-
-        for name in [
-            "min_where",
-            "max_where",
-            "min_cate",
-            "max_cate",
-            "min_cate_where",
-            "max_cate_where",
-        ] {
-            self.register_aggregate(name, AggregatorType::PlainAccumulator);
+        for kind in AggKind::ALL {
+            self.register_aggregate(kind.name(), kind.aggregator_type());
         }
 
-        for name in [
-            "count_where",
-            "sum_where",
-            "avg_where",
-            "count_cate",
-            "sum_cate",
-            "avg_cate",
-            "count_cate_where",
-            "sum_cate_where",
-            "avg_cate_where",
-        ] {
-            self.register_aggregate(name, AggregatorType::RetractableAccumulator);
+        for kind in CATE_KINDS {
+            for flavor in AggFlavor::ALL {
+                let name = format!("{}{}", kind.name(), flavor.suffix());
+                self.register_aggregate(&name, kind.aggregator_type());
+            }
         }
-
-        self.register_aggregate("stddev", AggregatorType::RetractableAccumulator);
-        self.register_aggregate("stddev_pop", AggregatorType::RetractableAccumulator);
-        self.register_aggregate("stddev_samp", AggregatorType::RetractableAccumulator);
-        self.register_aggregate("var_pop", AggregatorType::RetractableAccumulator);
-        self.register_aggregate("var_samp", AggregatorType::RetractableAccumulator);
-        self.register_aggregate("variance", AggregatorType::RetractableAccumulator);
     }
     
     fn register_aggregate(&mut self, name: &str, aggregator_type: AggregatorType) {

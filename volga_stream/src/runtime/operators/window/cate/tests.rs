@@ -140,27 +140,6 @@ fn format_float(value: f64) -> String {
     }
 }
 
-fn scalar_to_string(value: &ScalarValue) -> Option<String> {
-    match value {
-        ScalarValue::Null => None,
-        ScalarValue::Boolean(Some(v)) => Some(v.to_string()),
-        ScalarValue::Int8(Some(v)) => Some(v.to_string()),
-        ScalarValue::Int16(Some(v)) => Some(v.to_string()),
-        ScalarValue::Int32(Some(v)) => Some(v.to_string()),
-        ScalarValue::Int64(Some(v)) => Some(v.to_string()),
-        ScalarValue::UInt8(Some(v)) => Some(v.to_string()),
-        ScalarValue::UInt16(Some(v)) => Some(v.to_string()),
-        ScalarValue::UInt32(Some(v)) => Some(v.to_string()),
-        ScalarValue::UInt64(Some(v)) => Some(v.to_string()),
-        ScalarValue::Float32(Some(v)) => Some(format_float(*v as f64)),
-        ScalarValue::Float64(Some(v)) => Some(format_float(*v)),
-        ScalarValue::Utf8(Some(v)) => Some(v.clone()),
-        ScalarValue::LargeUtf8(Some(v)) => Some(v.clone()),
-        ScalarValue::Utf8View(Some(v)) => Some(v.clone()),
-        _ => None,
-    }
-}
-
 fn eval_window_expr(window_expr: &Arc<dyn datafusion::physical_plan::WindowExpr>) -> ScalarValue {
     let batches = [
         test_utils::batch(&[(1000, 1.0, "A", 0), (2000, 3.0, "A", 1)]),
@@ -318,7 +297,7 @@ async fn test_cate_where_matrix() {
                             assert_eq!(out, expected);
                         } else {
                             // For secondary or regular aggregate, just ensure it evaluates.
-                            assert!(scalar_to_string(&out).is_some(), "expected non-null");
+                            assert!(!matches!(out, ScalarValue::Null), "expected non-null");
                         }
                     }
                 }

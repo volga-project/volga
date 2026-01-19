@@ -18,7 +18,8 @@ use datafusion::logical_expr::{
 use datafusion::prelude::SessionContext;
 
 use super::accumulator::CateAccumulator;
-use super::types::{AggFlavor, AggKind, CateUdfSpec};
+use super::types::{AggFlavor, CateUdfSpec};
+use crate::runtime::operators::window::aggregates::AggKind;
 use super::utils::{coerce_value_type, df_error};
 
 #[derive(Debug, Clone)]
@@ -159,6 +160,7 @@ fn base_udaf(kind: AggKind) -> Arc<AggregateUDF> {
         AggKind::Count => count_udaf(),
         AggKind::Min => min_udaf(),
         AggKind::Max => max_udaf(),
+        _ => unreachable!("unsupported agg kind for cate UDAF"),
     }
 }
 

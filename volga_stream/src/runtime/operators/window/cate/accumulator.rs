@@ -15,7 +15,8 @@ use datafusion::physical_expr::expressions::Column;
 use datafusion::physical_expr::PhysicalExpr;
 use datafusion::scalar::ScalarValue;
 
-use super::types::{AggKind, CateKey, CateUdfSpec, EncodedStateBytes};
+use super::types::{CateKey, CateUdfSpec, EncodedStateBytes};
+use crate::runtime::operators::window::aggregates::{AggKind, AggregatorType};
 use super::utils::{
     acc_state_to_bytes, coerce_value_type, df_error, infer_value_type, merge_state_bytes,
     scalar_to_string,
@@ -55,10 +56,6 @@ impl CateAccumulator {
         Ok(coerced)
     }
 
-    fn is_retractable(kind: AggKind) -> bool {
-        matches!(kind, AggKind::Sum | AggKind::Avg | AggKind::Count)
-    }
-
     fn build_accumulator(&self, value_type: &DataType) -> Result<Box<dyn Accumulator>> {
         let coerced = if matches!(self.kind, AggKind::Count) {
             vec![value_type.clone()]
@@ -80,7 +77,7 @@ impl CateAccumulator {
             is_distinct: false,
             exprs: &exprs,
         };
-        if Self::is_retractable(self.kind) {
+        if matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator) {
             self.base_udaf.create_sliding_accumulator(acc_args)
         } else {
             self.base_udaf.accumulator(acc_args)
@@ -239,7 +236,7 @@ impl Accumulator for CateAccumulator {
     }
 
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        if !Self::is_retractable(self.kind) {
+        if !matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator) {
             return exec_err!("retract not supported for {}", self.base_udaf.name());
         }
 
@@ -423,6 +420,6 @@ impl Accumulator for CateAccumulator {
     }
 
     fn supports_retract_batch(&self) -> bool {
-        Self::is_retractable(self.kind)
+        matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator)
     }
 }

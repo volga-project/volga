@@ -5,14 +5,7 @@ use datafusion::logical_expr::AggregateUDF;
 use datafusion::scalar::ScalarValue;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum AggKind {
-    Sum,
-    Avg,
-    Count,
-    Min,
-    Max,
-}
+pub(crate) use crate::runtime::operators::window::aggregates::AggKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AggFlavor {
@@ -20,6 +13,30 @@ pub(crate) enum AggFlavor {
     Cate,
     CateWhere,
 }
+
+impl AggFlavor {
+    pub(crate) const ALL: [AggFlavor; 3] = [
+        AggFlavor::Where,
+        AggFlavor::Cate,
+        AggFlavor::CateWhere,
+    ];
+
+    pub(crate) fn suffix(&self) -> &'static str {
+        match self {
+            AggFlavor::Where => "_where",
+            AggFlavor::Cate => "_cate",
+            AggFlavor::CateWhere => "_cate_where",
+        }
+    }
+}
+
+pub(crate) const CATE_KINDS: [AggKind; 5] = [
+    AggKind::Sum,
+    AggKind::Avg,
+    AggKind::Count,
+    AggKind::Min,
+    AggKind::Max,
+];
 
 #[derive(Debug, Clone)]
 pub(crate) struct CateUdfSpec {

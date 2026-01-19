@@ -87,6 +87,7 @@ pub(crate) fn infer_value_type(kind: AggKind, state: &[Vec<u8>]) -> Result<DataT
         AggKind::Avg => scalars.get(1).or_else(|| scalars.get(0)),
         AggKind::Sum | AggKind::Min | AggKind::Max => scalars.get(0),
         AggKind::Count => Some(&ScalarValue::Int64(Some(0))),
+        _ => return exec_err!("unsupported agg kind for cate state"),
     }
     .ok_or_else(|| df_error("missing state value"))?;
     Ok(scalar.data_type())
