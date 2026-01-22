@@ -171,12 +171,12 @@ impl WatermarkAssignerState {
 /// Returns `Some(new_watermark_value)` when the task watermark advanced, otherwise `None`.
 pub async fn advance_watermark_min(
     watermark: WatermarkMessage,
-    upstream_vertices: &[String],
+    active_upstreams: &[String],
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
     current_watermark: Arc<AtomicU64>,
 ) -> Option<u64> {
     // Sources (no incoming edges): just advance monotonically.
-    if upstream_vertices.is_empty() {
+    if active_upstreams.is_empty() {
         let current_wm = current_watermark.load(Ordering::SeqCst);
         if watermark.watermark_value > current_wm {
             current_watermark.store(watermark.watermark_value, Ordering::SeqCst);
@@ -203,14 +203,14 @@ pub async fn advance_watermark_min(
     }
     upstream_wms.insert(upstream_id, watermark.watermark_value);
 
-    if !upstream_vertices
+    if !active_upstreams
         .iter()
         .all(|u| upstream_wms.contains_key(u))
     {
         return None;
     }
 
-    let min_watermark = upstream_vertices
+    let min_watermark = active_upstreams
         .iter()
         .map(|u| *upstream_wms.get(u).expect("missing upstream watermark"))
         .min()
@@ -238,6 +238,7 @@ mod tests {
         use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
     use crate::transport::transport_client::DataReaderControl;
     use std::sync::atomic::AtomicU8;
+    use std::time::Duration;
 
     #[test]
     fn assigner_tracks_per_upstream_independently() {
@@ -260,6 +261,7 @@ mod tests {
             time_hint: Some(TimeHint::ColumnName {
                 name: "ts_ms".to_string(),
             }),
+            idle_timeout_ms: Some(WatermarkAssignConfig::DEFAULT_IDLE_TIMEOUT_MS),
         };
         let mut assigner = WatermarkAssignerState::new(cfg, None);
 
@@ -413,6 +415,118 @@ mod tests {
             _ => unreachable!(),
         };
         assert_eq!(wm, 50);
+    }
+
+    #[tokio::test]
+    async fn idle_upstream_is_excluded_from_min_merge() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("ts_ms", DataType::Int64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let input = Box::pin(async_stream::stream! {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            yield Message::new(Some("u0".to_string()), batch, None, None);
+        });
+
+        let mut cfg = WatermarkAssignConfig::new(
+            0,
+            Some(TimeHint::ColumnName {
+                name: "ts_ms".to_string(),
+            }),
+        );
+        cfg.idle_timeout_ms = Some(1);
+
+        let mut out = StreamTask::create_preprocessed_input_stream(
+            input,
+            Arc::<str>::from("v0"),
+            OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
+                crate::common::test_utils::IdentityMapFunction,
+            )),
+            Some(cfg),
+            vec!["u0".to_string(), "u1".to_string()],
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
+            CheckpointAligner::new(
+                &["u0".to_string(), "u1".to_string()],
+                DataReaderControl::empty_for_test(),
+            ),
+            None,
+        );
+
+        let mut seen = Vec::new();
+        while let Some(m) = out.next().await {
+            seen.push(m);
+        }
+
+        assert!(matches!(seen[0], Message::Regular(_)));
+        assert!(matches!(seen[1], Message::Watermark(_)));
+    }
+
+    #[tokio::test]
+    async fn idle_timeout_disabled_blocks_min_merge() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("k", DataType::Utf8, false),
+            Field::new("ts_ms", DataType::Int64, false),
+        ]));
+
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec!["A"])) as ArrayRef,
+                Arc::new(Int64Array::from(vec![100_i64])) as ArrayRef,
+            ],
+        )
+        .unwrap();
+
+        let input = Box::pin(async_stream::stream! {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            yield Message::new(Some("u0".to_string()), batch, None, None);
+        });
+
+        let mut cfg = WatermarkAssignConfig::new(
+            0,
+            Some(TimeHint::ColumnName {
+                name: "ts_ms".to_string(),
+            }),
+        );
+        cfg.idle_timeout_ms = None;
+
+        let mut out = StreamTask::create_preprocessed_input_stream(
+            input,
+            Arc::<str>::from("v0"),
+            OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
+                crate::common::test_utils::IdentityMapFunction,
+            )),
+            Some(cfg),
+            vec!["u0".to_string(), "u1".to_string()],
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
+            CheckpointAligner::new(
+                &["u0".to_string(), "u1".to_string()],
+                DataReaderControl::empty_for_test(),
+            ),
+            None,
+        );
+
+        let mut seen = Vec::new();
+        while let Some(m) = out.next().await {
+            seen.push(m);
+        }
+
+        assert!(matches!(seen[0], Message::Regular(_)));
+        assert_eq!(seen.len(), 1);
     }
 }
 

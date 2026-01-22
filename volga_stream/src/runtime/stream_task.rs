@@ -28,7 +28,7 @@ use crate::transport::transport_client::DataReaderControl;
 use std::collections::HashSet;
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 // serde imports removed; this module does not define serializable DTOs directly.
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
@@ -348,21 +348,45 @@ impl StreamTask {
     ) -> MessageStream {
         Box::pin(stream! {
             let mut input_stream = input_stream;
+            let idle_timeout_ms = watermark_assign.as_ref().and_then(|cfg| cfg.idle_timeout_ms);
             let mut watermark_assigner =
                 watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, Some(&operator_config)));
+            let mut last_seen: HashMap<String, Instant> = upstream_vertices
+                .iter()
+                .map(|u| (u.clone(), Instant::now()))
+                .collect();
 
             while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
 
                 match &message {
                     Message::Watermark(watermark) => {
+                        if let Some(upstream_id) = watermark.metadata.upstream_vertex_id.as_ref() {
+                            last_seen.insert(upstream_id.clone(), Instant::now());
+                        }
                         if watermark_assigner.is_some() && watermark.watermark_value != MAX_WATERMARK_VALUE {
                             continue;
                         }
+                        let now = Instant::now();
+                        let active_upstreams: Vec<String> = if let Some(timeout_ms) = idle_timeout_ms {
+                            let timeout = Duration::from_millis(timeout_ms);
+                            upstream_vertices
+                                .iter()
+                                .filter(|u| {
+                                    last_seen
+                                        .get(*u)
+                                        .map(|t| now.duration_since(*t) <= timeout)
+                                        .unwrap_or(false)
+                                })
+                                .cloned()
+                                .collect()
+                        } else {
+                            upstream_vertices.clone()
+                        };
                         // Advance watermark and only forward to operator if advanced.
                         if let Some(new_watermark) = advance_watermark_min(
                             watermark.clone(),
-                            &upstream_vertices,
+                            &active_upstreams,
                             upstream_watermarks.clone(),
                             current_watermark.clone(),
                         ).await {
@@ -389,16 +413,33 @@ impl StreamTask {
                         let upstream_for_msg = message
                             .upstream_vertex_id()
                             .unwrap_or_else(|| vertex_id.as_ref().to_string());
+                        last_seen.insert(upstream_for_msg.clone(), Instant::now());
                         let injected = watermark_assigner
                             .as_mut()
                             .and_then(|assigner| assigner.on_data_message(&upstream_for_msg, &message));
                         yield message;
                         if let Some(wm) = injected {
+                            let now = Instant::now();
+                            let active_upstreams: Vec<String> = if let Some(timeout_ms) = idle_timeout_ms {
+                                let timeout = Duration::from_millis(timeout_ms);
+                                upstream_vertices
+                                    .iter()
+                                    .filter(|u| {
+                                        last_seen
+                                            .get(*u)
+                                            .map(|t| now.duration_since(*t) <= timeout)
+                                            .unwrap_or(false)
+                                    })
+                                    .cloned()
+                                    .collect()
+                            } else {
+                                upstream_vertices.clone()
+                            };
                             // Treat injected watermark exactly like an upstream watermark: merge and
                             // emit a task-local watermark only if it advances.
                             if let Some(new_watermark) = advance_watermark_min(
                                 wm.clone(),
-                                &upstream_vertices,
+                                &active_upstreams,
                                 upstream_watermarks.clone(),
                                 current_watermark.clone(),
                             ).await {
