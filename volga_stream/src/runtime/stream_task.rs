@@ -119,6 +119,29 @@ pub struct StreamTask {
 }
 
 impl StreamTask {
+    fn active_upstreams_for_idle(
+        now: Instant,
+        idle_timeout_ms: Option<u64>,
+        upstream_vertices: &[String],
+        last_seen: &HashMap<String, Instant>,
+    ) -> Vec<String> {
+        if let Some(timeout_ms) = idle_timeout_ms {
+            let timeout = Duration::from_millis(timeout_ms);
+            upstream_vertices
+                .iter()
+                .filter(|u| {
+                    last_seen
+                        .get(*u)
+                        .map(|t| now.duration_since(*t) <= timeout)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        } else {
+            upstream_vertices.to_vec()
+        }
+    }
+
     pub fn new(
         vertex_id: VertexId,
         operator_config: OperatorConfig,
@@ -355,7 +378,6 @@ impl StreamTask {
                 .iter()
                 .map(|u| (u.clone(), Instant::now()))
                 .collect();
-
             while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
 
@@ -367,22 +389,12 @@ impl StreamTask {
                         if watermark_assigner.is_some() && watermark.watermark_value != MAX_WATERMARK_VALUE {
                             continue;
                         }
-                        let now = Instant::now();
-                        let active_upstreams: Vec<String> = if let Some(timeout_ms) = idle_timeout_ms {
-                            let timeout = Duration::from_millis(timeout_ms);
-                            upstream_vertices
-                                .iter()
-                                .filter(|u| {
-                                    last_seen
-                                        .get(*u)
-                                        .map(|t| now.duration_since(*t) <= timeout)
-                                        .unwrap_or(false)
-                                })
-                                .cloned()
-                                .collect()
-                        } else {
-                            upstream_vertices.clone()
-                        };
+                        let active_upstreams = Self::active_upstreams_for_idle(
+                            Instant::now(),
+                            idle_timeout_ms,
+                            &upstream_vertices,
+                            &last_seen,
+                        );
                         // Advance watermark and only forward to operator if advanced.
                         if let Some(new_watermark) = advance_watermark_min(
                             watermark.clone(),
@@ -419,22 +431,12 @@ impl StreamTask {
                             .and_then(|assigner| assigner.on_data_message(&upstream_for_msg, &message));
                         yield message;
                         if let Some(wm) = injected {
-                            let now = Instant::now();
-                            let active_upstreams: Vec<String> = if let Some(timeout_ms) = idle_timeout_ms {
-                                let timeout = Duration::from_millis(timeout_ms);
-                                upstream_vertices
-                                    .iter()
-                                    .filter(|u| {
-                                        last_seen
-                                            .get(*u)
-                                            .map(|t| now.duration_since(*t) <= timeout)
-                                            .unwrap_or(false)
-                                    })
-                                    .cloned()
-                                    .collect()
-                            } else {
-                                upstream_vertices.clone()
-                            };
+                            let active_upstreams = Self::active_upstreams_for_idle(
+                                Instant::now(),
+                                idle_timeout_ms,
+                                &upstream_vertices,
+                                &last_seen,
+                            );
                             // Treat injected watermark exactly like an upstream watermark: merge and
                             // emit a task-local watermark only if it advances.
                             if let Some(new_watermark) = advance_watermark_min(
