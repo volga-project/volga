@@ -173,6 +173,23 @@ impl AggregateRegistry {
                 self.register_aggregate(&name, kind.aggregator_type());
             }
         }
+
+        for name in [
+            "top",
+            "top1_ratio",
+            "topn_frequency",
+            "top_n_key_ratio_cate",
+            "top_n_value_ratio_cate",
+        ] {
+            self.register_aggregate(name, AggregatorType::RetractableAccumulator);
+        }
+
+        for kind in CATE_KINDS {
+            let name = format!("top_n_key_{}_cate_where", kind.name());
+            self.register_aggregate(&name, kind.aggregator_type());
+            let name = format!("top_n_value_{}_cate_where", kind.name());
+            self.register_aggregate(&name, kind.aggregator_type());
+        }
     }
     
     fn register_aggregate(&mut self, name: &str, aggregator_type: AggregatorType) {

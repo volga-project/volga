@@ -18,6 +18,10 @@ use datafusion::logical_expr::{
 use datafusion::prelude::SessionContext;
 
 use super::accumulator::CateAccumulator;
+use crate::runtime::operators::window::top::grouped_topk::{
+    GroupedAggTopKAccumulator, RatioTopKAccumulator,
+};
+use crate::runtime::operators::window::top::heap::TopKOrder;
 use super::types::{AggFlavor, CateUdfSpec};
 use crate::runtime::operators::window::aggregates::AggKind;
 use super::utils::{coerce_value_type, df_error};
@@ -153,6 +157,121 @@ fn cate_udaf(spec: CateUdfSpec) -> AggregateUDF {
     AggregateUDF::from(CateUdf::new(spec))
 }
 
+#[derive(Debug, Clone)]
+enum CateTopMode {
+    Agg { kind: AggKind, base_udaf: Arc<AggregateUDF> },
+    Ratio,
+}
+
+#[derive(Debug, Clone)]
+struct CateTopUdf {
+    name: String,
+    order: TopKOrder,
+    mode: CateTopMode,
+    signature: Signature,
+}
+
+impl CateTopUdf {
+    fn new(name: &str, order: TopKOrder, mode: CateTopMode) -> Self {
+        Self {
+            name: name.to_string(),
+            order,
+            mode,
+            signature: Signature::user_defined(Volatility::Immutable),
+        }
+    }
+}
+
+impl AggregateUDFImpl for CateTopUdf {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn signature(&self) -> &Signature {
+        &self.signature
+    }
+
+    fn return_type(&self, _arg_types: &[DataType]) -> Result<DataType> {
+        Ok(DataType::Utf8)
+    }
+
+    fn coerce_types(&self, arg_types: &[DataType]) -> Result<Vec<DataType>> {
+        if arg_types.len() != 4 {
+            return exec_err!("{} expects 4 arguments", self.name);
+        }
+        let mut out: Vec<DataType> = Vec::with_capacity(arg_types.len());
+        match &self.mode {
+            CateTopMode::Agg { kind, base_udaf } => {
+                let coerced = coerce_value_type(*kind, base_udaf.as_ref(), &arg_types[0])?;
+                out.push(coerced);
+            }
+            CateTopMode::Ratio => {
+                out.push(arg_types[0].clone());
+            }
+        }
+        out.push(DataType::Boolean);
+        let cate_type = &arg_types[2];
+        let supported = matches!(
+            cate_type,
+            DataType::Utf8
+                | DataType::Int64
+                | DataType::Int32
+                | DataType::UInt64
+                | DataType::UInt32
+                | DataType::Float64
+                | DataType::Float32
+                | DataType::Boolean
+        );
+        if !supported {
+            return exec_err!("{} unsupported category type {}", self.name, cate_type);
+        }
+        out.push(cate_type.clone());
+        out.push(DataType::Int64);
+        Ok(out)
+    }
+
+    fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
+        match &self.mode {
+            CateTopMode::Agg { kind, base_udaf } => Ok(Box::new(
+                GroupedAggTopKAccumulator::new(*kind, base_udaf.clone(), self.order),
+            )),
+            CateTopMode::Ratio => Ok(Box::new(RatioTopKAccumulator::new(self.order))),
+        }
+    }
+
+    fn state_fields(&self, args: StateFieldsArgs) -> Result<Vec<Arc<Field>>> {
+        let field = Field::new(format!("{}_state", args.name), DataType::Binary, true);
+        Ok(vec![Arc::new(field)])
+    }
+
+    fn groups_accumulator_supported(&self, _args: AccumulatorArgs) -> bool {
+        false
+    }
+
+    fn create_groups_accumulator(
+        &self,
+        _args: AccumulatorArgs,
+    ) -> Result<Box<dyn GroupsAccumulator>> {
+        Err(df_error("groups accumulator not supported"))
+    }
+
+    fn reverse_expr(&self) -> ReversedUDAF {
+        ReversedUDAF::Identical
+    }
+
+    fn order_sensitivity(&self) -> AggregateOrderSensitivity {
+        AggregateOrderSensitivity::Insensitive
+    }
+}
+
+fn cate_top_udaf(name: &str, order: TopKOrder, mode: CateTopMode) -> AggregateUDF {
+    AggregateUDF::from(CateTopUdf::new(name, order, mode))
+}
+
 fn base_udaf(kind: AggKind) -> Arc<AggregateUDF> {
     match kind {
         AggKind::Sum => sum_udaf(),
@@ -260,4 +379,38 @@ pub fn register_cate_udafs(ctx: &SessionContext) {
     for f in fns {
         ctx.register_udaf(f);
     }
+
+    let top_aggs = [
+        AggKind::Sum,
+        AggKind::Avg,
+        AggKind::Count,
+        AggKind::Min,
+        AggKind::Max,
+    ];
+    for kind in top_aggs {
+        let base = base_udaf(kind);
+        let key_name = format!("top_n_key_{}_cate_where", kind.name());
+        ctx.register_udaf(cate_top_udaf(
+            &key_name,
+            TopKOrder::KeyDesc,
+            CateTopMode::Agg { kind, base_udaf: base.clone() },
+        ));
+        let value_name = format!("top_n_value_{}_cate_where", kind.name());
+        ctx.register_udaf(cate_top_udaf(
+            &value_name,
+            TopKOrder::MetricDesc,
+            CateTopMode::Agg { kind, base_udaf: base },
+        ));
+    }
+
+    ctx.register_udaf(cate_top_udaf(
+        "top_n_key_ratio_cate",
+        TopKOrder::KeyDesc,
+        CateTopMode::Ratio,
+    ));
+    ctx.register_udaf(cate_top_udaf(
+        "top_n_value_ratio_cate",
+        TopKOrder::MetricDesc,
+        CateTopMode::Ratio,
+    ));
 }
