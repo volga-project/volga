@@ -130,6 +130,38 @@ async fn parquet_parallel_tasks_consume_all_files() {
 }
 
 #[tokio::test]
+async fn parquet_projection_pushdown_roundtrip() {
+    let tmp_dir = std::env::temp_dir().join(format!("volga_parquet_projection_{}", Uuid::new_v4()));
+    let input_dir = tmp_dir.join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+
+    let schema = test_schema();
+    write_parquet_file(&input_dir.join("input.parquet"), schema.clone(), make_batch(schema.clone(), "A", 1));
+
+    let spec = ParquetSourceSpec {
+        path: format!("file://{}", input_dir.to_string_lossy()),
+        storage_options: HashMap::new(),
+        regex_pattern: None,
+        batch_size: Some(1024),
+    };
+    let mut config = ParquetSourceConfig::new(schema.clone(), spec);
+    let projection = vec![0];
+    let projected_schema = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Utf8, false),
+    ]));
+    config.set_projection(projection, projected_schema.clone());
+
+    let mut source = ParquetSourceFunction::new(config);
+    let ctx = RuntimeContext::new("src".to_string().into(), 0, 1, None, None, None);
+    source.open(&ctx).await.unwrap();
+
+    let msg = source.fetch().await.expect("expected batch");
+    let batch = msg.record_batch();
+    assert_eq!(batch.schema(), projected_schema);
+    assert_eq!(batch.num_columns(), 1);
+}
+
+#[tokio::test]
 #[ignore]
 async fn parquet_s3_roundtrip_localstack() {
     let docker = Cli::default();
