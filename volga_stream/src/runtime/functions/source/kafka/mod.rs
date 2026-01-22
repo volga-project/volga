@@ -27,8 +27,8 @@ pub struct KafkaSourceSpec {
     #[serde(default)]
     pub client_configs: HashMap<String, String>,
     pub poll_timeout_ms: u64,
-    pub max_batch_records: usize,
-    pub max_batch_bytes: usize,
+    pub max_batch_records: Option<usize>,
+    pub max_batch_bytes: Option<usize>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -216,8 +216,8 @@ impl KafkaSourceFunction {
 impl SourceFunctionTrait for KafkaSourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
         let consumer = self.consumer.as_ref().expect("consumer not initialized");
-        let max_records = self.config.spec.max_batch_records.max(1);
-        let max_bytes = self.config.spec.max_batch_bytes.max(1);
+        let max_records = self.config.spec.max_batch_records.unwrap_or(usize::MAX).max(1);
+        let max_bytes = self.config.spec.max_batch_bytes.unwrap_or(usize::MAX).max(1);
         let poll_timeout = Duration::from_millis(self.config.spec.poll_timeout_ms.max(1));
 
         loop {

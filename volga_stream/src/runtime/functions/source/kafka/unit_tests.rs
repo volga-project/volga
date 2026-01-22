@@ -18,8 +18,8 @@ fn test_config() -> KafkaSourceConfig {
         offset: KafkaOffsetSpec::Latest,
         client_configs: HashMap::new(),
         poll_timeout_ms: 10,
-        max_batch_records: 100,
-        max_batch_bytes: 1024 * 1024,
+        max_batch_records: Some(100),
+        max_batch_bytes: Some(1024 * 1024),
     };
     KafkaSourceConfig::new(schema, spec)
 }

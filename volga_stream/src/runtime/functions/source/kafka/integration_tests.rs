@@ -6,6 +6,7 @@ use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
 use rdkafka::consumer::BaseConsumer;
+use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
 use testcontainers::clients;
@@ -76,8 +77,8 @@ fn build_source(bootstrap_servers: String, schema: Arc<Schema>, offset: KafkaOff
         offset,
         client_configs: HashMap::new(),
         poll_timeout_ms: 50,
-        max_batch_records: 1,
-        max_batch_bytes: 1024 * 1024,
+        max_batch_records: Some(1),
+        max_batch_bytes: Some(1024 * 1024),
     };
     let config = KafkaSourceConfig::new(schema, spec);
     KafkaSourceFunction::new(config)
@@ -115,6 +116,18 @@ async fn wait_for_broker(bootstrap_servers: &str) {
     panic!("Kafka broker did not become ready at {}", bootstrap_servers);
 }
 
+async fn create_topic(bootstrap_servers: &str, topic: &str, partitions: i32) {
+    let admin: AdminClient<_> = ClientConfig::new()
+        .set("bootstrap.servers", bootstrap_servers)
+        .create()
+        .unwrap();
+
+    let new_topic = NewTopic::new(topic, partitions, TopicReplication::Fixed(1));
+    let _ = admin
+        .create_topics([&new_topic], &AdminOptions::new())
+        .await;
+}
+
 #[tokio::test]
 #[ignore]
 async fn kafka_source_reads_arrow_ipc() {
@@ -123,6 +136,7 @@ async fn kafka_source_reads_arrow_ipc() {
     let broker = node.get_host_port_ipv4(9092);
     let bootstrap_servers = format!("127.0.0.1:{broker}");
     wait_for_broker(&bootstrap_servers).await;
+    create_topic(&bootstrap_servers, "kafka_source_test", 1).await;
 
     let schema = test_schema();
     let payload = make_payload(&schema, "A", 100);
@@ -166,6 +180,7 @@ async fn kafka_source_checkpoint_restore_replays_from_saved_offsets() {
     let broker = node.get_host_port_ipv4(9092);
     let bootstrap_servers = format!("127.0.0.1:{broker}");
     wait_for_broker(&bootstrap_servers).await;
+    create_topic(&bootstrap_servers, "kafka_source_test", 1).await;
 
     let schema = test_schema();
     let producer: FutureProducer = ClientConfig::new()
@@ -216,4 +231,93 @@ async fn kafka_source_checkpoint_restore_replays_from_saved_offsets() {
     let expected: Vec<i64> = (4..=8).collect();
     let got: Vec<i64> = rows.into_iter().map(|(_, ts)| ts).collect();
     assert_eq!(got, expected);
+}
+
+#[tokio::test]
+#[ignore]
+async fn kafka_source_parallel_tasks_consume_all_partitions() {
+    let docker = clients::Cli::default();
+    let node = docker.run(redpanda_image());
+    let broker = node.get_host_port_ipv4(9092);
+    let bootstrap_servers = format!("127.0.0.1:{broker}");
+    wait_for_broker(&bootstrap_servers).await;
+    create_topic(&bootstrap_servers, "kafka_source_test", 3).await;
+
+    let schema = test_schema();
+    let producer: FutureProducer = ClientConfig::new()
+        .set("bootstrap.servers", &bootstrap_servers)
+        .create()
+        .unwrap();
+
+    let total_messages = 60;
+    for i in 0..total_messages {
+        let payload = make_payload(&schema, "A", i as i64);
+        let _ = producer
+            .send(
+                FutureRecord::<(), _>::to("kafka_source_test")
+                    .payload(&payload)
+                    .partition((i % 3) as i32),
+                Duration::from_secs(0),
+            )
+            .await
+            .unwrap();
+    }
+
+    let spec_a = KafkaSourceSpec {
+        bootstrap_servers: bootstrap_servers.clone(),
+        topic: "kafka_source_test".to_string(),
+        group_id: Some("kafka_source_group_a".to_string()),
+        group_id_prefix: None,
+        offset: KafkaOffsetSpec::Earliest,
+        client_configs: HashMap::new(),
+        poll_timeout_ms: 50,
+        max_batch_records: Some(5),
+        max_batch_bytes: Some(1024 * 1024),
+    };
+    let spec_b = KafkaSourceSpec {
+        bootstrap_servers,
+        topic: "kafka_source_test".to_string(),
+        group_id: Some("kafka_source_group_b".to_string()),
+        group_id_prefix: None,
+        offset: KafkaOffsetSpec::Earliest,
+        client_configs: HashMap::new(),
+        poll_timeout_ms: 50,
+        max_batch_records: Some(5),
+        max_batch_bytes: Some(1024 * 1024),
+    };
+
+    let ctx_a = RuntimeContext::new(
+        "kafka_source".to_string().into(),
+        0,
+        2,
+        None,
+        None,
+        None,
+    );
+    let ctx_b = RuntimeContext::new(
+        "kafka_source".to_string().into(),
+        1,
+        2,
+        None,
+        None,
+        None,
+    );
+
+    let mut source_a = KafkaSourceFunction::new(KafkaSourceConfig::new(schema.clone(), spec_a));
+    let mut source_b = KafkaSourceFunction::new(KafkaSourceConfig::new(schema.clone(), spec_b));
+    source_a.open(&ctx_a).await.unwrap();
+    source_b.open(&ctx_b).await.unwrap();
+
+    let mut seen = 0usize;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while seen < total_messages && tokio::time::Instant::now() < deadline {
+        for source in [&mut source_a, &mut source_b] {
+            if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(200), source.fetch()).await {
+                let batch = msg.record_batch();
+                seen += batch.num_rows();
+            }
+        }
+    }
+
+    assert_eq!(seen, total_messages as usize);
 }
