@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{DatagenSpec, KafkaSourceSpec};
+use super::{DatagenSpec, KafkaSourceSpec, ParquetSourceSpec};
 use super::schema_ipc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -15,5 +15,6 @@ pub struct SourceBindingSpec {
 pub enum SourceSpec {
     Datagen(DatagenSpec),
     Kafka(KafkaSourceSpec),
+    Parquet(ParquetSourceSpec),
 }
 

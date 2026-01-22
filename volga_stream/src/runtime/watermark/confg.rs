@@ -6,7 +6,7 @@ pub struct WatermarkAssignConfig {
 }
 
 impl WatermarkAssignConfig {
-    pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 30_000;
+    pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 1_000;
 
     pub fn new(out_of_orderness_ms: u64, time_hint: Option<TimeHint>) -> Self {
         Self {

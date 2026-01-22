@@ -48,6 +48,9 @@ lazy_static = "1.4"
 kameo = "0.16.0"
 arrow-row = "55.1.0"
 rdkafka = { version = "0.36", features = ["cmake-build"] }
+parquet = "55.2.0"
+object_store = { version = "0.12.3", features = ["aws", "http"] }
+regex = "1"
 
 tonic = "0.12"
 prost = "0.13"
@@ -80,6 +83,8 @@ base64 = "0.22"
 tower = "0.5"
 http-body-util = "0.1"
 testcontainers = "0.15"
+aws-config = "1"
+aws-sdk-s3 = "1"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

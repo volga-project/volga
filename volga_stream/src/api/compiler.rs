@@ -6,6 +6,7 @@ use crate::api::spec::pipeline::PipelineSpec;
 use crate::api::spec::operators::OperatorTuningSpec;
 use crate::runtime::functions::source::datagen_source::DatagenSourceConfig;
 use crate::runtime::functions::source::kafka::KafkaSourceConfig;
+use crate::runtime::functions::source::parquet::ParquetSourceConfig;
 use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
@@ -40,6 +41,9 @@ pub fn compile_logical_graph(spec: &PipelineSpec) -> LogicalGraph {
                 }
                 SourceSpec::Kafka(cfg) => {
                     SourceConfig::KafkaSourceConfig(KafkaSourceConfig::new(schema.clone(), cfg.clone()))
+                }
+                SourceSpec::Parquet(cfg) => {
+                    SourceConfig::ParquetSourceConfig(ParquetSourceConfig::new(schema.clone(), cfg.clone()))
                 }
             };
 

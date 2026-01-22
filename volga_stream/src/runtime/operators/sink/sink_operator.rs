@@ -1,6 +1,6 @@
 use std::{fmt};
 
-use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, SinkFunction, SinkFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::sink::{sink_function::create_sink_function, parquet::ParquetSinkConfig, SinkFunction, SinkFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -9,6 +9,7 @@ use async_trait::async_trait;
 pub enum SinkConfig {
     InMemoryStorageGrpcSinkConfig(String), // server_addr
     RequestSinkConfig,
+    ParquetSinkConfig(ParquetSinkConfig),
 }
 
 impl std::fmt::Display for SinkConfig {
@@ -16,6 +17,7 @@ impl std::fmt::Display for SinkConfig {
         match self {
             SinkConfig::InMemoryStorageGrpcSinkConfig(_) => write!(f, "InMemoryStorageGrpc"),
             SinkConfig::RequestSinkConfig => write!(f, "Request"),
+            SinkConfig::ParquetSinkConfig(_) => write!(f, "Parquet"),
         }
     }
 }

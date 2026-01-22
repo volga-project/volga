@@ -1,11 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::functions::sink::ParquetSinkSpec;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SinkSpec {
     InMemoryStorageGrpc { server_addr: String },
     Request,
+    Parquet(ParquetSinkSpec),
 }
 
 impl SinkSpec {
@@ -15,6 +17,7 @@ impl SinkSpec {
                 SinkConfig::InMemoryStorageGrpcSinkConfig(server_addr.clone())
             }
             SinkSpec::Request => SinkConfig::RequestSinkConfig,
+            SinkSpec::Parquet(spec) => SinkConfig::ParquetSinkConfig(spec.to_config()),
         }
     }
 }
