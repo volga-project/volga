@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use arrow::array::{Array, Int64Array, TimestampMillisecondArray};
 use arrow::record_batch::RecordBatch;
@@ -162,6 +163,86 @@ impl WatermarkAssignerState {
             ))
         } else {
             None
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WatermarkManager {
+    idle_timeout_ms: Option<u64>,
+    upstream_vertices: Vec<String>,
+    last_seen_processing_time: HashMap<String, Instant>,
+    upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+    current_watermark: Arc<AtomicU64>,
+    assigner: Option<WatermarkAssignerState>,
+}
+
+impl WatermarkManager {
+    pub fn new(
+        watermark_assign: Option<WatermarkAssignConfig>,
+        operator_config: Option<&OperatorConfig>,
+        upstream_vertices: Vec<String>,
+        upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+        current_watermark: Arc<AtomicU64>,
+    ) -> Self {
+        let idle_timeout_ms = watermark_assign.as_ref().and_then(|cfg| cfg.idle_timeout_ms);
+        let assigner = watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, operator_config));
+        let last_seen_processing_time = upstream_vertices
+            .iter()
+            .map(|u| (u.clone(), Instant::now()))
+            .collect();
+        Self {
+            idle_timeout_ms,
+            upstream_vertices,
+            last_seen_processing_time,
+            upstream_watermarks,
+            current_watermark,
+            assigner,
+        }
+    }
+
+    pub fn assigner_enabled(&self) -> bool {
+        self.assigner.is_some()
+    }
+
+    pub fn on_data_message(&mut self, upstream_vertex_id: &str, message: &Message) -> Option<WatermarkMessage> {
+        self.last_seen_processing_time
+            .insert(upstream_vertex_id.to_string(), Instant::now());
+        self.assigner
+            .as_mut()
+            .and_then(|assigner| assigner.on_data_message(upstream_vertex_id, message))
+    }
+
+    pub async fn merge_watermark(&mut self, watermark: WatermarkMessage) -> Option<u64> {
+        if let Some(upstream_id) = watermark.metadata.upstream_vertex_id.as_ref() {
+            self.last_seen_processing_time
+                .insert(upstream_id.clone(), Instant::now());
+        }
+        let active_upstreams = self.active_upstreams(Instant::now());
+        advance_watermark_min(
+            watermark,
+            &active_upstreams,
+            self.upstream_watermarks.clone(),
+            self.current_watermark.clone(),
+        )
+        .await
+    }
+
+    fn active_upstreams(&self, now: Instant) -> Vec<String> {
+        if let Some(timeout_ms) = self.idle_timeout_ms {
+            let timeout = Duration::from_millis(timeout_ms);
+            self.upstream_vertices
+                .iter()
+                .filter(|u| {
+                    self.last_seen_processing_time
+                        .get(*u)
+                        .map(|t| now.duration_since(*t) <= timeout)
+                        .unwrap_or(false)
+                })
+                .cloned()
+                .collect()
+        } else {
+            self.upstream_vertices.clone()
         }
     }
 }
