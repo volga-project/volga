@@ -34,7 +34,7 @@ use crate::runtime::master_server::master_service::master_service_client::Master
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
 use crate::runtime::watermark::WatermarkAssignConfig;
-use crate::runtime::watermark::{advance_watermark_min, WatermarkAssignerState};
+use crate::runtime::watermark::WatermarkManager;
 
 pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -348,24 +348,23 @@ impl StreamTask {
     ) -> MessageStream {
         Box::pin(stream! {
             let mut input_stream = input_stream;
-            let mut watermark_assigner =
-                watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, Some(&operator_config)));
-
+            let mut watermark_manager = WatermarkManager::new(
+                watermark_assign,
+                Some(&operator_config),
+                upstream_vertices.clone(),
+                upstream_watermarks.clone(),
+                current_watermark.clone(),
+            );
             while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
 
                 match &message {
                     Message::Watermark(watermark) => {
-                        if watermark_assigner.is_some() && watermark.watermark_value != MAX_WATERMARK_VALUE {
+                        if watermark_manager.assigner_enabled() && watermark.watermark_value != MAX_WATERMARK_VALUE {
                             continue;
                         }
                         // Advance watermark and only forward to operator if advanced.
-                        if let Some(new_watermark) = advance_watermark_min(
-                            watermark.clone(),
-                            &upstream_vertices,
-                            upstream_watermarks.clone(),
-                            current_watermark.clone(),
-                        ).await {
+                        if let Some(new_watermark) = watermark_manager.merge_watermark(watermark.clone()).await {
                             let mut wm = watermark.clone();
                             wm.watermark_value = new_watermark;
                             wm.metadata.upstream_vertex_id = Some(vertex_id.as_ref().to_string());
@@ -389,19 +388,12 @@ impl StreamTask {
                         let upstream_for_msg = message
                             .upstream_vertex_id()
                             .unwrap_or_else(|| vertex_id.as_ref().to_string());
-                        let injected = watermark_assigner
-                            .as_mut()
-                            .and_then(|assigner| assigner.on_data_message(&upstream_for_msg, &message));
+                        let injected = watermark_manager.on_data_message(&upstream_for_msg, &message);
                         yield message;
                         if let Some(wm) = injected {
                             // Treat injected watermark exactly like an upstream watermark: merge and
                             // emit a task-local watermark only if it advances.
-                            if let Some(new_watermark) = advance_watermark_min(
-                                wm.clone(),
-                                &upstream_vertices,
-                                upstream_watermarks.clone(),
-                                current_watermark.clone(),
-                            ).await {
+                            if let Some(new_watermark) = watermark_manager.merge_watermark(wm.clone()).await {
                                 yield Message::Watermark(WatermarkMessage::new(
                                     vertex_id.as_ref().to_string(),
                                     new_watermark,
@@ -608,10 +600,14 @@ impl StreamTask {
                     vertex_id.as_ref()
                 );
             }
-            let mut source_watermark_assigner = if is_source {
-                watermark_assign
-                    .clone()
-                    .map(|cfg| WatermarkAssignerState::new(cfg, Some(&vertex_operator_config)))
+            let mut source_watermark_manager = if is_source {
+                Some(WatermarkManager::new(
+                    watermark_assign.clone(),
+                    Some(&vertex_operator_config),
+                    upstream_vertices.clone(),
+                    upstream_watermarks.clone(),
+                    current_watermark.clone(),
+                ))
             } else {
                 None
             };
@@ -675,9 +671,9 @@ impl StreamTask {
                 match poll_res {
                     OperatorPollResult::Ready(mut message) => {
                         let injected_wm = if is_source && matches!(message, Message::Regular(_) | Message::Keyed(_)) {
-                            source_watermark_assigner
+                            source_watermark_manager
                                 .as_mut()
-                                .and_then(|assigner| assigner.on_data_message(vertex_id.as_ref(), &message))
+                                .and_then(|manager| manager.on_data_message(vertex_id.as_ref(), &message))
                         } else {
                             None
                         };
@@ -733,17 +729,14 @@ impl StreamTask {
                                 .unwrap_or_default()
                                 .as_millis() as u64);
                         }
-                        if let Message::Watermark(ref watermark) = message {
+                        if let Message::Watermark(ref mut watermark) = message {
                             if is_source {
-                                // Advance watermark for source, since it does not have preprocessed input like other operators
-                                advance_watermark_min(
-                                    watermark.clone(),
-                                    &upstream_vertices,
-                                    upstream_watermarks.clone(),
-                                    current_watermark.clone(),
-                                ).await;
+                                if let Some(manager) = source_watermark_manager.as_mut() {
+                                    if let Some(new_watermark) = manager.merge_watermark(watermark.clone()).await {
+                                        watermark.watermark_value = new_watermark;
+                                    }
+                                }
                             }
-
                             // If operator outputs max watermark, finish task
                             if watermark.watermark_value == MAX_WATERMARK_VALUE {
                                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);

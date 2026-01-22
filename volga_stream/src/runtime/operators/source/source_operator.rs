@@ -2,7 +2,7 @@ use anyhow::Result;
 use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
 
 #[derive(Debug, Clone)]
@@ -30,6 +30,7 @@ pub enum SourceConfig {
     WordCountSourceConfig(WordCountSourceConfig),
     DatagenSourceConfig(DatagenSourceConfig),
     HttpRequestSourceConfig(RequestSourceConfig),
+    KafkaSourceConfig(KafkaSourceConfig),
 }
 
 // TODO deprecate in favor of datagen
@@ -91,6 +92,7 @@ impl SourceConfig {
             SourceConfig::WordCountSourceConfig(config) => config.get_projection(),
             SourceConfig::DatagenSourceConfig(config) => config.get_projection(),
             SourceConfig::HttpRequestSourceConfig(_) => (None, None), // Request source doesn't support projection
+            SourceConfig::KafkaSourceConfig(config) => config.get_projection(),
         }
     }
 
@@ -100,6 +102,7 @@ impl SourceConfig {
             SourceConfig::WordCountSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::DatagenSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::HttpRequestSourceConfig(_) => {}, // Request source doesn't support projection
+            SourceConfig::KafkaSourceConfig(config) => config.set_projection(projection, schema),
         }
     }
 }
@@ -111,6 +114,7 @@ impl std::fmt::Display for SourceConfig {
             SourceConfig::WordCountSourceConfig(_) => write!(f, "WordCount"),
             SourceConfig::DatagenSourceConfig(_) => write!(f, "Datagen"),
             SourceConfig::HttpRequestSourceConfig(_) => write!(f, "HttpRequest"),
+            SourceConfig::KafkaSourceConfig(_) => write!(f, "Kafka"),
         }
     }
 }

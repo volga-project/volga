@@ -85,6 +85,7 @@ pub fn operator_config_requires_checkpoint(operator_config: &OperatorConfig) -> 
             match source_cfg {
                 // Only replayable datagen participates in checkpointing.
                 SourceConfig::DatagenSourceConfig(cfg) => cfg.spec.replayable,
+                SourceConfig::KafkaSourceConfig(_) => true,
                 _ => false,
             }
         }

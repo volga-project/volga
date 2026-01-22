@@ -5,6 +5,7 @@ use crate::api::spec::connectors::{SourceSpec, schema_from_ipc};
 use crate::api::spec::pipeline::PipelineSpec;
 use crate::api::spec::operators::OperatorTuningSpec;
 use crate::runtime::functions::source::datagen_source::DatagenSourceConfig;
+use crate::runtime::functions::source::kafka::KafkaSourceConfig;
 use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
@@ -36,6 +37,9 @@ pub fn compile_logical_graph(spec: &PipelineSpec) -> LogicalGraph {
             let source_config = match &src.source {
                 SourceSpec::Datagen(cfg) => {
                     SourceConfig::DatagenSourceConfig(DatagenSourceConfig::new(schema.clone(), cfg.clone()))
+                }
+                SourceSpec::Kafka(cfg) => {
+                    SourceConfig::KafkaSourceConfig(KafkaSourceConfig::new(schema.clone(), cfg.clone()))
                 }
             };
 

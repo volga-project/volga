@@ -1,6 +1,6 @@
 pub mod confg;
-pub mod runtime;
+pub mod manager;
 
 pub use confg::{TimeHint, WatermarkAssignConfig};
-pub use runtime::{advance_watermark_min, WatermarkAssignerState};
+pub use manager::{advance_watermark_min, WatermarkAssignerState, WatermarkManager};
 
