@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use arrow::record_batch::RecordBatch;
@@ -55,35 +55,46 @@ impl ParquetSourceConfig {
     }
 }
 
-#[derive(Debug)]
 pub struct ParquetSourceFunction {
     config: ParquetSourceConfig,
     file_list: Vec<ObjectMeta>,
-    current_stream: Option<Box<dyn Stream<Item = Result<RecordBatch, parquet::errors::ParquetError>> + Unpin + Send>>,
+    current_stream: Mutex<Option<Box<dyn Stream<Item = Result<RecordBatch, parquet::errors::ParquetError>> + Unpin + Send>>>,
+}
+
+impl std::fmt::Debug for ParquetSourceFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ParquetSourceFunction")
+            .field("config", &self.config)
+            .field("file_list_len", &self.file_list.len())
+            .finish()
+    }
 }
 
 #[async_trait]
 impl SourceFunctionTrait for ParquetSourceFunction {
     async fn fetch(&mut self) -> Option<Message> {
         loop {
-            if self.current_stream.is_none() {
+            if self.current_stream.lock().unwrap().is_none() {
                 let next_file = self.file_list.pop()?;
                 if let Ok(stream) = self.build_stream(&next_file).await {
-                    self.current_stream = Some(stream);
+                    *self.current_stream.lock().unwrap() = Some(stream);
                 } else {
                     continue;
                 }
             }
 
-            if let Some(stream) = &mut self.current_stream {
-                match stream.next().await {
+            let stream = self.current_stream.lock().unwrap().take();
+            if let Some(mut stream) = stream {
+                let next = stream.next().await;
+                *self.current_stream.lock().unwrap() = Some(stream);
+                match next {
                     Some(Ok(batch)) => return Some(Message::new(None, batch, None, None)),
                     Some(Err(_)) => {
-                        self.current_stream = None;
+                        *self.current_stream.lock().unwrap() = None;
                         continue;
                     }
                     None => {
-                        self.current_stream = None;
+                        *self.current_stream.lock().unwrap() = None;
                         continue;
                     }
                 }
@@ -131,7 +142,7 @@ impl ParquetSourceFunction {
         Self {
             config,
             file_list: Vec::new(),
-            current_stream: None,
+            current_stream: Mutex::new(None),
         }
     }
 

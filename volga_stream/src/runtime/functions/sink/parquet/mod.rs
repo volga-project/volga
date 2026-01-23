@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Cursor;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -21,7 +21,6 @@ use uuid::Uuid;
 use crate::common::Message;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::functions::sink::sink_function::SinkFunctionTrait;
 
 #[cfg(test)]
@@ -61,7 +60,7 @@ pub struct ParquetSinkFunction {
 
 #[derive(Debug)]
 struct ParquetWriterState {
-    writer: ArrowWriter<Cursor<Vec<u8>>>,
+    writer: Mutex<ArrowWriter<Cursor<Vec<u8>>>>,
     part: u64,
     schema: SchemaRef,
 }
@@ -112,24 +111,31 @@ impl ParquetSinkFunction {
         partition_path: &str,
         batch: RecordBatch,
     ) -> Result<()> {
+        let writer_properties = self.writer_properties();
         let writer_state = self.writers.entry(partition_path.to_string()).or_insert_with(|| {
             let cursor = Cursor::new(Vec::new());
             let writer = ArrowWriter::try_new(
                 cursor,
                 batch.schema(),
-                Some(self.writer_properties()),
+                Some(writer_properties),
             )
             .unwrap();
-            ParquetWriterState { writer, part: 0, schema: batch.schema() }
+            ParquetWriterState { writer: Mutex::new(writer), part: 0, schema: batch.schema() }
         });
 
-        writer_state.writer.write(&batch)?;
-
-        if let Some(target_size) = self.config.spec.target_file_size {
-            let current_size = writer_state.writer.inner().get_ref().len();
-            if current_size >= target_size {
-                self.flush_writer(partition_path).await?;
+        let mut should_flush = false;
+        {
+            let mut writer = writer_state.writer.lock().unwrap();
+            writer.write(&batch)?;
+            if let Some(target_size) = self.config.spec.target_file_size {
+                let current_size = writer.inner().get_ref().len();
+                if current_size >= target_size {
+                    should_flush = true;
+                }
             }
+        }
+        if should_flush {
+            self.flush_writer(partition_path).await?;
         }
         self.enforce_buffer_limit().await?;
         Ok(())
@@ -139,19 +145,30 @@ impl ParquetSinkFunction {
         let Some(store) = &self.store else {
             return Err(anyhow!("sink not initialized"));
         };
-        let state = self
-            .writers
-            .get_mut(partition_path)
-            .ok_or_else(|| anyhow!("missing writer state"))?;
-        state.writer.finish()?;
-        let cursor = std::mem::replace(&mut state.writer, ArrowWriter::try_new(
-            Cursor::new(Vec::new()),
-            state.schema.clone(),
-            Some(self.writer_properties()),
-        )?);
-        let data = cursor.into_inner()?.into_inner();
-        let obj_path = self.next_part_name(partition_path, state.part);
-        state.part += 1;
+        let writer_properties = self.writer_properties();
+        let result = {
+            let state = self
+                .writers
+                .get_mut(partition_path)
+                .ok_or_else(|| anyhow!("missing writer state"))?;
+            let mut writer = state.writer.lock().unwrap();
+            let buffered_size = writer.inner().get_ref().len() + writer.in_progress_size();
+            if buffered_size == 0 {
+                return Ok(());
+            }
+            writer.finish()?;
+            let data = writer.inner().get_ref().clone();
+            *writer = ArrowWriter::try_new(
+                Cursor::new(Vec::new()),
+                state.schema.clone(),
+                Some(writer_properties),
+            )?;
+            let part = state.part;
+            state.part += 1;
+            (data, part)
+        };
+        let (data, part) = result;
+        let obj_path = self.next_part_name(partition_path, part);
         store.put(&obj_path, object_store::PutPayload::from_bytes(Bytes::from(data))).await?;
         Ok(())
     }
@@ -180,14 +197,20 @@ impl ParquetSinkFunction {
     fn total_buffered_bytes(&self) -> usize {
         self.writers
             .values()
-            .map(|writer| writer.writer.inner().get_ref().len())
+            .map(|writer| {
+                let writer = writer.writer.lock().unwrap();
+                writer.inner().get_ref().len() + writer.in_progress_size()
+            })
             .sum()
     }
 
     fn largest_buffer_partition(&self) -> Option<String> {
         self.writers
             .iter()
-            .max_by_key(|(_, writer)| writer.writer.inner().get_ref().len())
+            .max_by_key(|(_, writer)| {
+                let writer = writer.writer.lock().unwrap();
+                writer.inner().get_ref().len() + writer.in_progress_size()
+            })
             .map(|(key, _)| key.clone())
     }
 

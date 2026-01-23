@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::path::Path;
 
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};

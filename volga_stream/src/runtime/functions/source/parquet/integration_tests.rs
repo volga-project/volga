@@ -12,7 +12,10 @@ use std::path::Path;
 use std::sync::Arc;
 use bytes::Bytes;
 use object_store::path::Path as ObjectPath;
-use testcontainers::{clients::Cli, GenericImage, RunnableImage, WaitFor};
+use object_store::PutPayload;
+use testcontainers::{clients::Cli, GenericImage, RunnableImage};
+use testcontainers::core::WaitFor;
+use uuid::Uuid;
 
 fn write_parquet_file(path: &Path, schema: SchemaRef, batch: RecordBatch) {
     let file = File::create(path).unwrap();
@@ -168,26 +171,12 @@ async fn parquet_s3_roundtrip_localstack() {
     let image = GenericImage::new("localstack/localstack", "latest")
         .with_env_var("SERVICES", "s3")
         .with_env_var("DEFAULT_REGION", "us-east-1")
+        .with_env_var("DEFAULT_BUCKETS", "volga-test")
         .with_exposed_port(4566)
         .with_wait_for(WaitFor::seconds(5));
     let runnable = RunnableImage::from(image);
     let container = docker.run(runnable);
     let endpoint = format!("http://127.0.0.1:{}", container.get_host_port_ipv4(4566));
-
-    std::env::set_var("AWS_ACCESS_KEY_ID", "test");
-    std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
-    std::env::set_var("AWS_REGION", "us-east-1");
-    let config = aws_config::from_env()
-        .endpoint_url(endpoint.clone())
-        .load()
-        .await;
-    let client = aws_sdk_s3::Client::new(&config);
-    client
-        .create_bucket()
-        .bucket("volga-test")
-        .send()
-        .await
-        .unwrap();
 
     let schema = test_schema();
     let batch = make_batch(schema.clone(), "A", 1);
@@ -207,7 +196,10 @@ async fn parquet_s3_roundtrip_localstack() {
         .build()
         .unwrap();
     store
-        .put(&ObjectPath::from("input/a.parquet"), Bytes::from(buffer.into_inner()))
+        .put(
+            &ObjectPath::from("input/a.parquet"),
+            PutPayload::from_bytes(Bytes::from(buffer.into_inner())),
+        )
         .await
         .unwrap();
 

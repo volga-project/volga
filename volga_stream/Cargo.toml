@@ -83,8 +83,6 @@ base64 = "0.22"
 tower = "0.5"
 http-body-util = "0.1"
 testcontainers = "0.15"
-aws-config = "1"
-aws-sdk-s3 = "1"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]
