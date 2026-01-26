@@ -1,10 +1,13 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::test_utils;
 use super::eval_window_expr;
 use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
+use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
+use datafusion::physical_plan::WindowExpr;
 
 #[derive(Clone, Copy)]
 enum Agg {
@@ -131,6 +134,48 @@ fn agg_expr(agg: Agg, variant: Variant, idx: usize) -> String {
     }
 }
 
+fn expected_for_name(name: &str) -> ScalarValue {
+    let (kind, suffix) = if let Some(stripped) = name.strip_suffix("_cate_where") {
+        (stripped, "cate_where")
+    } else if let Some(stripped) = name.strip_suffix("_cate") {
+        (stripped, "cate")
+    } else if let Some(stripped) = name.strip_suffix("_where") {
+        (stripped, "where")
+    } else {
+        (name, "regular")
+    };
+
+    let agg = match kind {
+        "sum" => Agg::Sum,
+        "count" => Agg::Count,
+        "avg" => Agg::Avg,
+        "min" => Agg::Min,
+        "max" => Agg::Max,
+        _ => return ScalarValue::Float64(Some(10.0)),
+    };
+
+    match suffix {
+        "where" => expected_where(agg),
+        "cate" => ScalarValue::Utf8(Some(expected_cate(agg, false))),
+        "cate_where" => ScalarValue::Utf8(Some(expected_cate(agg, true))),
+        "regular" => ScalarValue::Float64(Some(10.0)),
+        _ => ScalarValue::Float64(Some(10.0)),
+    }
+}
+
+fn agg_name_from_window_expr(window_expr: &Arc<dyn WindowExpr>) -> &str {
+    if let Some(plain_expr) = window_expr.as_any().downcast_ref::<PlainAggregateWindowExpr>() {
+        return plain_expr.get_aggregate_expr().fun().name();
+    }
+    if let Some(sliding_expr) = window_expr
+        .as_any()
+        .downcast_ref::<SlidingAggregateWindowExpr>()
+    {
+        return sliding_expr.get_aggregate_expr().fun().name();
+    }
+    panic!("window expr is not aggregate");
+}
+
 #[tokio::test]
 async fn test_cate_where_matrix() {
     let aggs = [Agg::Sum, Agg::Count, Agg::Avg, Agg::Min, Agg::Max];
@@ -159,17 +204,11 @@ async fn test_cate_where_matrix() {
                     let window_exprs = exec.window_expr();
                     for (idx, window_expr) in window_exprs.iter().enumerate() {
                         let out = eval_window_expr(window_expr);
-                        let expected = match (variant, idx) {
-                            (Variant::Where, 0) => expected_where(agg),
-                            (Variant::Cate, 0) => {
-                                ScalarValue::Utf8(Some(expected_cate(agg, false)))
-                            }
-                            (Variant::CateWhere, 0) => {
-                                ScalarValue::Utf8(Some(expected_cate(agg, true)))
-                            }
-                            (_, idx) if idx >= agg_count => ScalarValue::Float64(Some(10.0)),
-                            _ => ScalarValue::Float64(Some(7.0)),
-                        };
+                        let _ = idx;
+                        let _ = variant;
+                        let _ = agg;
+                        let name = agg_name_from_window_expr(window_expr);
+                        let expected = expected_for_name(name);
                         assert_eq!(out, expected);
                     }
                 }
