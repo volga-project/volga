@@ -11,6 +11,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
 use datafusion::common::ScalarValue;
+use futures::future::join_all;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
 use parquet::arrow::ArrowWriter;
@@ -95,17 +96,6 @@ impl ParquetSinkFunction {
         builder.build()
     }
 
-    fn next_part_name(&self, partition_path: &str, part: u64) -> ObjectPath {
-        let task_index = self.task_index.unwrap_or_default();
-        let file = format!("part-{}-{}-{}.parquet", task_index, Uuid::new_v4(), part);
-        let full = if partition_path.is_empty() {
-            self.base_prefix.child(file)
-        } else {
-            self.base_prefix.child(format!("{}/{}", partition_path, file))
-        };
-        full
-    }
-
     async fn write_batch_to_partition(
         &mut self,
         partition_path: &str,
@@ -141,42 +131,62 @@ impl ParquetSinkFunction {
         Ok(())
     }
 
-    async fn flush_writer(&mut self, partition_path: &str) -> Result<()> {
-        let Some(store) = &self.store else {
-            return Err(anyhow!("sink not initialized"));
-        };
+    fn flush_payload(&mut self, partition_path: &str) -> Result<Option<(ObjectPath, Bytes)>> {
         let writer_properties = self.writer_properties();
-        let result = {
-            let state = self
-                .writers
-                .get_mut(partition_path)
-                .ok_or_else(|| anyhow!("missing writer state"))?;
-            let mut writer = state.writer.lock().unwrap();
-            let buffered_size = writer.inner().get_ref().len() + writer.in_progress_size();
-            if buffered_size == 0 {
-                return Ok(());
-            }
-            writer.finish()?;
-            let data = writer.inner().get_ref().clone();
-            *writer = ArrowWriter::try_new(
-                Cursor::new(Vec::new()),
-                state.schema.clone(),
-                Some(writer_properties),
-            )?;
-            let part = state.part;
-            state.part += 1;
-            (data, part)
-        };
-        let (data, part) = result;
-        let obj_path = self.next_part_name(partition_path, part);
-        store.put(&obj_path, object_store::PutPayload::from_bytes(Bytes::from(data))).await?;
+        let base_prefix = self.base_prefix.clone();
+        let task_index = self.task_index.unwrap_or_default();
+        let state = self
+            .writers
+            .get_mut(partition_path)
+            .ok_or_else(|| anyhow!("missing writer state"))?;
+        let mut writer = state.writer.lock().unwrap();
+        let buffered_size = writer.inner().get_ref().len() + writer.in_progress_size();
+        if buffered_size == 0 {
+            return Ok(None);
+        }
+        writer.finish()?;
+        let data = writer.inner().get_ref().clone();
+        *writer = ArrowWriter::try_new(
+            Cursor::new(Vec::new()),
+            state.schema.clone(),
+            Some(writer_properties),
+        )?;
+        let part = state.part;
+        state.part += 1;
+        let obj_path = build_part_path(&base_prefix, partition_path, task_index, part);
+        Ok(Some((obj_path, Bytes::from(data))))
+    }
+
+    async fn flush_writer(&mut self, partition_path: &str) -> Result<()> {
+        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
+        if let Some((obj_path, data)) = self.flush_payload(partition_path)? {
+            store
+                .put(&obj_path, object_store::PutPayload::from_bytes(data))
+                .await?;
+        }
         Ok(())
     }
 
     async fn flush_all(&mut self) -> Result<()> {
+        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
         let keys: Vec<String> = self.writers.keys().cloned().collect();
+        let mut payloads = Vec::new();
         for key in keys {
-            self.flush_writer(&key).await?;
+            if let Some(payload) = self.flush_payload(&key)? {
+                payloads.push(payload);
+            }
+        }
+        let futures = payloads.into_iter().map(|(path, data)| {
+            let store = store.clone();
+            async move {
+                store
+                    .put(&path, object_store::PutPayload::from_bytes(data))
+                    .await
+            }
+        });
+        let results = join_all(futures).await;
+        for result in results {
+            result?;
         }
         Ok(())
     }
@@ -185,11 +195,27 @@ impl ParquetSinkFunction {
         let Some(max_buffer_bytes) = self.config.spec.max_buffer_bytes else {
             return Ok(());
         };
+        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
+        let mut payloads = Vec::new();
         while self.total_buffered_bytes() > max_buffer_bytes {
             let Some(partition) = self.largest_buffer_partition() else {
                 break;
             };
-            self.flush_writer(&partition).await?;
+            if let Some(payload) = self.flush_payload(&partition)? {
+                payloads.push(payload);
+            }
+        }
+        let futures = payloads.into_iter().map(|(path, data)| {
+            let store = store.clone();
+            async move {
+                store
+                    .put(&path, object_store::PutPayload::from_bytes(data))
+                    .await
+            }
+        });
+        let results = join_all(futures).await;
+        for result in results {
+            result?;
         }
         Ok(())
     }
@@ -351,5 +377,19 @@ fn split_s3_path(path: &str) -> Result<(String, String)> {
 impl ParquetSinkConfig {
     pub fn new(spec: ParquetSinkSpec) -> Self {
         Self { spec }
+    }
+}
+
+fn build_part_path(
+    base_prefix: &ObjectPath,
+    partition_path: &str,
+    task_index: i32,
+    part: u64,
+) -> ObjectPath {
+    let file = format!("part-{}-{}-{}.parquet", task_index, Uuid::new_v4(), part);
+    if partition_path.is_empty() {
+        base_prefix.child(file)
+    } else {
+        base_prefix.child(format!("{}/{}", partition_path, file))
     }
 }

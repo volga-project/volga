@@ -43,3 +43,38 @@ async fn sink_enforces_max_buffer_bytes() {
     let entries: Vec<_> = fs::read_dir(&tmp_dir).unwrap().collect();
     assert!(!entries.is_empty());
 }
+
+#[test]
+fn partition_batches_respects_partition_fields() {
+    let spec = ParquetSinkSpec {
+        path: "file:///tmp".to_string(),
+        storage_options: HashMap::new(),
+        compression: None,
+        row_group_size_bytes: None,
+        target_file_size: None,
+        max_buffer_bytes: None,
+        partition_fields: Some(vec!["k".to_string()]),
+    };
+    let sink = ParquetSinkFunction::new(ParquetSinkConfig::new(spec));
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("k", DataType::Utf8, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["A", "B"])) as _,
+            Arc::new(Int64Array::from(vec![1_i64, 2_i64])) as _,
+        ],
+    )
+    .unwrap();
+
+    let partitions = sink.partition_batches(batch).unwrap();
+    let mut partition_paths: Vec<String> = partitions
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect();
+    partition_paths.sort();
+    assert_eq!(partition_paths, vec!["k=A".to_string(), "k=B".to_string()]);
+}

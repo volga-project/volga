@@ -165,6 +165,42 @@ async fn parquet_projection_pushdown_roundtrip() {
 }
 
 #[tokio::test]
+async fn parquet_partitioned_sink_writes_directories() {
+    let tmp_dir = std::env::temp_dir().join(format!("volga_parquet_partitions_{}", Uuid::new_v4()));
+    let output_dir = tmp_dir.join("output");
+    fs::create_dir_all(&output_dir).unwrap();
+
+    let schema = test_schema();
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![
+            Arc::new(StringArray::from(vec!["A", "B"])) as _,
+            Arc::new(Int64Array::from(vec![1_i64, 2_i64])) as _,
+        ],
+    )
+    .unwrap();
+
+    let sink_spec = ParquetSinkSpec {
+        path: format!("file://{}", output_dir.to_string_lossy()),
+        storage_options: HashMap::new(),
+        compression: None,
+        row_group_size_bytes: None,
+        target_file_size: None,
+        max_buffer_bytes: None,
+        partition_fields: Some(vec!["k".to_string()]),
+    };
+    let sink_config = ParquetSinkConfig::new(sink_spec);
+    let mut sink = ParquetSinkFunction::new(sink_config);
+    let sink_ctx = RuntimeContext::new("sink".to_string().into(), 0, 1, None, None, None);
+    sink.open(&sink_ctx).await.unwrap();
+    sink.sink(Message::new(None, batch, None, None)).await.unwrap();
+    sink.close().await.unwrap();
+
+    assert!(output_dir.join("k=A").is_dir());
+    assert!(output_dir.join("k=B").is_dir());
+}
+
+#[tokio::test]
 #[ignore]
 async fn parquet_s3_roundtrip_localstack() {
     let docker = Cli::default();
