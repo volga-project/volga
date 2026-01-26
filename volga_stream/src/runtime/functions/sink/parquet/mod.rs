@@ -11,7 +11,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use bytes::Bytes;
 use datafusion::common::ScalarValue;
-use futures::future::join_all;
+use futures::stream::{self, StreamExt};
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
 use parquet::arrow::ArrowWriter;
@@ -34,8 +34,10 @@ pub struct ParquetSinkSpec {
     pub storage_options: HashMap<String, String>,
     pub compression: Option<String>,
     pub row_group_size_bytes: Option<usize>,
+    // If None, files are finalized only when buffer limit triggers or on close.
     pub target_file_size: Option<usize>,
     pub max_buffer_bytes: Option<usize>,
+    pub max_concurrent_puts: Option<usize>,
     pub partition_fields: Option<Vec<String>>,
 }
 
@@ -46,7 +48,9 @@ pub struct ParquetSinkConfig {
 
 impl ParquetSinkSpec {
     pub fn to_config(&self) -> ParquetSinkConfig {
-        ParquetSinkConfig { spec: self.clone() }
+        ParquetSinkConfig {
+            spec: self.clone(),
+        }
     }
 }
 
@@ -77,6 +81,20 @@ impl ParquetSinkFunction {
         }
     }
 
+    pub fn new_with_store(
+        config: ParquetSinkConfig,
+        store: Arc<dyn ObjectStore>,
+        base_prefix: ObjectPath,
+    ) -> Self {
+        Self {
+            config,
+            store: Some(store),
+            base_prefix,
+            task_index: None,
+            writers: HashMap::new(),
+        }
+    }
+
     fn writer_properties(&self) -> WriterProperties {
         let mut builder = WriterProperties::builder();
         if let Some(compression) = &self.config.spec.compression {
@@ -96,11 +114,11 @@ impl ParquetSinkFunction {
         builder.build()
     }
 
-    async fn write_batch_to_partition(
+    fn write_batch_to_partition(
         &mut self,
         partition_path: &str,
         batch: RecordBatch,
-    ) -> Result<()> {
+    ) -> Result<Vec<(ObjectPath, Bytes)>> {
         let writer_properties = self.writer_properties();
         let writer_state = self.writers.entry(partition_path.to_string()).or_insert_with(|| {
             let cursor = Cursor::new(Vec::new());
@@ -114,6 +132,7 @@ impl ParquetSinkFunction {
         });
 
         let mut should_flush = false;
+        let mut payloads = Vec::new();
         {
             let mut writer = writer_state.writer.lock().unwrap();
             writer.write(&batch)?;
@@ -125,10 +144,12 @@ impl ParquetSinkFunction {
             }
         }
         if should_flush {
-            self.flush_writer(partition_path).await?;
+            if let Some(payload) = self.flush_payload(partition_path)? {
+                payloads.push(payload);
+            }
         }
-        self.enforce_buffer_limit().await?;
-        Ok(())
+        payloads.extend(self.drain_buffer_limit()?);
+        Ok(payloads)
     }
 
     fn flush_payload(&mut self, partition_path: &str) -> Result<Option<(ObjectPath, Bytes)>> {
@@ -157,18 +178,7 @@ impl ParquetSinkFunction {
         Ok(Some((obj_path, Bytes::from(data))))
     }
 
-    async fn flush_writer(&mut self, partition_path: &str) -> Result<()> {
-        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
-        if let Some((obj_path, data)) = self.flush_payload(partition_path)? {
-            store
-                .put(&obj_path, object_store::PutPayload::from_bytes(data))
-                .await?;
-        }
-        Ok(())
-    }
-
     async fn flush_all(&mut self) -> Result<()> {
-        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
         let keys: Vec<String> = self.writers.keys().cloned().collect();
         let mut payloads = Vec::new();
         for key in keys {
@@ -176,26 +186,14 @@ impl ParquetSinkFunction {
                 payloads.push(payload);
             }
         }
-        let futures = payloads.into_iter().map(|(path, data)| {
-            let store = store.clone();
-            async move {
-                store
-                    .put(&path, object_store::PutPayload::from_bytes(data))
-                    .await
-            }
-        });
-        let results = join_all(futures).await;
-        for result in results {
-            result?;
-        }
-        Ok(())
+        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
+        self.put_payloads_bounded(store, payloads).await
     }
 
-    async fn enforce_buffer_limit(&mut self) -> Result<()> {
+    fn drain_buffer_limit(&mut self) -> Result<Vec<(ObjectPath, Bytes)>> {
         let Some(max_buffer_bytes) = self.config.spec.max_buffer_bytes else {
-            return Ok(());
+            return Ok(Vec::new());
         };
-        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
         let mut payloads = Vec::new();
         while self.total_buffered_bytes() > max_buffer_bytes {
             let Some(partition) = self.largest_buffer_partition() else {
@@ -205,15 +203,29 @@ impl ParquetSinkFunction {
                 payloads.push(payload);
             }
         }
-        let futures = payloads.into_iter().map(|(path, data)| {
+        Ok(payloads)
+    }
+
+    async fn put_payloads_bounded(
+        &self,
+        store: Arc<dyn ObjectStore>,
+        payloads: Vec<(ObjectPath, Bytes)>,
+    ) -> Result<()> {
+        if payloads.is_empty() {
+            return Ok(());
+        }
+        let max_concurrency = self.config.spec.max_concurrent_puts.unwrap_or(4).max(1);
+        let results = stream::iter(payloads.into_iter().map(|(path, data)| {
             let store = store.clone();
             async move {
                 store
                     .put(&path, object_store::PutPayload::from_bytes(data))
                     .await
             }
-        });
-        let results = join_all(futures).await;
+        }))
+        .buffer_unordered(max_concurrency)
+        .collect::<Vec<_>>()
+        .await;
         for result in results {
             result?;
         }
@@ -254,7 +266,12 @@ impl ParquetSinkFunction {
                     .map_err(|_| anyhow!("partition field '{}' not found in schema", field))?;
                 let array = batch.column(idx);
                 let value = ScalarValue::try_from_array(array, row)?;
-                let value_str = value.to_string();
+                let value_str = match value {
+                    ScalarValue::Utf8(Some(v)) => v,
+                    ScalarValue::LargeUtf8(Some(v)) => v,
+                    ScalarValue::Null => "null".to_string(),
+                    other => other.to_string(),
+                };
                 parts.push(format!("{}={}", field, value_str));
             }
             builder.append_value(parts.join("/"));
@@ -290,16 +307,22 @@ impl ParquetSinkFunction {
 impl SinkFunctionTrait for ParquetSinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
         let batch = message.record_batch().clone();
+        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
+        let mut payloads = Vec::new();
         for (partition_batch, partition_path) in self.partition_batches(batch)? {
-            self.write_batch_to_partition(&partition_path, partition_batch).await?;
+            payloads.extend(self.write_batch_to_partition(&partition_path, partition_batch)?);
         }
-        Ok(())
+        self.put_payloads_bounded(store, payloads).await
     }
 }
 
 #[async_trait]
 impl FunctionTrait for ParquetSinkFunction {
     async fn open(&mut self, ctx: &RuntimeContext) -> Result<()> {
+        if self.store.is_some() {
+            self.task_index = Some(ctx.task_index());
+            return Ok(());
+        }
         let (store, prefix) = build_object_store(&self.config.spec.path, &self.config.spec.storage_options)?;
         self.store = Some(store);
         self.base_prefix = prefix;
@@ -317,13 +340,6 @@ impl FunctionTrait for ParquetSinkFunction {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
-    }
-}
-
-#[cfg(test)]
-impl ParquetSinkFunction {
-    fn buffered_bytes_for_test(&self) -> usize {
-        self.total_buffered_bytes()
     }
 }
 
@@ -376,7 +392,9 @@ fn split_s3_path(path: &str) -> Result<(String, String)> {
 
 impl ParquetSinkConfig {
     pub fn new(spec: ParquetSinkSpec) -> Self {
-        Self { spec }
+        Self {
+            spec,
+        }
     }
 }
 

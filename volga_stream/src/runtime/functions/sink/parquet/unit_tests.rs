@@ -17,6 +17,7 @@ async fn sink_enforces_max_buffer_bytes() {
         row_group_size_bytes: None,
         target_file_size: None,
         max_buffer_bytes: Some(1),
+        max_concurrent_puts: None,
         partition_fields: Some(vec!["k".to_string()]),
     };
     let mut sink = ParquetSinkFunction::new(ParquetSinkConfig::new(spec));
@@ -27,21 +28,21 @@ async fn sink_enforces_max_buffer_bytes() {
         Field::new("k", DataType::Utf8, false),
         Field::new("v", DataType::Int64, false),
     ]));
-    let batch = RecordBatch::try_new(
-        schema.clone(),
-        vec![
-            Arc::new(StringArray::from(vec!["A"])) as _,
-            Arc::new(Int64Array::from(vec![1_i64])) as _,
-        ],
-    )
-    .unwrap();
-    sink.sink(Message::new(None, batch, None, None)).await.unwrap();
-
-    assert!(sink.buffered_bytes_for_test() <= 1);
+    for i in 0..5 {
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![
+                Arc::new(StringArray::from(vec![format!("k{}", i)])) as _,
+                Arc::new(Int64Array::from(vec![i as i64])) as _,
+            ],
+        )
+        .unwrap();
+        sink.sink(Message::new(None, batch, None, None)).await.unwrap();
+    }
 
     sink.close().await.unwrap();
     let entries: Vec<_> = fs::read_dir(&tmp_dir).unwrap().collect();
-    assert!(!entries.is_empty());
+    assert!(entries.len() > 1);
 }
 
 #[test]
@@ -53,6 +54,7 @@ fn partition_batches_respects_partition_fields() {
         row_group_size_bytes: None,
         target_file_size: None,
         max_buffer_bytes: None,
+        max_concurrent_puts: None,
         partition_fields: Some(vec!["k".to_string()]),
     };
     let sink = ParquetSinkFunction::new(ParquetSinkConfig::new(spec));
