@@ -133,6 +133,7 @@ pub struct PlanningContext {
 impl PlanningContext {
     pub fn new(df_session_context: SessionContext) -> Self {
         crate::runtime::operators::window::cate::register_cate_udafs(&df_session_context);
+        crate::runtime::operators::window::top::register_top_udafs(&df_session_context);
         Self {
             df_session_context,
             connector_configs: HashMap::new(),

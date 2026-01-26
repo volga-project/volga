@@ -6,6 +6,7 @@ use datafusion::scalar::ScalarValue;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use crate::runtime::operators::window::aggregates::AggKind;
+use crate::runtime::operators::window::top::heap::TopKKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum AggFlavor {
@@ -87,5 +88,22 @@ impl Hash for CateKey {
         // Use the precomputed hash for fast lookup; ScalarValue disambiguates collisions
         // without per-row string conversion.
         self.hash.hash(state);
+    }
+}
+
+impl TopKKey for CateKey {
+    fn cmp_key(&self, other: &Self) -> std::cmp::Ordering {
+        self.value
+            .partial_cmp(&other.value)
+            .unwrap_or_else(|| {
+                crate::runtime::operators::window::top::format::scalar_to_string(&self.value)
+                    .unwrap_or_default()
+                    .cmp(
+                        &crate::runtime::operators::window::top::format::scalar_to_string(
+                            &other.value,
+                        )
+                        .unwrap_or_default(),
+                    )
+            })
     }
 }

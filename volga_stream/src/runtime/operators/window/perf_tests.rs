@@ -116,7 +116,7 @@ async fn run_case(name: String, sql: &str, batches: &[RecordBatch], iters: usize
 
 #[tokio::test]
 #[ignore]
-async fn perf_cate_matrix() {
+async fn perf_custom_aggs() {
     let rows = parse_arg("--rows", 200_000);
     let batch_size = parse_arg("--batch", 4096);
     let categories = parse_arg("--cate", 100);
@@ -126,7 +126,7 @@ async fn perf_cate_matrix() {
     let window = "WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW)";
 
     let agg_kinds = ["sum", "count", "avg", "min", "max"];
-    let variants = [
+    let cate_variants = [
         ("regular", "{}(value) OVER w as v0"),
         ("where", "{}_where(value, value > 0.5) OVER w as v0"),
         ("cate", "{}_cate(value, partition_key) OVER w as v0"),
@@ -134,21 +134,57 @@ async fn perf_cate_matrix() {
     ];
 
     for agg in agg_kinds {
-        for (label, template) in variants {
+        for (label, template) in cate_variants {
             let select = template.replace("{}", agg);
             let sql = format!(
                 "SELECT timestamp, value, partition_key, {select} FROM test_table {window}"
             );
             run_case(format!("{agg}/{label}"), &sql, &batches, iters).await;
         }
+    }
 
+    let top_variants = [
+        ("top", "top(value, 5) OVER w as v0"),
+        ("topn_frequency", "topn_frequency(value, 5) OVER w as v0"),
+        ("top1_ratio", "top1_ratio(value) OVER w as v0"),
+    ];
+    for (label, select) in top_variants {
         let sql = format!(
+            "SELECT timestamp, value, partition_key, {select} FROM test_table {window}"
+        );
+        run_case(format!("top/{label}"), &sql, &batches, iters).await;
+    }
+
+    for agg in agg_kinds {
+        let key_sql = format!(
             "SELECT timestamp, value, partition_key, \
-            {agg}_cate(value, partition_key) OVER w as cate_val, \
-            {agg}_where(value, value > 0.5) OVER w as where_val, \
-            sum(value) OVER w as sum_val \
+            top_n_key_{agg}_cate_where(value, value > 0.5, partition_key, 5) OVER w as v0 \
             FROM test_table {window}"
         );
-        run_case(format!("{agg}/mix"), &sql, &batches, iters).await;
+        run_case(format!("top_n_key_{agg}"), &key_sql, &batches, iters).await;
+
+        let value_sql = format!(
+            "SELECT timestamp, value, partition_key, \
+            top_n_value_{agg}_cate_where(value, value > 0.5, partition_key, 5) OVER w as v0 \
+            FROM test_table {window}"
+        );
+        run_case(format!("top_n_value_{agg}"), &value_sql, &batches, iters).await;
+    }
+
+    let ratio_variants = [
+        (
+            "top_n_key_ratio_cate",
+            "top_n_key_ratio_cate(value, value > 0.5, partition_key, 5) OVER w as v0",
+        ),
+        (
+            "top_n_value_ratio_cate",
+            "top_n_value_ratio_cate(value, value > 0.5, partition_key, 5) OVER w as v0",
+        ),
+    ];
+    for (label, select) in ratio_variants {
+        let sql = format!(
+            "SELECT timestamp, value, partition_key, {select} FROM test_table {window}"
+        );
+        run_case(label.to_string(), &sql, &batches, iters).await;
     }
 }

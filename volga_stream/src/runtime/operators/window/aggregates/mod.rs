@@ -15,6 +15,13 @@ use crate::storage::batch_store::Timestamp;
 use crate::storage::index::{DataRequest, SortedRangeView};
 use crate::runtime::operators::window::Cursor;
 use crate::runtime::operators::window::cate::types::{AggFlavor, CATE_KINDS};
+use crate::runtime::operators::window::top::accumulators::frequency::{
+    TOP1_RATIO_NAME, TOPN_FREQUENCY_NAME,
+};
+use crate::runtime::operators::window::top::accumulators::ratio::{
+    TOP_N_KEY_RATIO_CATE_NAME, TOP_N_VALUE_RATIO_CATE_NAME,
+};
+use crate::runtime::operators::window::top::accumulators::value::TOP_NAME;
 
 pub mod arrow_utils;
 pub mod evaluator;
@@ -172,6 +179,23 @@ impl AggregateRegistry {
                 let name = format!("{}{}", kind.name(), flavor.suffix());
                 self.register_aggregate(&name, kind.aggregator_type());
             }
+        }
+
+        for name in [
+            TOP_NAME,
+            TOP1_RATIO_NAME,
+            TOPN_FREQUENCY_NAME,
+            TOP_N_KEY_RATIO_CATE_NAME,
+            TOP_N_VALUE_RATIO_CATE_NAME,
+        ] {
+            self.register_aggregate(name, AggregatorType::RetractableAccumulator);
+        }
+
+        for kind in CATE_KINDS {
+            let name = format!("top_n_key_{}_cate_where", kind.name());
+            self.register_aggregate(&name, kind.aggregator_type());
+            let name = format!("top_n_value_{}_cate_where", kind.name());
+            self.register_aggregate(&name, kind.aggregator_type());
         }
     }
     
