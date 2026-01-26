@@ -235,7 +235,7 @@ impl Planner {
         if table_scan.projection.is_some() {
             let projection = table_scan.projection.as_ref().unwrap().clone();
             let schema = table_scan.projected_schema.inner().clone();
-            // TODO: push projection into source functions to drop unused columns before record batches are materialized.
+            // Projection pushdown is only applied by sources that explicitly support it.
             source_config.set_projection(projection, schema);
         }
         

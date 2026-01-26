@@ -1,8 +1,8 @@
 use anyhow::Result;
-use arrow::{array::{ArrayRef, RecordBatch}, datatypes::SchemaRef};
+use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig, parquet::ParquetSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
 
 #[derive(Debug, Clone)]
@@ -31,6 +31,7 @@ pub enum SourceConfig {
     DatagenSourceConfig(DatagenSourceConfig),
     HttpRequestSourceConfig(RequestSourceConfig),
     KafkaSourceConfig(KafkaSourceConfig),
+    ParquetSourceConfig(ParquetSourceConfig),
 }
 
 // TODO deprecate in favor of datagen
@@ -93,6 +94,7 @@ impl SourceConfig {
             SourceConfig::DatagenSourceConfig(config) => config.get_projection(),
             SourceConfig::HttpRequestSourceConfig(_) => (None, None), // Request source doesn't support projection
             SourceConfig::KafkaSourceConfig(config) => config.get_projection(),
+            SourceConfig::ParquetSourceConfig(config) => config.get_projection(),
         }
     }
 
@@ -103,6 +105,7 @@ impl SourceConfig {
             SourceConfig::DatagenSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::HttpRequestSourceConfig(_) => {}, // Request source doesn't support projection
             SourceConfig::KafkaSourceConfig(config) => config.set_projection(projection, schema),
+            SourceConfig::ParquetSourceConfig(config) => config.set_projection(projection, schema),
         }
     }
 }
@@ -115,6 +118,7 @@ impl std::fmt::Display for SourceConfig {
             SourceConfig::DatagenSourceConfig(_) => write!(f, "Datagen"),
             SourceConfig::HttpRequestSourceConfig(_) => write!(f, "HttpRequest"),
             SourceConfig::KafkaSourceConfig(_) => write!(f, "Kafka"),
+            SourceConfig::ParquetSourceConfig(_) => write!(f, "Parquet"),
         }
     }
 }
@@ -122,8 +126,6 @@ impl std::fmt::Display for SourceConfig {
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
-    projection: Option<Vec<usize>>,
-    projected_schema: Option<SchemaRef>,
 }
 
 impl SourceOperator {
@@ -135,8 +137,6 @@ impl SourceOperator {
         let source_function = create_source_function(source_config);
         Self {
             base: OperatorBase::new_with_function(source_function, config),
-            projection: None,
-            projected_schema: None,
         }
     }
 }
@@ -173,25 +173,7 @@ impl OperatorTrait for SourceOperator {
             Some(Message::Watermark(watermark)) => {
                 return OperatorPollResult::Ready(Message::Watermark(watermark));
             }
-            Some(message) => {
-                if let Some(proj) = &self.projection {
-                    let batch = message.record_batch();
-                    let projected_columns: Vec<ArrayRef> = proj
-                        .iter()
-                        .map(|&i| batch.column(i).clone())
-                        .collect();
-                   
-                    let projected_batch = RecordBatch::try_new(
-                        self.projected_schema.clone().expect("should have schema with projection"),
-                        projected_columns,
-                    ).unwrap();
-                    
-                    let projected_message = Message::new(message.upstream_vertex_id(), projected_batch, message.ingest_timestamp(), message.get_extras());
-                    OperatorPollResult::Ready(projected_message)
-                } else {
-                    OperatorPollResult::Ready(message)
-                }
-            }
+            Some(message) => OperatorPollResult::Ready(message),
             None => OperatorPollResult::None,
         }
     }

@@ -11,6 +11,7 @@ use super::vector_source::VectorSourceFunction;
 use super::word_count_source::WordCountSourceFunction;
 use super::datagen_source::DatagenSourceFunction;
 use super::kafka::KafkaSourceFunction;
+use super::parquet::ParquetSourceFunction;
 
 #[async_trait]
 pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
@@ -32,6 +33,7 @@ pub enum SourceFunction {
     Datagen(DatagenSourceFunction),
     HttpRequest(HttpRequestSourceFunction),
     Kafka(KafkaSourceFunction),
+    Parquet(ParquetSourceFunction),
 }
 
 impl fmt::Display for SourceFunction {
@@ -42,6 +44,7 @@ impl fmt::Display for SourceFunction {
             SourceFunction::Datagen(_) => write!(f, "Datagen"),
             SourceFunction::HttpRequest(_) => write!(f, "HttpRequest"),
             SourceFunction::Kafka(_) => write!(f, "Kafka"),
+            SourceFunction::Parquet(_) => write!(f, "Parquet"),
         }
     }
 }
@@ -55,6 +58,7 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::Datagen(f) => f.fetch().await,
             SourceFunction::HttpRequest(f) => f.fetch().await,
             SourceFunction::Kafka(f) => f.fetch().await,
+            SourceFunction::Parquet(f) => f.fetch().await,
         }
     }
 
@@ -65,6 +69,7 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::Datagen(f) => f.snapshot_position().await,
             SourceFunction::HttpRequest(f) => f.snapshot_position().await,
             SourceFunction::Kafka(f) => f.snapshot_position().await,
+            SourceFunction::Parquet(f) => f.snapshot_position().await,
         }
     }
 
@@ -75,6 +80,7 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::Datagen(f) => f.restore_position(bytes).await,
             SourceFunction::HttpRequest(f) => f.restore_position(bytes).await,
             SourceFunction::Kafka(f) => f.restore_position(bytes).await,
+            SourceFunction::Parquet(f) => f.restore_position(bytes).await,
         }
     }
 }
@@ -88,6 +94,7 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Datagen(f) => f.open(context).await,
             SourceFunction::HttpRequest(f) => f.open(context).await,
             SourceFunction::Kafka(f) => f.open(context).await,
+            SourceFunction::Parquet(f) => f.open(context).await,
         }
     }
     
@@ -98,6 +105,7 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Datagen(f) => f.close().await,
             SourceFunction::HttpRequest(f) => f.close().await,
             SourceFunction::Kafka(f) => f.close().await,
+            SourceFunction::Parquet(f) => f.close().await,
         }
     }
     
@@ -133,6 +141,9 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
         }
         SourceConfig::KafkaSourceConfig(config) => {
             SourceFunction::Kafka(KafkaSourceFunction::new(config))
+        }
+        SourceConfig::ParquetSourceConfig(config) => {
+            SourceFunction::Parquet(ParquetSourceFunction::new(config))
         }
     }
 } 
