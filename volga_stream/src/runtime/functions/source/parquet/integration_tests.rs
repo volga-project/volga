@@ -275,9 +275,10 @@ async fn parquet_partitioned_sink_writes_directories() {
     sink.sink(Message::new(None, batch, None, None)).await.unwrap();
     sink.close().await.unwrap();
 
-    let (store, prefix) = super::build_object_store(
+    let (store, prefix) = crate::runtime::functions::parquet_utils::build_object_store(
         &format!("file://{}", output_dir.to_string_lossy()),
         &HashMap::new(),
+        false,
     )
     .unwrap();
     let mut listed = store.list(Some(&prefix));

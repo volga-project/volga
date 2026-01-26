@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::io::Cursor;
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, anyhow};
@@ -21,8 +20,9 @@ use uuid::Uuid;
 
 use crate::common::Message;
 use crate::runtime::functions::function_trait::FunctionTrait;
-use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::functions::parquet_utils::build_object_store;
 use crate::runtime::functions::sink::sink_function::SinkFunctionTrait;
+use crate::runtime::runtime_context::RuntimeContext;
 
 #[cfg(test)]
 mod unit_tests;
@@ -323,7 +323,11 @@ impl FunctionTrait for ParquetSinkFunction {
             self.task_index = Some(ctx.task_index());
             return Ok(());
         }
-        let (store, prefix) = build_object_store(&self.config.spec.path, &self.config.spec.storage_options)?;
+        let (store, prefix) = build_object_store(
+            &self.config.spec.path,
+            &self.config.spec.storage_options,
+            false,
+        )?;
         self.store = Some(store);
         self.base_prefix = prefix;
         self.task_index = Some(ctx.task_index());
@@ -341,53 +345,6 @@ impl FunctionTrait for ParquetSinkFunction {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
-}
-
-fn build_object_store(
-    path: &str,
-    storage_options: &HashMap<String, String>,
-) -> Result<(Arc<dyn ObjectStore>, ObjectPath)> {
-    if path.starts_with("s3://") {
-        let (bucket, prefix) = split_s3_path(path)?;
-        let mut builder = object_store::aws::AmazonS3Builder::new()
-            .with_bucket_name(bucket);
-        if let Some(region) = storage_options.get("region") {
-            builder = builder.with_region(region);
-        }
-        if let Some(endpoint) = storage_options.get("endpoint_url") {
-            builder = builder.with_endpoint(endpoint);
-            if endpoint.starts_with("http://") {
-                builder = builder.with_allow_http(true);
-            }
-        }
-        if let (Some(key), Some(secret)) = (
-            storage_options.get("access_key_id"),
-            storage_options.get("secret_access_key"),
-        ) {
-            builder = builder.with_access_key_id(key).with_secret_access_key(secret);
-        }
-        let store = builder.build()?;
-        let store = Arc::new(store) as Arc<dyn ObjectStore>;
-        Ok((store, ObjectPath::from(prefix)))
-    } else {
-        let local_path = if let Some(stripped) = path.strip_prefix("file://") {
-            stripped
-        } else {
-            path
-        };
-        let local_path = PathBuf::from(local_path);
-        let store = object_store::local::LocalFileSystem::new_with_prefix(&local_path)?;
-        let store = Arc::new(store) as Arc<dyn ObjectStore>;
-        Ok((store, ObjectPath::from("")))
-    }
-}
-
-fn split_s3_path(path: &str) -> Result<(String, String)> {
-    let stripped = path.trim_start_matches("s3://");
-    let mut parts = stripped.splitn(2, '/');
-    let bucket = parts.next().ok_or_else(|| anyhow!("missing s3 bucket"))?.to_string();
-    let prefix = parts.next().unwrap_or("").to_string();
-    Ok((bucket, prefix))
 }
 
 impl ParquetSinkConfig {
