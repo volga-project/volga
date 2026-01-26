@@ -7,6 +7,7 @@ pub mod worker;
 pub mod worker_server;
 pub mod master;
 pub mod master_server;
+pub mod bootstrap;
 pub mod functions;
 pub mod metrics;
 pub mod observability;

@@ -7,8 +7,6 @@ use tokio::task::JoinHandle;
 use tokio::sync::Mutex;
 
 use crate::api::{compile_logical_graph, ExecutionProfile, PipelineSpec};
-use crate::cluster::cluster_provider::{ClusterProvider, LocalMachineClusterProvider};
-use crate::cluster::node_assignment::{SingleNodeStrategy, SingleWorkerStrategy};
 use crate::control_plane::types::{AttemptId, ExecutionIds};
 use crate::executor::local_runtime_adapter::LocalRuntimeAdapter;
 use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
@@ -21,7 +19,6 @@ use crate::transport::transport_backend_actor::TransportBackendType;
 pub struct PipelineContext {
     pub spec: PipelineSpec,
     runtime_adapter: Option<Arc<dyn RuntimeAdapter>>,
-    cluster_provider: Option<Arc<dyn ClusterProvider>>,
 }
 
 pub struct PipelineContextRunHandle {
@@ -41,17 +38,11 @@ impl PipelineContext {
         Self {
             spec,
             runtime_adapter: None,
-            cluster_provider: None,
         }
     }
 
     pub fn with_runtime_adapter(mut self, adapter: Arc<dyn RuntimeAdapter>) -> Self {
         self.runtime_adapter = Some(adapter);
-        self
-    }
-
-    pub fn with_cluster_provider(mut self, provider: Arc<dyn ClusterProvider>) -> Self {
-        self.cluster_provider = Some(provider);
         self
     }
 
@@ -120,16 +111,14 @@ impl PipelineContext {
             }
             ExecutionProfile::LocalOrchestrated => {
                 let adapter = Arc::new(LocalRuntimeAdapter::new());
-                let cluster_provider = Arc::new(LocalMachineClusterProvider::single_node());
-                let node_assign = Arc::new(SingleNodeStrategy);
 
                 let handle = adapter
                     .start_attempt(StartAttemptRequest {
                         execution_ids,
+                        pipeline_spec: self.spec.clone(),
                         execution_graph,
                         num_workers_per_operator: 1,
-                        cluster_provider,
-                        node_assign,
+                        placement_strategy: self.spec.placement_strategy.clone(),
                         transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
                         worker_runtime: self.spec.worker_runtime.clone(),
                         operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
@@ -148,18 +137,14 @@ impl PipelineContext {
                 let runtime_adapter = self
                     .runtime_adapter
                     .expect("Orchestrated profile requires a runtime_adapter");
-                let cluster_provider = self
-                    .cluster_provider
-                    .expect("Orchestrated profile requires a cluster_provider");
-                let node_assign = Arc::new(SingleWorkerStrategy);
 
                 let handle = runtime_adapter
                     .start_attempt(StartAttemptRequest {
                         execution_ids,
+                        pipeline_spec: self.spec.clone(),
                         execution_graph,
                         num_workers_per_operator,
-                        cluster_provider,
-                        node_assign,
+                        placement_strategy: self.spec.placement_strategy.clone(),
                         transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
                         worker_runtime: self.spec.worker_runtime.clone(),
                         operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),

@@ -14,8 +14,6 @@ use crate::control_plane::types::{
 };
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::cluster::cluster_provider::LocalMachineClusterProvider;
-use crate::cluster::node_assignment::SingleNodeStrategy;
 use crate::api::PipelineSpec as UserPipelineSpec;
 use crate::runtime::observability::{PipelineSnapshot, PipelineSnapshotEntry};
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
@@ -109,10 +107,10 @@ impl ControlPlaneController {
                         .adapter
                         .start_attempt(StartAttemptRequest {
                             execution_ids: run.execution_ids.clone(),
+                            pipeline_spec: spec.clone(),
                             execution_graph: graph,
                             num_workers_per_operator,
-                            cluster_provider: Arc::new(LocalMachineClusterProvider::single_node()),
-                            node_assign: Arc::new(SingleNodeStrategy),
+                            placement_strategy: spec.placement_strategy.clone(),
                             transport_overrides_queue_records: spec.transport_overrides_queue_records(),
                             worker_runtime: spec.worker_runtime.clone(),
                             operator_type_storage_overrides: spec.operator_type_storage_overrides(),
@@ -211,7 +209,7 @@ impl ControlPlaneController {
                 }
                 PipelineDesiredState::Stopped | PipelineDesiredState::Paused | PipelineDesiredState::Draining => {
                     if let Some(handle) = running_guard.remove(&pipeline_id) {
-                        handle.abort();
+                        self.adapter.stop_attempt(handle).await?;
                     }
                     if let Some(h) = pollers_guard.remove(&pipeline_id) {
                         h.abort();
