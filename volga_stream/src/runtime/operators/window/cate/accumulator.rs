@@ -2,13 +2,11 @@ use std::collections::HashMap;
 use std::mem::size_of_val;
 use std::sync::Arc;
 
-use ahash::RandomState;
 use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
 use arrow::compute::kernels::boolean::and_kleene;
 use arrow::compute::{filter, is_not_null, take};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::{exec_err, Result};
-use datafusion::common::hash_utils::create_hashes;
 use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator, AggregateUDF};
 use datafusion::physical_expr::expressions::Column;
@@ -17,6 +15,9 @@ use datafusion::scalar::ScalarValue;
 
 use super::types::{CateKey, CateUdfSpec, EncodedStateBytes};
 use crate::runtime::operators::window::aggregates::{AggKind, AggregatorType};
+use crate::runtime::operators::window::top::utils::{
+    group_indices_by_scalar_with_hash, hash_scalar_value,
+};
 use super::utils::{
     acc_state_to_bytes, coerce_value_type, df_error, infer_value_type, merge_state_bytes,
     scalar_to_string,
@@ -100,62 +101,11 @@ impl CateAccumulator {
         Ok(mask)
     }
 
-    fn hash_categories(cate_array: &ArrayRef) -> Result<Vec<u64>> {
-        let mut hashes = vec![0u64; cate_array.len()];
-        let random_state = RandomState::with_seeds(0, 0, 0, 0);
-        create_hashes(&[cate_array.clone()], &random_state, &mut hashes)?;
-        Ok(hashes)
-    }
-
-    fn group_indices_by_key(
-        cate_array: &ArrayRef,
-        hashes: &[u64],
-    ) -> Result<Vec<(CateKey, Vec<u32>)>> {
-        #[derive(Debug)]
-        struct Bucket {
-            key: CateKey,
-            indices: Vec<u32>,
-        }
-
-        let mut by_hash: HashMap<u64, Vec<Bucket>> = HashMap::new();
-        for row in 0..cate_array.len() {
-            let hash = hashes[row];
-            let buckets = by_hash.entry(hash).or_default();
-            let mut matched = false;
-            for bucket in buckets.iter_mut() {
-                if bucket.key.value.eq_array(cate_array, row)? {
-                    bucket.indices.push(row as u32);
-                    matched = true;
-                    break;
-                }
-            }
-            if !matched {
-                let value = ScalarValue::try_from_array(cate_array.as_ref(), row)
-                    .map_err(|e| df_error(format!("category value decode failed: {e}")))?;
-                let key = CateKey { hash, value };
-                buckets.push(Bucket {
-                    key,
-                    indices: vec![row as u32],
-                });
-            }
-        }
-
-        let mut out = Vec::new();
-        for buckets in by_hash.into_values() {
-            for bucket in buckets {
-                out.push((bucket.key, bucket.indices));
-            }
-        }
-        Ok(out)
-    }
-
     fn key_from_value(value: ScalarValue) -> Result<CateKey> {
-        let array = value
-            .to_array_of_size(1)
+        let hash = hash_scalar_value(&value)
             .map_err(|e| df_error(format!("hash value to array failed: {e}")))?;
-        let hashes = Self::hash_categories(&array)?;
         Ok(CateKey {
-            hash: hashes[0],
+            hash,
             value,
         })
     }
@@ -220,8 +170,8 @@ impl Accumulator for CateAccumulator {
             return Ok(());
         }
 
-        let hashes = Self::hash_categories(&cate_array)?;
-        for (key, indices) in Self::group_indices_by_key(&cate_array, &hashes)? {
+        for (value, hash, indices) in group_indices_by_scalar_with_hash(&cate_array)? {
+            let key = CateKey { hash, value };
             if !self.cate.contains_key(&key) {
                 let acc = self.build_accumulator(&value_type)?;
                 self.cate.insert(key.clone(), acc);
@@ -297,9 +247,9 @@ impl Accumulator for CateAccumulator {
             return Ok(());
         }
 
-        let hashes = Self::hash_categories(&cate_array)?;
         let mut to_remove: Vec<CateKey> = Vec::new();
-        for (key, indices) in Self::group_indices_by_key(&cate_array, &hashes)? {
+        for (value, hash, indices) in group_indices_by_scalar_with_hash(&cate_array)? {
+            let key = CateKey { hash, value };
             if !self.cate.contains_key(&key) {
                 let acc = self.build_accumulator(&value_type)?;
                 self.cate.insert(key.clone(), acc);

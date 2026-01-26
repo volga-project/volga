@@ -11,6 +11,8 @@ pub mod state;
 
 #[cfg(test)]
 mod window_operator_tests;
+#[cfg(test)]
+mod perf_tests;
 
 pub use window_operator::WindowOperator;
 pub use window_request_operator::WindowRequestOperator;

@@ -18,8 +18,9 @@ use datafusion::logical_expr::{
 use datafusion::prelude::SessionContext;
 
 use super::accumulator::CateAccumulator;
-use crate::runtime::operators::window::top::grouped_topk::{
-    GroupedAggTopKAccumulator, RatioTopKAccumulator,
+use crate::runtime::operators::window::top::accumulators::grouped_agg::GroupedAggTopKAccumulator;
+use crate::runtime::operators::window::top::accumulators::ratio::{
+    RatioTopKAccumulator, TOP_N_KEY_RATIO_CATE_NAME, TOP_N_VALUE_RATIO_CATE_NAME,
 };
 use crate::runtime::operators::window::top::heap::TopKOrder;
 use super::types::{AggFlavor, CateUdfSpec};
@@ -404,12 +405,12 @@ pub fn register_cate_udafs(ctx: &SessionContext) {
     }
 
     ctx.register_udaf(cate_top_udaf(
-        "top_n_key_ratio_cate",
+        TOP_N_KEY_RATIO_CATE_NAME,
         TopKOrder::KeyDesc,
         CateTopMode::Ratio,
     ));
     ctx.register_udaf(cate_top_udaf(
-        "top_n_value_ratio_cate",
+        TOP_N_VALUE_RATIO_CATE_NAME,
         TopKOrder::MetricDesc,
         CateTopMode::Ratio,
     ));

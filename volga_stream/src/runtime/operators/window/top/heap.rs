@@ -1,5 +1,5 @@
 use std::cmp::Ordering;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use std::hash::Hash;
 
 use ahash::RandomState;
@@ -98,24 +98,46 @@ impl<K: TopKKey> TopKMap<K> {
         self.map.remove(key);
     }
 
+    pub(crate) fn get_metric(&self, key: &K) -> Option<&ScalarValue> {
+        self.map.get(key)
+    }
+
+    pub(crate) fn entries(&self) -> Vec<(K, ScalarValue)> {
+        self.map
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.map.len()
+    }
+
+    // Lazy invalidation: heap can grow with stale entries after updates/retracts.
+    // Eval pops until it finds entries that still match the current map value,
+    // dropping stale ones on the way. This bounds per-eval heap cleanup; heap
+    // size is amortized by repeated evals rather than eager deletes on update.
     pub(crate) fn top_n(&mut self, n: usize) -> Vec<(K, ScalarValue)> {
         if n == 0 {
             return Vec::new();
         }
-        let mut out = Vec::with_capacity(n);
-        let mut kept: Vec<TopKEntry<K>> = Vec::with_capacity(n);
-        while out.len() < n {
+        let mut out_entries: Vec<TopKEntry<K>> = Vec::with_capacity(n);
+        let mut seen: HashSet<K> = HashSet::with_capacity(n);
+        while out_entries.len() < n {
             let entry = match self.heap.pop() {
                 Some(entry) => entry,
                 None => break,
             };
             let current = self.map.get(&entry.key);
-            if current == Some(&entry.metric) {
-                out.push((entry.key.clone(), entry.metric.clone()));
-                kept.push(entry);
+            if current == Some(&entry.metric) && seen.insert(entry.key.clone()) {
+                out_entries.push(entry);
             }
         }
-        for entry in kept {
+        let out = out_entries
+            .iter()
+            .map(|entry| (entry.key.clone(), entry.metric.clone()))
+            .collect();
+        for entry in out_entries {
             self.heap.push(entry);
         }
         out

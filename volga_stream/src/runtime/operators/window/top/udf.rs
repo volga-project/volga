@@ -11,8 +11,11 @@ use datafusion::logical_expr::{
 };
 use datafusion::prelude::SessionContext;
 
-use super::grouped_topk::{FrequencyMode, FrequencyTopKAccumulator};
-use super::value_topk::TopValueAccumulator;
+use super::accumulators::frequency::{
+    FrequencyMode, FrequencyTopKAccumulator, TOP1_RATIO_NAME, TOPN_FREQUENCY_NAME,
+};
+use super::accumulators::value::TOP_NAME;
+use super::accumulators::value::TopValueAccumulator;
 
 #[derive(Debug, Clone, Copy)]
 enum TopUdfKind {
@@ -127,9 +130,9 @@ fn top_udaf(name: &str, kind: TopUdfKind) -> AggregateUDF {
 
 pub fn register_top_udafs(ctx: &SessionContext) {
     let fns = vec![
-        top_udaf("top", TopUdfKind::TopValue),
-        top_udaf("topn_frequency", TopUdfKind::TopNFrequency),
-        top_udaf("top1_ratio", TopUdfKind::Top1Ratio),
+        top_udaf(TOP_NAME, TopUdfKind::TopValue),
+        top_udaf(TOPN_FREQUENCY_NAME, TopUdfKind::TopNFrequency),
+        top_udaf(TOP1_RATIO_NAME, TopUdfKind::Top1Ratio),
     ];
     for f in fns {
         ctx.register_udaf(f);

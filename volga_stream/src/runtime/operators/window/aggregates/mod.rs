@@ -15,6 +15,13 @@ use crate::storage::batch_store::Timestamp;
 use crate::storage::index::{DataRequest, SortedRangeView};
 use crate::runtime::operators::window::Cursor;
 use crate::runtime::operators::window::cate::types::{AggFlavor, CATE_KINDS};
+use crate::runtime::operators::window::top::accumulators::frequency::{
+    TOP1_RATIO_NAME, TOPN_FREQUENCY_NAME,
+};
+use crate::runtime::operators::window::top::accumulators::ratio::{
+    TOP_N_KEY_RATIO_CATE_NAME, TOP_N_VALUE_RATIO_CATE_NAME,
+};
+use crate::runtime::operators::window::top::accumulators::value::TOP_NAME;
 
 pub mod arrow_utils;
 pub mod evaluator;
@@ -175,11 +182,11 @@ impl AggregateRegistry {
         }
 
         for name in [
-            "top",
-            "top1_ratio",
-            "topn_frequency",
-            "top_n_key_ratio_cate",
-            "top_n_value_ratio_cate",
+            TOP_NAME,
+            TOP1_RATIO_NAME,
+            TOPN_FREQUENCY_NAME,
+            TOP_N_KEY_RATIO_CATE_NAME,
+            TOP_N_VALUE_RATIO_CATE_NAME,
         ] {
             self.register_aggregate(name, AggregatorType::RetractableAccumulator);
         }
