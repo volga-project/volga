@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
+use crate::runtime::bootstrap::WorkerBootstrapPayload;
+
 pub mod master_service {
     tonic::include_proto!("master_service");
 }
@@ -14,6 +16,7 @@ use master_service::{
     GetTaskCheckpointRequest, GetTaskCheckpointResponse, StateBlob,
     GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
     GetLatestSnapshotRequest, GetLatestSnapshotResponse,
+    GetWorkerBootstrapRequest, GetWorkerBootstrapResponse,
 };
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -75,6 +78,7 @@ pub struct MasterLatestSnapshot {
 pub struct MasterServiceImpl {
     registry: Arc<Mutex<MasterCheckpointRegistry>>,
     latest_snapshot: Arc<Mutex<Option<MasterLatestSnapshot>>>,
+    bootstrap_payload: Arc<Mutex<Option<WorkerBootstrapPayload>>>,
 }
 
 impl MasterServiceImpl {
@@ -82,11 +86,17 @@ impl MasterServiceImpl {
         Self {
             registry: Arc::new(Mutex::new(MasterCheckpointRegistry::default())),
             latest_snapshot: Arc::new(Mutex::new(None)),
+            bootstrap_payload: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn snapshot_sink(&self) -> Arc<Mutex<Option<MasterLatestSnapshot>>> {
         self.latest_snapshot.clone()
+    }
+
+    pub async fn set_bootstrap_payload(&self, payload: WorkerBootstrapPayload) {
+        let mut guard = self.bootstrap_payload.lock().await;
+        *guard = Some(payload);
     }
 }
 
@@ -192,6 +202,20 @@ impl MasterService for MasterServiceImpl {
             }))
         }
     }
+
+    async fn get_worker_bootstrap(
+        &self,
+        _request: Request<GetWorkerBootstrapRequest>,
+    ) -> Result<Response<GetWorkerBootstrapResponse>, Status> {
+        let guard = self.bootstrap_payload.lock().await;
+        let Some(payload) = guard.as_ref() else {
+            return Err(Status::failed_precondition("bootstrap payload not set"));
+        };
+        let bytes = bincode::serialize(payload).map_err(|e| {
+            Status::internal(format!("failed to serialize bootstrap payload: {e}"))
+        })?;
+        Ok(Response::new(GetWorkerBootstrapResponse { bootstrap_bytes: bytes }))
+    }
 }
 
 /// Server that hosts MasterService
@@ -212,6 +236,10 @@ impl MasterServer {
 
     pub fn snapshot_sink(&self) -> Arc<Mutex<Option<MasterLatestSnapshot>>> {
         self.service.snapshot_sink()
+    }
+
+    pub async fn set_bootstrap_payload(&mut self, payload: WorkerBootstrapPayload) {
+        self.service.set_bootstrap_payload(payload).await;
     }
 
     pub async fn set_checkpointable_tasks(&mut self, tasks: Vec<TaskKey>) {

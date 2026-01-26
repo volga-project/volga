@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::LogicalGraph;
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceBindingSpec};
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
+use crate::api::spec::placement::PlacementStrategy;
+use crate::api::spec::resources::{ResourceProfiles, ResourceStrategy};
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
@@ -34,6 +36,9 @@ pub struct PipelineSpec {
     pub execution_profile: ExecutionProfile,
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
+    pub placement_strategy: PlacementStrategy,
+    pub resource_strategy: ResourceStrategy,
+    pub resource_profiles: ResourceProfiles,
     pub worker_runtime: WorkerRuntimeSpec,
     /// Per-operator-type storage overrides (shared across all instances of that operator type in a worker).
     /// Key is a stable operator-type string (e.g. "window").
@@ -73,6 +78,9 @@ impl PipelineSpecBuilder {
                 },
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
+                placement_strategy: PlacementStrategy::default(),
+                resource_strategy: ResourceStrategy::default(),
+                resource_profiles: ResourceProfiles::default(),
                 worker_runtime: WorkerRuntimeSpec::default(),
                 operator_type_storage: HashMap::new(),
                 operator_overrides: OperatorOverrides::default(),
@@ -101,6 +109,21 @@ impl PipelineSpecBuilder {
 
     pub fn with_execution_profile(mut self, profile: ExecutionProfile) -> Self {
         self.spec.execution_profile = profile;
+        self
+    }
+
+    pub fn with_placement_strategy(mut self, strategy: PlacementStrategy) -> Self {
+        self.spec.placement_strategy = strategy;
+        self
+    }
+
+    pub fn with_resource_strategy(mut self, strategy: ResourceStrategy) -> Self {
+        self.spec.resource_strategy = strategy;
+        self
+    }
+
+    pub fn with_resource_profiles(mut self, profiles: ResourceProfiles) -> Self {
+        self.spec.resource_profiles = profiles;
         self
     }
 

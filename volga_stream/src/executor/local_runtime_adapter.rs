@@ -1,7 +1,8 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::cluster::node_assignment::node_to_vertex_ids;
+use crate::cluster::cluster_provider::{ClusterProvider, LocalMachineClusterProvider};
+use crate::cluster::node_assignment::{node_to_vertex_ids, SingleNodeStrategy};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::master::Master;
@@ -11,6 +12,7 @@ use crate::runtime::worker_server::WorkerServer;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::transport::channel::Channel;
+use crate::api::spec::placement::PlacementStrategy;
 
 pub struct LocalRuntimeAdapter;
 
@@ -23,14 +25,17 @@ impl LocalRuntimeAdapter {
 #[async_trait]
 impl RuntimeAdapter for LocalRuntimeAdapter {
     async fn start_attempt(&self, mut req: StartAttemptRequest) -> Result<AttemptHandle> {
-        let cluster_nodes = req
-            .cluster_provider
+        if req.placement_strategy != PlacementStrategy::SingleNode {
+            panic!("LocalRuntimeAdapter only supports SingleNode placement strategy");
+        }
+        let cluster_provider = LocalMachineClusterProvider::single_node();
+        let cluster_nodes = cluster_provider
             .get_all_nodes()
             .values()
             .cloned()
             .collect::<Vec<_>>();
-
-        let vertex_to_node = req.node_assign.assign_nodes(&req.execution_graph, &cluster_nodes);
+        let node_assign = SingleNodeStrategy;
+        let vertex_to_node = node_assign.assign_nodes(&req.execution_graph, &cluster_nodes);
         req.execution_graph
             .update_channels_with_node_mapping_and_transport(
                 Some(&vertex_to_node),
@@ -110,20 +115,36 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
 
         let execution_ids = req.execution_ids.clone();
         let worker_addrs_for_join = worker_addrs.clone();
+        let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
         let join = tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            tokio::select! {
+                _ = stop_receiver => {
+                    let mut servers = worker_servers;
+                    for s in servers.iter_mut() {
+                        s.stop().await;
+                    }
+                    let mut ms = master_server;
+                    ms.stop().await;
+                    Ok(crate::runtime::observability::PipelineSnapshot::new(std::collections::HashMap::new()))
+                }
+                result = async {
+                    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-            let mut master = Master::new().with_snapshot_sink(master_snapshot_sink);
-            master.execute(worker_addrs_for_join.clone()).await?;
+                    let mut master = Master::new().with_snapshot_sink(master_snapshot_sink);
+                    master.execute(worker_addrs_for_join.clone()).await?;
 
-            let worker_states = master.get_worker_states().await;
-            let mut servers = worker_servers;
-            for s in servers.iter_mut() {
-                s.stop().await;
+                    let worker_states = master.get_worker_states().await;
+                    let mut servers = worker_servers;
+                    for s in servers.iter_mut() {
+                        s.stop().await;
+                    }
+                    let mut ms = master_server;
+                    ms.stop().await;
+                    Ok(crate::runtime::observability::PipelineSnapshot::new(worker_states))
+                } => {
+                    result
+                }
             }
-            let mut ms = master_server;
-            ms.stop().await;
-            Ok(crate::runtime::observability::PipelineSnapshot::new(worker_states))
         });
 
         Ok(AttemptHandle {
@@ -131,7 +152,16 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             master_addr,
             worker_addrs,
             join,
+            stop_sender: Some(stop_sender),
         })
+    }
+
+    async fn stop_attempt(&self, mut handle: AttemptHandle) -> Result<()> {
+        if let Some(stop_sender) = handle.stop_sender.take() {
+            let _ = stop_sender.send(());
+        }
+        let _ = handle.join.await;
+        Ok(())
     }
 }
 

@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
+
 /// Represents a node in the cluster
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterNode {
     pub node_id: String,
     pub node_ip: String,
@@ -24,6 +26,7 @@ pub trait ClusterProvider: Send + Sync {
     fn get_all_nodes(&self) -> &HashMap<String, ClusterNode>;
 }
 
+// TODO this is not used, we can delete
 /// Simple in-memory cluster provider
 #[derive(Debug, Clone)]
 pub struct InMemoryClusterProvider {

@@ -7,6 +7,7 @@ service MasterService {
   rpc GetTaskCheckpoint(GetTaskCheckpointRequest) returns (GetTaskCheckpointResponse);
   rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
   rpc GetLatestSnapshot(GetLatestSnapshotRequest) returns (GetLatestSnapshotResponse);
+  rpc GetWorkerBootstrap(GetWorkerBootstrapRequest) returns (GetWorkerBootstrapResponse);
 }
 
 message StateBlob {
@@ -56,6 +57,14 @@ message GetLatestSnapshotResponse {
   bytes snapshot_bytes = 2;
   uint64 ts_ms = 3;
   uint64 seq = 4;
+}
+
+message GetWorkerBootstrapRequest {
+  string worker_id = 1;
+}
+
+message GetWorkerBootstrapResponse {
+  bytes bootstrap_bytes = 1;
 }
 
 
