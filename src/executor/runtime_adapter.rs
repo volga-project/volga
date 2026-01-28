@@ -5,7 +5,7 @@ use tokio::task::JoinHandle;
 use crate::control_plane::types::ExecutionIds;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::observability::PipelineSnapshot;
-use crate::api::spec::placement::PlacementStrategy;
+use crate::cluster::node_assignment::NodeAssignStrategyName;
 use crate::api::spec::pipeline::PipelineSpec;
 use crate::api::WorkerRuntimeSpec;
 use crate::api::StorageSpec;
@@ -16,7 +16,7 @@ pub struct StartAttemptRequest {
     pub pipeline_spec: PipelineSpec,
     pub execution_graph: ExecutionGraph,
     pub num_workers_per_operator: usize,
-    pub placement_strategy: PlacementStrategy,
+    pub node_assign_strategy: NodeAssignStrategyName,
     // TODO do we need this? Why is it not inside worker_runtime.transport?
     pub transport_overrides_queue_records: std::collections::HashMap<String, u32>,
     
@@ -52,5 +52,6 @@ impl AttemptHandle {
 pub trait RuntimeAdapter: Send + Sync {
     async fn start_attempt(&self, req: StartAttemptRequest) -> Result<AttemptHandle>;
     async fn stop_attempt(&self, handle: AttemptHandle) -> Result<()>;
+    fn supported_assign_strategies(&self) -> &[NodeAssignStrategyName];
 }
 

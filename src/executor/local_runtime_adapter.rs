@@ -1,8 +1,13 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use std::collections::HashMap;
 
-use crate::cluster::cluster_provider::{ClusterProvider, LocalMachineClusterProvider};
-use crate::cluster::node_assignment::{node_to_vertex_ids, SingleNodeStrategy};
+use crate::cluster::node_assignment::{
+    node_to_vertex_ids,
+    ClusterNode,
+    NodeAssignStrategyName,
+    SingleNodeStrategy,
+};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::master::Master;
@@ -12,7 +17,6 @@ use crate::runtime::worker_server::WorkerServer;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::transport::channel::Channel;
-use crate::api::spec::placement::PlacementStrategy;
 
 pub struct LocalRuntimeAdapter;
 
@@ -22,15 +26,42 @@ impl LocalRuntimeAdapter {
     }
 }
 
+#[derive(Debug, Clone)]
+struct LocalMachineClusterProvider {
+    nodes: HashMap<String, ClusterNode>,
+}
+
+impl LocalMachineClusterProvider {
+    pub fn single_node() -> Self {
+        let mut nodes = HashMap::new();
+        nodes.insert(
+            "local".to_string(),
+            ClusterNode::new("local".to_string(), "127.0.0.1".to_string(), 0),
+        );
+        Self { nodes }
+    }
+
+    pub fn nodes(&self) -> &HashMap<String, ClusterNode> {
+        &self.nodes
+    }
+}
+
 #[async_trait]
 impl RuntimeAdapter for LocalRuntimeAdapter {
     async fn start_attempt(&self, mut req: StartAttemptRequest) -> Result<AttemptHandle> {
-        if req.placement_strategy != PlacementStrategy::SingleNode {
-            panic!("LocalRuntimeAdapter only supports SingleNode placement strategy");
+        if !self
+            .supported_assign_strategies()
+            .iter()
+            .any(|s| s == &req.node_assign_strategy)
+        {
+            panic!(
+                "LocalRuntimeAdapter does not support node assignment strategy {:?}",
+                req.node_assign_strategy
+            );
         }
         let cluster_provider = LocalMachineClusterProvider::single_node();
         let cluster_nodes = cluster_provider
-            .get_all_nodes()
+            .nodes()
             .values()
             .cloned()
             .collect::<Vec<_>>();
@@ -162,6 +193,11 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         }
         let _ = handle.join.await;
         Ok(())
+    }
+
+    fn supported_assign_strategies(&self) -> &[NodeAssignStrategyName] {
+        static SUPPORTED: [NodeAssignStrategyName; 1] = [NodeAssignStrategyName::SingleNode];
+        &SUPPORTED
     }
 }
 
