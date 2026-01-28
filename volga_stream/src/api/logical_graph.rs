@@ -603,7 +603,7 @@ impl fmt::Display for LogicalGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::cluster_provider::create_test_cluster_nodes;
+    use crate::cluster::node_assignment::create_test_cluster_nodes;
     use crate::cluster::node_assignment::{NodeAssignStrategy, OperatorPerNodeStrategy};
     use crate::common::test_utils::IdentityMapFunction;
     use crate::runtime::functions::key_by::KeyByFunction;

@@ -1,6 +1,26 @@
 use std::collections::HashMap;
+
+use serde::{Deserialize, Serialize};
+
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::cluster::cluster_provider::ClusterNode;
+/// Represents a node in the cluster.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterNode {
+    pub node_id: String,
+    pub node_ip: String,
+    pub node_port: u16,
+}
+
+impl ClusterNode {
+    pub fn new(node_id: String, node_ip: String, node_port: u16) -> Self {
+        Self {
+            node_id,
+            node_ip,
+            node_port,
+        }
+    }
+}
+
 
 /// Mapping from execution vertex ID to cluster node
 pub type ExecutionVertexNodeMapping = HashMap<String, ClusterNode>;
@@ -17,6 +37,18 @@ pub fn node_to_vertex_ids(mapping: &ExecutionVertexNodeMapping) -> HashMap<Strin
 pub trait NodeAssignStrategy: Send + Sync {
     /// Assign execution vertices to cluster nodes
     fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping;
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum NodeAssignStrategyName {
+    SingleNode,
+    OperatorPerNode,
+}
+
+impl Default for NodeAssignStrategyName {
+    fn default() -> Self {
+        Self::SingleNode
+    }
 }
 
 /// Strategy that assigns all vertices to the first (single) node.
@@ -99,10 +131,28 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
     }
 }
 
+pub fn strategy_from_name(name: &NodeAssignStrategyName) -> Box<dyn NodeAssignStrategy> {
+    match name {
+        NodeAssignStrategyName::SingleNode => Box::new(SingleNodeStrategy),
+        NodeAssignStrategyName::OperatorPerNode => Box::new(OperatorPerNodeStrategy),
+    }
+}
+
+pub fn create_test_cluster_nodes(num_nodes: usize) -> Vec<ClusterNode> {
+    (0..num_nodes)
+        .map(|i| {
+            ClusterNode::new(
+                format!("node{}", i + 1),
+                format!("192.168.1.{}", 10 + i),
+                8080 + i as u16,
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::cluster_provider::create_test_cluster_nodes;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::execution_graph::ExecutionGraph;
 

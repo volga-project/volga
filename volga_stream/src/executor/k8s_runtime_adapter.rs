@@ -11,9 +11,8 @@ use k8s_openapi::api::core::v1::Service;
 use serde_json::json;
 use tokio::time::sleep;
 
-use crate::api::spec::placement::PlacementStrategy;
+use crate::cluster::node_assignment::{ClusterNode, NodeAssignStrategyName};
 use crate::api::spec::resources::ResourceProfile;
-use crate::cluster::cluster_provider::ClusterNode;
 use crate::executor::resource_planner::{DefaultResourcePlanner, ResourcePlanner};
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::bootstrap::WorkerBootstrapPayload;
@@ -191,8 +190,15 @@ impl K8sRuntimeAdapter {
 #[async_trait]
 impl RuntimeAdapter for K8sRuntimeAdapter {
     async fn start_attempt(&self, mut req: StartAttemptRequest) -> Result<AttemptHandle> {
-        if req.placement_strategy != PlacementStrategy::SingleNode {
-            panic!("K8sRuntimeAdapter currently supports SingleNode placement only");
+        if !self
+            .supported_assign_strategies()
+            .iter()
+            .any(|s| s == &req.node_assign_strategy)
+        {
+            panic!(
+                "K8sRuntimeAdapter does not support node assignment strategy {:?}",
+                req.node_assign_strategy
+            );
         }
 
         let base = Self::base_name(&req.execution_ids);
@@ -226,7 +232,7 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         let bootstrap_payload = WorkerBootstrapPayload {
             execution_ids: req.execution_ids.clone(),
             pipeline_spec: req.pipeline_spec.clone(),
-            placement_strategy: req.placement_strategy.clone(),
+            node_assign_strategy: req.node_assign_strategy.clone(),
             cluster_nodes: worker_nodes.clone(),
             transport_overrides_queue_records: req.transport_overrides_queue_records.clone(),
             worker_runtime: req.worker_runtime.clone(),
@@ -442,5 +448,13 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
             handle.abort();
         }
         Ok(())
+    }
+
+    fn supported_assign_strategies(&self) -> &[NodeAssignStrategyName] {
+        static SUPPORTED: [NodeAssignStrategyName; 2] = [
+            NodeAssignStrategyName::SingleNode,
+            NodeAssignStrategyName::OperatorPerNode,
+        ];
+        &SUPPORTED
     }
 }

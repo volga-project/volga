@@ -110,7 +110,7 @@ impl ControlPlaneController {
                             pipeline_spec: spec.clone(),
                             execution_graph: graph,
                             num_workers_per_operator,
-                            placement_strategy: spec.placement_strategy.clone(),
+                            node_assign_strategy: spec.node_assign_strategy.clone(),
                             transport_overrides_queue_records: spec.transport_overrides_queue_records(),
                             worker_runtime: spec.worker_runtime.clone(),
                             operator_type_storage_overrides: spec.operator_type_storage_overrides(),

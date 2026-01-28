@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::api::LogicalGraph;
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceBindingSpec};
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
-use crate::api::spec::placement::PlacementStrategy;
+use crate::cluster::node_assignment::NodeAssignStrategyName;
 use crate::api::spec::resources::{ResourceProfiles, ResourceStrategy};
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
@@ -36,7 +36,7 @@ pub struct PipelineSpec {
     pub execution_profile: ExecutionProfile,
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
-    pub placement_strategy: PlacementStrategy,
+    pub node_assign_strategy: NodeAssignStrategyName,
     pub resource_strategy: ResourceStrategy,
     pub resource_profiles: ResourceProfiles,
     pub worker_runtime: WorkerRuntimeSpec,
@@ -78,7 +78,7 @@ impl PipelineSpecBuilder {
                 },
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
-                placement_strategy: PlacementStrategy::default(),
+                node_assign_strategy: NodeAssignStrategyName::default(),
                 resource_strategy: ResourceStrategy::default(),
                 resource_profiles: ResourceProfiles::default(),
                 worker_runtime: WorkerRuntimeSpec::default(),
@@ -112,8 +112,8 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_placement_strategy(mut self, strategy: PlacementStrategy) -> Self {
-        self.spec.placement_strategy = strategy;
+    pub fn with_node_assign_strategy(mut self, strategy: NodeAssignStrategyName) -> Self {
+        self.spec.node_assign_strategy = strategy;
         self
     }
 
