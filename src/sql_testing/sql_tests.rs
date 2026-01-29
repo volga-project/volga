@@ -503,7 +503,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
         )
         .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql(test_case.sql)
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::InProcess { num_threads_per_task: 4 })
         .build();
     let context = PipelineContext::new(spec);
 

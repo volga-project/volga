@@ -11,11 +11,19 @@ use k8s_openapi::api::core::v1::Service;
 use serde_json::json;
 use tokio::time::sleep;
 
-use crate::cluster::node_assignment::{ClusterNode, NodeAssignStrategyName};
+use crate::executor::placement::{
+    build_task_placement_mapping,
+    strategy_from_name,
+    worker_to_task_ids,
+    TaskPlacementStrategyName,
+    WorkerEndpoint,
+    WorkerTaskPlacement,
+};
 use crate::api::spec::resources::ResourceProfile;
-use crate::executor::resource_planner::{DefaultResourcePlanner, ResourcePlanner};
+use crate::executor::resource_planner::ResourcePlanner;
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::bootstrap::WorkerBootstrapPayload;
+use crate::api::spec::runtime_adapter::RuntimeAdapterKind;
 
 pub struct K8sRuntimeConfig {
     pub namespace: String,
@@ -79,7 +87,7 @@ impl K8sRuntimeAdapter {
         namespace: &str,
         worker_port: u16,
         replicas: usize,
-    ) -> Vec<ClusterNode> {
+    ) -> Vec<WorkerEndpoint> {
         (0..replicas)
             .map(|i| {
                 let pod_name = format!("{worker_statefulset}-{i}");
@@ -87,7 +95,7 @@ impl K8sRuntimeAdapter {
                     "{}.{}.{}.svc.cluster.local",
                     pod_name, headless_service, namespace
                 );
-                ClusterNode::new(pod_name, addr, worker_port)
+                WorkerEndpoint::new(pod_name, addr, worker_port)
             })
             .collect()
     }
@@ -190,14 +198,26 @@ impl K8sRuntimeAdapter {
 #[async_trait]
 impl RuntimeAdapter for K8sRuntimeAdapter {
     async fn start_attempt(&self, mut req: StartAttemptRequest) -> Result<AttemptHandle> {
+        let task_placement_strategy = req
+            .pipeline_spec
+            .execution_profile
+            .task_placement_strategy()
+            .cloned()
+            .unwrap_or_else(|| panic!("execution profile does not define task placement strategy"));
+        let resource_strategy = req
+            .pipeline_spec
+            .execution_profile
+            .resource_strategy()
+            .cloned()
+            .unwrap_or_else(|| panic!("execution profile does not define resource strategy"));
         if !self
-            .supported_assign_strategies()
+            .supported_task_placement_strategies()
             .iter()
-            .any(|s| s == &req.node_assign_strategy)
+            .any(|s| s == &task_placement_strategy)
         {
             panic!(
-                "K8sRuntimeAdapter does not support node assignment strategy {:?}",
-                req.node_assign_strategy
+                "K8sRuntimeAdapter does not support task placement strategy {:?}",
+                task_placement_strategy
             );
         }
 
@@ -206,22 +226,29 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         let worker_service_name = Self::worker_service_name(&base);
         let worker_statefulset = Self::worker_statefulset_name(&base);
 
-        let replicas = req.num_workers_per_operator.max(1);
-        let worker_nodes = Self::make_worker_nodes(
+        let placement_strategy = strategy_from_name(&task_placement_strategy);
+        let mut placements = placement_strategy.place_tasks(&req.execution_graph);
+        if placements.is_empty() {
+            placements.push(WorkerTaskPlacement::new(Vec::new()));
+        }
+
+        let resource_plan = ResourcePlanner::plan(
+            &placements,
+            &resource_strategy,
+            &req.pipeline_spec.resource_profiles,
+        );
+        let replicas = resource_plan.worker_resources.len().max(1);
+        let worker_endpoints = Self::make_worker_nodes(
             &worker_statefulset,
             &worker_service_name,
             &self.config.namespace,
             self.config.worker_port,
             replicas,
         );
+        let task_placement_mapping =
+            build_task_placement_mapping(&placements, &worker_endpoints);
+        let worker_task_ids = worker_to_task_ids(&task_placement_mapping);
 
-        let planner = DefaultResourcePlanner;
-        let resource_plan = planner.plan(
-            &req.execution_graph,
-            replicas,
-            &req.pipeline_spec.resource_strategy,
-            &req.pipeline_spec.resource_profiles,
-        );
         let worker_resource = resource_plan
             .worker_resources
             .get(0)
@@ -232,17 +259,17 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         let bootstrap_payload = WorkerBootstrapPayload {
             execution_ids: req.execution_ids.clone(),
             pipeline_spec: req.pipeline_spec.clone(),
-            node_assign_strategy: req.node_assign_strategy.clone(),
-            cluster_nodes: worker_nodes.clone(),
+            worker_endpoints: worker_endpoints.clone(),
+            worker_task_ids: worker_task_ids.clone(),
             transport_overrides_queue_records: req.transport_overrides_queue_records.clone(),
             worker_runtime: req.worker_runtime.clone(),
             operator_type_storage_overrides: req.operator_type_storage_overrides.clone(),
         };
 
         let bootstrap_b64 = Self::encode_b64(&bootstrap_payload)?;
-        let worker_addrs = worker_nodes
+        let worker_addrs = worker_endpoints
             .iter()
-            .map(|n| format!("{}:{}", n.node_ip, n.node_port))
+            .map(|n| format!("{}:{}", n.host, n.port))
             .collect::<Vec<_>>();
 
         let master_addr = format!("{}.{}:{}", master_service_name, self.config.namespace, self.config.master_port);
@@ -450,11 +477,15 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         Ok(())
     }
 
-    fn supported_assign_strategies(&self) -> &[NodeAssignStrategyName] {
-        static SUPPORTED: [NodeAssignStrategyName; 2] = [
-            NodeAssignStrategyName::SingleNode,
-            NodeAssignStrategyName::OperatorPerNode,
+    fn supported_task_placement_strategies(&self) -> &[TaskPlacementStrategyName] {
+        static SUPPORTED: [TaskPlacementStrategyName; 2] = [
+            TaskPlacementStrategyName::SingleNode,
+            TaskPlacementStrategyName::OperatorPerNode,
         ];
         &SUPPORTED
+    }
+
+    fn runtime_kind(&self) -> RuntimeAdapterKind {
+        RuntimeAdapterKind::K8s
     }
 }

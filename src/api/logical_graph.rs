@@ -603,8 +603,8 @@ impl fmt::Display for LogicalGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::node_assignment::create_test_cluster_nodes;
-    use crate::cluster::node_assignment::{NodeAssignStrategy, OperatorPerNodeStrategy};
+    use crate::executor::placement::create_test_worker_endpoints;
+    use crate::executor::placement::{TaskPlacementStrategy, OperatorPerNodeStrategy, build_task_placement_mapping};
     use crate::common::test_utils::IdentityMapFunction;
     use crate::runtime::functions::key_by::KeyByFunction;
     use crate::runtime::operators::sink::sink_operator::SinkConfig;
@@ -738,10 +738,11 @@ mod tests {
         let mut execution_graph = logical_graph.to_execution_graph();
         
         // Create cluster nodes
-        let cluster_nodes = create_test_cluster_nodes(num_operators);
+        let worker_endpoints = create_test_worker_endpoints(num_operators);
 
-        // Use OperatorPerNodeStrategy to assign vertices to nodes
-        let vertex_to_node = OperatorPerNodeStrategy.assign_nodes(&execution_graph, &cluster_nodes);
+        // Use OperatorPerNodeStrategy to assign tasks to workers
+        let placements = OperatorPerNodeStrategy.place_tasks(&execution_graph);
+        let vertex_to_node = build_task_placement_mapping(&placements, &worker_endpoints);
 
         // Update channels based on cluster mapping
         execution_graph.update_channels_with_node_mapping(Some(&vertex_to_node));

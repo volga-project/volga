@@ -35,7 +35,6 @@ impl MapFunctionTrait for KeyedToRegularMapFunction {
 // TODO this fails - fix
 // #[test]
 fn test_distributed_execution() -> Result<()> {
-    let num_workers_per_operator = 2;
     let parallelism_per_worker = 2;
     let num_messages_per_source = 10;
     
@@ -78,11 +77,11 @@ fn test_distributed_execution() -> Result<()> {
         ];
 
         // Create streaming context with local full orchestration (master + worker servers)
-        let total_parallelism = num_workers_per_operator * parallelism_per_worker;
+        let total_parallelism = parallelism_per_worker;
         let spec = PipelineSpecBuilder::new()
             .with_parallelism(total_parallelism)
             .with_logical_graph(LogicalGraph::from_linear_operators(operators, total_parallelism, false))
-            .with_execution_profile(ExecutionProfile::LocalOrchestrated)
+            .with_execution_profile(ExecutionProfile::local_default())
             .build();
         let context = PipelineContext::new(spec);
 
@@ -112,7 +111,7 @@ fn test_distributed_execution() -> Result<()> {
     }
 
     println!("[TEST] Result values: {:?}", values);
-    let total_parallelism = num_workers_per_operator * parallelism_per_worker;
+    let total_parallelism = parallelism_per_worker;
     let expected_total_messages = num_messages_per_source * total_parallelism;
     assert_eq!(result_len, expected_total_messages, 
         "Expected {} messages ({} unique values × {} total parallelism), got {}", 

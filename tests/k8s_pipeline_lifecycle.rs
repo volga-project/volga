@@ -48,9 +48,7 @@ async fn k8s_pipeline_lifecycle() -> Result<()> {
     .await?;
 
     let mut spec = PipelineSpecBuilder::new()
-        .with_execution_profile(ExecutionProfile::Orchestrated {
-            num_workers_per_operator: 1,
-        })
+        .with_execution_profile(ExecutionProfile::k8s_default())
         .build();
     spec.sql = None;
 
@@ -60,8 +58,6 @@ async fn k8s_pipeline_lifecycle() -> Result<()> {
             execution_ids: execution_ids.clone(),
             pipeline_spec: spec.clone(),
             execution_graph: ExecutionGraph::new(),
-            num_workers_per_operator: 1,
-            node_assign_strategy: spec.node_assign_strategy.clone(),
             transport_overrides_queue_records: spec.transport_overrides_queue_records(),
             worker_runtime: spec.worker_runtime.clone(),
             operator_type_storage_overrides: spec.operator_type_storage_overrides(),

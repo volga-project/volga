@@ -51,7 +51,7 @@ fn test_word_count() -> Result<()> {
             storage_server_addr
         )))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::InProcess { num_threads_per_task: 4 })
         .build();
     let context = PipelineContext::new(spec);
 

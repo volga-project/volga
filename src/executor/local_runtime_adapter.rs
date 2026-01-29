@@ -1,12 +1,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use std::collections::HashMap;
-
-use crate::cluster::node_assignment::{
-    node_to_vertex_ids,
-    ClusterNode,
-    NodeAssignStrategyName,
-    SingleNodeStrategy,
+use crate::executor::placement::{
+    build_task_placement_mapping,
+    strategy_from_name,
+    worker_to_task_ids,
+    TaskPlacementStrategyName,
+    WorkerEndpoint,
+    WorkerTaskPlacement,
 };
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
@@ -17,6 +17,7 @@ use crate::runtime::worker_server::WorkerServer;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::transport::channel::Channel;
+use crate::api::spec::runtime_adapter::RuntimeAdapterKind;
 
 pub struct LocalRuntimeAdapter;
 
@@ -26,50 +27,47 @@ impl LocalRuntimeAdapter {
     }
 }
 
-#[derive(Debug, Clone)]
-struct LocalMachineClusterProvider {
-    nodes: HashMap<String, ClusterNode>,
-}
-
-impl LocalMachineClusterProvider {
-    pub fn single_node() -> Self {
-        let mut nodes = HashMap::new();
-        nodes.insert(
-            "local".to_string(),
-            ClusterNode::new("local".to_string(), "127.0.0.1".to_string(), 0),
-        );
-        Self { nodes }
-    }
-
-    pub fn nodes(&self) -> &HashMap<String, ClusterNode> {
-        &self.nodes
-    }
-}
-
 #[async_trait]
 impl RuntimeAdapter for LocalRuntimeAdapter {
     async fn start_attempt(&self, mut req: StartAttemptRequest) -> Result<AttemptHandle> {
+        let task_placement_strategy = req
+            .pipeline_spec
+            .execution_profile
+            .task_placement_strategy()
+            .cloned()
+            .unwrap_or_else(|| panic!("execution profile does not define task placement strategy"));
         if !self
-            .supported_assign_strategies()
+            .supported_task_placement_strategies()
             .iter()
-            .any(|s| s == &req.node_assign_strategy)
+            .any(|s| s == &task_placement_strategy)
         {
             panic!(
-                "LocalRuntimeAdapter does not support node assignment strategy {:?}",
-                req.node_assign_strategy
+                "LocalRuntimeAdapter does not support task placement strategy {:?}",
+                task_placement_strategy
             );
         }
-        let cluster_provider = LocalMachineClusterProvider::single_node();
-        let cluster_nodes = cluster_provider
-            .nodes()
-            .values()
-            .cloned()
+        let placement_strategy = strategy_from_name(&task_placement_strategy);
+        let mut placements = placement_strategy.place_tasks(&req.execution_graph);
+        if placements.is_empty() {
+            placements.push(WorkerTaskPlacement::new(Vec::new()));
+        }
+        let worker_endpoints = placements
+            .iter()
+            .enumerate()
+            .map(|(idx, _)| {
+                let worker_id = if placements.len() == 1 {
+                    "local".to_string()
+                } else {
+                    format!("local-{idx}")
+                };
+                WorkerEndpoint::new(worker_id, "127.0.0.1".to_string(), 0)
+            })
             .collect::<Vec<_>>();
-        let node_assign = SingleNodeStrategy;
-        let vertex_to_node = node_assign.assign_nodes(&req.execution_graph, &cluster_nodes);
+        let task_placement_mapping =
+            build_task_placement_mapping(&placements, &worker_endpoints);
         req.execution_graph
             .update_channels_with_node_mapping_and_transport(
-                Some(&vertex_to_node),
+                Some(&task_placement_mapping),
                 &req.worker_runtime.transport,
                 &req.transport_overrides_queue_records,
             );
@@ -91,15 +89,15 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         master_server.start(&master_addr).await?;
         let master_snapshot_sink = master_server.snapshot_sink();
 
-        let node_to_vertex_ids = node_to_vertex_ids(&vertex_to_node);
+        let worker_to_task_ids = worker_to_task_ids(&task_placement_mapping);
         let mut worker_servers = Vec::new();
         let mut worker_addrs = Vec::new();
 
-        for node_id in node_to_vertex_ids.keys() {
+        for worker_id in worker_to_task_ids.keys() {
             let port = gen_unique_grpc_port();
             let addr = format!("127.0.0.1:{}", port);
 
-            let vertex_ids = node_to_vertex_ids.get(node_id).unwrap().clone();
+            let vertex_ids = worker_to_task_ids.get(worker_id).unwrap().clone();
 
             // Select data-plane transport backend based on actual channels:
             // - if any edge touching this worker's vertices is remote, use gRPC transport backend
@@ -121,7 +119,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             };
 
             let mut worker_config = WorkerConfig::new(
-                node_id.clone(),
+                worker_id.clone(),
                 req.execution_ids.clone(),
                 req.execution_graph.clone(),
                 vertex_ids
@@ -195,9 +193,13 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         Ok(())
     }
 
-    fn supported_assign_strategies(&self) -> &[NodeAssignStrategyName] {
-        static SUPPORTED: [NodeAssignStrategyName; 1] = [NodeAssignStrategyName::SingleNode];
+    fn supported_task_placement_strategies(&self) -> &[TaskPlacementStrategyName] {
+        static SUPPORTED: [TaskPlacementStrategyName; 1] = [TaskPlacementStrategyName::SingleNode];
         &SUPPORTED
+    }
+
+    fn runtime_kind(&self) -> RuntimeAdapterKind {
+        RuntimeAdapterKind::Local
     }
 }
 

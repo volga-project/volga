@@ -310,7 +310,7 @@ async fn test_request_source_sink_e2e() {
         // Build PipelineSpec with the pre-constructed logical graph (keep upstream test structure).
         let spec = PipelineSpecBuilder::new()
             .with_parallelism(parallelism)
-            .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+            .with_execution_profile(ExecutionProfile::InProcess { num_threads_per_task: 4 })
             .with_logical_graph(logical_graph)
             .build();
 

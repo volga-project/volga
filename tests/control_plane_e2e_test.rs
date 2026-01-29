@@ -88,7 +88,7 @@ async fn test_control_plane_e2e_snapshots_and_metrics() {
     "#;
 
     let spec = PipelineSpecBuilder::new()
-        .with_execution_profile(ExecutionProfile::Orchestrated { num_workers_per_operator: 1 })
+        .with_execution_profile(ExecutionProfile::k8s_default())
         .with_execution_mode(ExecutionMode::Streaming)
         .with_parallelism(1)
         .with_snapshot_history_retention_window_ms(10_000)

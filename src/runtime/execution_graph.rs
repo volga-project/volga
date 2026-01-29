@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
+use crate::executor::placement::TaskPlacementMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
 use crate::transport::channel::Channel;
@@ -207,7 +207,7 @@ impl ExecutionGraph {
     // channel mapping depends on cluster configuration and is defined at runtime
     pub fn update_channels_with_node_mapping(
         &mut self,
-        execution_vertex_to_cluster_node: Option<&ExecutionVertexNodeMapping>,
+        execution_vertex_to_cluster_node: Option<&TaskPlacementMapping>,
     ) {
         self.update_channels_with_node_mapping_and_transport(
             execution_vertex_to_cluster_node,
@@ -218,7 +218,7 @@ impl ExecutionGraph {
 
     pub fn update_channels_with_node_mapping_and_transport(
         &mut self,
-        execution_vertex_to_cluster_node: Option<&ExecutionVertexNodeMapping>,
+        execution_vertex_to_cluster_node: Option<&TaskPlacementMapping>,
         transport: &TransportSpec,
         per_operator_queue_records: &HashMap<String, u32>,
     ) {
