@@ -2,6 +2,7 @@ use crate::api::spec::resources::{ResourceProfile, ResourceProfiles, ResourceStr
 use crate::executor::placement::WorkerTaskPlacement;
 #[derive(Clone, Debug)]
 pub struct ResourcePlan {
+    pub master_resource: ResourceProfile,
     pub worker_resources: Vec<ResourceProfile>,
 }
 
@@ -18,6 +19,7 @@ impl ResourcePlanner {
             ResourceStrategy::PerWorker => profiles.worker_default.clone(),
         };
         ResourcePlan {
+            master_resource: profiles.master_default.clone(),
             worker_resources: vec![profile; workers],
         }
     }

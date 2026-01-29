@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder, WorkerRuntimeSpec},
     api::compile_logical_graph,
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
@@ -181,7 +181,11 @@ pub async fn run_word_count_benchmark(
         )
         .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_execution_profile(ExecutionProfile::InProcess { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::InProcess)
+        .with_worker_runtime_spec(WorkerRuntimeSpec {
+            num_threads_per_task: 4,
+            ..WorkerRuntimeSpec::default()
+        })
         .build();
 
     let logical_graph = compile_logical_graph(&spec);

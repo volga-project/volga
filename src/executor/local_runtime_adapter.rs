@@ -126,7 +126,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                     .into_iter()
                     .map(|v| std::sync::Arc::<str>::from(v))
                     .collect(),
-                1,
+                req.worker_runtime.num_threads_per_task,
                 transport_backend_type,
             )
             .with_master_addr(master_addr.clone());

@@ -21,5 +21,6 @@ impl Default for ResourceStrategy {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResourceProfiles {
+    pub master_default: ResourceProfile,
     pub worker_default: ResourceProfile,
 }
