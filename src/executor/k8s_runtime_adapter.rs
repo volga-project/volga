@@ -12,9 +12,7 @@ use serde_json::json;
 use tokio::time::sleep;
 
 use crate::executor::placement::{
-    build_task_placement_mapping,
     strategy_from_name,
-    worker_to_task_ids,
     TaskPlacementStrategyName,
     WorkerEndpoint,
     WorkerTaskPlacement,
@@ -22,8 +20,7 @@ use crate::executor::placement::{
 use crate::api::spec::resources::ResourceProfile;
 use crate::executor::resource_planner::ResourcePlanner;
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
-use crate::runtime::bootstrap::WorkerBootstrapPayload;
-use crate::api::spec::runtime_adapter::RuntimeAdapterKind;
+use crate::executor::bootstrap::MasterBootstrapPayload;
 
 pub struct K8sRuntimeConfig {
     pub namespace: String,
@@ -174,11 +171,11 @@ impl K8sRuntimeAdapter {
         Err(anyhow!("deployment {name} did not become ready"))
     }
 
-    fn base_name(execution_ids: &crate::control_plane::types::ExecutionIds) -> String {
+    fn base_name(pipeline_execution_context: &crate::control_plane::types::PipelineExecutionContext) -> String {
         format!(
             "volga-{}-{}",
-            execution_ids.pipeline_id.0.to_string(),
-            execution_ids.attempt_id.0
+            pipeline_execution_context.pipeline_id.0.to_string(),
+            pipeline_execution_context.attempt_id.0
         )
         .to_lowercase()
     }
@@ -221,7 +218,7 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
             );
         }
 
-        let base = Self::base_name(&req.execution_ids);
+        let base = Self::base_name(&req.pipeline_execution_context);
         let master_service_name = Self::master_service_name(&base);
         let worker_service_name = Self::worker_service_name(&base);
         let worker_statefulset = Self::worker_statefulset_name(&base);
@@ -245,10 +242,6 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
             self.config.worker_port,
             replicas,
         );
-        let task_placement_mapping =
-            build_task_placement_mapping(&placements, &worker_endpoints);
-        let worker_task_ids = worker_to_task_ids(&task_placement_mapping);
-
         let worker_resource = resource_plan
             .worker_resources
             .get(0)
@@ -258,14 +251,11 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         let master_resources_json = Self::resource_requirements(&master_resource);
         let worker_resources_json = Self::resource_requirements(&worker_resource);
 
-        let bootstrap_payload = WorkerBootstrapPayload {
-            execution_ids: req.execution_ids.clone(),
-            pipeline_spec: req.pipeline_spec.clone(),
+        let pipeline_spec = req.pipeline_spec.clone();
+        let bootstrap_payload = MasterBootstrapPayload {
+            pipeline_execution_context: req.pipeline_execution_context.clone(),
+            pipeline_spec,
             worker_endpoints: worker_endpoints.clone(),
-            worker_task_ids: worker_task_ids.clone(),
-            transport_overrides_queue_records: req.transport_overrides_queue_records.clone(),
-            worker_runtime: req.worker_runtime.clone(),
-            operator_type_storage_overrides: req.operator_type_storage_overrides.clone(),
         };
 
         let bootstrap_b64 = Self::encode_b64(&bootstrap_payload)?;
@@ -284,8 +274,8 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
 
         let base_labels = json!({
             "app": "volga",
-            "pipeline_id": req.execution_ids.pipeline_id.0.to_string(),
-            "attempt_id": format!("{}", req.execution_ids.attempt_id.0),
+            "pipeline_id": req.pipeline_execution_context.pipeline_id.0.to_string(),
+            "attempt_id": format!("{}", req.pipeline_execution_context.attempt_id.0),
         })
         .as_object()
         .expect("labels map")
@@ -443,7 +433,7 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         self.wait_for_deployment_ready(&deployments, &master_service_name).await?;
         self.wait_for_statefulset_ready(&statefulsets, &worker_statefulset, replicas).await?;
 
-        let execution_ids = req.execution_ids.clone();
+        let pipeline_execution_context = req.pipeline_execution_context.clone();
         let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
         let join = tokio::spawn(async move {
             let _ = stop_receiver.await;
@@ -451,7 +441,7 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         });
 
         Ok(AttemptHandle {
-            execution_ids,
+            pipeline_execution_context,
             master_addr,
             worker_addrs,
             join,
@@ -460,7 +450,7 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
     }
 
     async fn stop_attempt(&self, handle: AttemptHandle) -> Result<()> {
-        let base = Self::base_name(&handle.execution_ids);
+        let base = Self::base_name(&handle.pipeline_execution_context);
         let master_service_name = Self::master_service_name(&base);
         let worker_service_name = Self::worker_service_name(&base);
         let worker_statefulset = Self::worker_statefulset_name(&base);
@@ -484,13 +474,10 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
 
     fn supported_task_placement_strategies(&self) -> &[TaskPlacementStrategyName] {
         static SUPPORTED: [TaskPlacementStrategyName; 2] = [
-            TaskPlacementStrategyName::SingleNode,
-            TaskPlacementStrategyName::OperatorPerNode,
+            TaskPlacementStrategyName::SingleWorker,
+            TaskPlacementStrategyName::OperatorPerWorker,
         ];
         &SUPPORTED
     }
 
-    fn runtime_kind(&self) -> RuntimeAdapterKind {
-        RuntimeAdapterKind::K8s
-    }
 }

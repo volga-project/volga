@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::{
-    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder, WorkerRuntimeSpec},
+    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
     storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -47,10 +47,6 @@ fn test_worker_execution() -> Result<()> {
         .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT value FROM test_table")
         .with_execution_profile(ExecutionProfile::InProcess)
-        .with_worker_runtime_spec(WorkerRuntimeSpec {
-            num_threads_per_task: 4,
-            ..WorkerRuntimeSpec::default()
-        })
         .build();
     let context = PipelineContext::new(spec);
 

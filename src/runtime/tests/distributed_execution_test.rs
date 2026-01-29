@@ -77,6 +77,7 @@ fn test_distributed_execution() -> Result<()> {
         ];
 
         // Create streaming context with local full orchestration (master + worker servers)
+        // TODO: this is semantically wrong now that worker count is derived; fix when enabling test.
         let total_parallelism = parallelism_per_worker;
         let spec = PipelineSpecBuilder::new()
             .with_parallelism(total_parallelism)

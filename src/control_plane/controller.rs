@@ -12,7 +12,8 @@ use crate::control_plane::types::{
     PipelineDesiredState, PipelineEvent, PipelineEventKind, PipelineId, PipelineLifecycleState,
     PipelineStatus,
 };
-use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
+use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
+use crate::api::spec::runtime_adapter::RuntimeAdapterSpec;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::api::PipelineSpec as UserPipelineSpec;
 use crate::runtime::observability::{PipelineSnapshot, PipelineSnapshotEntry};
@@ -22,18 +23,27 @@ use crate::runtime::master_server::master_service::GetLatestSnapshotRequest;
 #[derive(Clone)]
 pub struct ControlPlaneController {
     store: Arc<InMemoryStore>,
-    adapter: Arc<dyn RuntimeAdapter>,
+    adapters: HashMap<RuntimeAdapterSpec, Arc<dyn RuntimeAdapter>>,
     graphs: Arc<RwLock<HashMap<PipelineId, ExecutionGraph>>>,
     specs: Arc<RwLock<HashMap<PipelineId, UserPipelineSpec>>>,
-    running: Arc<Mutex<HashMap<PipelineId, AttemptHandle>>>,
+    running: Arc<Mutex<HashMap<PipelineId, RunningAttempt>>>,
     snapshot_pollers: Arc<Mutex<HashMap<PipelineId, JoinHandle<()>>>>,
 }
 
+#[derive(Clone)]
+struct RunningAttempt {
+    adapter_spec: RuntimeAdapterSpec,
+    handle: AttemptHandle,
+}
+
 impl ControlPlaneController {
-    pub fn new(store: Arc<InMemoryStore>, adapter: Arc<dyn RuntimeAdapter>) -> Self {
+    pub fn new(
+        store: Arc<InMemoryStore>,
+        adapters: HashMap<RuntimeAdapterSpec, Arc<dyn RuntimeAdapter>>,
+    ) -> Self {
         Self {
             store,
-            adapter,
+            adapters,
             graphs: Arc::new(RwLock::new(HashMap::new())),
             specs: Arc::new(RwLock::new(HashMap::new())),
             running: Arc::new(Mutex::new(HashMap::new())),
@@ -68,7 +78,7 @@ impl ControlPlaneController {
         let specs_guard = self.specs.read().await;
 
         for run in runs {
-            let pipeline_id = run.execution_ids.pipeline_id;
+            let pipeline_id = run.pipeline_execution_context.pipeline_id;
             let desired = self
                 .store
                 .get_desired_state(pipeline_id)
@@ -80,8 +90,8 @@ impl ControlPlaneController {
 
             match desired {
                 PipelineDesiredState::Running => {
-                    if let Some(handle) = running_guard.get(&pipeline_id) {
-                        if handle.is_finished() {
+                    if let Some(running) = running_guard.get(&pipeline_id) {
+                        if running.handle.is_finished() {
                             running_guard.remove(&pipeline_id);
                         } else {
                             continue;
@@ -102,23 +112,21 @@ impl ControlPlaneController {
                         .execution_profile
                         .runtime_adapter_spec()
                         .unwrap_or_else(|| panic!("execution profile does not use a runtime adapter"));
-                    if self.adapter.runtime_kind() != adapter_spec.kind() {
-                        panic!(
-                            "runtime adapter kind {:?} does not match pipeline spec {:?}",
-                            self.adapter.runtime_kind(),
-                            adapter_spec.kind()
-                        );
-                    }
+                    let adapter = self
+                        .adapters
+                        .get(&adapter_spec)
+                        .unwrap_or_else(|| panic!("missing runtime adapter for {:?}", adapter_spec));
 
-                    let handle = self
-                        .adapter
+                    let mut spec = spec.clone();
+                    spec.worker_runtime.transport_overrides_queue_records =
+                        spec.transport_overrides_queue_records();
+                    spec.worker_runtime.operator_type_storage_overrides =
+                        spec.operator_type_storage_overrides();
+                    let handle = adapter
                         .start_attempt(StartAttemptRequest {
-                            execution_ids: run.execution_ids.clone(),
-                            pipeline_spec: spec.clone(),
+                            pipeline_execution_context: run.pipeline_execution_context.clone(),
+                            pipeline_spec: spec,
                             execution_graph: graph,
-                            transport_overrides_queue_records: spec.transport_overrides_queue_records(),
-                            worker_runtime: spec.worker_runtime.clone(),
-                            operator_type_storage_overrides: spec.operator_type_storage_overrides(),
                         })
                         .await?;
 
@@ -126,7 +134,7 @@ impl ControlPlaneController {
                         .put_status(
                             pipeline_id,
                             PipelineStatus {
-                                execution_ids: run.execution_ids.clone(),
+                                pipeline_execution_context: run.pipeline_execution_context.clone(),
                                 state: PipelineLifecycleState::Running,
                                 updated_at: Utc::now(),
                                 worker_count: handle.worker_addrs.len(),
@@ -139,7 +147,7 @@ impl ControlPlaneController {
                         .append_event(
                             pipeline_id,
                             PipelineEvent {
-                                execution_ids: run.execution_ids.clone(),
+                                pipeline_execution_context: run.pipeline_execution_context.clone(),
                                 at: Utc::now(),
                                 kind: PipelineEventKind::StateChanged {
                                     state: PipelineLifecycleState::Running,
@@ -148,7 +156,13 @@ impl ControlPlaneController {
                         )
                         .await;
 
-                    running_guard.insert(pipeline_id, handle);
+                    running_guard.insert(
+                        pipeline_id,
+                        RunningAttempt {
+                            adapter_spec: adapter_spec.clone(),
+                            handle,
+                        },
+                    );
 
                     // Start snapshot polling (CP -> Master) for this pipeline attempt.
                     if !pollers_guard.contains_key(&pipeline_id) {
@@ -156,6 +170,7 @@ impl ControlPlaneController {
                         let master_addr = running_guard
                             .get(&pipeline_id)
                             .expect("handle just inserted")
+                            .handle
                             .master_addr
                             .clone();
                         let poll_pipeline_id = pipeline_id;
@@ -213,8 +228,12 @@ impl ControlPlaneController {
                     }
                 }
                 PipelineDesiredState::Stopped | PipelineDesiredState::Paused | PipelineDesiredState::Draining => {
-                    if let Some(handle) = running_guard.remove(&pipeline_id) {
-                        self.adapter.stop_attempt(handle).await?;
+                    if let Some(running) = running_guard.remove(&pipeline_id) {
+                        let adapter = self
+                            .adapters
+                            .get(&running.adapter_spec)
+                            .unwrap_or_else(|| panic!("missing runtime adapter for {:?}", running.adapter_spec));
+                        adapter.stop_attempt(running.handle).await?;
                     }
                     if let Some(h) = pollers_guard.remove(&pipeline_id) {
                         h.abort();
@@ -224,7 +243,7 @@ impl ControlPlaneController {
                         .put_status(
                             pipeline_id,
                             PipelineStatus {
-                                execution_ids: run.execution_ids.clone(),
+                                pipeline_execution_context: run.pipeline_execution_context.clone(),
                                 state: PipelineLifecycleState::Stopped,
                                 updated_at: Utc::now(),
                                 worker_count: 0,
@@ -237,7 +256,7 @@ impl ControlPlaneController {
                         .append_event(
                             pipeline_id,
                             PipelineEvent {
-                                execution_ids: run.execution_ids.clone(),
+                                pipeline_execution_context: run.pipeline_execution_context.clone(),
                                 at: Utc::now(),
                                 kind: PipelineEventKind::StateChanged {
                                     state: PipelineLifecycleState::Stopped,

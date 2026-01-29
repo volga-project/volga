@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder, WorkerRuntimeSpec},
+    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::{test_utils::{gen_unique_grpc_port, print_pipeline_state}, message::Message},
     runtime::{
         functions::{
@@ -52,10 +52,6 @@ fn test_word_count() -> Result<()> {
         )))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_execution_profile(ExecutionProfile::InProcess)
-        .with_worker_runtime_spec(WorkerRuntimeSpec {
-            num_threads_per_task: 4,
-            ..WorkerRuntimeSpec::default()
-        })
         .build();
     let context = PipelineContext::new(spec);
 

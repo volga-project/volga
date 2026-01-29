@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::control_plane::types::ExecutionIds;
+use crate::control_plane::types::PipelineExecutionContext;
 use crate::runtime::metrics::WorkerAggregateMetrics;
 use crate::runtime::VertexId;
 use crate::runtime::metrics::TaskMetrics;
@@ -46,7 +46,7 @@ pub enum TaskOperatorMetrics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerSnapshot {
-    pub execution_ids: ExecutionIds,
+    pub pipeline_execution_context: PipelineExecutionContext,
     pub worker_id: String,
     pub task_statuses: HashMap<VertexId, StreamTaskStatus>,
     pub worker_metrics: Option<WorkerAggregateMetrics>,
@@ -54,9 +54,9 @@ pub struct WorkerSnapshot {
 }
 
 impl WorkerSnapshot {
-    pub fn new(worker_id: String, execution_ids: ExecutionIds) -> Self {
+    pub fn new(worker_id: String, pipeline_execution_context: PipelineExecutionContext) -> Self {
         Self {
-            execution_ids,
+            pipeline_execution_context,
             worker_id,
             task_statuses: HashMap::new(),
             worker_metrics: None,

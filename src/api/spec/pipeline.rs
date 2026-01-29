@@ -46,14 +46,14 @@ pub enum ExecutionProfile {
 impl ExecutionProfile {
     pub fn local_default() -> Self {
         Self::Local {
-            task_placement_strategy: TaskPlacementStrategyName::SingleNode,
+            task_placement_strategy: TaskPlacementStrategyName::SingleWorker,
             resource_strategy: ResourceStrategy::PerWorker,
         }
     }
 
     pub fn k8s_default() -> Self {
         Self::K8s {
-            task_placement_strategy: TaskPlacementStrategyName::SingleNode,
+            task_placement_strategy: TaskPlacementStrategyName::SingleWorker,
             resource_strategy: ResourceStrategy::PerWorker,
         }
     }
@@ -161,51 +161,8 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_in_process_profile(mut self) -> Self {
-        self.spec.execution_profile = ExecutionProfile::InProcess;
-        self
-    }
-
     pub fn with_worker_runtime_spec(mut self, worker_runtime: WorkerRuntimeSpec) -> Self {
         self.spec.worker_runtime = worker_runtime;
-        self
-    }
-
-    pub fn with_local_profile(
-        mut self,
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    ) -> Self {
-        self.spec.execution_profile = ExecutionProfile::Local {
-            task_placement_strategy,
-            resource_strategy,
-        };
-        self
-    }
-
-    pub fn with_k8s_profile(
-        mut self,
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    ) -> Self {
-        self.spec.execution_profile = ExecutionProfile::K8s {
-            task_placement_strategy,
-            resource_strategy,
-        };
-        self
-    }
-
-    pub fn with_custom_profile(
-        mut self,
-        runtime_adapter: RuntimeAdapterSpec,
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    ) -> Self {
-        self.spec.execution_profile = ExecutionProfile::Custom {
-            runtime_adapter,
-            task_placement_strategy,
-            resource_strategy,
-        };
         self
     }
 

@@ -6,7 +6,7 @@ use testcontainers::{clients::Cli, images::generic::GenericImage};
 
 use volga_stream::api::spec::pipeline::PipelineSpecBuilder;
 use volga_stream::api::ExecutionProfile;
-use volga_stream::control_plane::types::{AttemptId, ExecutionIds};
+use volga_stream::control_plane::types::{AttemptId, PipelineExecutionContext};
 use volga_stream::executor::k8s_runtime_adapter::{K8sRuntimeAdapter, K8sRuntimeConfig};
 use volga_stream::executor::runtime_adapter::StartAttemptRequest;
 use volga_stream::runtime::execution_graph::ExecutionGraph;
@@ -52,15 +52,12 @@ async fn k8s_pipeline_lifecycle() -> Result<()> {
         .build();
     spec.sql = None;
 
-    let execution_ids = ExecutionIds::fresh(AttemptId(1));
+    let pipeline_execution_context = PipelineExecutionContext::fresh(AttemptId(1));
     let handle = adapter
         .start_attempt(StartAttemptRequest {
-            execution_ids: execution_ids.clone(),
+            pipeline_execution_context: pipeline_execution_context.clone(),
             pipeline_spec: spec.clone(),
             execution_graph: ExecutionGraph::new(),
-            transport_overrides_queue_records: spec.transport_overrides_queue_records(),
-            worker_runtime: spec.worker_runtime.clone(),
-            operator_type_storage_overrides: spec.operator_type_storage_overrides(),
         })
         .await?;
 

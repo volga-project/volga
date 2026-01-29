@@ -1,6 +1,6 @@
 use crate::{
     api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder},
-    control_plane::types::{AttemptId, ExecutionIds},
+    control_plane::types::{AttemptId, PipelineExecutionContext},
     runtime::{
         functions::{
             source::{
@@ -256,7 +256,7 @@ async fn test_request_execution_mode() {
 
     let mut worker = Worker::new(WorkerConfig::new(
         "request_mode_worker".to_string(),
-        ExecutionIds::fresh(AttemptId(1)),
+        PipelineExecutionContext::fresh(AttemptId(1)),
         exec_graph,
         vertex_ids,
         2,

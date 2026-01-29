@@ -7,9 +7,10 @@ use tokio::task::JoinHandle;
 use tokio::sync::Mutex;
 
 use crate::api::{compile_logical_graph, ExecutionProfile, PipelineSpec};
-use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::control_plane::types::{AttemptId, PipelineExecutionContext};
 use crate::executor::local_runtime_adapter::LocalRuntimeAdapter;
 use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
+use crate::api::spec::runtime_adapter::RuntimeAdapterSpec;
 use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::PipelineSnapshotHistory;
 use crate::runtime::worker::{Worker, WorkerConfig};
@@ -18,7 +19,7 @@ use crate::transport::transport_backend_actor::TransportBackendType;
 #[derive(Clone)]
 pub struct PipelineContext {
     pub spec: PipelineSpec,
-    runtime_adapter: Option<Arc<dyn RuntimeAdapter>>,
+    runtime_adapters: StdHashMap<RuntimeAdapterSpec, Arc<dyn RuntimeAdapter>>,
 }
 
 pub struct PipelineContextRunHandle {
@@ -37,12 +38,15 @@ impl PipelineContext {
     pub fn new(spec: PipelineSpec) -> Self {
         Self {
             spec,
-            runtime_adapter: None,
+            runtime_adapters: StdHashMap::new(),
         }
     }
 
-    pub fn with_runtime_adapter(mut self, adapter: Arc<dyn RuntimeAdapter>) -> Self {
-        self.runtime_adapter = Some(adapter);
+    pub fn with_runtime_adapters(
+        mut self,
+        adapters: StdHashMap<RuntimeAdapterSpec, Arc<dyn RuntimeAdapter>>,
+    ) -> Self {
+        self.runtime_adapters = adapters;
         self
     }
 
@@ -52,31 +56,38 @@ impl PipelineContext {
     ) -> Result<PipelineSnapshot> {
         let logical_graph = compile_logical_graph(&self.spec);
         let mut execution_graph = logical_graph.to_execution_graph();
-        let execution_ids = ExecutionIds::fresh(AttemptId(1));
+        let pipeline_execution_context = PipelineExecutionContext::fresh(AttemptId(1));
+
+        let mut spec = self.spec.clone();
+        spec.worker_runtime.transport_overrides_queue_records =
+            spec.transport_overrides_queue_records();
+        spec.worker_runtime.operator_type_storage_overrides =
+            spec.operator_type_storage_overrides();
 
         match self.spec.execution_profile.clone() {
             ExecutionProfile::InProcess => {
                 execution_graph.update_channels_with_node_mapping_and_transport(
                     None,
-                    &self.spec.worker_runtime.transport,
-                    &self.spec.transport_overrides_queue_records(),
+                    &spec.worker_runtime.transport,
+                    &spec.worker_runtime.transport_overrides_queue_records,
                 );
                 let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
                 let worker_id = "single_worker".to_string();
 
                 let mut worker_config = WorkerConfig::new(
                     worker_id.clone(),
-                    execution_ids,
+                    pipeline_execution_context,
                     execution_graph,
                     vertex_ids,
-                    self.spec.worker_runtime.num_threads_per_task,
+                    spec.worker_runtime.num_threads_per_task,
                     TransportBackendType::InMemory,
                 );
-                worker_config.storage_budgets = self.spec.worker_runtime.storage.budgets.clone();
-                worker_config.inmem_store_lock_pool_size = self.spec.worker_runtime.storage.inmem_store_lock_pool_size;
-                worker_config.inmem_store_bucket_granularity = self.spec.worker_runtime.storage.inmem_store_bucket_granularity;
-                worker_config.inmem_store_max_batch_size = self.spec.worker_runtime.storage.inmem_store_max_batch_size;
-                worker_config.operator_type_storage_overrides = self.spec.operator_type_storage_overrides();
+                worker_config.storage_budgets = spec.worker_runtime.storage.budgets.clone();
+                worker_config.inmem_store_lock_pool_size = spec.worker_runtime.storage.inmem_store_lock_pool_size;
+                worker_config.inmem_store_bucket_granularity = spec.worker_runtime.storage.inmem_store_bucket_granularity;
+                worker_config.inmem_store_max_batch_size = spec.worker_runtime.storage.inmem_store_max_batch_size;
+                worker_config.operator_type_storage_overrides =
+                    spec.worker_runtime.operator_type_storage_overrides.clone();
                 let mut worker = Worker::new(worker_config);
 
                 if let Some(pipeline_state_sender) = state_updates_sender {
@@ -114,12 +125,9 @@ impl PipelineContext {
 
                 let handle = adapter
                     .start_attempt(StartAttemptRequest {
-                        execution_ids,
-                        pipeline_spec: self.spec.clone(),
+                        pipeline_execution_context,
+                        pipeline_spec: spec.clone(),
                         execution_graph,
-                        transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
-                        worker_runtime: self.spec.worker_runtime.clone(),
-                        operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
                     })
                     .await?;
 
@@ -130,30 +138,21 @@ impl PipelineContext {
                 Ok(final_state)
             }
             ExecutionProfile::K8s { .. } | ExecutionProfile::Custom { .. } => {
-                let runtime_adapter = self
-                    .runtime_adapter
-                    .expect("Execution profile requires a runtime_adapter");
                 let adapter_spec = self
                     .spec
                     .execution_profile
                     .runtime_adapter_spec()
                     .unwrap_or_else(|| panic!("execution profile does not use a runtime adapter"));
-                if runtime_adapter.runtime_kind() != adapter_spec.kind() {
-                    panic!(
-                        "runtime adapter kind {:?} does not match pipeline spec {:?}",
-                        runtime_adapter.runtime_kind(),
-                        adapter_spec.kind()
-                    );
-                }
+                let runtime_adapter = self
+                    .runtime_adapters
+                    .get(&adapter_spec)
+                    .unwrap_or_else(|| panic!("missing runtime adapter for {:?}", adapter_spec));
 
                 let handle = runtime_adapter
                     .start_attempt(StartAttemptRequest {
-                        execution_ids,
-                        pipeline_spec: self.spec.clone(),
+                        pipeline_execution_context,
+                        pipeline_spec: spec.clone(),
                         execution_graph,
-                        transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
-                        worker_runtime: self.spec.worker_runtime.clone(),
-                        operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
                     })
                     .await?;
 
