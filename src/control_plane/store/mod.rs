@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::RwLock;
 
 use crate::control_plane::types::{
-    CheckpointMetadata, ExecutionIds, PipelineDesiredState, PipelineEvent, PipelineId, PipelineRun,
+    CheckpointMetadata, PipelineExecutionContext, PipelineDesiredState, PipelineEvent, PipelineId, PipelineRun,
     PipelineSpec, PipelineSpecId, PipelineStatus,
 };
 use crate::api::PipelineSpec as UserPipelineSpec;
@@ -59,7 +59,7 @@ struct InMemoryInner {
     status: HashMap<PipelineId, PipelineStatus>,
     events: HashMap<PipelineId, Vec<PipelineEvent>>,
     checkpoints: HashMap<PipelineId, Vec<CheckpointMetadata>>,
-    execution_ids_by_pipeline: HashMap<PipelineId, ExecutionIds>,
+    pipeline_execution_context_by_pipeline: HashMap<PipelineId, PipelineExecutionContext>,
     snapshots: HashMap<PipelineId, Vec<PipelineSnapshotEntry>>,
 }
 
@@ -73,14 +73,14 @@ impl InMemoryStore {
         Self::default()
     }
 
-    pub async fn put_execution_ids(&self, pipeline_id: PipelineId, execution_ids: ExecutionIds) {
+    pub async fn put_pipeline_execution_context(&self, pipeline_id: PipelineId, pipeline_execution_context: PipelineExecutionContext) {
         let mut inner = self.inner.write().await;
-        inner.execution_ids_by_pipeline.insert(pipeline_id, execution_ids);
+        inner.pipeline_execution_context_by_pipeline.insert(pipeline_id, pipeline_execution_context);
     }
 
-    pub async fn get_execution_ids(&self, pipeline_id: PipelineId) -> Option<ExecutionIds> {
+    pub async fn get_pipeline_execution_context(&self, pipeline_id: PipelineId) -> Option<PipelineExecutionContext> {
         let inner = self.inner.read().await;
-        inner.execution_ids_by_pipeline.get(&pipeline_id).cloned()
+        inner.pipeline_execution_context_by_pipeline.get(&pipeline_id).cloned()
     }
 }
 
@@ -106,7 +106,7 @@ impl PipelineSpecStore for InMemoryStore {
 impl PipelineRunStore for InMemoryStore {
     async fn put_run(&self, run: PipelineRun) {
         let mut guard = self.inner.write().await;
-        guard.runs.insert(run.execution_ids.pipeline_id, run);
+        guard.runs.insert(run.pipeline_execution_context.pipeline_id, run);
     }
 
     async fn get_run(&self, pipeline_id: PipelineId) -> Option<PipelineRun> {
@@ -176,7 +176,7 @@ impl PipelineSnapshotStore for InMemoryStore {
     async fn append_snapshot(&self, pipeline_id: PipelineId, entry: PipelineSnapshotEntry) {
         let mut guard = self.inner.write().await;
         let retention_ms = guard
-            .execution_ids_by_pipeline
+            .pipeline_execution_context_by_pipeline
             .get(&pipeline_id)
             .and_then(|ids| guard.specs.get(&ids.pipeline_spec_id))
             .and_then(|stored| serde_json::from_slice::<UserPipelineSpec>(&stored.spec_bytes).ok())

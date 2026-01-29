@@ -27,13 +27,13 @@ pub struct OperatorId(pub String);
 pub struct TaskId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct ExecutionIds {
+pub struct PipelineExecutionContext {
     pub pipeline_spec_id: PipelineSpecId,
     pub pipeline_id: PipelineId,
     pub attempt_id: AttemptId,
 }
 
-impl ExecutionIds {
+impl PipelineExecutionContext {
     pub fn new(pipeline_spec_id: PipelineSpecId, pipeline_id: PipelineId, attempt_id: AttemptId) -> Self {
         Self {
             pipeline_spec_id,
@@ -78,14 +78,14 @@ pub struct PipelineSpec {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineRun {
-    pub execution_ids: ExecutionIds,
+    pub pipeline_execution_context: PipelineExecutionContext,
     pub created_at: DateTime<Utc>,
     pub desired_state: PipelineDesiredState,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStatus {
-    pub execution_ids: ExecutionIds,
+    pub pipeline_execution_context: PipelineExecutionContext,
     pub state: PipelineLifecycleState,
     pub updated_at: DateTime<Utc>,
     pub worker_count: usize,
@@ -106,14 +106,14 @@ pub enum PipelineEventKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineEvent {
-    pub execution_ids: ExecutionIds,
+    pub pipeline_execution_context: PipelineExecutionContext,
     pub at: DateTime<Utc>,
     pub kind: PipelineEventKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointMetadata {
-    pub execution_ids: ExecutionIds,
+    pub pipeline_execution_context: PipelineExecutionContext,
     pub checkpoint_id: u64,
     pub committed_at: DateTime<Utc>,
     pub manifest_uri: String,

@@ -29,7 +29,7 @@ struct CreatePipelineSpecResponse {
 
 #[derive(Debug, serde::Deserialize)]
 struct StartPipelineResponse {
-    execution_ids: volga_stream::control_plane::types::ExecutionIds,
+    pipeline_execution_context: volga_stream::control_plane::types::PipelineExecutionContext,
 }
 
 #[tokio::test]
@@ -88,7 +88,7 @@ async fn test_control_plane_e2e_snapshots_and_metrics() {
     "#;
 
     let spec = PipelineSpecBuilder::new()
-        .with_execution_profile(ExecutionProfile::k8s_default())
+        .with_execution_profile(ExecutionProfile::local_default())
         .with_execution_mode(ExecutionMode::Streaming)
         .with_parallelism(1)
         .with_snapshot_history_retention_window_ms(10_000)
@@ -108,9 +108,14 @@ async fn test_control_plane_e2e_snapshots_and_metrics() {
 
     // Bring up Control Plane state (in-proc).
     let store = InMemoryStore::new();
+    let mut adapters = std::collections::HashMap::new();
+    adapters.insert(
+        volga_stream::api::spec::runtime_adapter::RuntimeAdapterSpec::Local,
+        Arc::new(volga_stream::executor::local_runtime_adapter::LocalRuntimeAdapter::new()),
+    );
     let controller = Arc::new(ControlPlaneController::new(
         Arc::new(store.clone()),
-        Arc::new(volga_stream::executor::local_runtime_adapter::LocalRuntimeAdapter::new()),
+        adapters,
     ));
     let app_state = ControlPlaneAppState::new(store.clone(), controller.clone());
     let app = router(app_state);
@@ -138,7 +143,7 @@ async fn test_control_plane_e2e_snapshots_and_metrics() {
     controller.reconcile_once().await.unwrap();
 
     // 4) Wait until CP has at least one snapshot.
-    let pipeline_id = start_resp.execution_ids.pipeline_id;
+    let pipeline_id = start_resp.pipeline_execution_context.pipeline_id;
     let _latest = wait_for_snapshot(&store, pipeline_id, Duration::from_secs(15)).await;
 
     // 5) Validate CP HTTP snapshot endpoints.

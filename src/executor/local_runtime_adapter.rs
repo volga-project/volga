@@ -17,7 +17,6 @@ use crate::runtime::worker_server::WorkerServer;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::transport::channel::Channel;
-use crate::api::spec::runtime_adapter::RuntimeAdapterKind;
 
 pub struct LocalRuntimeAdapter;
 
@@ -68,8 +67,11 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         req.execution_graph
             .update_channels_with_node_mapping_and_transport(
                 Some(&task_placement_mapping),
-                &req.worker_runtime.transport,
-                &req.transport_overrides_queue_records,
+                &req.pipeline_spec.worker_runtime.transport,
+                &req
+                    .pipeline_spec
+                    .worker_runtime
+                    .transport_overrides_queue_records,
             );
 
         let master_port = gen_unique_grpc_port();
@@ -120,21 +122,29 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
 
             let mut worker_config = WorkerConfig::new(
                 worker_id.clone(),
-                req.execution_ids.clone(),
+                req.pipeline_execution_context.clone(),
                 req.execution_graph.clone(),
                 vertex_ids
                     .into_iter()
                     .map(|v| std::sync::Arc::<str>::from(v))
                     .collect(),
-                req.worker_runtime.num_threads_per_task,
+                req.pipeline_spec.worker_runtime.num_threads_per_task,
                 transport_backend_type,
             )
             .with_master_addr(master_addr.clone());
-            worker_config.storage_budgets = req.worker_runtime.storage.budgets.clone();
-            worker_config.inmem_store_lock_pool_size = req.worker_runtime.storage.inmem_store_lock_pool_size;
-            worker_config.inmem_store_bucket_granularity = req.worker_runtime.storage.inmem_store_bucket_granularity;
-            worker_config.inmem_store_max_batch_size = req.worker_runtime.storage.inmem_store_max_batch_size;
-            worker_config.operator_type_storage_overrides = req.operator_type_storage_overrides.clone();
+            worker_config.storage_budgets = req.pipeline_spec.worker_runtime.storage.budgets.clone();
+            worker_config.inmem_store_lock_pool_size =
+                req.pipeline_spec.worker_runtime.storage.inmem_store_lock_pool_size;
+            worker_config.inmem_store_bucket_granularity =
+                req.pipeline_spec.worker_runtime.storage.inmem_store_bucket_granularity;
+            worker_config.inmem_store_max_batch_size =
+                req.pipeline_spec.worker_runtime.storage.inmem_store_max_batch_size;
+            worker_config.operator_type_storage_overrides =
+                req
+                    .pipeline_spec
+                    .worker_runtime
+                    .operator_type_storage_overrides
+                    .clone();
 
             let mut worker_server = WorkerServer::new(worker_config);
             worker_server.start(&addr).await?;
@@ -142,7 +152,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             worker_addrs.push(addr);
         }
 
-        let execution_ids = req.execution_ids.clone();
+        let pipeline_execution_context = req.pipeline_execution_context.clone();
         let worker_addrs_for_join = worker_addrs.clone();
         let (stop_sender, stop_receiver) = tokio::sync::oneshot::channel();
         let join = tokio::spawn(async move {
@@ -177,7 +187,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         });
 
         Ok(AttemptHandle {
-            execution_ids,
+            pipeline_execution_context,
             master_addr,
             worker_addrs,
             join,
@@ -194,12 +204,9 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
     }
 
     fn supported_task_placement_strategies(&self) -> &[TaskPlacementStrategyName] {
-        static SUPPORTED: [TaskPlacementStrategyName; 1] = [TaskPlacementStrategyName::SingleNode];
+        static SUPPORTED: [TaskPlacementStrategyName; 1] = [TaskPlacementStrategyName::SingleWorker];
         &SUPPORTED
     }
 
-    fn runtime_kind(&self) -> RuntimeAdapterKind {
-        RuntimeAdapterKind::Local
-    }
 }
 

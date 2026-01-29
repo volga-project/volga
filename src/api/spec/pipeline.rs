@@ -14,6 +14,7 @@ use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
+use crate::transport::transport_spec::OperatorTransportSpec;
 use crate::storage::StorageBudgetConfig;
 use crate::runtime::operators::window::TimeGranularity;
 
@@ -35,19 +36,24 @@ pub enum ExecutionProfile {
         task_placement_strategy: TaskPlacementStrategyName,
         resource_strategy: ResourceStrategy,
     },
+    Custom {
+        runtime_adapter: RuntimeAdapterSpec,
+        task_placement_strategy: TaskPlacementStrategyName,
+        resource_strategy: ResourceStrategy,
+    },
 }
 
 impl ExecutionProfile {
     pub fn local_default() -> Self {
         Self::Local {
-            task_placement_strategy: TaskPlacementStrategyName::SingleNode,
+            task_placement_strategy: TaskPlacementStrategyName::SingleWorker,
             resource_strategy: ResourceStrategy::PerWorker,
         }
     }
 
     pub fn k8s_default() -> Self {
         Self::K8s {
-            task_placement_strategy: TaskPlacementStrategyName::SingleNode,
+            task_placement_strategy: TaskPlacementStrategyName::SingleWorker,
             resource_strategy: ResourceStrategy::PerWorker,
         }
     }
@@ -57,6 +63,7 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { .. } => Some(RuntimeAdapterSpec::Local),
             ExecutionProfile::K8s { .. } => Some(RuntimeAdapterSpec::K8s),
+            ExecutionProfile::Custom { runtime_adapter, .. } => Some(runtime_adapter.clone()),
         }
     }
 
@@ -65,6 +72,7 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { task_placement_strategy, .. } => Some(task_placement_strategy),
             ExecutionProfile::K8s { task_placement_strategy, .. } => Some(task_placement_strategy),
+            ExecutionProfile::Custom { task_placement_strategy, .. } => Some(task_placement_strategy),
         }
     }
 
@@ -73,6 +81,7 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { resource_strategy, .. } => Some(resource_strategy),
             ExecutionProfile::K8s { resource_strategy, .. } => Some(resource_strategy),
+            ExecutionProfile::Custom { resource_strategy, .. } => Some(resource_strategy),
         }
     }
 }
@@ -107,6 +116,10 @@ pub struct PipelineSpec {
 #[derive(Clone, Debug)]
 pub struct PipelineSpecBuilder {
     spec: PipelineSpec,
+}
+
+fn operator_override_transport_queue_records(o: &OperatorOverride) -> Option<u32> {
+    o.transport.as_ref().and_then(|t| t.queue_records)
 }
 
 impl PipelineSpecBuilder {
@@ -148,37 +161,8 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_in_process_profile(mut self) -> Self {
-        self.spec.execution_profile = ExecutionProfile::InProcess;
-        self
-    }
-
     pub fn with_worker_runtime_spec(mut self, worker_runtime: WorkerRuntimeSpec) -> Self {
         self.spec.worker_runtime = worker_runtime;
-        self
-    }
-
-    pub fn with_local_profile(
-        mut self,
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    ) -> Self {
-        self.spec.execution_profile = ExecutionProfile::Local {
-            task_placement_strategy,
-            resource_strategy,
-        };
-        self
-    }
-
-    pub fn with_k8s_profile(
-        mut self,
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    ) -> Self {
-        self.spec.execution_profile = ExecutionProfile::K8s {
-            task_placement_strategy,
-            resource_strategy,
-        };
         self
     }
 
@@ -189,6 +173,14 @@ impl PipelineSpecBuilder {
 
     pub fn with_transport_default_queue_records(mut self, queue_records: u32) -> Self {
         self.spec.worker_runtime.transport.default_queue_records = queue_records.max(1);
+        self
+    }
+
+    pub fn with_operator_transport_queue_records(mut self, operator_id: &str, queue_records: u32) -> Self {
+        self.spec.operator_overrides.per_operator
+            .entry(operator_id.to_string())
+            .or_insert_with(OperatorOverride::default)
+            .transport = Some(OperatorTransportSpec { queue_records: Some(queue_records.max(1)) });
         self
     }
 
@@ -287,10 +279,6 @@ impl PipelineSpecBuilder {
     pub fn build(self) -> PipelineSpec {
         self.spec
     }
-}
-
-fn operator_override_transport_queue_records(o: &OperatorOverride) -> Option<u32> {
-    o.transport.as_ref().and_then(|t| t.queue_records)
 }
 
 impl PipelineSpec {

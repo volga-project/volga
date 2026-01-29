@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::{Once, OnceLock}};
 
 use crate::runtime::VertexId;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::control_plane::types::ExecutionIds;
+use crate::control_plane::types::PipelineExecutionContext;
 use crate::storage::StorageStatsSnapshot;
 
 // Global Prometheus handle for programmatic access
@@ -263,14 +263,14 @@ impl OperatorAggregateMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerAggregateMetrics {
     pub worker_id: String,
-    pub execution_ids: ExecutionIds,
+    pub pipeline_execution_context: PipelineExecutionContext,
     pub operator_metrics: HashMap<String, OperatorAggregateMetrics>,
     pub tasks_metrics: HashMap<String, TaskMetrics>
 }
 
 impl WorkerAggregateMetrics {
 
-    pub fn new(worker_id: String, execution_ids: ExecutionIds, tasks_metrics: HashMap<String, TaskMetrics>, graph: &ExecutionGraph) -> Self {
+    pub fn new(worker_id: String, pipeline_execution_context: PipelineExecutionContext, tasks_metrics: HashMap<String, TaskMetrics>, graph: &ExecutionGraph) -> Self {
         let mut metrics_by_operator: HashMap<String, Vec<TaskMetrics>> = HashMap::new();
 
         // Group task metrics by operator_id
@@ -295,16 +295,16 @@ impl WorkerAggregateMetrics {
 
         WorkerAggregateMetrics {
             worker_id,
-            execution_ids,
+            pipeline_execution_context,
             operator_metrics,
             tasks_metrics
         }
     }
 
     pub fn record(&self) {
-        let pipeline_spec_id = self.execution_ids.pipeline_spec_id.0.to_string();
-        let pipeline_id = self.execution_ids.pipeline_id.0.to_string();
-        let attempt_id = self.execution_ids.attempt_id.0.to_string();
+        let pipeline_spec_id = self.pipeline_execution_context.pipeline_spec_id.0.to_string();
+        let pipeline_id = self.pipeline_execution_context.pipeline_id.0.to_string();
+        let attempt_id = self.pipeline_execution_context.attempt_id.0.to_string();
 
         for (operator_id, operator_metrics) in self.operator_metrics.iter() {
             // Record throughput metrics
@@ -435,9 +435,9 @@ impl WorkerAggregateMetrics {
 /// These are intentionally gauges (set-to-current) rather than counters to avoid
 /// double-counting across poll ticks.
 pub fn emit_poll_derived_gauges(worker_metrics: &WorkerAggregateMetrics) {
-    let pipeline_spec_id = worker_metrics.execution_ids.pipeline_spec_id.0.to_string();
-    let pipeline_id = worker_metrics.execution_ids.pipeline_id.0.to_string();
-    let attempt_id = worker_metrics.execution_ids.attempt_id.0.to_string();
+    let pipeline_spec_id = worker_metrics.pipeline_execution_context.pipeline_spec_id.0.to_string();
+    let pipeline_id = worker_metrics.pipeline_execution_context.pipeline_id.0.to_string();
+    let attempt_id = worker_metrics.pipeline_execution_context.attempt_id.0.to_string();
 
     let mut worker_max_backpressure = 0.0f64;
     for (vertex_id, task_metrics) in worker_metrics.tasks_metrics.iter() {
