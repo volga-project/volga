@@ -27,7 +27,7 @@ pub enum ExecutionMode {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ExecutionProfile {
-    InProcess { num_threads_per_task: usize },
+    InProcess,
     Local {
         task_placement_strategy: TaskPlacementStrategyName,
         resource_strategy: ResourceStrategy,
@@ -60,7 +60,7 @@ impl ExecutionProfile {
 
     pub fn runtime_adapter_spec(&self) -> Option<RuntimeAdapterSpec> {
         match self {
-            ExecutionProfile::InProcess { .. } => None,
+            ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { .. } => Some(RuntimeAdapterSpec::Local),
             ExecutionProfile::K8s { .. } => Some(RuntimeAdapterSpec::K8s),
             ExecutionProfile::Custom { runtime_adapter, .. } => Some(runtime_adapter.clone()),
@@ -69,7 +69,7 @@ impl ExecutionProfile {
 
     pub fn task_placement_strategy(&self) -> Option<&TaskPlacementStrategyName> {
         match self {
-            ExecutionProfile::InProcess { .. } => None,
+            ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { task_placement_strategy, .. } => Some(task_placement_strategy),
             ExecutionProfile::K8s { task_placement_strategy, .. } => Some(task_placement_strategy),
             ExecutionProfile::Custom { task_placement_strategy, .. } => Some(task_placement_strategy),
@@ -78,7 +78,7 @@ impl ExecutionProfile {
 
     pub fn resource_strategy(&self) -> Option<&ResourceStrategy> {
         match self {
-            ExecutionProfile::InProcess { .. } => None,
+            ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { resource_strategy, .. } => Some(resource_strategy),
             ExecutionProfile::K8s { resource_strategy, .. } => Some(resource_strategy),
             ExecutionProfile::Custom { resource_strategy, .. } => Some(resource_strategy),
@@ -126,9 +126,7 @@ impl PipelineSpecBuilder {
     pub fn new() -> Self {
         Self {
             spec: PipelineSpec {
-                execution_profile: ExecutionProfile::InProcess {
-                    num_threads_per_task: 4,
-                },
+                execution_profile: ExecutionProfile::InProcess,
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
                 resource_profiles: ResourceProfiles::default(),
@@ -163,8 +161,13 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_in_process_threads(mut self, num_threads_per_task: usize) -> Self {
-        self.spec.execution_profile = ExecutionProfile::InProcess { num_threads_per_task };
+    pub fn with_in_process_profile(mut self) -> Self {
+        self.spec.execution_profile = ExecutionProfile::InProcess;
+        self
+    }
+
+    pub fn with_worker_runtime_spec(mut self, worker_runtime: WorkerRuntimeSpec) -> Self {
+        self.spec.worker_runtime = worker_runtime;
         self
     }
 

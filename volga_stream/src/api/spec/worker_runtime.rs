@@ -9,6 +9,7 @@ use crate::transport::transport_spec::TransportSpec;
 pub struct WorkerRuntimeSpec {
     pub transport: TransportSpec,
     pub storage: StorageSpec,
+    pub num_threads_per_task: usize,
     /// Snapshot history retention window, in milliseconds.
     /// When omitted, defaults to 10 minutes.
     pub history_retention_window_ms: Option<u64>,
@@ -19,6 +20,7 @@ impl Default for WorkerRuntimeSpec {
         Self {
             transport: TransportSpec::default(),
             storage: StorageSpec::default(),
+            num_threads_per_task: 4,
             history_retention_window_ms: None,
         }
     }

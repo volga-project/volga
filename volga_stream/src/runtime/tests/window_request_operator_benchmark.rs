@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
+    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder, WorkerRuntimeSpec},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::metrics::PipelineStateHistory,
     runtime::{
@@ -181,7 +181,11 @@ pub async fn run_window_request_benchmark(
             Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         )
         .sql(sql)
-        .with_execution_profile(ExecutionProfile::InProcess { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::InProcess)
+        .with_worker_runtime_spec(WorkerRuntimeSpec {
+            num_threads_per_task: 4,
+            ..WorkerRuntimeSpec::default()
+        })
         .with_execution_mode(ExecutionMode::Request)
         .build();
     let context = PipelineContext::new(spec);

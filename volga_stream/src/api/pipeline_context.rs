@@ -55,7 +55,7 @@ impl PipelineContext {
         let execution_ids = ExecutionIds::fresh(AttemptId(1));
 
         match self.spec.execution_profile.clone() {
-            ExecutionProfile::InProcess { num_threads_per_task } => {
+            ExecutionProfile::InProcess => {
                 execution_graph.update_channels_with_node_mapping_and_transport(
                     None,
                     &self.spec.worker_runtime.transport,
@@ -69,7 +69,7 @@ impl PipelineContext {
                     execution_ids,
                     execution_graph,
                     vertex_ids,
-                    num_threads_per_task,
+                    self.spec.worker_runtime.num_threads_per_task,
                     TransportBackendType::InMemory,
                 );
                 worker_config.storage_budgets = self.spec.worker_runtime.storage.budgets.clone();
