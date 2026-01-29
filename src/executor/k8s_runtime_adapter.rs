@@ -254,6 +254,8 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
             .get(0)
             .cloned()
             .unwrap_or_default();
+        let master_resource = resource_plan.master_resource.clone();
+        let master_resources_json = Self::resource_requirements(&master_resource);
         let worker_resources_json = Self::resource_requirements(&worker_resource);
 
         let bootstrap_payload = WorkerBootstrapPayload {
@@ -303,6 +305,9 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
                 }]
             }]
         });
+        if let Some(resources) = master_resources_json {
+            master_pod_spec["containers"][0]["resources"] = resources;
+        }
         if !self.config.master_node_selector.is_empty() {
             master_pod_spec["nodeSelector"] = json!(self.config.master_node_selector);
         }
