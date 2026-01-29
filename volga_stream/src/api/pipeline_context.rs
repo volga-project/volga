@@ -55,7 +55,7 @@ impl PipelineContext {
         let execution_ids = ExecutionIds::fresh(AttemptId(1));
 
         match self.spec.execution_profile.clone() {
-            ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task } => {
+            ExecutionProfile::InProcess { num_threads_per_task } => {
                 execution_graph.update_channels_with_node_mapping_and_transport(
                     None,
                     &self.spec.worker_runtime.transport,
@@ -109,7 +109,7 @@ impl PipelineContext {
                 worker_states.insert(worker_id, worker_state);
                 Ok(PipelineSnapshot::new(worker_states))
             }
-            ExecutionProfile::LocalOrchestrated => {
+            ExecutionProfile::Local { .. } => {
                 let adapter = Arc::new(LocalRuntimeAdapter::new());
 
                 let handle = adapter
@@ -117,8 +117,6 @@ impl PipelineContext {
                         execution_ids,
                         pipeline_spec: self.spec.clone(),
                         execution_graph,
-                        num_workers_per_operator: 1,
-                        node_assign_strategy: self.spec.node_assign_strategy.clone(),
                         transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
                         worker_runtime: self.spec.worker_runtime.clone(),
                         operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
@@ -131,20 +129,28 @@ impl PipelineContext {
                 }
                 Ok(final_state)
             }
-            ExecutionProfile::Orchestrated {
-                num_workers_per_operator,
-            } => {
+            ExecutionProfile::K8s { .. } | ExecutionProfile::Custom { .. } => {
                 let runtime_adapter = self
                     .runtime_adapter
-                    .expect("Orchestrated profile requires a runtime_adapter");
+                    .expect("Execution profile requires a runtime_adapter");
+                let adapter_spec = self
+                    .spec
+                    .execution_profile
+                    .runtime_adapter_spec()
+                    .unwrap_or_else(|| panic!("execution profile does not use a runtime adapter"));
+                if runtime_adapter.runtime_kind() != adapter_spec.kind() {
+                    panic!(
+                        "runtime adapter kind {:?} does not match pipeline spec {:?}",
+                        runtime_adapter.runtime_kind(),
+                        adapter_spec.kind()
+                    );
+                }
 
                 let handle = runtime_adapter
                     .start_attempt(StartAttemptRequest {
                         execution_ids,
                         pipeline_spec: self.spec.clone(),
                         execution_graph,
-                        num_workers_per_operator,
-                        node_assign_strategy: self.spec.node_assign_strategy.clone(),
                         transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
                         worker_runtime: self.spec.worker_runtime.clone(),
                         operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),

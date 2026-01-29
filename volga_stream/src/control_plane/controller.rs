@@ -98,10 +98,17 @@ impl ControlPlaneController {
                         .cloned()
                         .ok_or_else(|| anyhow::anyhow!("missing pipeline spec for pipeline_id={:?}", pipeline_id))?;
 
-                    let num_workers_per_operator = match spec.execution_profile {
-                        crate::api::ExecutionProfile::Orchestrated { num_workers_per_operator } => num_workers_per_operator,
-                        _ => 1,
-                    };
+                    let adapter_spec = spec
+                        .execution_profile
+                        .runtime_adapter_spec()
+                        .unwrap_or_else(|| panic!("execution profile does not use a runtime adapter"));
+                    if self.adapter.runtime_kind() != adapter_spec.kind() {
+                        panic!(
+                            "runtime adapter kind {:?} does not match pipeline spec {:?}",
+                            self.adapter.runtime_kind(),
+                            adapter_spec.kind()
+                        );
+                    }
 
                     let handle = self
                         .adapter
@@ -109,8 +116,6 @@ impl ControlPlaneController {
                             execution_ids: run.execution_ids.clone(),
                             pipeline_spec: spec.clone(),
                             execution_graph: graph,
-                            num_workers_per_operator,
-                            node_assign_strategy: spec.node_assign_strategy.clone(),
                             transport_overrides_queue_records: spec.transport_overrides_queue_records(),
                             worker_runtime: spec.worker_runtime.clone(),
                             operator_type_storage_overrides: spec.operator_type_storage_overrides(),

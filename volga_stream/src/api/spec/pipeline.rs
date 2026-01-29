@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::LogicalGraph;
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceBindingSpec};
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
-use crate::cluster::node_assignment::NodeAssignStrategyName;
+use crate::api::spec::runtime_adapter::RuntimeAdapterSpec;
+use crate::executor::placement::TaskPlacementStrategyName;
 use crate::api::spec::resources::{ResourceProfiles, ResourceStrategy};
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
@@ -26,9 +27,63 @@ pub enum ExecutionMode {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ExecutionProfile {
-    SingleWorkerNoMaster { num_threads_per_task: usize },
-    LocalOrchestrated,
-    Orchestrated { num_workers_per_operator: usize },
+    InProcess { num_threads_per_task: usize },
+    Local {
+        task_placement_strategy: TaskPlacementStrategyName,
+        resource_strategy: ResourceStrategy,
+    },
+    K8s {
+        task_placement_strategy: TaskPlacementStrategyName,
+        resource_strategy: ResourceStrategy,
+    },
+    Custom {
+        runtime_adapter: RuntimeAdapterSpec,
+        task_placement_strategy: TaskPlacementStrategyName,
+        resource_strategy: ResourceStrategy,
+    },
+}
+
+impl ExecutionProfile {
+    pub fn local_default() -> Self {
+        Self::Local {
+            task_placement_strategy: TaskPlacementStrategyName::SingleNode,
+            resource_strategy: ResourceStrategy::PerWorker,
+        }
+    }
+
+    pub fn k8s_default() -> Self {
+        Self::K8s {
+            task_placement_strategy: TaskPlacementStrategyName::SingleNode,
+            resource_strategy: ResourceStrategy::PerWorker,
+        }
+    }
+
+    pub fn runtime_adapter_spec(&self) -> Option<RuntimeAdapterSpec> {
+        match self {
+            ExecutionProfile::InProcess { .. } => None,
+            ExecutionProfile::Local { .. } => Some(RuntimeAdapterSpec::Local),
+            ExecutionProfile::K8s { .. } => Some(RuntimeAdapterSpec::K8s),
+            ExecutionProfile::Custom { runtime_adapter, .. } => Some(runtime_adapter.clone()),
+        }
+    }
+
+    pub fn task_placement_strategy(&self) -> Option<&TaskPlacementStrategyName> {
+        match self {
+            ExecutionProfile::InProcess { .. } => None,
+            ExecutionProfile::Local { task_placement_strategy, .. } => Some(task_placement_strategy),
+            ExecutionProfile::K8s { task_placement_strategy, .. } => Some(task_placement_strategy),
+            ExecutionProfile::Custom { task_placement_strategy, .. } => Some(task_placement_strategy),
+        }
+    }
+
+    pub fn resource_strategy(&self) -> Option<&ResourceStrategy> {
+        match self {
+            ExecutionProfile::InProcess { .. } => None,
+            ExecutionProfile::Local { resource_strategy, .. } => Some(resource_strategy),
+            ExecutionProfile::K8s { resource_strategy, .. } => Some(resource_strategy),
+            ExecutionProfile::Custom { resource_strategy, .. } => Some(resource_strategy),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -36,8 +91,6 @@ pub struct PipelineSpec {
     pub execution_profile: ExecutionProfile,
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
-    pub node_assign_strategy: NodeAssignStrategyName,
-    pub resource_strategy: ResourceStrategy,
     pub resource_profiles: ResourceProfiles,
     pub worker_runtime: WorkerRuntimeSpec,
     /// Per-operator-type storage overrides (shared across all instances of that operator type in a worker).
@@ -73,13 +126,11 @@ impl PipelineSpecBuilder {
     pub fn new() -> Self {
         Self {
             spec: PipelineSpec {
-                execution_profile: ExecutionProfile::SingleWorkerNoMaster {
+                execution_profile: ExecutionProfile::InProcess {
                     num_threads_per_task: 4,
                 },
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
-                node_assign_strategy: NodeAssignStrategyName::default(),
-                resource_strategy: ResourceStrategy::default(),
                 resource_profiles: ResourceProfiles::default(),
                 worker_runtime: WorkerRuntimeSpec::default(),
                 operator_type_storage: HashMap::new(),
@@ -112,13 +163,46 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_node_assign_strategy(mut self, strategy: NodeAssignStrategyName) -> Self {
-        self.spec.node_assign_strategy = strategy;
+    pub fn with_in_process_threads(mut self, num_threads_per_task: usize) -> Self {
+        self.spec.execution_profile = ExecutionProfile::InProcess { num_threads_per_task };
         self
     }
 
-    pub fn with_resource_strategy(mut self, strategy: ResourceStrategy) -> Self {
-        self.spec.resource_strategy = strategy;
+    pub fn with_local_profile(
+        mut self,
+        task_placement_strategy: TaskPlacementStrategyName,
+        resource_strategy: ResourceStrategy,
+    ) -> Self {
+        self.spec.execution_profile = ExecutionProfile::Local {
+            task_placement_strategy,
+            resource_strategy,
+        };
+        self
+    }
+
+    pub fn with_k8s_profile(
+        mut self,
+        task_placement_strategy: TaskPlacementStrategyName,
+        resource_strategy: ResourceStrategy,
+    ) -> Self {
+        self.spec.execution_profile = ExecutionProfile::K8s {
+            task_placement_strategy,
+            resource_strategy,
+        };
+        self
+    }
+
+    pub fn with_custom_profile(
+        mut self,
+        runtime_adapter: RuntimeAdapterSpec,
+        task_placement_strategy: TaskPlacementStrategyName,
+        resource_strategy: ResourceStrategy,
+    ) -> Self {
+        self.spec.execution_profile = ExecutionProfile::Custom {
+            runtime_adapter,
+            task_placement_strategy,
+            resource_strategy,
+        };
         self
     }
 

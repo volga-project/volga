@@ -254,7 +254,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
             schema,
         )
         .sql(&sql)
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 });
+        .with_execution_profile(ExecutionProfile::InProcess { num_threads_per_task: 4 });
 
     
     // Set execution mode 

@@ -1,32 +1,19 @@
 use crate::api::spec::resources::{ResourceProfile, ResourceProfiles, ResourceStrategy};
-use crate::runtime::execution_graph::ExecutionGraph;
-
+use crate::executor::placement::WorkerTaskPlacement;
 #[derive(Clone, Debug)]
 pub struct ResourcePlan {
     pub worker_resources: Vec<ResourceProfile>,
 }
 
-pub trait ResourcePlanner: Send + Sync {
-    fn plan(
-        &self,
-        graph: &ExecutionGraph,
-        num_workers: usize,
-        strategy: &ResourceStrategy,
-        profiles: &ResourceProfiles,
-    ) -> ResourcePlan;
-}
+pub struct ResourcePlanner;
 
-pub struct DefaultResourcePlanner;
-
-impl ResourcePlanner for DefaultResourcePlanner {
-    fn plan(
-        &self,
-        _graph: &ExecutionGraph,
-        num_workers: usize,
+impl ResourcePlanner {
+    pub fn plan(
+        placements: &[WorkerTaskPlacement],
         strategy: &ResourceStrategy,
         profiles: &ResourceProfiles,
     ) -> ResourcePlan {
-        let workers = num_workers.max(1);
+        let workers = placements.len().max(1);
         let profile = match strategy {
             ResourceStrategy::PerWorker => profiles.worker_default.clone(),
             ResourceStrategy::PerOperatorType => {
