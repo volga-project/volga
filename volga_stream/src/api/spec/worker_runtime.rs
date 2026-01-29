@@ -10,6 +10,8 @@ pub struct WorkerRuntimeSpec {
     pub transport: TransportSpec,
     pub storage: StorageSpec,
     pub num_threads_per_task: usize,
+    pub transport_overrides_queue_records: std::collections::HashMap<String, u32>,
+    pub operator_type_storage_overrides: std::collections::HashMap<String, StorageSpec>,
     /// Snapshot history retention window, in milliseconds.
     /// When omitted, defaults to 10 minutes.
     pub history_retention_window_ms: Option<u64>,
@@ -21,6 +23,8 @@ impl Default for WorkerRuntimeSpec {
             transport: TransportSpec::default(),
             storage: StorageSpec::default(),
             num_threads_per_task: 4,
+            transport_overrides_queue_records: std::collections::HashMap::new(),
+            operator_type_storage_overrides: std::collections::HashMap::new(),
             history_retention_window_ms: None,
         }
     }

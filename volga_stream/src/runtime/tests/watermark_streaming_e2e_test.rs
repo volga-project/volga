@@ -16,7 +16,7 @@ use crate::runtime::tests::test_utils::{
     create_window_input_schema, wait_for_status, window_rows_from_messages, WindowOutputRow,
 };
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
-use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::control_plane::types::{AttemptId, PipelineExecutionContext};
 
 fn parse_task_index_from_key(key: &str) -> Option<i32> {
     // Keys come from datagen as "key-{task_index}-{key_id}" when using FieldGenerator::Key.
@@ -144,7 +144,7 @@ pub(crate) async fn run_watermark_window_pipeline(
 
     let mut worker = Worker::new(WorkerConfig::new(
         "wm-e2e-worker".to_string(),
-        ExecutionIds::fresh(AttemptId(1)),
+        PipelineExecutionContext::fresh(AttemptId(1)),
         exec_graph,
         vertex_ids,
         2,

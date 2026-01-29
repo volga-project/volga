@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder, WorkerRuntimeSpec},
+    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     api::compile_logical_graph,
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
@@ -254,11 +254,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
             schema,
         )
         .sql(&sql)
-        .with_execution_profile(ExecutionProfile::InProcess)
-        .with_worker_runtime_spec(WorkerRuntimeSpec {
-            num_threads_per_task: 4,
-            ..WorkerRuntimeSpec::default()
-        });
+        .with_execution_profile(ExecutionProfile::InProcess);
 
     
     // Set execution mode 

@@ -1,5 +1,5 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder, WorkerRuntimeSpec},
+    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::test_utils::{IdentityMapFunction, gen_unique_grpc_port},
     api::{Planner, PlanningContext},
     runtime::{
@@ -311,10 +311,6 @@ async fn test_request_source_sink_e2e() {
         let spec = PipelineSpecBuilder::new()
             .with_parallelism(parallelism)
             .with_execution_profile(ExecutionProfile::InProcess)
-            .with_worker_runtime_spec(WorkerRuntimeSpec {
-                num_threads_per_task: 4,
-                ..WorkerRuntimeSpec::default()
-            })
             .with_logical_graph(logical_graph)
             .build();
 

@@ -16,7 +16,7 @@ pub use compiler::compile_logical_graph;
 pub use spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder};
 pub use spec::operators::{OperatorOverride, OperatorOverrides};
 pub use spec::connectors::{DatagenSpec, RequestSourceSinkSpec, SinkSpec, SourceSpec, SourceBindingSpec};
-pub use spec::runtime_adapter::{RuntimeAdapterKind, RuntimeAdapterSpec};
+pub use spec::runtime_adapter::RuntimeAdapterSpec;
 pub use crate::executor::placement::TaskPlacementStrategyName;
 pub use spec::resources::{ResourceProfiles, ResourceStrategy};
 pub use spec::storage::StorageSpec;

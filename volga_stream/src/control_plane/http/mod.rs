@@ -17,7 +17,7 @@ use crate::api::compile_logical_graph;
 use crate::control_plane::controller::ControlPlaneController;
 use crate::control_plane::store::{InMemoryStore, PipelineEventStore, PipelineRunStore, PipelineSpecStore, PipelineSnapshotStore};
 use crate::control_plane::types::{
-    AttemptId, ExecutionIds, PipelineDesiredState, PipelineEvent, PipelineEventKind, PipelineId,
+    AttemptId, PipelineExecutionContext, PipelineDesiredState, PipelineEvent, PipelineEventKind, PipelineId,
     PipelineLifecycleState, PipelineRun, PipelineSpec, PipelineSpecId, PipelineStatus,
 };
 use crate::runtime::observability::{PipelineDerivedStats, PipelineSnapshotEntry};
@@ -95,7 +95,7 @@ pub struct StartPipelineRequest {
 
 #[derive(Debug, Serialize)]
 pub struct StartPipelineResponse {
-    pub execution_ids: ExecutionIds,
+    pub pipeline_execution_context: PipelineExecutionContext,
 }
 
 async fn start_pipeline(
@@ -103,8 +103,8 @@ async fn start_pipeline(
     Json(req): Json<StartPipelineRequest>,
 ) -> Result<Json<StartPipelineResponse>, StatusCode> {
     let attempt_id = AttemptId(1);
-    let execution_ids = ExecutionIds::new(req.pipeline_spec_id, PipelineId(Uuid::new_v4()), attempt_id);
-    let pipeline_id = execution_ids.pipeline_id;
+    let pipeline_execution_context = PipelineExecutionContext::new(req.pipeline_spec_id, PipelineId(Uuid::new_v4()), attempt_id);
+    let pipeline_id = pipeline_execution_context.pipeline_id;
 
     let stored = state
         .store
@@ -122,12 +122,12 @@ async fn start_pipeline(
         .await;
     state.controller.register_pipeline_spec(pipeline_id, spec).await;
 
-    state.store.put_execution_ids(pipeline_id, execution_ids.clone()).await;
+    state.store.put_pipeline_execution_context(pipeline_id, pipeline_execution_context.clone()).await;
 
     state
         .store
         .put_run(PipelineRun {
-            execution_ids: execution_ids.clone(),
+            pipeline_execution_context: pipeline_execution_context.clone(),
             created_at: Utc::now(),
             desired_state: req.desired_state.unwrap_or(PipelineDesiredState::Running),
         })
@@ -142,7 +142,7 @@ async fn start_pipeline(
         .await;
 
     let status = PipelineStatus {
-        execution_ids: execution_ids.clone(),
+        pipeline_execution_context: pipeline_execution_context.clone(),
         state: PipelineLifecycleState::Creating,
         updated_at: Utc::now(),
         worker_count: 0,
@@ -152,7 +152,7 @@ async fn start_pipeline(
     state.store.put_status(pipeline_id, status).await;
 
     let event = PipelineEvent {
-        execution_ids: execution_ids.clone(),
+        pipeline_execution_context: pipeline_execution_context.clone(),
         at: Utc::now(),
         kind: PipelineEventKind::StateChanged {
             state: PipelineLifecycleState::Creating,
@@ -160,7 +160,7 @@ async fn start_pipeline(
     };
     state.store.append_event(pipeline_id, event).await;
 
-    Ok(Json(StartPipelineResponse { execution_ids }))
+    Ok(Json(StartPipelineResponse { pipeline_execution_context }))
 }
 
 async fn get_status(

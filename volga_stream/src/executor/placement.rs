@@ -72,20 +72,20 @@ pub trait TaskPlacementStrategy: Send + Sync {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TaskPlacementStrategyName {
-    SingleNode,
-    OperatorPerNode,
+    SingleWorker,
+    OperatorPerWorker,
 }
 
 impl Default for TaskPlacementStrategyName {
     fn default() -> Self {
-        Self::SingleNode
+        Self::SingleWorker
     }
 }
 
 /// Strategy that places all vertices on a single worker.
-pub struct SingleNodeStrategy;
+pub struct SingleWorkerStrategy;
 
-impl TaskPlacementStrategy for SingleNodeStrategy {
+impl TaskPlacementStrategy for SingleWorkerStrategy {
     fn place_tasks(&self, execution_graph: &ExecutionGraph) -> Vec<WorkerTaskPlacement> {
         let task_ids = execution_graph.get_vertices().keys().cloned().collect();
         vec![WorkerTaskPlacement::new(task_ids)]
@@ -93,9 +93,9 @@ impl TaskPlacementStrategy for SingleNodeStrategy {
 }
 
 /// Strategy that places all vertices with the same operator_id on a single worker.
-pub struct OperatorPerNodeStrategy;
+pub struct OperatorPerWorkerStrategy;
 
-impl TaskPlacementStrategy for OperatorPerNodeStrategy {
+impl TaskPlacementStrategy for OperatorPerWorkerStrategy {
     fn place_tasks(&self, execution_graph: &ExecutionGraph) -> Vec<WorkerTaskPlacement> {
         let mut operator_to_vertices: HashMap<String, Vec<VertexId>> = HashMap::new();
         for vertex_id in execution_graph.get_vertices().keys() {
@@ -118,8 +118,8 @@ impl TaskPlacementStrategy for OperatorPerNodeStrategy {
 
 pub fn strategy_from_name(name: &TaskPlacementStrategyName) -> Box<dyn TaskPlacementStrategy> {
     match name {
-        TaskPlacementStrategyName::SingleNode => Box::new(SingleNodeStrategy),
-        TaskPlacementStrategyName::OperatorPerNode => Box::new(OperatorPerNodeStrategy),
+        TaskPlacementStrategyName::SingleWorker => Box::new(SingleWorkerStrategy),
+        TaskPlacementStrategyName::OperatorPerWorker => Box::new(OperatorPerWorkerStrategy),
     }
 }
 

@@ -13,7 +13,7 @@ use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
-use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::control_plane::types::{AttemptId, PipelineExecutionContext};
 use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
@@ -128,7 +128,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut worker = Worker::new(
         WorkerConfig::new(
             "worker1".to_string(),
-            ExecutionIds::fresh(AttemptId(1)),
+            PipelineExecutionContext::fresh(AttemptId(1)),
             exec_graph1,
             vertex_ids_1,
             2,
@@ -227,7 +227,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut worker2 = Worker::new(
         WorkerConfig::new(
             "worker2".to_string(),
-            ExecutionIds::fresh(AttemptId(2)),
+            PipelineExecutionContext::fresh(AttemptId(2)),
             exec_graph2,
             vertex_ids_2,
             2,
