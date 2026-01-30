@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::sync::Mutex;
 
-use crate::api::{compile_logical_graph, ExecutionProfile, PipelineSpec};
+use crate::api::{ExecutionProfile, PipelineSpec};
 use crate::control_plane::types::{AttemptId, PipelineExecutionContext};
 use crate::executor::local_runtime_adapter::LocalRuntimeAdapter;
 use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
@@ -54,40 +54,27 @@ impl PipelineContext {
         self,
         state_updates_sender: Option<mpsc::Sender<PipelineSnapshot>>,
     ) -> Result<PipelineSnapshot> {
-        let logical_graph = compile_logical_graph(&self.spec);
-        let mut execution_graph = logical_graph.to_execution_graph();
+        let mut execution_plan =
+            crate::runtime::execution_plan::ExecutionPlan::from_spec(&self.spec, Vec::new());
+        let mut execution_graph = execution_plan.execution_graph.clone();
         let pipeline_execution_context = PipelineExecutionContext::fresh(AttemptId(1));
 
         let mut spec = self.spec.clone();
-        spec.worker_runtime.transport_overrides_queue_records =
-            spec.transport_overrides_queue_records();
-        spec.worker_runtime.operator_type_storage_overrides =
-            spec.operator_type_storage_overrides();
+        spec.worker_runtime = execution_plan.worker_runtime.clone();
 
         match self.spec.execution_profile.clone() {
             ExecutionProfile::InProcess => {
-                execution_graph.update_channels_with_node_mapping_and_transport(
-                    None,
-                    &spec.worker_runtime.transport,
-                    &spec.worker_runtime.transport_overrides_queue_records,
-                );
                 let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
                 let worker_id = "single_worker".to_string();
 
-                let mut worker_config = WorkerConfig::new(
+                let worker_config = WorkerConfig::new(
                     worker_id.clone(),
                     pipeline_execution_context,
                     execution_graph,
                     vertex_ids,
-                    spec.worker_runtime.num_threads_per_task,
                     TransportBackendType::InMemory,
+                    spec.worker_runtime,
                 );
-                worker_config.storage_budgets = spec.worker_runtime.storage.budgets.clone();
-                worker_config.inmem_store_lock_pool_size = spec.worker_runtime.storage.inmem_store_lock_pool_size;
-                worker_config.inmem_store_bucket_granularity = spec.worker_runtime.storage.inmem_store_bucket_granularity;
-                worker_config.inmem_store_max_batch_size = spec.worker_runtime.storage.inmem_store_max_batch_size;
-                worker_config.operator_type_storage_overrides =
-                    spec.worker_runtime.operator_type_storage_overrides.clone();
                 let mut worker = Worker::new(worker_config);
 
                 if let Some(pipeline_state_sender) = state_updates_sender {

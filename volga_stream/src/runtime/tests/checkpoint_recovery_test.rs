@@ -12,7 +12,7 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
-use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
+use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder, WorkerRuntimeSpec};
 use crate::control_plane::types::{AttemptId, PipelineExecutionContext};
 use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
@@ -131,8 +131,11 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             PipelineExecutionContext::fresh(AttemptId(1)),
             exec_graph1,
             vertex_ids_1,
-            2,
             TransportBackendType::InMemory,
+            WorkerRuntimeSpec {
+                num_threads_per_task: 2,
+                ..WorkerRuntimeSpec::default()
+            },
         )
         .with_master_addr(master_addr.clone()),
     );
@@ -230,8 +233,11 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             PipelineExecutionContext::fresh(AttemptId(2)),
             exec_graph2,
             vertex_ids_2,
-            2,
             TransportBackendType::InMemory,
+            WorkerRuntimeSpec {
+                num_threads_per_task: 2,
+                ..WorkerRuntimeSpec::default()
+            },
         )
         .with_master_addr(master_addr.clone())
         .with_restore_checkpoint_id(1),

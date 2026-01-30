@@ -24,6 +24,14 @@ name = "volga_stream"
 crate-type = ["rlib"]
 path = "src/lib.rs"
 
+[[bin]]
+name = "volga_master"
+path = "src/entrypoints/volga_master.rs"
+
+[[bin]]
+name = "volga_worker"
+path = "src/entrypoints/volga_worker.rs"
+
 [build-dependencies]
 tonic-build = "0.12"
 

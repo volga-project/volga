@@ -79,7 +79,6 @@ pub struct MasterServiceImpl {
     registry: Arc<Mutex<MasterCheckpointRegistry>>,
     latest_snapshot: Arc<Mutex<Option<MasterLatestSnapshot>>>,
     bootstrap_payload: Arc<Mutex<Option<MasterBootstrapPayload>>>,
-    worker_task_ids: Arc<Mutex<Option<HashMap<String, Vec<String>>>>>,
 }
 
 impl MasterServiceImpl {
@@ -88,7 +87,6 @@ impl MasterServiceImpl {
             registry: Arc::new(Mutex::new(MasterCheckpointRegistry::default())),
             latest_snapshot: Arc::new(Mutex::new(None)),
             bootstrap_payload: Arc::new(Mutex::new(None)),
-            worker_task_ids: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -99,11 +97,6 @@ impl MasterServiceImpl {
     pub async fn set_bootstrap_payload(&self, payload: MasterBootstrapPayload) {
         let mut guard = self.bootstrap_payload.lock().await;
         *guard = Some(payload);
-    }
-
-    pub async fn set_worker_task_ids(&self, mapping: HashMap<String, Vec<String>>) {
-        let mut guard = self.worker_task_ids.lock().await;
-        *guard = Some(mapping);
     }
 
 }
@@ -220,19 +213,15 @@ impl MasterService for MasterServiceImpl {
         let Some(payload) = guard.as_ref() else {
             return Err(Status::failed_precondition("bootstrap payload not set"));
         };
-        let task_ids_guard = self.worker_task_ids.lock().await;
-        let Some(worker_task_ids) = task_ids_guard.as_ref() else {
-            return Err(Status::failed_precondition("worker task ids not set"));
-        };
-        let assigned_task_ids = worker_task_ids
+        let assigned_task_ids = payload
+            .plan
+            .worker_task_ids
             .get(&worker_id)
             .cloned()
             .unwrap_or_default();
         let worker_payload = WorkerBootstrapPayload {
             pipeline_execution_context: payload.pipeline_execution_context.clone(),
-            pipeline_spec: payload.pipeline_spec.clone(),
-            worker_endpoints: payload.worker_endpoints.clone(),
-            worker_task_ids: worker_task_ids.clone(),
+            plan: payload.plan.clone(),
             worker_id,
             assigned_task_ids,
         };
@@ -265,10 +254,6 @@ impl MasterServer {
 
     pub async fn set_bootstrap_payload(&mut self, payload: MasterBootstrapPayload) {
         self.service.set_bootstrap_payload(payload).await;
-    }
-
-    pub async fn set_worker_task_ids(&mut self, mapping: HashMap<String, Vec<String>>) {
-        self.service.set_worker_task_ids(mapping).await;
     }
 
 

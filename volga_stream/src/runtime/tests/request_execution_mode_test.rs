@@ -1,5 +1,5 @@
 use crate::{
-    api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder},
+    api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder, WorkerRuntimeSpec},
     control_plane::types::{AttemptId, PipelineExecutionContext},
     runtime::{
         functions::{
@@ -259,8 +259,11 @@ async fn test_request_execution_mode() {
         PipelineExecutionContext::fresh(AttemptId(1)),
         exec_graph,
         vertex_ids,
-        2,
         TransportBackendType::InMemory,
+        WorkerRuntimeSpec {
+            num_threads_per_task: 2,
+            ..WorkerRuntimeSpec::default()
+        },
     ));
     worker.start().await;
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;

@@ -24,11 +24,10 @@ use futures::future::join_all;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
-use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
+use crate::storage::WorkerStorageContext;
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
-use crate::runtime::operators::window::TimeGranularity;
 use crate::control_plane::types::PipelineExecutionContext;
-use crate::api::StorageSpec;
+use crate::api::WorkerRuntimeSpec;
 use crate::runtime::operators::operator::operator_storage_key_and_default_spec;
 
 use tokio::sync::mpsc;
@@ -39,15 +38,10 @@ pub struct WorkerConfig {
     pub pipeline_execution_context: PipelineExecutionContext,
     pub graph: ExecutionGraph,
     pub vertex_ids: Vec<VertexId>,
-    pub num_threads_per_task: usize,
     pub transport_backend_type: TransportBackendType,
+    pub worker_runtime: WorkerRuntimeSpec,
     pub master_addr: Option<String>,
     pub restore_checkpoint_id: Option<u64>,
-    pub storage_budgets: StorageBudgetConfig,
-    pub inmem_store_lock_pool_size: usize,
-    pub inmem_store_bucket_granularity: TimeGranularity,
-    pub inmem_store_max_batch_size: usize,
-    pub operator_type_storage_overrides: HashMap<String, StorageSpec>,
 }
 
 impl WorkerConfig {
@@ -56,23 +50,18 @@ impl WorkerConfig {
         pipeline_execution_context: PipelineExecutionContext,
         graph: ExecutionGraph,
         vertex_ids: Vec<VertexId>,
-        num_threads_per_task: usize,
         transport_backend_type: TransportBackendType,
+        worker_runtime: WorkerRuntimeSpec,
     ) -> Self {
         Self {
             worker_id,
             pipeline_execution_context,
             graph,
             vertex_ids,
-            num_threads_per_task,
             transport_backend_type,
+            worker_runtime,
             master_addr: None,
             restore_checkpoint_id: None,
-            storage_budgets: StorageBudgetConfig::default(),
-            inmem_store_lock_pool_size: 4096,
-            inmem_store_bucket_granularity: TimeGranularity::Seconds(1),
-            inmem_store_max_batch_size: 1024,
-            operator_type_storage_overrides: HashMap::new(),
         }
     }
 
@@ -95,13 +84,9 @@ pub struct Worker {
     graph: ExecutionGraph,
     vertex_ids: Vec<VertexId>,
     transport_backend_type: TransportBackendType,
+    worker_runtime: WorkerRuntimeSpec,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
-    storage_budgets: StorageBudgetConfig,
-    inmem_store_lock_pool_size: usize,
-    inmem_store_bucket_granularity: TimeGranularity,
-    inmem_store_max_batch_size: usize,
-    operator_type_storage_overrides: HashMap<String, StorageSpec>,
     task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<VertexId, Runtime>,
@@ -123,7 +108,7 @@ impl Worker {
         let mut task_runtimes = HashMap::new();
         for vertex_id in &config.vertex_ids {
             let task_runtime = Builder::new_multi_thread()
-                .worker_threads(config.num_threads_per_task)
+                .worker_threads(config.worker_runtime.num_threads_per_task)
                 .enable_all()
                 .thread_name(format!("task-runtime-{}", vertex_id))
                 .build().unwrap();
@@ -150,13 +135,9 @@ impl Worker {
             vertex_ids: config.vertex_ids.clone(),
             task_actors: HashMap::new(),
             transport_backend_type: config.transport_backend_type,
+            worker_runtime: config.worker_runtime,
             master_addr: config.master_addr.clone(),
             restore_checkpoint_id: config.restore_checkpoint_id,
-            storage_budgets: config.storage_budgets,
-            inmem_store_lock_pool_size: config.inmem_store_lock_pool_size,
-            inmem_store_bucket_granularity: config.inmem_store_bucket_granularity,
-            inmem_store_max_batch_size: config.inmem_store_max_batch_size,
-            operator_type_storage_overrides: config.operator_type_storage_overrides,
             backend_actor: None,
             task_runtimes,
             transport_backend_runtime: Some(
@@ -314,6 +295,7 @@ impl Worker {
 
             if let Some((storage_type, default_spec)) = operator_storage_key_and_default_spec(&vertex.operator_config) {
                 let effective = self
+                    .worker_runtime
                     .operator_type_storage_overrides
                     .get(storage_type)
                     .cloned()

@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use datafusion::common::ScalarValue;
 
-use crate::api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
+use crate::api::{ExecutionMode, PipelineSpecBuilder, WorkerRuntimeSpec, compile_logical_graph};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
 use crate::runtime::operators::operator::OperatorConfig;
@@ -147,8 +147,11 @@ pub(crate) async fn run_watermark_window_pipeline(
         PipelineExecutionContext::fresh(AttemptId(1)),
         exec_graph,
         vertex_ids,
-        2,
         TransportBackendType::InMemory,
+        WorkerRuntimeSpec {
+            num_threads_per_task: 2,
+            ..WorkerRuntimeSpec::default()
+        },
     ));
 
     worker.start().await;
