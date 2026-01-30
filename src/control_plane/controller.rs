@@ -117,7 +117,9 @@ impl ControlPlaneController {
                         .get(&adapter_spec)
                         .unwrap_or_else(|| panic!("missing runtime adapter for {:?}", adapter_spec));
 
-                    let spec = spec.clone();
+                    let mut spec = spec.clone();
+                    spec.worker_runtime =
+                        crate::runtime::execution_plan::ExecutionPlan::resolve_worker_runtime(&spec);
                     let handle = adapter
                         .start_attempt(StartAttemptRequest {
                             pipeline_execution_context: run.pipeline_execution_context.clone(),

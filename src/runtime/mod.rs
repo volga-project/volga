@@ -1,5 +1,6 @@
 pub mod runtime_context;
 pub mod execution_graph;
+pub mod execution_plan;
 pub mod operators;
 pub mod stream_task;
 pub mod stream_task_actor;
@@ -14,6 +15,7 @@ pub mod observability;
 pub mod state;
 pub mod utils;
 pub mod watermark;
+pub mod entrypoints;
 
 use std::sync::Arc;
 

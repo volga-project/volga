@@ -20,7 +20,8 @@ use crate::executor::placement::{
 use crate::api::spec::resources::ResourceProfile;
 use crate::executor::resource_planner::ResourcePlanner;
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
-use crate::executor::bootstrap::MasterBootstrapPayload;
+use crate::executor::bootstrap::{ExecutionPlanPayload, MasterBootstrapPayload};
+use crate::runtime::execution_plan::ExecutionPlan;
 
 pub struct K8sRuntimeConfig {
     pub namespace: String,
@@ -251,11 +252,10 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
         let master_resources_json = Self::resource_requirements(&master_resource);
         let worker_resources_json = Self::resource_requirements(&worker_resource);
 
-        let pipeline_spec = req.pipeline_spec.clone();
+        let execution_plan = ExecutionPlan::from_spec(&req.pipeline_spec, worker_endpoints.clone());
         let bootstrap_payload = MasterBootstrapPayload {
             pipeline_execution_context: req.pipeline_execution_context.clone(),
-            pipeline_spec,
-            worker_endpoints: worker_endpoints.clone(),
+            plan: ExecutionPlanPayload::from_plan(&execution_plan),
         };
 
         let bootstrap_b64 = Self::encode_b64(&bootstrap_payload)?;
