@@ -120,7 +120,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                 TransportBackendType::InMemory
             };
 
-            let mut worker_config = WorkerConfig::new(
+            let worker_config = WorkerConfig::new(
                 worker_id.clone(),
                 req.pipeline_execution_context.clone(),
                 req.execution_graph.clone(),
@@ -128,23 +128,10 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                     .into_iter()
                     .map(|v| std::sync::Arc::<str>::from(v))
                     .collect(),
-                req.pipeline_spec.worker_runtime.num_threads_per_task,
                 transport_backend_type,
+                req.pipeline_spec.worker_runtime.clone(),
             )
             .with_master_addr(master_addr.clone());
-            worker_config.storage_budgets = req.pipeline_spec.worker_runtime.storage.budgets.clone();
-            worker_config.inmem_store_lock_pool_size =
-                req.pipeline_spec.worker_runtime.storage.inmem_store_lock_pool_size;
-            worker_config.inmem_store_bucket_granularity =
-                req.pipeline_spec.worker_runtime.storage.inmem_store_bucket_granularity;
-            worker_config.inmem_store_max_batch_size =
-                req.pipeline_spec.worker_runtime.storage.inmem_store_max_batch_size;
-            worker_config.operator_type_storage_overrides =
-                req
-                    .pipeline_spec
-                    .worker_runtime
-                    .operator_type_storage_overrides
-                    .clone();
 
             let mut worker_server = WorkerServer::new(worker_config);
             worker_server.start(&addr).await?;
