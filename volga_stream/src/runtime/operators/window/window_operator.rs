@@ -242,9 +242,9 @@ impl OperatorTrait for WindowOperator {
 
         if self.state.is_none() {
             let storage = context
-                .worker_storage_context()
-                .expect("WorkerStorageContext must be provided by RuntimeContext");
-            let in_mem_low_watermark_per_mille = storage.budgets.in_mem_low_watermark_per_mille;
+                .worker_storage_runtime()
+                .expect("WorkerStorageRuntime must be provided by RuntimeContext");
+            let in_mem_low_watermark_per_mille = storage.config.pressure.hot_low_watermark_per_mille;
 
             let task_id: crate::runtime::TaskId = context.vertex_id_arc();
             self.state = Some(Arc::new(WindowOperatorState::new(
@@ -394,50 +394,36 @@ impl OperatorTrait for WindowOperator {
         // and update the bucket index to reference `BatchRef::Stored`.
         self.state_ref().flush_in_mem_runs_to_store().await?;
         self.state_ref().await_store_persisted().await?;
+        self.state_ref().flush_window_states_to_backend_state().await?;
 
-        let state_cp = self.state_ref().to_checkpoint();
-        let batch_store_cp = self
+        let token = self
             .state_ref()
-            .get_batch_store()
-            .to_checkpoint(self.state_ref().task_id());
+            .storage()
+            .checkpoint(self.state_ref().task_id())
+            .await?;
 
-        Ok(vec![
-            ("window_operator_state".to_string(), bincode::serialize(&state_cp)?),
-            ("batch_store".to_string(), bincode::serialize(&batch_store_cp)?),
-        ])
+        Ok(vec![(
+            "storage_checkpoint".to_string(),
+            bincode::serialize(&token)?,
+        )])
     }
 
     async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
-        let state_bytes = blobs
+        let storage_bytes = blobs
             .iter()
-            .find(|(name, _)| name == "window_operator_state")
-            .map(|(_, b)| b.as_slice());
-        let batch_store_bytes = blobs
-            .iter()
-            .find(|(name, _)| name == "batch_store")
+            .find(|(name, _)| name == "storage_checkpoint")
             .map(|(_, b)| b.as_slice());
 
-        if state_bytes.is_none() && batch_store_bytes.is_none() {
+        let Some(bytes) = storage_bytes else {
             return Ok(());
-        }
+        };
 
-        if let Some(bytes) = batch_store_bytes {
-            let cp: crate::storage::batch_store::BatchStoreCheckpoint = bincode::deserialize(bytes)?;
-            self.state_ref()
-                .get_batch_store()
-                .apply_checkpoint(self.state_ref().task_id(), cp);
-        } else {
-            panic!("Batch store bytes are missing");
-        }
-
-        if let Some(bytes) = state_bytes {
-            let cp: crate::runtime::operators::window::window_operator_state::WindowOperatorStateCheckpoint =
-                bincode::deserialize(bytes)?;
-            // Important: do not replace the state Arc (it is registered in OperatorStates in open()).
-            self.state_ref().apply_checkpoint(cp);
-        } else {
-            panic!("Window operator state bytes are missing");
-        }
+        let token: crate::storage::StorageCheckpointToken = bincode::deserialize(bytes)?;
+        self.state_ref()
+            .storage()
+            .apply_checkpoint(self.state_ref().task_id(), token)
+            .await?;
+        self.state_ref().restore_window_states_from_backend_state().await?;
 
         Ok(())
     }

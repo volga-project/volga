@@ -2,7 +2,7 @@ use crate::{
     api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     common::{message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
     runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    InMemoryStorageClient, InMemoryStorageServer
 };
 use anyhow::Result;
 

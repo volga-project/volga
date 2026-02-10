@@ -2,11 +2,12 @@ use std::sync::Arc;
 
 use arrow::array::{ArrayRef, RecordBatch, TimestampMillisecondArray, UInt64Array};
 
-use crate::runtime::operators::window::aggregates::BucketRange;
-use crate::runtime::operators::window::state::tiles::TimeGranularity;
-use crate::runtime::operators::window::Cursor;
-use crate::storage::batch_store::Timestamp;
-use crate::storage::WorkLease;
+use crate::storage::index::BucketRange;
+use crate::storage::index::TimeGranularity;
+use crate::storage::index::Cursor;
+use crate::storage::batch::Timestamp;
+use crate::storage::delete::batch_pins::BatchLease;
+use crate::storage::memory_pool::ScratchPermit;
 
 #[derive(Debug, Clone, Copy)]
 pub enum DataBounds {
@@ -107,9 +108,12 @@ pub struct SortedRangeView {
     start: Cursor,
     end: Cursor,
     segments: Vec<SortedSegment>,
-    // Keeps work-memory permit alive for the lifetime of this view.
+    // Keeps scratch permit alive for the lifetime of this view.
     #[allow(dead_code)]
-    work_lease: Option<WorkLease>,
+    work_lease: Option<ScratchPermit>,
+    // Keeps pinned stored ids alive for the lifetime of this view.
+    #[allow(dead_code)]
+    pin_lease: Option<Arc<BatchLease>>,
 }
 
 impl SortedRangeView {
@@ -119,7 +123,8 @@ impl SortedRangeView {
         start: Cursor,
         end: Cursor,
         segments: Vec<SortedSegment>,
-        work_lease: Option<WorkLease>,
+        work_lease: Option<ScratchPermit>,
+        pin_lease: Option<Arc<BatchLease>>,
     ) -> Self {
         Self {
             request,
@@ -128,6 +133,7 @@ impl SortedRangeView {
             end,
             segments,
             work_lease,
+            pin_lease,
         }
     }
 

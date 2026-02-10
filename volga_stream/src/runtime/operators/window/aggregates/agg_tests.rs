@@ -11,7 +11,7 @@ use crate::runtime::operators::window::aggregates::plain::CursorBounds;
 use crate::runtime::operators::window::aggregates::{Aggregation, VirtualPoint};
 use crate::storage::index::{BucketIndex, DataRequest, SortedRangeView};
 use crate::runtime::operators::window::{Cursor, TimeGranularity};
-use crate::storage::batch_store::BatchId;
+use crate::storage::batch::BatchId;
 use arrow::array::BooleanArray;
 
 #[derive(Debug, Clone, Copy)]

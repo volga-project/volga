@@ -11,7 +11,7 @@ use async_trait::async_trait;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
-use crate::storage::batch_store::Timestamp;
+use crate::storage::batch::Timestamp;
 use crate::storage::index::{DataRequest, SortedRangeView};
 use crate::runtime::operators::window::Cursor;
 use crate::runtime::operators::window::cate::types::{AggFlavor, CATE_KINDS};
@@ -29,18 +29,7 @@ pub mod plain;
 pub mod retractable;
 pub mod point_request_merge;
 
-/// A logical bucket interval in bucket timestamp space (inclusive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BucketRange {
-    pub start: Timestamp,
-    pub end: Timestamp,
-}
-
-impl BucketRange {
-    pub fn new(start: Timestamp, end: Timestamp) -> Self {
-        Self { start, end }
-    }
-}
+pub use crate::storage::index::BucketRange;
 
 /// A single "virtual" point for request-mode window evaluation.
 #[derive(Debug, Clone)]
@@ -310,7 +299,7 @@ pub(crate) mod test_utils {
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::storage::index::{DataRequest, SortedRangeView, SortedSegment};
     use crate::runtime::operators::window::{Cursor, TimeGranularity, SEQ_NO_COLUMN_NAME};
-    use crate::storage::batch_store::Timestamp;
+    use crate::storage::batch::Timestamp;
 
     pub fn test_schema_with_seq() -> SchemaRef {
         Arc::new(Schema::new(vec![
@@ -374,7 +363,7 @@ pub(crate) mod test_utils {
             out.push(SortedSegment::new(bucket_ts, b, 0, 3, Arc::new(args)));
         }
         out.sort_by_key(|b| b.bucket_ts());
-        SortedRangeView::new(request, granularity, start, end, out, None)
+        SortedRangeView::new(request, granularity, start, end, out, None, None)
     }
 }
 

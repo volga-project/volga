@@ -28,15 +28,15 @@ use crate::common::{MAX_WATERMARK_VALUE, WatermarkMessage};
 use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
+use crate::runtime::operators::window::TileConfig;
 use crate::runtime::operators::window::window_operator::{
     ExecutionMode, RequestAdvancePolicy, WindowOperator, WindowOperatorConfig,
 };
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorStates;
-use crate::storage::batch_store::{BatchStore, InMemBatchStore};
-use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
+use crate::storage::backend::inmem::InMemBackend;
+use crate::storage::{StorageBackendConfig, TimeGranularity, WorkerStorageRuntime};
 use crate::common::Key;
-use crate::runtime::operators::window::TimeGranularity;
 
 fn test_input_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -90,10 +90,11 @@ async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
 }
 
 fn runtime_context() -> RuntimeContext {
-    let store = Arc::new(InMemBatchStore::new(64, TimeGranularity::Seconds(1), 128))
-        as Arc<dyn BatchStore>;
-    let shared =
-        WorkerStorageContext::new(store, StorageBudgetConfig::default()).expect("storage ctx");
+    let cfg = StorageBackendConfig::default();
+    let shared = WorkerStorageRuntime::new_with_backend(cfg, move || {
+        Arc::new(InMemBackend::new(TimeGranularity::Seconds(1), 128))
+    })
+    .expect("storage runtime");
 
     let mut ctx = RuntimeContext::new(
         "test_vertex".to_string().into(),
@@ -103,7 +104,7 @@ fn runtime_context() -> RuntimeContext {
         Some(Arc::new(OperatorStates::new())),
         None,
     );
-    ctx.set_worker_storage_context(shared);
+    ctx.set_worker_storage_runtime(shared);
     ctx
 }
 
@@ -348,8 +349,7 @@ async fn test_tiling_min_max_and_avg_smoke_and_strict_late_drop() {
     let mut cfg = WindowOperatorConfig::new(window_exec);
     cfg.spec.parallelize = true;
 
-    use crate::runtime::operators::window::state::tiles::{TileConfig, TimeGranularity as Tg};
-    let tile_config = TileConfig::new(vec![Tg::Minutes(1), Tg::Minutes(5)]).expect("tile cfg");
+    let tile_config = TileConfig::new(vec![crate::storage::TimeGranularity::Minutes(1), crate::storage::TimeGranularity::Minutes(5)]).expect("tile cfg");
     cfg.tiling_configs = vec![Some(tile_config.clone()), Some(tile_config.clone()), Some(tile_config)];
 
     let mut h = Harness::new(cfg).await;

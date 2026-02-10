@@ -9,7 +9,7 @@ use crate::{
         },
         operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
     },
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    InMemoryStorageClient, InMemoryStorageServer
 };
 use anyhow::Result;
 use std::{collections::HashMap, sync::Arc};

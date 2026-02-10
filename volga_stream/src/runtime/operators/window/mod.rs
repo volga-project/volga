@@ -17,7 +17,8 @@ mod perf_tests;
 pub use window_operator::WindowOperator;
 pub use window_request_operator::WindowRequestOperator;
 pub use shared::WindowConfig;
-pub use state::tiles::{Tiles, TileConfig, TimeGranularity};
+pub use state::tiles::{Tiles, TileConfig};
+pub use crate::storage::TimeGranularity;
 pub use state::window_operator_state;
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";

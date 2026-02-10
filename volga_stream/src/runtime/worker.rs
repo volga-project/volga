@@ -24,9 +24,18 @@ use futures::future::join_all;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
-use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
-use crate::storage::batch_store::{BatchStore, InMemBatchStore};
-use crate::runtime::operators::window::TimeGranularity;
+use crate::storage::{
+    StorageBackendConfig,
+    StorageBackendSelection,
+    WorkerStorageRuntime,
+    parse_storage_backend_from_job_config,
+};
+use crate::storage::backend::inmem::InMemBackend;
+use crate::storage::backend::remote_backend::RemoteBackend;
+use crate::storage::backend::remote_backend_inner::RemoteBackendInnerConfig;
+use crate::storage::backend::DynStorageBackend;
+use crate::storage::TimeGranularity;
+use object_store::local::LocalFileSystem;
 use crate::control_plane::types::ExecutionIds;
 use crate::api::StorageSpec;
 use crate::runtime::operators::operator::operator_storage_key_and_default_spec;
@@ -43,7 +52,7 @@ pub struct WorkerConfig {
     pub transport_backend_type: TransportBackendType,
     pub master_addr: Option<String>,
     pub restore_checkpoint_id: Option<u64>,
-    pub storage_budgets: StorageBudgetConfig,
+    pub storage_budgets: StorageBackendConfig,
     pub inmem_store_lock_pool_size: usize,
     pub inmem_store_bucket_granularity: TimeGranularity,
     pub inmem_store_max_batch_size: usize,
@@ -68,7 +77,7 @@ impl WorkerConfig {
             transport_backend_type,
             master_addr: None,
             restore_checkpoint_id: None,
-            storage_budgets: StorageBudgetConfig::default(),
+            storage_budgets: StorageBackendConfig::default(),
             inmem_store_lock_pool_size: 4096,
             inmem_store_bucket_granularity: TimeGranularity::Seconds(1),
             inmem_store_max_batch_size: 1024,
@@ -97,8 +106,7 @@ pub struct Worker {
     transport_backend_type: TransportBackendType,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
-    storage_budgets: StorageBudgetConfig,
-    inmem_store_lock_pool_size: usize,
+    storage_budgets: StorageBackendConfig,
     inmem_store_bucket_granularity: TimeGranularity,
     inmem_store_max_batch_size: usize,
     operator_type_storage_overrides: HashMap<String, StorageSpec>,
@@ -153,7 +161,6 @@ impl Worker {
             master_addr: config.master_addr.clone(),
             restore_checkpoint_id: config.restore_checkpoint_id,
             storage_budgets: config.storage_budgets,
-            inmem_store_lock_pool_size: config.inmem_store_lock_pool_size,
             inmem_store_bucket_granularity: config.inmem_store_bucket_granularity,
             inmem_store_max_batch_size: config.inmem_store_max_batch_size,
             operator_type_storage_overrides: config.operator_type_storage_overrides,
@@ -288,9 +295,54 @@ impl Worker {
     pub async fn spawn_actors(&mut self) {
         println!("[WORKER] Spawning actors");
 
-        // Per-operator-type storage contexts (e.g. separate store+budgets for window operators).
-        // Backend selection (SlateDB) will be added later; for now use InMemBatchStore.
-        let mut storage_by_type: HashMap<String, Arc<WorkerStorageContext>> = HashMap::new();
+        // Per-operator-type storage runtimes (budgets/policy overrides only).
+        let mut storage_by_type: HashMap<String, Arc<WorkerStorageRuntime>> = HashMap::new();
+
+        let mut base_job_config = HashMap::<String, Value>::new();
+        if let Some(master_addr) = &self.master_addr {
+            base_job_config.insert("master_addr".to_string(), Value::String(master_addr.clone()));
+        }
+        if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
+            base_job_config.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
+        }
+        base_job_config.insert(
+            "pipeline_spec_id".to_string(),
+            Value::String(self.execution_ids.pipeline_spec_id.0.to_string()),
+        );
+        base_job_config.insert(
+            "pipeline_id".to_string(),
+            Value::String(self.execution_ids.pipeline_id.0.to_string()),
+        );
+        base_job_config.insert("attempt_id".to_string(), Value::from(self.execution_ids.attempt_id.0));
+        base_job_config.insert("worker_id".to_string(), Value::String(self.worker_id.clone()));
+
+        let backend_selection = parse_storage_backend_from_job_config(&base_job_config)
+            .unwrap_or(StorageBackendSelection::InMem);
+        let shared_backend: DynStorageBackend = match backend_selection {
+            StorageBackendSelection::InMem => Arc::new(InMemBackend::new(
+                self.inmem_store_bucket_granularity,
+                self.inmem_store_max_batch_size,
+            )),
+            StorageBackendSelection::Remote(cfg) => {
+                let object_store = Arc::new(
+                    LocalFileSystem::new_with_prefix(&cfg.object_store_root)
+                        .expect("object_store_root must exist"),
+                );
+                let inner_cfg = RemoteBackendInnerConfig {
+                    db_path: cfg.db_path,
+                    checkpoint_lifetime_secs: cfg.checkpoint_lifetime_secs,
+                    bucket_granularity: self.inmem_store_bucket_granularity,
+                    max_batch_size: self.inmem_store_max_batch_size,
+                    foyer_memory_bytes: cfg.foyer_memory_bytes,
+                    foyer_disk_bytes: cfg.foyer_disk_bytes,
+                    foyer_disk_path: cfg.foyer_disk_path,
+                };
+                let backend = RemoteBackend::open(inner_cfg, object_store)
+                    .await
+                    .expect("remote backend");
+                Arc::new(backend)
+            }
+        };
 
         let mut backend: Box<dyn TransportBackend> = match self.transport_backend_type {
             TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new()),
@@ -317,14 +369,14 @@ impl Worker {
                     .operator_type_storage_overrides
                     .get(storage_type)
                     .cloned()
-                    .unwrap_or(default_spec);
+                    .unwrap_or_else(|| {
+                        let mut spec = default_spec;
+                        spec.budgets = self.storage_budgets;
+                        spec
+                    });
                 storage_by_type.entry(storage_type.to_string()).or_insert_with(|| {
-                    let store = Arc::new(InMemBatchStore::new(
-                        effective.inmem_store_lock_pool_size,
-                        effective.inmem_store_bucket_granularity,
-                        effective.inmem_store_max_batch_size,
-                    )) as Arc<dyn BatchStore>;
-                    WorkerStorageContext::new(store, effective.budgets).expect("worker storage ctx")
+                    WorkerStorageRuntime::new_with_backend(effective.budgets, || shared_backend.clone())
+                        .expect("worker storage runtime")
                 });
             }
 
@@ -333,20 +385,7 @@ impl Worker {
                 vertex_id.clone(),
                 vertex.task_index,
                 vertex.parallelism,
-                {
-                    let mut cfg = HashMap::<String, Value>::new();
-                    if let Some(master_addr) = &self.master_addr {
-                        cfg.insert("master_addr".to_string(), Value::String(master_addr.clone()));
-                    }
-                    if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
-                        cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
-                    }
-                    cfg.insert("pipeline_spec_id".to_string(), Value::String(self.execution_ids.pipeline_spec_id.0.to_string()));
-                    cfg.insert("pipeline_id".to_string(), Value::String(self.execution_ids.pipeline_id.0.to_string()));
-                    cfg.insert("attempt_id".to_string(), Value::from(self.execution_ids.attempt_id.0));
-                    cfg.insert("worker_id".to_string(), Value::String(self.worker_id.clone()));
-                    Some(cfg)
-                },
+                Some(base_job_config.clone()),
                 Some(self.operator_states.clone()),
                 Some(self.graph.clone()),
             );
@@ -359,7 +398,7 @@ impl Worker {
                     .get(storage_type)
                     .cloned()
                     .expect("storage ctx must exist for operator type");
-                runtime_context.set_worker_storage_context(ctx);
+                runtime_context.set_worker_storage_runtime(ctx);
             }
 
             // Create the task and its actor in the task's runtime

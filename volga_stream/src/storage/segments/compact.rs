@@ -6,7 +6,7 @@ use arrow::compute::take;
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 
-use crate::runtime::operators::window::Cursor;
+use crate::storage::index::Cursor;
 
 /// Compact a set of batches into sorted, disjoint segments.
 ///
@@ -170,10 +170,7 @@ fn k_way_merge_to_batch(
         let next_row = item.row_idx + 1;
         if next_row < batches[item.batch_idx].num_rows() {
             heap.push(HeapItem {
-                cursor: Cursor::new(
-                    ts_cols[item.batch_idx].value(next_row),
-                    seq_cols[item.batch_idx].value(next_row),
-                ),
+                cursor: Cursor::new(ts_cols[item.batch_idx].value(next_row), seq_cols[item.batch_idx].value(next_row)),
                 batch_idx: item.batch_idx,
                 row_idx: next_row,
             });
@@ -233,9 +230,4 @@ mod tests {
         }
     }
 }
-
-
-
-
-
 
