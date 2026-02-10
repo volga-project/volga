@@ -20,7 +20,7 @@ use volga_stream::control_plane::types::{PipelineDesiredState, PipelineId, Pipel
 use volga_stream::runtime::functions::source::datagen_source::FieldGenerator;
 use volga_stream::runtime::observability::PipelineSnapshotEntry;
 use volga_stream::runtime::observability::snapshot_types::TaskOperatorMetrics;
-use volga_stream::storage::InMemoryStorageServer;
+use volga_stream::InMemoryStorageServer;
 
 #[derive(Debug, serde::Deserialize)]
 struct CreatePipelineSpecResponse {

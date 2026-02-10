@@ -12,7 +12,7 @@ use crate::{
             source::source_operator::{SourceConfig, WordCountSourceConfig},
         },
     },
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    InMemoryStorageClient, InMemoryStorageServer
 };
 use anyhow::Result;
 use core::sync::atomic::{AtomicBool, Ordering};

@@ -13,7 +13,7 @@ use crate::{
             window::{TileConfig, TimeGranularity, window_operator::ExecutionMode as WindowExecutionMode},
         },
     },
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    InMemoryStorageClient, InMemoryStorageServer
 };
 use anyhow::Result;
 use std::collections::HashMap;

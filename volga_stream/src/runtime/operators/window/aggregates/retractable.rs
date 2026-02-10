@@ -5,7 +5,7 @@ use datafusion::physical_plan::WindowExpr;
 use tokio_rayon::rayon::ThreadPool;
 
 use crate::storage::index::{BucketIndex, DataRequest, SortedRangeView};
-use crate::runtime::operators::window::state::tiles::TimeGranularity;
+use crate::storage::TimeGranularity;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::Cursor;
 

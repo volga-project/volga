@@ -9,7 +9,7 @@ use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
 use crate::runtime::operators::window::aggregates::AggregationExecResult;
 use crate::storage::index::{BucketIndex, get_window_length_ms, get_window_size_rows};
 use crate::runtime::operators::window::{RowPtr, Tiles, WindowAggregator, create_window_aggregator};
-use crate::storage::batch_store::Timestamp;
+use crate::storage::batch::Timestamp;
 
 use crate::runtime::operators::window::aggregates::VirtualPoint;
 use crate::storage::index::{DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
@@ -413,7 +413,7 @@ mod tests {
     use crate::storage::index::BucketIndex;
     use crate::runtime::operators::window::state::tiles::TileConfig;
     use crate::runtime::operators::window::TimeGranularity;
-    use crate::storage::batch_store::BatchId;
+    use crate::storage::batch::BatchId;
 
     fn assert_f64s(vals: &[ScalarValue], expected: &[f64]) {
         assert_eq!(vals.len(), expected.len());

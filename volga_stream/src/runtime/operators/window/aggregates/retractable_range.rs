@@ -7,7 +7,7 @@ use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::state::window_logic;
 use crate::storage::index::{get_window_length_ms, get_window_size_rows, BucketIndex, DataBounds, DataRequest, SortedRangeIndex, SortedRangeView};
-use crate::runtime::operators::window::state::tiles::TimeGranularity;
+use crate::storage::TimeGranularity;
 use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 use crate::runtime::operators::window::{Cursor, RowPtr};
 
@@ -437,7 +437,7 @@ mod tests {
     use crate::runtime::operators::window::aggregates::test_utils;
     use crate::storage::index::BucketIndex;
     use crate::runtime::operators::window::TimeGranularity;
-    use crate::storage::batch_store::BatchId;
+    use crate::storage::batch::BatchId;
 
     fn assert_f64s(vals: &[ScalarValue], expected: &[f64]) {
         assert_eq!(vals.len(), expected.len());

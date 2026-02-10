@@ -11,7 +11,7 @@ use crate::{
             source::source_operator::SourceConfig,
         },
     },
-    storage::InMemoryStorageServer,
+    InMemoryStorageServer,
 };
 use anyhow::Result;
 use arrow::datatypes::{Schema, Field, DataType, TimeUnit};
