@@ -13,7 +13,8 @@ use crate::storage::index::{
     BucketIndex, DataBounds, DataRequest, SortedRangeIndex, SortedRangeView, SortedSegment,
     get_window_length_ms, get_window_size_rows,
 };
-use crate::runtime::operators::window::{Cursor, Tiles, TimeGranularity};
+use crate::runtime::operators::window::{Cursor, Tiles};
+use crate::storage::TimeGranularity;
 
 use super::{CursorBounds};
 use super::plain_range_cache::{eval_stored_window_cached, WindowSlicesCache};
@@ -185,6 +186,7 @@ impl Aggregation for PlainRangeAggregation {
                 Cursor::new(i64::MAX, u64::MAX),
                 merged,
                 None,
+                None,
             )
         };
 
@@ -274,7 +276,7 @@ mod tests {
     use crate::runtime::operators::window::PlainAggregation;
     use crate::runtime::operators::window::state::tiles::TileConfig;
     use crate::runtime::operators::window::TimeGranularity;
-    use crate::storage::batch_store::BatchId;
+    use crate::storage::batch::BatchId;
 
     fn assert_f64s(vals: &[ScalarValue], expected: &[f64]) {
         assert_eq!(vals.len(), expected.len());

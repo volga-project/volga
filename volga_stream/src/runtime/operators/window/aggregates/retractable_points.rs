@@ -349,7 +349,7 @@ mod tests {
     use crate::runtime::operators::window::aggregates::test_utils;
     use crate::storage::index::BucketIndex;
     use crate::runtime::operators::window::TimeGranularity;
-    use crate::storage::batch_store::BatchId;
+    use crate::storage::batch::BatchId;
 
     fn assert_f64s(vals: &[ScalarValue], expected: &[f64]) {
         assert_eq!(vals.len(), expected.len());

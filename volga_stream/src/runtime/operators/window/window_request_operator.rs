@@ -22,7 +22,7 @@ use crate::runtime::operators::window::{AggregatorType, Cursor, TileConfig, Tile
 use crate::runtime::operators::window::shared::{WindowConfig, build_window_operator_parts, stack_concat_results};
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
-use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
+use crate::storage::read::plan::RangesLoadPlan;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
 use tokio_rayon::rayon::ThreadPool;
@@ -355,8 +355,10 @@ impl WindowRequestOperator {
             }
         }
 
-        let views_by_agg =
-            load_sorted_ranges_views(self.get_state(), key, &load_plans).await;
+        let views_by_agg = self
+            .get_state()
+            .load_sorted_ranges_views(key, &load_plans)
+            .await;
 
         let futs: Vec<_> = aggs
             .iter()
@@ -533,6 +535,8 @@ mod tests {
     use crate::runtime::runtime_context::RuntimeContext;
     use crate::runtime::state::OperatorStates;
     use crate::common::Key;
+    use crate::storage::backend::inmem::InMemBackend;
+    use crate::storage::{StorageBackendConfig, TimeGranularity, WorkerStorageRuntime};
     use futures::stream;
 
     fn create_test_schema() -> SchemaRef {
@@ -609,14 +613,11 @@ mod tests {
         let window_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_op");
         let request_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_request_op");
 
-        let budgets = crate::storage::StorageBudgetConfig::default();
-        let store = Arc::new(crate::storage::batch_store::InMemBatchStore::new(
-            64,
-            crate::runtime::operators::window::TimeGranularity::Seconds(1),
-            128,
-        )) as Arc<dyn crate::storage::batch_store::BatchStore>;
-        let shared =
-            crate::storage::WorkerStorageContext::new(store, budgets).expect("ctx");
+        let cfg = StorageBackendConfig::default();
+        let shared = WorkerStorageRuntime::new_with_backend(cfg, move || {
+            Arc::new(InMemBackend::new(TimeGranularity::Seconds(1), 128))
+        })
+        .expect("storage runtime");
 
         // Create and set up window operator
         let mut window_operator = WindowOperator::new(OperatorConfig::WindowConfig(window_config.clone()));
@@ -628,7 +629,7 @@ mod tests {
             Some(operator_states.clone()),
             None,
         );
-        window_context.set_worker_storage_context(shared.clone());
+        window_context.set_worker_storage_runtime(shared.clone());
         window_operator.open(&window_context).await.expect("Should be able to open window operator");
 
         // Create request operator
@@ -667,7 +668,7 @@ mod tests {
             Some(operator_states.clone()),
             Some(execution_graph),
         );
-        request_context.set_worker_storage_context(shared.clone());
+        request_context.set_worker_storage_runtime(shared.clone());
 
         // Open request operator - it will find the peer window operator vertex from the execution graph
         request_operator.open(&request_context).await.expect("Should open");

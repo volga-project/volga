@@ -8,7 +8,7 @@ use crate::storage::index::{RowPtr, SortedRangeIndex};
 use crate::runtime::operators::window::state::window_logic;
 use crate::runtime::operators::window::state::tiles::Tile;
 use crate::runtime::operators::window::Tiles;
-use crate::storage::batch_store::Timestamp;
+use crate::storage::batch::Timestamp;
 
 #[derive(Default)]
 pub(super) struct WindowSlicesCache {

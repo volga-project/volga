@@ -2,9 +2,8 @@ use std::cmp::Ordering;
 
 use arrow::array::{Array, ArrayRef};
 
-use crate::runtime::operators::window::aggregates::BucketRange;
-use crate::runtime::operators::window::{Cursor, RowPtr};
-use crate::storage::batch_store::Timestamp;
+use crate::storage::index::{BucketRange, Cursor, RowPtr};
+use crate::storage::batch::Timestamp;
 
 use super::sorted_range_view::{SortedRangeView, SortedSegment};
 
@@ -258,23 +257,6 @@ impl<'a> SortedRangeIndex<'a> {
         None
     }
 
-    /// Find the last position with row_pos <= `cursor` within this view.
-    pub fn seek_rowpos_le(&self, cursor: Cursor) -> Option<RowPtr> {
-        if self.is_empty() {
-            return None;
-        }
-        if cursor < self.start {
-            return None;
-        }
-        if cursor >= self.end {
-            return Some(self.last_pos());
-        }
-        match self.seek_rowpos_gt(cursor) {
-            Some(after) => self.prev_pos(after),
-            None => Some(self.last_pos()),
-        }
-    }
-
     pub fn seek_rowpos_ge(&self, cursor: Cursor) -> Option<RowPtr> {
         let cursor = cursor.max(self.start);
         for (seg_idx, seg) in self.segments.iter().enumerate() {
@@ -304,6 +286,20 @@ impl<'a> SortedRangeIndex<'a> {
             }
         }
         None
+    }
+
+    pub fn seek_rowpos_le(&self, cursor: Cursor) -> Option<RowPtr> {
+        if cursor < self.start {
+            return None;
+        }
+        if cursor >= self.end {
+            return Some(self.last_pos());
+        }
+        if let Some(eq) = self.seek_rowpos_eq(cursor) {
+            return Some(eq);
+        }
+        let after = self.seek_rowpos_gt(cursor)?;
+        self.prev_pos(after)
     }
 
     pub fn seek_ts_ge(&self, ts: Timestamp) -> Option<RowPtr> {
@@ -423,12 +419,12 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
 
-    use crate::runtime::operators::window::aggregates::BucketRange;
+    use crate::storage::index::BucketRange;
     use crate::storage::index::{DataBounds, DataRequest, SortedRangeView, SortedSegment};
-    use crate::runtime::operators::window::state::tiles::TimeGranularity;
-    use crate::runtime::operators::window::Cursor;
-    use crate::runtime::operators::window::RowPtr;
-    use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
+    use crate::storage::index::TimeGranularity;
+    use crate::storage::index::Cursor;
+    use crate::storage::index::RowPtr;
+    use crate::storage::constants::SEQ_NO_COLUMN_NAME;
 
     use super::SortedRangeIndex;
 
@@ -475,7 +471,7 @@ mod tests {
             ));
         }
         segments.sort_by_key(|b| b.bucket_ts());
-        SortedRangeView::new(request, gran, start, end, segments, None)
+        SortedRangeView::new(request, gran, start, end, segments, None, None)
     }
 
     #[test]

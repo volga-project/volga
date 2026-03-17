@@ -5,7 +5,7 @@ use serde_json::Value;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
 use crate::runtime::state::OperatorStates;
-use crate::storage::WorkerStorageContext;
+use crate::storage::WorkerStorageRuntime;
 use crate::runtime::VertexId;
 
 #[derive(Clone, Debug)]
@@ -16,7 +16,7 @@ pub struct RuntimeContext {
     job_config: HashMap<String, Value>,
     operator_states: Option<Arc<OperatorStates>>,
     execution_graph: Option<ExecutionGraph>,
-    worker_storage: Option<Arc<WorkerStorageContext>>,
+    worker_storage: Option<Arc<WorkerStorageRuntime>>,
 
     // if we have request source+sink configured:
     // shared receiver for source tasks to receive requests from RequestSourceProcessor
@@ -56,11 +56,11 @@ impl RuntimeContext {
     pub fn operator_states(&self) -> &Arc<OperatorStates> { self.operator_states.as_ref().expect("operator states should be set") }
     pub fn execution_graph(&self) -> &ExecutionGraph { self.execution_graph.as_ref().expect("execution graph should be set") }
 
-    pub fn set_worker_storage_context(&mut self, storage: Arc<WorkerStorageContext>) {
+    pub fn set_worker_storage_runtime(&mut self, storage: Arc<WorkerStorageRuntime>) {
         self.worker_storage = Some(storage);
     }
 
-    pub fn worker_storage_context(&self) -> Option<Arc<WorkerStorageContext>> {
+    pub fn worker_storage_runtime(&self) -> Option<Arc<WorkerStorageRuntime>> {
         self.worker_storage.clone()
     }
 

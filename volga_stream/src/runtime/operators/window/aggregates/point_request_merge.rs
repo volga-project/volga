@@ -1,6 +1,6 @@
 use crate::runtime::operators::window::aggregates::BucketRange;
 use crate::storage::index::{DataBounds, DataRequest};
-use crate::runtime::operators::window::TimeGranularity;
+use crate::storage::TimeGranularity;
 
 #[derive(Debug, Clone)]
 pub struct PlannedRange {

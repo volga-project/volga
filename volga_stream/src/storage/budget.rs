@@ -1,56 +1,99 @@
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
 
-/// Worker-level hard limits for storage-related memory/IO.
-///
-/// This is intentionally backend-agnostic: it constrains in-memory caching and concurrency,
-/// while backend-specific configs (e.g. SlateDB pools) will be validated against these budgets.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StorageBudgetConfig {
-    /// Hard cap for `InMemBatchCache`.
-    pub in_mem_limit_bytes: usize,
-    /// Target low watermark (per-mille, e.g. 700 = 70%) to stop eviction/dumping once below.
-    pub in_mem_low_watermark_per_mille: u32,
+use crate::storage::memory_pool::TenantBudget;
 
-    /// Hard cap for "work memory" used during reads/hydration.
-    pub work_limit_bytes: usize,
+/// Per-tenant memory budgets used by `WorkerMemoryPool`.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct StorageMemoryBudgetConfig {
+    pub total_limit_bytes: usize,
+    pub write_buffer: TenantBudget,
+    pub base_runs: TenantBudget,
+    pub state_cache: TenantBudget,
+}
 
-    /// Max number of concurrently processed keys (limits work/hydration memory fanout).
+/// Concurrency knobs for IO and per-key processing.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct StorageConcurrencyConfig {
     pub max_inflight_keys: usize,
-    /// Max number of concurrent store loads per key/read (fanout control for singular store API).
     pub load_io_parallelism: usize,
 }
 
-impl StorageBudgetConfig {
+/// Policy knobs for pressure relief / eviction.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct StoragePressureConfig {
+    pub hot_low_watermark_per_mille: u32,
+}
+
+/// Unified storage backend configuration: memory budgets, concurrency knobs, and pressure policy.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct StorageBackendConfig {
+    pub memory: StorageMemoryBudgetConfig,
+    pub concurrency: StorageConcurrencyConfig,
+    pub pressure: StoragePressureConfig,
+    pub backlog_limit_bytes: usize,
+}
+
+impl StorageBackendConfig {
     pub fn validate(&self) -> anyhow::Result<()> {
-        if self.in_mem_limit_bytes == 0 {
-            bail!("in_mem_limit_bytes must be > 0");
+        if self.memory.total_limit_bytes == 0 {
+            bail!("memory.total_limit_bytes must be > 0");
         }
-        if self.in_mem_low_watermark_per_mille > 1000 {
-            bail!("in_mem_low_watermark_per_mille must be <= 1000");
+        if self.pressure.hot_low_watermark_per_mille > 1000 {
+            bail!("pressure.hot_low_watermark_per_mille must be <= 1000");
         }
-        if self.work_limit_bytes == 0 {
-            bail!("work_limit_bytes must be > 0");
+        for (label, budget) in [
+            ("write_buffer", self.memory.write_buffer),
+            ("base_runs", self.memory.base_runs),
+            ("state_cache", self.memory.state_cache),
+        ] {
+            if budget.soft_max_bytes == 0 {
+                bail!("memory.{label}.soft_max_bytes must be > 0");
+            }
+            if budget.reserve_bytes > budget.soft_max_bytes {
+                bail!("memory.{label}.reserve_bytes must be <= soft_max_bytes");
+            }
         }
-        if self.max_inflight_keys == 0 {
-            bail!("max_inflight_keys must be > 0");
+        if self.concurrency.max_inflight_keys == 0 {
+            bail!("concurrency.max_inflight_keys must be > 0");
         }
-        if self.load_io_parallelism == 0 {
-            bail!("load_io_parallelism must be > 0");
+        if self.concurrency.load_io_parallelism == 0 {
+            bail!("concurrency.load_io_parallelism must be > 0");
+        }
+        if self.backlog_limit_bytes == 0 {
+            bail!("backlog_limit_bytes must be > 0");
         }
         Ok(())
     }
 }
 
-impl Default for StorageBudgetConfig {
+impl Default for StorageBackendConfig {
     fn default() -> Self {
         Self {
-            // Conservative defaults; operators can override via their config.
-            in_mem_limit_bytes: 256 * 1024 * 1024,
-            in_mem_low_watermark_per_mille: 700,
-            work_limit_bytes: 256 * 1024 * 1024,
-            max_inflight_keys: 1,
-            load_io_parallelism: 16,
+            memory: StorageMemoryBudgetConfig {
+                // Conservative defaults; operators can override via their config.
+                total_limit_bytes: 896 * 1024 * 1024,
+                write_buffer: TenantBudget {
+                    reserve_bytes: 64 * 1024 * 1024,
+                    soft_max_bytes: 256 * 1024 * 1024,
+                },
+                base_runs: TenantBudget {
+                    reserve_bytes: 64 * 1024 * 1024,
+                    soft_max_bytes: 256 * 1024 * 1024,
+                },
+                state_cache: TenantBudget {
+                    reserve_bytes: 16 * 1024 * 1024,
+                    soft_max_bytes: 64 * 1024 * 1024,
+                },
+            },
+            concurrency: StorageConcurrencyConfig {
+                max_inflight_keys: 1,
+                load_io_parallelism: 16,
+            },
+            pressure: StoragePressureConfig {
+                hot_low_watermark_per_mille: 700,
+            },
+            backlog_limit_bytes: 896 * 1024 * 1024,
         }
     }
 }

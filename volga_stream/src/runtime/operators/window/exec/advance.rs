@@ -11,9 +11,7 @@ use crate::runtime::operators::window::aggregates::{Aggregation, BucketRange};
 use crate::runtime::operators::window::aggregates::plain::PlainAggregation;
 use crate::runtime::operators::window::aggregates::retractable::RetractableAggregation;
 use crate::runtime::operators::window::shared::stack_concat_results;
-use crate::runtime::operators::window::state::sorted_range_view_loader::{
-    load_sorted_ranges_views, RangesLoadPlan,
-};
+use crate::storage::read::plan::RangesLoadPlan;
 use crate::runtime::operators::window::state::window_logic;
 use crate::runtime::operators::window::{AggregatorType, Cursor};
 use crate::storage::index::{SortedRangeIndex, SortedRangeView};
@@ -265,8 +263,10 @@ impl WindowOperator {
         key: &Key,
         plan: &AdvancePlan,
     ) -> (LoadedRanges, AggregationOutputs) {
-        let views_by_item =
-            load_sorted_ranges_views(self.state_ref(), key, &plan.aggregation_plan.load_plans).await;
+        let views_by_item = self
+            .state_ref()
+            .load_sorted_ranges_views(key, &plan.aggregation_plan.load_plans)
+            .await;
         debug_assert_eq!(
             plan.aggregation_plan.window_agg_work_items.len(),
             views_by_item.len(),

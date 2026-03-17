@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 
-use crate::storage::batch_store::BatchId;
+use crate::storage::batch::BatchId;
 use crate::runtime::TaskId;
 
 /// Store-agnostic pin counts for MVCC-style safe reads.
@@ -57,15 +57,15 @@ impl BatchPins {
     }
 
     /// Pin `batch_ids` until the returned lease is dropped.
-    pub fn pin(self: Arc<Self>, task_id: TaskId, batch_ids: Vec<BatchId>) -> BatchLease {
+    pub fn pin(self: Arc<Self>, task_id: TaskId, batch_ids: Vec<BatchId>) -> Arc<BatchLease> {
         for id in &batch_ids {
             self.pin_one(task_id.clone(), *id);
         }
-        BatchLease {
+        Arc::new(BatchLease {
             pins: self,
             task_id,
             batch_ids,
-        }
+        })
     }
 }
 
@@ -85,6 +85,20 @@ impl Drop for BatchLease {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
 
+    #[test]
+    fn pin_lease_releases_on_drop() {
+        let pins = Arc::new(BatchPins::new());
+        let task_id: TaskId = Arc::<str>::from("t");
+        let batch_id = BatchId::new(1, 2, 3);
 
-
+        assert!(!pins.is_pinned(&task_id, &batch_id));
+        let lease = pins.clone().pin(task_id.clone(), vec![batch_id]);
+        assert!(pins.is_pinned(&task_id, &batch_id));
+        drop(lease);
+        assert!(!pins.is_pinned(&task_id, &batch_id));
+    }
+}

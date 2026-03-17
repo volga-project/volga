@@ -26,8 +26,8 @@ use crate::runtime::operators::window::shared::build_window_operator_parts;
 use crate::runtime::operators::window::TimeGranularity;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorStates;
-use crate::storage::batch_store::{BatchStore, InMemBatchStore};
-use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
+use crate::storage::backend::inmem::InMemBackend;
+use crate::storage::{StorageBackendConfig, WorkerStorageRuntime};
 use crate::common::Key;
 
 fn test_input_schema() -> SchemaRef {
@@ -82,10 +82,11 @@ async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
 }
 
 fn runtime_context() -> RuntimeContext {
-    let store = Arc::new(InMemBatchStore::new(64, TimeGranularity::Seconds(1), 128))
-        as Arc<dyn BatchStore>;
-    let shared =
-        WorkerStorageContext::new(store, StorageBudgetConfig::default()).expect("storage ctx");
+    let cfg = StorageBackendConfig::default();
+    let shared = WorkerStorageRuntime::new_with_backend(cfg, move || {
+        Arc::new(InMemBackend::new(TimeGranularity::Seconds(1), 128))
+    })
+    .expect("storage runtime");
 
     let mut ctx = RuntimeContext::new(
         "test_vertex".to_string().into(),
@@ -95,7 +96,7 @@ fn runtime_context() -> RuntimeContext {
         Some(Arc::new(OperatorStates::new())),
         None,
     );
-    ctx.set_worker_storage_context(shared);
+    ctx.set_worker_storage_runtime(shared);
     ctx
 }
 
@@ -254,12 +255,15 @@ async fn test_compaction_persisted_plus_new_deltas_does_not_drop_history() {
     assert_eq!(out1.num_rows(), 100);
     assert_eq!(h.drain_passthrough_watermark().await, 1099);
 
-    h.state().periodic_dump_to_store().await.expect("dump");
+    h.state()
+        .periodic_dump_to_store_for_tests()
+        .await
+        .expect("dump");
 
     let ts2: Vec<i64> = (1100..1110).collect();
     h.ingest(batch(ts2, vec![1.0; 10], vec!["A"; 10]), "A")
         .await;
-    h.state().compact_bucket_on_read(&key_a, bucket_ts).await;
+    h.state().compact_bucket_for_tests(&key_a, bucket_ts).await;
 
     let out2 = h.watermark_output(1109).await;
     assert_eq!(out2.num_rows(), 10);
@@ -277,20 +281,18 @@ async fn test_ingest_triggers_pressure_relief_when_in_mem_over_limit() {
 
     let stats_before = StorageStats::global().snapshot();
 
-    let budgets = StorageBudgetConfig {
-        in_mem_limit_bytes: 1024,
-        in_mem_low_watermark_per_mille: 500,
-        work_limit_bytes: 1024 * 1024,
-        max_inflight_keys: 1,
-        load_io_parallelism: 1,
-    };
+    let mut cfg = StorageBackendConfig::default();
+    cfg.memory.total_limit_bytes = 1024 * 1024;
+    cfg.memory.write_buffer.reserve_bytes = 0;
+    cfg.memory.write_buffer.soft_max_bytes = 1024;
+    cfg.pressure.hot_low_watermark_per_mille = 500;
+    cfg.concurrency.max_inflight_keys = 1;
+    cfg.concurrency.load_io_parallelism = 1;
 
-    let store: Arc<dyn BatchStore> = Arc::new(InMemBatchStore::new(
-        4,
-        TimeGranularity::Seconds(1),
-        256,
-    ));
-    let storage = WorkerStorageContext::new(store, budgets.clone()).unwrap();
+    let storage = WorkerStorageRuntime::new_with_backend(cfg, move || {
+        Arc::new(InMemBackend::new(TimeGranularity::Seconds(1), 256))
+    })
+    .unwrap();
 
     let sql = "SELECT
         timestamp, value,
@@ -309,7 +311,7 @@ async fn test_ingest_triggers_pressure_relief_when_in_mem_over_limit() {
         Vec::new(),
         None,
         0, // dump_hot_bucket_count: treat everything as cold for eviction
-        budgets.in_mem_low_watermark_per_mille,
+        cfg.pressure.hot_low_watermark_per_mille,
         4, // in_mem_dump_parallelism
     );
 
@@ -333,13 +335,13 @@ async fn test_ingest_triggers_pressure_relief_when_in_mem_over_limit() {
 
     let _ = state.insert_batch(&k, None, b).await;
 
-    let limit = state.in_mem_batch_cache().limit_bytes();
-    let low = (limit.saturating_mul(budgets.in_mem_low_watermark_per_mille as usize)) / 1000;
+    let limit = state.storage().writer().write_buffer_soft_max_bytes();
+    let low = (limit.saturating_mul(cfg.pressure.hot_low_watermark_per_mille as usize)) / 1000;
     assert!(
-        state.in_mem_batch_cache().bytes() <= low,
+        state.storage().writer().write_buffer_bytes() <= low,
         "expected eviction down to low watermark (<= {}), got {}",
         low,
-        state.in_mem_batch_cache().bytes()
+        state.storage().writer().write_buffer_bytes()
     );
 
     let stats_after = StorageStats::global().snapshot();

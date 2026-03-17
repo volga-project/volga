@@ -3,9 +3,9 @@ use std::collections::BTreeMap;
 use datafusion::logical_expr::WindowFrame;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::operators::window::TimeGranularity;
-use crate::runtime::operators::window::aggregates::BucketRange;
-use crate::storage::batch_store::{BatchId, Timestamp};
+use crate::storage::index::TimeGranularity;
+use crate::storage::index::BucketRange;
+use crate::storage::batch::{BatchId, Timestamp};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct Cursor {
@@ -68,6 +68,7 @@ pub struct BatchMeta {
 pub struct PrunedBatches {
     pub stored: Vec<BatchId>,
     pub inmem: Vec<InMemBatchId>,
+    pub bytes_estimate: usize,
 }
 
 /// A bucket containing batches with the same bucket timestamp.
@@ -259,12 +260,6 @@ impl BucketIndex {
             self.bucket_granularity.start(prev.ts)
         };
 
-        // Watermark can be earlier than the first seen bucket (e.g. out_of_orderness on the first batch).
-        // In that case there is no delta to process.
-        if start_bucket_ts > end_bucket_ts {
-            return None;
-        }
-
         let mut iter = self.buckets.range(start_bucket_ts..=end_bucket_ts);
         let first = iter.next().map(|(k, _)| *k)?;
         let last = self
@@ -398,6 +393,7 @@ impl BucketIndex {
                     if let Some(id) = b.run.inmem_id() {
                         pruned.inmem.push(id);
                     }
+                    pruned.bytes_estimate = pruned.bytes_estimate.saturating_add(b.bytes_estimate);
                     self.total_rows -= b.row_count;
                     bucket.row_count -= b.row_count;
                     false
@@ -414,6 +410,7 @@ impl BucketIndex {
                     if let Some(id) = b.run.inmem_id() {
                         pruned.inmem.push(id);
                     }
+                    pruned.bytes_estimate = pruned.bytes_estimate.saturating_add(b.bytes_estimate);
                     self.total_rows -= b.row_count;
                     bucket.row_count -= b.row_count;
                     false
@@ -432,6 +429,7 @@ impl BucketIndex {
                     if let Some(id) = m.run.stored_batch_id() {
                         pruned.stored.push(id);
                     }
+                    pruned.bytes_estimate = pruned.bytes_estimate.saturating_add(m.bytes_estimate);
                     if !hot_base_pruned && bucket.hot_base_segments.is_empty() {
                         // Only adjust counts if persisted is the canonical representation.
                         self.total_rows -= m.row_count;

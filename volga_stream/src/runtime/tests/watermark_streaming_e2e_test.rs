@@ -10,7 +10,7 @@ use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, Dat
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
-use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
+use crate::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::runtime::tests::test_utils::{
     create_window_input_schema, wait_for_status, window_rows_from_messages, WindowOutputRow,

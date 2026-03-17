@@ -12,8 +12,7 @@ use crate::api::spec::storage::StorageSpec;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::transport::transport_spec::OperatorTransportSpec;
-use crate::storage::StorageBudgetConfig;
-use crate::runtime::operators::window::TimeGranularity;
+use crate::storage::{StorageBackendConfig, TimeGranularity};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionMode {
@@ -117,7 +116,7 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_storage_budgets(mut self, budgets: StorageBudgetConfig) -> Self {
+    pub fn with_storage_budgets(mut self, budgets: StorageBackendConfig) -> Self {
         self.spec.worker_runtime.storage.budgets = budgets;
         self
     }

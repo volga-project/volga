@@ -488,7 +488,7 @@ pub fn emit_storage_stats_gauges(snapshot: &StorageStatsSnapshot, labels: &Metri
         LABEL_ATTEMPT_ID => attempt_id.clone(),
         LABEL_WORKER_ID => labels.worker_id.clone(),
         base().0 => base().1.clone()
-    ).set(snapshot.inmem_batches as f64);
+    ).set(snapshot.hot_batches as f64);
     gauge!(
         METRIC_STORAGE_INMEM_BYTES,
         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
@@ -496,7 +496,7 @@ pub fn emit_storage_stats_gauges(snapshot: &StorageStatsSnapshot, labels: &Metri
         LABEL_ATTEMPT_ID => attempt_id.clone(),
         LABEL_WORKER_ID => labels.worker_id.clone(),
         base().0 => base().1.clone()
-    ).set(snapshot.inmem_bytes as f64);
+    ).set(snapshot.hot_bytes as f64);
 
     gauge!(
         METRIC_STORAGE_PRESSURE_RELIEF_RUNS,

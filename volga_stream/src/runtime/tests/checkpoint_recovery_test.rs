@@ -15,7 +15,7 @@ use crate::transport::transport_backend_actor::TransportBackendType;
 use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
 use crate::control_plane::types::{AttemptId, ExecutionIds};
 use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
-use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
+use crate::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 // Watermark assigner placement is done by the planner (see LogicalGraph::to_execution_graph).
 
@@ -189,15 +189,30 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         );
 
         if window_vertex_ids.contains(&task.vertex_id) {
-            let cp_state_bytes = resp
+            let cp_bytes = resp
                 .blobs
                 .iter()
-                .find(|b| b.name == "window_operator_state")
+                .find(|b| b.name == "storage_checkpoint")
                 .map(|b| b.bytes.as_slice())
-                .expect("window_operator_state blob missing");
-            let cp: crate::runtime::operators::window::window_operator_state::WindowOperatorStateCheckpoint =
-                bincode::deserialize(cp_state_bytes)?;
-            checkpointed_window_key_counts.insert(task.vertex_id.clone(), cp.keys.len());
+                .expect("storage_checkpoint blob missing");
+            let token: crate::storage::StorageCheckpointToken =
+                bincode::deserialize(cp_bytes)?;
+            let key_count = match token {
+                crate::storage::StorageCheckpointToken::InMem { state, .. } => {
+                    let index_key = crate::storage::write::state_cache::state_index_key("window_states");
+                    let index_bytes = state
+                        .into_iter()
+                        .find(|(k, _)| *k == index_key)
+                        .map(|(_, v)| v)
+                        .unwrap_or_default();
+                    let keys: Vec<Vec<u8>> = bincode::deserialize(&index_bytes).unwrap_or_default();
+                    keys.len()
+                }
+                crate::storage::StorageCheckpointToken::Remote(_) => {
+                    panic!("window state key count requires in-mem checkpoints")
+                }
+            };
+            checkpointed_window_key_counts.insert(task.vertex_id.clone(), key_count);
         }
     }
 
@@ -256,9 +271,8 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             .expect("Expected WindowOperatorState");
 
         // Ensure we can serialize state after restore and that key count matches checkpoint.
-        let restored_state = window_state.to_checkpoint();
         assert_eq!(
-            restored_state.keys.len(),
+            window_state.window_keys_count(),
             *checkpointed_key_count,
             "restored key count must match checkpoint for {}",
             window_vertex_id
