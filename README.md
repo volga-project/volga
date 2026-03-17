@@ -1,4 +1,4 @@
-<h2 align="center">Volga - Real-time data processing in Python for modern AI/ML systems</h2>
+<h2 align="center">Volga - Real-time data processing for modern AI/ML systems</h2>
 <p align="center">
   <img src="https://github.com/volga-project/volga/blob/master/.github/logo_white_bckgr_50_pct.png?raw=true" width="150" height="150">
 </p>
