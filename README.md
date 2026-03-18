@@ -14,7 +14,7 @@
   
 </div>
 
-**[Volga](https://volgaai.substack.com/p/volga-open-source-feature-engine-1)** is a data processing engine aiming to be an alternative to general streaming engines like Flink and Spark as well as AI/ML oriented systems like [Chronon](https://github.com/airbnb/chronon) and [OpenMLDB](https://github.com/4paradigm/OpenMLDB). It is built in Rust using [Apache DataFusion](https://github.com/apache/datafusion) and [Apache Arrow](https://arrow.apache.org/). 
+**[Volga](https://volgaai.substack.com/p/volga-a-rust-rewrite-of-a-real-time)** is a data processing engine aiming to be an alternative to general streaming engines like Flink and Spark as well as AI/ML oriented systems like [Chronon](https://github.com/airbnb/chronon) and [OpenMLDB](https://github.com/4paradigm/OpenMLDB). It is built in Rust using [Apache DataFusion](https://github.com/apache/datafusion) and [Apache Arrow](https://arrow.apache.org/). 
 
 # 🤯 What and why
 
