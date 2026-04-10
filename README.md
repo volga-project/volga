@@ -225,6 +225,7 @@ cargo test
 
 - [ ] Remote state (production-ready)
 - [ ] Batch execution mode
+- [ ] Batch Shuffle Service
 - [ ] Join operator
 - [ ] Kubernetes deployment
 - [ ] Python Client 
