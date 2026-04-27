@@ -1,9 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::cluster::node_assignment::node_to_vertex_ids;
 use crate::common::test_utils::gen_unique_grpc_port;
-use crate::executor::placement::TaskPlacementStrategyName;
+use crate::executor::placement::{
+    build_task_placement_mapping, strategy_from_name, worker_to_task_ids, TaskPlacementStrategyName,
+};
 use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::master::Master;
 use crate::runtime::master_server::{MasterServer, TaskKey};
@@ -31,7 +32,12 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             .cloned()
             .collect::<Vec<_>>();
 
-        let vertex_to_node = req.node_assign.assign_nodes(&req.execution_graph, &cluster_nodes);
+        let placement_strategy = strategy_from_name(TaskPlacementStrategyName::SingleWorker);
+        let vertex_to_node = build_task_placement_mapping(
+            &req.execution_graph,
+            placement_strategy.as_ref(),
+            &cluster_nodes,
+        );
         req.execution_graph
             .update_channels_with_node_mapping_and_transport(
                 Some(&vertex_to_node),
@@ -56,7 +62,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         master_server.start(&master_addr).await?;
         let master_snapshot_sink = master_server.snapshot_sink();
 
-        let node_to_vertex_ids = node_to_vertex_ids(&vertex_to_node);
+        let node_to_vertex_ids = worker_to_task_ids(&vertex_to_node);
         let mut worker_servers = Vec::new();
         let mut worker_addrs = Vec::new();
 
