@@ -5,5 +5,6 @@ pub mod api;
 pub mod cluster;
 pub mod storage;
 pub mod executor;
+pub mod entrypoints;
 pub mod sql_testing;
 pub mod control_plane;

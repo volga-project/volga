@@ -1,5 +1,7 @@
 pub mod runtime_context;
 pub mod execution_graph;
+pub mod execution_plan;
+pub mod entrypoints;
 pub mod operators;
 pub mod stream_task;
 pub mod stream_task_actor;
