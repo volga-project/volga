@@ -14,7 +14,6 @@ use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::transport::transport_spec::OperatorTransportSpec;
 use crate::storage::StorageBudgetConfig;
 use crate::runtime::operators::window::TimeGranularity;
 
@@ -161,14 +160,6 @@ impl PipelineSpecBuilder {
 
     pub fn with_transport_default_queue_records(mut self, queue_records: u32) -> Self {
         self.spec.worker_runtime.transport.default_queue_records = queue_records.max(1);
-        self
-    }
-
-    pub fn with_operator_transport_queue_records(mut self, operator_id: &str, queue_records: u32) -> Self {
-        self.spec.operator_overrides.per_operator
-            .entry(operator_id.to_string())
-            .or_insert_with(OperatorOverride::default)
-            .transport = Some(OperatorTransportSpec { queue_records: Some(queue_records.max(1)) });
         self
     }
 
