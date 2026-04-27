@@ -119,60 +119,82 @@ impl PipelineContext {
                 Ok(PipelineSnapshot::new(worker_states))
             }
             ExecutionProfile::LocalOrchestrated => {
-                let adapter = Arc::new(LocalRuntimeAdapter::new());
-                let cluster_provider = Arc::new(LocalMachineClusterProvider::single_node());
+                let adapter: Arc<dyn RuntimeAdapter> = self
+                    .runtime_adapter
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(LocalRuntimeAdapter::new()));
+                let cluster_provider = self
+                    .cluster_provider
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(LocalMachineClusterProvider::single_node()));
                 let node_assign = Arc::new(SingleNodeStrategy);
 
-                let handle = adapter
-                    .start_attempt(StartAttemptRequest {
-                        execution_ids,
-                        execution_graph,
-                        num_workers_per_operator: 1,
-                        cluster_provider,
-                        node_assign,
-                        transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
-                        worker_runtime: self.spec.worker_runtime.clone(),
-                        operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
-                    })
-                    .await?;
-
-                let final_state = handle.wait().await?;
-                if let Some(sender) = state_updates_sender {
-                    let _ = sender.send(final_state.clone()).await;
-                }
-                Ok(final_state)
+                self.execute_with_adapter(
+                    adapter,
+                    execution_ids,
+                    execution_graph,
+                    1,
+                    cluster_provider,
+                    node_assign,
+                    state_updates_sender,
+                )
+                .await
             }
             ExecutionProfile::Orchestrated {
                 num_workers_per_operator,
             } => {
-                let runtime_adapter = self
+                let adapter = self
                     .runtime_adapter
+                    .clone()
                     .expect("Orchestrated profile requires a runtime_adapter");
                 let cluster_provider = self
                     .cluster_provider
+                    .clone()
                     .expect("Orchestrated profile requires a cluster_provider");
                 let node_assign = Arc::new(SingleWorkerStrategy);
 
-                let handle = runtime_adapter
-                    .start_attempt(StartAttemptRequest {
-                        execution_ids,
-                        execution_graph,
-                        num_workers_per_operator,
-                        cluster_provider,
-                        node_assign,
-                        transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
-                        worker_runtime: self.spec.worker_runtime.clone(),
-                        operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
-                    })
-                    .await?;
-
-                let final_state = handle.wait().await?;
-                if let Some(sender) = state_updates_sender {
-                    let _ = sender.send(final_state.clone()).await;
-                }
-                Ok(final_state)
+                self.execute_with_adapter(
+                    adapter,
+                    execution_ids,
+                    execution_graph,
+                    num_workers_per_operator,
+                    cluster_provider,
+                    node_assign,
+                    state_updates_sender,
+                )
+                .await
             }
         }
+    }
+
+    async fn execute_with_adapter(
+        &self,
+        adapter: Arc<dyn RuntimeAdapter>,
+        execution_ids: ExecutionIds,
+        execution_graph: crate::runtime::execution_graph::ExecutionGraph,
+        num_workers_per_operator: usize,
+        cluster_provider: Arc<dyn ClusterProvider>,
+        node_assign: Arc<dyn crate::cluster::node_assignment::NodeAssignStrategy>,
+        state_updates_sender: Option<mpsc::Sender<PipelineSnapshot>>,
+    ) -> Result<PipelineSnapshot> {
+        let handle = adapter
+            .start_attempt(StartAttemptRequest {
+                execution_ids,
+                execution_graph,
+                num_workers_per_operator,
+                cluster_provider,
+                node_assign,
+                transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
+                worker_runtime: self.spec.worker_runtime.clone(),
+                operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
+            })
+            .await?;
+
+        let final_state = handle.wait().await?;
+        if let Some(sender) = state_updates_sender {
+            let _ = sender.send(final_state.clone()).await;
+        }
+        Ok(final_state)
     }
 
     pub async fn execute(self) -> Result<PipelineSnapshot> {
