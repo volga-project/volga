@@ -5,6 +5,7 @@ use tokio::task::JoinHandle;
 use crate::cluster::cluster_provider::ClusterProvider;
 use crate::cluster::node_assignment::NodeAssignStrategy;
 use crate::control_plane::types::ExecutionIds;
+use crate::executor::placement::TaskPlacementStrategyName;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::observability::PipelineSnapshot;
 use crate::api::WorkerRuntimeSpec;
@@ -41,13 +42,6 @@ impl AttemptHandle {
     pub fn is_finished(&self) -> bool {
         self.join.is_finished()
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TaskPlacementStrategyName {
-    SingleNode,
-    SingleWorker,
-    OperatorPerNode,
 }
 
 #[async_trait]

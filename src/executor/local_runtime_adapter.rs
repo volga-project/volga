@@ -3,9 +3,8 @@ use async_trait::async_trait;
 
 use crate::cluster::node_assignment::node_to_vertex_ids;
 use crate::common::test_utils::gen_unique_grpc_port;
-use crate::executor::runtime_adapter::{
-    AttemptHandle, RuntimeAdapter, StartAttemptRequest, TaskPlacementStrategyName,
-};
+use crate::executor::placement::TaskPlacementStrategyName;
+use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
 use crate::runtime::master::Master;
 use crate::runtime::master_server::{MasterServer, TaskKey};
 use crate::runtime::worker::WorkerConfig;
@@ -142,11 +141,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
     }
 
     fn supported_task_placement_strategies(&self) -> &'static [TaskPlacementStrategyName] {
-        &[
-            TaskPlacementStrategyName::SingleNode,
-            TaskPlacementStrategyName::SingleWorker,
-            TaskPlacementStrategyName::OperatorPerNode,
-        ]
+        &[TaskPlacementStrategyName::SingleWorker]
     }
 }
 
