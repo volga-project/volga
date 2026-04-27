@@ -43,8 +43,17 @@ impl AttemptHandle {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskPlacementStrategyName {
+    SingleNode,
+    SingleWorker,
+    OperatorPerNode,
+}
+
 #[async_trait]
 pub trait RuntimeAdapter: Send + Sync {
     async fn start_attempt(&self, req: StartAttemptRequest) -> Result<AttemptHandle>;
+    async fn stop_attempt(&self, handle: &AttemptHandle) -> Result<()>;
+    fn supported_task_placement_strategies(&self) -> &'static [TaskPlacementStrategyName];
 }
 

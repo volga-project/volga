@@ -211,7 +211,7 @@ impl ControlPlaneController {
                 }
                 PipelineDesiredState::Stopped | PipelineDesiredState::Paused | PipelineDesiredState::Draining => {
                     if let Some(handle) = running_guard.remove(&pipeline_id) {
-                        handle.abort();
+                        self.adapter.stop_attempt(&handle).await?;
                     }
                     if let Some(h) = pollers_guard.remove(&pipeline_id) {
                         h.abort();
