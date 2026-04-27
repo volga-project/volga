@@ -14,6 +14,7 @@ use master_service::{
     GetTaskCheckpointRequest, GetTaskCheckpointResponse, StateBlob,
     GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
     GetLatestSnapshotRequest, GetLatestSnapshotResponse,
+    GetWorkerBootstrapRequest, GetWorkerBootstrapResponse,
 };
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -75,6 +76,7 @@ pub struct MasterLatestSnapshot {
 pub struct MasterServiceImpl {
     registry: Arc<Mutex<MasterCheckpointRegistry>>,
     latest_snapshot: Arc<Mutex<Option<MasterLatestSnapshot>>>,
+    worker_bootstrap_payload: Arc<Mutex<Option<Vec<u8>>>>,
 }
 
 impl MasterServiceImpl {
@@ -82,11 +84,17 @@ impl MasterServiceImpl {
         Self {
             registry: Arc::new(Mutex::new(MasterCheckpointRegistry::default())),
             latest_snapshot: Arc::new(Mutex::new(None)),
+            worker_bootstrap_payload: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn snapshot_sink(&self) -> Arc<Mutex<Option<MasterLatestSnapshot>>> {
         self.latest_snapshot.clone()
+    }
+
+    pub async fn set_worker_bootstrap_payload(&self, payload: Vec<u8>) {
+        let mut guard = self.worker_bootstrap_payload.lock().await;
+        *guard = Some(payload);
     }
 }
 
@@ -192,6 +200,24 @@ impl MasterService for MasterServiceImpl {
             }))
         }
     }
+
+    async fn get_worker_bootstrap(
+        &self,
+        _request: Request<GetWorkerBootstrapRequest>,
+    ) -> Result<Response<GetWorkerBootstrapResponse>, Status> {
+        let guard = self.worker_bootstrap_payload.lock().await;
+        if let Some(payload) = guard.as_ref() {
+            Ok(Response::new(GetWorkerBootstrapResponse {
+                has_payload: true,
+                payload_bytes: payload.clone(),
+            }))
+        } else {
+            Ok(Response::new(GetWorkerBootstrapResponse {
+                has_payload: false,
+                payload_bytes: Vec::new(),
+            }))
+        }
+    }
 }
 
 /// Server that hosts MasterService
@@ -217,6 +243,10 @@ impl MasterServer {
     pub async fn set_checkpointable_tasks(&mut self, tasks: Vec<TaskKey>) {
         let mut registry = self.service.registry.lock().await;
         registry.expected_tasks = tasks.into_iter().collect();
+    }
+
+    pub async fn set_worker_bootstrap_payload(&self, payload: Vec<u8>) {
+        self.service.set_worker_bootstrap_payload(payload).await;
     }
 
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
