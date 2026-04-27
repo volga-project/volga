@@ -16,10 +16,6 @@ impl ResourcePlanner {
         let workers = placements.len().max(1);
         let profile = match strategy {
             ResourceStrategy::PerWorker => profiles.worker_default.clone(),
-            ResourceStrategy::PerOperatorType => {
-                // TODO: implement operator-type planning with stateless chaining.
-                profiles.worker_default.clone()
-            }
         };
         ResourcePlan {
             worker_resources: vec![profile; workers],

@@ -478,9 +478,8 @@ impl RuntimeAdapter for K8sRuntimeAdapter {
     }
 
     fn supported_task_placement_strategies(&self) -> &[TaskPlacementStrategyName] {
-        static SUPPORTED: [TaskPlacementStrategyName; 2] = [
+        static SUPPORTED: [TaskPlacementStrategyName; 1] = [
             TaskPlacementStrategyName::SingleNode,
-            TaskPlacementStrategyName::OperatorPerNode,
         ];
         &SUPPORTED
     }

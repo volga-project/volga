@@ -14,7 +14,6 @@ use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::transport::transport_spec::OperatorTransportSpec;
 use crate::storage::StorageBudgetConfig;
 use crate::runtime::operators::window::TimeGranularity;
 
@@ -33,11 +32,6 @@ pub enum ExecutionProfile {
         resource_strategy: ResourceStrategy,
     },
     K8s {
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    },
-    Custom {
-        runtime_adapter: RuntimeAdapterSpec,
         task_placement_strategy: TaskPlacementStrategyName,
         resource_strategy: ResourceStrategy,
     },
@@ -63,7 +57,6 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess { .. } => None,
             ExecutionProfile::Local { .. } => Some(RuntimeAdapterSpec::Local),
             ExecutionProfile::K8s { .. } => Some(RuntimeAdapterSpec::K8s),
-            ExecutionProfile::Custom { runtime_adapter, .. } => Some(runtime_adapter.clone()),
         }
     }
 
@@ -72,7 +65,6 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess { .. } => None,
             ExecutionProfile::Local { task_placement_strategy, .. } => Some(task_placement_strategy),
             ExecutionProfile::K8s { task_placement_strategy, .. } => Some(task_placement_strategy),
-            ExecutionProfile::Custom { task_placement_strategy, .. } => Some(task_placement_strategy),
         }
     }
 
@@ -81,7 +73,6 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess { .. } => None,
             ExecutionProfile::Local { resource_strategy, .. } => Some(resource_strategy),
             ExecutionProfile::K8s { resource_strategy, .. } => Some(resource_strategy),
-            ExecutionProfile::Custom { resource_strategy, .. } => Some(resource_strategy),
         }
     }
 }
@@ -116,10 +107,6 @@ pub struct PipelineSpec {
 #[derive(Clone, Debug)]
 pub struct PipelineSpecBuilder {
     spec: PipelineSpec,
-}
-
-fn operator_override_transport_queue_records(o: &OperatorOverride) -> Option<u32> {
-    o.transport.as_ref().and_then(|t| t.queue_records)
 }
 
 impl PipelineSpecBuilder {
@@ -192,20 +179,6 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_custom_profile(
-        mut self,
-        runtime_adapter: RuntimeAdapterSpec,
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    ) -> Self {
-        self.spec.execution_profile = ExecutionProfile::Custom {
-            runtime_adapter,
-            task_placement_strategy,
-            resource_strategy,
-        };
-        self
-    }
-
     pub fn with_resource_profiles(mut self, profiles: ResourceProfiles) -> Self {
         self.spec.resource_profiles = profiles;
         self
@@ -213,14 +186,6 @@ impl PipelineSpecBuilder {
 
     pub fn with_transport_default_queue_records(mut self, queue_records: u32) -> Self {
         self.spec.worker_runtime.transport.default_queue_records = queue_records.max(1);
-        self
-    }
-
-    pub fn with_operator_transport_queue_records(mut self, operator_id: &str, queue_records: u32) -> Self {
-        self.spec.operator_overrides.per_operator
-            .entry(operator_id.to_string())
-            .or_insert_with(OperatorOverride::default)
-            .transport = Some(OperatorTransportSpec { queue_records: Some(queue_records.max(1)) });
         self
     }
 
@@ -319,6 +284,10 @@ impl PipelineSpecBuilder {
     pub fn build(self) -> PipelineSpec {
         self.spec
     }
+}
+
+fn operator_override_transport_queue_records(o: &OperatorOverride) -> Option<u32> {
+    o.transport.as_ref().and_then(|t| t.queue_records)
 }
 
 impl PipelineSpec {

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
@@ -13,7 +11,6 @@ pub struct ResourceProfile {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ResourceStrategy {
     PerWorker,
-    PerOperatorType,
 }
 
 impl Default for ResourceStrategy {
@@ -25,6 +22,4 @@ impl Default for ResourceStrategy {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ResourceProfiles {
     pub worker_default: ResourceProfile,
-    pub stateless_default: ResourceProfile,
-    pub stateful_by_type: HashMap<String, ResourceProfile>,
 }

@@ -129,7 +129,7 @@ impl PipelineContext {
                 }
                 Ok(final_state)
             }
-            ExecutionProfile::K8s { .. } | ExecutionProfile::Custom { .. } => {
+            ExecutionProfile::K8s { .. } => {
                 let runtime_adapter = self
                     .runtime_adapter
                     .expect("Execution profile requires a runtime_adapter");
