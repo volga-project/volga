@@ -13,3 +13,4 @@ pub mod checkpoint_recovery_test;
 pub mod watermark_streaming_e2e_test;
 pub mod watermark_streaming_benchmark_test;
 pub mod test_utils;
+pub mod bootstrap_payload_test;
