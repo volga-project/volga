@@ -16,5 +16,6 @@ pub use compiler::compile_logical_graph;
 pub use spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder};
 pub use spec::operators::{OperatorOverride, OperatorOverrides};
 pub use spec::connectors::{DatagenSpec, RequestSourceSinkSpec, SinkSpec, SourceSpec, SourceBindingSpec};
+pub use spec::resources::{ResourceProfile, ResourceProfiles, ResourceStrategy};
 pub use spec::storage::StorageSpec;
 pub use spec::worker_runtime::WorkerRuntimeSpec;
