@@ -68,10 +68,6 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             .update_channels_with_node_mapping_and_transport(
                 Some(&task_placement_mapping),
                 &req.pipeline_spec.worker_runtime.transport,
-                &req
-                    .pipeline_spec
-                    .worker_runtime
-                    .transport_overrides_queue_records,
             );
 
         let master_port = gen_unique_grpc_port();
@@ -139,13 +135,6 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                 req.pipeline_spec.worker_runtime.storage.inmem_store_bucket_granularity;
             worker_config.inmem_store_max_batch_size =
                 req.pipeline_spec.worker_runtime.storage.inmem_store_max_batch_size;
-            worker_config.operator_type_storage_overrides =
-                req
-                    .pipeline_spec
-                    .worker_runtime
-                    .operator_type_storage_overrides
-                    .clone();
-
             let mut worker_server = WorkerServer::new(worker_config);
             worker_server.start(&addr).await?;
             worker_servers.push(worker_server);

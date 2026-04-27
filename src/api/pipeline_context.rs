@@ -58,18 +58,13 @@ impl PipelineContext {
         let mut execution_graph = logical_graph.to_execution_graph();
         let pipeline_execution_context = PipelineExecutionContext::fresh(AttemptId(1));
 
-        let mut spec = self.spec.clone();
-        spec.worker_runtime.transport_overrides_queue_records =
-            spec.transport_overrides_queue_records();
-        spec.worker_runtime.operator_type_storage_overrides =
-            spec.operator_type_storage_overrides();
+        let spec = self.spec.clone();
 
         match self.spec.execution_profile.clone() {
             ExecutionProfile::InProcess => {
                 execution_graph.update_channels_with_node_mapping_and_transport(
                     None,
                     &spec.worker_runtime.transport,
-                    &spec.worker_runtime.transport_overrides_queue_records,
                 );
                 let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
                 let worker_id = "single_worker".to_string();
@@ -86,8 +81,6 @@ impl PipelineContext {
                 worker_config.inmem_store_lock_pool_size = spec.worker_runtime.storage.inmem_store_lock_pool_size;
                 worker_config.inmem_store_bucket_granularity = spec.worker_runtime.storage.inmem_store_bucket_granularity;
                 worker_config.inmem_store_max_batch_size = spec.worker_runtime.storage.inmem_store_max_batch_size;
-                worker_config.operator_type_storage_overrides =
-                    spec.worker_runtime.operator_type_storage_overrides.clone();
                 let mut worker = Worker::new(worker_config);
 
                 if let Some(pipeline_state_sender) = state_updates_sender {
@@ -137,7 +130,7 @@ impl PipelineContext {
                 }
                 Ok(final_state)
             }
-            ExecutionProfile::K8s { .. } | ExecutionProfile::Custom { .. } => {
+            ExecutionProfile::K8s { .. } => {
                 let adapter_spec = self
                     .spec
                     .execution_profile

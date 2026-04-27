@@ -117,11 +117,7 @@ impl ControlPlaneController {
                         .get(&adapter_spec)
                         .unwrap_or_else(|| panic!("missing runtime adapter for {:?}", adapter_spec));
 
-                    let mut spec = spec.clone();
-                    spec.worker_runtime.transport_overrides_queue_records =
-                        spec.transport_overrides_queue_records();
-                    spec.worker_runtime.operator_type_storage_overrides =
-                        spec.operator_type_storage_overrides();
+                    let spec = spec.clone();
                     let handle = adapter
                         .start_attempt(StartAttemptRequest {
                             pipeline_execution_context: run.pipeline_execution_context.clone(),

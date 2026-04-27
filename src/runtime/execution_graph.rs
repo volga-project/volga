@@ -212,7 +212,6 @@ impl ExecutionGraph {
         self.update_channels_with_node_mapping_and_transport(
             execution_vertex_to_cluster_node,
             &TransportSpec::default(),
-            &HashMap::new(),
         );
     }
 
@@ -220,28 +219,9 @@ impl ExecutionGraph {
         &mut self,
         execution_vertex_to_cluster_node: Option<&TaskPlacementMapping>,
         transport: &TransportSpec,
-        per_operator_queue_records: &HashMap<String, u32>,
     ) {
         for edge in self.edges.values_mut() {
-            let source_operator_id = self
-                .vertices
-                .get(&edge.source_vertex_id)
-                .expect("source vertex should exist")
-                .operator_id
-                .clone();
-            let target_operator_id = self
-                .vertices
-                .get(&edge.target_vertex_id)
-                .expect("target vertex should exist")
-                .operator_id
-                .clone();
             let mut queue_size_records = transport.default_queue_records.max(1);
-            if let Some(v) = per_operator_queue_records.get(&source_operator_id) {
-                queue_size_records = queue_size_records.max((*v).max(1));
-            }
-            if let Some(v) = per_operator_queue_records.get(&target_operator_id) {
-                queue_size_records = queue_size_records.max((*v).max(1));
-            }
 
             let channel = if let Some(vertex_to_node) = execution_vertex_to_cluster_node {
                 // Check if vertices are on different nodes

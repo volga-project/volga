@@ -36,11 +36,6 @@ pub enum ExecutionProfile {
         task_placement_strategy: TaskPlacementStrategyName,
         resource_strategy: ResourceStrategy,
     },
-    Custom {
-        runtime_adapter: RuntimeAdapterSpec,
-        task_placement_strategy: TaskPlacementStrategyName,
-        resource_strategy: ResourceStrategy,
-    },
 }
 
 impl ExecutionProfile {
@@ -63,7 +58,6 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { .. } => Some(RuntimeAdapterSpec::Local),
             ExecutionProfile::K8s { .. } => Some(RuntimeAdapterSpec::K8s),
-            ExecutionProfile::Custom { runtime_adapter, .. } => Some(runtime_adapter.clone()),
         }
     }
 
@@ -72,7 +66,6 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { task_placement_strategy, .. } => Some(task_placement_strategy),
             ExecutionProfile::K8s { task_placement_strategy, .. } => Some(task_placement_strategy),
-            ExecutionProfile::Custom { task_placement_strategy, .. } => Some(task_placement_strategy),
         }
     }
 
@@ -81,7 +74,6 @@ impl ExecutionProfile {
             ExecutionProfile::InProcess => None,
             ExecutionProfile::Local { resource_strategy, .. } => Some(resource_strategy),
             ExecutionProfile::K8s { resource_strategy, .. } => Some(resource_strategy),
-            ExecutionProfile::Custom { resource_strategy, .. } => Some(resource_strategy),
         }
     }
 }
@@ -116,10 +108,6 @@ pub struct PipelineSpec {
 #[derive(Clone, Debug)]
 pub struct PipelineSpecBuilder {
     spec: PipelineSpec,
-}
-
-fn operator_override_transport_queue_records(o: &OperatorOverride) -> Option<u32> {
-    o.transport.as_ref().and_then(|t| t.queue_records)
 }
 
 impl PipelineSpecBuilder {
@@ -281,19 +269,5 @@ impl PipelineSpecBuilder {
     }
 }
 
-impl PipelineSpec {
-    pub fn transport_overrides_queue_records(&self) -> HashMap<String, u32> {
-        let mut out = HashMap::new();
-        for (op_id, ov) in &self.operator_overrides.per_operator {
-            if let Some(v) = operator_override_transport_queue_records(ov) {
-                out.insert(op_id.clone(), v.max(1));
-            }
-        }
-        out
-    }
-
-    pub fn operator_type_storage_overrides(&self) -> HashMap<String, StorageSpec> {
-        self.operator_type_storage.clone()
-    }
-}
+impl PipelineSpec {}
 
