@@ -1,6 +1,7 @@
 use tonic::{Request, Response, Status};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
+use crate::common::ids::ChannelId;
 use crate::common::message::Message;
 
 pub mod message_stream {
@@ -17,11 +18,11 @@ use crate::transport::grpc::grpc_streaming_service::message_stream::message_stre
 #[derive(Default)]
 pub struct MessageStreamServiceImpl {
     // Channel to send received messages to the application
-    tx: Option<mpsc::Sender<(Message, String)>>,
+    tx: Option<mpsc::Sender<(Message, ChannelId)>>,
 }
 
 impl MessageStreamServiceImpl {
-    pub fn new(tx: mpsc::Sender<(Message, String)>) -> Self {
+    pub fn new(tx: mpsc::Sender<(Message, ChannelId)>) -> Self {
         Self {
             tx: Some(tx),
         }
@@ -40,11 +41,11 @@ impl MessageStreamService for MessageStreamServiceImpl {
         // Process incoming messages
         while let Some(message) = stream.message().await? {
             let message_data = message.message_data;
-            let channel_id = message.channel_id;
-            
+            let channel_id = ChannelId::from_raw(message.channel_id);
+
             // Deserialize the message
             let deserialized_message = Message::from_bytes(&message_data);
-            
+
             // Send to application via channel
             if let Err(e) = tx.send((deserialized_message, channel_id)).await {
                 eprintln!("[SERVER] Failed to send message to application: {}", e);
@@ -67,8 +68,8 @@ impl MessageStreamClient {
     }
 
     pub async fn connect_with_retry(
-        addr: String, 
-        max_retries: u32, 
+        addr: String,
+        max_retries: u32,
         delay: Duration
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut last_error = None;
@@ -82,7 +83,7 @@ impl MessageStreamClient {
                 Err(e) => {
                     last_error = Some(e);
                     if attempt < max_retries {
-                        println!("[GRPC_CLIENT] Connection attempt {} failed for {}: {}. Retrying in {:?}...", 
+                        println!("[GRPC_CLIENT] Connection attempt {} failed for {}: {}. Retrying in {:?}...",
                                 attempt + 1, addr, last_error.as_ref().unwrap(), delay);
                         sleep(delay).await;
                     }
@@ -90,13 +91,13 @@ impl MessageStreamClient {
             }
         }
 
-        Err(format!("Failed to connect to {} after {} attempts. Last error: {}", 
+        Err(format!("Failed to connect to {} after {} attempts. Last error: {}",
                    addr, max_retries + 1, last_error.unwrap()).into())
     }
 
     pub async fn stream_messages(
         &mut self,
-        rx: mpsc::Receiver<(Message, String)>,
+        rx: mpsc::Receiver<(Message, ChannelId)>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let stream = tokio_stream::StreamExt::map(
             tokio_stream::wrappers::ReceiverStream::new(rx),
@@ -104,15 +105,15 @@ impl MessageStreamClient {
                 // Serialize the message
                 let message_data = message.to_bytes();
                 GrpcMessage {
-                    message_data,
-                    channel_id,
+                    message_data: message_data,
+                    channel_id: channel_id.raw(),
                 }
             }
         );
 
         let request = Request::new(stream);
         let _response = self.client.stream_messages(request).await?;
-        
+
         Ok(())
     }
 }

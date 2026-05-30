@@ -14,6 +14,7 @@ use testcontainers::core::WaitFor;
 use testcontainers::{GenericImage, RunnableImage};
 
 use crate::common::message::Message;
+use crate::common::{OperatorTypeCode, VertexId};
 use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::functions::source::source_function::SourceFunctionTrait;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -156,8 +157,7 @@ async fn kafka_source_reads_arrow_ipc() {
     let mut source = build_source(bootstrap_servers, schema, KafkaOffsetSpec::Earliest);
 
     let ctx = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        0,
+        VertexId::new(OperatorTypeCode::SourceKafka, 1, 1),
         1,
         None,
         None,
@@ -201,8 +201,7 @@ async fn kafka_source_checkpoint_restore_replays_from_saved_offsets() {
 
     let mut source = build_source(bootstrap_servers.clone(), schema.clone(), KafkaOffsetSpec::Earliest);
     let ctx = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        0,
+        VertexId::new(OperatorTypeCode::SourceKafka, 1, 1),
         1,
         None,
         None,
@@ -287,16 +286,14 @@ async fn kafka_source_parallel_tasks_consume_all_partitions() {
     };
 
     let ctx_a = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        0,
+        VertexId::new(OperatorTypeCode::SourceKafka, 1, 2),
         2,
         None,
         None,
         None,
     );
     let ctx_b = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        1,
+        VertexId::new(OperatorTypeCode::SourceKafka, 2, 2),
         2,
         None,
         None,

@@ -109,8 +109,8 @@ pub struct DatagenSourceFunction {
     config: DatagenSourceConfig,
     
     // Runtime state
-    task_index: Option<i32>,
-    parallelism: Option<i32>,
+    task_index: Option<u16>,
+    parallelism: Option<u16>,
     vertex_id: Option<String>,
     
     // Rate coordination state
@@ -653,6 +653,7 @@ mod tests {
     use arrow::array::{Array, StringArray, Int64Array, Float64Array, TimestampMillisecondArray};
     use arrow::datatypes::{DataType, Field, TimeUnit};
     use crate::common::message::Message;
+    use crate::common::{OperatorTypeCode, VertexId};
 
     fn create_test_config() -> DatagenSourceConfig {
         let schema = Arc::new(Schema::new(vec![
@@ -712,8 +713,7 @@ mod tests {
             let mut source = DatagenSourceFunction::new(config.clone());
             
             let ctx = RuntimeContext::new(
-                "test".to_string().into(),
-                task_index,
+                VertexId::new(OperatorTypeCode::Map, 1, task_index),
                 parallelism,
                 None,
                 None,
@@ -853,16 +853,15 @@ mod tests {
                 let mut source = DatagenSourceFunction::new(config_clone);
                 
                 let ctx = RuntimeContext::new(
-                    "test".to_string().into(),
-                    task_index,
+                    VertexId::new(OperatorTypeCode::Map, 1, task_index),
                     parallelism,
                     None,
                     None,
                     None
                 );
-                
+
                 source.open(&ctx).await.unwrap();
-                
+
                 let mut task_timestamps = Vec::new();
                 let mut batch_count = 0;
                 
@@ -1043,8 +1042,7 @@ mod tests {
             // Baseline: uninterrupted run
             let mut baseline = DatagenSourceFunction::new(cfg.clone());
             let ctx = RuntimeContext::new(
-                "test".to_string().into(),
-                task_index,
+                VertexId::new(OperatorTypeCode::SourceDatagen, 1, task_index),
                 parallelism,
                 None,
                 None,
@@ -1056,8 +1054,7 @@ mod tests {
             // Interrupted: run until checkpoint, snapshot, restart, restore, continue
             let mut first = DatagenSourceFunction::new(cfg.clone());
             let ctx_first = RuntimeContext::new(
-                "test".to_string().into(),
-                task_index,
+                VertexId::new(OperatorTypeCode::SourceDatagen, 1, task_index),
                 parallelism,
                 None,
                 None,
@@ -1069,8 +1066,7 @@ mod tests {
 
             let mut second = DatagenSourceFunction::new(cfg.clone());
             let ctx_second = RuntimeContext::new(
-                "test".to_string().into(),
-                task_index,
+                VertexId::new(OperatorTypeCode::SourceDatagen, 1, task_index),
                 parallelism,
                 None,
                 None,

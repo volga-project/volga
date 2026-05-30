@@ -54,7 +54,7 @@ fn test_stream_task_actor() -> Result<()> {
         // Non-source tasks only finish when they receive a terminal watermark from upstream.
         // With strict upstream tracking, the watermark must carry the true upstream vertex id.
         test_messages.push(Message::Watermark(WatermarkMessage::new(
-            input_vertex_id.as_ref().to_string(),
+            input_vertex_id,
             MAX_WATERMARK_VALUE,
             None,
         )));
@@ -63,10 +63,9 @@ fn test_stream_task_actor() -> Result<()> {
         let task = StreamTask::new(
             task_vertex_id.clone(),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            configs.remove(task_vertex_id.as_ref()).unwrap(),
+            configs.remove(&task_vertex_id).unwrap(),
             RuntimeContext::new(
                 task_vertex_id.clone(),
-                0,
                 1,
                 None,
                 None,
@@ -80,8 +79,8 @@ fn test_stream_task_actor() -> Result<()> {
         let backend_ref = spawn(backend_actor);
 
         // Create external writer and reader actors
-        let input_actor = TestDataWriterActor::new(input_vertex_id.clone(), configs.remove(input_vertex_id.as_ref()).unwrap());
-        let output_actor = TestDataReaderActor::new(output_vertex_id.clone(), configs.remove(output_vertex_id.as_ref()).unwrap());
+        let input_actor = TestDataWriterActor::new(input_vertex_id.clone(), configs.remove(&input_vertex_id).unwrap());
+        let output_actor = TestDataReaderActor::new(output_vertex_id.clone(), configs.remove(&output_vertex_id).unwrap());
         let task_actor = StreamTaskActor::new(task);
 
         let input_ref = spawn(input_actor);
@@ -102,8 +101,8 @@ fn test_stream_task_actor() -> Result<()> {
             // let channel_id = gen_channel_id(&input_vertex_id, &task_vertex_id);
             // Channel ids are protocol strings.
             let channel = Channel::new_local(
-                input_vertex_id.as_ref().to_string(),
-                task_vertex_id.as_ref().to_string(),
+                input_vertex_id.clone(),
+                task_vertex_id.clone(),
             );
             input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                 channel,

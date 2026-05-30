@@ -47,8 +47,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             .values()
             .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
             .map(|v| TaskKey {
-                vertex_id: v.vertex_id.as_ref().to_string(),
-                task_index: v.task_index,
+                vertex_id: v.vertex_id
             })
             .collect::<Vec<_>>();
         master_server.set_checkpointable_tasks(expected_tasks).await;
@@ -69,7 +68,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             // - if any edge touching this worker's vertices is remote, use gRPC transport backend
             // - otherwise, prefer in-memory transport backend (single-node / single-worker fast path)
             let has_remote_channels = vertex_ids.iter().any(|vertex_id| {
-                if let Some((in_edges, out_edges)) = req.execution_graph.get_edges_for_vertex(vertex_id) {
+                if let Some((in_edges, out_edges)) = req.execution_graph.get_edges_for_vertex(*vertex_id) {
                     in_edges
                         .iter()
                         .chain(out_edges.iter())
@@ -88,10 +87,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                 node_id.clone(),
                 req.execution_ids.clone(),
                 req.execution_graph.clone(),
-                vertex_ids
-                    .into_iter()
-                    .map(|v| std::sync::Arc::<str>::from(v))
-                    .collect(),
+                vertex_ids,
                 1,
                 transport_backend_type,
             )

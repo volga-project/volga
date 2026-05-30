@@ -9,7 +9,7 @@ use std::sync::Mutex;
 use lazy_static::lazy_static;
 use async_trait::async_trait;
 
-use crate::common::Message;
+use crate::common::{Message, OperatorId, VertexId};
 use crate::runtime::functions::map::MapFunctionTrait;
 use crate::runtime::observability::PipelineSnapshot;
 use crate::runtime::metrics::{PipelineStateHistory, ThroughputRates};
@@ -45,7 +45,7 @@ pub fn gen_unique_grpc_port() -> u16 {
 
 pub fn print_pipeline_state(
     pipeline_state: &PipelineSnapshot,
-    operator_ids: Option<&[String]>,
+    operator_ids: Option<&[OperatorId]>,
     tasks_only: bool,
     operators_only: bool,
     history: Option<&PipelineStateHistory>,
@@ -54,7 +54,7 @@ pub fn print_pipeline_state(
     println!("\n=== Pipeline State ===");
     
     // Calculate throughput rates if history is provided
-    let throughput_rates: Option<HashMap<String, ThroughputRates>> = if let (Some(hist), Some(window_secs)) = (history, throughput_window_seconds) {
+    let throughput_rates: Option<HashMap<VertexId, ThroughputRates>> = if let (Some(hist), Some(window_secs)) = (history, throughput_window_seconds) {
         if !hist.samples.is_empty() {
             Some(hist.calculate_throughput_rates(window_secs))
         } else {
@@ -65,29 +65,31 @@ pub fn print_pipeline_state(
     };
     
     // Helper function to check if an operator_id should be included
-    let should_include_operator = |operator_id: &str| -> bool {
-        operator_ids.map_or(true, |ids| ids.contains(&operator_id.to_string()))
+    let should_include_operator = |operator_id: OperatorId| -> bool {
+        operator_ids.map_or(true, |ids| ids.contains(&operator_id))
     };
     
-    // Helper function to check if a vertex_id (task) should be included
-    // Vertex IDs are typically formatted as "operator_id_parallel_index"
-    let should_include_task = |vertex_id: &str| -> bool {
+    // Helper function to check if a vertex_id (task) should be included.
+    // The Display form encodes operator_type and instance, so substring match
+    // against operator_id (e.g. "Map_3") still works.
+    let should_include_task = |vertex_label: VertexId| -> bool {
         if let Some(operator_ids) = operator_ids {
-            operator_ids.iter().any(|op_id| vertex_id.starts_with(op_id))
+            operator_ids.iter().any(|op_id| vertex_label.operator_id() == *op_id)
         } else {
             true
         }
     };
-    
+
     for (worker_id, worker_state) in &pipeline_state.worker_states {
         println!("\n--- Worker: {} ---", worker_id);
-        
+
         if !operators_only {
             println!("Task Statuses:");
             let mut has_task_statuses = false;
             for (vertex_id, status) in &worker_state.task_statuses {
-                if should_include_task(vertex_id) {
-                    println!("  {}: {:?}", vertex_id, status);
+                let label = vertex_id;
+                if should_include_task(vertex_id.clone()) {
+                    println!("  {}: {:?}", label, status);
                     has_task_statuses = true;
                 }
             }
@@ -101,7 +103,7 @@ pub fn print_pipeline_state(
             println!("\nOperator Metrics:");
             let mut has_operator_metrics = false;
             for (operator_id, operator_metrics) in &worker_metrics.operator_metrics {
-                if should_include_operator(operator_id) {
+                if should_include_operator(operator_id.clone()) {
                     println!("  Operator: {}", operator_id);
                     println!("    Throughput:");
                     println!("      Messages Sent: {} (total)", operator_metrics.throughput_metrics.messages_sent);
@@ -127,7 +129,7 @@ pub fn print_pipeline_state(
             println!("\nTask Metrics:");
             let mut has_task_metrics = false;
             for (vertex_id, task_metrics) in &worker_metrics.tasks_metrics {
-                if should_include_task(vertex_id) {
+                if should_include_task(vertex_id.clone()) {
                     println!("  Task: {}", vertex_id);
                     println!("    Throughput:");
                     println!("      Messages Sent: {} (total)", task_metrics.throughput_stast.messages_sent);

@@ -1,14 +1,16 @@
 use std::collections::HashMap;
+use crate::common::ids::VertexId;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::cluster::cluster_provider::ClusterNode;
+use crate::common::OperatorId;
 
 /// Mapping from execution vertex ID to cluster node
-pub type ExecutionVertexNodeMapping = HashMap<String, ClusterNode>;
+pub type ExecutionVertexNodeMapping = HashMap<VertexId, ClusterNode>;
 
-pub fn node_to_vertex_ids(mapping: &ExecutionVertexNodeMapping) -> HashMap<String, Vec<String>> {
+pub fn node_to_vertex_ids(mapping: &ExecutionVertexNodeMapping) -> HashMap<String, Vec<VertexId>> {
     let mut node_to_vertex_ids = HashMap::new();
     for (vertex_id, node) in mapping {
-        node_to_vertex_ids.entry(node.node_id.clone()).or_insert_with(Vec::new).push(vertex_id.clone());
+        node_to_vertex_ids.entry(node.node_id.clone()).or_insert_with(Vec::new).push(*vertex_id);
     }
     node_to_vertex_ids
 }
@@ -30,7 +32,7 @@ impl NodeAssignStrategy for SingleNodeStrategy {
         }
         let node = cluster_nodes[0].clone();
         for vertex_id in execution_graph.get_vertices().keys() {
-            mapping.insert(vertex_id.as_ref().to_string(), node.clone());
+            mapping.insert(*vertex_id, node.clone());
         }
         mapping
     }
@@ -48,7 +50,7 @@ impl NodeAssignStrategy for SingleWorkerStrategy {
         }
         let worker_node = cluster_nodes[1].clone();
         for vertex_id in execution_graph.get_vertices().keys() {
-            mapping.insert(vertex_id.as_ref().to_string(), worker_node.clone());
+            mapping.insert(*vertex_id, worker_node.clone());
         }
         mapping
     }
@@ -60,21 +62,21 @@ pub struct OperatorPerNodeStrategy;
 impl NodeAssignStrategy for OperatorPerNodeStrategy {
     fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping {
         let mut mapping = ExecutionVertexNodeMapping::new();
-        
+
         if cluster_nodes.is_empty() {
             return mapping;
         }
 
         // Group vertices by operator_id
-        let mut operator_to_vertices: HashMap<String, Vec<String>> = HashMap::new();
-        
+        let mut operator_to_vertices: HashMap<OperatorId, Vec<VertexId>> = HashMap::new();
+
         for vertex_id in execution_graph.get_vertices().keys() {
-            let vertex = execution_graph.get_vertices().get(vertex_id).expect("vertex should exist");
-            let operator_id = vertex.operator_id.clone();
+            let execution_vertex = execution_graph.get_vertices().get(vertex_id).expect("vertex should exist");
+            let operator_id = execution_vertex.vertex_id.operator_id();
             operator_to_vertices
                 .entry(operator_id)
                 .or_insert_with(Vec::new)
-                .push(vertex_id.as_ref().to_string());
+                .push(*vertex_id);
         }
 
         // Check if we have enough nodes for all operators
@@ -86,12 +88,12 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
         let mut node_index = 0;
         for (_operator_id, vertex_ids) in operator_to_vertices {
             let cluster_node = &cluster_nodes[node_index % cluster_nodes.len()];
-            
+
             // Assign all vertices of this operator to the same node
             for vertex_id in vertex_ids {
                 mapping.insert(vertex_id, cluster_node.clone());
             }
-            
+
             node_index += 1;
         }
 
@@ -103,6 +105,7 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
 mod tests {
     use super::*;
     use crate::cluster::cluster_provider::create_test_cluster_nodes;
+    use crate::common::OperatorId;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::execution_graph::ExecutionGraph;
 
@@ -111,24 +114,24 @@ mod tests {
         use datafusion::execution::context::SessionContext;
         use arrow::datatypes::{Schema, Field, DataType};
         use std::sync::Arc;
-        
+
         let ctx = SessionContext::new();
         let mut planner = Planner::new(PlanningContext::new(ctx));
-        
+
         // Register test table
         planner.register_source(
-            "test_table".to_string(), 
-            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
+            "test_table".to_string(),
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
             Arc::new(Schema::new(vec![
                 Field::new("id", DataType::Int32, false),
                 Field::new("value", DataType::Float64, false),
             ]))
         );
-        
+
         // Create logical graph from SQL
         let sql = "SELECT id FROM test_table WHERE value > 3.0";
         let logical_graph = planner.sql_to_graph(sql).unwrap();
-        
+
         // Convert to execution graph
         logical_graph.to_execution_graph()
     }
@@ -138,12 +141,12 @@ mod tests {
         let execution_graph = create_test_execution_graph();
 
         // Group vertices by operator_id
-        let mut operator_to_vertices: HashMap<String, Vec<String>> = HashMap::new();
-        for (vertex_id, vertex) in execution_graph.get_vertices() {
+        let mut operator_to_vertices: HashMap<OperatorId, Vec<VertexId>> = HashMap::new();
+        for (vertex_id, execution_vertex) in execution_graph.get_vertices() {
             operator_to_vertices
-                .entry(vertex.operator_id.clone())
+                .entry(execution_vertex.vertex_id.operator_id())
                 .or_insert_with(Vec::new)
-                .push(vertex_id.as_ref().to_string());
+                .push(*vertex_id);
         }
 
         let num_operators = operator_to_vertices.len();
@@ -157,34 +160,34 @@ mod tests {
         assert_eq!(mapping.len(), execution_graph.get_vertices().len());
 
         // Group vertices by assigned node
-        let mut node_to_vertices: HashMap<String, Vec<String>> = HashMap::new();
+        let mut node_to_vertices: HashMap<String, Vec<VertexId>> = HashMap::new();
         for (vertex_id, cluster_node) in &mapping {
             node_to_vertices
                 .entry(cluster_node.node_id.clone())
                 .or_insert_with(Vec::new)
-                .push(vertex_id.clone());
+                .push(*vertex_id);
         }
 
         // Verify that each node contains vertices with the same operator_id
         for (node_id, vertex_ids) in &node_to_vertices {
             let mut operator_ids = std::collections::HashSet::new();
             for vertex_id in vertex_ids {
-                let vertex = execution_graph.get_vertices().get(vertex_id.as_str()).unwrap();
-                operator_ids.insert(vertex.operator_id.clone());
+                let execution_vertex = execution_graph.get_vertices().get(vertex_id).unwrap();
+                operator_ids.insert(execution_vertex.vertex_id.operator_id());
             }
             // All vertices on the same node should have the same operator_id
             assert_eq!(operator_ids.len(), 1, "Node {} contains vertices with different operator_ids: {:?}", node_id, operator_ids);
         }
 
         // Verify that each operator_id maps to exactly one node
-        let mut operator_to_node: HashMap<String, String> = HashMap::new();
+        let mut operator_to_node: HashMap<OperatorId, String> = HashMap::new();
         for (vertex_id, cluster_node) in &mapping {
-            let vertex = execution_graph.get_vertices().get(vertex_id.as_str()).unwrap();
-            let operator_id = &vertex.operator_id;
-            
+            let vertex = execution_graph.get_vertices().get(vertex_id).unwrap();
+            let operator_id = &vertex.vertex_id.operator_id();
+
             if let Some(existing_node) = operator_to_node.get(operator_id) {
-                assert_eq!(existing_node, &cluster_node.node_id, 
-                    "Operator {} is assigned to multiple nodes: {} and {}", 
+                assert_eq!(existing_node, &cluster_node.node_id,
+                    "Operator {} is assigned to multiple nodes: {} and {}",
                     operator_id, existing_node, cluster_node.node_id);
             } else {
                 operator_to_node.insert(operator_id.clone(), cluster_node.node_id.clone());
@@ -194,9 +197,9 @@ mod tests {
         // Verify that all operator_ids from the execution graph are present
         let expected_operator_ids: std::collections::HashSet<_> = execution_graph.get_vertices()
             .values()
-            .map(|v| v.operator_id.clone())
+            .map(|v| v.vertex_id.operator_id())
             .collect();
         let mapped_operator_ids: std::collections::HashSet<_> = operator_to_node.keys().cloned().collect();
         assert_eq!(expected_operator_ids, mapped_operator_ids);
     }
-} 
+}

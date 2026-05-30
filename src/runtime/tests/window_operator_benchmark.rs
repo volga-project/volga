@@ -1,6 +1,7 @@
 use crate::{
     api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     api::compile_logical_graph,
+    common::{OperatorId, OperatorTypeCode},
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
@@ -172,7 +173,7 @@ fn update_window_configs_in_graph(
     let window_nodes: Vec<NodeIndex> = graph
         .get_nodes()
         .filter(|node| matches!(node.operator_config, OperatorConfig::WindowConfig(_)))
-        .map(|node| graph.get_node_index(&node.operator_id).unwrap())
+        .map(|node| graph.get_node_index(node.operator_id).unwrap())
         .collect();
     
     for node_idx in window_nodes {
@@ -332,13 +333,13 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
                             println!("[{}] Worker State", timestamp);
                             
                             // Find window operator IDs
-                            let window_operator_ids: Vec<String> = pipeline_state.worker_states
+                            let window_operator_ids: Vec<OperatorId> = pipeline_state.worker_states
                                 .values()
                                 .flat_map(|ws| {
                                     ws.worker_metrics.as_ref()
                                         .map(|wm| {
                                             wm.operator_metrics.keys()
-                                                .filter(|id| id.starts_with("Window_"))
+                                                .filter(|id| id.op_type() == OperatorTypeCode::Window)
                                                 .cloned()
                                                 .collect::<Vec<_>>()
                                         })

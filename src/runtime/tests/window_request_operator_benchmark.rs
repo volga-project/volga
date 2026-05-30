@@ -22,6 +22,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use datafusion::common::ScalarValue;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use crate::common::{OperatorId, OperatorTypeCode};
 
 fn create_datagen_config(
     rate: Option<f32>,
@@ -229,7 +230,7 @@ pub async fn run_window_request_benchmark(
                     
                     print_pipeline_state(
                         &pipeline_state, 
-                        Some(&["Window_1".to_string()]), 
+                        Some(&[OperatorId::new(OperatorTypeCode::Window, 1)]),
                         true, 
                         false,
                         Some(&history),

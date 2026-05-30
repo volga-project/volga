@@ -9,6 +9,7 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::observability::PipelineSnapshot;
 use crate::api::WorkerRuntimeSpec;
 use crate::api::StorageSpec;
+use crate::common::OperatorId;
 
 #[derive(Clone)]
 pub struct StartAttemptRequest {
@@ -17,7 +18,7 @@ pub struct StartAttemptRequest {
     pub num_workers_per_operator: usize,
     pub cluster_provider: std::sync::Arc<dyn ClusterProvider>,
     pub node_assign: std::sync::Arc<dyn NodeAssignStrategy>,
-    pub transport_overrides_queue_records: std::collections::HashMap<String, u32>,
+    pub transport_overrides_queue_records: std::collections::HashMap<OperatorId, u32>,
     pub worker_runtime: WorkerRuntimeSpec,
     pub operator_type_storage_overrides: std::collections::HashMap<String, StorageSpec>,
 }

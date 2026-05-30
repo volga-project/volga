@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use datafusion::common::ScalarValue;
+use kameo::Reply;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master_server::{MasterServer, TaskKey};
@@ -20,6 +21,7 @@ use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 // Watermark assigner placement is done by the planner (see LogicalGraph::to_execution_graph).
 
 use crate::runtime::tests::test_utils::{create_window_input_schema, wait_for_status, window_rows_from_messages};
+use crate::runtime::VertexId;
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[tokio::test]
@@ -96,7 +98,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let lateness_ms: i64 = out_of_orderness_ms as i64;
     let vertex_ids_snapshot: Vec<_> = exec_graph1.get_vertices().keys().cloned().collect();
     for vid in vertex_ids_snapshot {
-        if let Some(v) = exec_graph1.get_vertex_mut(vid.as_ref()) {
+        if let Some(v) = exec_graph1.get_vertex_mut(vid) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
                 cfg.spec.lateness = Some(lateness_ms);
             }
@@ -109,7 +111,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         .get_vertices()
         .values()
         .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
-        .map(|v| TaskKey { vertex_id: v.vertex_id.as_ref().to_string(), task_index: v.task_index })
+        .map(|v| TaskKey { vertex_id: v.vertex_id })
         .collect::<Vec<_>>();
     master_server
         .set_checkpointable_tasks(expected_tasks.clone())
@@ -117,11 +119,11 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     master_server.start(&master_addr).await?;
 
     // Track all window vertices for state verification (parallelism > 1 => multiple task vertices)
-    let window_vertex_ids: Vec<String> = exec_graph1
+    let window_vertex_ids: Vec<VertexId> = exec_graph1
         .get_vertices()
         .values()
         .filter(|v| matches!(v.operator_config, OperatorConfig::WindowConfig(_)))
-        .map(|v| v.vertex_id.as_ref().to_string())
+        .map(|v| v.vertex_id)
         .collect();
 
     // Start worker #1
@@ -162,14 +164,14 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     }
 
     // Fetch checkpointed state for all checkpointable vertices from master for later comparison.
-    let mut checkpointed_window_key_counts: HashMap<String, usize> = HashMap::new();
+    let mut checkpointed_window_key_counts: HashMap<VertexId, usize> = HashMap::new();
     for task in &expected_tasks {
         let resp = master_client
             .get_task_checkpoint(tonic::Request::new(
                 crate::runtime::master_server::master_service::GetTaskCheckpointRequest {
                     checkpoint_id: 1,
-                    vertex_id: task.vertex_id.clone(),
-                    task_index: task.task_index,
+                    vertex_id: task.vertex_id.raw(),
+                    task_index: task.vertex_id.task_index() as i32,
                 },
             ))
             .await?
@@ -215,7 +217,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut exec_graph2 = logical_graph.to_execution_graph();
     let vertex_ids_snapshot: Vec<_> = exec_graph2.get_vertices().keys().cloned().collect();
     for vid in vertex_ids_snapshot {
-        if let Some(v) = exec_graph2.get_vertex_mut(vid.as_ref()) {
+        if let Some(v) = exec_graph2.get_vertex_mut(vid) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
                 cfg.spec.lateness = Some(lateness_ms);
             }
@@ -247,7 +249,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             .unwrap_or_else(|| panic!("missing checkpointed window key count for {}", window_vertex_id));
 
         let state_any = op_states
-            .get_operator_state(window_vertex_id)
+            .get_operator_state(*window_vertex_id)
             .unwrap_or_else(|| panic!("Expected window operator state to be registered for {}", window_vertex_id));
 
         let window_state = state_any

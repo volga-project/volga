@@ -5,6 +5,8 @@ use arrow::datatypes::Schema as ArrowSchema;
 use petgraph::graph::{DiGraph, NodeIndex};
 use petgraph::prelude::EdgeRef;
 use petgraph::Direction;
+use crate::common::ids::{OperatorTypeCode, VertexId};
+use crate::common::OperatorId;
 use crate::runtime::operators::chained::chained_operator::group_operators_for_chaining;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
@@ -17,7 +19,7 @@ use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Clone)]
 pub struct LogicalNode {
-    pub operator_id: String, // unique id for the node/operator
+    pub operator_id: OperatorId, // unique human-readable id for the node/operator, e.g. "Map_1"
     pub operator_config: OperatorConfig,
     pub parallelism: usize,
     pub in_schema: Option<Arc<ArrowSchema>>,
@@ -27,8 +29,9 @@ pub struct LogicalNode {
 
 impl LogicalNode {
     pub fn new(operator_config: OperatorConfig, parallelism: usize, in_schema: Option<Arc<ArrowSchema>>, out_schema: Option<Arc<ArrowSchema>>) -> Self {
+        let op_type_code = OperatorTypeCode::from(&operator_config);
         Self {
-            operator_id: String::new(), // Will be set by add_node
+            operator_id: OperatorId::new(op_type_code, 0), // Will be set by add_node
             operator_config,
             parallelism,
             in_schema,
@@ -36,7 +39,7 @@ impl LogicalNode {
             watermark_assign: None,
         }
     }
-} 
+}
 
 /// Connector configuration for sources and sinks
 #[derive(Debug, Clone)]
@@ -47,15 +50,17 @@ pub struct ConnectorConfig {
 
 #[derive(Debug, Clone)]
 pub struct LogicalEdge {
-    pub source_node_id: String,
-    pub target_node_id: String,
+    pub source_node_id: OperatorId,
+    pub target_node_id: OperatorId,
     pub partition_type: PartitionType,
 }
 
 #[derive(Debug, Clone)]
 pub struct LogicalGraph {
     graph: DiGraph<LogicalNode, LogicalEdge>,
-    operator_type_counters: HashMap<String, u32>,
+    /// Per-op-type counter; assigns 1-based instance ids that fit in `u8`.
+    /// Panics in `add_node` if more than 255 instances of the same type are created.
+    operator_type_counters: HashMap<OperatorTypeCode, u8>,
     root_node_index: Option<NodeIndex>,
     watermarks_enabled: bool,
 }
@@ -86,9 +91,9 @@ impl LogicalGraph {
     }
     
     /// Get node index by operator_id
-    pub fn get_node_index(&self, operator_id: &String) -> Option<NodeIndex> {
+    pub fn get_node_index(&self, operator_id: OperatorId) -> Option<NodeIndex> {
         self.graph.node_indices()
-            .find(|&idx| self.graph[idx].operator_id == *operator_id)
+            .find(|&idx| self.graph[idx].operator_id == operator_id)
     }
 
     pub fn get_all_node_indices(&self) -> Vec<NodeIndex> {
@@ -111,14 +116,19 @@ impl LogicalGraph {
     }
 
     pub fn add_node(&mut self, mut node: LogicalNode) -> NodeIndex {
-        // Generate unique operator_id based on operator configtype
-        let operator_config_type = format!("{}", node.operator_config);
-        let counter = self.operator_type_counters.entry(operator_config_type.clone()).or_insert(0);
-        *counter += 1;
-        node.operator_id = format!("{}_{}", operator_config_type, counter);
-        
-        let node_index = self.graph.add_node(node);
-        node_index
+        let op_type_code = node.operator_id.op_type();
+        let counter = self.operator_type_counters.entry(op_type_code).or_insert(0);
+        let next = counter.checked_add(1).unwrap_or_else(|| {
+            panic!(
+                "More than 127 instances of operator type {:?} in one pipeline — \
+                 bump the instance_id width if this is ever a real limit",
+                op_type_code
+            )
+        });
+        *counter = next;
+        node.operator_id = OperatorId::new(op_type_code, next);
+
+        self.graph.add_node(node)
     }
 
     pub fn add_edge(&mut self, source: NodeIndex, target: NodeIndex) -> petgraph::graph::EdgeIndex {
@@ -126,15 +136,15 @@ impl LogicalGraph {
         let target_node = &self.graph[target];
         let partition_type = determine_partition_type(&source_node.operator_config, &target_node.operator_config);
         let edge = LogicalEdge {
-            source_node_id: source_node.operator_id.clone(),
-            target_node_id: target_node.operator_id.clone(),
+            source_node_id: source_node.operator_id,
+            target_node_id: target_node.operator_id,
             partition_type,
         };
         
         self.graph.add_edge(source, target, edge)
     }
 
-    pub fn get_node(&self, operator_id: String) -> Option<&LogicalNode> {
+    pub fn get_node(&self, operator_id: OperatorId) -> Option<&LogicalNode> {
         self.graph.node_weights().find(|node| node.operator_id == operator_id)
     }
 
@@ -166,7 +176,7 @@ impl LogicalGraph {
         //
         // TODO: extend placement for joins/unions (multiple-input operators), where "closest window" is ambiguous
         // and per-input watermark generation needs careful handling.
-        let mut auto_watermark_assign: HashMap<String, WatermarkAssignConfig> = HashMap::new();
+        let mut auto_watermark_assign: HashMap<OperatorId, WatermarkAssignConfig> = HashMap::new();
         if self.watermarks_enabled {
             let source_nodes: Vec<NodeIndex> = self
                 .graph
@@ -224,7 +234,7 @@ impl LogicalGraph {
         }
 
         let mut execution_graph = ExecutionGraph::new();
-        let mut logical_to_execution_mapping: HashMap<NodeIndex, Vec<String>> = HashMap::new();
+        let mut logical_to_execution_mapping: HashMap<NodeIndex, Vec<VertexId>> = HashMap::new();
 
         // Create execution vertices for each logical node
         for logical_node in self.graph.node_weights() {
@@ -234,19 +244,25 @@ impl LogicalGraph {
 
             let mut execution_vertex_ids = Vec::new();
             let parallelism = logical_node.parallelism;
+            assert!(
+                parallelism <= u16::MAX as usize,
+                "parallelism {} exceeds u16::MAX for operator {}",
+                parallelism, logical_node.operator_id
+            );
 
             // Create parallel execution vertices for this logical node
             for i in 0..parallelism {
-                let execution_vertex_id = format!("{}_{}", logical_node.operator_id, i);
-
-                let execution_vertex = ExecutionVertex::new(
-                    execution_vertex_id.clone(),
-                    logical_node.operator_id.clone(),
-                    logical_node.operator_config.clone(),
-                    parallelism as i32,
-                    i as i32,
+                let execution_vertex_id = VertexId::new(
+                    logical_node.operator_id.op_type(),
+                    logical_node.operator_id.instance(),
+                    i as u16,
                 );
-                let mut execution_vertex = execution_vertex;
+
+                let mut execution_vertex = ExecutionVertex::new(
+                    execution_vertex_id,
+                    logical_node.operator_config.clone(),
+                    parallelism as i32
+                );
                 execution_vertex.watermark_assign = logical_node
                     .watermark_assign
                     .clone()
@@ -274,9 +290,8 @@ impl LogicalGraph {
             for source_execution_vertex_id in source_execution_vertices {
                 for target_execution_vertex_id in target_execution_vertices {
                     let execution_edge = ExecutionEdge::new(
-                        source_execution_vertex_id.clone(),
-                        target_execution_vertex_id.clone(),
-                        self.graph[target_logical_node_index].operator_id.clone(),
+                        *source_execution_vertex_id,
+                        *target_execution_vertex_id,
                         partition_type.clone(),
                         None, // No channel initially
                     );
@@ -694,9 +709,9 @@ mod tests {
         // Verify partition types
         for edge in edges.values() {
             assert!(matches!(edge.partition_type, PartitionType::RoundRobin),
-                "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+                "Edge {} -> {} should use RoundRobin partitioning", edge.edge_id.source(), edge.edge_id.target());
             // Verify channels are not set initially
-            assert!(edge.channel.is_none(), "Edge {} -> {} should not have channel set initially", edge.source_vertex_id, edge.target_vertex_id);
+            assert!(edge.channel.is_none(), "Edge {} -> {} should not have channel set initially", edge.edge_id.source(), edge.edge_id.target());
         }
     }
 
@@ -757,8 +772,8 @@ mod tests {
         // Verify that edges between different nodes use remote channels
         for edge in edges.values() {
             // Get source and target nodes from the mapping
-            let source_node = vertex_to_node.get(edge.source_vertex_id.as_ref()).expect("Source vertex should be mapped");
-            let target_node = vertex_to_node.get(edge.target_vertex_id.as_ref()).expect("Target vertex should be mapped");
+            let source_node = vertex_to_node.get(&edge.edge_id.source()).expect("Source vertex should be mapped");
+            let target_node = vertex_to_node.get(&edge.edge_id.target()).expect("Target vertex should be mapped");
             
             // Check if vertices are on different nodes
             if source_node.node_id != target_node.node_id {
@@ -770,12 +785,12 @@ mod tests {
                         assert_eq!(*target_port, target_node.node_port as i32);
                     }
                     Some(Channel::Local { .. }) => {
-                        panic!("Expected remote channel for cross-node edge {} -> {}", 
-                               edge.source_vertex_id, edge.target_vertex_id);
+                        panic!("Expected remote channel for cross-node edge {} -> {}",
+                               edge.edge_id.source(), edge.edge_id.target());
                     }
                     None => {
-                        panic!("Expected channel to be set for edge {} -> {}", 
-                               edge.source_vertex_id, edge.target_vertex_id);
+                        panic!("Expected channel to be set for edge {} -> {}",
+                               edge.edge_id.source(), edge.edge_id.target());
                     }
                 }
             } else {
@@ -841,7 +856,7 @@ mod tests {
             // chain_source->map1->keyby -> chain_map2->sink should use Hash partitioning
             // because keyby is the last operator in the source chain
             assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
-                "Edge {} -> {} should use Hash partitioning (keyby -> map2)", edge.source_vertex_id, edge.target_vertex_id);
+                "Edge {} -> {} should use Hash partitioning (keyby -> map2)", edge.edge_id.source(), edge.edge_id.target());
         }
     }
 
@@ -866,26 +881,26 @@ mod tests {
 
         // Check partition types for all edges
         for edge in graph.get_edges().values() {
-            let source_vertex = graph.get_vertex(&edge.source_vertex_id).unwrap();
-            let target_vertex = graph.get_vertex(&edge.target_vertex_id).unwrap();
+            let source_vertex = graph.get_vertex(edge.edge_id.source()).unwrap();
+            let target_vertex = graph.get_vertex(edge.edge_id.target()).unwrap();
 
             match (&source_vertex.operator_config, &target_vertex.operator_config) {
                 (OperatorConfig::SourceConfig(_), OperatorConfig::KeyByConfig(_)) => {
                     // source -> keyby should use RoundRobin
                     assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
-                        "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+                        "Edge {} -> {} should use RoundRobin partitioning", edge.edge_id.source(), edge.edge_id.target());
                 }
                 (OperatorConfig::KeyByConfig(_), OperatorConfig::MapConfig(_)) => {
                     // keyby -> map should use Hash partitioning
                     assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::Hash),
-                        "Edge {} -> {} should use Hash partitioning", edge.source_vertex_id, edge.target_vertex_id);
+                        "Edge {} -> {} should use Hash partitioning", edge.edge_id.source(), edge.edge_id.target());
                 }
                 (OperatorConfig::MapConfig(_), OperatorConfig::SinkConfig(_)) => {
                     // map -> sink should use RoundRobin
                     assert!(matches!(edge.partition_type, crate::runtime::partition::PartitionType::RoundRobin),
-                        "Edge {} -> {} should use RoundRobin partitioning", edge.source_vertex_id, edge.target_vertex_id);
+                        "Edge {} -> {} should use RoundRobin partitioning", edge.edge_id.source(), edge.edge_id.target());
                 }
-                _ => panic!("Unexpected edge: {} -> {}", edge.source_vertex_id, edge.target_vertex_id)
+                _ => panic!("Unexpected edge: {} -> {}", edge.edge_id.source(), edge.edge_id.target())
             }
         }
     }

@@ -188,8 +188,8 @@ impl KafkaSourceFunction {
 
     fn compute_assigned_partitions(
         total_partitions: usize,
-        task_index: i32,
-        parallelism: i32,
+        task_index: u16,
+        parallelism: u16,
     ) -> Vec<i32> {
         (0..total_partitions)
             .filter(|i| i % parallelism as usize == task_index as usize)

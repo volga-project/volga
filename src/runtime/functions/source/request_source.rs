@@ -448,8 +448,8 @@ mod tests {
     use tokio::time::{sleep, Duration};
     use futures::FutureExt;
     use std::sync::Arc;
+    use crate::common::{OperatorTypeCode, VertexId};
 
-    
     fn create_test_config(schema: SchemaRef) -> RequestSourceConfig {
         let port = gen_unique_grpc_port();
 
@@ -466,7 +466,7 @@ mod tests {
     }
 
     fn create_test_runtime_context() -> RuntimeContext {
-        RuntimeContext::new(Arc::<str>::from("test_vertex"), 0, 1, None, None, None)
+        RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 0),  1, None, None, None)
     }
     
     async fn create_test_processor_and_source(schema: SchemaRef) -> (RequestSourceProcessor, HttpRequestSourceFunction) {
@@ -572,7 +572,7 @@ mod tests {
         for i in 0..record_batch.num_rows() {
             let record_batch_slice = record_batch.slice(i, 1);
             let response_message = Message::new(
-                Some("processor".to_string()),
+                Some(VertexId::new(OperatorTypeCode::Map, 1, 1)),
                 record_batch_slice,
                 Some(12345),
                 Some(extras.clone())

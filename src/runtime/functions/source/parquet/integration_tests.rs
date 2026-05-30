@@ -15,6 +15,7 @@ use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use testcontainers::{clients::Cli, GenericImage, RunnableImage};
 use testcontainers::core::WaitFor;
 use uuid::Uuid;
+use crate::common::{OperatorTypeCode, VertexId};
 
 fn write_parquet_file(path: &Path, schema: SchemaRef, batch: RecordBatch) {
     let file = File::create(path).unwrap();
@@ -60,7 +61,7 @@ async fn parquet_roundtrip_via_sink_and_source(
     };
     let sink_config = ParquetSinkConfig::new(sink_spec);
     let mut sink = ParquetSinkFunction::new(sink_config);
-    let sink_ctx = RuntimeContext::new("sink".to_string().into(), 0, 1, None, None, None);
+    let sink_ctx = RuntimeContext::new(VertexId::new(OperatorTypeCode::SinkParquet, 2, 0),  1, None, None, None);
     sink.open(&sink_ctx).await.unwrap();
 
     let mut input_batches = Vec::new();
@@ -94,7 +95,7 @@ async fn parquet_roundtrip_via_sink_and_source(
     };
     let source_config = ParquetSourceConfig::new(schema.clone(), source_spec);
     let mut source = ParquetSourceFunction::new(source_config);
-    let source_ctx = RuntimeContext::new("src".to_string().into(), 0, 1, None, None, None);
+    let source_ctx = RuntimeContext::new(VertexId::new(OperatorTypeCode::SourceParquet, 1, 0),  1, None, None, None);
     source.open(&source_ctx).await.unwrap();
 
     let mut output_rows = Vec::new();
@@ -180,7 +181,7 @@ async fn parquet_parallel_tasks_consume_all_files() {
     let mut rows = Vec::new();
     for task_index in 0..2 {
         let mut source = ParquetSourceFunction::new(config.clone());
-        let ctx = RuntimeContext::new("src".to_string().into(), task_index, 2, None, None, None);
+        let ctx = RuntimeContext::new(VertexId::new(OperatorTypeCode::SourceParquet, 1, task_index), 2, None, None, None);
         source.open(&ctx).await.unwrap();
         while let Some(msg) = source.fetch().await {
             let batch = msg.record_batch();
@@ -233,7 +234,7 @@ async fn parquet_projection_pushdown_roundtrip() {
     config.set_projection(projection, projected_schema.clone());
 
     let mut source = ParquetSourceFunction::new(config);
-    let ctx = RuntimeContext::new("src".to_string().into(), 0, 1, None, None, None);
+    let ctx = RuntimeContext::new(VertexId::new(OperatorTypeCode::SourceParquet, 1, 0),  1, None, None, None);
     source.open(&ctx).await.unwrap();
 
     let msg = source.fetch().await.expect("expected batch");
@@ -270,7 +271,7 @@ async fn parquet_partitioned_sink_writes_directories() {
     };
     let sink_config = ParquetSinkConfig::new(sink_spec);
     let mut sink = ParquetSinkFunction::new(sink_config);
-    let sink_ctx = RuntimeContext::new("sink".to_string().into(), 0, 1, None, None, None);
+    let sink_ctx = RuntimeContext::new(VertexId::new(OperatorTypeCode::SinkParquet, 1, 0),  1, None, None, None);
     sink.open(&sink_ctx).await.unwrap();
     sink.sink(Message::new(None, batch, None, None)).await.unwrap();
     sink.close().await.unwrap();
@@ -315,7 +316,7 @@ async fn parquet_sink_bounded_concurrency_backpressure() {
     };
     let sink_config = ParquetSinkConfig::new(sink_spec);
     let mut sink = ParquetSinkFunction::new_with_store(sink_config, store.clone(), ObjectPath::from(""));
-    let sink_ctx = RuntimeContext::new("sink".to_string().into(), 0, 1, None, None, None);
+    let sink_ctx = RuntimeContext::new(VertexId::new(OperatorTypeCode::SinkParquet, 1, 0),  1, None, None, None);
     sink.open(&sink_ctx).await.unwrap();
 
     let schema = test_schema();

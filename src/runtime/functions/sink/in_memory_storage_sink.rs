@@ -127,7 +127,7 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
         
         // Final flush
         if let Some(ref client) = self.storage_client {
-            let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id());
+            let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id().to_string());
             Self::flush_buffers(client, &self.buffer, &self.keyed_buffer, vertex_id.as_deref()).await?;
         }
     
@@ -147,7 +147,7 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
 mod tests {
     use super::*;
     use crate::common::test_utils::{create_test_string_batch, gen_unique_grpc_port};
-    use crate::common::Key;
+    use crate::common::{Key, OperatorTypeCode, VertexId};
     use tokio::runtime::Runtime;
     use arrow::array::StringArray;
     use crate::common::message::{KeyedMessage, BaseMessage};
@@ -197,8 +197,7 @@ mod tests {
 
             // Open sink function
             let context = RuntimeContext::new(
-                "test_sink".to_string().into(),
-                0,
+                VertexId::new(OperatorTypeCode::SinkInMemoryStorageGrpc, 1, 1),
                 1,
                 None,
                 None,

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::transport::transport_spec::OperatorTransportSpec;
 use crate::api::spec::operators::tuning::OperatorTuningSpec;
+use crate::common::OperatorId;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OperatorOverride {
@@ -14,6 +15,6 @@ pub struct OperatorOverride {
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct OperatorOverrides {
     pub defaults: OperatorOverride,
-    pub per_operator: HashMap<String, OperatorOverride>,
+    pub per_operator: HashMap<OperatorId, OperatorOverride>,
 }
 

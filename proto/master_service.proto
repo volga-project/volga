@@ -16,7 +16,7 @@ message StateBlob {
 
 message ReportCheckpointRequest {
   uint64 checkpoint_id = 1;
-  string vertex_id = 2;
+  fixed32 vertex_id = 2;
   int32 task_index = 3;
   repeated StateBlob blobs = 4;
 }
@@ -28,7 +28,7 @@ message ReportCheckpointResponse {
 
 message GetTaskCheckpointRequest {
   uint64 checkpoint_id = 1;
-  string vertex_id = 2;
+  fixed32 vertex_id = 2;
   int32 task_index = 3;
 }
 

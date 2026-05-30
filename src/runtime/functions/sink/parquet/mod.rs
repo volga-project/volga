@@ -59,7 +59,7 @@ pub struct ParquetSinkFunction {
     config: ParquetSinkConfig,
     store: Option<Arc<dyn ObjectStore>>,
     base_prefix: ObjectPath,
-    task_index: Option<i32>,
+    task_index: Option<u16>,
     writers: HashMap<String, ParquetWriterState>,
 }
 
@@ -358,7 +358,7 @@ impl ParquetSinkConfig {
 fn build_part_path(
     base_prefix: &ObjectPath,
     partition_path: &str,
-    task_index: i32,
+    task_index: u16,
     part: u64,
 ) -> ObjectPath {
     let file = format!("part-{}-{}-{}.parquet", task_index, Uuid::new_v4(), part);

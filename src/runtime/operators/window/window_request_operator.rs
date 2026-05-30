@@ -25,6 +25,7 @@ use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::state::sorted_range_view_loader::{load_sorted_ranges_views, RangesLoadPlan};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorState;
+use crate::runtime::VertexId;
 use tokio_rayon::rayon::ThreadPool;
 use tokio::time::Duration;
 
@@ -109,19 +110,19 @@ impl WindowRequestOperator {
     }
 
     // TODO use info from logical graph to get window_operator<->window_request_operator pair
-    fn get_peer_window_operator_vertex_id(&self, vertex_id: String, graph: &ExecutionGraph) -> String {
-        let current_vertex = graph.get_vertex(&vertex_id)
+    fn get_peer_window_operator_vertex_id(&self, vertex_id: VertexId, graph: &ExecutionGraph) -> VertexId {
+        let current_vertex = graph.get_vertex(vertex_id)
             .expect(&format!("Vertex {} not found in execution graph", vertex_id));
-        let task_index = current_vertex.task_index;
+        let task_index = current_vertex.vertex_id.task_index();
 
         // Collect all window operator vertices
         let mut window_operator_ids = HashSet::new();
         let mut window_vertices = Vec::new();
-        
+
         for (vid, vertex) in graph.get_vertices() {
             if let OperatorConfig::WindowConfig(_) = &vertex.operator_config {
-                window_operator_ids.insert(vertex.operator_id.clone());
-                window_vertices.push((vid.clone(), vertex));
+                window_operator_ids.insert(vertex.vertex_id.operator_id());
+                window_vertices.push((*vid, vertex));
             }
         }
 
@@ -136,12 +137,12 @@ impl WindowRequestOperator {
 
         // Find the window operator vertex with the same task_index
         for (vid, vertex) in window_vertices {
-            if vid.as_ref() == vertex_id.as_str() {
+            if vid == vertex_id {
                 continue;
             }
-            
-            if vertex.task_index == task_index {
-                return vid.as_ref().to_string();
+
+            if vertex.vertex_id.task_index() == task_index {
+                return vid;
             }
         }
 
@@ -433,14 +434,14 @@ impl OperatorTrait for WindowRequestOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await?;
         
-        let vertex_id = context.vertex_id().to_string();
+        let vertex_id = context.vertex_id();
         let operator_states = context.operator_states();
-        let window_operator_vertex_id = self.get_peer_window_operator_vertex_id(vertex_id.clone(), context.execution_graph());
+        let window_operator_vertex_id = self.get_peer_window_operator_vertex_id(vertex_id, context.execution_graph());
 
         let timeout = Duration::from_secs(2);
         let state_arc = tokio::time::timeout(
             timeout,
-            operator_states.wait_for_operator_state(&window_operator_vertex_id),
+            operator_states.wait_for_operator_state(window_operator_vertex_id),
         )
         .await
         .unwrap_or_else(|_| {
@@ -532,7 +533,7 @@ mod tests {
     use crate::common::message::Message;
     use crate::runtime::runtime_context::RuntimeContext;
     use crate::runtime::state::OperatorStates;
-    use crate::common::Key;
+    use crate::common::{Key, OperatorTypeCode};
     use futures::stream;
 
     fn create_test_schema() -> SchemaRef {
@@ -548,7 +549,7 @@ mod tests {
         let timestamp_array = Arc::new(TimestampMillisecondArray::from(timestamps));
         let value_array = Arc::new(Float64Array::from(values));
         let partition_array = Arc::new(StringArray::from(partition_keys));
-        
+
         RecordBatch::try_new(schema, vec![timestamp_array, value_array, partition_array])
             .expect("Should be able to create test batch")
     }
@@ -557,11 +558,11 @@ mod tests {
         let schema = Arc::new(Schema::new(vec![
             Field::new("partition", DataType::Utf8, false),
         ]));
-        
+
         let partition_array = StringArray::from(vec![partition_name]);
         let key_batch = RecordBatch::try_new(schema, vec![Arc::new(partition_array)])
             .expect("Failed to create key batch");
-        
+
         Key::new(key_batch).expect("Failed to create key")
     }
 
@@ -569,10 +570,10 @@ mod tests {
         let ctx = SessionContext::new();
         let mut planner = Planner::new(PlanningContext::new(ctx));
         let schema = create_test_schema();
-        
+
         planner.register_source(
-            "test_table".to_string(), 
-            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), 
+            "test_table".to_string(),
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
             schema.clone()
         );
 
@@ -583,7 +584,7 @@ mod tests {
         let key = create_test_key(partition_key);
         Message::new_keyed(None, batch, key, None, None)
     }
-    
+
     #[tokio::test]
     async fn test_window_request_operator() {
         let sql = "SELECT 
@@ -597,7 +598,7 @@ mod tests {
             MAX(value) OVER w as max_val
         FROM test_table
         WINDOW w AS (PARTITION BY partition_key ORDER BY timestamp RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW)";
-        
+
         let window_exec = extract_window_exec_from_sql(sql).await;
         let mut window_config = WindowOperatorConfig::new(window_exec.clone());
         window_config.execution_mode = ExecutionMode::Request;
@@ -606,8 +607,8 @@ mod tests {
         window_config.spec.request_advance_policy = RequestAdvancePolicy::OnIngest;
 
         let operator_states = Arc::new(OperatorStates::new());
-        let window_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_op");
-        let request_operator_vertex_id: crate::runtime::VertexId = Arc::<str>::from("window_request_op");
+        let window_operator_vertex_id = VertexId::new(OperatorTypeCode::Window, 1, 1);
+        let request_operator_vertex_id = VertexId::new(OperatorTypeCode::WindowRequest, 1, 1);
 
         let budgets = crate::storage::StorageBudgetConfig::default();
         let store = Arc::new(crate::storage::batch_store::InMemBatchStore::new(
@@ -622,7 +623,6 @@ mod tests {
         let mut window_operator = WindowOperator::new(OperatorConfig::WindowConfig(window_config.clone()));
         let mut window_context = RuntimeContext::new(
             window_operator_vertex_id.clone(),
-            0,
             1,
             None,
             Some(operator_states.clone()),
@@ -640,28 +640,23 @@ mod tests {
         // Create execution graph with both vertices
         use crate::runtime::execution_graph::ExecutionVertex;
         let mut execution_graph = ExecutionGraph::new();
-        
+
         let window_vertex = ExecutionVertex::new(
-            window_operator_vertex_id.as_ref().to_string(),
-            "window_op".to_string(),
+            window_operator_vertex_id,
             OperatorConfig::WindowConfig(window_config),
-            1,
-            0,
+            1
         );
         execution_graph.add_vertex(window_vertex);
-        
+
         let request_vertex = ExecutionVertex::new(
-            request_operator_vertex_id.as_ref().to_string(),
-            "window_request_op".to_string(),
+            request_operator_vertex_id,
             OperatorConfig::WindowRequestConfig(request_config),
-            1,
-            0,
+            1
         );
         execution_graph.add_vertex(request_vertex);
 
         let mut request_context = RuntimeContext::new(
             request_operator_vertex_id.clone(),
-            0,
             1,
             None,
             Some(operator_states.clone()),

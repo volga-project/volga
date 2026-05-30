@@ -154,7 +154,7 @@ async fn wait_for_task_prefix_status(
         let mut all_match = true;
 
         for (vertex_id, task_status) in &st.task_statuses {
-            if vertex_id.starts_with(prefix) {
+            if vertex_id.to_string().starts_with(prefix) {
                 matched = true;
                 if *task_status != status {
                     all_match = false;
@@ -269,7 +269,7 @@ async fn test_request_execution_mode() {
     wait_for_request_server(&request_source_config.spec.bind_address, Duration::from_secs(5)).await;
     wait_for_task_prefix_status(
         &worker,
-        "Source(HttpRequest)_1",
+        "SourceHttpRequest.1",
         StreamTaskStatus::Running,
         Duration::from_secs(5),
     )

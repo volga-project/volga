@@ -9,6 +9,7 @@ use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceBindin
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
+use crate::common::OperatorId;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::transport::transport_spec::OperatorTransportSpec;
@@ -109,9 +110,9 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_operator_transport_queue_records(mut self, operator_id: &str, queue_records: u32) -> Self {
+    pub fn with_operator_transport_queue_records(mut self, operator_id: OperatorId, queue_records: u32) -> Self {
         self.spec.operator_overrides.per_operator
-            .entry(operator_id.to_string())
+            .entry(operator_id)
             .or_insert_with(OperatorOverride::default)
             .transport = Some(OperatorTransportSpec { queue_records: Some(queue_records.max(1)) });
         self
@@ -158,11 +159,11 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_operator_override(mut self, operator_id: &str, override_spec: OperatorOverride) -> Self {
+    pub fn with_operator_override(mut self, operator_id: OperatorId, override_spec: OperatorOverride) -> Self {
         self.spec
             .operator_overrides
             .per_operator
-            .insert(operator_id.to_string(), override_spec);
+            .insert(operator_id, override_spec);
         self
     }
 
@@ -215,7 +216,7 @@ impl PipelineSpecBuilder {
 }
 
 impl PipelineSpec {
-    pub fn transport_overrides_queue_records(&self) -> HashMap<String, u32> {
+    pub fn transport_overrides_queue_records(&self) -> HashMap<OperatorId, u32> {
         let mut out = HashMap::new();
         for (op_id, ov) in &self.operator_overrides.per_operator {
             if let Some(v) = operator_override_transport_queue_records(ov) {

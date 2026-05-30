@@ -59,7 +59,9 @@ impl OperatorTrait for JoinOperator {
             Some(message) => {
                 // TODO proper lookup for upstream_vertex_id position (left or right)
                 if let Some(upstream_id) = message.upstream_vertex_id() {
-                    if upstream_id.contains("left") {
+                    // Heuristic: route by parity of op-type code as a placeholder.
+                    // Real impl should look up left/right side from execution graph.
+                    if upstream_id.op_type().as_u8() % 2 == 0 {
                         self.left_buffer.push(message.clone());
                     } else {
                         self.right_buffer.push(message.clone());

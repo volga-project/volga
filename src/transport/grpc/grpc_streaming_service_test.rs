@@ -1,3 +1,4 @@
+use crate::common::ids::{ChannelId, OperatorTypeCode, VertexId};
 use crate::common::message::Message;
 use crate::common::key::Key;
 use crate::transport::grpc::grpc_streaming_service::{
@@ -11,10 +12,18 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use std::collections::HashMap;
 
+fn test_vertex_id(seed: u8) -> VertexId {
+    VertexId::new(OperatorTypeCode::Map, seed, 0)
+}
+
+fn test_channel_id(seed: u8) -> ChannelId {
+    ChannelId::new(test_vertex_id(seed * 2), test_vertex_id(seed * 2 + 1))
+}
+
 /// Start the gRPC server with custom shutdown signal
 pub async fn start_server(
     addr: String,
-    tx: mpsc::Sender<(Message, String)>,
+    tx: mpsc::Sender<(Message, ChannelId)>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("[SERVER] Starting gRPC server on {}", addr);
@@ -40,7 +49,7 @@ pub async fn start_server(
 /// Start the gRPC client
 pub async fn start_client(
     server_addr: String,
-    rx: mpsc::Receiver<(Message, String)>,
+    rx: mpsc::Receiver<(Message, ChannelId)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!("[CLIENT] Starting gRPC client");
     let mut client = MessageStreamClient::connect(server_addr).await?;
@@ -54,7 +63,7 @@ pub async fn stream_grpc_many_clients_one_server() {
     let server_addr = "127.0.0.1:50053";
     
     // Create channels for server communication
-    let (server_tx, mut server_rx) = mpsc::channel::<(Message, String)>(100);
+    let (server_tx, mut server_rx) = mpsc::channel::<(Message, ChannelId)>(100);
     
     // Create shutdown channel
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
@@ -74,10 +83,10 @@ pub async fn stream_grpc_many_clients_one_server() {
     
     // Create multiple clients with different channel IDs
     let client_configs = vec![
-        ("client1".to_string(), "channel1".to_string(), 10),
-        ("client2".to_string(), "channel2".to_string(), 10),
-        ("client3".to_string(), "channel3".to_string(), 10),
-        ("client4".to_string(), "channel4".to_string(), 10),
+        ("client1".to_string(), test_channel_id(1), 10),
+        ("client2".to_string(), test_channel_id(2), 10),
+        ("client3".to_string(), test_channel_id(3), 10),
+        ("client4".to_string(), test_channel_id(4), 10),
     ];
     
     let mut client_handles = Vec::new();
@@ -89,7 +98,7 @@ pub async fn stream_grpc_many_clients_one_server() {
         println!("[TEST] Starting client: {} on channel: {} with {} messages", 
                 client_name, channel_id, message_count);
         
-        let (client_tx, client_rx) = mpsc::channel::<(Message, String)>(100);
+        let (client_tx, client_rx) = mpsc::channel::<(Message, ChannelId)>(100);
         
         // Start client task
         let client_handle = tokio::spawn(async move {
@@ -108,9 +117,10 @@ pub async fn stream_grpc_many_clients_one_server() {
     for (client_name, channel_id, message_count, client_tx) in client_senders {
         let send_task = tokio::spawn(async move {
             let mut client_sent_messages = Vec::new();
-            
+            let upstream_vertex_id = channel_id.source();
+
             for i in 0..message_count {
-                let message = create_test_message_for_client(&client_name, i);
+                let message = create_test_message_for_client(&client_name, upstream_vertex_id, i);
                 
                 // Store sent message for verification
                 client_sent_messages.push((i, message.clone()));
@@ -270,7 +280,7 @@ fn get_message_type(message: &Message) -> MessageType {
     }
 }
 
-fn create_test_message_for_client(client_name: &str, index: usize) -> Message {
+fn create_test_message_for_client(client_name: &str, upstream_vertex_id: VertexId, index: usize) -> Message {
     // Create schema
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int64, false),
@@ -294,7 +304,7 @@ fn create_test_message_for_client(client_name: &str, index: usize) -> Message {
             ).unwrap();
             
             Message::new(
-                Some(format!("upstream_{}", client_name)),
+                Some(upstream_vertex_id),
                 record_batch,
                 Some(1234567890 + index as u64),
                 None
@@ -324,7 +334,7 @@ fn create_test_message_for_client(client_name: &str, index: usize) -> Message {
             ).unwrap();
             
             Message::new_keyed(
-                Some(format!("upstream_{}", client_name)),
+                Some(upstream_vertex_id),
                 data_batch,
                 key,
                 Some(1234567890 + index as u64),
@@ -335,7 +345,7 @@ fn create_test_message_for_client(client_name: &str, index: usize) -> Message {
             // Watermark message
             Message::Watermark(
                 crate::common::message::WatermarkMessage::new(
-                    format!("source_{}", client_name),
+                    upstream_vertex_id,
                     9876543210 + index as u64,
                     Some(1234567890 + index as u64)
                 )
