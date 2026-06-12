@@ -32,6 +32,7 @@ use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, 
 // serde imports removed; this module does not define serializable DTOs directly.
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
+use crate::common::OperatorId;
 use crate::runtime::VertexId;
 use crate::runtime::watermark::WatermarkAssignConfig;
 use crate::runtime::watermark::WatermarkManager;
@@ -44,12 +45,12 @@ pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 pub(crate) struct CheckpointAligner {
     upstream_count: usize,
     current_checkpoint: Option<u64>,
-    seen_upstreams: HashSet<String>,
+    seen_upstreams: HashSet<VertexId>,
     reader_control: DataReaderControl,
 }
 
 impl CheckpointAligner {
-    pub(crate) fn new(upstream_vertices: &[String], reader_control: DataReaderControl) -> Self {
+    pub(crate) fn new(upstream_vertices: &[VertexId], reader_control: DataReaderControl) -> Self {
         Self {
             upstream_count: upstream_vertices.len(),
             current_checkpoint: None,
@@ -62,7 +63,6 @@ impl CheckpointAligner {
         let upstream_vertex_id = barrier
             .metadata
             .upstream_vertex_id
-            .clone()
             .expect("Barrier must have upstream vertex id");
 
         let checkpoint_id = barrier.checkpoint_id;
@@ -74,7 +74,7 @@ impl CheckpointAligner {
             return None;
         }
 
-        self.reader_control.block_upstream(&upstream_vertex_id);
+        self.reader_control.block_upstream(upstream_vertex_id);
         self.seen_upstreams.insert(upstream_vertex_id);
 
         if self.seen_upstreams.len() == self.upstream_count {
@@ -112,7 +112,7 @@ pub struct StreamTask {
     run_signal_sender: Option<watch::Sender<bool>>,
     close_signal_sender: Option<watch::Sender<bool>>,
     checkpoint_trigger_sender: Option<mpsc::UnboundedSender<u64>>,
-    upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>, // upstream_vertex_id -> watermark_value
+    upstream_watermarks: Arc<Mutex<HashMap<VertexId, u64>>>, // upstream_vertex_id -> watermark_value
     current_watermark: Arc<AtomicU64>,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
@@ -186,8 +186,7 @@ impl StreamTask {
         operator: &mut dyn OperatorTrait,
         master_client: &mut Option<MasterServiceClient<tonic::transport::Channel>>,
         restore_checkpoint_id: Option<u64>,
-        vertex_id: &str,
-        task_index: i32,
+        vertex_id: VertexId
     ) -> Result<()> {
         let Some(restore_checkpoint_id) = restore_checkpoint_id else {
             return Ok(());
@@ -198,13 +197,13 @@ impl StreamTask {
 
         println!(
             "[CHECKPOINT] {} task_index={} restoring from checkpoint_id={}",
-            vertex_id, task_index, restore_checkpoint_id
+            vertex_id, vertex_id.task_index(), restore_checkpoint_id
         );
 
         let req = crate::runtime::master_server::master_service::GetTaskCheckpointRequest {
             checkpoint_id: restore_checkpoint_id,
-            vertex_id: vertex_id.to_string(),
-            task_index,
+            vertex_id: vertex_id.raw(),
+            task_index: vertex_id.task_index() as i32,
         };
         let resp = client
             .get_task_checkpoint(tonic::Request::new(req))
@@ -241,13 +240,14 @@ impl StreamTask {
         labels: Option<&MetricsLabels>,
     ) {
         let is_control_message = matches!(message, Message::Watermark(_) | Message::CheckpointBarrier(_));
-        
+
         if !is_control_message {
+            let vid = vertex_id.to_string();
             if recv_or_send {
                 if let Some(labels) = labels {
                     counter!(
                         METRIC_STREAM_TASK_MESSAGES_RECV,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
+                        LABEL_VERTEX_ID => vid.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -255,7 +255,7 @@ impl StreamTask {
                     ).increment(1);
                     counter!(
                         METRIC_STREAM_TASK_RECORDS_RECV,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
+                        LABEL_VERTEX_ID => vid.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -263,18 +263,18 @@ impl StreamTask {
                     ).increment(message.num_records() as u64);
                     counter!(
                         METRIC_STREAM_TASK_BYTES_RECV,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
+                        LABEL_VERTEX_ID => vid.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).increment(message.get_memory_size() as u64);
                 } else {
-                    counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
-                    counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
-                    counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
+                    counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vid.clone()).increment(1);
+                    counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vid.clone()).increment(message.num_records() as u64);
+                    counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vid.clone()).increment(message.get_memory_size() as u64);
                 }
-                
+
                 if let Some(ingest_timestamp) = message.ingest_timestamp() {
                     let current_time = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -284,7 +284,7 @@ impl StreamTask {
                     if let Some(labels) = labels {
                         histogram!(
                             METRIC_STREAM_TASK_LATENCY,
-                            LABEL_VERTEX_ID => vertex_id.clone(),
+                            LABEL_VERTEX_ID => vid.clone(),
                             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -292,7 +292,7 @@ impl StreamTask {
                         )
                         .record(latency as f64);
                     } else {
-                        histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone())
+                        histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vid.clone())
                             .record(latency as f64);
                     }
                 }
@@ -301,7 +301,7 @@ impl StreamTask {
                 if let Some(labels) = labels {
                     counter!(
                         METRIC_STREAM_TASK_MESSAGES_SENT,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
+                        LABEL_VERTEX_ID => vid.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -309,7 +309,7 @@ impl StreamTask {
                     ).increment(1);
                     counter!(
                         METRIC_STREAM_TASK_RECORDS_SENT,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
+                        LABEL_VERTEX_ID => vid.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -317,16 +317,16 @@ impl StreamTask {
                     ).increment(message.num_records() as u64);
                     counter!(
                         METRIC_STREAM_TASK_BYTES_SENT,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
+                        LABEL_VERTEX_ID => vid.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).increment(message.get_memory_size() as u64);
                 } else {
-                    counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
-                    counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
-                    counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
+                    counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vid.clone()).increment(1);
+                    counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vid.clone()).increment(message.num_records() as u64);
+                    counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vid).increment(message.get_memory_size() as u64);
                 }
             }
         }
@@ -339,8 +339,8 @@ impl StreamTask {
         vertex_id: VertexId,
         operator_config: OperatorConfig,
         watermark_assign: Option<WatermarkAssignConfig>,
-        upstream_vertices: Vec<String>,
-        upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+        upstream_vertices: Vec<VertexId>,
+        upstream_watermarks: Arc<Mutex<HashMap<VertexId, u64>>>,
         current_watermark: Arc<AtomicU64>,
         _status: Arc<AtomicU8>,
         mut aligner: CheckpointAligner,
@@ -356,7 +356,7 @@ impl StreamTask {
                 current_watermark.clone(),
             );
             while let Some(message) = input_stream.next().await {
-                Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
+                Self::record_metrics(vertex_id, &message, true, labels.as_ref());
 
                 match &message {
                     Message::Watermark(watermark) => {
@@ -367,7 +367,7 @@ impl StreamTask {
                         if let Some(new_watermark) = watermark_manager.merge_watermark(watermark.clone()).await {
                             let mut wm = watermark.clone();
                             wm.watermark_value = new_watermark;
-                            wm.metadata.upstream_vertex_id = Some(vertex_id.as_ref().to_string());
+                            wm.metadata.upstream_vertex_id = Some(vertex_id);
                             yield Message::Watermark(wm);
                         }
                     }
@@ -376,7 +376,7 @@ impl StreamTask {
                             // Once fully aligned, yield a single barrier downstream through the operator.
                             // StreamTask will intercept this barrier, do synchronous checkpointing, and forward it.
                             yield Message::CheckpointBarrier(crate::common::message::CheckpointBarrierMessage::new(
-                                vertex_id.as_ref().to_string(),
+                                vertex_id,
                                 checkpoint_id,
                                 None,
                             ));
@@ -387,15 +387,15 @@ impl StreamTask {
                         // then run it through the same min-upstream merge logic.
                         let upstream_for_msg = message
                             .upstream_vertex_id()
-                            .unwrap_or_else(|| vertex_id.as_ref().to_string());
-                        let injected = watermark_manager.on_data_message(&upstream_for_msg, &message);
+                            .unwrap_or(vertex_id);
+                        let injected = watermark_manager.on_data_message(upstream_for_msg, &message);
                         yield message;
                         if let Some(wm) = injected {
                             // Treat injected watermark exactly like an upstream watermark: merge and
                             // emit a task-local watermark only if it advances.
                             if let Some(new_watermark) = watermark_manager.merge_watermark(wm.clone()).await {
                                 yield Message::Watermark(WatermarkMessage::new(
-                                    vertex_id.as_ref().to_string(),
+                                    vertex_id,
                                     new_watermark,
                                     None,
                                 ));
@@ -409,7 +409,7 @@ impl StreamTask {
 
     // Helper function to send message to collectors (similar to original stream_task.rs)
     async fn send_to_collectors_if_needed(
-        mut collectors_per_target_operator: &mut HashMap<String, Collector>,
+        mut collectors_per_target_operator: &mut HashMap<OperatorId, Collector>,
         message: Message,
         vertex_id: VertexId,
         status: Arc<AtomicU8>
@@ -466,23 +466,23 @@ impl StreamTask {
     }
 
     pub async fn start(&mut self) {
-        let vertex_id = self.vertex_id.clone();
+        let vertex_id = self.vertex_id;
         let runtime_context = self.runtime_context.clone();
         let status = self.status.clone();
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
         let master_addr = self.master_addr.clone();
         let restore_checkpoint_id = self.restore_checkpoint_id;
-        
+
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
-        
-        let upstream_vertices: Vec<String> = execution_graph
-            .get_edges_for_vertex(vertex_id.as_ref())
+
+        let upstream_vertices: Vec<VertexId> = execution_graph
+            .get_edges_for_vertex(vertex_id)
             .map(|(input_edges, _)| {
                 input_edges
                     .iter()
-                    .map(|e| e.source_vertex_id.as_ref().to_string())
+                    .map(|e| e.edge_id.source())
                     .collect()
             })
             .unwrap_or_default();
@@ -502,18 +502,18 @@ impl StreamTask {
         let metrics_labels = self.metrics_labels.clone();
         let run_loop_handle = tokio::spawn(async move {
             let mut operator = create_operator(operator_config);
-            
-            let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
-            
-            let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
-            let (_, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
+            let mut transport_client = TransportClient::new(vertex_id, transport_client_config);
+
+            let mut collectors_per_target_operator: HashMap<OperatorId, Collector> = HashMap::new();
+
+            let (_, output_edges) = execution_graph.get_edges_for_vertex(vertex_id).unwrap();
             let num_output_edges = output_edges.len();
 
             for edge in output_edges {
                 let channel = edge.get_channel();
                 let partition_type = edge.partition_type.clone();
-                let target_operator_id = edge.target_operator_id.clone();
+                let target_operator_id = edge.edge_id.target().operator_id();
 
                 let writer = transport_client.writer.as_ref()
                     .unwrap_or_else(|| panic!("Writer not initialized"));
@@ -557,8 +557,7 @@ impl StreamTask {
                 &mut operator,
                 &mut master_client,
                 restore_checkpoint_id,
-                &vertex_id,
-                runtime_context.task_index(),
+                vertex_id
             )
             .await?;
 
@@ -581,7 +580,7 @@ impl StreamTask {
             let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
             let mut data_reader_control: Option<crate::transport::transport_client::DataReaderControl> = None;
             let vertex_meta = execution_graph
-                .get_vertex(&vertex_id)
+                .get_vertex(vertex_id)
                 .expect("vertex should exist in execution graph");
             let watermark_assign = vertex_meta.watermark_assign.clone();
             let vertex_operator_config = vertex_meta.operator_config.clone();
@@ -597,7 +596,7 @@ impl StreamTask {
                 assert!(
                     watermark_assign.is_none(),
                     "StreamTask {}: watermark_assign is not allowed in Batch execution mode",
-                    vertex_id.as_ref()
+                    vertex_id
                 );
             }
             let mut source_watermark_manager = if is_source {
@@ -623,7 +622,7 @@ impl StreamTask {
 
                 let preprocessed_stream = Self::create_preprocessed_input_stream(
                     input_stream,
-                    vertex_id.clone(),
+                    vertex_id,
                     vertex_operator_config.clone(),
                     watermark_assign.clone(),
                     upstream_vertices.clone(),
@@ -649,7 +648,7 @@ impl StreamTask {
                             );
                             Some(Message::CheckpointBarrier(
                                 crate::common::message::CheckpointBarrierMessage::new(
-                                    vertex_id.as_ref().to_string(),
+                                    vertex_id,
                                     checkpoint_id,
                                     None,
                                 ),
@@ -673,7 +672,7 @@ impl StreamTask {
                         let injected_wm = if is_source && matches!(message, Message::Regular(_) | Message::Keyed(_)) {
                             source_watermark_manager
                                 .as_mut()
-                                .and_then(|manager| manager.on_data_message(vertex_id.as_ref(), &message))
+                                .and_then(|manager| manager.on_data_message(vertex_id, &message))
                         } else {
                             None
                         };
@@ -698,8 +697,8 @@ impl StreamTask {
                                     .report_checkpoint(tonic::Request::new(
                                         crate::runtime::master_server::master_service::ReportCheckpointRequest {
                                             checkpoint_id,
-                                            vertex_id: vertex_id.as_ref().to_string(),
-                                            task_index: runtime_context.task_index(),
+                                            vertex_id: vertex_id.raw(),
+                                            task_index: runtime_context.task_index() as i32,
                                             blobs: blobs
                                                 .into_iter()
                                                 .map(|(name, bytes)| crate::runtime::master_server::master_service::StateBlob { name, bytes })
@@ -745,26 +744,26 @@ impl StreamTask {
                         }
                         
                         if MESSAGE_TRACE_ENABLED.load(Ordering::Relaxed) {
-                            message.append_trace(&vertex_id);
+                            message.append_trace(vertex_id);
                         }
 
                         // Set upstream vertex id for all messages before sending downstream
-                        message.set_upstream_vertex_id(vertex_id.as_ref().to_string());
-                        Self::record_metrics(vertex_id.clone(), &message, false, metrics_labels.as_ref());
+                        message.set_upstream_vertex_id(vertex_id);
+                        Self::record_metrics(vertex_id, &message, false, metrics_labels.as_ref());
 
                         // Send to collectors
                         Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,
-                            vertex_id.clone(),
+                            vertex_id,
                             status.clone()
                         ).await;
 
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);
-                            injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
+                            injected.set_upstream_vertex_id(vertex_id);
                             Self::record_metrics(
-                                vertex_id.clone(),
+                                vertex_id,
                                 &injected,
                                 false,
                                 metrics_labels.as_ref(),
@@ -772,7 +771,7 @@ impl StreamTask {
                             Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 injected,
-                                vertex_id.clone(),
+                                vertex_id,
                                 status.clone(),
                             )
                             .await;
@@ -781,15 +780,15 @@ impl StreamTask {
                     OperatorPollResult::None => {
                         if is_source {
                             let wm = Message::Watermark(WatermarkMessage::new(
-                                vertex_id.as_ref().to_string(),
+                                vertex_id,
                                 MAX_WATERMARK_VALUE,
                                 None,
                             ));
-                            Self::record_metrics(vertex_id.clone(), &wm, false, metrics_labels.as_ref());
+                            Self::record_metrics(vertex_id, &wm, false, metrics_labels.as_ref());
                             Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 wm,
-                                vertex_id.clone(),
+                                vertex_id,
                                 status.clone(),
                             )
                             .await;
@@ -798,7 +797,7 @@ impl StreamTask {
                         } else {
                             panic!(
                                 "StreamTask {}: upstream ended without terminal watermark",
-                                vertex_id.as_ref()
+                                vertex_id
                             );
                         }
                     }

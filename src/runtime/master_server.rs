@@ -4,6 +4,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
+use crate::common::ids::VertexId;
+
 pub mod master_service {
     tonic::include_proto!("master_service");
 }
@@ -16,10 +18,9 @@ use master_service::{
     GetLatestSnapshotRequest, GetLatestSnapshotResponse,
 };
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TaskKey {
-    pub vertex_id: String,
-    pub task_index: i32,
+    pub vertex_id: VertexId,
 }
 
 #[derive(Debug, Default)]
@@ -99,8 +100,7 @@ impl MasterService for MasterServiceImpl {
         let req = request.into_inner();
         let checkpoint_id = req.checkpoint_id;
         let task = TaskKey {
-            vertex_id: req.vertex_id,
-            task_index: req.task_index,
+            vertex_id: VertexId::from_raw(req.vertex_id)
         };
 
         let blobs = req
@@ -110,7 +110,7 @@ impl MasterService for MasterServiceImpl {
             .collect::<Vec<_>>();
 
         let mut registry = self.registry.lock().await;
-        registry.store.put(checkpoint_id, task.clone(), blobs);
+        registry.store.put(checkpoint_id, task, blobs);
         let expected_count = registry.expected_tasks.len();
         registry.coordinator.ack(checkpoint_id, task, expected_count);
 
@@ -127,8 +127,7 @@ impl MasterService for MasterServiceImpl {
         let req = request.into_inner();
         let checkpoint_id = req.checkpoint_id;
         let task = TaskKey {
-            vertex_id: req.vertex_id,
-            task_index: req.task_index,
+            vertex_id: VertexId::from_raw(req.vertex_id)
         };
 
         let registry = self.registry.lock().await;

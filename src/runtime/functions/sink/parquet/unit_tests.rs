@@ -4,6 +4,7 @@ use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use std::fs;
 use uuid::Uuid;
+use crate::common::{OperatorTypeCode, VertexId};
 
 #[tokio::test]
 async fn sink_enforces_max_buffer_bytes() {
@@ -21,7 +22,7 @@ async fn sink_enforces_max_buffer_bytes() {
         partition_fields: Some(vec!["k".to_string()]),
     };
     let mut sink = ParquetSinkFunction::new(ParquetSinkConfig::new(spec));
-    let ctx = RuntimeContext::new("sink".to_string().into(), 0, 1, None, None, None);
+    let ctx = RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 1),  1, None, None, None);
     sink.open(&ctx).await.unwrap();
 
     let schema = Arc::new(Schema::new(vec![

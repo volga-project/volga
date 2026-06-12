@@ -3,6 +3,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time;
+use crate::common::ids::ChannelId;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::VertexId;
@@ -26,11 +27,11 @@ pub struct GrpcTransportBackend {
     reader_task: Option<tokio::task::JoinHandle<()>>,
     writer_task: Option<tokio::task::JoinHandle<()>>,
 
-    reader_senders: Option<HashMap<String, BatchSender>>,
-    writer_receivers: Option<HashMap<String, BatchReceiver>>,
+    reader_senders: Option<HashMap<ChannelId, BatchSender>>,
+    writer_receivers: Option<HashMap<ChannelId, BatchReceiver>>,
 
     nodes: Option<Vec<(String, String, i32)>>,
-    channel_to_node: Option<HashMap<String, String>>,
+    channel_to_node: Option<HashMap<ChannelId, String>>,
     port: Option<i32>,
 
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -86,16 +87,16 @@ impl GrpcTransportBackend {
         return p.unwrap()
     }
 
-    fn get_remote_nodes_from_out_channels(&self, out_channels: &[Channel]) -> (Vec<(String, String, i32)>, HashMap<String, String>) {
+    fn get_remote_nodes_from_out_channels(&self, out_channels: &[Channel]) -> (Vec<(String, String, i32)>, HashMap<ChannelId, String>) {
         if out_channels.len() == 0 {
             panic!("No channels provided");
         }
         let mut nodes = HashMap::new();
         let mut channel_to_node = HashMap::new();
-        
+
         for channel in out_channels {
             if let Channel::Remote { target_node_ip, target_node_id, target_port, .. } = channel {
-                let channel_id = channel.get_channel_id().clone();
+                let channel_id = channel.get_channel_id();
                 channel_to_node.insert(channel_id, target_node_id.clone());
                 
                 let ip_and_port = nodes.get(target_node_id);
@@ -195,9 +196,9 @@ impl TransportBackend for GrpcTransportBackend {
         if writer_receivers.len() != 0 {
 
             // Start clients for each peer node
-            let channel_to_node: HashMap<String, String> = self.channel_to_node.take().expect("Nodes should be found");
+            let channel_to_node: HashMap<ChannelId, String> = self.channel_to_node.take().expect("Nodes should be found");
             let nodes = self.nodes.take().expect("Nodes should be found");
-            let mut client_txs: HashMap<String, mpsc::Sender<(Message, String)>> = HashMap::new();
+            let mut client_txs: HashMap<String, mpsc::Sender<(Message, ChannelId)>> = HashMap::new();
             
             // println!("[GRPC_BACKEND] Setting up clients for nodes: {:?}", nodes);
             // println!("[GRPC_BACKEND] Channel to node mapping: {:?}", channel_to_node);
@@ -221,26 +222,24 @@ impl TransportBackend for GrpcTransportBackend {
             // routes data from writer channels to clients based on peer node<->channel mapping
             let writer_task = tokio::spawn(async move {
                 let mut receiver_futures = Vec::new();
-                
+
                 // Create futures for all writer receivers
                 for (channel_id, mut receiver) in writer_receivers {
-                    let channel_id_clone = channel_id.clone();
+                    let channel_id_clone = channel_id;
                     let client_txs_clone = client_txs.clone();
                     let channel_to_node_clone = channel_to_node.clone();
-                    
+
                     let r = running.clone();
                     let future = async move {
-                        
+
                         // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
                         while r.load(std::sync::atomic::Ordering::Relaxed) {
                             match time::timeout(Duration::from_millis(100), receiver.recv()).await {
                                 Ok(Some(message)) => {
                                     let node_id = channel_to_node_clone.get(&channel_id_clone).unwrap();
-                                    // println!("[GRPC_BACKEND] Looking up client for node_id: {} (channel: {})", node_id, channel_id_clone);
-                                    // println!("[GRPC_BACKEND] Available client_txs keys: {:?}", client_txs_clone.keys().collect::<Vec<_>>());
                                     let client_tx = client_txs_clone.get(node_id).unwrap();
                                     while r.load(std::sync::atomic::Ordering::Relaxed) {
-                                        match time::timeout(Duration::from_millis(100), client_tx.send((message.clone(), channel_id_clone.clone()))).await {
+                                        match time::timeout(Duration::from_millis(100), client_tx.send((message.clone(), channel_id_clone))).await {
                                             Ok(Ok(())) => {
                                                 break;
                                             }, 
@@ -313,7 +312,7 @@ impl TransportBackend for GrpcTransportBackend {
         let mut all_output_edges = Vec::new();
         
         for vertex_id in &vertex_ids {
-            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()).unwrap();
+            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(*vertex_id).unwrap();
             all_input_edges.extend(input_edges);
             all_output_edges.extend(output_edges);
         }
@@ -331,47 +330,47 @@ impl TransportBackend for GrpcTransportBackend {
             self.nodes = Some(remote_nodes);
         }
 
-        let mut reader_receivers = HashMap::new();
-        let mut reader_senders = HashMap::new();
-        
+        let mut reader_receivers: HashMap<ChannelId, BatchReceiver> = HashMap::new();
+        let mut reader_senders: HashMap<ChannelId, BatchSender> = HashMap::new();
+
         for edge in &all_input_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
             let (tx, rx) = batch_bounded_channel(channel.get_queue_size_records());
-            reader_senders.insert(channel_id.clone(), tx);
-            reader_receivers.insert(channel_id.clone(), rx);
+            reader_senders.insert(channel_id, tx);
+            reader_receivers.insert(channel_id, rx);
         }
 
-        let mut writer_receivers = HashMap::new();
-        let mut writer_senders = HashMap::new();
+        let mut writer_receivers: HashMap<ChannelId, BatchReceiver> = HashMap::new();
+        let mut writer_senders: HashMap<ChannelId, BatchSender> = HashMap::new();
 
         for edge in &all_output_edges {
             let channel = edge.get_channel();
             let channel_id = channel.get_channel_id();
             let (tx, rx) = batch_bounded_channel(channel.get_queue_size_records());
-            writer_senders.insert(channel_id.clone(), tx);
-            writer_receivers.insert(channel_id.clone(), rx);
+            writer_senders.insert(channel_id, tx);
+            writer_receivers.insert(channel_id, rx);
         }
 
         let mut transport_client_configs: HashMap<VertexId, TransportClientConfig> = HashMap::new();
-        
+
         for vertex_id in vertex_ids {
             let config = transport_client_configs
-                .entry(vertex_id.clone())
-                .or_insert(TransportClientConfig::new(vertex_id.clone()));
-            
-            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()).unwrap();
-            
+                .entry(vertex_id)
+                .or_insert(TransportClientConfig::new(vertex_id));
+
+            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id).unwrap();
+
             for edge in input_edges {
                 let channel = edge.get_channel();
                 let channel_id = channel.get_channel_id();
-                config.add_reader_receiver(channel_id.clone(), reader_receivers.remove(&channel_id).unwrap());
+                config.add_reader_receiver(channel_id, reader_receivers.remove(&channel_id).unwrap());
             }
 
             for edge in output_edges {
                 let channel = edge.get_channel();
                 let channel_id = channel.get_channel_id();
-                config.add_writer_sender(channel_id.clone(), writer_senders.get(&channel_id).unwrap().clone());
+                config.add_writer_sender(channel_id, writer_senders.get(&channel_id).unwrap().clone());
             }
         }
 

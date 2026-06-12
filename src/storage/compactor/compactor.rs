@@ -1055,6 +1055,7 @@ mod tests {
     use arrow::array::StringArray;
     use arrow::array::TimestampMillisecondArray;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+    use crate::common::{OperatorTypeCode, VertexId};
     use crate::runtime::operators::window::BucketIndex;
     use crate::runtime::operators::window::TimeGranularity;
     use crate::storage::batch_store::InMemBatchStore;
@@ -1116,7 +1117,7 @@ mod tests {
 
         let arc = Arc::new(RwLock::new(ws));
         compactor
-            .compact_bucket(&key, &arc, Arc::<str>::from("t"), bucket_ts, 0)
+            .compact_bucket(&key, &arc, VertexId::new(OperatorTypeCode::Map, 1, 1), bucket_ts, 0)
             .await;
 
         assert!(in_mem.get(old_id1).is_none());
@@ -1161,7 +1162,7 @@ mod tests {
             .dump_bucket(
                 &key,
                 &arc,
-                Arc::<str>::from("t"),
+                VertexId::new(OperatorTypeCode::Map, 1, 1),
                 bucket_ts,
                 0,
                 DumpMode::KeepHot,

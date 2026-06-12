@@ -13,6 +13,7 @@ use async_trait::async_trait;
 use arrow::array::StringArray;
 use arrow::datatypes::{Field, Schema};
 use std::sync::Arc;
+use crate::common::{OperatorTypeCode, VertexId};
 
 // Simple test map functions
 #[derive(Debug, Clone)]
@@ -75,14 +76,14 @@ async fn test_chained_operator_map_map() {
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
     ];
     let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
+    let context = RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 1),  1, None, None, None);
     
     chained_operator.open(&context).await.unwrap();
     
     // Set up input stream
     let input_batch = create_test_string_batch(vec!["hello".to_string(), "world".to_string()]);
     let input_message = Message::new(None, input_batch, None, None);
-    let watermark = Message::Watermark(WatermarkMessage::new("test".to_string(), 1000, None));
+    let watermark = Message::Watermark(WatermarkMessage::new(VertexId::new(OperatorTypeCode::Map, 1, 1), 1000, None));
     
     let input_stream = Box::pin(futures::stream::iter(vec![input_message, watermark]));
     chained_operator.set_input(Some(input_stream));
@@ -106,7 +107,7 @@ async fn test_chained_operator_source_map() {
     let test_messages = vec![
         Message::new(None, create_test_string_batch(vec!["hello".to_string()]), None, None),
         Message::new(None, create_test_string_batch(vec!["world".to_string()]), None, None),
-        Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
+        Message::Watermark(WatermarkMessage::new(VertexId::new(OperatorTypeCode::Map, 1, 1), MAX_WATERMARK_VALUE, None)),
     ];
     let configs = vec![
         OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
@@ -114,7 +115,7 @@ async fn test_chained_operator_source_map() {
     ];
 
     let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
+    let context = RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 1), 1, None, None, None);
     
     // Test open
     chained_operator.open(&context).await.unwrap();
@@ -156,7 +157,7 @@ async fn test_chained_operator_source_keyby() {
     
     let test_messages = vec![
         Message::new(None, batch, None, None),
-        Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
+        Message::Watermark(WatermarkMessage::new(VertexId::new(OperatorTypeCode::Map, 1, 1), MAX_WATERMARK_VALUE, None)),
     ];
     
     let configs = vec![
@@ -165,7 +166,7 @@ async fn test_chained_operator_source_keyby() {
     ];
     
     let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
+    let context = RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 1), 1, None, None, None);
     
     // Test open
     chained_operator.open(&context).await.unwrap();
@@ -219,7 +220,7 @@ async fn test_chained_operator_source_map_keyby() {
     
     let test_messages = vec![
         Message::new(None, batch, None, None),
-        Message::Watermark(WatermarkMessage::new("source".to_string(), MAX_WATERMARK_VALUE, None)),
+        Message::Watermark(WatermarkMessage::new(VertexId::new(OperatorTypeCode::Map, 1, 1), MAX_WATERMARK_VALUE, None)),
     ];
     
     let configs = vec![
@@ -229,7 +230,7 @@ async fn test_chained_operator_source_map_keyby() {
     ];
     
     let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
+    let context = RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 1), 1, None, None, None);
     
     // Test open
     chained_operator.open(&context).await.unwrap();
@@ -336,7 +337,7 @@ async fn test_chained_operator_source_map_sink() {
     // Verify operator type is ChainedSourceSink
     assert_eq!(chained_operator.operator_type(), OperatorType::ChainedSourceSink);
     
-    let context = RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None);
+    let context = RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 1), 1, None, None, None);
     
     // Test open
     chained_operator.open(&context).await.unwrap();

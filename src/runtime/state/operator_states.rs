@@ -37,18 +37,18 @@ impl OperatorStates {
         }
     }
 
-    pub fn get_operator_state(&self, vertex_id: &str) -> Option<Arc<dyn OperatorState>> {
-        self.states.get(vertex_id).map(|entry| entry.value().clone())
+    pub fn get_operator_state(&self, vertex_id: VertexId) -> Option<Arc<dyn OperatorState>> {
+        self.states.get(&vertex_id).map(|entry| entry.value().clone())
     }
 
-    pub async fn wait_for_operator_state(&self, vertex_id: &str) -> Arc<dyn OperatorState> {
+    pub async fn wait_for_operator_state(&self, vertex_id: VertexId) -> Arc<dyn OperatorState> {
         loop {
             if let Some(state) = self.get_operator_state(vertex_id) {
                 return state;
             }
             let notify = self
                 .notifies
-                .entry(Arc::<str>::from(vertex_id))
+                .entry(vertex_id.clone())
                 .or_insert_with(|| Arc::new(Notify::new()))
                 .clone();
             // Re-check to avoid missed notifications between the first check and registration.
@@ -59,17 +59,16 @@ impl OperatorStates {
         }
     }
 
-    pub fn get_or_insert_operator_state<F>(&self, vertex_id: &str, factory: F) -> Arc<dyn OperatorState>
+    pub fn get_or_insert_operator_state<F>(&self, vertex_id: VertexId, factory: F) -> Arc<dyn OperatorState>
     where
         F: FnOnce() -> Arc<dyn OperatorState>,
     {
-        if let Some(state) = self.states.get(vertex_id) {
+        if let Some(state) = self.states.get(&vertex_id) {
             state.value().clone()
         } else {
             let new_state = factory();
-            let id: VertexId = Arc::<str>::from(vertex_id);
-            self.states.insert(id.clone(), new_state.clone());
-            if let Some(n) = self.notifies.get(vertex_id) {
+            self.states.insert(vertex_id.clone(), new_state.clone());
+            if let Some(n) = self.notifies.get(&vertex_id) {
                 n.notify_waiters();
             }
             new_state

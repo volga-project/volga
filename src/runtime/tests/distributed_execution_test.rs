@@ -11,6 +11,7 @@ use anyhow::Result;
 use tokio::runtime::Runtime;
 use arrow::array::StringArray;
 use async_trait::async_trait;
+use crate::common::{OperatorTypeCode, VertexId};
 
 #[derive(Debug, Clone)]
 struct KeyedToRegularMapFunction;
@@ -64,7 +65,7 @@ fn test_distributed_execution() -> Result<()> {
         
         // Add max watermark as the last message
         source_messages.push(Message::Watermark(WatermarkMessage::new(
-            "source".to_string(),
+            VertexId::new(OperatorTypeCode::Map, 1, 1),
             MAX_WATERMARK_VALUE,
             None,
         )));

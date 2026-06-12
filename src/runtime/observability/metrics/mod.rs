@@ -5,7 +5,7 @@ use metrics_exporter_tcp::TcpBuilder;
 use metrics_util::layers::FanoutBuilder;
 use prometheus_parse::{Scrape, Value, HistogramCount};
 use std::{collections::HashMap, sync::{Once, OnceLock}};
-
+use crate::common::OperatorId;
 use crate::runtime::VertexId;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::control_plane::types::ExecutionIds;
@@ -233,7 +233,7 @@ impl ThroughputMetrics {
 // per-task metrics (task/vertex scope)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMetrics {
-    pub vertex_id: String,
+    pub vertex_id: VertexId,
     pub latency_stats: LatencyMetrics,
     pub throughput_stast: ThroughputMetrics,
     pub backpressure_per_peer: HashMap<String, f64>,
@@ -242,13 +242,13 @@ pub struct TaskMetrics {
 // aggregated metrics for an operator_id over all its tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorAggregateMetrics {
-    pub operator_id: String,
+    pub operator_id: OperatorId,
     pub latency_metrics: LatencyMetrics,
     pub throughput_metrics: ThroughputMetrics,
 }
 
 impl OperatorAggregateMetrics {
-    pub fn new(operator_id: String, task_metrics: Vec<TaskMetrics>) -> Self {
+    pub fn new(operator_id: OperatorId, task_metrics: Vec<TaskMetrics>) -> Self {
         let latency_stats = LatencyMetrics::merge(task_metrics.iter().map(|m| &m.latency_stats).collect());
         let throughput_stats = ThroughputMetrics::merge(task_metrics.iter().map(|m| &m.throughput_stast).collect());
 
@@ -264,24 +264,22 @@ impl OperatorAggregateMetrics {
 pub struct WorkerAggregateMetrics {
     pub worker_id: String,
     pub execution_ids: ExecutionIds,
-    pub operator_metrics: HashMap<String, OperatorAggregateMetrics>,
-    pub tasks_metrics: HashMap<String, TaskMetrics>
+    pub operator_metrics: HashMap<OperatorId, OperatorAggregateMetrics>,
+    pub tasks_metrics: HashMap<VertexId, TaskMetrics>
 }
 
 impl WorkerAggregateMetrics {
 
-    pub fn new(worker_id: String, execution_ids: ExecutionIds, tasks_metrics: HashMap<String, TaskMetrics>, graph: &ExecutionGraph) -> Self {
-        let mut metrics_by_operator: HashMap<String, Vec<TaskMetrics>> = HashMap::new();
+    pub fn new(worker_id: String, execution_ids: ExecutionIds, tasks_metrics: HashMap<VertexId, TaskMetrics>) -> Self {
+        let mut metrics_by_operator: HashMap<OperatorId, Vec<TaskMetrics>> = HashMap::new();
 
-        // Group task metrics by operator_id
+        // Group task metrics by operator_id.
         for (vertex_id, task_metrics) in tasks_metrics.iter() {
-            if let Some(vertex) = graph.get_vertex(vertex_id) {
-                let operator_id = vertex.operator_id.clone();
-                metrics_by_operator
-                    .entry(operator_id)
-                    .or_insert_with(Vec::new)
-                    .push(task_metrics.clone());
-            }
+            let operator_id = vertex_id.operator_id();
+            metrics_by_operator
+                .entry(operator_id)
+                .or_insert_with(Vec::new)
+                .push(task_metrics.clone());
         }
 
         // Create OperatorMetrics for each operator by merging its task metrics
@@ -307,10 +305,11 @@ impl WorkerAggregateMetrics {
         let attempt_id = self.execution_ids.attempt_id.0.to_string();
 
         for (operator_id, operator_metrics) in self.operator_metrics.iter() {
+            let operator_id_label = operator_id.to_string();
             // Record throughput metrics
             counter!(
                 METRIC_OPERATOR_MESSAGES_SENT,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -318,7 +317,7 @@ impl WorkerAggregateMetrics {
             ).increment(operator_metrics.throughput_metrics.messages_sent);
             counter!(
                 METRIC_OPERATOR_MESSAGES_RECV,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -326,7 +325,7 @@ impl WorkerAggregateMetrics {
             ).increment(operator_metrics.throughput_metrics.messages_recv);
             counter!(
                 METRIC_OPERATOR_RECORDS_SENT,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -334,7 +333,7 @@ impl WorkerAggregateMetrics {
             ).increment(operator_metrics.throughput_metrics.records_sent);
             counter!(
                 METRIC_OPERATOR_RECORDS_RECV,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -342,7 +341,7 @@ impl WorkerAggregateMetrics {
             ).increment(operator_metrics.throughput_metrics.records_recv);
             counter!(
                 METRIC_OPERATOR_BYTES_SENT,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -350,17 +349,17 @@ impl WorkerAggregateMetrics {
             ).increment(operator_metrics.throughput_metrics.bytes_sent);
             counter!(
                 METRIC_OPERATOR_BYTES_RECV,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
                 LABEL_ATTEMPT_ID => attempt_id.clone()
             ).increment(operator_metrics.throughput_metrics.bytes_recv);
-            
+
             // Record latency metrics
             gauge!(
                 METRIC_OPERATOR_LATENCY_99,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -368,7 +367,7 @@ impl WorkerAggregateMetrics {
             ).set(operator_metrics.latency_metrics.p99);
             gauge!(
                 METRIC_OPERATOR_LATENCY_95,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -376,7 +375,7 @@ impl WorkerAggregateMetrics {
             ).set(operator_metrics.latency_metrics.p95);
             gauge!(
                 METRIC_OPERATOR_LATENCY_50,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -384,19 +383,20 @@ impl WorkerAggregateMetrics {
             ).set(operator_metrics.latency_metrics.p50);
             gauge!(
                 METRIC_OPERATOR_LATENCY_AVG,
-                LABEL_OPERATOR_ID => operator_id.clone(),
+                LABEL_OPERATOR_ID => operator_id_label,
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
                 LABEL_ATTEMPT_ID => attempt_id.clone()
             ).set(operator_metrics.latency_metrics.avg);
         }
-        
+
         // Record stream task latency metrics
         for (vertex_id, task_metrics) in self.tasks_metrics.iter() {
+            let vertex_id_label = vertex_id.to_string();
             gauge!(
                 METRIC_STREAM_TASK_LATENCY_99,
-                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_VERTEX_ID => vertex_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -404,7 +404,7 @@ impl WorkerAggregateMetrics {
             ).set(task_metrics.latency_stats.p99);
             gauge!(
                 METRIC_STREAM_TASK_LATENCY_95,
-                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_VERTEX_ID => vertex_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -412,7 +412,7 @@ impl WorkerAggregateMetrics {
             ).set(task_metrics.latency_stats.p95);
             gauge!(
                 METRIC_STREAM_TASK_LATENCY_50,
-                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_VERTEX_ID => vertex_id_label.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -420,7 +420,7 @@ impl WorkerAggregateMetrics {
             ).set(task_metrics.latency_stats.p50);
             gauge!(
                 METRIC_STREAM_TASK_LATENCY_AVG,
-                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_VERTEX_ID => vertex_id_label,
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -450,7 +450,7 @@ pub fn emit_poll_derived_gauges(worker_metrics: &WorkerAggregateMetrics) {
 
         gauge!(
             METRIC_STREAM_TASK_BACKPRESSURE_MAX,
-            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_VERTEX_ID => vertex_id.to_string(),
             LABEL_WORKER_ID => worker_metrics.worker_id.clone(),
             LABEL_PIPELINE_SPEC_ID => pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => pipeline_id.clone(),
@@ -615,8 +615,8 @@ pub struct TaskThroughputStats {
 
 #[derive(Debug, Clone)]
 pub struct FinalStats {
-    pub throughput_per_task: HashMap<String, TaskThroughputStats>,
-    pub latency_per_task: HashMap<String, LatencyMetrics>,
+    pub throughput_per_task: HashMap<VertexId, TaskThroughputStats>,
+    pub latency_per_task: HashMap<VertexId, LatencyMetrics>,
 }
 
 impl PipelineStateHistory {
@@ -630,7 +630,7 @@ impl PipelineStateHistory {
         self.samples.push((timestamp, pipeline_state));
     }
 
-    pub fn calculate_throughput_rates(&self, window_seconds: u64) -> HashMap<String, ThroughputRates> {
+    pub fn calculate_throughput_rates(&self, window_seconds: u64) -> HashMap<VertexId, ThroughputRates> {
         let mut rates = HashMap::new();
         
         if self.samples.is_empty() {
@@ -700,8 +700,8 @@ impl PipelineStateHistory {
     }
 
     pub fn final_stats(&self) -> FinalStats {
-        let mut throughput_per_task: HashMap<String, TaskThroughputStats> = HashMap::new();
-        let mut latency_per_task: HashMap<String, LatencyMetrics> = HashMap::new();
+        let mut throughput_per_task: HashMap<VertexId, TaskThroughputStats> = HashMap::new();
+        let mut latency_per_task: HashMap<VertexId, LatencyMetrics> = HashMap::new();
         
         if self.samples.len() < 2 {
             return FinalStats {
@@ -711,7 +711,7 @@ impl PipelineStateHistory {
         }
         
         // Calculate throughput rates for each consecutive pair of samples
-        let mut all_rates_per_task: HashMap<String, Vec<ThroughputRates>> = HashMap::new();
+        let mut all_rates_per_task: HashMap<VertexId, Vec<ThroughputRates>> = HashMap::new();
         
         for i in 1..self.samples.len() {
             let (start_timestamp, start_state) = &self.samples[i - 1];
@@ -786,7 +786,7 @@ impl PipelineStateHistory {
         }
         
         // Aggregate latency histograms per task across all samples
-        let mut latency_histograms_per_task: HashMap<String, Vec<&LatencyMetrics>> = HashMap::new();
+        let mut latency_histograms_per_task: HashMap<VertexId, Vec<&LatencyMetrics>> = HashMap::new();
         
         for (_timestamp, pipeline_state) in &self.samples {
             for (_worker_id, worker_state) in &pipeline_state.worker_states {
@@ -898,11 +898,11 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
 pub fn get_stream_task_metrics(vertex_id: VertexId, labels: Option<&MetricsLabels>) -> TaskMetrics {
     let handle = PROMETHEUS_HANDLE.get().expect("Metrics not initialized");
     let prometheus_text = handle.render();
-    
-    parse_stream_task_metrics(&prometheus_text, vertex_id.as_ref(), labels)
+
+    parse_stream_task_metrics(&prometheus_text, vertex_id.clone(), labels)
 }
 
-fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Option<&MetricsLabels>) -> TaskMetrics {
+fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: VertexId, labels: Option<&MetricsLabels>) -> TaskMetrics {
     let scrape = Scrape::parse(prometheus_text.lines().map(|line| Ok(line.to_string())))
         .expect("Failed to parse Prometheus metrics");
     
@@ -915,10 +915,12 @@ fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Opt
     let mut latency_histogram = vec![0u64; LATENCY_BUCKET_BOUNDARIES.len()];
     let mut backpressure_per_peer = HashMap::new();
 
+    let vertex_id_label = vertex_id.to_string();
+
     for sample in scrape.samples {
         // Check if this metric belongs to our vertex_id
         if let Some(sample_vertex_id) = sample.labels.get(LABEL_VERTEX_ID) {
-            if sample_vertex_id != vertex_id {
+            if sample_vertex_id != vertex_id_label.as_str() {
                 continue;
             }
         } else {
@@ -972,7 +974,7 @@ fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Opt
     let throughput_stats = ThroughputMetrics::new(messages_sent, messages_recv, records_sent, records_recv, bytes_sent, bytes_recv);
     
     TaskMetrics {
-        vertex_id: vertex_id.to_string(),
+        vertex_id,
         latency_stats,
         throughput_stast: throughput_stats,
         backpressure_per_peer
@@ -990,10 +992,9 @@ fn convert_histogram_counts_to_buckets(histogram_counts: &[HistogramCount]) -> V
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use super::*;
     use metrics::{counter, histogram};
+    use crate::common::OperatorTypeCode;
 
     /// Helper function to manually build a histogram from latency measurements
     fn build_expected_histogram(latencies: &[f64], boundaries: &[f64]) -> Vec<u64> {
@@ -1018,7 +1019,7 @@ mod tests {
     fn test_stream_task_metrics_prometheus_parsing() {
         init_metrics();
         
-        let vertex_id = "test_task_123".to_string();
+        let vertex_id = VertexId::new(OperatorTypeCode::Map, 1, 1);
         let labels = MetricsLabels {
             pipeline_spec_id: "spec".to_string(),
             pipeline_id: "pipe".to_string(),
@@ -1029,7 +1030,7 @@ mod tests {
         // Record stream task metrics
         counter!(
             METRIC_STREAM_TASK_MESSAGES_SENT,
-            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_VERTEX_ID => vertex_id.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1037,7 +1038,7 @@ mod tests {
         ).increment(5);
         counter!(
             METRIC_STREAM_TASK_MESSAGES_RECV,
-            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_VERTEX_ID => vertex_id.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1045,7 +1046,7 @@ mod tests {
         ).increment(3);
         counter!(
             METRIC_STREAM_TASK_RECORDS_SENT,
-            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_VERTEX_ID => vertex_id.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1053,7 +1054,7 @@ mod tests {
         ).increment(25);
         counter!(
             METRIC_STREAM_TASK_RECORDS_RECV,
-            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_VERTEX_ID => vertex_id.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1061,7 +1062,7 @@ mod tests {
         ).increment(15);
         counter!(
             METRIC_STREAM_TASK_BYTES_SENT,
-            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_VERTEX_ID => vertex_id.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1069,7 +1070,7 @@ mod tests {
         ).increment(1024);
         counter!(
             METRIC_STREAM_TASK_BYTES_RECV,
-            LABEL_VERTEX_ID => vertex_id.clone(),
+            LABEL_VERTEX_ID => vertex_id.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1083,7 +1084,7 @@ mod tests {
         for &latency in &latency_measurements {
             histogram!(
                 METRIC_STREAM_TASK_LATENCY,
-                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_VERTEX_ID => vertex_id.to_string(),
                 LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                 LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                 LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1094,8 +1095,8 @@ mod tests {
         // Build expected histogram manually
         let expected_histogram = build_expected_histogram(&latency_measurements, &LATENCY_BUCKET_BOUNDARIES);
         
-        let parsed_metrics = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
-        
+        let parsed_metrics = get_stream_task_metrics(vertex_id.clone(), Some(&labels));
+
         // Verify the parsed stream task metrics
         assert_eq!(parsed_metrics.vertex_id, vertex_id);
         assert_eq!(parsed_metrics.throughput_stast.messages_sent, 5);
@@ -1129,10 +1130,10 @@ mod tests {
                    "Should have recorded {} latency measurements", latency_measurements.len());
         
         // Test vertex isolation with a second vertex
-        let vertex_b = "task_b".to_string();
+        let vertex_b = VertexId::new(OperatorTypeCode::Map, 1, 0);
         counter!(
             METRIC_STREAM_TASK_MESSAGES_SENT,
-            LABEL_VERTEX_ID => vertex_b.clone(),
+            LABEL_VERTEX_ID => vertex_b.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -1140,23 +1141,23 @@ mod tests {
         ).increment(1);
         counter!(
             METRIC_STREAM_TASK_RECORDS_SENT,
-            LABEL_VERTEX_ID => vertex_b.clone(),
+            LABEL_VERTEX_ID => vertex_b.to_string(),
             LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
             LABEL_WORKER_ID => labels.worker_id.clone()
         ).increment(50);
-        
-        let metrics_b = get_stream_task_metrics(Arc::<str>::from(vertex_b.clone()), Some(&labels));
-        
+
+        let metrics_b = get_stream_task_metrics(vertex_b.clone(), Some(&labels));
+
         // Verify isolation - vertex B should only see its own metrics
-        assert_eq!(metrics_b.vertex_id, vertex_b);
+        assert_eq!(metrics_b.vertex_id.to_string(), vertex_b.to_string());
         assert_eq!(metrics_b.throughput_stast.messages_sent, 1);
         assert_eq!(metrics_b.throughput_stast.records_sent, 50);
         assert_eq!(metrics_b.throughput_stast.messages_recv, 0); // Not set for vertex B
-        
+
         // Verify original vertex still has correct metrics
-        let metrics_a_again = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
+        let metrics_a_again = get_stream_task_metrics(vertex_id.clone(), Some(&labels));
         assert_eq!(metrics_a_again.throughput_stast.messages_sent, 5);
         assert_eq!(metrics_a_again.throughput_stast.records_sent, 25);
     }

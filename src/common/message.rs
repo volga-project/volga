@@ -4,6 +4,7 @@ use serde::{Serialize, Deserialize};
 use std::io::{Cursor, Read, Write};
 use std::collections::HashMap;
 
+use super::ids::VertexId;
 use super::Key;
 
 #[derive(Debug, Clone)]
@@ -13,7 +14,7 @@ pub struct BaseMessage {
 }
 
 impl BaseMessage {
-    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
+    pub fn new(upstream_vertex_id: Option<VertexId>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
         Self {
             record_batch,
             metadata: MessageMetadata { upstream_vertex_id, ingest_timestamp, extras }
@@ -24,7 +25,7 @@ impl BaseMessage {
         self.metadata.ingest_timestamp = Some(ingest_timestamp);
     }
 
-    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: VertexId) {
         self.metadata.upstream_vertex_id = Some(upstream_vertex_id);
     }
 
@@ -98,19 +99,16 @@ impl BaseMessage {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageMetadata {
-    pub upstream_vertex_id: Option<String>,
+    pub upstream_vertex_id: Option<VertexId>,
     pub ingest_timestamp: Option<u64>,
     pub extras: Option<HashMap<String, String>>,
 }
 
 impl MessageMetadata {
     pub fn get_memory_size(&self) -> usize {
-        // Option<u64> = 8 bytes, Option<String> = 24 bytes + string length
+        // VertexId is u32 -> Option<VertexId> = 8 bytes (with niche).
         let mut len = 0;
-        if let Some(ref vertex_id) = self.upstream_vertex_id {
-            len += vertex_id.len();
-        }
-        
+
         // Add memory for extras HashMap
         if let Some(ref extras) = self.extras {
             len += 24; // HashMap overhead
@@ -118,8 +116,8 @@ impl MessageMetadata {
                 len += key.len() + value.len() + 48; // String overhead for each entry
             }
         }
-        
-        8 + 24 + 24 + len // u64 + Option<String> + Option<HashMap> + content
+
+        8 + 8 + 24 + len // ingest_timestamp + upstream_vertex_id + Option<HashMap> + content
     }
 }
 
@@ -199,7 +197,7 @@ pub struct WatermarkMessage {
 }
 
 impl WatermarkMessage {
-    pub fn new(upstream_vertex_id: String, watermark_value: u64, ingest_timestamp: Option<u64>) -> Self {
+    pub fn new(upstream_vertex_id: VertexId, watermark_value: u64, ingest_timestamp: Option<u64>) -> Self {
         Self {
             watermark_value,
             metadata: MessageMetadata {
@@ -214,7 +212,7 @@ impl WatermarkMessage {
         self.metadata.ingest_timestamp = Some(ingest_timestamp);
     }
 
-    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: VertexId) {
         self.metadata.upstream_vertex_id = Some(upstream_vertex_id);
     }
 
@@ -242,7 +240,7 @@ pub struct CheckpointBarrierMessage {
 }
 
 impl CheckpointBarrierMessage {
-    pub fn new(upstream_vertex_id: String, checkpoint_id: u64, ingest_timestamp: Option<u64>) -> Self {
+    pub fn new(upstream_vertex_id: VertexId, checkpoint_id: u64, ingest_timestamp: Option<u64>) -> Self {
         Self {
             checkpoint_id,
             metadata: MessageMetadata {
@@ -257,7 +255,7 @@ impl CheckpointBarrierMessage {
         self.metadata.ingest_timestamp = Some(ingest_timestamp);
     }
 
-    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: VertexId) {
         self.metadata.upstream_vertex_id = Some(upstream_vertex_id);
     }
 
@@ -284,23 +282,23 @@ pub enum Message {
 
 impl Message {
 
-    pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
+    pub fn new(upstream_vertex_id: Option<VertexId>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
         Message::Regular(BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, extras))
     }
 
-    pub fn new_keyed(upstream_vertex_id: Option<String>, record_batch: RecordBatch, key: Key, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
+    pub fn new_keyed(upstream_vertex_id: Option<VertexId>, record_batch: RecordBatch, key: Key, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
         Message::Keyed(KeyedMessage::new(
             BaseMessage::new(upstream_vertex_id, record_batch, ingest_timestamp, extras),
             key,
         ))
     }
 
-    pub fn upstream_vertex_id(&self) -> Option<String> {
+    pub fn upstream_vertex_id(&self) -> Option<VertexId> {
         match self {
-            Message::Regular(message) => message.metadata.upstream_vertex_id.clone(),
-            Message::Keyed(message) => message.base.metadata.upstream_vertex_id.clone(),
-            Message::Watermark(message) => message.metadata.upstream_vertex_id.clone(),
-            Message::CheckpointBarrier(message) => message.metadata.upstream_vertex_id.clone(),
+            Message::Regular(message) => message.metadata.upstream_vertex_id,
+            Message::Keyed(message) => message.base.metadata.upstream_vertex_id,
+            Message::Watermark(message) => message.metadata.upstream_vertex_id,
+            Message::CheckpointBarrier(message) => message.metadata.upstream_vertex_id,
         }
     }
 
@@ -341,7 +339,7 @@ impl Message {
         }
     }
 
-    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: String) {
+    pub fn set_upstream_vertex_id(&mut self, upstream_vertex_id: VertexId) {
         match self {
             Message::Regular(message) => message.set_upstream_vertex_id(upstream_vertex_id),
             Message::Keyed(message) => message.base.set_upstream_vertex_id(upstream_vertex_id),
@@ -361,7 +359,7 @@ impl Message {
         metadata.extras.clone()
     }
 
-    pub fn append_trace(&mut self, vertex_id: &str) {
+    pub fn append_trace(&mut self, vertex_id: VertexId) {
         let extras = match self {
             Message::Regular(m) => m.metadata.extras.get_or_insert_with(HashMap::new),
             Message::Keyed(m) => m.base.metadata.extras.get_or_insert_with(HashMap::new),
@@ -374,7 +372,7 @@ impl Message {
             *entry = vertex_id.to_string();
         } else {
             entry.push(',');
-            entry.push_str(vertex_id);
+            entry.push_str(vertex_id.to_string().as_str());
         }
     }
 
@@ -504,7 +502,7 @@ mod tests {
 
         // Create a regular message
         let original_message = Message::new(
-            Some("upstream_vertex".to_string()),
+            Some(VertexId::new(crate::common::ids::OperatorTypeCode::Map, 1, 0)),
             record_batch,
             Some(1234567890),
             None
@@ -554,7 +552,7 @@ mod tests {
 
         // Create a keyed message
         let original_message = Message::new_keyed(
-            Some("upstream_vertex".to_string()),
+            Some(VertexId::new(crate::common::ids::OperatorTypeCode::Map, 1, 0)),
             record_batch,
             key.clone(),
             Some(1234567890),
@@ -585,7 +583,7 @@ mod tests {
     fn test_watermark_message_serialization() {
         // Create a watermark message
         let mut original_message = Message::Watermark(WatermarkMessage::new(
-            "source_vertex".to_string(),
+            VertexId::new(crate::common::ids::OperatorTypeCode::SourceVector, 1, 0),
             9876543210,
             None
         ));

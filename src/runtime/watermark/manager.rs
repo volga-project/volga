@@ -11,7 +11,7 @@ use crate::common::message::{Message, WatermarkMessage};
 use crate::runtime::operators::operator::OperatorConfig;
 
 use datafusion::physical_plan::expressions::Column;
-
+use crate::runtime::VertexId;
 use super::confg::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Clone)]
@@ -34,7 +34,7 @@ struct UpstreamWatermarkProgress {
 pub struct WatermarkAssignerState {
     out_of_orderness_ms: u64,
     ts_column: TsColumnSpec,
-    per_upstream: HashMap<String, UpstreamWatermarkProgress>,
+    per_upstream: HashMap<VertexId, UpstreamWatermarkProgress>,
 }
 
 impl WatermarkAssignerState {
@@ -135,7 +135,7 @@ impl WatermarkAssignerState {
 
     pub fn on_data_message(
         &mut self,
-        upstream_vertex_id: &str,
+        upstream_vertex_id: VertexId,
         message: &Message,
     ) -> Option<WatermarkMessage> {
         let batch = message.record_batch();
@@ -146,7 +146,7 @@ impl WatermarkAssignerState {
 
         let progress = self
             .per_upstream
-            .entry(upstream_vertex_id.to_string())
+            .entry(upstream_vertex_id)
             .or_default();
 
         progress.max_event_time_seen_ms = progress.max_event_time_seen_ms.max(batch_max);
@@ -157,7 +157,7 @@ impl WatermarkAssignerState {
         if candidate > progress.last_emitted_wm_ms {
             progress.last_emitted_wm_ms = candidate;
             Some(WatermarkMessage::new(
-                upstream_vertex_id.to_string(),
+                upstream_vertex_id,
                 candidate,
                 None,
             ))
@@ -170,9 +170,9 @@ impl WatermarkAssignerState {
 #[derive(Debug)]
 pub struct WatermarkManager {
     idle_timeout_ms: Option<u64>,
-    upstream_vertices: Vec<String>,
-    last_seen_processing_time: HashMap<String, Instant>,
-    upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+    upstream_vertices: Vec<VertexId>,
+    last_seen_processing_time: HashMap<VertexId, Instant>,
+    upstream_watermarks: Arc<Mutex<HashMap<VertexId, u64>>>,
     current_watermark: Arc<AtomicU64>,
     assigner: Option<WatermarkAssignerState>,
 }
@@ -181,15 +181,15 @@ impl WatermarkManager {
     pub fn new(
         watermark_assign: Option<WatermarkAssignConfig>,
         operator_config: Option<&OperatorConfig>,
-        upstream_vertices: Vec<String>,
-        upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+        upstream_vertices: Vec<VertexId>,
+        upstream_watermarks: Arc<Mutex<HashMap<VertexId, u64>>>,
         current_watermark: Arc<AtomicU64>,
     ) -> Self {
         let idle_timeout_ms = watermark_assign.as_ref().and_then(|cfg| cfg.idle_timeout_ms);
         let assigner = watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, operator_config));
         let last_seen_processing_time = upstream_vertices
             .iter()
-            .map(|u| (u.clone(), Instant::now()))
+            .map(|u| (*u, Instant::now()))
             .collect();
         Self {
             idle_timeout_ms,
@@ -205,18 +205,18 @@ impl WatermarkManager {
         self.assigner.is_some()
     }
 
-    pub fn on_data_message(&mut self, upstream_vertex_id: &str, message: &Message) -> Option<WatermarkMessage> {
+    pub fn on_data_message(&mut self, upstream_vertex_id: VertexId, message: &Message) -> Option<WatermarkMessage> {
         self.last_seen_processing_time
-            .insert(upstream_vertex_id.to_string(), Instant::now());
+            .insert(upstream_vertex_id, Instant::now());
         self.assigner
             .as_mut()
             .and_then(|assigner| assigner.on_data_message(upstream_vertex_id, message))
     }
 
     pub async fn merge_watermark(&mut self, watermark: WatermarkMessage) -> Option<u64> {
-        if let Some(upstream_id) = watermark.metadata.upstream_vertex_id.as_ref() {
+        if let Some(upstream_id) = watermark.metadata.upstream_vertex_id {
             self.last_seen_processing_time
-                .insert(upstream_id.clone(), Instant::now());
+                .insert(upstream_id, Instant::now());
         }
         let active_upstreams = self.active_upstreams(Instant::now());
         advance_watermark_min(
@@ -228,7 +228,7 @@ impl WatermarkManager {
         .await
     }
 
-    fn active_upstreams(&self, now: Instant) -> Vec<String> {
+    fn active_upstreams(&self, now: Instant) -> Vec<VertexId> {
         if let Some(timeout_ms) = self.idle_timeout_ms {
             let timeout = Duration::from_millis(timeout_ms);
             self.upstream_vertices
@@ -239,7 +239,7 @@ impl WatermarkManager {
                         .map(|t| now.duration_since(*t) <= timeout)
                         .unwrap_or(false)
                 })
-                .cloned()
+                .copied()
                 .collect()
         } else {
             self.upstream_vertices.clone()
@@ -252,8 +252,8 @@ impl WatermarkManager {
 /// Returns `Some(new_watermark_value)` when the task watermark advanced, otherwise `None`.
 pub async fn advance_watermark_min(
     watermark: WatermarkMessage,
-    active_upstreams: &[String],
-    upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
+    active_upstreams: &[VertexId],
+    upstream_watermarks: Arc<Mutex<HashMap<VertexId, u64>>>,
     current_watermark: Arc<AtomicU64>,
 ) -> Option<u64> {
     // Sources (no incoming edges): just advance monotonically.
@@ -269,7 +269,6 @@ pub async fn advance_watermark_min(
     let upstream_id = watermark
         .metadata
         .upstream_vertex_id
-        .clone()
         .unwrap_or_else(|| panic!("Watermark must have upstream_vertex_id set: {:?}", watermark));
 
     let mut upstream_wms = upstream_watermarks.lock().await;
@@ -315,11 +314,16 @@ mod tests {
     use futures::stream;
     use futures::StreamExt;
 
-        use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-        use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
+    use crate::common::ids::{OperatorTypeCode, VertexId as VId};
+    use crate::runtime::observability::snapshot_types::StreamTaskStatus;
+    use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
     use crate::transport::transport_client::DataReaderControl;
     use std::sync::atomic::AtomicU8;
     use std::time::Duration;
+
+    fn vid(instance: u8, parallel: u16) -> VId {
+        VId::new(OperatorTypeCode::Map, instance, parallel)
+    }
 
     #[test]
     fn assigner_tracks_per_upstream_independently() {
@@ -346,12 +350,14 @@ mod tests {
         };
         let mut assigner = WatermarkAssignerState::new(cfg, None);
 
-        let wm1 = assigner.on_data_message("upA", &msg).unwrap();
-        assert_eq!(wm1.metadata.upstream_vertex_id.as_deref(), Some("upA"));
+        let up_a = vid(1, 0);
+        let up_b = vid(2, 0);
+        let wm1 = assigner.on_data_message(up_a, &msg).unwrap();
+        assert_eq!(wm1.metadata.upstream_vertex_id, Some(up_a));
         assert_eq!(wm1.watermark_value, 100);
 
-        let wm2 = assigner.on_data_message("upB", &msg).unwrap();
-        assert_eq!(wm2.metadata.upstream_vertex_id.as_deref(), Some("upB"));
+        let wm2 = assigner.on_data_message(up_b, &msg).unwrap();
+        assert_eq!(wm2.metadata.upstream_vertex_id, Some(up_b));
         assert_eq!(wm2.watermark_value, 100);
     }
 
@@ -379,9 +385,11 @@ mod tests {
         )
         .unwrap();
 
+        let u0 = vid(1, 0);
+        let v0 = vid(10, 0);
         let input = Box::pin(stream::iter(vec![
-            Message::new(Some("u0".to_string()), b1, None, None),
-            Message::new(Some("u0".to_string()), b2, None, None),
+            Message::new(Some(u0), b1, None, None),
+            Message::new(Some(u0), b2, None, None),
         ]));
 
         let cfg = WatermarkAssignConfig::new(
@@ -393,16 +401,16 @@ mod tests {
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
-            Arc::<str>::from("v0"),
+            v0,
             OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
                 crate::common::test_utils::IdentityMapFunction,
             )),
             Some(cfg),
-            vec!["u0".to_string()],
+            vec![u0],
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
-            CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
+            CheckpointAligner::new(&[u0], DataReaderControl::empty_for_test()),
             None,
         );
 
@@ -453,8 +461,11 @@ mod tests {
         )
         .unwrap();
 
-        let m0 = Message::new(Some("u0".to_string()), b_u0, None, None);
-        let m1 = Message::new(Some("u1".to_string()), b_u1, None, None);
+        let u0 = vid(1, 0);
+        let u1 = vid(2, 0);
+        let v0 = vid(10, 0);
+        let m0 = Message::new(Some(u0), b_u0, None, None);
+        let m1 = Message::new(Some(u1), b_u1, None, None);
 
         let input = Box::pin(stream::iter(vec![m0, m1]));
         let cfg = WatermarkAssignConfig::new(
@@ -466,17 +477,17 @@ mod tests {
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
-            Arc::<str>::from("v0"),
+            v0,
             OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
                 crate::common::test_utils::IdentityMapFunction,
             )),
             Some(cfg),
-            vec!["u0".to_string(), "u1".to_string()],
+            vec![u0, u1],
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
             CheckpointAligner::new(
-                &["u0".to_string(), "u1".to_string()],
+                &[u0, u1],
                 DataReaderControl::empty_for_test(),
             ),
             None,
@@ -514,9 +525,12 @@ mod tests {
         )
         .unwrap();
 
+        let u0 = vid(1, 0);
+        let u1 = vid(2, 0);
+        let v0 = vid(10, 0);
         let input = Box::pin(async_stream::stream! {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            yield Message::new(Some("u0".to_string()), batch, None, None);
+            yield Message::new(Some(u0), batch, None, None);
         });
 
         let mut cfg = WatermarkAssignConfig::new(
@@ -529,17 +543,17 @@ mod tests {
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
-            Arc::<str>::from("v0"),
+            v0,
             OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
                 crate::common::test_utils::IdentityMapFunction,
             )),
             Some(cfg),
-            vec!["u0".to_string(), "u1".to_string()],
+            vec![u0, u1],
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
             CheckpointAligner::new(
-                &["u0".to_string(), "u1".to_string()],
+                &[u0, u1],
                 DataReaderControl::empty_for_test(),
             ),
             None,
@@ -570,9 +584,12 @@ mod tests {
         )
         .unwrap();
 
+        let u0 = vid(1, 0);
+        let u1 = vid(2, 0);
+        let v0 = vid(10, 0);
         let input = Box::pin(async_stream::stream! {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            yield Message::new(Some("u0".to_string()), batch, None, None);
+            yield Message::new(Some(u0), batch, None, None);
         });
 
         let mut cfg = WatermarkAssignConfig::new(
@@ -585,17 +602,17 @@ mod tests {
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
-            Arc::<str>::from("v0"),
+            v0,
             OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
                 crate::common::test_utils::IdentityMapFunction,
             )),
             Some(cfg),
-            vec!["u0".to_string(), "u1".to_string()],
+            vec![u0, u1],
             Arc::new(Mutex::new(HashMap::new())),
             Arc::new(AtomicU64::new(0)),
             Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
             CheckpointAligner::new(
-                &["u0".to_string(), "u1".to_string()],
+                &[u0, u1],
                 DataReaderControl::empty_for_test(),
             ),
             None,

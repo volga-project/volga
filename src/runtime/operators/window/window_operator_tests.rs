@@ -24,7 +24,7 @@ use datafusion::prelude::SessionContext;
 
 use crate::api::planner::{Planner, PlanningContext};
 use crate::common::message::Message;
-use crate::common::{MAX_WATERMARK_VALUE, WatermarkMessage};
+use crate::common::{MAX_WATERMARK_VALUE, WatermarkMessage, VertexId, OperatorTypeCode};
 use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
@@ -74,7 +74,7 @@ fn keyed_message(b: RecordBatch, partition: &str) -> Message {
 }
 
 fn watermark_message(wm: u64) -> Message {
-    Message::Watermark(WatermarkMessage::new("test".to_string(), wm, Some(0)))
+    Message::Watermark(WatermarkMessage::new(VertexId::new(OperatorTypeCode::Map, 1, 1), wm, Some(0)))
 }
 
 async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
@@ -96,8 +96,7 @@ fn runtime_context() -> RuntimeContext {
         WorkerStorageContext::new(store, StorageBudgetConfig::default()).expect("storage ctx");
 
     let mut ctx = RuntimeContext::new(
-        "test_vertex".to_string().into(),
-        0,
+        VertexId::new(OperatorTypeCode::Map, 1, 1),
         1,
         None,
         Some(Arc::new(OperatorStates::new())),

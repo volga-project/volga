@@ -446,10 +446,15 @@ mod tests {
     use super::*;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{Schema, Field, DataType};
-    use rand::{random, Rng};
+    use rand::Rng;
     use std::sync::Arc;
     use std::time::Instant;
     use crate::common::{Key, MAX_WATERMARK_VALUE};
+    use crate::common::ids::{OperatorTypeCode, VertexId};
+
+    fn test_vid(parallel: u16) -> VertexId {
+        VertexId::new(OperatorTypeCode::Map, 1, parallel)
+    }
 
     fn create_test_record_batch(rows: usize) -> arrow::record_batch::RecordBatch {
         let schema = Arc::new(Schema::new(vec![
@@ -472,7 +477,7 @@ mod tests {
     fn create_test_message(rows: usize, timestamp: u64) -> Message {
         let record_batch = create_test_record_batch(rows);
         Message::new(
-            Some("test_vertex".to_string()),
+            Some(VertexId::new(OperatorTypeCode::Map, 1, 0)),
             record_batch,
             Some(timestamp),
             None
@@ -495,7 +500,7 @@ mod tests {
         
         let key_obj = Key::new(key_batch).unwrap();
         Message::new_keyed(
-            Some("test_vertex".to_string()),
+            Some(VertexId::new(OperatorTypeCode::Map, 1, 0)),
             record_batch,
             key_obj,
             Some(timestamp),
@@ -580,7 +585,7 @@ mod tests {
         
         // Add watermark message
         let watermark = Message::Watermark(crate::common::message::WatermarkMessage::new(
-            "test".to_string(), 100, Some(100)
+            VertexId::new(OperatorTypeCode::Map, 1, 0), 100, Some(100)
         ));
         
         batcher.write_message(&"test_channel".to_string(), watermark).await.unwrap();
@@ -820,17 +825,17 @@ mod tests {
         assert!(rx_mixed.try_recv().is_err(), "Mixed channel should not have auto-flushed");
         
         let watermark_regular = Message::Watermark(crate::common::message::WatermarkMessage::new(
-            "watermark_regular".to_string(), 1000, Some(1000)
+            VertexId::new(OperatorTypeCode::Map, 1, 1), 1000, Some(1000)
         ));
         batcher.write_message(&"regular_channel".to_string(), watermark_regular).await.unwrap();
-        
+
         let watermark_keyed = Message::Watermark(crate::common::message::WatermarkMessage::new(
-            "watermark_keyed".to_string(), 2000, Some(2000)
+            VertexId::new(OperatorTypeCode::Map, 1, 2), 2000, Some(2000)
         ));
         batcher.write_message(&"keyed_channel".to_string(), watermark_keyed).await.unwrap();
-        
+
         let watermark_mixed = Message::Watermark(crate::common::message::WatermarkMessage::new(
-            "watermark_mixed".to_string(), 3000, Some(3000)
+            VertexId::new(OperatorTypeCode::Map, 1, 3), 3000, Some(3000)
         ));
         batcher.write_message(&"mixed_channel".to_string(), watermark_mixed).await.unwrap();
         
@@ -1065,7 +1070,7 @@ mod tests {
                         // Generate watermark every 10th message
                         if message_id % 10 == 0 {
                             let watermark = Message::Watermark(crate::common::message::WatermarkMessage::new(
-                                format!("watermark_{}", message_id),
+                                VertexId::new(OperatorTypeCode::Map, 1, (message_id as u16).wrapping_add(1)),
                                 message_id,
                                 Some(message_id)
                             ));
@@ -1091,7 +1096,7 @@ mod tests {
                 // send max watermark to each channel to notify of finish
                 for channel_id in &channels {
                     let watermark = Message::Watermark(crate::common::message::WatermarkMessage::new(
-                        format!("watermark_{}", message_id),
+                        VertexId::new(OperatorTypeCode::Map, 1, (message_id as u16).wrapping_add(1)),
                         MAX_WATERMARK_VALUE,
                         Some(message_id)
                     ));

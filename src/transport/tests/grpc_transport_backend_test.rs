@@ -1,10 +1,8 @@
-use crate::runtime::execution_graph::{gen_edge_id, ExecutionEdge, ExecutionGraph, ExecutionVertex};
+use crate::common::ids::{ChannelId, OperatorTypeCode, VertexId};
+use crate::runtime::execution_graph::{ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
-use crate::runtime::functions::{
-    map::MapFunction,
-    map::MapFunctionTrait,
-};
+use crate::runtime::functions::map::MapFunction;
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use crate::transport::channel::Channel;
 use crate::common::message::Message;
@@ -14,8 +12,17 @@ use crate::transport::{GrpcTransportBackend, TransportBackend};
 use arrow::array::StringArray;
 use kameo::spawn;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::time::{sleep, Duration};
+
+fn make_writer_vid(node_idx: usize, writer_idx: usize, num_writers_per_node: usize) -> VertexId {
+    let parallel = (node_idx * num_writers_per_node + writer_idx) as u16;
+    VertexId::new(OperatorTypeCode::Map, 1, parallel)
+}
+
+fn make_reader_vid(node_idx: usize, reader_idx: usize, num_readers_per_node: usize) -> VertexId {
+    let parallel = (node_idx * num_readers_per_node + reader_idx) as u16;
+    VertexId::new(OperatorTypeCode::Map, 2, parallel)
+}
 
 #[tokio::test]
 async fn test_grpc_transport_backend() {
@@ -25,52 +32,42 @@ async fn test_grpc_transport_backend() {
     let num_writers_per_node = 3;
     let num_readers_per_node = 3;
     let messages_per_writer = 5;
-    
+
     // Create vertex IDs for each node
-    let mut writer_vertex_ids = Vec::new();
-    let mut reader_vertex_ids = Vec::new();
+    let mut writer_vertex_ids: Vec<VertexId> = Vec::new();
+    let mut reader_vertex_ids: Vec<VertexId> = Vec::new();
 
     for node_idx in 0..num_writer_nodes {
         for writer_idx in 0..num_writers_per_node {
-            writer_vertex_ids.push(format!("writer_node_{}_writer_{}", node_idx, writer_idx));
+            writer_vertex_ids.push(make_writer_vid(node_idx, writer_idx, num_writers_per_node));
         }
     }
 
     for node_idx in 0..num_reader_nodes {
         for reader_idx in 0..num_readers_per_node {
-            reader_vertex_ids.push(format!("reader_node_{}_reader_{}", node_idx, reader_idx));
+            reader_vertex_ids.push(make_reader_vid(node_idx, reader_idx, num_readers_per_node));
         }
     }
 
     // Create a single execution graph for the entire system
     let mut graph = ExecutionGraph::new();
-    
+
     // Add all writer vertices
-    for node_idx in 0..num_writer_nodes {
-        for writer_idx in 0..num_writers_per_node {
-            let vertex_id = format!("writer_node_{}_writer_{}", node_idx, writer_idx);
-            graph.add_vertex(ExecutionVertex::new(
-                vertex_id.clone(),
-                "writer_operator".to_string(),
-                OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-                1,
-                0
-            ));
-        }
+    for writer_vertex_id in &writer_vertex_ids {
+        graph.add_vertex(ExecutionVertex::new(
+            *writer_vertex_id,
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            1
+        ));
     }
 
     // Add all reader vertices
-    for node_idx in 0..num_reader_nodes {
-        for reader_idx in 0..num_readers_per_node {
-            let vertex_id = format!("reader_node_{}_reader_{}", node_idx, reader_idx);
-            graph.add_vertex(ExecutionVertex::new(
-                vertex_id.clone(),
-                "reader_operator".to_string(),
-                OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-                1,
-                0
-            ));
-        }
+    for reader_vertex_id in &reader_vertex_ids {
+        graph.add_vertex(ExecutionVertex::new(
+            *reader_vertex_id,
+            OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
+            1
+        ));
     }
 
     // Create remote channels between all writers and all readers
@@ -80,26 +77,25 @@ async fn test_grpc_transport_backend() {
             // Calculate target node ID
             let target_node_id = reader_idx / num_readers_per_node;
             let source_node_id = writer_idx / num_writers_per_node;
-            
+
             // Use port based on target node ID to ensure same node gets same port
             let target_port = 50051 + target_node_id as i32;
-            
+
             let edge = ExecutionEdge::new(
-                writer_vertex_id.clone(),
-                reader_vertex_id.clone(),
-                reader_vertex_id.clone(),
+                *writer_vertex_id,
+                *reader_vertex_id,
                 PartitionType::Forward,
                 Some(Channel::new_remote(
-                    writer_vertex_id.clone(),
-                    reader_vertex_id.clone(),
+                    *writer_vertex_id,
+                    *reader_vertex_id,
                     "127.0.0.1".to_string(),
                     format!("writer_node_{}", source_node_id),
                     "127.0.0.1".to_string(),
                     format!("reader_node_{}", target_node_id),
-                    target_port
-                ))
+                    target_port,
+                )),
             );
-            
+
             graph.add_edge(edge);
         }
     }
@@ -111,11 +107,10 @@ async fn test_grpc_transport_backend() {
     // Create writer node backends
     for node_idx in 0..num_writer_nodes {
         let mut backend: Box<dyn TransportBackend> = Box::new(GrpcTransportBackend::new());
-        let vertex_ids = (0..num_writers_per_node)
-            .map(|writer_idx| format!("writer_node_{}_writer_{}", node_idx, writer_idx))
-            .map(|s| Arc::<str>::from(s))
-            .collect::<Vec<_>>();
-        
+        let vertex_ids: Vec<VertexId> = (0..num_writers_per_node)
+            .map(|writer_idx| make_writer_vid(node_idx, writer_idx, num_writers_per_node))
+            .collect();
+
         let configs = backend.init_channels(&graph, vertex_ids);
         writer_backends.push((backend, configs));
     }
@@ -123,11 +118,10 @@ async fn test_grpc_transport_backend() {
     // Create reader node backends
     for node_idx in 0..num_reader_nodes {
         let mut backend: Box<dyn TransportBackend> = Box::new(GrpcTransportBackend::new());
-        let vertex_ids = (0..num_readers_per_node)
-            .map(|reader_idx| format!("reader_node_{}_reader_{}", node_idx, reader_idx))
-            .map(|s| Arc::<str>::from(s))
-            .collect::<Vec<_>>();
-        
+        let vertex_ids: Vec<VertexId> = (0..num_readers_per_node)
+            .map(|reader_idx| make_reader_vid(node_idx, reader_idx, num_readers_per_node))
+            .collect();
+
         let configs = backend.init_channels(&graph, vertex_ids);
         reader_backends.push((backend, configs));
     }
@@ -142,10 +136,10 @@ async fn test_grpc_transport_backend() {
         let backend_actor = TransportBackendActor::new(backend);
         let backend_ref = spawn(backend_actor);
         writer_backend_refs.push(backend_ref);
-        
+
         // Create writer actors for this backend
         for (vertex_id, config) in configs {
-            let writer_actor = TestDataWriterActor::new(vertex_id.clone(), config);
+            let writer_actor = TestDataWriterActor::new(vertex_id, config);
             let writer_ref = spawn(writer_actor);
             writer_refs.insert(vertex_id, writer_ref.clone());
         }
@@ -155,10 +149,10 @@ async fn test_grpc_transport_backend() {
         let backend_actor = TransportBackendActor::new(backend);
         let backend_ref = spawn(backend_actor);
         reader_backend_refs.push(backend_ref);
-        
+
         // Create reader actors for this backend
         for (vertex_id, config) in configs {
-            let reader_actor = TestDataReaderActor::new(vertex_id.clone(), config);
+            let reader_actor = TestDataReaderActor::new(vertex_id, config);
             let reader_ref = spawn(reader_actor);
             reader_refs.insert(vertex_id, reader_ref.clone());
         }
@@ -178,21 +172,21 @@ async fn test_grpc_transport_backend() {
     // Create test data and send from each writer to each reader
     for writer_idx in 0..writer_vertex_ids.len() {
         // Start writer
-        let writer_vertex_id = &writer_vertex_ids[writer_idx];
-        let writer_ref = writer_refs.get(writer_vertex_id.as_str()).unwrap();
+        let writer_vertex_id = writer_vertex_ids[writer_idx];
+        let writer_ref = writer_refs.get(&writer_vertex_id).unwrap();
         writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::Start).await.unwrap();
-        
+
         for message_idx in 0..messages_per_writer {
             let message = Message::new(
-                Some(format!("writer_{}_stream", writer_idx)),
+                Some(writer_vertex_id),
                 create_test_string_batch(vec![format!("writer_{}_batch_{}", writer_idx, message_idx)]),
                 Some(100),
-                None
+                None,
             );
 
             for reader_idx in 0..reader_vertex_ids.len() {
-                let edge_id = gen_edge_id(&writer_vertex_id, &reader_vertex_ids[reader_idx]);
-                let channel = graph.get_edge(&edge_id).unwrap().get_channel();
+                let edge_id = ChannelId::new(writer_vertex_id, reader_vertex_ids[reader_idx]);
+                let channel = graph.get_edge(edge_id).unwrap().get_channel();
                 writer_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
                     channel,
                     message: message.clone(),
@@ -209,10 +203,10 @@ async fn test_grpc_transport_backend() {
 
     // Verify data received by each reader
     for reader_idx in 0..reader_vertex_ids.len() {
-        let reader_vertex_id = &reader_vertex_ids[reader_idx];
-        let reader_ref = reader_refs.get(reader_vertex_id.as_str()).unwrap();
+        let reader_vertex_id = reader_vertex_ids[reader_idx];
+        let reader_ref = reader_refs.get(&reader_vertex_id).unwrap();
         let mut received_messages = Vec::new();
-        
+
         // Read all expected batches
         for _ in 0..(writer_vertex_ids.len() * messages_per_writer) {
             let result = reader_ref.ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage).await.unwrap();
@@ -222,7 +216,7 @@ async fn test_grpc_transport_backend() {
         }
 
         // Verify we got all expected batches
-        assert_eq!(received_messages.len(), writer_vertex_ids.len() * messages_per_writer, 
+        assert_eq!(received_messages.len(), writer_vertex_ids.len() * messages_per_writer,
             "Reader {} did not receive all expected batches", reader_idx);
 
         // Create a map to track received batches by writer and batch number
@@ -234,13 +228,13 @@ async fn test_grpc_transport_backend() {
                 .downcast_ref::<StringArray>()
                 .unwrap()
                 .value(0);
-            
+
             // Parse writer_idx and batch_num from the value
             let parts: Vec<&str> = value.split("_batch_").collect();
             let writer_part = parts[0].strip_prefix("writer_").unwrap();
             let writer_idx = writer_part.parse::<usize>().unwrap();
             let message_idx = parts[1].parse::<usize>().unwrap();
-            
+
             received_map.insert((writer_idx, message_idx), value.to_string());
         }
 
@@ -264,6 +258,6 @@ async fn test_grpc_transport_backend() {
     for backend_ref in &reader_backend_refs {
         backend_ref.ask(TransportBackendActorMessage::Close).await.unwrap();
     }
-    
+
     println!("gRPC transport backend test completed successfully!");
-} 
+}

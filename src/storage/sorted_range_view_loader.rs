@@ -103,6 +103,14 @@ pub fn plan_load_from_index(bucket_index: &BucketIndex, plans: &[RangesLoadPlan]
                         DataBounds::All => {}
                     }
 
+                    // Dedup: same run may be referenced from both base (hot_base or persisted)
+                    // and hot_deltas during compactor tier transitions. Skip if we've already
+                    // accounted for it in this bucket — otherwise the loaded SortedRangeView
+                    // would contain duplicate segments and violate disjoint/ordered invariants.
+                    if !seen_runs.insert((bucket.timestamp, meta.run)) {
+                        continue;
+                    }
+
                     match meta.run {
                         BatchRef::Stored(id) => {
                             batch_ids_to_load.insert(id);
@@ -349,7 +357,7 @@ mod tests {
     use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt64Array};
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use arrow::record_batch::RecordBatch;
-
+    use crate::common::{OperatorTypeCode, VertexId};
     use crate::runtime::operators::window::TimeGranularity;
     use crate::runtime::operators::window::aggregates::{BucketRange, test_utils};
     use crate::storage::batch_store::{BatchStore, BatchId, InMemBatchStore};
@@ -501,7 +509,7 @@ mod tests {
 
         let store = Arc::new(InMemBatchStore::new(8, TimeGranularity::Seconds(1), 16)) as Arc<dyn BatchStore>;
         store
-            .put_batch_with_id(Arc::<str>::from("t"), batch_id, stored_batch.clone(), &key)
+            .put_batch_with_id(VertexId::new(OperatorTypeCode::Map, 1, 1), batch_id, stored_batch.clone(), &key)
             .await;
 
         let mut idx = BucketIndex::new(TimeGranularity::Seconds(1));
@@ -538,7 +546,7 @@ mod tests {
             pins,
             work_budget.clone(),
             &in_mem,
-            Arc::<str>::from("t"),
+            VertexId::new(OperatorTypeCode::Map, 1, 1),
             &key,
             0,
             2,
@@ -575,10 +583,10 @@ mod tests {
         let store_dyn: Arc<dyn BatchStore> = store.clone();
 
         store_dyn
-            .put_batch_with_id(Arc::<str>::from("t"), id_known, make_batch(0, 0), &key)
+            .put_batch_with_id(VertexId::new(OperatorTypeCode::Map, 1, 1), id_known, make_batch(0, 0), &key)
             .await;
         store_dyn
-            .put_batch_with_id(Arc::<str>::from("t"), id_missing, make_batch(1, 1), &key)
+            .put_batch_with_id(VertexId::new(OperatorTypeCode::Map, 1, 1), id_missing, make_batch(1, 1), &key)
             .await;
 
         let mut idx = BucketIndex::new(TimeGranularity::Seconds(1));
@@ -626,7 +634,7 @@ mod tests {
             pins,
             work_budget.clone(),
             &in_mem,
-            Arc::<str>::from("t"),
+            VertexId::new(OperatorTypeCode::Map, 1, 1),
             &key,
             0,
             2,

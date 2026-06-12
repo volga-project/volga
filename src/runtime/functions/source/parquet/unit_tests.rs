@@ -7,6 +7,8 @@ use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use parquet::arrow::ArrowWriter;
 use uuid::Uuid;
+use crate::common::OperatorTypeCode;
+use crate::runtime::VertexId;
 
 fn write_parquet(path: &Path, schema: SchemaRef, batch: RecordBatch) {
     let file = File::create(path).unwrap();
@@ -50,8 +52,7 @@ async fn parquet_source_applies_projection_mask() {
 
     let mut source = ParquetSourceFunction::new(config);
     let ctx = RuntimeContext::new(
-        "parquet_source".to_string().into(),
-        0,
+        VertexId::new(OperatorTypeCode::SourceParquet, 1, 0),
         1,
         None,
         None,

@@ -1,6 +1,7 @@
 use crate::{
     api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
     api::compile_logical_graph,
+    common::OperatorId,
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
     runtime::{
         functions::source::word_count_source::BatchingMode,
@@ -114,8 +115,8 @@ async fn poll_pipeline_state_updates(
     benchmark_metrics: &mut BenchmarkMetrics,
     last_metrics: &mut Option<(u64, u64)>, // (messages, records)
     last_timestamp: &mut Instant,
-    source_operator_id: String,
-    sink_operator_id: String,
+    source_operator_id: OperatorId,
+    sink_operator_id: OperatorId,
 ) -> Option<PipelineSnapshot> {
     let current_time = Instant::now();
     let pipeline_state = match state_updates_receiver.recv().await {

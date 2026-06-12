@@ -9,7 +9,7 @@ service MessageStreamService {
 
 message GrpcMessage {
   bytes message_data = 1;
-  string channel_id = 2;
+  fixed64 channel_id = 2;
 }
 
 message EmptyResponse {

@@ -15,6 +15,8 @@ use std::collections::HashMap;
 
 #[cfg(test)]
 use arrow::array::Array;
+#[cfg(test)]
+use crate::common::{OperatorTypeCode, VertexId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BatchingMode {
@@ -286,7 +288,7 @@ async fn test_word_count_source(
         batching_mode,
     );
 
-    source.open(&RuntimeContext::new(Arc::<str>::from("test"), 0, 1, None, None, None)).await.unwrap();
+    source.open(&RuntimeContext::new(VertexId::new(OperatorTypeCode::Map, 1, 0),  1, None, None, None)).await.unwrap();
 
     let mut word_counts = HashMap::new();
     

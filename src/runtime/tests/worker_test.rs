@@ -10,6 +10,8 @@ use anyhow::Result;
 use tokio::runtime::Runtime;
 use arrow::datatypes::{Schema, Field, DataType};
 use std::sync::Arc;
+use crate::common::OperatorTypeCode;
+use crate::runtime::VertexId;
 
 // TODO test early worker interruption/shutdown via setting state to finished from outside
 #[test]
@@ -24,7 +26,7 @@ fn test_worker_execution() -> Result<()> {
 
     let mut test_messages = expected_messages.clone();
     test_messages.push(Message::Watermark(WatermarkMessage::new(
-        "source".to_string(),
+        VertexId::new(OperatorTypeCode::Map, 1, 1),
         MAX_WATERMARK_VALUE,
         None,
     )));

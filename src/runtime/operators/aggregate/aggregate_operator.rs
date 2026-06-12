@@ -74,11 +74,12 @@ impl AggregateOperator {
         }
 
         // Debug: Print vertex_id and emission info
-        let vertex_id = if let Some(ctx) = &self.base.runtime_context {
-            ctx.vertex_id()
-        } else {
-            "unknown_vertex"
-        };
+        let vertex_id = self
+            .base
+            .runtime_context
+            .as_ref()
+            .map(|ctx| ctx.vertex_id().to_string())
+            .unwrap_or_else(|| "unknown_vertex".to_string());
         
         let mut words_being_emitted = Vec::new();
 
@@ -281,6 +282,7 @@ impl OperatorTrait for AggregateOperator {
 
 #[cfg(test)]
 mod tests {
+    use crate::common::{OperatorTypeCode, VertexId};
     use super::*;
 
     #[tokio::test]
@@ -364,7 +366,7 @@ mod tests {
         
         // Add max watermark to finalize aggregation
         messages_to_process.push(Message::Watermark(crate::common::WatermarkMessage::new(
-            "test".to_string(),
+            VertexId::new(OperatorTypeCode::Map, 1, 1),
             MAX_WATERMARK_VALUE,
             Some(0)
         )));

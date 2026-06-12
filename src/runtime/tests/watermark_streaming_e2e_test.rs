@@ -123,7 +123,7 @@ pub(crate) async fn run_watermark_window_pipeline(
     // Set lateness directly on the execution graph for this test (PipelineContext/LogicalGraph stay unaware).
     let vertex_ids_snapshot: Vec<_> = exec_graph.get_vertices().keys().cloned().collect();
     for vid in vertex_ids_snapshot {
-        if let Some(v) = exec_graph.get_vertex_mut(vid.as_ref()) {
+        if let Some(v) = exec_graph.get_vertex_mut(vid) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
                 cfg.spec.lateness = Some(lateness_ms);
             }

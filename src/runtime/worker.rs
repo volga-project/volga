@@ -209,7 +209,7 @@ impl Worker {
                 task_statuses.insert(vertex_id.clone(), state.status.clone());
                 task_metrics.insert(vertex_id.clone(), state.metrics.clone());
 
-                if let Some(op_state) = operator_states.get_operator_state(vertex_id.as_ref()) {
+                if let Some(op_state) = operator_states.get_operator_state(vertex_id.clone()) {
                     if let Some(m) = op_state.task_operator_metrics() {
                         task_operator_metrics.insert(vertex_id.clone(), m);
                     }
@@ -217,11 +217,11 @@ impl Worker {
             }
         }
 
-        let task_metrics_str: HashMap<String, TaskMetrics> = task_metrics
+        let task_metrics_str: HashMap<VertexId, TaskMetrics> = task_metrics
             .into_iter()
-            .map(|(k, v)| (k.as_ref().to_string(), v))
+            .map(|(k, v)| (k, v))
             .collect();
-        let worker_metrics = WorkerAggregateMetrics::new(worker_id, execution_ids, task_metrics_str, &graph);
+        let worker_metrics = WorkerAggregateMetrics::new(worker_id, execution_ids, task_metrics_str);
         worker_metrics.record();
         emit_poll_derived_gauges(&worker_metrics);
 
@@ -308,7 +308,7 @@ impl Worker {
         for vertex_id in &vertex_ids {
             let vertex = self
                 .graph
-                .get_vertex(vertex_id.as_ref())
+                .get_vertex(*vertex_id)
                 .expect("Vertex should exist");
             let task_runtime = self.task_runtimes.get(vertex_id).expect("Task runtime should exist");
 
@@ -331,8 +331,7 @@ impl Worker {
             // Create runtime context for the vertex
             let mut runtime_context = RuntimeContext::new(
                 vertex_id.clone(),
-                vertex.task_index,
-                vertex.parallelism,
+                vertex.parallelism as u16,
                 {
                     let mut cfg = HashMap::<String, Value>::new();
                     if let Some(master_addr) = &self.master_addr {
@@ -506,7 +505,7 @@ impl Worker {
 
     async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
         println!("[WORKER] Sending {:?} signal to all task actors", signal);
-        
+
         for (vertex_id, runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
@@ -599,14 +598,14 @@ impl Worker {
     pub async fn trigger_checkpoint(&mut self, checkpoint_id: u64) {
         println!("[WORKER] Triggering checkpoint {} on source tasks", checkpoint_id);
         for (vertex_id, runtime) in &self.task_runtimes {
-            let vertex_id = vertex_id.clone();
-            let vertex_type = self.graph.get_vertex_type(vertex_id.as_ref());
+            let vertex_id = *vertex_id;
+            let vertex_type = self.graph.get_vertex_type(vertex_id);
             if vertex_type != OperatorType::Source && vertex_type != OperatorType::ChainedSourceSink {
                 continue;
             }
 
             // Only trigger sources that actually participate in checkpointing.
-            if let Some(v) = self.graph.get_vertices().get(vertex_id.as_ref()) {
+            if let Some(v) = self.graph.get_vertices().get(&vertex_id) {
                 if !operator_config_requires_checkpoint(&v.operator_config) {
                     continue;
                 }

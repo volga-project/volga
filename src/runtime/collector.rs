@@ -6,6 +6,7 @@ use crate::runtime::partition::Partition;
 use crate::runtime::partition::PartitionTrait;
 use futures::future::join_all;
 use tokio::sync::mpsc;
+use crate::common::OperatorId;
 
 // Routes messages to multiple channels based on the partition strategy
 #[derive(Clone)]
@@ -86,10 +87,10 @@ impl Collector {
     }
 
     pub async fn write_message_to_operators(
-        collectors: &mut HashMap<String, Collector>,
+        collectors: &mut HashMap<OperatorId, Collector>,
         message: &Message,
-        channels_per_operator: HashMap<String, Vec<Channel>>
-    ) -> HashMap<String, HashMap<Channel, (bool, u32)>> {
+        channels_per_operator: HashMap<OperatorId, Vec<Channel>>
+    ) -> HashMap<OperatorId, HashMap<Channel, (bool, u32)>> {
         let mut futures = Vec::new();
         for (operator_id, collector) in collectors.iter_mut() {
             let operator_id = operator_id.clone();

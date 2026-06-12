@@ -12,6 +12,7 @@ use arrow::record_batch::RecordBatch;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
+use crate::runtime::VertexId;
 
 #[derive(Debug, Clone)]
 pub struct Accumulator {
@@ -68,7 +69,7 @@ pub trait ReduceFunctionTrait: Send + Sync + fmt::Debug {
 
 /// Trait for extracting final results from aggregated data
 pub trait AggregationResultExtractorTrait: Send + Sync + fmt::Debug {
-    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message;
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<VertexId>, ingest_timestamp: Option<u64>) -> Message;
 }
 
 /// Default implementation of ResultExtractor that includes all aggregation values
@@ -76,7 +77,7 @@ pub trait AggregationResultExtractorTrait: Send + Sync + fmt::Debug {
 pub struct AllAggregationsResultExtractor;
 
 impl AggregationResultExtractorTrait for AllAggregationsResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message {
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<VertexId>, ingest_timestamp: Option<u64>) -> Message {
         // Create a schema with all aggregation fields
         let schema = Arc::new(Schema::new(vec![
             Field::new("min", DataType::Float64, false),
@@ -136,7 +137,7 @@ impl SingleAggregationResultExtractor {
 }
 
 impl AggregationResultExtractorTrait for SingleAggregationResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message {
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<VertexId>, ingest_timestamp: Option<u64>) -> Message {
         let value = match self.aggregation_type {
             AggregationType::Min => result.min,
             AggregationType::Max => result.max,
@@ -173,7 +174,7 @@ pub enum AggregationResultExtractor {
 }
 
 impl AggregationResultExtractorTrait for AggregationResultExtractor {
-    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<String>, ingest_timestamp: Option<u64>) -> Message {
+    fn extract_result(&self, key: &Key, result: &AggregationResult, upstream_vertex_id: Option<VertexId>, ingest_timestamp: Option<u64>) -> Message {
         match self {
             AggregationResultExtractor::All(e) => e.extract_result(key, result, upstream_vertex_id, ingest_timestamp),
             AggregationResultExtractor::Single(e) => e.extract_result(key, result, upstream_vertex_id, ingest_timestamp),

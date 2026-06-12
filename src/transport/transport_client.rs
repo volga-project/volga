@@ -8,6 +8,7 @@ use tokio::sync::Notify;
 use futures::stream;
 use crate::transport::batcher::BatcherConfig;
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use crate::common::ChannelId;
 use crate::runtime::VertexId;
 
 // pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
@@ -15,8 +16,8 @@ use crate::runtime::VertexId;
 #[derive(Debug)]
 pub struct TransportClientConfig {
     pub vertex_id: VertexId,
-    pub reader_receivers: Option<HashMap<String, BatchReceiver>>,
-    pub writer_senders: Option<HashMap<String, BatchSender>>,
+    pub reader_receivers: Option<HashMap<ChannelId, BatchReceiver>>,
+    pub writer_senders: Option<HashMap<ChannelId, BatchSender>>,
     pub metrics_labels: Option<MetricsLabels>,
 }
 
@@ -30,14 +31,14 @@ impl TransportClientConfig {
         }
     }
 
-    pub fn add_reader_receiver(&mut self, channel_id: String, receiver: BatchReceiver) {
+    pub fn add_reader_receiver(&mut self, channel_id: ChannelId, receiver: BatchReceiver) {
         if self.reader_receivers.is_none() {
             self.reader_receivers = Some(HashMap::new());
         }
         self.reader_receivers.as_mut().unwrap().insert(channel_id, receiver);
     }
 
-    pub fn add_writer_sender(&mut self, channel_id: String, sender: BatchSender) {
+    pub fn add_writer_sender(&mut self, channel_id: ChannelId, sender: BatchSender) {
         if self.writer_senders.is_none() {
             self.writer_senders = Some(HashMap::new());
         }
@@ -52,7 +53,7 @@ impl TransportClientConfig {
 #[derive(Debug)]
 pub struct DataReader {
     _vertex_id: VertexId,
-    receivers: HashMap<String, BatchReceiver>,
+    receivers: HashMap<ChannelId, BatchReceiver>,
 }
 
 #[derive(Debug)]
@@ -82,18 +83,18 @@ impl UpstreamGate {
 #[derive(Debug, Clone)]
 pub struct DataReaderControl {
     // upstream_vertex_id -> gate shared by all channels from that upstream
-    gates: HashMap<String, Arc<UpstreamGate>>,
+    gates: HashMap<VertexId, Arc<UpstreamGate>>,
 }
 
 impl DataReaderControl {
-    pub fn block_upstream(&self, upstream_vertex_id: &str) {
-        if let Some(gate) = self.gates.get(upstream_vertex_id) {
+    pub fn block_upstream(&self, upstream_vertex_id: VertexId) {
+        if let Some(gate) = self.gates.get(&upstream_vertex_id) {
             gate.block();
         }
     }
 
-    pub fn unblock_upstream(&self, upstream_vertex_id: &str) {
-        if let Some(gate) = self.gates.get(upstream_vertex_id) {
+    pub fn unblock_upstream(&self, upstream_vertex_id: VertexId) {
+        if let Some(gate) = self.gates.get(&upstream_vertex_id) {
             gate.unblock();
         }
     }
@@ -111,7 +112,7 @@ impl DataReaderControl {
 }
 
 impl DataReader {
-    pub fn new(vertex_id: VertexId, receivers: HashMap<String, BatchReceiver>) -> Self {
+    pub fn new(vertex_id: VertexId, receivers: HashMap<ChannelId, BatchReceiver>) -> Self {
         Self {
             _vertex_id: vertex_id,
             receivers,
@@ -132,12 +133,12 @@ impl DataReader {
                 })) as MessageStream
             })
             .collect();
-        
+
         Box::pin(stream::select_all(receiver_streams))
     }
 
     pub fn message_stream_with_control(self) -> (MessageStream, DataReaderControl) {
-        let mut gates: HashMap<String, Arc<UpstreamGate>> = HashMap::new();
+        let mut gates: HashMap<VertexId, Arc<UpstreamGate>> = HashMap::new();
 
         // Convert each BatchReceiver into a gated stream and then select_all.
         // No background tasks: gating happens inside the stream.
@@ -145,11 +146,7 @@ impl DataReader {
             .into_iter()
             .map(|(channel_id, receiver)| {
                 // channel id is "{source}_to_{target}"
-                let upstream_vertex_id = channel_id
-                    .split("_to_")
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let upstream_vertex_id = channel_id.target();
 
                 let gate = gates
                     .entry(upstream_vertex_id)
@@ -178,7 +175,7 @@ impl DataReader {
 #[derive(Debug, Clone)]
 pub struct DataWriter {
     pub vertex_id: VertexId,
-    pub senders: HashMap<String, BatchSender>,
+    pub senders: HashMap<ChannelId, BatchSender>,
     metrics_labels: Option<MetricsLabels>,
     // batcher: Batcher,
     default_timeout: Duration,
@@ -187,10 +184,10 @@ pub struct DataWriter {
 }
 
 impl DataWriter {
-    pub fn new(vertex_id: VertexId, senders: HashMap<String, BatchSender>, metrics_labels: Option<MetricsLabels>) -> Self {
+    pub fn new(vertex_id: VertexId, senders: HashMap<ChannelId, BatchSender>, metrics_labels: Option<MetricsLabels>) -> Self {
         let batching_config = BatcherConfig::default();
         // let batcher = Batcher::new(batching_config.clone(), senders.clone());
-        
+
         Self {
             vertex_id,
             senders,
@@ -238,12 +235,14 @@ impl DataWriter {
                 let queue_size = sender.size();
                 let queue_remaining = sender.capacity();
                 let target_vertex_id = channel.get_target_vertex_id();
+                let vertex_label = self.vertex_id.to_string();
+                let target_vertex_label = target_vertex_id.to_string();
 
                 if let Some(labels) = &self.metrics_labels {
                     gauge!(
                         METRIC_STREAM_TASK_TX_QUEUE_SIZE,
-                        LABEL_VERTEX_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_VERTEX_ID => vertex_label.clone(),
+                        LABEL_TARGET_VERTEX_ID => target_vertex_label.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -251,8 +250,8 @@ impl DataWriter {
                     ).set(queue_size);
                     gauge!(
                         METRIC_STREAM_TASK_TX_QUEUE_REM,
-                        LABEL_VERTEX_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_VERTEX_ID => vertex_label.clone(),
+                        LABEL_TARGET_VERTEX_ID => target_vertex_label.clone(),
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
@@ -261,18 +260,18 @@ impl DataWriter {
                     let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
                     gauge!(
                         METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
-                        LABEL_VERTEX_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_VERTEX_ID => vertex_label,
+                        LABEL_TARGET_VERTEX_ID => target_vertex_label,
                         LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).set(backpressure);
                 } else {
-                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_size);
-                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_remaining);
+                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => vertex_label.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_label.clone()).set(queue_size);
+                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_VERTEX_ID => vertex_label.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_label.clone()).set(queue_remaining);
                     let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
-                    gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(backpressure);
+                    gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_VERTEX_ID => vertex_label, LABEL_TARGET_VERTEX_ID => target_vertex_label).set(backpressure);
                 }
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {
@@ -291,12 +290,12 @@ impl DataWriter {
                 panic!("DataWriter {:?} channel {} not found", self.vertex_id, channel_id);
             }
         }
-    
+
         (false, start_time.elapsed().as_millis() as u32)
     }
 
-    pub fn get_queue_size_and_capacity(&self, channel_id: &str) -> Option<(u32, u32)> {
-        self.senders.get(channel_id).map(|sender| (sender.size(), sender.capacity()))
+    pub fn get_queue_size_and_capacity(&self, channel_id: ChannelId) -> Option<(u32, u32)> {
+        self.senders.get(&channel_id).map(|sender| (sender.size(), sender.capacity()))
     }
 }
 
@@ -328,7 +327,7 @@ impl TransportClient {
         }
     }
 
-    pub fn vertex_id(&self) -> &str {
-        self.vertex_id.as_ref()
+    pub fn vertex_id(&self) -> VertexId {
+        self.vertex_id.clone()
     }
 }

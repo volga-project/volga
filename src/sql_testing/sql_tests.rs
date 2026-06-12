@@ -12,6 +12,7 @@ use arrow::{
     record_batch::RecordBatch
 };
 use std::sync::Arc;
+use crate::common::{OperatorTypeCode, VertexId};
 
 /// Test case definition for SQL queries
 #[derive(Debug)]
@@ -486,7 +487,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
         .collect();
     
     test_messages.push(Message::Watermark(WatermarkMessage::new(
-        "source".to_string(),
+        VertexId::new(OperatorTypeCode::Map, 1, 1),
         MAX_WATERMARK_VALUE,
         None,
     )));

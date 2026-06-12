@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
-
+use crate::common::VertexId;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::Worker;
 
@@ -32,18 +32,13 @@ pub async fn wait_for_status(worker: &Worker, status: StreamTaskStatus, timeout:
 #[derive(Debug, Clone)]
 pub struct WindowOutputRow {
     pub trace: Option<String>,
-    pub upstream_vertex_id: Option<String>,
-    pub upstream_task_index: Option<i32>,
+    pub upstream_vertex_id: Option<VertexId>,
     pub timestamp_ms: i64,
     pub partition_key: String,
     pub value: f64,
     pub sum: f64,
     pub cnt: i64,
     pub avg: f64,
-}
-
-pub fn parse_task_index_from_vertex_id(vertex_id: &str) -> Option<i32> {
-    vertex_id.rsplit('_').next()?.parse::<i32>().ok()
 }
 
 pub fn window_rows_from_messages(messages: Vec<crate::common::message::Message>) -> Vec<WindowOutputRow> {
@@ -54,8 +49,8 @@ pub fn window_rows_from_messages(messages: Vec<crate::common::message::Message>)
 
         let upstream_vertex_id = msg.upstream_vertex_id();
         let upstream_task_index = upstream_vertex_id
-            .as_deref()
-            .and_then(parse_task_index_from_vertex_id);
+            .unwrap()
+            .task_index();
 
         let batch = msg.record_batch();
         let ts = batch
@@ -93,7 +88,6 @@ pub fn window_rows_from_messages(messages: Vec<crate::common::message::Message>)
             out.push(WindowOutputRow {
                 trace: trace.clone(),
                 upstream_vertex_id: upstream_vertex_id.clone(),
-                upstream_task_index,
                 timestamp_ms: ts.value(i),
                 partition_key: key.value(i).to_string(),
                 value: val.value(i),

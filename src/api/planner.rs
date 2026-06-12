@@ -1010,7 +1010,7 @@ mod tests {
         let window_node = nodes_after.iter()
             .find(|n| matches!(n.operator_config, OperatorConfig::WindowConfig(_)))
             .expect("Should have window node");
-        let window_node_idx = graph.get_node_index(&window_node.operator_id)
+        let window_node_idx = graph.get_node_index(window_node.operator_id)
             .expect("Should find window node index");
         let outgoing_after = graph.get_neighbors(window_node_idx, Direction::Outgoing);
         assert_eq!(outgoing_after.len(), 0, "Window should have no outgoing edges after conversion");
