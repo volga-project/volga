@@ -3,7 +3,6 @@ use std::time::Duration;
 
 use anyhow::Result;
 use datafusion::common::ScalarValue;
-use kameo::Reply;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master_server::{MasterServer, TaskKey};
