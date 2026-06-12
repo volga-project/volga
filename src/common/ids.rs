@@ -331,32 +331,13 @@ mod tests {
     #[test]
     fn op_type_code_roundtrip_covers_all_variants() {
         // Exhaustively iterate via from_u8 across the assigned range.
-        let all = [
-            OperatorTypeCode::Invalid,
-            OperatorTypeCode::SourceVector,
-            OperatorTypeCode::SourceWordCount,
-            OperatorTypeCode::SourceDatagen,
-            OperatorTypeCode::SourceHttpRequest,
-            OperatorTypeCode::SourceKafka,
-            OperatorTypeCode::SourceParquet,
-            OperatorTypeCode::SinkInMemoryStorageGrpc,
-            OperatorTypeCode::SinkRequest,
-            OperatorTypeCode::SinkParquet,
-            OperatorTypeCode::Map,
-            OperatorTypeCode::KeyBy,
-            OperatorTypeCode::Reduce,
-            OperatorTypeCode::Aggregate,
-            OperatorTypeCode::Window,
-            OperatorTypeCode::WindowRequest,
-            OperatorTypeCode::Join,
-            OperatorTypeCode::Chained,
-        ];
-
+        let all: Vec<_> = (0u8..=u8::MAX)
+            .filter_map(OperatorTypeCode::from_u8)
+            .collect();
         for code in all {
             let byte = code.as_u8();
             assert_eq!(OperatorTypeCode::from_u8(byte), Some(code), "code {byte:#x}");
         }
-
         // Unassigned bytes return None.
         assert_eq!(OperatorTypeCode::from_u8(0x12), None);
         assert_eq!(OperatorTypeCode::from_u8(0xFF), None);
