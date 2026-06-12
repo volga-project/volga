@@ -74,6 +74,7 @@ metrics-exporter-tcp = "0.11.1"
 metrics-util = "0.20.0"
 prometheus-parse = "0.2.5"
 indexmap = "2.11.4"
+num_enum = "0.7"
 axum = "0.7"
 hyper = "1.0"
 reqwest = { version = "0.11", features = ["json"] }

@@ -9,6 +9,7 @@
 //! - up to 255 instances of the same operator type within one pipeline
 //! - up to 65535 parallel partitions per operator instance
 
+use num_enum::TryFromPrimitive;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -18,33 +19,42 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 
 /// Stable u8 code per concrete operator variant.
 ///
-/// New codes must be appended (never inserted in the middle, never renumbered)
-/// so existing checkpoints and serialized vertex ids remain interpretable.
+/// Codes are partitioned into ranges so new variants always land in the right
+/// logical group. Never renumber existing codes — serialized vertex ids and
+/// checkpoints depend on stability.
+///
+/// Ranges:
+///   0x00        — Invalid (sentinel)
+///   0x01–0x1F   — Sources
+///   0x20–0x3F   — Sinks
+///   0x40–0xFF   — Operators
 #[repr(u8)]
-#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Eq, PartialEq, Hash, Debug, Serialize, Deserialize, TryFromPrimitive)]
 pub enum OperatorTypeCode {
     Invalid = 0x00,
 
-    SourceVector = 0x01,
-    SourceWordCount = 0x02,
-    SourceDatagen = 0x03,
+    // Sources: 0x01–0x1F
+    SourceVector      = 0x01,
+    SourceWordCount   = 0x02,
+    SourceDatagen     = 0x03,
     SourceHttpRequest = 0x04,
-    SourceKafka = 0x05,
-    SourceParquet = 0x06,
+    SourceKafka       = 0x05,
+    SourceParquet     = 0x06,
 
-    SinkInMemoryStorageGrpc = 0x07,
-    SinkRequest = 0x08,
-    SinkParquet = 0x09,
+    // Sinks: 0x20–0x3F
+    SinkInMemoryStorageGrpc = 0x20,
+    SinkRequest             = 0x21,
+    SinkParquet             = 0x22,
 
-    Map = 0x0A,
-    KeyBy = 0x0B,
-    Reduce = 0x0C,
-    Aggregate = 0x0D,
-    Window = 0x0E,
-    WindowRequest = 0x0F,
-    Join = 0x10,
-
-    Chained = 0x11,
+    // Operators: 0x40–0xFF
+    Map           = 0x40,
+    KeyBy         = 0x41,
+    Reduce        = 0x42,
+    Aggregate     = 0x43,
+    Window        = 0x44,
+    WindowRequest = 0x45,
+    Join          = 0x46,
+    Chained       = 0x47,
 }
 
 impl OperatorTypeCode {
@@ -53,27 +63,7 @@ impl OperatorTypeCode {
     }
 
     pub fn from_u8(byte: u8) -> Option<Self> {
-        match byte {
-            0x00 => Some(Self::Invalid),
-            0x01 => Some(Self::SourceVector),
-            0x02 => Some(Self::SourceWordCount),
-            0x03 => Some(Self::SourceDatagen),
-            0x04 => Some(Self::SourceHttpRequest),
-            0x05 => Some(Self::SourceKafka),
-            0x06 => Some(Self::SourceParquet),
-            0x07 => Some(Self::SinkInMemoryStorageGrpc),
-            0x08 => Some(Self::SinkRequest),
-            0x09 => Some(Self::SinkParquet),
-            0x0A => Some(Self::Map),
-            0x0B => Some(Self::KeyBy),
-            0x0C => Some(Self::Reduce),
-            0x0D => Some(Self::Aggregate),
-            0x0E => Some(Self::Window),
-            0x0F => Some(Self::WindowRequest),
-            0x10 => Some(Self::Join),
-            0x11 => Some(Self::Chained),
-            _ => None,
-        }
+        Self::try_from(byte).ok()
     }
 
     pub fn short_name(self) -> &'static str {
@@ -349,7 +339,7 @@ mod tests {
         assert_eq!(v.op_type(), OperatorTypeCode::Map);
         assert_eq!(v.instance(), 7);
         assert_eq!(v.task_index(), 42);
-        assert_eq!(v.raw(), 0x0A_07_00_2A);
+        assert_eq!(v.raw(), 0x40_07_00_2A);
     }
 
     #[test]
@@ -395,7 +385,7 @@ mod tests {
         let o = OperatorId::new(OperatorTypeCode::Map, 7);
         assert_eq!(o.op_type(), OperatorTypeCode::Map);
         assert_eq!(o.instance(), 7);
-        assert_eq!(o.raw(), 0x0A_07);
+        assert_eq!(o.raw(), 0x40_07);
     }
 
     #[test]
