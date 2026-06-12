@@ -270,25 +270,16 @@ pub struct WorkerAggregateMetrics {
 
 impl WorkerAggregateMetrics {
 
-    pub fn new(worker_id: String, execution_ids: ExecutionIds, tasks_metrics: HashMap<VertexId, TaskMetrics>, graph: &ExecutionGraph) -> Self {
+    pub fn new(worker_id: String, execution_ids: ExecutionIds, tasks_metrics: HashMap<VertexId, TaskMetrics>) -> Self {
         let mut metrics_by_operator: HashMap<OperatorId, Vec<TaskMetrics>> = HashMap::new();
 
         // Group task metrics by operator_id.
-        // The HashMap is keyed by vertex_id rendered via Display; iterate vertices in the graph
-        // and reverse-match by Display form to recover their operator_id.
-        let by_label: HashMap<VertexId, &TaskMetrics> = tasks_metrics
-            .iter()
-            .map(|(k, v)| (k.clone(), v))
-            .collect();
-        for vertex in graph.get_vertices().values() {
-            let vertex_id = vertex.vertex_id;
-            if let Some(task_metrics) = by_label.get(&vertex_id) {
-                let operator_id = vertex_id.operator_id();
-                metrics_by_operator
-                    .entry(operator_id)
-                    .or_insert_with(Vec::new)
-                    .push((*task_metrics).clone());
-            }
+        for (vertex_id, task_metrics) in tasks_metrics.iter() {
+            let operator_id = vertex_id.operator_id();
+            metrics_by_operator
+                .entry(operator_id)
+                .or_insert_with(Vec::new)
+                .push(task_metrics.clone());
         }
 
         // Create OperatorMetrics for each operator by merging its task metrics

@@ -221,7 +221,7 @@ impl Worker {
             .into_iter()
             .map(|(k, v)| (k, v))
             .collect();
-        let worker_metrics = WorkerAggregateMetrics::new(worker_id, execution_ids, task_metrics_str, &graph);
+        let worker_metrics = WorkerAggregateMetrics::new(worker_id, execution_ids, task_metrics_str);
         worker_metrics.record();
         emit_poll_derived_gauges(&worker_metrics);
 
