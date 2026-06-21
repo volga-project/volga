@@ -1,8 +1,5 @@
 use crate::{
-    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    common::{message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
-    runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    api::{PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{MAX_WATERMARK_VALUE, WatermarkMessage, message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}}, executor::single_worker, runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 
@@ -493,7 +490,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     
-    // Create streaming context
+    // Create spec
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(1)
         .with_source(
@@ -503,15 +500,14 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
         )
         .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql(test_case.sql)
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .build();
-    let context = PipelineContext::new(spec);
 
     // Start storage server and execute
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();
     
-    context.execute().await.unwrap();
+    single_worker::execute(spec).await.unwrap();
     
     let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
     let actual_messages = client.get_vector().await.unwrap();

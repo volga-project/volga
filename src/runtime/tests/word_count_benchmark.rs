@@ -1,18 +1,11 @@
 use crate::{
-    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    api::compile_logical_graph,
-    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    runtime::{
-        functions::source::word_count_source::BatchingMode,
-        observability::{PipelineSnapshot, WorkerSnapshot},
-        metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics},
-        operators::{
+    api::{PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::single_worker, runtime::{
+        functions::source::word_count_source::BatchingMode, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, observability::{PipelineSnapshot, WorkerSnapshot}, operators::{
             operator::OperatorConfig,
             sink::sink_operator::SinkConfig,
             source::source_operator::{SourceConfig, WordCountSourceConfig},
-        },
-    },
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+        }
+    }, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -161,7 +154,7 @@ pub async fn run_word_count_benchmark(
 ) -> Result<(HashMap<String, f64>, BenchmarkMetrics)> {
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
-    // Create streaming context using SQL instead of manual operator configuration
+    // Create spec using SQL instead of manual operator configuration
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_source(
@@ -181,11 +174,10 @@ pub async fn run_word_count_benchmark(
         )
         .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .build();
 
     let logical_graph = compile_logical_graph(&spec);
-    let context = PipelineContext::new(spec);
 
     let source_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SourceConfig(_))).first().unwrap().operator_id.clone();
     let sink_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SinkConfig(_))).first().unwrap().operator_id.clone();
@@ -235,8 +227,7 @@ pub async fn run_word_count_benchmark(
         }
     });
     
-    // Execute using StreamingContext with metrics
-    context.execute_with_state_updates(Some(state_updates_sender)).await.unwrap();
+    single_worker::execute_with_state_updates(spec, Some(state_updates_sender)).await.unwrap();
     running.store(false, Ordering::Relaxed);
 
     // Wait for metrics task to complete

@@ -1,10 +1,7 @@
 #![cfg(test)]
 
 use crate::{
-    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    common::{message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}, WatermarkMessage, MAX_WATERMARK_VALUE},
-    runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    api::{PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{MAX_WATERMARK_VALUE, WatermarkMessage, message::Message, test_utils::{create_test_string_batch, gen_unique_grpc_port, verify_message_records_match}}, executor::single_worker, runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use tokio::runtime::Runtime;
@@ -36,7 +33,7 @@ fn test_worker_execution() -> Result<()> {
         Field::new("value", DataType::Utf8, false),
     ]));
     
-    // Create streaming context using SQL
+    // Create spec using SQL
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(1)
         .with_source(
@@ -46,15 +43,14 @@ fn test_worker_execution() -> Result<()> {
         )
         .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         .sql("SELECT value FROM test_table")
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .build();
-    let context = PipelineContext::new(spec);
 
     let vector_messages = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
         
-        context.execute().await.unwrap();
+        single_worker::execute(spec).await.unwrap();
         
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let vector_messages = client.get_vector().await.unwrap();

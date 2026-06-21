@@ -1,19 +1,11 @@
 use crate::{
-    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    api::compile_logical_graph,
-    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    runtime::{
-        functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
-        functions::source::DatagenSpec,
-        observability::PipelineSnapshot,
-        metrics::PipelineStateHistory,
-        operators::{
+    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::single_worker, runtime::{
+        functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot, operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
             window::{TileConfig, TimeGranularity, window_operator::ExecutionMode as WindowExecutionMode},
-        },
-    },
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+        }
+    }, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use std::collections::HashMap;
@@ -254,7 +246,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
             schema,
         )
         .sql(&sql)
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 });
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 });
 
     
     // Set execution mode 
@@ -275,7 +267,6 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     let mut logical_graph = compile_logical_graph(&spec);
     update_window_configs_in_graph(&mut logical_graph, &config)?;
     spec.logical_graph = Some(logical_graph);
-    let context = PipelineContext::new(spec);
 
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();
@@ -378,7 +369,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     
     // Spawn execution task
     let execution_task = tokio::spawn(async move {
-        context.execute_with_state_updates(Some(state_updates_sender)).await
+        single_worker::execute_with_state_updates(spec, Some(state_updates_sender)).await
     });
     
     // Race between execution completion and timeout

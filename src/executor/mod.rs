@@ -1,2 +1,2 @@
-pub mod runtime_adapter;
-pub mod local_runtime_adapter;
+pub mod single_worker;
+pub mod master_worker;

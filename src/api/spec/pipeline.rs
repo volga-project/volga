@@ -24,14 +24,13 @@ pub enum ExecutionMode {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ExecutionProfile {
-    SingleWorkerNoMaster { num_threads_per_task: usize },
-    LocalOrchestrated,
-    Orchestrated { num_workers_per_operator: usize },
+    SingleWorker { num_threads_per_task: usize },
+    MasterWorker { num_threads_per_task: usize },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PipelineSpec {
-    pub execution_profile: ExecutionProfile,
+    pub execution_profile: Option<ExecutionProfile>,
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
     pub worker_runtime: WorkerRuntimeSpec,
@@ -68,9 +67,7 @@ impl PipelineSpecBuilder {
     pub fn new() -> Self {
         Self {
             spec: PipelineSpec {
-                execution_profile: ExecutionProfile::SingleWorkerNoMaster {
-                    num_threads_per_task: 4,
-                },
+                execution_profile: None,
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
                 worker_runtime: WorkerRuntimeSpec::default(),
@@ -100,7 +97,7 @@ impl PipelineSpecBuilder {
     }
 
     pub fn with_execution_profile(mut self, profile: ExecutionProfile) -> Self {
-        self.spec.execution_profile = profile;
+        self.spec.execution_profile = Some(profile);
         self
     }
 
@@ -210,6 +207,10 @@ impl PipelineSpecBuilder {
     }
 
     pub fn build(self) -> PipelineSpec {
+        // assert that the execution profile is set
+        if self.spec.execution_profile.is_none() {
+            panic!("Execution profile must be set");
+        }
         self.spec
     }
 }

@@ -5,6 +5,7 @@ use anyhow::Result;
 use datafusion::common::ScalarValue;
 use uuid::Uuid;
 
+use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
@@ -106,6 +107,7 @@ pub(crate) async fn run_watermark_window_pipeline(
                 format!("http://{}", storage_server_addr),
             ),
         )
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .sql(sql)
         .build();
 
@@ -121,7 +123,7 @@ pub(crate) async fn run_watermark_window_pipeline(
     if lateness_ms < 0 {
         panic!("lateness_ms must be >= 0, got {}", lateness_ms);
     }
-    // Set lateness directly on the execution graph for this test (PipelineContext/LogicalGraph stay unaware).
+    // Set lateness directly on the execution graph for this test
     let vertex_ids_snapshot: Vec<_> = exec_graph.get_vertices().keys().cloned().collect();
     for vid in vertex_ids_snapshot {
         if let Some(v) = exec_graph.get_vertex_mut(vid.as_ref()) {

@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use datafusion::common::ScalarValue;
 use uuid::Uuid;
+use crate::api::spec::pipeline::ExecutionProfile;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
@@ -36,7 +37,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let master_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     let mut master_server = MasterServer::new();
 
-    // Build pipeline via PipelineContextBuilder (like benchmarks): datagen -> window -> sink
+    // Build spec: datagen -> window -> sink
     let schema = create_window_input_schema();
     let sql = "SELECT timestamp, value, partition_key, \
                SUM(value) OVER w as sum_val, \
@@ -81,6 +82,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             "http://{}",
             storage_server_addr
         )))
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .sql(sql)
         .build();
 
@@ -93,7 +95,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     ));
 
     let mut exec_graph1 = logical_graph.to_execution_graph();
-    // Apply lateness directly to window operators for this test (PipelineContext stays unaware).
+    // Apply lateness directly to window operators for this test
     let lateness_ms: i64 = out_of_orderness_ms as i64;
     let vertex_ids_snapshot: Vec<_> = exec_graph1.get_vertices().keys().cloned().collect();
     for vid in vertex_ids_snapshot {

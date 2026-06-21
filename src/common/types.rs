@@ -20,12 +20,12 @@ pub enum PipelineState {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PipelineSpec {
-    pub pipeline_spec_id: PipelineSpecId,
-    pub created_at: DateTime<Utc>,
-    pub spec_bytes: Vec<u8>,
-}
+// #[derive(Debug, Clone, Serialize, Deserialize)]
+// pub struct PipelineSpec {
+//     pub pipeline_spec_id: PipelineSpecId,
+//     pub created_at: DateTime<Utc>,
+//     pub spec_bytes: Vec<u8>,
+// }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipelineStatus {

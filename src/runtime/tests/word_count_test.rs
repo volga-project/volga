@@ -1,15 +1,12 @@
 use crate::{
-    api::{ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    common::{test_utils::{gen_unique_grpc_port, print_pipeline_state}, message::Message},
-    runtime::{
+    api::{PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{message::Message, test_utils::{gen_unique_grpc_port, print_pipeline_state}}, executor::single_worker, runtime::{
         functions::{
             key_by::KeyByFunction,
             reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
             source::word_count_source::BatchingMode,
         },
         operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
-    },
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    }, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use std::{collections::HashMap, sync::Arc};
@@ -51,15 +48,14 @@ fn test_word_count() -> Result<()> {
             storage_server_addr
         )))
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .build();
-    let context = PipelineContext::new(spec);
 
     let (result_vec, pipeline_state) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
         
-        let pipeline_state = context.execute().await.unwrap();
+        let pipeline_state = single_worker::execute(spec).await.unwrap();
         
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let result_vec = client.get_vector().await.unwrap();

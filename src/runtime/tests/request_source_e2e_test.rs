@@ -1,20 +1,16 @@
 use crate::{
-    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    common::test_utils::{IdentityMapFunction, gen_unique_grpc_port},
-    api::{Planner, PlanningContext},
-    runtime::{
+    api::{PipelineSpecBuilder, Planner, PlanningContext, logical_graph::LogicalGraph, spec::pipeline::ExecutionProfile}, common::test_utils::{IdentityMapFunction, gen_unique_grpc_port}, executor::single_worker, runtime::{
         functions::{
             key_by::{KeyByFunction, key_by_function::extract_datafusion_window_exec},
             map::MapFunction,
-            source::request_source::RequestSourceConfig,
-            source::RequestSourceSinkSpec,
+            source::{RequestSourceSinkSpec, request_source::RequestSourceConfig},
         },
         operators::{
             operator::OperatorConfig,
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
         },
-    },
+    }
 };
 use datafusion::prelude::SessionContext;
 use arrow::datatypes::{Schema, Field, DataType};
@@ -305,21 +301,20 @@ async fn test_request_source_sink_e2e() {
         ];
 
     // Create logical graph, no chaining
-        let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
+    let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
 
-        // Build PipelineSpec with the pre-constructed logical graph (keep upstream test structure).
-        let spec = PipelineSpecBuilder::new()
-            .with_parallelism(parallelism)
-            .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
-            .with_logical_graph(logical_graph)
-            .build();
+    // Build PipelineSpec with the pre-constructed logical graph (keep upstream test structure).
+    let spec = PipelineSpecBuilder::new()
+        .with_parallelism(parallelism)
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_logical_graph(logical_graph)
+        .build();
 
-        let context = PipelineContext::new(spec);
 
-        // Start pipeline execution in background
-    // TODO implement stop for context
+    // Start pipeline execution in background
+    // TODO implement stop
     let _pipeline_handle = tokio::spawn(async move {
-        context.execute().await.unwrap();
+        single_worker::execute(spec).await.unwrap();
     });
 
     // Wait for server to start
@@ -440,5 +435,5 @@ async fn test_request_source_sink_e2e() {
     assert_eq!(results.len(), total_requests, "Should complete all requested requests");
     assert_eq!(successful_requests, total_requests, "Should have at least some successful requests");
     
-    // TODO - implement stop for context and stop the pipeline
+    // TODO - implement stop and stop the pipeline
 }

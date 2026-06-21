@@ -1,17 +1,8 @@
 use crate::{
-    api::{ExecutionMode, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    runtime::metrics::PipelineStateHistory,
-    runtime::{
-        functions::source::DatagenSpec,
-        functions::source::datagen_source::{DatagenSourceConfig, FieldGenerator},
-        observability::PipelineSnapshot,
-        operators::{
+    api::{ExecutionMode, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::single_worker, runtime::{functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot, operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
-        },
-    },
-    storage::InMemoryStorageServer,
+        }}, storage::InMemoryStorageServer
 };
 use anyhow::Result;
 use arrow::datatypes::{Schema, Field, DataType, TimeUnit};
@@ -181,10 +172,9 @@ pub async fn run_window_request_benchmark(
             Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
         )
         .sql(sql)
-        .with_execution_profile(ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .with_execution_mode(ExecutionMode::Request)
         .build();
-    let context = PipelineContext::new(spec);
 
     let (state_updates_sender, mut state_updates_receiver) = mpsc::channel(100);
     let running = Arc::new(AtomicBool::new(true));
@@ -241,7 +231,8 @@ pub async fn run_window_request_benchmark(
         }
     });
     
-    context.execute_with_state_updates(Some(state_updates_sender)).await?;
+    single_worker::execute_with_state_updates(spec, Some(state_updates_sender)).await?;
+    
     running.store(false, Ordering::Relaxed);
 
     let _ = state_updates_task.await;

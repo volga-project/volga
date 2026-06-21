@@ -1,11 +1,10 @@
+use std::sync::Arc;
+
 use crate::{
-    api::{logical_graph::LogicalGraph, ExecutionProfile, PipelineContext, PipelineSpecBuilder},
-    common::{test_utils::{create_test_string_batch, gen_unique_grpc_port}, message::{Message, WatermarkMessage}, MAX_WATERMARK_VALUE},
-    runtime::{
+    api::{PipelineSpecBuilder, logical_graph::LogicalGraph, spec::pipeline::ExecutionProfile}, cluster::{cluster_provider::LocalMachineClusterProvider, node_assignment::SingleNodeStrategy}, common::{MAX_WATERMARK_VALUE, message::{Message, WatermarkMessage}, test_utils::{create_test_string_batch, gen_unique_grpc_port}}, executor::master_worker, runtime::{
         functions::{key_by::KeyByFunction, map::{MapFunction, MapFunctionTrait}},
         operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}},
-    },
-    storage::{InMemoryStorageClient, InMemoryStorageServer}
+    }, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 use tokio::runtime::Runtime;
@@ -77,18 +76,19 @@ fn test_distributed_execution() -> Result<()> {
             OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
         ];
 
-        // Create streaming context with local full orchestration (master + worker servers)
+        // Create spec with local full orchestration (master + worker servers)
         let total_parallelism = num_workers_per_operator * parallelism_per_worker;
         let spec = PipelineSpecBuilder::new()
             .with_parallelism(total_parallelism)
             .with_logical_graph(LogicalGraph::from_linear_operators(operators, total_parallelism, false))
-            .with_execution_profile(ExecutionProfile::LocalOrchestrated)
+            .with_execution_profile(ExecutionProfile::MasterWorker { num_threads_per_task: 4 })
             .build();
-        let context = PipelineContext::new(spec);
 
         println!("[TEST] Starting distributed execution");
         
-        context.execute().await.unwrap();
+        let cluster_provider = Arc::new(LocalMachineClusterProvider::single_node());
+        let node_assign = Arc::new(SingleNodeStrategy);
+        master_worker::execute(spec, cluster_provider, node_assign).await.unwrap();
         println!("[TEST] Distributed execution completed successfully");
 
         // Get results from storage

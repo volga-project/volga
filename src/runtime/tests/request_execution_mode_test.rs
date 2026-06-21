@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph}, common::types::PipelineId, runtime::{
+    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::types::PipelineId, runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator}, observability::snapshot_types::StreamTaskStatus, operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
@@ -236,6 +236,7 @@ async fn test_request_execution_mode() {
             SourceConfig::HttpRequestSourceConfig(request_source_config.clone()),
             Some(SinkConfig::RequestSinkConfig),
         )
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .sql(sql)
         .build();
 
