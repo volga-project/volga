@@ -5,13 +5,14 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::sync::Mutex;
+use uuid::Uuid;
 
 use crate::api::{compile_logical_graph, ExecutionProfile, PipelineSpec};
 use crate::cluster::cluster_provider::{ClusterProvider, LocalMachineClusterProvider};
 use crate::cluster::node_assignment::{SingleNodeStrategy, SingleWorkerStrategy};
-use crate::control_plane::types::{AttemptId, ExecutionIds};
+use crate::common::types::PipelineId;
 use crate::executor::local_runtime_adapter::LocalRuntimeAdapter;
-use crate::executor::runtime_adapter::{RuntimeAdapter, StartAttemptRequest};
+use crate::executor::runtime_adapter::{RuntimeAdapter, StartPipelineRequest};
 use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::PipelineSnapshotHistory;
 use crate::runtime::worker::{Worker, WorkerConfig};
@@ -61,7 +62,7 @@ impl PipelineContext {
     ) -> Result<PipelineSnapshot> {
         let logical_graph = compile_logical_graph(&self.spec);
         let mut execution_graph = logical_graph.to_execution_graph();
-        let execution_ids = ExecutionIds::fresh(AttemptId(1));
+        let pipeline_id = PipelineId(Uuid::new_v4());
 
         match self.spec.execution_profile.clone() {
             ExecutionProfile::SingleWorkerNoMaster { num_threads_per_task } => {
@@ -75,7 +76,7 @@ impl PipelineContext {
 
                 let mut worker_config = WorkerConfig::new(
                     worker_id.clone(),
-                    execution_ids,
+                    pipeline_id,
                     execution_graph,
                     vertex_ids,
                     num_threads_per_task,
@@ -124,14 +125,14 @@ impl PipelineContext {
                 let node_assign = Arc::new(SingleNodeStrategy);
 
                 let handle = adapter
-                    .start_attempt(StartAttemptRequest {
-                        execution_ids,
+                    .start_pipeline(StartPipelineRequest {
+                        pipeline_id,
                         execution_graph,
                         num_workers_per_operator: 1,
                         cluster_provider,
                         node_assign,
                         transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
-                        worker_runtime: self.spec.worker_runtime.clone(),
+                        worker_runtime_spec: self.spec.worker_runtime.clone(),
                         operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
                     })
                     .await?;
@@ -154,14 +155,14 @@ impl PipelineContext {
                 let node_assign = Arc::new(SingleWorkerStrategy);
 
                 let handle = runtime_adapter
-                    .start_attempt(StartAttemptRequest {
-                        execution_ids,
+                    .start_pipeline(StartPipelineRequest {
+                        pipeline_id,
                         execution_graph,
                         num_workers_per_operator,
                         cluster_provider,
                         node_assign,
                         transport_overrides_queue_records: self.spec.transport_overrides_queue_records(),
-                        worker_runtime: self.spec.worker_runtime.clone(),
+                        worker_runtime_spec: self.spec.worker_runtime.clone(),
                         operator_type_storage_overrides: self.spec.operator_type_storage_overrides(),
                     })
                     .await?;

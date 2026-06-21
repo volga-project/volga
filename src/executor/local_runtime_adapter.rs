@@ -3,7 +3,7 @@ use async_trait::async_trait;
 
 use crate::cluster::node_assignment::node_to_vertex_ids;
 use crate::common::test_utils::gen_unique_grpc_port;
-use crate::executor::runtime_adapter::{AttemptHandle, RuntimeAdapter, StartAttemptRequest};
+use crate::executor::runtime_adapter::{PipelineExecutionHandle, RuntimeAdapter, StartPipelineRequest};
 use crate::runtime::master::Master;
 use crate::runtime::master_server::{MasterServer, TaskKey};
 use crate::runtime::worker::WorkerConfig;
@@ -22,7 +22,7 @@ impl LocalRuntimeAdapter {
 
 #[async_trait]
 impl RuntimeAdapter for LocalRuntimeAdapter {
-    async fn start_attempt(&self, mut req: StartAttemptRequest) -> Result<AttemptHandle> {
+    async fn start_pipeline(&self, mut req: StartPipelineRequest) -> Result<PipelineExecutionHandle> {
         let cluster_nodes = req
             .cluster_provider
             .get_all_nodes()
@@ -34,14 +34,14 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
         req.execution_graph
             .update_channels_with_node_mapping_and_transport(
                 Some(&vertex_to_node),
-                &req.worker_runtime.transport,
+                &req.worker_runtime_spec.transport,
                 &req.transport_overrides_queue_records,
             );
 
         let master_port = gen_unique_grpc_port();
         let master_addr = format!("127.0.0.1:{}", master_port);
         let mut master_server = MasterServer::new();
-        let expected_tasks = req
+        let checkpointable_tasks = req
             .execution_graph
             .get_vertices()
             .values()
@@ -51,7 +51,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                 task_index: v.task_index,
             })
             .collect::<Vec<_>>();
-        master_server.set_checkpointable_tasks(expected_tasks).await;
+        master_server.set_checkpointable_tasks(checkpointable_tasks).await;
         master_server.start(&master_addr).await?;
         let master_snapshot_sink = master_server.snapshot_sink();
 
@@ -86,7 +86,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
 
             let mut worker_config = WorkerConfig::new(
                 node_id.clone(),
-                req.execution_ids.clone(),
+                req.pipeline_id.clone(),
                 req.execution_graph.clone(),
                 vertex_ids
                     .into_iter()
@@ -96,10 +96,10 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
                 transport_backend_type,
             )
             .with_master_addr(master_addr.clone());
-            worker_config.storage_budgets = req.worker_runtime.storage.budgets.clone();
-            worker_config.inmem_store_lock_pool_size = req.worker_runtime.storage.inmem_store_lock_pool_size;
-            worker_config.inmem_store_bucket_granularity = req.worker_runtime.storage.inmem_store_bucket_granularity;
-            worker_config.inmem_store_max_batch_size = req.worker_runtime.storage.inmem_store_max_batch_size;
+            worker_config.storage_budgets = req.worker_runtime_spec.storage.budgets.clone();
+            worker_config.inmem_store_lock_pool_size = req.worker_runtime_spec.storage.inmem_store_lock_pool_size;
+            worker_config.inmem_store_bucket_granularity = req.worker_runtime_spec.storage.inmem_store_bucket_granularity;
+            worker_config.inmem_store_max_batch_size = req.worker_runtime_spec.storage.inmem_store_max_batch_size;
             worker_config.operator_type_storage_overrides = req.operator_type_storage_overrides.clone();
 
             let mut worker_server = WorkerServer::new(worker_config);
@@ -108,7 +108,7 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             worker_addrs.push(addr);
         }
 
-        let execution_ids = req.execution_ids.clone();
+        let pipeline_id = req.pipeline_id.clone();
         let worker_addrs_for_join = worker_addrs.clone();
         let join = tokio::spawn(async move {
             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -126,8 +126,8 @@ impl RuntimeAdapter for LocalRuntimeAdapter {
             Ok(crate::runtime::observability::PipelineSnapshot::new(worker_states))
         });
 
-        Ok(AttemptHandle {
-            execution_ids,
+        Ok(PipelineExecutionHandle {
+            pipeline_id,
             master_addr,
             worker_addrs,
             join,

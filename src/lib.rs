@@ -6,4 +6,3 @@ pub mod cluster;
 pub mod storage;
 pub mod executor;
 pub mod sql_testing;
-pub mod control_plane;

@@ -3,9 +3,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use datafusion::common::ScalarValue;
+use uuid::Uuid;
 
 use crate::api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
 use crate::common::test_utils::gen_unique_grpc_port;
+use crate::common::types::PipelineId;
 use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
@@ -16,7 +18,6 @@ use crate::runtime::tests::test_utils::{
     create_window_input_schema, wait_for_status, window_rows_from_messages, WindowOutputRow,
 };
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
-use crate::control_plane::types::{AttemptId, ExecutionIds};
 
 fn parse_task_index_from_key(key: &str) -> Option<i32> {
     // Keys come from datagen as "key-{task_index}-{key_id}" when using FieldGenerator::Key.
@@ -144,7 +145,7 @@ pub(crate) async fn run_watermark_window_pipeline(
 
     let mut worker = Worker::new(WorkerConfig::new(
         "wm-e2e-worker".to_string(),
-        ExecutionIds::fresh(AttemptId(1)),
+        PipelineId(Uuid::new_v4()),
         exec_graph,
         vertex_ids,
         2,

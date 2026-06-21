@@ -1,7 +1,7 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{metrics::{MetricsLabels, LABEL_ATTEMPT_ID, LABEL_PIPELINE_ID, LABEL_PIPELINE_SPEC_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
@@ -244,18 +244,14 @@ impl DataWriter {
                         METRIC_STREAM_TASK_TX_QUEUE_SIZE,
                         LABEL_VERTEX_ID => self.vertex_id.clone(),
                         LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
-                        LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).set(queue_size);
                     gauge!(
                         METRIC_STREAM_TASK_TX_QUEUE_REM,
                         LABEL_VERTEX_ID => self.vertex_id.clone(),
                         LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
-                        LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).set(queue_remaining);
                     let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
@@ -263,9 +259,7 @@ impl DataWriter {
                         METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
                         LABEL_VERTEX_ID => self.vertex_id.clone(),
                         LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
-                        LABEL_PIPELINE_SPEC_ID => labels.pipeline_spec_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_ATTEMPT_ID => labels.attempt_id.to_string(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).set(backpressure);
                 } else {

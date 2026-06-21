@@ -1,14 +1,6 @@
-use crate::runtime::{
-    execution_graph::ExecutionGraph,
-    functions::source::request_source::{extract_request_source_config, RequestSourceProcessor},
-    metrics::emit_poll_derived_gauges,
-    observability::snapshot_types::WorkerSnapshot,
-    runtime_context::RuntimeContext,
-    stream_task::{StreamTask},
-    stream_task_actor::{StreamTaskActor, StreamTaskMessage},
-    state::OperatorStates,
-    observability::snapshot_types::TaskOperatorMetrics,
-};
+use crate::{common::types::PipelineId, runtime::{
+    execution_graph::ExecutionGraph, functions::source::request_source::{RequestSourceProcessor, extract_request_source_config}, metrics::emit_poll_derived_gauges, observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot}, runtime_context::RuntimeContext, state::OperatorStates, stream_task::StreamTask, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
+}};
 use crate::runtime::VertexId;
 use crate::runtime::metrics::{MetricsLabels, TaskMetrics, WorkerAggregateMetrics};
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
@@ -27,7 +19,6 @@ use serde_json::Value;
 use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 use crate::runtime::operators::window::TimeGranularity;
-use crate::control_plane::types::ExecutionIds;
 use crate::api::StorageSpec;
 use crate::runtime::operators::operator::operator_storage_key_and_default_spec;
 
@@ -36,7 +27,7 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
     pub worker_id: String,
-    pub execution_ids: ExecutionIds,
+    pub pipeline_id: PipelineId,
     pub graph: ExecutionGraph,
     pub vertex_ids: Vec<VertexId>,
     pub num_threads_per_task: usize,
@@ -53,7 +44,7 @@ pub struct WorkerConfig {
 impl WorkerConfig {
     pub fn new(
         worker_id: String,
-        execution_ids: ExecutionIds,
+        pipeline_id: PipelineId,
         graph: ExecutionGraph,
         vertex_ids: Vec<VertexId>,
         num_threads_per_task: usize,
@@ -61,7 +52,7 @@ impl WorkerConfig {
     ) -> Self {
         Self {
             worker_id,
-            execution_ids,
+            pipeline_id,
             graph,
             vertex_ids,
             num_threads_per_task,
@@ -91,7 +82,7 @@ impl WorkerConfig {
 
 pub struct Worker {
     worker_id: String,
-    execution_ids: ExecutionIds,
+    pipeline_id: PipelineId,
     graph: ExecutionGraph,
     vertex_ids: Vec<VertexId>,
     transport_backend_type: TransportBackendType,
@@ -145,7 +136,7 @@ impl Worker {
 
         Self {
             worker_id: config.worker_id.clone(),
-            execution_ids: config.execution_ids.clone(),
+            pipeline_id: config.pipeline_id.clone(),
             graph: config.graph,
             vertex_ids: config.vertex_ids.clone(),
             task_actors: HashMap::new(),
@@ -168,7 +159,7 @@ impl Worker {
             request_source_processor_runtime,
             worker_state: Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
                 config.worker_id,
-                config.execution_ids,
+                config.pipeline_id,
             ))),
             operator_states: Arc::new(OperatorStates::new()),
             running: Arc::new(AtomicBool::new(false)),
@@ -179,7 +170,7 @@ impl Worker {
 
     async fn poll_and_update_tasks_state(
         worker_id: String,
-        execution_ids: ExecutionIds,
+        pipeline_id: PipelineId,
         task_runtimes: HashMap<VertexId, Handle>,
         task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
@@ -221,7 +212,7 @@ impl Worker {
             .into_iter()
             .map(|(k, v)| (k.as_ref().to_string(), v))
             .collect();
-        let worker_metrics = WorkerAggregateMetrics::new(worker_id, execution_ids, task_metrics_str, &graph);
+        let worker_metrics = WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
         worker_metrics.record();
         emit_poll_derived_gauges(&worker_metrics);
 
@@ -341,9 +332,7 @@ impl Worker {
                     if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
                     }
-                    cfg.insert("pipeline_spec_id".to_string(), Value::String(self.execution_ids.pipeline_spec_id.0.to_string()));
-                    cfg.insert("pipeline_id".to_string(), Value::String(self.execution_ids.pipeline_id.0.to_string()));
-                    cfg.insert("attempt_id".to_string(), Value::from(self.execution_ids.attempt_id.0));
+                    cfg.insert("pipeline_id".to_string(), Value::String(self.pipeline_id.0.to_string()));
                     cfg.insert("worker_id".to_string(), Value::String(self.worker_id.clone()));
                     Some(cfg)
                 },
@@ -365,9 +354,7 @@ impl Worker {
             // Create the task and its actor in the task's runtime
             let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();
             transport_cfg.set_metrics_labels(MetricsLabels {
-                pipeline_spec_id: self.execution_ids.pipeline_spec_id.0.to_string(),
-                pipeline_id: self.execution_ids.pipeline_id.0.to_string(),
-                attempt_id: self.execution_ids.attempt_id.0,
+                pipeline_id: self.pipeline_id.0.to_string(),
                 worker_id: self.worker_id.clone(),
             });
             let task = StreamTask::new(
@@ -421,7 +408,7 @@ impl Worker {
         let state = self.worker_state.clone();
         let operator_states = self.operator_states.clone();
         let worker_id = self.worker_id.clone();
-        let execution_ids = self.execution_ids.clone();
+        let pipeline_id = self.pipeline_id.clone();
         
         let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
             .map(|(k, v)| (k.clone(), v.handle().clone()))
@@ -431,7 +418,7 @@ impl Worker {
             while running.load(Ordering::SeqCst) {
                 Self::poll_and_update_tasks_state(
                     worker_id.clone(),
-                    execution_ids.clone(),
+                    pipeline_id.clone(),
                     task_runtime_handles.clone(),
                     task_actors.clone(),
                     graph.clone(),
@@ -444,7 +431,7 @@ impl Worker {
             // final poll
             Self::poll_and_update_tasks_state(
                 worker_id.clone(),
-                execution_ids.clone(),
+                pipeline_id.clone(),
                 task_runtime_handles,
                 task_actors,
                 graph,
@@ -533,7 +520,7 @@ impl Worker {
             let state = self.worker_state.clone();
             Self::poll_and_update_tasks_state(
                 self.worker_id.clone(),
-                self.execution_ids.clone(),
+                self.pipeline_id.clone(),
                 task_runtime_handles,
                 task_actors,
                 graph,

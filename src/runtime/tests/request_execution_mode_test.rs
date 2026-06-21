@@ -1,26 +1,17 @@
 use crate::{
-    api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder},
-    control_plane::types::{AttemptId, ExecutionIds},
-    runtime::{
-        functions::{
-            source::{
-                datagen_source::{DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator},
-            },
-        },
-        operators::{
+    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph}, common::types::PipelineId, runtime::{
+        functions::source::datagen_source::{DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator}, observability::snapshot_types::StreamTaskStatus, operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
-        },
-        observability::snapshot_types::StreamTaskStatus,
-        worker::{Worker, WorkerConfig},
-        tests::request_source_e2e_test::{create_test_config, run_continuous_requests},
-    },
+        }, tests::request_source_e2e_test::{create_test_config, run_continuous_requests}, worker::{Worker, WorkerConfig}
+    }
 };
 use crate::runtime::tests::test_utils::wait_for_status;
 use crate::transport::transport_backend_actor::TransportBackendType;
 use datafusion::scalar::ScalarValue;
 use arrow::datatypes::{Schema, Field, DataType, TimeUnit};
 use rand::Rng;
+use uuid::Uuid;
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tokio::time::{sleep, Duration, Instant};
@@ -256,7 +247,7 @@ async fn test_request_execution_mode() {
 
     let mut worker = Worker::new(WorkerConfig::new(
         "request_mode_worker".to_string(),
-        ExecutionIds::fresh(AttemptId(1)),
+        PipelineId(Uuid::new_v4()),
         exec_graph,
         vertex_ids,
         2,
