@@ -8,7 +8,8 @@ use crate::api::spec::pipeline::ExecutionProfile;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
-use crate::runtime::master_server::{MasterServer, TaskKey};
+use crate::runtime::master_checkpoint::TaskKey;
+use crate::runtime::master_server::MasterServer;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
@@ -24,9 +25,9 @@ use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::tests::test_utils::{create_window_input_schema, wait_for_status, window_rows_from_messages};
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
+// TODO: This test passes individually but can fail when running the full suite (likely cross-test interference).
 #[tokio::test]
 async fn test_manual_checkpoint_and_restore() -> Result<()> {
-    // TODO: This test passes individually but can fail when running the full suite (likely cross-test interference).
     crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());

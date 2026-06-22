@@ -1,11 +1,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
-use crate::runtime::master_server::MasterLatestSnapshot;
 
 // PipelineState moved to runtime/observability/snapshot_types.rs
 
@@ -150,7 +148,7 @@ pub struct Master {
     worker_endpoints_by_id: Arc<Mutex<HashMap<String, String>>>,
     state_polling_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<std::sync::atomic::AtomicBool>,
-    snapshot_sink: Option<Arc<Mutex<Option<MasterLatestSnapshot>>>>,
+    lates_pipeline_snapshot: Arc<Mutex<Option<PipelineSnapshot>>>,
 }
 
 impl Master {
@@ -161,13 +159,8 @@ impl Master {
             worker_endpoints_by_id: Arc::new(Mutex::new(HashMap::new())),
             state_polling_handle: None,
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            snapshot_sink: None,
+            lates_pipeline_snapshot: Arc::new(Mutex::new(None)),
         }
-    }
-
-    pub fn with_snapshot_sink(mut self, sink: Arc<Mutex<Option<MasterLatestSnapshot>>>) -> Self {
-        self.snapshot_sink = Some(sink);
-        self
     }
 
     /// Connect to all workers
@@ -245,10 +238,9 @@ impl Master {
         let worker_states = self.worker_states.clone();
         let worker_endpoints_by_id = self.worker_endpoints_by_id.clone();
         let running = self.running.clone();
-        let snapshot_sink = self.snapshot_sink.clone();
+        let lates_pipeline_snapshot = self.lates_pipeline_snapshot.clone();
         
         let handle = tokio::spawn(async move {
-            let mut seq: u64 = 1;
             while running.load(std::sync::atomic::Ordering::Relaxed) {
                 let mut new_states_by_worker_id = HashMap::new();
                 let mut new_endpoints_by_worker_id = HashMap::new();
@@ -279,22 +271,9 @@ impl Master {
                     *endpoints_guard = new_endpoints_by_worker_id;
                 }
 
-                if let Some(sink) = snapshot_sink.as_ref() {
-                    let ts_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    let snapshot = PipelineSnapshot::new(snapshot_states.clone());
-                    if let Ok(bytes) = bincode::serialize(&snapshot) {
-                        let mut guard = sink.lock().await;
-                        *guard = Some(MasterLatestSnapshot {
-                            ts_ms,
-                            seq,
-                            snapshot_bytes: bytes,
-                        });
-                        seq = seq.saturating_add(1);
-                    }
-                }
+                let snapshot = PipelineSnapshot::new(snapshot_states.clone());
+                let mut guard = lates_pipeline_snapshot.lock().await;
+                *guard = Some(snapshot);
                 
                 sleep(Duration::from_millis(100)).await;
             }
@@ -462,7 +441,7 @@ impl Master {
         Ok(())
     }
 
-    /// Execute the complete job lifecycle according to the new protocol
+    /// Execute the complete job lifecycle
     pub async fn execute(&mut self, worker_ips: Vec<String>) -> anyhow::Result<()> {
         println!("[MASTER] Starting execution with {} workers", worker_ips.len());
         
@@ -509,5 +488,10 @@ impl Master {
     pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
         let states_guard = self.worker_states.lock().await;
         states_guard.clone()
+    }
+
+    pub async fn get_latest_pipeline_snapshot(&self) -> Option<PipelineSnapshot> {
+        let guard = self.lates_pipeline_snapshot.lock().await;
+        guard.clone()
     }
 } 

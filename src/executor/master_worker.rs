@@ -9,8 +9,8 @@ use crate::cluster::cluster_provider::ClusterProvider;
 use crate::cluster::node_assignment::{node_to_vertex_ids, NodeAssignStrategy};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
-use crate::runtime::master::Master;
-use crate::runtime::master_server::{MasterServer, TaskKey};
+use crate::runtime::master_checkpoint::TaskKey;
+use crate::runtime::master_server::MasterServer;
 use crate::runtime::observability::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::worker::WorkerConfig;
@@ -56,7 +56,6 @@ pub async fn execute(
         .collect::<Vec<_>>();
     master_server.set_checkpointable_tasks(checkpointable_tasks).await;
     master_server.start(&master_addr).await?;
-    let master_snapshot_sink = master_server.snapshot_sink();
 
     let node_to_vertex_ids = node_to_vertex_ids(&vertex_to_node);
     let mut worker_servers = Vec::new();
@@ -122,10 +121,8 @@ pub async fn execute(
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    let mut master = Master::new().with_snapshot_sink(master_snapshot_sink);
-    master.execute(worker_addrs_for_join).await?;
-
-    let worker_states = master.get_worker_states().await;
+    master_server.execute(worker_addrs_for_join).await?;
+    let worker_states = master_server.get_worker_states().await;
     let mut servers = worker_servers;
     for s in servers.iter_mut() {
         s.stop().await;

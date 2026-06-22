@@ -175,6 +175,7 @@ impl PipelineSpecBuilder {
         self
     }
 
+    // TODO is this needed
     pub fn add_source_binding(mut self, src: SourceBindingSpec) -> Self {
         self.spec.sources.push(src);
         self

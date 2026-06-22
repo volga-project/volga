@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use super::{DatagenSpec, KafkaSourceSpec, ParquetSourceSpec};
 use super::schema_ipc;
 
+// TODO is this needed
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SourceBindingSpec {
     pub table_name: String,

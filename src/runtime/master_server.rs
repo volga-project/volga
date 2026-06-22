@@ -1,8 +1,11 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
+use crate::runtime::master::Master;
+use crate::runtime::master_checkpoint::{MasterCheckpointRegistry, TaskKey};
+use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
 
 pub mod master_service {
     tonic::include_proto!("master_service");
@@ -13,80 +16,22 @@ use master_service::{
     ReportCheckpointRequest, ReportCheckpointResponse,
     GetTaskCheckpointRequest, GetTaskCheckpointResponse, StateBlob,
     GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
-    GetLatestSnapshotRequest, GetLatestSnapshotResponse,
+    GetLatestPipelineSnapshotRequest, GetLatestPipelineSnapshotResponse,
 };
-
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
-pub struct TaskKey {
-    pub vertex_id: String,
-    pub task_index: i32,
-}
-
-#[derive(Debug, Default)]
-pub struct MasterCheckpointCoordinator {
-    pub acks: HashMap<u64, HashSet<TaskKey>>,
-    pub completed: BTreeSet<u64>,
-}
-
-impl MasterCheckpointCoordinator {
-    pub fn ack(&mut self, checkpoint_id: u64, task: TaskKey, expected_task_count: usize) {
-        self.acks.entry(checkpoint_id).or_default().insert(task);
-        if expected_task_count != 0 {
-            if let Some(acked) = self.acks.get(&checkpoint_id) {
-                if acked.len() == expected_task_count {
-                    self.completed.insert(checkpoint_id);
-                }
-            }
-        }
-    }
-
-    pub fn latest_complete(&self) -> Option<u64> {
-        self.completed.iter().next_back().copied()
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct MasterCheckpointStore {
-    pub snapshots: HashMap<(u64, TaskKey), Vec<(String, Vec<u8>)>>,
-}
-
-impl MasterCheckpointStore {
-    pub fn put(&mut self, checkpoint_id: u64, task: TaskKey, blobs: Vec<(String, Vec<u8>)>) {
-        self.snapshots.insert((checkpoint_id, task), blobs);
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct MasterCheckpointRegistry {
-    pub coordinator: MasterCheckpointCoordinator,
-    pub store: MasterCheckpointStore,
-    pub expected_tasks: HashSet<TaskKey>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MasterLatestSnapshot {
-    pub ts_ms: u64,
-    pub seq: u64,
-    pub snapshot_bytes: Vec<u8>,
-}
 
 /// Server implementation of MasterService
 #[derive(Clone)]
 pub struct MasterServiceImpl {
-    registry: Arc<Mutex<MasterCheckpointRegistry>>,
-    latest_snapshot: Arc<Mutex<Option<MasterLatestSnapshot>>>,
+    checkpoint_registry: Arc<Mutex<MasterCheckpointRegistry>>,
+    master: Arc<Mutex<Master>>,
 }
 
 impl MasterServiceImpl {
     pub fn new() -> Self {
         Self {
-            registry: Arc::new(Mutex::new(MasterCheckpointRegistry::default())),
-            latest_snapshot: Arc::new(Mutex::new(None)),
+            checkpoint_registry: Arc::new(Mutex::new(MasterCheckpointRegistry::default())),
+            master: Arc::new(Mutex::new(Master::new())),
         }
-    }
-
-    pub fn snapshot_sink(&self) -> Arc<Mutex<Option<MasterLatestSnapshot>>> {
-        self.latest_snapshot.clone()
     }
 }
 
@@ -109,7 +54,7 @@ impl MasterService for MasterServiceImpl {
             .map(|b| (b.name, b.bytes))
             .collect::<Vec<_>>();
 
-        let mut registry = self.registry.lock().await;
+        let mut registry = self.checkpoint_registry.lock().await;
         registry.store.put(checkpoint_id, task.clone(), blobs);
         let expected_count = registry.expected_tasks.len();
         registry.coordinator.ack(checkpoint_id, task, expected_count);
@@ -131,10 +76,10 @@ impl MasterService for MasterServiceImpl {
             task_index: req.task_index,
         };
 
-        let registry = self.registry.lock().await;
+        let registry = self.checkpoint_registry.lock().await;
         let blobs = registry
             .store
-            .snapshots
+            .checkpoint_snapshots
             .get(&(checkpoint_id, task))
             .cloned()
             .unwrap_or_default()
@@ -153,7 +98,7 @@ impl MasterService for MasterServiceImpl {
         &self,
         _request: Request<GetLatestCompleteCheckpointRequest>,
     ) -> Result<Response<GetLatestCompleteCheckpointResponse>, Status> {
-        let registry = self.registry.lock().await;
+        let registry = self.checkpoint_registry.lock().await;
         if let Some(checkpoint_id) = registry.coordinator.latest_complete() {
             Ok(Response::new(GetLatestCompleteCheckpointResponse {
                 success: true,
@@ -171,20 +116,27 @@ impl MasterService for MasterServiceImpl {
         }
     }
 
-    async fn get_latest_snapshot(
+    async fn get_latest_pipeline_snapshot(
         &self,
-        _request: Request<GetLatestSnapshotRequest>,
-    ) -> Result<Response<GetLatestSnapshotResponse>, Status> {
-        let guard = self.latest_snapshot.lock().await;
-        if let Some(s) = guard.as_ref() {
-            Ok(Response::new(GetLatestSnapshotResponse {
+        _request: Request<GetLatestPipelineSnapshotRequest>,
+    ) -> Result<Response<GetLatestPipelineSnapshotResponse>, Status> {
+        let snapshot_opt: Option<PipelineSnapshot> = {
+            let master = self.master.lock().await;
+            master.get_latest_pipeline_snapshot().await
+        };
+
+        if let Some(snapshot) = snapshot_opt {
+            let snapshot_bytes = bincode::serialize(&snapshot).map_err(|e| {
+                Status::internal(format!("Failed to serialize latest pipeline snapshot: {}", e))
+            })?;
+            Ok(Response::new(GetLatestPipelineSnapshotResponse {
                 has_snapshot: true,
-                snapshot_bytes: s.snapshot_bytes.clone(),
-                ts_ms: s.ts_ms,
-                seq: s.seq,
+                snapshot_bytes,
+                ts_ms: 0,
+                seq: 0,
             }))
         } else {
-            Ok(Response::new(GetLatestSnapshotResponse {
+            Ok(Response::new(GetLatestPipelineSnapshotResponse {
                 has_snapshot: false,
                 snapshot_bytes: Vec::new(),
                 ts_ms: 0,
@@ -210,13 +162,19 @@ impl MasterServer {
         }
     }
 
-    pub fn snapshot_sink(&self) -> Arc<Mutex<Option<MasterLatestSnapshot>>> {
-        self.service.snapshot_sink()
+    pub async fn set_checkpointable_tasks(&mut self, tasks: Vec<TaskKey>) {
+        let mut registry = self.service.checkpoint_registry.lock().await;
+        registry.expected_tasks = tasks.into_iter().collect();
     }
 
-    pub async fn set_checkpointable_tasks(&mut self, tasks: Vec<TaskKey>) {
-        let mut registry = self.service.registry.lock().await;
-        registry.expected_tasks = tasks.into_iter().collect();
+    pub async fn execute(&self, worker_ips: Vec<String>) -> anyhow::Result<()> {
+        let mut master = self.service.master.lock().await;
+        master.execute(worker_ips).await
+    }
+
+    pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
+        let master = self.service.master.lock().await;
+        master.get_worker_states().await
     }
 
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
