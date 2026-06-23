@@ -94,3 +94,109 @@ pub fn compile_logical_graph(spec: &PipelineSpec) -> LogicalGraph {
     graph
 }
 
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow::datatypes::{DataType, Field, Schema};
+
+    use crate::cluster::cluster_provider::ClusterNode;
+    use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
+    use super::compile_logical_graph;
+    use crate::api::spec::pipeline::{PipelineSpecBuilder, ExecutionProfile};
+    use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
+    use crate::transport::channel::Channel;
+
+    fn build_mock_vertex_mapping(
+        graph: &crate::runtime::execution_graph::ExecutionGraph,
+    ) -> ExecutionVertexNodeMapping {
+        let node_a = ClusterNode::new("node-a".to_string(), "127.0.0.1".to_string(), 10001);
+        let node_b = ClusterNode::new("node-b".to_string(), "127.0.0.1".to_string(), 10002);
+        let mut mapping: ExecutionVertexNodeMapping = HashMap::new();
+
+        for vertex in graph.get_vertices().values() {
+            let node = if vertex.task_index % 2 == 0 {
+                node_a.clone()
+            } else {
+                node_b.clone()
+            };
+            mapping.insert(vertex.vertex_id.as_ref().to_string(), node);
+        }
+
+        mapping
+    }
+
+    // make sure compiling spec is deterministic
+    #[test]
+    fn test_compiled_graph_signature_consistency() {
+        let events_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("ts", DataType::Int64, false),
+            Field::new("value", DataType::Float64, false),
+        ]));
+        let users_schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Int32, false),
+            Field::new("name", DataType::Utf8, false),
+        ]));
+
+        let spec = PipelineSpecBuilder::new()
+            .with_execution_profile(ExecutionProfile::SingleWorker {
+                num_threads_per_task: 4,
+            })
+            .with_parallelism(2)
+            .with_source(
+                "events".to_string(),
+                SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+                events_schema,
+            )
+            .with_source(
+                "users".to_string(),
+                SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+                users_schema,
+            )
+            .sql(
+                "SELECT \
+                    e.id, \
+                    e.ts, \
+                    SUM(e.value) OVER ( \
+                        PARTITION BY e.id \
+                        ORDER BY e.ts \
+                        RANGE BETWEEN 2 PRECEDING AND CURRENT ROW \
+                    ) AS rolling_sum \
+                 FROM events e \
+                 WHERE e.value > 0.0",
+            )
+            .build();
+
+        let mut graph1 = compile_logical_graph(&spec).to_execution_graph();
+        let mut graph2 = compile_logical_graph(&spec).to_execution_graph();
+
+        let mapping1 = build_mock_vertex_mapping(&graph1);
+        let mapping2 = build_mock_vertex_mapping(&graph2);
+
+        graph1.update_channels_with_node_mapping(Some(&mapping1));
+        graph2.update_channels_with_node_mapping(Some(&mapping2));
+
+        let has_local = graph1
+            .get_edges()
+            .values()
+            .any(|e| matches!(e.channel, Some(Channel::Local { .. })));
+        let has_remote = graph1
+            .get_edges()
+            .values()
+            .any(|e| matches!(e.channel, Some(Channel::Remote { .. })));
+        assert!(has_local, "expected at least one local channel");
+        assert!(has_remote, "expected at least one remote channel");
+
+        let signature1 = graph1.signature();
+        let signature2 = graph2.signature();
+
+        assert!(!signature1.is_empty(), "signature should not be empty");
+        assert_eq!(
+            signature1, signature2,
+            "execution graph signatures should match for the same PipelineSpec"
+        );
+    }
+}
+

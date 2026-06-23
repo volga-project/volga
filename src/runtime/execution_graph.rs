@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+
 use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
@@ -198,6 +199,37 @@ impl ExecutionGraph {
                 }
             })
             .collect()
+    }
+
+    /// Deterministic textual signature for graph-identity checks.
+    /// Uses stable sorted vertex IDs and edge channel identity (type + channel_id).
+    pub fn signature(&self) -> String {
+        let mut vertex_ids = self
+            .vertices
+            .keys()
+            .map(|id| id.as_ref().to_string())
+            .collect::<Vec<_>>();
+        vertex_ids.sort();
+
+        let mut edge_ids = self.edges.keys().cloned().collect::<Vec<_>>();
+        edge_ids.sort();
+
+        let mut lines = Vec::with_capacity(1 + vertex_ids.len() + edge_ids.len());
+        lines.push(format!(
+            "meta|execution_mode={}",
+            self.execution_mode.as_deref().unwrap_or("None")
+        ));
+        lines.extend(vertex_ids.into_iter().map(|id| format!("vertex|id={}", id)));
+        lines.extend(edge_ids.into_iter().map(|id| {
+            let edge = self.edges.get(&id).expect("edge id should exist");
+            let channel_sig = match &edge.channel {
+                None => "None".to_string(),
+                Some(Channel::Local { channel_id, .. }) => format!("Local:{}", channel_id),
+                Some(Channel::Remote { channel_id, .. }) => format!("Remote:{}", channel_id),
+            };
+            format!("edge|id={}|channel={}", id, channel_sig)
+        }));
+        lines.join("\n")
     }
 
     // TODO we should add topology verification for request mode (window+window_request and reques source+sink tasks on same nodes)
