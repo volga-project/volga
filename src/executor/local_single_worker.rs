@@ -5,26 +5,21 @@ use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::{compile_logical_graph, PipelineSpec};
+use crate::api::{LogicalGraph, PipelineSpec};
 use crate::common::types::PipelineId;
 use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
 
-// Simulates a single worker executing a pipeline, used locally
-
+// Locally simulates a single worker executing a pipeline, used locally
 pub async fn execute_with_state_updates(
     spec: PipelineSpec,
+    logical_graph: LogicalGraph,
     state_updates_sender: Option<mpsc::Sender<PipelineSnapshot>>,
 ) -> Result<PipelineSnapshot> {
-    let logical_graph = compile_logical_graph(&spec);
     let mut execution_graph = logical_graph.to_execution_graph();
     let pipeline_id = PipelineId(Uuid::new_v4());
-    execution_graph.update_channels_with_node_mapping_and_transport(
-        None,
-        &spec.worker_runtime.transport,
-        &spec.transport_overrides_queue_records(),
-    );
+    execution_graph.configure_channels(None, Some(&spec));
     let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
     let worker_id = "single_worker".to_string();
 
@@ -47,7 +42,7 @@ pub async fn execute_with_state_updates(
     worker_config.inmem_store_bucket_granularity = spec.worker_runtime.storage.inmem_store_bucket_granularity;
     worker_config.inmem_store_max_batch_size = spec.worker_runtime.storage.inmem_store_max_batch_size;
     worker_config.operator_type_storage_overrides = spec.operator_type_storage_overrides();
-    let mut worker = Worker::new(worker_config);
+    let mut worker = Worker::from_config(worker_config);
 
     if let Some(pipeline_state_sender) = state_updates_sender {
         let (worker_state_sender, mut worker_state_receiver) = mpsc::channel::<WorkerSnapshot>(100);
@@ -77,6 +72,6 @@ pub async fn execute_with_state_updates(
     Ok(PipelineSnapshot::new(worker_states))
 }
 
-pub async fn execute(spec: PipelineSpec) -> Result<PipelineSnapshot> {
-    execute_with_state_updates(spec, None).await
+pub async fn execute(spec: PipelineSpec, logical_graph: LogicalGraph) -> Result<PipelineSnapshot> {
+    execute_with_state_updates(spec, logical_graph, None).await
 }

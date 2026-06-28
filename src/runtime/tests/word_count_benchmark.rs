@@ -1,5 +1,5 @@
 use crate::{
-    api::{PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::single_worker, runtime::{
+    api::{ConnectorConfigs, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{
         functions::source::word_count_source::BatchingMode, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, observability::{PipelineSnapshot, WorkerSnapshot}, operators::{
             operator::OperatorConfig,
             sink::sink_operator::SinkConfig,
@@ -157,8 +157,13 @@ pub async fn run_word_count_benchmark(
     // Create spec using SQL instead of manual operator configuration
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
-        .with_source(
-            "word_count_source".to_string(), 
+        .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .build();
+    let mut connector_configs = ConnectorConfigs::default();
+    connector_configs.sources.insert(
+        "word_count_source".to_string(),
+        (
             SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
                 word_length,
                 dictionary_size_per_source,
@@ -166,18 +171,16 @@ pub async fn run_word_count_benchmark(
                 Some(run_for_s),
                 batch_size,
                 batching_mode,
-            )), 
+            )),
             Arc::new(Schema::new(vec![
                 Field::new("word", arrow::datatypes::DataType::Utf8, false),
                 Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
-            ]))
-        )
-        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
-        .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
-        .build();
+            ])),
+        ),
+    );
+    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)));
 
-    let logical_graph = compile_logical_graph(&spec);
+    let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     let source_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SourceConfig(_))).first().unwrap().operator_id.clone();
     let sink_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SinkConfig(_))).first().unwrap().operator_id.clone();
@@ -227,7 +230,7 @@ pub async fn run_word_count_benchmark(
         }
     });
     
-    single_worker::execute_with_state_updates(spec, Some(state_updates_sender)).await.unwrap();
+    local_single_worker::execute_with_state_updates(spec, logical_graph, Some(state_updates_sender)).await.unwrap();
     running.store(false, Ordering::Relaxed);
 
     // Wait for metrics task to complete

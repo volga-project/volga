@@ -67,7 +67,7 @@ impl GrpcTransportBackend {
 
         let mut p: Option<i32> = None;
         for channel in in_channels {
-            if let Channel::Remote { target_port: port, .. } = channel {
+            if let Channel::Remote { target_transport_port: port, .. } = channel {
                 if p.is_none() {
                     p = Some(*port);
                 } else {
@@ -94,7 +94,7 @@ impl GrpcTransportBackend {
         let mut channel_to_node = HashMap::new();
         
         for channel in out_channels {
-            if let Channel::Remote { target_node_ip, target_node_id, target_port, .. } = channel {
+            if let Channel::Remote { target_node_ip, target_node_id, target_transport_port: target_port, .. } = channel {
                 let channel_id = channel.get_channel_id().clone();
                 channel_to_node.insert(channel_id, target_node_id.clone());
                 

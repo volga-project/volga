@@ -1,5 +1,5 @@
 use crate::{
-    api::{PipelineSpecBuilder, Planner, PlanningContext, logical_graph::LogicalGraph, spec::pipeline::ExecutionProfile}, common::test_utils::{IdentityMapFunction, gen_unique_grpc_port}, executor::single_worker, runtime::{
+    api::{PipelineSpecBuilder, Planner, PlanningContext, logical_graph::LogicalGraph, spec::pipeline::ExecutionProfile}, common::test_utils::{IdentityMapFunction, gen_unique_grpc_port}, executor::local_single_worker, runtime::{
         functions::{
             key_by::{KeyByFunction, key_by_function::extract_datafusion_window_exec},
             map::MapFunction,
@@ -303,18 +303,17 @@ async fn test_request_source_sink_e2e() {
     // Create logical graph, no chaining
     let logical_graph = LogicalGraph::from_linear_operators(operators, parallelism, false);
 
-    // Build PipelineSpec with the pre-constructed logical graph (keep upstream test structure).
+    // Build PipelineSpec with runtime knobs; logical graph is passed separately to executor.
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
-        .with_logical_graph(logical_graph)
         .build();
 
 
     // Start pipeline execution in background
     // TODO implement stop
     let _pipeline_handle = tokio::spawn(async move {
-        single_worker::execute(spec).await.unwrap();
+        local_single_worker::execute(spec, logical_graph).await.unwrap();
     });
 
     // Wait for server to start

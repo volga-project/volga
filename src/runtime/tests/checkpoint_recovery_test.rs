@@ -1,25 +1,25 @@
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
 use datafusion::common::ScalarValue;
 use uuid::Uuid;
 use crate::api::spec::pipeline::ExecutionProfile;
+use crate::orchestrator::orchestrator::{Orchestrator, LocalOrchestrator};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
-use crate::runtime::master_checkpoint::TaskKey;
+use crate::runtime::master::{Master, MasterConfig};
 use crate::runtime::master_server::MasterServer;
 use crate::runtime::operators::operator::OperatorConfig;
-use crate::runtime::operators::sink::sink_operator::SinkConfig;
-use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
+use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc};
 use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
-use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
+use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
-use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 // Watermark assigner placement is done by the planner (see LogicalGraph::to_execution_graph).
 
 use crate::runtime::tests::test_utils::{create_window_input_schema, wait_for_status, window_rows_from_messages};
@@ -36,7 +36,8 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
 
     // Start master server
     let master_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-    let mut master_server = MasterServer::new();
+    let orchestrator: Arc<dyn Orchestrator> = Arc::new(LocalOrchestrator::new(1, Uuid::new_v4().to_string()));
+    let mut master_server = MasterServer::new(orchestrator);
 
     // Build spec: datagen -> window -> sink
     let schema = create_window_input_schema();
@@ -58,36 +59,32 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     fields.insert("value".to_string(), FieldGenerator::Values { values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))] });
 
     let total_records: usize = 2_000;
-    let datagen_cfg = DatagenSourceConfig::new(
-        schema.clone(),
-        DatagenSpec {
+    let schema_ipc = schema_to_ipc(&schema);
+    let datagen_spec = DatagenSpec {
             rate: Some(1_000.0),
             limit: Some(total_records),
             run_for_s: None,
             batch_size: 256,
             fields,
             replayable: true,
-        },
-    );
+        };
 
     let out_of_orderness_ms: u64 = 100;
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Streaming)
-        .with_source(
-            "datagen_source".to_string(),
-            SourceConfig::DatagenSourceConfig(datagen_cfg),
-            schema.clone(),
-        )
-        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
-            "http://{}",
-            storage_server_addr
-        )))
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_source(SourceSpec {
+            table_name: "datagen_source".to_string(),
+            schema_ipc,
+            source: SourceSpecKind::Datagen(datagen_spec),
+        })
+        .with_sink(SinkSpec::InMemoryStorageGrpc {
+            server_addr: format!("http://{}", storage_server_addr),
+        })
         .sql(sql)
         .build();
-
-    let mut logical_graph = compile_logical_graph(&spec);
+    let mut logical_graph = compile_logical_graph(&spec, None);
     // Allow concurrency-induced reordering across tasks without dropping records as "late".
     // We size this based on records per task (1ms step) + small headroom.
     logical_graph.set_window_watermark_assign(WatermarkAssignConfig::new(
@@ -106,17 +103,12 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             }
         }
     }
-    exec_graph1.update_channels_with_node_mapping(None);
+    exec_graph1.configure_channels(None, None);
 
     let vertex_ids_1 = exec_graph1.get_vertices().keys().cloned().collect();
-    let expected_tasks = exec_graph1
-        .get_vertices()
-        .values()
-        .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
-        .map(|v| TaskKey { vertex_id: v.vertex_id.as_ref().to_string(), task_index: v.task_index })
-        .collect::<Vec<_>>();
+    let expected_tasks = Master::checkpointable_tasks_for_graph(&exec_graph1);
     master_server
-        .set_checkpointable_tasks(expected_tasks.clone())
+        .configure(MasterConfig::with_graph(exec_graph1.clone(), 1))
         .await;
     master_server.start(&master_addr).await?;
 
@@ -129,7 +121,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         .collect();
 
     // Start worker #1
-    let mut worker = Worker::new(
+    let mut worker = Worker::from_config(
         WorkerConfig::new(
             "worker1".to_string(),
             PipelineId(Uuid::new_v4()),
@@ -225,10 +217,10 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             }
         }
     }
-    exec_graph2.update_channels_with_node_mapping(None);
+    exec_graph2.configure_channels(None, None);
     let vertex_ids_2 = exec_graph2.get_vertices().keys().cloned().collect();
 
-    let mut worker2 = Worker::new(
+    let mut worker2 = Worker::from_config(
         WorkerConfig::new(
             "worker2".to_string(),
             PipelineId(Uuid::new_v4()),

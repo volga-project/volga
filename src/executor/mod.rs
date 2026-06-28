@@ -1,2 +1,2 @@
-pub mod single_worker;
-pub mod master_worker;
+pub mod local_single_worker;
+pub mod local_master_worker;

@@ -39,7 +39,7 @@ fn test_stream_task_actor() -> Result<()> {
 
         let logical_graph = LogicalGraph::from_linear_operators(operators, 1, false);
         let mut graph = logical_graph.to_execution_graph();
-        graph.update_channels_with_node_mapping(None);
+        graph.configure_channels(None, None);
 
         let mut vertex_ids = graph.get_vertices().keys().cloned().collect::<Vec<crate::runtime::VertexId>>();
         vertex_ids.sort();

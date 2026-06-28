@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
 use crate::api::{LogicalGraph, Planner, PlanningContext};
-use crate::api::spec::connectors::{SourceSpec, schema_from_ipc};
-use crate::api::spec::pipeline::PipelineSpec;
-use crate::api::spec::operators::OperatorTuningSpec;
+use crate::api::spec::connectors::{SourceSpecKind, schema_from_ipc};
+use crate::api::spec::operators::{OperatorOverrides, OperatorTuningSpec};
+use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpec};
 use crate::runtime::functions::source::datagen_source::DatagenSourceConfig;
 use crate::runtime::functions::source::kafka::KafkaSourceConfig;
 use crate::runtime::functions::source::parquet::ParquetSourceConfig;
@@ -11,60 +11,64 @@ use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 
-pub fn compile_logical_graph(spec: &PipelineSpec) -> LogicalGraph {
-    if let Some(graph) = &spec.logical_graph {
-        return graph.clone();
+fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
+    if spec.sources.is_empty() {
+        panic!("PipelineSpec must contain source connector specs when compile_logical_graph is called without overrides");
     }
+    let mut connector_configs = ConnectorConfigs::default();
+    for src in &spec.sources {
+        let schema = Arc::new(schema_from_ipc(&src.schema_ipc));
+        let source_config = match &src.source {
+            SourceSpecKind::Datagen(cfg) => {
+                SourceConfig::DatagenSourceConfig(DatagenSourceConfig::new(schema.clone(), cfg.clone()))
+            }
+            SourceSpecKind::Kafka(cfg) => {
+                SourceConfig::KafkaSourceConfig(KafkaSourceConfig::new(schema.clone(), cfg.clone()))
+            }
+            SourceSpecKind::Parquet(cfg) => {
+                SourceConfig::ParquetSourceConfig(ParquetSourceConfig::new(schema.clone(), cfg.clone()))
+            }
+        };
+        connector_configs
+            .sources
+            .insert(src.table_name.clone(), (source_config, schema));
+    }
+    if let Some(req) = &spec.request_source_sink {
+        let schema = Arc::new(schema_from_ipc(&req.schema_ipc));
+        let request_source = RequestSourceConfig::new(req.clone()).set_schema(schema);
+        connector_configs.request_source = Some(SourceConfig::HttpRequestSourceConfig(request_source));
+        connector_configs.request_sink = req.sink.as_ref().map(|s| s.to_sink_config());
+    }
+    if let Some(sink) = &spec.sink {
+        connector_configs.sink = Some(sink.to_sink_config());
+    }
+    connector_configs
+}
 
-    let sql = spec
-        .sql
-        .as_ref()
-        .expect("PipelineSpec has no sql or logical_graph");
-
+fn compile_logical_graph_from_parts(
+    sql: &str,
+    parallelism: usize,
+    execution_mode: ExecutionMode,
+    operator_overrides: &OperatorOverrides,
+    connector_configs: &ConnectorConfigs,
+) -> LogicalGraph {
     let df_ctx = datafusion::prelude::SessionContext::new();
     let mut planner = Planner::new(
         PlanningContext::new(df_ctx)
-            .with_parallelism(spec.parallelism)
-            .with_execution_mode(spec.execution_mode),
+            .with_parallelism(parallelism)
+            .with_execution_mode(execution_mode),
     );
 
-    if !spec.inline_sources.is_empty() {
-        for (table_name, (source_config, schema)) in &spec.inline_sources {
-            planner.register_source(table_name.clone(), source_config.clone(), schema.clone());
-        }
-    } else {
-        for src in &spec.sources {
-            let schema = Arc::new(schema_from_ipc(&src.schema_ipc));
-            let source_config = match &src.source {
-                SourceSpec::Datagen(cfg) => {
-                    SourceConfig::DatagenSourceConfig(DatagenSourceConfig::new(schema.clone(), cfg.clone()))
-                }
-                SourceSpec::Kafka(cfg) => {
-                    SourceConfig::KafkaSourceConfig(KafkaSourceConfig::new(schema.clone(), cfg.clone()))
-                }
-                SourceSpec::Parquet(cfg) => {
-                    SourceConfig::ParquetSourceConfig(ParquetSourceConfig::new(schema.clone(), cfg.clone()))
-                }
-            };
-
-            planner.register_source(src.table_name.clone(), source_config, schema);
-        }
+    for (table_name, (source_config, schema)) in &connector_configs.sources {
+        planner.register_source(table_name.clone(), source_config.clone(), schema.clone());
     }
 
-    if let Some(req_src) = &spec.inline_request_source {
-        planner.register_request_source_sink(req_src.clone(), spec.inline_request_sink.clone());
-    } else if let Some(req) = &spec.request_source_sink {
-        let schema = Arc::new(schema_from_ipc(&req.schema_ipc));
-        let request_source = RequestSourceConfig::new(req.clone()).set_schema(schema);
-
-        let sink_cfg = req.sink.as_ref().map(|s| s.to_sink_config());
-        planner.register_request_source_sink(SourceConfig::HttpRequestSourceConfig(request_source), sink_cfg);
+    if let Some(req_src) = &connector_configs.request_source {
+        planner.register_request_source_sink(req_src.clone(), connector_configs.request_sink.clone());
     }
 
-    if let Some(sink) = &spec.inline_sink {
+    if let Some(sink) = &connector_configs.sink {
         planner.register_sink(sink.clone());
-    } else if let Some(sink) = &spec.sink {
-        planner.register_sink(sink.to_sink_config());
     }
 
     let mut graph = planner
@@ -75,11 +79,11 @@ pub fn compile_logical_graph(spec: &PipelineSpec) -> LogicalGraph {
     let node_indices = graph.get_all_node_indices();
     for idx in node_indices {
         let operator_id = graph.get_node_by_index(idx).operator_id.clone();
-        let override_spec = spec.operator_overrides.per_operator.get(&operator_id);
+        let override_spec = operator_overrides.per_operator.get(&operator_id);
 
         if let Some(node) = graph.get_node_by_index_mut(idx) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = node.operator_config {
-                if let Some(OperatorTuningSpec::Window(win)) = &spec.operator_overrides.defaults.tuning {
+                if let Some(OperatorTuningSpec::Window(win)) = &operator_overrides.defaults.tuning {
                     cfg.set_spec(win.clone());
                 }
                 if let Some(o) = override_spec {
@@ -94,6 +98,27 @@ pub fn compile_logical_graph(spec: &PipelineSpec) -> LogicalGraph {
     graph
 }
 
+pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&ConnectorConfigs>) -> LogicalGraph {
+    let sql = spec
+        .sql
+        .as_ref()
+        .expect("PipelineSpec has no sql");
+    let connector_configs_owned;
+    let connector_configs = if let Some(overrides) = connector_overrides {
+        overrides
+    } else {
+        connector_configs_owned = connector_configs_from_spec(spec);
+        &connector_configs_owned
+    };
+    compile_logical_graph_from_parts(
+        sql,
+        spec.parallelism,
+        spec.execution_mode,
+        &spec.operator_overrides,
+        connector_configs,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -101,19 +126,19 @@ mod tests {
 
     use arrow::datatypes::{DataType, Field, Schema};
 
-    use crate::cluster::cluster_provider::ClusterNode;
-    use crate::cluster::node_assignment::ExecutionVertexNodeMapping;
+    use crate::orchestrator::orchestrator::WorkerNode;
+    use crate::orchestrator::task_assignment::TaskWorkerMapping;
     use super::compile_logical_graph;
-    use crate::api::spec::pipeline::{PipelineSpecBuilder, ExecutionProfile};
+    use crate::api::spec::pipeline::{ConnectorConfigs, PipelineSpecBuilder, ExecutionProfile};
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::transport::channel::Channel;
 
     fn build_mock_vertex_mapping(
         graph: &crate::runtime::execution_graph::ExecutionGraph,
-    ) -> ExecutionVertexNodeMapping {
-        let node_a = ClusterNode::new("node-a".to_string(), "127.0.0.1".to_string(), 10001);
-        let node_b = ClusterNode::new("node-b".to_string(), "127.0.0.1".to_string(), 10002);
-        let mut mapping: ExecutionVertexNodeMapping = HashMap::new();
+    ) -> TaskWorkerMapping {
+        let node_a = WorkerNode::new("node-a".to_string(), "127.0.0.1".to_string(), 10001, 11001);
+        let node_b = WorkerNode::new("node-b".to_string(), "127.0.0.1".to_string(), 10002, 11002);
+        let mut mapping: TaskWorkerMapping = HashMap::new();
 
         for vertex in graph.get_vertices().values() {
             let node = if vertex.task_index % 2 == 0 {
@@ -140,21 +165,20 @@ mod tests {
             Field::new("name", DataType::Utf8, false),
         ]));
 
+        let mut connector_configs = ConnectorConfigs::default();
+        connector_configs.sources.insert(
+            "events".to_string(),
+            (SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), events_schema),
+        );
+        connector_configs.sources.insert(
+            "users".to_string(),
+            (SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), users_schema),
+        );
         let spec = PipelineSpecBuilder::new()
             .with_execution_profile(ExecutionProfile::SingleWorker {
                 num_threads_per_task: 4,
             })
             .with_parallelism(2)
-            .with_source(
-                "events".to_string(),
-                SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
-                events_schema,
-            )
-            .with_source(
-                "users".to_string(),
-                SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
-                users_schema,
-            )
             .sql(
                 "SELECT \
                     e.id, \
@@ -169,14 +193,14 @@ mod tests {
             )
             .build();
 
-        let mut graph1 = compile_logical_graph(&spec).to_execution_graph();
-        let mut graph2 = compile_logical_graph(&spec).to_execution_graph();
+        let mut graph1 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
+        let mut graph2 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
 
         let mapping1 = build_mock_vertex_mapping(&graph1);
         let mapping2 = build_mock_vertex_mapping(&graph2);
 
-        graph1.update_channels_with_node_mapping(Some(&mapping1));
-        graph2.update_channels_with_node_mapping(Some(&mapping2));
+        graph1.configure_channels(Some(&mapping1), None);
+        graph2.configure_channels(Some(&mapping2), None);
 
         let has_local = graph1
             .get_edges()

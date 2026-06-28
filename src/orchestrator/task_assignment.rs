@@ -1,34 +1,54 @@
 use std::collections::HashMap;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::cluster::cluster_provider::ClusterNode;
+use crate::orchestrator::orchestrator::WorkerNode;
+use serde::{Deserialize, Serialize};
 
-/// Mapping from execution vertex ID to cluster node
-pub type ExecutionVertexNodeMapping = HashMap<String, ClusterNode>;
+/// Mapping from execution vertex ID (task ID) to worker node
+pub type TaskWorkerMapping = HashMap<String, WorkerNode>;
 
-pub fn node_to_vertex_ids(mapping: &ExecutionVertexNodeMapping) -> HashMap<String, Vec<String>> {
-    let mut node_to_vertex_ids = HashMap::new();
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TaskWorkerAssignmentStrategyType {
+    SingleWorker,
+    OperatorPerWorker,
+}
+
+// inverse mapping
+pub fn worker_to_tasks(mapping: &TaskWorkerMapping) -> HashMap<String, Vec<String>> {
+    let mut worker_to_tasks = HashMap::new();
     for (vertex_id, node) in mapping {
-        node_to_vertex_ids.entry(node.node_id.clone()).or_insert_with(Vec::new).push(vertex_id.clone());
+        worker_to_tasks.entry(node.worker_id.clone()).or_insert_with(Vec::new).push(vertex_id.clone());
     }
-    node_to_vertex_ids
+    worker_to_tasks
 }
 
 /// Strategy for assigning execution vertices to cluster nodes
-pub trait NodeAssignStrategy: Send + Sync {
+pub trait TaskWorkerAssignStrategy: Send + Sync {
     /// Assign execution vertices to cluster nodes
-    fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping;
+    fn assign_tasks(&self, execution_graph: &ExecutionGraph, nodes: &[WorkerNode]) -> TaskWorkerMapping;
 }
 
-/// Strategy that assigns all vertices to the first (single) node.
-pub struct SingleNodeStrategy;
+pub fn assign_tasks_with_strategy(
+    strategy: &TaskWorkerAssignmentStrategyType,
+    execution_graph: &ExecutionGraph,
+    nodes: &[WorkerNode],
+) -> TaskWorkerMapping {
+    match strategy {
+        // TODO add pipeline first strategy
+        TaskWorkerAssignmentStrategyType::SingleWorker => SingleWorkerStrategy.assign_tasks(execution_graph, nodes),
+        TaskWorkerAssignmentStrategyType::OperatorPerWorker => OperatorPerWorkerStrategy.assign_tasks(execution_graph, nodes),
+    }
+}
 
-impl NodeAssignStrategy for SingleNodeStrategy {
-    fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping {
-        let mut mapping = ExecutionVertexNodeMapping::new();
-        if cluster_nodes.is_empty() {
+/// Strategy that assigns all vertices to the first (single) worker node.
+pub struct SingleWorkerStrategy;
+
+impl TaskWorkerAssignStrategy for SingleWorkerStrategy {
+    fn assign_tasks(&self, execution_graph: &ExecutionGraph, nodes: &[WorkerNode]) -> TaskWorkerMapping {
+        let mut mapping = TaskWorkerMapping::new();
+        if nodes.is_empty() {
             return mapping;
         }
-        let node = cluster_nodes[0].clone();
+        let node = nodes[0].clone();
         for vertex_id in execution_graph.get_vertices().keys() {
             mapping.insert(vertex_id.as_ref().to_string(), node.clone());
         }
@@ -36,32 +56,15 @@ impl NodeAssignStrategy for SingleNodeStrategy {
     }
 }
 
-/// Strategy that uses two nodes: node[0] reserved for master, node[1] for the single worker.
-/// All vertices are assigned to node[1].
-pub struct SingleWorkerStrategy;
-
-impl NodeAssignStrategy for SingleWorkerStrategy {
-    fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping {
-        let mut mapping = ExecutionVertexNodeMapping::new();
-        if cluster_nodes.len() < 2 {
-            panic!("SingleWorkerStrategy requires at least 2 cluster nodes (master + worker)");
-        }
-        let worker_node = cluster_nodes[1].clone();
-        for vertex_id in execution_graph.get_vertices().keys() {
-            mapping.insert(vertex_id.as_ref().to_string(), worker_node.clone());
-        }
-        mapping
-    }
-}
 
 /// Strategy that places all vertices with the same operator_id on a single node
-pub struct OperatorPerNodeStrategy;
+pub struct OperatorPerWorkerStrategy;
 
-impl NodeAssignStrategy for OperatorPerNodeStrategy {
-    fn assign_nodes(&self, execution_graph: &ExecutionGraph, cluster_nodes: &[ClusterNode]) -> ExecutionVertexNodeMapping {
-        let mut mapping = ExecutionVertexNodeMapping::new();
+impl TaskWorkerAssignStrategy for OperatorPerWorkerStrategy {
+    fn assign_tasks(&self, execution_graph: &ExecutionGraph, nodes: &[WorkerNode]) -> TaskWorkerMapping {
+        let mut mapping = TaskWorkerMapping::new();
         
-        if cluster_nodes.is_empty() {
+        if nodes.is_empty() {
             return mapping;
         }
 
@@ -78,18 +81,18 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
         }
 
         // Check if we have enough nodes for all operators
-        if operator_to_vertices.len() > cluster_nodes.len() {
-            panic!("Not enough cluster nodes ({}) to assign all operators ({})", cluster_nodes.len(), operator_to_vertices.len());
+        if operator_to_vertices.len() > nodes.len() {
+            panic!("Not enough worker nodes ({}) to assign all operators ({})", nodes.len(), operator_to_vertices.len());
         }
 
-        // Assign each operator group to a cluster node
+        // Assign each operator group to a worker node
         let mut node_index = 0;
         for (_operator_id, vertex_ids) in operator_to_vertices {
-            let cluster_node = &cluster_nodes[node_index % cluster_nodes.len()];
+            let worker_node = &nodes[node_index % nodes.len()];
             
             // Assign all vertices of this operator to the same node
             for vertex_id in vertex_ids {
-                mapping.insert(vertex_id, cluster_node.clone());
+                mapping.insert(vertex_id, worker_node.clone());
             }
             
             node_index += 1;
@@ -102,7 +105,7 @@ impl NodeAssignStrategy for OperatorPerNodeStrategy {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::cluster_provider::create_test_cluster_nodes;
+    use crate::orchestrator::orchestrator::mock_worker_nodes;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::runtime::execution_graph::ExecutionGraph;
 
@@ -134,7 +137,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_operator_per_node_strategy() {
+    async fn test_operator_per_worker_strategy() {
         let execution_graph = create_test_execution_graph();
 
         // Group vertices by operator_id
@@ -148,19 +151,19 @@ mod tests {
 
         let num_operators = operator_to_vertices.len();
 
-        let cluster_nodes = create_test_cluster_nodes(num_operators);
+        let nodes = mock_worker_nodes(num_operators);
 
-        let strategy = OperatorPerNodeStrategy;
-        let mapping = strategy.assign_nodes(&execution_graph, &cluster_nodes);
+        let strategy = OperatorPerWorkerStrategy;
+        let mapping = strategy.assign_tasks(&execution_graph, &nodes);
 
         // Verify that all vertices are mapped
         assert_eq!(mapping.len(), execution_graph.get_vertices().len());
 
         // Group vertices by assigned node
         let mut node_to_vertices: HashMap<String, Vec<String>> = HashMap::new();
-        for (vertex_id, cluster_node) in &mapping {
+        for (vertex_id, node) in &mapping {
             node_to_vertices
-                .entry(cluster_node.node_id.clone())
+                .entry(node.worker_id.clone())
                 .or_insert_with(Vec::new)
                 .push(vertex_id.clone());
         }
@@ -177,17 +180,17 @@ mod tests {
         }
 
         // Verify that each operator_id maps to exactly one node
-        let mut operator_to_node: HashMap<String, String> = HashMap::new();
-        for (vertex_id, cluster_node) in &mapping {
+        let mut operator_to_worker: HashMap<String, String> = HashMap::new();
+        for (vertex_id, node) in &mapping {
             let vertex = execution_graph.get_vertices().get(vertex_id.as_str()).unwrap();
             let operator_id = &vertex.operator_id;
             
-            if let Some(existing_node) = operator_to_node.get(operator_id) {
-                assert_eq!(existing_node, &cluster_node.node_id, 
+            if let Some(existing_node) = operator_to_worker.get(operator_id) {
+                assert_eq!(existing_node, &node.worker_id, 
                     "Operator {} is assigned to multiple nodes: {} and {}", 
-                    operator_id, existing_node, cluster_node.node_id);
+                    operator_id, existing_node, node.worker_id);
             } else {
-                operator_to_node.insert(operator_id.clone(), cluster_node.node_id.clone());
+                operator_to_worker.insert(operator_id.clone(), node.worker_id.clone());
             }
         }
 
@@ -196,7 +199,7 @@ mod tests {
             .values()
             .map(|v| v.operator_id.clone())
             .collect();
-        let mapped_operator_ids: std::collections::HashSet<_> = operator_to_node.keys().cloned().collect();
+        let mapped_operator_ids: std::collections::HashSet<_> = operator_to_worker.keys().cloned().collect();
         assert_eq!(expected_operator_ids, mapped_operator_ids);
     }
 } 

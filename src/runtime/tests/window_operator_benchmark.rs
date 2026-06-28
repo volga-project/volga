@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::single_worker, runtime::{
+    api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{
         functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot, operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
@@ -237,14 +237,18 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     println!("Query: {}", sql);
 
+    let mut connector_configs = ConnectorConfigs::default();
+    connector_configs.sources.insert(
+        "datagen_source".to_string(),
+        (
+            SourceConfig::DatagenSourceConfig(datagen_config),
+            schema,
+        ),
+    );
+
     // Create pipeline spec builder
     let mut spec_builder = PipelineSpecBuilder::new()
         .with_parallelism(config.parallelism)
-        .with_source(
-            "datagen_source".to_string(),
-            SourceConfig::DatagenSourceConfig(datagen_config),
-            schema,
-        )
         .sql(&sql)
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 });
 
@@ -254,19 +258,17 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
         // request mode has no direct sink
         spec_builder = spec_builder.with_execution_mode(ExecutionMode::Request);
     } else {
-        spec_builder = spec_builder
-            .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
-                "http://{}",
-                storage_server_addr
-            )))
-            .with_execution_mode(ExecutionMode::Streaming);
+        connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+            "http://{}",
+            storage_server_addr
+        )));
+        spec_builder = spec_builder.with_execution_mode(ExecutionMode::Streaming);
 
     }
 
-    let mut spec = spec_builder.build();
-    let mut logical_graph = compile_logical_graph(&spec);
+    let spec = spec_builder.build();
+    let mut logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
     update_window_configs_in_graph(&mut logical_graph, &config)?;
-    spec.logical_graph = Some(logical_graph);
 
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();
@@ -369,7 +371,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     
     // Spawn execution task
     let execution_task = tokio::spawn(async move {
-        single_worker::execute_with_state_updates(spec, Some(state_updates_sender)).await
+        local_single_worker::execute_with_state_updates(spec, logical_graph, Some(state_updates_sender)).await
     });
     
     // Race between execution completion and timeout

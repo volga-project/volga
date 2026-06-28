@@ -4,6 +4,7 @@ package worker_service;
 
 // WorkerService provides RPC methods for managing worker lifecycle and state
 service WorkerService {
+  rpc ConfigureWorker(ConfigureWorkerRequest) returns (ConfigureWorkerResponse);
   // Get the current state of the worker including task statuses and metrics
   rpc GetWorkerState(GetWorkerStateRequest) returns (GetWorkerStateResponse);
   
@@ -21,6 +22,16 @@ service WorkerService {
 
   // Trigger a checkpoint. Only source tasks should inject barriers.
   rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
+}
+
+message ConfigureWorkerRequest {
+  bytes init_payload_bytes = 1;
+}
+
+message ConfigureWorkerResponse {
+  bool success = 1;
+  string error_message = 2;
+  string execution_graph_signature = 3;
 }
 
 // Request message for GetWorkerState

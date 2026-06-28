@@ -603,8 +603,8 @@ impl fmt::Display for LogicalGraph {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cluster::cluster_provider::create_test_cluster_nodes;
-    use crate::cluster::node_assignment::{NodeAssignStrategy, OperatorPerNodeStrategy};
+    use crate::orchestrator::orchestrator::mock_worker_nodes;
+    use crate::orchestrator::task_assignment::{TaskWorkerAssignStrategy, OperatorPerWorkerStrategy};
     use crate::common::test_utils::IdentityMapFunction;
     use crate::runtime::functions::key_by::KeyByFunction;
     use crate::runtime::operators::sink::sink_operator::SinkConfig;
@@ -738,13 +738,13 @@ mod tests {
         let mut execution_graph = logical_graph.to_execution_graph();
         
         // Create cluster nodes
-        let cluster_nodes = create_test_cluster_nodes(num_operators);
+        let cluster_nodes = mock_worker_nodes(num_operators);
 
         // Use OperatorPerNodeStrategy to assign vertices to nodes
-        let vertex_to_node = OperatorPerNodeStrategy.assign_nodes(&execution_graph, &cluster_nodes);
+        let vertex_to_node = OperatorPerWorkerStrategy.assign_tasks(&execution_graph, &cluster_nodes);
 
         // Update channels based on cluster mapping
-        execution_graph.update_channels_with_node_mapping(Some(&vertex_to_node));
+        execution_graph.configure_channels(Some(&vertex_to_node), None);
 
         // Verify execution vertices
         let vertices = execution_graph.get_vertices();
@@ -761,13 +761,13 @@ mod tests {
             let target_node = vertex_to_node.get(edge.target_vertex_id.as_ref()).expect("Target vertex should be mapped");
             
             // Check if vertices are on different nodes
-            if source_node.node_id != target_node.node_id {
+            if source_node.worker_id != target_node.worker_id {
                 // Vertices are on different nodes, should use remote channel
                 match &edge.channel {
-                    Some(Channel::Remote { source_node_ip, target_node_ip, target_port, .. }) => {
-                        assert_eq!(source_node_ip, &source_node.node_ip);
-                        assert_eq!(target_node_ip, &target_node.node_ip);
-                        assert_eq!(*target_port, target_node.node_port as i32);
+                    Some(Channel::Remote { source_node_ip, target_node_ip, target_transport_port, .. }) => {
+                        assert_eq!(source_node_ip, &source_node.worker_ip);
+                        assert_eq!(target_node_ip, &target_node.worker_ip);
+                        assert_eq!(*target_transport_port, target_node.transport_port as i32);
                     }
                     Some(Channel::Local { .. }) => {
                         panic!("Expected remote channel for cross-node edge {} -> {}", 

@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionMode, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::single_worker, runtime::{functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot, operators::{
+    api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot, operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
         }}, storage::InMemoryStorageServer
@@ -162,19 +162,19 @@ pub async fn run_window_request_benchmark(
 
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
-        .with_source(
-            "events".to_string(),
-            SourceConfig::DatagenSourceConfig(query_datagen_config),
-            schema.clone()
-        )
-        .with_request_source_sink_inline(
-            SourceConfig::DatagenSourceConfig(request_datagen_config),
-            Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)))
-        )
         .sql(sql)
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .with_execution_mode(ExecutionMode::Request)
         .build();
+    let mut connector_configs = ConnectorConfigs::default();
+    connector_configs.sources.insert(
+        "events".to_string(),
+        (SourceConfig::DatagenSourceConfig(query_datagen_config), schema.clone()),
+    );
+    connector_configs.request_source = Some(SourceConfig::DatagenSourceConfig(request_datagen_config));
+    connector_configs.request_sink =
+        Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)));
+    let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     let (state_updates_sender, mut state_updates_receiver) = mpsc::channel(100);
     let running = Arc::new(AtomicBool::new(true));
@@ -231,7 +231,7 @@ pub async fn run_window_request_benchmark(
         }
     });
     
-    single_worker::execute_with_state_updates(spec, Some(state_updates_sender)).await?;
+    local_single_worker::execute_with_state_updates(spec, logical_graph, Some(state_updates_sender)).await?;
     
     running.store(false, Ordering::Relaxed);
 

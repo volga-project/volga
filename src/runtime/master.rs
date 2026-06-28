@@ -1,9 +1,17 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
+use crate::api::PipelineSpec;
+use crate::orchestrator::orchestrator::{Orchestrator, WorkerNode};
+use crate::orchestrator::task_assignment::{assign_tasks_with_strategy, worker_to_tasks};
+use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::master_checkpoint::{MasterCheckpointRegistry, TaskKey};
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
+use crate::runtime::worker_config_utils::WorkerInitPayload;
+use crate::runtime::worker_server::worker_service::worker_service_client::WorkerServiceClient as WorkerConfigServiceClient;
 
 // PipelineState moved to runtime/observability/snapshot_types.rs
 
@@ -143,28 +151,61 @@ impl WorkerClient {
 
 /// Master that orchestrates multiple worker servers
 pub struct Master {
+    orchestrator: Arc<dyn Orchestrator>,
+    config: Arc<Mutex<Option<MasterConfig>>>,
     worker_clients: Arc<Mutex<HashMap<String, WorkerClient>>>,
+    registered_workers: Arc<Mutex<HashSet<String>>>,
+    checkpoint_registry: Arc<Mutex<MasterCheckpointRegistry>>,
     worker_states: Arc<Mutex<HashMap<String, WorkerSnapshot>>>,
     worker_endpoints_by_id: Arc<Mutex<HashMap<String, String>>>,
-    state_polling_handle: Option<tokio::task::JoinHandle<()>>,
+    state_polling_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
     running: Arc<std::sync::atomic::AtomicBool>,
     lates_pipeline_snapshot: Arc<Mutex<Option<PipelineSnapshot>>>,
 }
 
-impl Master {
-    pub fn new() -> Self {
+#[derive(Clone)]
+pub struct MasterConfig {
+    pub spec: Option<PipelineSpec>,
+    pub execution_graph: ExecutionGraph,
+    pub expected_workers: usize,
+}
+
+impl MasterConfig {
+    pub fn with_spec(spec: PipelineSpec, execution_graph: ExecutionGraph, expected_workers: usize) -> Self {
         Self {
+            spec: Some(spec),
+            execution_graph,
+            expected_workers,
+        }
+    }
+
+    pub fn with_graph(execution_graph: ExecutionGraph, expected_workers: usize) -> Self {
+        Self {
+            spec: None,
+            execution_graph,
+            expected_workers,
+        }
+    }
+}
+
+impl Master {
+    pub fn new(orchestrator: Arc<dyn Orchestrator>) -> Self {
+        Self {
+            orchestrator,
+            config: Arc::new(Mutex::new(None)),
             worker_clients: Arc::new(Mutex::new(HashMap::new())),
+            registered_workers: Arc::new(Mutex::new(HashSet::new())),
+            checkpoint_registry: Arc::new(Mutex::new(MasterCheckpointRegistry::default())),
             worker_states: Arc::new(Mutex::new(HashMap::new())),
             worker_endpoints_by_id: Arc::new(Mutex::new(HashMap::new())),
-            state_polling_handle: None,
+            state_polling_handle: Arc::new(Mutex::new(None)),
             running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             lates_pipeline_snapshot: Arc::new(Mutex::new(None)),
         }
     }
 
     /// Connect to all workers
-    pub async fn connect_to_workers(&mut self, worker_ips: Vec<String>) -> anyhow::Result<()> {
+    pub async fn connect_to_workers(&self, worker_ips: Vec<String>) -> anyhow::Result<()> {
         println!("[MASTER] Connecting to {} workers", worker_ips.len());
         
         let mut clients_guard = self.worker_clients.lock().await;
@@ -186,8 +227,217 @@ impl Master {
         Ok(())
     }
 
+    pub async fn register_worker(&self, worker_id: String) {
+        let mut workers = self.registered_workers.lock().await;
+        workers.insert(worker_id);
+    }
+
+    pub fn checkpointable_tasks_for_graph(execution_graph: &ExecutionGraph) -> Vec<TaskKey> {
+        execution_graph
+            .get_vertices()
+            .values()
+            .filter(|v| operator_config_requires_checkpoint(&v.operator_config))
+            .map(|v| TaskKey {
+                vertex_id: v.vertex_id.as_ref().to_string(),
+                task_index: v.task_index,
+            })
+            .collect::<Vec<_>>()
+    }
+
+    pub async fn configure(&self, config: MasterConfig) {
+        let mut registry = self.checkpoint_registry.lock().await;
+        registry.expected_tasks = Self::checkpointable_tasks_for_graph(&config.execution_graph)
+            .into_iter()
+            .collect();
+        drop(registry);
+
+        let mut guard = self.config.lock().await;
+        *guard = Some(config);
+    }
+
+    pub async fn report_checkpoint(
+        &self,
+        checkpoint_id: u64,
+        task: TaskKey,
+        blobs: Vec<(String, Vec<u8>)>,
+    ) {
+        let mut registry = self.checkpoint_registry.lock().await;
+        registry.store.put(checkpoint_id, task.clone(), blobs);
+        let expected_count = registry.expected_tasks.len();
+        registry.coordinator.ack(checkpoint_id, task, expected_count);
+    }
+
+    pub async fn get_task_checkpoint(
+        &self,
+        checkpoint_id: u64,
+        task: TaskKey,
+    ) -> Vec<(String, Vec<u8>)> {
+        let registry = self.checkpoint_registry.lock().await;
+        registry
+            .store
+            .checkpoint_snapshots
+            .get(&(checkpoint_id, task))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub async fn get_latest_complete_checkpoint(&self) -> Option<u64> {
+        let registry = self.checkpoint_registry.lock().await;
+        registry.coordinator.latest_complete()
+    }
+
+    async fn wait_for_workers_registration(
+        &self,
+        expected_workers: usize,
+    ) -> anyhow::Result<Vec<String>> {
+        println!(
+            "[MASTER] Waiting for worker registration: expected={}",
+            expected_workers
+        );
+        let mut last_count = usize::MAX;
+        loop {
+            let workers = self.registered_workers.lock().await;
+            if workers.len() != last_count {
+                println!(
+                    "[MASTER] Registered workers progress: {}/{}",
+                    workers.len(),
+                    expected_workers
+                );
+                last_count = workers.len();
+            }
+            if workers.len() >= expected_workers {
+                let mut worker_ids = workers.iter().cloned().collect::<Vec<_>>();
+                worker_ids.sort();
+                println!("[MASTER] Registration complete: workers={:?}", worker_ids);
+                return Ok(worker_ids);
+            }
+            drop(workers);
+            sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    async fn configure_workers(
+        &self,
+        spec: &PipelineSpec,
+        base_graph: &ExecutionGraph,
+        pipeline_id: &str,
+        worker_ids_sorted: &[String],
+        worker_nodes: &HashMap<String, WorkerNode>,
+    ) -> anyhow::Result<Vec<String>> {
+        println!(
+            "[MASTER] Configuring workers: count={} pipeline_id={}",
+            worker_ids_sorted.len(),
+            pipeline_id
+        );
+        let mut node_list = Vec::<WorkerNode>::new();
+        for worker_id in worker_ids_sorted {
+            let node = worker_nodes
+                .get(worker_id)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Worker node not found for worker_id={}", worker_id))?;
+            println!(
+                "[MASTER] Worker node resolved: worker_id={} addr={}:{}",
+                worker_id, node.worker_ip, node.worker_port
+            );
+            node_list.push(node);
+        }
+        let assignment_strategy = spec
+            .node_assignment_strategy
+            .as_ref()
+            .unwrap_or_else(|| panic!("node_assignment_strategy must be set for master-worker configuration"));
+        let vertex_to_node = assign_tasks_with_strategy(
+            assignment_strategy,
+            base_graph,
+            &node_list,
+        );
+
+        let worker_to_tasks = worker_to_tasks(&vertex_to_node);
+        let mut configure_futures = Vec::new();
+        for worker_id in worker_ids_sorted {
+            let worker_id = worker_id.clone();
+            let node = worker_nodes
+                .get(&worker_id)
+                .ok_or_else(|| anyhow::anyhow!("Worker node not found for worker_id={}", worker_id))?;
+            let worker_addr = format!("{}:{}", node.worker_ip, node.worker_port);
+            let vertex_ids = worker_to_tasks
+                .get(&worker_id)
+                .cloned()
+                .unwrap_or_default();
+            println!(
+                "[MASTER] Sending configure request: worker_id={} addr={} assigned_vertices={}",
+                worker_id,
+                worker_addr,
+                vertex_ids.len()
+            );
+            let payload = WorkerInitPayload {
+                worker_id: worker_id.clone(),
+                pipeline_id: pipeline_id.to_string(),
+                pipeline_spec: spec.clone(),
+                vertex_ids,
+                task_worker_mapping: vertex_to_node.clone(),
+            };
+
+            let future = async move {
+                let init_payload_bytes = bincode::serialize(&payload)?;
+                let mut client = WorkerConfigServiceClient::connect(format!("http://{}", worker_addr))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to connect to worker {}: {}", worker_id, e))?;
+                let req = crate::runtime::worker_server::worker_service::ConfigureWorkerRequest {
+                    init_payload_bytes,
+                };
+                let resp = client
+                    .configure_worker(tonic::Request::new(req))
+                    .await
+                    .map_err(|e| anyhow::anyhow!("configure_worker RPC failed for {}: {}", worker_id, e))?
+                    .into_inner();
+                println!(
+                    "[MASTER] Received configure response: worker_id={} success={}",
+                    worker_id, resp.success
+                );
+                if !resp.success {
+                    return Err(anyhow::anyhow!(
+                        "Worker {} rejected configure: {}",
+                        worker_id,
+                        resp.error_message
+                    ));
+                }
+                
+                Ok::<(String, String), anyhow::Error>((worker_id, resp.execution_graph_signature))
+            };
+            configure_futures.push(future);
+        }
+
+        let configure_results = futures::future::join_all(configure_futures).await;
+        
+        // verify all workers consistently compiled execution graph
+        let mut expected_execution_graph_signature: Option<String> = None;
+        for result in configure_results {
+            let (worker_id, worker_signature) = result?;
+            if worker_signature.is_empty() {
+                panic!(
+                    "Worker {} returned empty execution graph signature during configure",
+                    worker_id
+                );
+            }
+            if let Some(expected_signature) = &expected_execution_graph_signature {
+                if expected_signature != &worker_signature {
+                    panic!(
+                        "Execution graph signature mismatch. Worker {} has {}, expected {}",
+                        worker_id,
+                        worker_signature,
+                        expected_signature
+                    );
+                }
+            } else {
+                expected_execution_graph_signature = Some(worker_signature);
+            }
+        }
+
+        Ok(worker_ids_sorted.to_vec())
+    }
+
     /// Start all workers
-    pub async fn start_all_workers(&mut self) -> anyhow::Result<()> {
+    pub async fn start_all_workers(&self) -> anyhow::Result<()> {
         println!("[MASTER] Starting all workers");
         
         // Collect worker IPs first
@@ -231,7 +481,7 @@ impl Master {
     }
 
     /// Start periodic state polling
-    pub fn start_state_polling(&mut self) {
+    pub async fn start_state_polling(&self) {
         println!("[MASTER] Starting state polling task");
         
         let worker_clients = self.worker_clients.clone();
@@ -279,7 +529,8 @@ impl Master {
             }
         });
         
-        self.state_polling_handle = Some(handle);
+        let mut handle_guard = self.state_polling_handle.lock().await;
+        *handle_guard = Some(handle);
     }
 
     /// Wait for all workers to have tasks in the specified status
@@ -316,7 +567,7 @@ impl Master {
     }
 
     /// Start all tasks on all workers
-    pub async fn run_all_tasks(&mut self) -> anyhow::Result<()> {
+    pub async fn run_all_tasks(&self) -> anyhow::Result<()> {
         println!("[MASTER] Running all tasks on all workers");
         let worker_ips: Vec<String> = {
             let clients_guard = self.worker_clients.lock().await;
@@ -354,7 +605,7 @@ impl Master {
     }
 
     /// Close all tasks on all workers
-    pub async fn close_all_tasks(&mut self) -> anyhow::Result<()> {
+    pub async fn close_all_tasks(&self) -> anyhow::Result<()> {
         println!("[MASTER] Closing all tasks on all workers");
         
         // Collect worker IPs first
@@ -398,7 +649,7 @@ impl Master {
     }
 
     /// Close all workers
-    pub async fn close_all_workers(&mut self) -> anyhow::Result<()> {
+    pub async fn close_all_workers(&self) -> anyhow::Result<()> {
         println!("[MASTER] Closing all workers");
         
         // Collect worker IPs first
@@ -441,42 +692,72 @@ impl Master {
         Ok(())
     }
 
-    /// Execute the complete job lifecycle
-    pub async fn execute(&mut self, worker_ips: Vec<String>) -> anyhow::Result<()> {
-        println!("[MASTER] Starting execution with {} workers", worker_ips.len());
+    /// Execute the complete pipeline lifecycle
+    pub async fn execute(&self) -> anyhow::Result<()> {
+        println!("[MASTER] Starting execution lifecycle");
+        let (spec, execution_graph, expected_workers) = {
+            let config = self.config.lock().await;
+            let config = config.clone().ok_or_else(|| {
+                anyhow::anyhow!("Master is not configured: call configure before execute")
+            })?;
+            let spec = config.spec.ok_or_else(|| {
+                anyhow::anyhow!("Master is configured without spec: provide spec in MasterConfig before execute")
+            })?;
+            (spec, config.execution_graph, config.expected_workers)
+        };
         
         self.running.store(true, std::sync::atomic::Ordering::Relaxed);
         
-        // 1. Master connects to all workers
+        // 1. Wait for workers to register.
+        let worker_ids_sorted = self.wait_for_workers_registration(expected_workers).await?;
+        let pipeline_id = self.orchestrator.get_pipeline_id().await;
+        let worker_nodes = self.orchestrator.get_worker_nodes().await;
+
+        // 2. Configure workers from pipeline spec.
+        let worker_ids_sorted = self
+            .configure_workers(&spec, &execution_graph, &pipeline_id, &worker_ids_sorted, &worker_nodes)
+            .await?;
+        let worker_ips = worker_ids_sorted
+            .iter()
+            .map(|id| {
+                let node = worker_nodes
+                    .get(id)
+                    .unwrap_or_else(|| panic!("worker node not found for worker_id={}", id));
+                format!("{}:{}", node.worker_ip, node.worker_port)
+            })
+            .collect::<Vec<_>>();
+
+        // 3. Master connects to all workers.
         self.connect_to_workers(worker_ips).await?;
         
-        // 2. Master starts all workers
+        // 4. Master starts all workers.
         self.start_all_workers().await?;
         
-        // 3. Start state polling to monitor worker states
-        self.start_state_polling();
+        // 5. Start state polling to monitor worker states.
+        self.start_state_polling().await;
         
-        // 4. Master waits for all tasks on all workers to be opened
+        // 6. Master waits for all tasks on all workers to be opened.
         self.wait_for_all_tasks_status(StreamTaskStatus::Opened, Some(Duration::from_secs(30))).await?;
         
-        // 5. Master runs all tasks on all workers
+        // 7. Master runs all tasks on all workers.
         self.run_all_tasks().await?;
         
-        // 6. Master waits for all tasks on all workers to be finished
+        // 8. Master waits for all tasks on all workers to be finished.
         self.wait_for_all_tasks_status(StreamTaskStatus::Finished, None).await?;
         
-        // 7. Master closes all tasks on all workers
+        // 9. Master closes all tasks on all workers.
         self.close_all_tasks().await?;
         
-        // 8. Master waits for all tasks on all workers to be closed
+        // 10. Master waits for all tasks on all workers to be closed.
         self.wait_for_all_tasks_status(StreamTaskStatus::Closed, Some(Duration::from_secs(30))).await?;
         
-        // 9. Master closes workers
+        // 11. Master closes workers.
         self.close_all_workers().await?;
         
         // Stop state polling
         self.running.store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(handle) = self.state_polling_handle.take() {
+        let mut handle_guard = self.state_polling_handle.lock().await;
+        if let Some(handle) = handle_guard.take() {
             let _ = handle.await;
         }
         

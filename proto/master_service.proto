@@ -3,10 +3,20 @@ syntax = "proto3";
 package master_service;
 
 service MasterService {
+  rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
   rpc ReportCheckpoint(ReportCheckpointRequest) returns (ReportCheckpointResponse);
   rpc GetTaskCheckpoint(GetTaskCheckpointRequest) returns (GetTaskCheckpointResponse);
   rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
   rpc GetLatestPipelineSnapshot(GetLatestPipelineSnapshotRequest) returns (GetLatestPipelineSnapshotResponse);
+}
+
+message RegisterWorkerRequest {
+  string worker_id = 1;
+}
+
+message RegisterWorkerResponse {
+  bool success = 1;
+  string error_message = 2;
 }
 
 message StateBlob {

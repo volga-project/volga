@@ -1,5 +1,5 @@
 use crate::{
-    api::{PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{message::Message, test_utils::{gen_unique_grpc_port, print_pipeline_state}}, executor::single_worker, runtime::{
+    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{message::Message, test_utils::{gen_unique_grpc_port, print_pipeline_state}}, executor::local_single_worker, runtime::{
         functions::{
             key_by::KeyByFunction,
             reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
@@ -28,8 +28,13 @@ fn test_word_count() -> Result<()> {
 
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
-        .with_source(
-            "word_count_source".to_string(),
+        .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .build();
+    let mut connector_configs = ConnectorConfigs::default();
+    connector_configs.sources.insert(
+        "word_count_source".to_string(),
+        (
             SourceConfig::WordCountSourceConfig(WordCountSourceConfig::new(
                 word_length,
                 dictionary_size_per_source,
@@ -42,20 +47,19 @@ fn test_word_count() -> Result<()> {
                 Field::new("word", arrow::datatypes::DataType::Utf8, false),
                 Field::new("timestamp", arrow::datatypes::DataType::Int64, false),
             ])),
-        )
-        .with_sink_inline(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
-            "http://{}",
-            storage_server_addr
-        )))
-        .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
-        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
-        .build();
+        ),
+    );
+    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+        "http://{}",
+        storage_server_addr
+    )));
+    let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     let (result_vec, pipeline_state) = runtime.block_on(async {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
         
-        let pipeline_state = single_worker::execute(spec).await.unwrap();
+        let pipeline_state = local_single_worker::execute(spec, logical_graph).await.unwrap();
         
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
         let result_vec = client.get_vector().await.unwrap();

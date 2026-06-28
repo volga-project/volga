@@ -10,5 +10,5 @@ pub use crate::runtime::functions::source::RequestSourceSinkSpec;
 pub use crate::runtime::functions::sink::ParquetSinkSpec;
 pub use schema_ipc::{schema_from_ipc, schema_to_ipc};
 pub use sink::SinkSpec;
-pub use source::{SourceSpec, SourceBindingSpec};
+pub use source::{SourceSpec, SourceSpecKind};
 

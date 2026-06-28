@@ -1,5 +1,5 @@
 use crate::{
-    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::types::PipelineId, runtime::{
+    api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::types::PipelineId, runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator}, observability::snapshot_types::StreamTaskStatus, operators::{
             sink::sink_operator::SinkConfig,
             source::source_operator::SourceConfig,
@@ -169,11 +169,9 @@ async fn wait_for_task_prefix_status(
 
 // TODO make single hot key test case to make sure no deadlocks occur
 
-
-// TODO this test fails when running with others via 'cargo test' - why?
+// TODO: This test passes individually but can fail when running the full suite (likely cross-test interference).
 #[tokio::test]
 async fn test_request_execution_mode() {
-    // TODO: Passes individually but can fail when running the full suite (likely cross-test interference).
     let parallelism = 4;
     let max_pending_requests = 5000;
     let request_timeout_ms = 100000;
@@ -227,26 +225,24 @@ async fn test_request_execution_mode() {
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Request)
-        .with_source(
-            "events".to_string(),
-            SourceConfig::DatagenSourceConfig(datagen_config),
-            schema.clone(),
-        )
-        .with_request_source_sink_inline(
-            SourceConfig::HttpRequestSourceConfig(request_source_config.clone()),
-            Some(SinkConfig::RequestSinkConfig),
-        )
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .sql(sql)
         .build();
+    let mut connector_configs = ConnectorConfigs::default();
+    connector_configs.sources.insert(
+        "events".to_string(),
+        (SourceConfig::DatagenSourceConfig(datagen_config), schema.clone()),
+    );
+    connector_configs.request_source = Some(SourceConfig::HttpRequestSourceConfig(request_source_config.clone()));
+    connector_configs.request_sink = Some(SinkConfig::RequestSinkConfig);
 
-    let logical_graph = compile_logical_graph(&spec);
+    let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
     let mut exec_graph = logical_graph.to_execution_graph();
     exec_graph.set_execution_mode(format!("{:?}", ExecutionMode::Request));
-    exec_graph.update_channels_with_node_mapping(None);
+    exec_graph.configure_channels(None, None);
     let vertex_ids = exec_graph.get_vertices().keys().cloned().collect();
 
-    let mut worker = Worker::new(WorkerConfig::new(
+    let mut worker = Worker::from_config(WorkerConfig::new(
         "request_mode_worker".to_string(),
         PipelineId(Uuid::new_v4()),
         exec_graph,

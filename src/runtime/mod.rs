@@ -4,6 +4,7 @@ pub mod operators;
 pub mod stream_task;
 pub mod stream_task_actor;
 pub mod worker;
+pub mod worker_config_utils;
 pub mod worker_server;
 pub mod master;
 pub mod master_checkpoint;
@@ -19,7 +20,7 @@ use std::sync::Arc;
 
 /// Operator/task identity within a worker.
 ///
-/// In this codebase `vertex_id` is effectively the task namespace (unique per operator task).
+/// vertex == task
 pub type VertexId = Arc<str>;
 pub type TaskId = VertexId;
 

@@ -31,7 +31,7 @@ pub enum Channel {
         source_node_id: String,
         target_node_ip: String,
         target_node_id: String,
-        target_port: i32,
+        target_transport_port: i32,
         queue_size_records: u32,
     }
 }
@@ -86,7 +86,7 @@ impl Channel {
             source_node_id,
             target_node_ip,
             target_node_id,
-            target_port,
+            target_transport_port: target_port,
             queue_size_records,
         }
     }

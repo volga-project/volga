@@ -4,8 +4,7 @@ use std::sync::Arc;
 use arrow::datatypes::Schema;
 use serde::{Deserialize, Serialize};
 
-use crate::api::LogicalGraph;
-use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceBindingSpec};
+use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
@@ -14,6 +13,7 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::transport::transport_spec::OperatorTransportSpec;
 use crate::storage::StorageBudgetConfig;
 use crate::runtime::operators::window::TimeGranularity;
+use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionMode {
@@ -38,20 +38,19 @@ pub struct PipelineSpec {
     /// Key is a stable operator-type string (e.g. "window").
     pub operator_type_storage: HashMap<String, StorageSpec>,
     pub operator_overrides: OperatorOverrides,
-    pub sources: Vec<SourceBindingSpec>,
+    pub sources: Vec<SourceSpec>,
     pub request_source_sink: Option<RequestSourceSinkSpec>,
     pub sink: Option<SinkSpec>,
     pub sql: Option<String>,
-    #[serde(skip)]
-    pub logical_graph: Option<LogicalGraph>,
-    #[serde(skip)]
-    pub inline_sources: HashMap<String, (SourceConfig, Arc<Schema>)>,
-    #[serde(skip)]
-    pub inline_request_source: Option<SourceConfig>,
-    #[serde(skip)]
-    pub inline_request_sink: Option<SinkConfig>,
-    #[serde(skip)]
-    pub inline_sink: Option<SinkConfig>,
+    pub node_assignment_strategy: Option<TaskWorkerAssignmentStrategyType>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ConnectorConfigs {
+    pub sources: HashMap<String, (SourceConfig, Arc<Schema>)>,
+    pub request_source: Option<SourceConfig>,
+    pub request_sink: Option<SinkConfig>,
+    pub sink: Option<SinkConfig>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,11 +76,7 @@ impl PipelineSpecBuilder {
                 request_source_sink: None,
                 sink: None,
                 sql: None,
-                logical_graph: None,
-                inline_sources: HashMap::new(),
-                inline_request_source: None,
-                inline_request_sink: None,
-                inline_sink: None,
+                node_assignment_strategy: None,
             },
         }
     }
@@ -165,30 +160,19 @@ impl PipelineSpecBuilder {
 
     pub fn sql(mut self, sql: &str) -> Self {
         self.spec.sql = Some(sql.to_string());
-        self.spec.logical_graph = None;
         self
     }
 
-    pub fn with_logical_graph(mut self, logical_graph: LogicalGraph) -> Self {
-        self.spec.logical_graph = Some(logical_graph);
-        self.spec.sql = None;
+    pub fn with_node_assignment_strategy(mut self, strategy: TaskWorkerAssignmentStrategyType) -> Self {
+        self.spec.node_assignment_strategy = Some(strategy);
         self
     }
 
-    // TODO is this needed
-    pub fn add_source_binding(mut self, src: SourceBindingSpec) -> Self {
+    pub fn with_source(mut self, src: SourceSpec) -> Self {
+        if self.spec.sources.iter().any(|s| s.table_name == src.table_name) {
+            panic!("Duplicate source table_name in PipelineSpecBuilder::with_source: {}", src.table_name);
+        }
         self.spec.sources.push(src);
-        self
-    }
-
-    pub fn with_source(mut self, table_name: String, source_config: SourceConfig, schema: Arc<Schema>) -> Self {
-        self.spec.inline_sources.insert(table_name, (source_config, schema));
-        self
-    }
-
-    pub fn with_request_source_sink_inline(mut self, source_config: SourceConfig, sink_config: Option<SinkConfig>) -> Self {
-        self.spec.inline_request_source = Some(source_config);
-        self.spec.inline_request_sink = sink_config;
         self
     }
 
@@ -199,11 +183,6 @@ impl PipelineSpecBuilder {
 
     pub fn with_sink(mut self, sink: SinkSpec) -> Self {
         self.spec.sink = Some(sink);
-        self
-    }
-
-    pub fn with_sink_inline(mut self, sink: SinkConfig) -> Self {
-        self.spec.inline_sink = Some(sink);
         self
     }
 

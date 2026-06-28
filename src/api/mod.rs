@@ -12,7 +12,8 @@ pub use logical_graph::{
 pub use planner::{Planner, PlanningContext};
 // pub use pipeline_context::PipelineContext;
 pub use compiler::compile_logical_graph;
-pub use spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder};
+pub use spec::pipeline::{ConnectorConfigs, ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder};
+pub use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 pub use spec::operators::{OperatorOverride, OperatorOverrides};
 pub use spec::connectors::{DatagenSpec, RequestSourceSinkSpec, SinkSpec, SourceSpec};
 pub use spec::storage::StorageSpec;

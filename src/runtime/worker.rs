@@ -23,6 +23,7 @@ use crate::api::StorageSpec;
 use crate::runtime::operators::operator::operator_storage_key_and_default_spec;
 
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -82,17 +83,7 @@ impl WorkerConfig {
 
 pub struct Worker {
     worker_id: String,
-    pipeline_id: PipelineId,
-    graph: ExecutionGraph,
-    vertex_ids: Vec<VertexId>,
-    transport_backend_type: TransportBackendType,
-    master_addr: Option<String>,
-    restore_checkpoint_id: Option<u64>,
-    storage_budgets: StorageBudgetConfig,
-    inmem_store_lock_pool_size: usize,
-    inmem_store_bucket_granularity: TimeGranularity,
-    inmem_store_max_batch_size: usize,
-    operator_type_storage_overrides: HashMap<String, StorageSpec>,
+    config: Option<WorkerConfig>,
     task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
     task_runtimes: HashMap<VertexId, Runtime>,
@@ -110,7 +101,46 @@ pub struct Worker {
 }
 
 impl Worker {
-    pub fn new(config: WorkerConfig) -> Self {
+    pub fn new(worker_id: String) -> Self {
+        Self {
+            worker_id: worker_id.clone(),
+            config: None,
+            task_actors: HashMap::new(),
+            backend_actor: None,
+            task_runtimes: HashMap::new(),
+            transport_backend_runtime: None,
+            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
+                worker_id,
+                PipelineId(Uuid::nil()),
+            ))),
+            operator_states: Arc::new(OperatorStates::new()),
+            running: Arc::new(AtomicBool::new(false)),
+            tasks_state_polling_handle: None,
+            request_source_processor: None,
+            request_source_processor_runtime: None,
+        }
+    }
+
+    pub fn from_config(config: WorkerConfig) -> Self {
+        let mut worker = Self::new(config.worker_id.clone());
+        worker.configure(config);
+        worker
+    }
+
+    pub fn configure(&mut self, config: WorkerConfig) {
+        if self.running.load(Ordering::SeqCst) {
+            panic!("Cannot configure worker while it is running");
+        }
+        let mut config = config;
+        config.worker_id = self.worker_id.clone();
+        println!(
+            "[WORKER] Configuring worker_id={} pipeline_id={} vertices={} threads_per_task={}",
+            config.worker_id,
+            config.pipeline_id.0,
+            config.vertex_ids.len(),
+            config.num_threads_per_task
+        );
+
         let mut task_runtimes = HashMap::new();
         for vertex_id in &config.vertex_ids {
             let task_runtime = Builder::new_multi_thread()
@@ -134,38 +164,31 @@ impl Worker {
             None
         };
 
-        Self {
-            worker_id: config.worker_id.clone(),
-            pipeline_id: config.pipeline_id.clone(),
-            graph: config.graph,
-            vertex_ids: config.vertex_ids.clone(),
-            task_actors: HashMap::new(),
-            transport_backend_type: config.transport_backend_type,
-            master_addr: config.master_addr.clone(),
-            restore_checkpoint_id: config.restore_checkpoint_id,
-            storage_budgets: config.storage_budgets,
-            inmem_store_lock_pool_size: config.inmem_store_lock_pool_size,
-            inmem_store_bucket_granularity: config.inmem_store_bucket_granularity,
-            inmem_store_max_batch_size: config.inmem_store_max_batch_size,
-            operator_type_storage_overrides: config.operator_type_storage_overrides,
-            backend_actor: None,
-            task_runtimes,
-            transport_backend_runtime: Some(
-                Builder::new_multi_thread()
+        self.task_actors = HashMap::new();
+        self.backend_actor = None;
+        self.task_runtimes = task_runtimes;
+        self.transport_backend_runtime = Some(
+            Builder::new_multi_thread()
                 .worker_threads(1)
                 .enable_all()
                 .thread_name("transport-backend-runtime")
-                .build().unwrap()),
-            request_source_processor_runtime,
-            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
-                config.worker_id,
-                config.pipeline_id,
-            ))),
-            operator_states: Arc::new(OperatorStates::new()),
-            running: Arc::new(AtomicBool::new(false)),
-            tasks_state_polling_handle: None,
-            request_source_processor: None
-        }
+                .build()
+                .unwrap(),
+        );
+        self.worker_state = Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
+            self.worker_id.clone(),
+            config.pipeline_id.clone(),
+        )));
+        self.operator_states = Arc::new(OperatorStates::new());
+        self.running = Arc::new(AtomicBool::new(false));
+        self.tasks_state_polling_handle = None;
+        self.request_source_processor = None;
+        self.request_source_processor_runtime = request_source_processor_runtime;
+        self.config = Some(config);
+    }
+
+    pub fn is_configured(&self) -> bool {
+        self.config.is_some()
     }
 
     async fn poll_and_update_tasks_state(
@@ -278,16 +301,21 @@ impl Worker {
 
     pub async fn spawn_actors(&mut self) {
         println!("[WORKER] Spawning actors");
+        let config = self
+            .config
+            .as_ref()
+            .expect("Worker must be configured before use")
+            .clone();
 
         // Per-operator-type storage contexts (e.g. separate store+budgets for window operators).
         // Backend selection (SlateDB) will be added later; for now use InMemBatchStore.
         let mut storage_by_type: HashMap<String, Arc<WorkerStorageContext>> = HashMap::new();
 
-        let mut backend: Box<dyn TransportBackend> = match self.transport_backend_type {
+        let mut backend: Box<dyn TransportBackend> = match config.transport_backend_type {
             TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new()),
             TransportBackendType::InMemory => Box::new(InMemoryTransportBackend::new()),
         };
-        let mut transport_client_configs = backend.init_channels(&self.graph, self.vertex_ids.clone());
+        let mut transport_client_configs = backend.init_channels(&config.graph, config.vertex_ids.clone());
 
         let backend_actor_task = self.transport_backend_runtime.as_ref().unwrap().spawn(async{
             return spawn(TransportBackendActor::new(backend))
@@ -295,16 +323,16 @@ impl Worker {
         let backend_actor_ref = backend_actor_task.await.unwrap();
         self.backend_actor = Some(backend_actor_ref);
 
-        let vertex_ids = self.vertex_ids.clone();
+        let vertex_ids = config.vertex_ids.clone();
         for vertex_id in &vertex_ids {
-            let vertex = self
+            let vertex = config
                 .graph
                 .get_vertex(vertex_id.as_ref())
                 .expect("Vertex should exist");
             let task_runtime = self.task_runtimes.get(vertex_id).expect("Task runtime should exist");
 
             if let Some((storage_type, default_spec)) = operator_storage_key_and_default_spec(&vertex.operator_config) {
-                let effective = self
+                let effective = config
                     .operator_type_storage_overrides
                     .get(storage_type)
                     .cloned()
@@ -326,18 +354,18 @@ impl Worker {
                 vertex.parallelism,
                 {
                     let mut cfg = HashMap::<String, Value>::new();
-                    if let Some(master_addr) = &self.master_addr {
+                    if let Some(master_addr) = &config.master_addr {
                         cfg.insert("master_addr".to_string(), Value::String(master_addr.clone()));
                     }
-                    if let Some(restore_checkpoint_id) = self.restore_checkpoint_id {
+                    if let Some(restore_checkpoint_id) = config.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
                     }
-                    cfg.insert("pipeline_id".to_string(), Value::String(self.pipeline_id.0.to_string()));
-                    cfg.insert("worker_id".to_string(), Value::String(self.worker_id.clone()));
+                    cfg.insert("pipeline_id".to_string(), Value::String(config.pipeline_id.0.to_string()));
+                    cfg.insert("worker_id".to_string(), Value::String(config.worker_id.clone()));
                     Some(cfg)
                 },
                 Some(self.operator_states.clone()),
-                Some(self.graph.clone()),
+                Some(config.graph.clone()),
             );
             if let Some(request_source_processor) = &self.request_source_processor {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
@@ -354,15 +382,15 @@ impl Worker {
             // Create the task and its actor in the task's runtime
             let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();
             transport_cfg.set_metrics_labels(MetricsLabels {
-                pipeline_id: self.pipeline_id.0.to_string(),
-                worker_id: self.worker_id.clone(),
+                pipeline_id: config.pipeline_id.0.to_string(),
+                worker_id: config.worker_id.clone(),
             });
             let task = StreamTask::new(
                 vertex_id.clone(),
                 vertex.operator_config.clone(),
                 transport_cfg,
                 runtime_context,
-                self.graph.clone(),
+                config.graph.clone(),
             );
             let task_actor = StreamTaskActor::new(task);
             let task_ref = task_runtime.spawn(async{
@@ -380,15 +408,20 @@ impl Worker {
         state_updates_sender: Option<mpsc::Sender<WorkerSnapshot>>
     ) {
         println!("[WORKER] Starting tasks");
+        let config = self
+            .config
+            .as_ref()
+            .expect("Worker must be configured before use")
+            .clone();
 
         // Start all tasks
         let mut start_futures = Vec::new();
-        for (vertex_id, runtime) in &self.task_runtimes {
+        for (vertex_id, task_runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
 
             let task_ref = task_ref.clone();
-            let fut = runtime.spawn(async move {
+            let fut = task_runtime.spawn(async move {
                 if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Start).await {
                     eprintln!("Error starting task {}: {}", vertex_id, e);
                 }
@@ -404,11 +437,11 @@ impl Worker {
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
         let task_actors = self.task_actors.clone();
-        let graph = self.graph.clone();
+        let graph = config.graph.clone();
         let state = self.worker_state.clone();
         let operator_states = self.operator_states.clone();
-        let worker_id = self.worker_id.clone();
-        let pipeline_id = self.pipeline_id.clone();
+        let worker_id = config.worker_id.clone();
+        let pipeline_id = config.pipeline_id.clone();
         
         let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
             .map(|(k, v)| (k.clone(), v.handle().clone()))
@@ -454,14 +487,19 @@ impl Worker {
     }
 
     async fn start_request_source_processor_if_needed(&mut self) {
-        if let Some(runtime) = &self.request_source_processor_runtime {
-            let request_source_config = extract_request_source_config(&self.graph).expect("request_source_config should be set");
+        let config = self
+            .config
+            .as_ref()
+            .expect("Worker must be configured before use")
+            .clone();
+        if let Some(request_runtime) = &self.request_source_processor_runtime {
+            let request_source_config = extract_request_source_config(&config.graph).expect("request_source_config should be set");
             println!("[WORKER] Starting request source processor");
             
             let mut processor = RequestSourceProcessor::new(request_source_config);
             
             // Start the processor in its dedicated runtime
-            let (processor, start_result) = runtime.spawn(async move {
+            let (processor, start_result) = request_runtime.spawn(async move {
                 let result = processor.start().await;
                 (processor, result)
             }).await.unwrap();
@@ -476,10 +514,10 @@ impl Worker {
 
     async fn stop_request_source_processor_if_needed(&mut self) {
         if let Some(mut processor) = self.request_source_processor.take() {
-            let runtime = self.request_source_processor_runtime.as_ref().expect("request_source_processor_runtime should be set");
+            let request_runtime = self.request_source_processor_runtime.as_ref().expect("request_source_processor_runtime should be set");
             println!("[WORKER] Stopping request source processor");
             
-            let stop_result = runtime.spawn(async move {
+            let stop_result = request_runtime.spawn(async move {
                 processor.stop().await
             }).await.unwrap();
             
@@ -494,12 +532,12 @@ impl Worker {
     async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
         println!("[WORKER] Sending {:?} signal to all task actors", signal);
         
-        for (vertex_id, runtime) in &self.task_runtimes {
+        for (vertex_id, task_runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
             let signal_clone = signal.clone();
             let signal_for_error = signal.clone();
-            let fut = runtime.spawn(async move {
+            let fut = task_runtime.spawn(async move {
                 if let Err(e) = task_ref.ask(signal_clone).await {
                     eprintln!("Error sending {:?} signal to task {}: {}", signal_for_error, vertex_id, e);
                 }
@@ -511,16 +549,20 @@ impl Worker {
     }
 
     pub async fn get_state(&self) -> WorkerSnapshot {
+        let config = self
+            .config
+            .as_ref()
+            .expect("Worker must be configured before use");
         if self.running.load(Ordering::SeqCst) {
-        let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
+            let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
                 .map(|(k, v)| (k.clone(), v.handle().clone()))
                 .collect();
             let task_actors = self.task_actors.clone();
-            let graph = self.graph.clone();
+            let graph = config.graph.clone();
             let state = self.worker_state.clone();
             Self::poll_and_update_tasks_state(
-                self.worker_id.clone(),
-                self.pipeline_id.clone(),
+                config.worker_id.clone(),
+                config.pipeline_id.clone(),
                 task_runtime_handles,
                 task_actors,
                 graph,
@@ -545,18 +587,18 @@ impl Worker {
         }
 
         // Shutdown transport backend runtime
-        if let Some(runtime) = self.transport_backend_runtime.take() {
-            runtime.shutdown_background();
+        if let Some(backend_runtime) = self.transport_backend_runtime.take() {
+            backend_runtime.shutdown_background();
         }
 
         // Shutdown request source processor runtime
-        if let Some(runtime) = self.request_source_processor_runtime.take() {
-            runtime.shutdown_background();
+        if let Some(request_runtime) = self.request_source_processor_runtime.take() {
+            request_runtime.shutdown_background();
         }
 
         // Shutdown task runtimes
-        for (_, runtime) in self.task_runtimes.drain() {
-            runtime.shutdown_background();
+        for (_, task_runtime) in self.task_runtimes.drain() {
+            task_runtime.shutdown_background();
         }
 
         // Clear actor references
@@ -569,6 +611,9 @@ impl Worker {
 
     // control functions
     pub async fn start(&mut self) {
+        if !self.is_configured() {
+            panic!("Worker must be configured before start");
+        }
         self.start_request_source_processor_if_needed().await;
         self.spawn_actors().await;
         self.start_tasks(None).await;
@@ -585,22 +630,27 @@ impl Worker {
 
     pub async fn trigger_checkpoint(&mut self, checkpoint_id: u64) {
         println!("[WORKER] Triggering checkpoint {} on source tasks", checkpoint_id);
-        for (vertex_id, runtime) in &self.task_runtimes {
+        let config = self
+            .config
+            .as_ref()
+            .expect("Worker must be configured before use")
+            .clone();
+        for (vertex_id, task_runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
-            let vertex_type = self.graph.get_vertex_type(vertex_id.as_ref());
+            let vertex_type = config.graph.get_vertex_type(vertex_id.as_ref());
             if vertex_type != OperatorType::Source && vertex_type != OperatorType::ChainedSourceSink {
                 continue;
             }
 
             // Only trigger sources that actually participate in checkpointing.
-            if let Some(v) = self.graph.get_vertices().get(vertex_id.as_ref()) {
+            if let Some(v) = config.graph.get_vertices().get(vertex_id.as_ref()) {
                 if !operator_config_requires_checkpoint(&v.operator_config) {
                     continue;
                 }
             }
 
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
-            let fut = runtime.spawn(async move {
+            let fut = task_runtime.spawn(async move {
                 let _ = task_ref.ask(StreamTaskMessage::TriggerCheckpoint(checkpoint_id)).await;
             });
             let _ = fut.await;

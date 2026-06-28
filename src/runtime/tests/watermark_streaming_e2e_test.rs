@@ -6,7 +6,7 @@ use datafusion::common::ScalarValue;
 use uuid::Uuid;
 
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
+use crate::api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
 use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
@@ -97,21 +97,24 @@ pub(crate) async fn run_watermark_window_pipeline(
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Streaming)
-        .with_source(
-            "datagen_source".to_string(),
-            crate::runtime::operators::source::source_operator::SourceConfig::DatagenSourceConfig(datagen_cfg),
-            schema.clone(),
-        )
-        .with_sink_inline(
-            crate::runtime::operators::sink::sink_operator::SinkConfig::InMemoryStorageGrpcSinkConfig(
-                format!("http://{}", storage_server_addr),
-            ),
-        )
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .sql(sql)
         .build();
+    let mut connector_configs = ConnectorConfigs::default();
+    connector_configs.sources.insert(
+        "datagen_source".to_string(),
+        (
+            crate::runtime::operators::source::source_operator::SourceConfig::DatagenSourceConfig(datagen_cfg),
+            schema.clone(),
+        ),
+    );
+    connector_configs.sink = Some(
+        crate::runtime::operators::sink::sink_operator::SinkConfig::InMemoryStorageGrpcSinkConfig(
+            format!("http://{}", storage_server_addr),
+        ),
+    );
 
-    let mut logical_graph = compile_logical_graph(&spec);
+    let mut logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
     // Explicitly configure watermark out-of-orderness for all window operators.
     logical_graph.set_window_watermark_assign(WatermarkAssignConfig::new(
         out_of_orderness_ms,
@@ -133,7 +136,7 @@ pub(crate) async fn run_watermark_window_pipeline(
         }
     }
 
-    exec_graph.update_channels_with_node_mapping(None);
+    exec_graph.configure_channels(None, None);
     let vertex_ids = exec_graph.get_vertices().keys().cloned().collect();
 
     // Sanity: ensure we actually built a window operator (planner-side watermark placement should attach to it).
@@ -145,7 +148,7 @@ pub(crate) async fn run_watermark_window_pipeline(
         "expected execution graph to contain a Window operator"
     );
 
-    let mut worker = Worker::new(WorkerConfig::new(
+    let mut worker = Worker::from_config(WorkerConfig::new(
         "wm-e2e-worker".to_string(),
         PipelineId(Uuid::new_v4()),
         exec_graph,
@@ -282,8 +285,6 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
     }
     Ok(())
 }
-
-
 
 // parallel bounded-loss scenario moved to `watermark_streaming_benchmark_test.rs`
 
