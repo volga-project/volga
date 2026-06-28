@@ -1,11 +1,11 @@
 use crate::{
-    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{message::Message, test_utils::{gen_unique_grpc_port, print_pipeline_state}}, executor::local_single_worker, runtime::{
+    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::connectors::SinkSpec, spec::pipeline::ExecutionProfile}, common::{message::Message, test_utils::{gen_unique_grpc_port, print_pipeline_state}}, executor::local_single_worker, runtime::{
         functions::{
             key_by::KeyByFunction,
             reduce::{AggregationResultExtractor, AggregationType, ReduceFunction},
             source::word_count_source::BatchingMode,
         },
-        operators::{operator::OperatorConfig, sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
+        operators::{operator::OperatorConfig, source::source_operator::{SourceConfig, WordCountSourceConfig}},
     }, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
@@ -30,6 +30,9 @@ fn test_word_count() -> Result<()> {
         .with_parallelism(parallelism)
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_sink(SinkSpec::InMemoryStorageGrpc {
+            server_addr: format!("http://{}", storage_server_addr),
+        })
         .build();
     let mut connector_configs = ConnectorConfigs::default();
     connector_configs.sources.insert(
@@ -49,10 +52,6 @@ fn test_word_count() -> Result<()> {
             ])),
         ),
     );
-    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
-        "http://{}",
-        storage_server_addr
-    )));
     let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     let (result_vec, pipeline_state) = runtime.block_on(async {

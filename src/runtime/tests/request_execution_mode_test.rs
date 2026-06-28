@@ -1,8 +1,6 @@
 use crate::{
-    api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::types::PipelineId, runtime::{
+    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile, spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc}}, common::types::PipelineId, runtime::{
         functions::source::datagen_source::{DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator}, observability::snapshot_types::StreamTaskStatus, operators::{
-            sink::sink_operator::SinkConfig,
-            source::source_operator::SourceConfig,
         }, tests::request_source_e2e_test::{create_test_config, run_continuous_requests}, worker::{Worker, WorkerConfig}
     }
 };
@@ -170,6 +168,7 @@ async fn wait_for_task_prefix_status(
 // TODO make single hot key test case to make sure no deadlocks occur
 
 // TODO: This test passes individually but can fail when running the full suite (likely cross-test interference).
+// TODO: panics after test successfully completes when closing sources/sinks - fix
 #[tokio::test]
 async fn test_request_execution_mode() {
     let parallelism = 4;
@@ -221,22 +220,24 @@ async fn test_request_execution_mode() {
     // TODO set window config - tiling, lateness, etc
     
     let request_source_config = request_source_config.set_schema(schema.clone());
+    let mut request_source_sink_spec: RequestSourceSinkSpec = request_source_config.spec.clone();
+    request_source_sink_spec.schema_ipc = schema_to_ipc(&schema);
+    request_source_sink_spec.sink = Some(SinkSpec::Request);
 
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Request)
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_source(SourceSpec {
+            table_name: "events".to_string(),
+            schema_ipc: schema_to_ipc(&schema),
+            source: SourceSpecKind::Datagen(datagen_config.spec.clone()),
+        })
+        .with_request_source_sink(request_source_sink_spec)
         .sql(sql)
         .build();
-    let mut connector_configs = ConnectorConfigs::default();
-    connector_configs.sources.insert(
-        "events".to_string(),
-        (SourceConfig::DatagenSourceConfig(datagen_config), schema.clone()),
-    );
-    connector_configs.request_source = Some(SourceConfig::HttpRequestSourceConfig(request_source_config.clone()));
-    connector_configs.request_sink = Some(SinkConfig::RequestSinkConfig);
 
-    let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
+    let logical_graph = compile_logical_graph(&spec, None);
     let mut exec_graph = logical_graph.to_execution_graph();
     exec_graph.set_execution_mode(format!("{:?}", ExecutionMode::Request));
     exec_graph.configure_channels(None, None);

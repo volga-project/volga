@@ -1,8 +1,6 @@
 use crate::{
-    api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{
+    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile, spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc}}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{
         functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot, operators::{
-            sink::sink_operator::SinkConfig,
-            source::source_operator::SourceConfig,
             window::{TileConfig, TimeGranularity, window_operator::ExecutionMode as WindowExecutionMode},
         }
     }, storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -237,20 +235,16 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     println!("Query: {}", sql);
 
-    let mut connector_configs = ConnectorConfigs::default();
-    connector_configs.sources.insert(
-        "datagen_source".to_string(),
-        (
-            SourceConfig::DatagenSourceConfig(datagen_config),
-            schema,
-        ),
-    );
-
     // Create pipeline spec builder
     let mut spec_builder = PipelineSpecBuilder::new()
         .with_parallelism(config.parallelism)
         .sql(&sql)
-        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 });
+        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_source(SourceSpec {
+            table_name: "datagen_source".to_string(),
+            schema_ipc: schema_to_ipc(&schema),
+            source: SourceSpecKind::Datagen(datagen_config.spec.clone()),
+        });
 
     
     // Set execution mode 
@@ -258,16 +252,15 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
         // request mode has no direct sink
         spec_builder = spec_builder.with_execution_mode(ExecutionMode::Request);
     } else {
-        connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
-            "http://{}",
-            storage_server_addr
-        )));
+        spec_builder = spec_builder.with_sink(SinkSpec::InMemoryStorageGrpc {
+            server_addr: format!("http://{}", storage_server_addr),
+        });
         spec_builder = spec_builder.with_execution_mode(ExecutionMode::Streaming);
 
     }
 
     let spec = spec_builder.build();
-    let mut logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
+    let mut logical_graph = compile_logical_graph(&spec, None);
     update_window_configs_in_graph(&mut logical_graph, &config)?;
 
     let mut storage_server = InMemoryStorageServer::new();

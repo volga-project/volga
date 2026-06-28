@@ -12,9 +12,6 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 
 fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
-    if spec.sources.is_empty() {
-        panic!("PipelineSpec must contain source connector specs when compile_logical_graph is called without overrides");
-    }
     let mut connector_configs = ConnectorConfigs::default();
     for src in &spec.sources {
         let schema = Arc::new(schema_from_ipc(&src.schema_ipc));
@@ -43,6 +40,25 @@ fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
         connector_configs.sink = Some(sink.to_sink_config());
     }
     connector_configs
+}
+
+fn merge_connector_configs(
+    mut base: ConnectorConfigs,
+    overrides: &ConnectorConfigs,
+) -> ConnectorConfigs {
+    for (table_name, source_cfg) in &overrides.sources {
+        base.sources.insert(table_name.clone(), source_cfg.clone());
+    }
+    if let Some(request_source) = &overrides.request_source {
+        base.request_source = Some(request_source.clone());
+    }
+    if let Some(request_sink) = &overrides.request_sink {
+        base.request_sink = Some(request_sink.clone());
+    }
+    if let Some(sink) = &overrides.sink {
+        base.sink = Some(sink.clone());
+    }
+    base
 }
 
 fn compile_logical_graph_from_parts(
@@ -103,19 +119,23 @@ pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&C
         .sql
         .as_ref()
         .expect("PipelineSpec has no sql");
-    let connector_configs_owned;
-    let connector_configs = if let Some(overrides) = connector_overrides {
-        overrides
+    let spec_connector_configs = connector_configs_from_spec(spec);
+    let connector_configs_owned = if let Some(overrides) = connector_overrides {
+        merge_connector_configs(spec_connector_configs, overrides)
     } else {
-        connector_configs_owned = connector_configs_from_spec(spec);
-        &connector_configs_owned
+        assert!(
+            !spec_connector_configs.sources.is_empty()
+                || spec_connector_configs.request_source.is_some(),
+            "PipelineSpec must contain source/request-source connectors when compile_logical_graph is called without overrides"
+        );
+        spec_connector_configs
     };
     compile_logical_graph_from_parts(
         sql,
         spec.parallelism,
         spec.execution_mode,
         &spec.operator_overrides,
-        connector_configs,
+        &connector_configs_owned,
     )
 }
 

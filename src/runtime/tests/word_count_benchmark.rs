@@ -1,8 +1,7 @@
 use crate::{
-    api::{ConnectorConfigs, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{
+    api::{ConnectorConfigs, PipelineSpecBuilder, compile_logical_graph, spec::connectors::SinkSpec, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{
         functions::source::word_count_source::BatchingMode, metrics::{LATENCY_BUCKET_BOUNDARIES, LatencyMetrics}, observability::{PipelineSnapshot, WorkerSnapshot}, operators::{
             operator::OperatorConfig,
-            sink::sink_operator::SinkConfig,
             source::source_operator::{SourceConfig, WordCountSourceConfig},
         }
     }, storage::{InMemoryStorageClient, InMemoryStorageServer}
@@ -159,6 +158,9 @@ pub async fn run_word_count_benchmark(
         .with_parallelism(parallelism)
         .sql("SELECT word, COUNT(*) as count FROM word_count_source GROUP BY word")
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_sink(SinkSpec::InMemoryStorageGrpc {
+            server_addr: format!("http://{}", storage_server_addr),
+        })
         .build();
     let mut connector_configs = ConnectorConfigs::default();
     connector_configs.sources.insert(
@@ -178,8 +180,6 @@ pub async fn run_word_count_benchmark(
             ])),
         ),
     );
-    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)));
-
     let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     let source_operator_id = logical_graph.get_nodes_by_predicate(|node| matches!(node.operator_config, OperatorConfig::SourceConfig(_))).first().unwrap().operator_id.clone();

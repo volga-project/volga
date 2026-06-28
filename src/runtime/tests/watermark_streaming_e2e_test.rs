@@ -6,10 +6,11 @@ use datafusion::common::ScalarValue;
 use uuid::Uuid;
 
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
+use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc};
+use crate::api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
-use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec, FieldGenerator};
+use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::worker::{Worker, WorkerConfig};
@@ -82,39 +83,31 @@ pub(crate) async fn run_watermark_window_pipeline(
         },
     );
 
-    let datagen_cfg = DatagenSourceConfig::new(
-        schema.clone(),
-        DatagenSpec {
+    let datagen_spec = DatagenSpec {
             rate,
             limit: Some(total_records),
             run_for_s: None,
             batch_size: 256,
             fields,
             replayable: true,
-        },
-    );
+        };
 
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Streaming)
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_source(SourceSpec {
+            table_name: "datagen_source".to_string(),
+            schema_ipc: schema_to_ipc(&schema),
+            source: SourceSpecKind::Datagen(datagen_spec),
+        })
+        .with_sink(SinkSpec::InMemoryStorageGrpc {
+            server_addr: format!("http://{}", storage_server_addr),
+        })
         .sql(sql)
         .build();
-    let mut connector_configs = ConnectorConfigs::default();
-    connector_configs.sources.insert(
-        "datagen_source".to_string(),
-        (
-            crate::runtime::operators::source::source_operator::SourceConfig::DatagenSourceConfig(datagen_cfg),
-            schema.clone(),
-        ),
-    );
-    connector_configs.sink = Some(
-        crate::runtime::operators::sink::sink_operator::SinkConfig::InMemoryStorageGrpcSinkConfig(
-            format!("http://{}", storage_server_addr),
-        ),
-    );
 
-    let mut logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
+    let mut logical_graph = compile_logical_graph(&spec, None);
     // Explicitly configure watermark out-of-orderness for all window operators.
     logical_graph.set_window_watermark_assign(WatermarkAssignConfig::new(
         out_of_orderness_ms,

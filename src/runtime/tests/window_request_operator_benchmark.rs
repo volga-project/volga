@@ -1,8 +1,5 @@
 use crate::{
-    api::{ConnectorConfigs, ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot, operators::{
-            sink::sink_operator::SinkConfig,
-            source::source_operator::SourceConfig,
-        }}, storage::InMemoryStorageServer
+    api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph, spec::pipeline::ExecutionProfile, spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc}}, common::test_utils::{gen_unique_grpc_port, print_pipeline_state}, executor::local_single_worker, runtime::{functions::source::{DatagenSpec, datagen_source::{DatagenSourceConfig, FieldGenerator}}, metrics::PipelineStateHistory, observability::PipelineSnapshot}, storage::InMemoryStorageServer
 };
 use anyhow::Result;
 use arrow::datatypes::{Schema, Field, DataType, TimeUnit};
@@ -159,22 +156,29 @@ pub async fn run_window_request_benchmark(
     )";
 
     let benchmark_start = Instant::now();
+    let request_bind_address = format!("127.0.0.1:{}", gen_unique_grpc_port());
 
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .sql(sql)
         .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
         .with_execution_mode(ExecutionMode::Request)
+        .with_source(SourceSpec {
+            table_name: "events".to_string(),
+            schema_ipc: schema_to_ipc(&schema),
+            source: SourceSpecKind::Datagen(query_datagen_config.spec.clone()),
+        })
+        .with_request_source_sink(RequestSourceSinkSpec {
+            bind_address: request_bind_address,
+            max_pending_requests: 10_000,
+            request_timeout_ms: 30_000,
+            schema_ipc: schema_to_ipc(&request_datagen_config.schema),
+            sink: Some(SinkSpec::InMemoryStorageGrpc {
+                server_addr: format!("http://{}", storage_server_addr),
+            }),
+        })
         .build();
-    let mut connector_configs = ConnectorConfigs::default();
-    connector_configs.sources.insert(
-        "events".to_string(),
-        (SourceConfig::DatagenSourceConfig(query_datagen_config), schema.clone()),
-    );
-    connector_configs.request_source = Some(SourceConfig::DatagenSourceConfig(request_datagen_config));
-    connector_configs.request_sink =
-        Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)));
-    let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
+    let logical_graph = compile_logical_graph(&spec, None);
 
     let (state_updates_sender, mut state_updates_receiver) = mpsc::channel(100);
     let running = Arc::new(AtomicBool::new(true));
