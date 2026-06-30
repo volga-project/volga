@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, Duration};
 use crate::api::PipelineSpec;
-use crate::orchestrator::orchestrator::{Orchestrator, WorkerNode};
+use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode};
 use crate::orchestrator::task_assignment::{assign_tasks_with_strategy, worker_to_tasks};
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master_checkpoint::{MasterCheckpointRegistry, TaskKey};
@@ -151,7 +151,7 @@ impl WorkerClient {
 
 /// Master that orchestrates multiple worker servers
 pub struct Master {
-    orchestrator: Arc<dyn Orchestrator>,
+    orchestrator: Arc<dyn MasterOrchestrator>,
     config: Arc<Mutex<Option<MasterConfig>>>,
     worker_clients: Arc<Mutex<HashMap<String, WorkerClient>>>,
     registered_workers: Arc<Mutex<HashSet<String>>>,
@@ -189,7 +189,7 @@ impl MasterConfig {
 }
 
 impl Master {
-    pub fn new(orchestrator: Arc<dyn Orchestrator>) -> Self {
+    pub fn new(orchestrator: Arc<dyn MasterOrchestrator>) -> Self {
         Self {
             orchestrator,
             config: Arc::new(Mutex::new(None)),
@@ -565,6 +565,7 @@ impl Master {
         
         Ok(())
     }
+
 
     /// Start all tasks on all workers
     pub async fn run_all_tasks(&self) -> anyhow::Result<()> {

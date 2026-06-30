@@ -297,7 +297,7 @@ impl WorkerAggregateMetrics {
     }
 
     pub fn record(&self) {
-        let pipeline_id = self.pipeline_id.0.to_string();
+        let pipeline_id = self.pipeline_id.0.clone();
 
         for (operator_id, operator_metrics) in self.operator_metrics.iter() {
             // Record throughput metrics
@@ -400,7 +400,7 @@ impl WorkerAggregateMetrics {
 /// These are intentionally gauges (set-to-current) rather than counters to avoid
 /// double-counting across poll ticks.
 pub fn emit_poll_derived_gauges(worker_metrics: &WorkerAggregateMetrics) {
-    let pipeline_id = worker_metrics.pipeline_id.0.to_string();
+    let pipeline_id = worker_metrics.pipeline_id.0.clone();
 
     let mut worker_max_backpressure = 0.0f64;
     for (vertex_id, task_metrics) in worker_metrics.tasks_metrics.iter() {

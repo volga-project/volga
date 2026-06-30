@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
-use crate::orchestrator::orchestrator::Orchestrator;
+use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::master::{Master, MasterConfig};
 use crate::runtime::master_checkpoint::TaskKey;
 use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
@@ -27,7 +27,7 @@ pub struct MasterServiceImpl {
 }
 
 impl MasterServiceImpl {
-    pub fn new(orchestrator: Arc<dyn Orchestrator>) -> Self {
+    pub fn new(orchestrator: Arc<dyn MasterOrchestrator>) -> Self {
         Self {
             master: Arc::new(Master::new(orchestrator)),
         }
@@ -156,7 +156,7 @@ pub struct MasterServer {
 }
 
 impl MasterServer {
-    pub fn new(orchestrator: Arc<dyn Orchestrator>) -> Self {
+    pub fn new(orchestrator: Arc<dyn MasterOrchestrator>) -> Self {
         Self {
             service: MasterServiceImpl::new(orchestrator),
             server_handle: None,

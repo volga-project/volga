@@ -23,7 +23,6 @@ use crate::api::StorageSpec;
 use crate::runtime::operators::operator::operator_storage_key_and_default_spec;
 
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 #[derive(Debug, Clone)]
 pub struct WorkerConfig {
@@ -111,7 +110,7 @@ impl Worker {
             transport_backend_runtime: None,
             worker_state: Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
                 worker_id,
-                PipelineId(Uuid::nil()),
+                PipelineId(String::new()),
             ))),
             operator_states: Arc::new(OperatorStates::new()),
             running: Arc::new(AtomicBool::new(false)),
@@ -136,7 +135,7 @@ impl Worker {
         println!(
             "[WORKER] Configuring worker_id={} pipeline_id={} vertices={} threads_per_task={}",
             config.worker_id,
-            config.pipeline_id.0,
+            config.pipeline_id.0.as_str(),
             config.vertex_ids.len(),
             config.num_threads_per_task
         );
@@ -360,7 +359,7 @@ impl Worker {
                     if let Some(restore_checkpoint_id) = config.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
                     }
-                    cfg.insert("pipeline_id".to_string(), Value::String(config.pipeline_id.0.to_string()));
+                    cfg.insert("pipeline_id".to_string(), Value::String(config.pipeline_id.0.clone()));
                     cfg.insert("worker_id".to_string(), Value::String(config.worker_id.clone()));
                     Some(cfg)
                 },
@@ -382,7 +381,7 @@ impl Worker {
             // Create the task and its actor in the task's runtime
             let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();
             transport_cfg.set_metrics_labels(MetricsLabels {
-                pipeline_id: config.pipeline_id.0.to_string(),
+                pipeline_id: config.pipeline_id.0.clone(),
                 worker_id: config.worker_id.clone(),
             });
             let task = StreamTask::new(

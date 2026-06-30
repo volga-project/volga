@@ -6,9 +6,9 @@ use uuid::Uuid;
 #[serde(transparent)]
 pub struct PipelineSpecId(pub Uuid);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct PipelineId(pub Uuid);
+pub struct PipelineId(pub String);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PipelineState {

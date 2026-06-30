@@ -6,7 +6,8 @@ use anyhow::Result;
 use datafusion::common::ScalarValue;
 use uuid::Uuid;
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::orchestrator::orchestrator::{Orchestrator, LocalOrchestrator};
+use crate::orchestrator::local::LocalMasterOrchestrator;
+use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
@@ -36,7 +37,8 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
 
     // Start master server
     let master_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-    let orchestrator: Arc<dyn Orchestrator> = Arc::new(LocalOrchestrator::new(1, Uuid::new_v4().to_string()));
+    let orchestrator: Arc<dyn MasterOrchestrator> =
+        Arc::new(LocalMasterOrchestrator::new(1, Uuid::new_v4().to_string()));
     let mut master_server = MasterServer::new(orchestrator);
 
     // Build spec: datagen -> window -> sink
@@ -124,7 +126,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut worker = Worker::from_config(
         WorkerConfig::new(
             "worker1".to_string(),
-            PipelineId(Uuid::new_v4()),
+            PipelineId(Uuid::new_v4().to_string()),
             exec_graph1,
             vertex_ids_1,
             2,
@@ -223,7 +225,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     let mut worker2 = Worker::from_config(
         WorkerConfig::new(
             "worker2".to_string(),
-            PipelineId(Uuid::new_v4()),
+            PipelineId(Uuid::new_v4().to_string()),
             exec_graph2,
             vertex_ids_2,
             2,

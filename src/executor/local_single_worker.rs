@@ -2,7 +2,6 @@ use std::collections::HashMap as StdHashMap;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{LogicalGraph, PipelineSpec};
@@ -18,7 +17,7 @@ pub async fn execute_with_state_updates(
     state_updates_sender: Option<mpsc::Sender<PipelineSnapshot>>,
 ) -> Result<PipelineSnapshot> {
     let mut execution_graph = logical_graph.to_execution_graph();
-    let pipeline_id = PipelineId(Uuid::new_v4());
+    let pipeline_id = PipelineId(uuid::Uuid::new_v4().to_string());
     execution_graph.configure_channels(None, Some(&spec));
     let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
     let worker_id = "single_worker".to_string();

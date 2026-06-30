@@ -4,7 +4,8 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use crate::api::{LogicalGraph, PipelineSpec};
-use crate::orchestrator::orchestrator::{Orchestrator, LocalOrchestrator};
+use crate::orchestrator::local::{LocalMasterOrchestrator, LocalWorkerOrchestrator};
+use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master::MasterConfig;
 use crate::runtime::master_server::MasterServer;
@@ -20,18 +21,19 @@ pub async fn execute(
     let master_port = gen_unique_grpc_port();
     let master_addr = format!("127.0.0.1:{}", master_port);
     let pipeline_id = Uuid::new_v4().to_string();
-    let local_orchestrator = Arc::new(
-        LocalOrchestrator::new(num_workers.max(1), pipeline_id)
-            .with_spec(spec.clone())
-            .with_master_service_addr(master_addr.clone()),
+    let local_master_orchestrator = Arc::new(
+        LocalMasterOrchestrator::new(num_workers.max(1), pipeline_id)
+            .with_spec(spec.clone()),
     );
-    let orchestrator: Arc<dyn Orchestrator> = local_orchestrator;
+    let master_orchestrator: Arc<dyn MasterOrchestrator> = local_master_orchestrator.clone();
+    let worker_orchestrator: Arc<dyn WorkerOrchestrator> =
+        Arc::new(LocalWorkerOrchestrator::new(master_addr.clone()));
 
-    let worker_nodes_map = orchestrator.get_worker_nodes().await;
-    let expected_workers = orchestrator.get_num_expected_workers().await;
+    let worker_nodes_map = master_orchestrator.get_worker_nodes().await;
+    let expected_workers = master_orchestrator.get_num_expected_workers().await;
     let execution_graph = logical_graph.to_execution_graph();
     let master_config = MasterConfig::with_spec(spec.clone(), execution_graph, expected_workers);
-    let mut master_server = MasterServer::new(orchestrator.clone());
+    let mut master_server = MasterServer::new(master_orchestrator);
     master_server.configure(master_config).await;
     master_server.start(&master_addr).await?;
 
@@ -40,7 +42,7 @@ pub async fn execute(
     for node in worker_nodes_map.values() {
         let worker_id = node.worker_id.clone();
         let addr = format!("{}:{}", node.worker_ip, node.worker_port);
-        let mut worker_server = WorkerServer::new(worker_id, orchestrator.clone());
+        let mut worker_server = WorkerServer::new(worker_id, worker_orchestrator.clone());
         worker_server.start(&addr).await?;
         worker_server.register_with_master().await?;
         worker_servers.push(worker_server);

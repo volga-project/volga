@@ -1,10 +1,10 @@
 use tonic::{Request, Response, Status};
 use std::sync::Arc;
 use tokio::sync::Mutex;
+use tokio::sync::oneshot;
 use tokio::time::Duration;
-use uuid::Uuid;
 
-use crate::orchestrator::orchestrator::Orchestrator;
+use crate::orchestrator::orchestrator::WorkerOrchestrator;
 use crate::common::types::PipelineId;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::worker_config_utils::{build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type, WorkerInitPayload};
@@ -28,15 +28,21 @@ use worker_service::{
 /// Server implementation of the WorkerService
 pub struct WorkerServiceImpl {
     worker: Arc<Mutex<Worker>>,
-    orchestrator: Arc<dyn Orchestrator>,
+    orchestrator: Arc<dyn WorkerOrchestrator>,
+    close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
 
 impl WorkerServiceImpl {
-    pub fn new(worker_id: String, orchestrator: Arc<dyn Orchestrator>) -> Self {
+    pub fn new(
+        worker_id: String,
+        orchestrator: Arc<dyn WorkerOrchestrator>,
+        close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
+    ) -> Self {
         let worker = Worker::new(worker_id);
         Self {
             worker: Arc::new(Mutex::new(worker)),
             orchestrator,
+            close_worker_notify,
         }
     }
 }
@@ -63,11 +69,9 @@ impl WorkerService for WorkerServiceImpl {
         let transport_backend_type = resolve_transport_backend_type(&execution_graph, &payload.vertex_ids);
         let num_threads_per_task = resolve_num_threads_per_task(&spec);
 
-        let pipeline_uuid = Uuid::parse_str(&payload.pipeline_id)
-            .map_err(|e| Status::invalid_argument(format!("Invalid pipeline_id: {}", e)))?;
         let mut worker_config = WorkerConfig::new(
             payload.worker_id,
-            PipelineId(pipeline_uuid),
+            PipelineId(payload.pipeline_id),
             execution_graph,
             vertex_ids,
             num_threads_per_task.max(1),
@@ -148,6 +152,11 @@ impl WorkerService for WorkerServiceImpl {
         worker_guard.close().await;
         
         println!("[WORKER_SERVER] Worker closed successfully");
+
+        let mut notify_guard = self.close_worker_notify.lock().await;
+        if let Some(tx) = notify_guard.take() {
+            let _ = tx.send(());
+        }
         
         Ok(Response::new(CloseWorkerResponse {
             success: true,
@@ -186,15 +195,23 @@ impl WorkerService for WorkerServiceImpl {
 pub struct WorkerServer {
     service: WorkerServiceImpl,
     server_handle: Option<tokio::task::JoinHandle<()>>,
+    close_worker_rx: Option<oneshot::Receiver<()>>,
     worker_id: String,
-    orchestrator: Arc<dyn Orchestrator>,
+    orchestrator: Arc<dyn WorkerOrchestrator>,
 }
 
 impl WorkerServer {
-    pub fn new(worker_id: String, orchestrator: Arc<dyn Orchestrator>) -> Self {
+    pub fn new(worker_id: String, orchestrator: Arc<dyn WorkerOrchestrator>) -> Self {
+        let (close_worker_tx, close_worker_rx) = oneshot::channel::<()>();
+        let close_worker_notify = Arc::new(Mutex::new(Some(close_worker_tx)));
         Self {
-            service: WorkerServiceImpl::new(worker_id.clone(), orchestrator.clone()),
+            service: WorkerServiceImpl::new(
+                worker_id.clone(),
+                orchestrator.clone(),
+                close_worker_notify,
+            ),
             server_handle: None,
+            close_worker_rx: Some(close_worker_rx),
             worker_id,
             orchestrator,
         }
@@ -294,6 +311,12 @@ impl WorkerServer {
         )))
     }
 
+    pub async fn wait_for_close_request(&mut self) {
+        if let Some(rx) = self.close_worker_rx.take() {
+            let _ = rx.await;
+        }
+    }
+
     /// Stop the gRPC server
     pub async fn stop(&mut self) {
         // Ensure we shut down the worker runtimes cleanly; otherwise dropping tokio runtimes
@@ -315,6 +338,7 @@ impl Clone for WorkerServiceImpl {
         Self {
             worker: self.worker.clone(),
             orchestrator: self.orchestrator.clone(),
+            close_worker_notify: self.close_worker_notify.clone(),
         }
     }
 } 

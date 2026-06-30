@@ -12,17 +12,25 @@ debug = true
 strip = false
 
 [package]
-name = "volga_stream"
+name = "volga"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [lib]
-name = "volga_stream"
+name = "volga"
 # crate-type = ["cdylib", "rlib"]
 # crate-type = ["cdylib"]
 crate-type = ["rlib"]
 path = "src/lib.rs"
+
+[[bin]]
+name = "volga-master"
+path = "src/bin/volga-master.rs"
+
+[[bin]]
+name = "volga-worker"
+path = "src/bin/volga-worker.rs"
 
 [build-dependencies]
 tonic-build = "0.12"

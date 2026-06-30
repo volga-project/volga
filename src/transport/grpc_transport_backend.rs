@@ -133,7 +133,7 @@ impl TransportBackend for GrpcTransportBackend {
             // let (server_tx, mut server_rx) = batch_bounded_channel(...);
             let shutdown_rx = self.shutdown_rx.take().unwrap();
             let server_handle = tokio::spawn(async move {
-                let addr = format!("127.0.0.1:{}", port).parse().unwrap();
+                let addr = format!("0.0.0.0:{}", port).parse().unwrap();
                 let service = MessageStreamServiceImpl::new(server_tx);
                 let svc = MessageStreamServiceServer::new(service);
 
@@ -255,9 +255,8 @@ impl TransportBackend for GrpcTransportBackend {
                                     }
                                 },
                                 Ok(None) => {
-                                    if r.load(std::sync::atomic::Ordering::Relaxed) {
-                                        panic!("[GRPC_BACKEND] Client channel closed");
-                                    }
+                                    // Channel closure is expected when task pipelines finish/teardown.
+                                    break;
                                 },
                                 Err(_) => {
                                     // timeout

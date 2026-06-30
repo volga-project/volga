@@ -143,7 +143,7 @@ pub(crate) async fn run_watermark_window_pipeline(
 
     let mut worker = Worker::from_config(WorkerConfig::new(
         "wm-e2e-worker".to_string(),
-        PipelineId(Uuid::new_v4()),
+        PipelineId(Uuid::new_v4().to_string()),
         exec_graph,
         vertex_ids,
         2,

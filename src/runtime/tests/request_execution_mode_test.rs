@@ -245,7 +245,7 @@ async fn test_request_execution_mode() {
 
     let mut worker = Worker::from_config(WorkerConfig::new(
         "request_mode_worker".to_string(),
-        PipelineId(Uuid::new_v4()),
+        PipelineId(Uuid::new_v4().to_string()),
         exec_graph,
         vertex_ids,
         2,
