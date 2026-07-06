@@ -1,0 +1,13 @@
+.git
+.gitignore
+bin
+tmp
+dist
+vendor
+*.test
+*.out
+coverage*
+.DS_Store
+config
+hack
+README.md

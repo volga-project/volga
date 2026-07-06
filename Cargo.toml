@@ -32,12 +32,21 @@ path = "src/bin/volga-master.rs"
 name = "volga-worker"
 path = "src/bin/volga-worker.rs"
 
+[[bin]]
+name = "volga-test-storage"
+path = "src/bin/volga-test-storage.rs"
+
+[[bin]]
+name = "generate-kube-pipeline-schema"
+path = "src/bin/generate-kube-pipeline-schema.rs"
+
 [build-dependencies]
 tonic-build = "0.12"
 
 [dependencies]
 serde = { version = "1.0.130", features = ["derive"] }
 serde_json = "1.0.68"
+schemars = "1.0.4"
 serde_with = "3"
 rand = "0.8.5"
 bincode = "1.3.3"
@@ -86,11 +95,13 @@ axum = "0.7"
 hyper = "1.0"
 reqwest = { version = "0.11", features = ["json"] }
 base64 = "0.22"
+arrow-integration-test = "55.0.0"
 
 [dev-dependencies]
 tower = "0.5"
 http-body-util = "0.1"
 testcontainers = "0.15"
+serde_yaml = "0.9"
 
 [build]
 rustflags = ["--cfg", "tokio_unstable"]

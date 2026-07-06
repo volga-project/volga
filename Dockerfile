@@ -33,7 +33,7 @@ COPY proto ./proto
 COPY src ./src
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
-    cargo build --release --bin volga-master --bin volga-worker
+    cargo build --release --bin volga-master --bin volga-worker --bin volga-test-storage
 
 FROM debian:bookworm-slim AS runtime
 
@@ -46,5 +46,6 @@ WORKDIR /app
 
 COPY --from=builder /app/target/release/volga-master /usr/local/bin/volga-master
 COPY --from=builder /app/target/release/volga-worker /usr/local/bin/volga-worker
+COPY --from=builder /app/target/release/volga-test-storage /usr/local/bin/volga-test-storage
 
 ENV RUST_LOG=info

@@ -963,7 +963,7 @@ mod tests {
                 bind_address: "127.0.0.1:8080".to_string(),
                 max_pending_requests: 100,
                 request_timeout_ms: 5000,
-                schema_ipc: vec![],
+                schema_json: None,
                 sink: None,
             }
         ));

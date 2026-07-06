@@ -4,15 +4,19 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
-use reqwest::header::{AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::Value;
 
-use crate::api::PipelineSpec;
+use crate::api::{KubePipelineSpec, PipelineSpec};
 
 use super::orchestrator::{MasterOrchestrator, WorkerNode, WorkerOrchestrator};
+
+const VOLGA_CRD_GROUP: &str = "volga.io";
+const VOLGA_CRD_VERSION: &str = "v1alpha1";
+const VOLGA_CRD_PLURAL: &str = "volgapipelines";
 
 #[derive(Clone)]
 struct KubeApiClient {
@@ -91,29 +95,32 @@ fn json_get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
 
 fn json_get_string(value: &Value, candidate_paths: &[&[&str]]) -> Option<String> {
     candidate_paths.iter().find_map(|path| {
-        json_get_path(value, path).and_then(|v| v.as_str()).map(ToString::to_string)
+        json_get_path(value, path)
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
     })
 }
 
 fn json_get_usize(value: &Value, candidate_paths: &[&[&str]]) -> Option<usize> {
-    candidate_paths
-        .iter()
-        .find_map(|path| json_get_path(value, path).and_then(|v| v.as_u64()).map(|v| v as usize))
+    candidate_paths.iter().find_map(|path| {
+        json_get_path(value, path)
+            .and_then(|v| v.as_u64())
+            .map(|v| v as usize)
+    })
 }
 
 fn build_api_from_env() -> Result<Arc<KubeApiClient>> {
     let namespace = env::var("KUBE_NAMESPACE")
         .or_else(|_| env::var("POD_NAMESPACE"))
-        .unwrap_or_else(|_| panic!("KUBE_NAMESPACE or POD_NAMESPACE is required for kube orchestrator"));
+        .unwrap_or_else(|_| {
+            panic!("KUBE_NAMESPACE or POD_NAMESPACE is required for kube orchestrator")
+        });
     Ok(Arc::new(KubeApiClient::in_cluster(namespace)?))
 }
 
 #[derive(Clone)]
 pub struct KubeMasterOrchestrator {
     api: Arc<KubeApiClient>,
-    crd_group: String,
-    crd_version: String,
-    crd_plural: String,
     crd_name: String,
     worker_label_selector: String,
     worker_id_label_key: String,
@@ -123,25 +130,15 @@ pub struct KubeMasterOrchestrator {
 
 #[derive(Clone)]
 pub struct KubeWorkerOrchestrator {
-    api: Arc<KubeApiClient>,
-    crd_group: String,
-    crd_version: String,
-    crd_plural: String,
-    crd_name: String,
-    worker_id_label_key: String,
+    master_service_addr: String,
+    worker_id: String,
 }
 
 impl KubeMasterOrchestrator {
     pub fn from_env() -> Result<Self> {
         let api = build_api_from_env()?;
-        let crd_group =
-            env::var("VOLGA_CRD_GROUP").unwrap_or_else(|_| panic!("VOLGA_CRD_GROUP is required"));
-        let crd_version =
-            env::var("VOLGA_CRD_VERSION").unwrap_or_else(|_| panic!("VOLGA_CRD_VERSION is required"));
-        let crd_plural =
-            env::var("VOLGA_CRD_PLURAL").unwrap_or_else(|_| panic!("VOLGA_CRD_PLURAL is required"));
-        let crd_name =
-            env::var("VOLGA_CRD_NAME").unwrap_or_else(|_| panic!("VOLGA_CRD_NAME is required"));
+        let crd_name = env::var("VOLGA_PIPELINE_CRD_NAME")
+            .unwrap_or_else(|_| panic!("VOLGA_PIPELINE_CRD_NAME is required"));
         let worker_label_selector = env::var("VOLGA_WORKER_LABEL_SELECTOR")
             .unwrap_or_else(|_| panic!("VOLGA_WORKER_LABEL_SELECTOR is required"));
         let worker_id_label_key = env::var("VOLGA_WORKER_ID_LABEL")
@@ -156,9 +153,6 @@ impl KubeMasterOrchestrator {
             .unwrap_or_else(|e| panic!("failed to parse VOLGA_WORKER_TRANSPORT_PORT as u16: {e}"));
         Ok(Self {
             api,
-            crd_group,
-            crd_version,
-            crd_plural,
             crd_name,
             worker_label_selector,
             worker_id_label_key,
@@ -170,7 +164,7 @@ impl KubeMasterOrchestrator {
     fn crd_path(&self) -> String {
         format!(
             "/apis/{}/{}/namespaces/{}/{}/{}",
-            self.crd_group, self.crd_version, self.api.namespace, self.crd_plural, self.crd_name
+            VOLGA_CRD_GROUP, VOLGA_CRD_VERSION, self.api.namespace, VOLGA_CRD_PLURAL, self.crd_name
         )
     }
 
@@ -181,57 +175,15 @@ impl KubeMasterOrchestrator {
 
 impl KubeWorkerOrchestrator {
     pub fn from_env() -> Result<Self> {
-        let api = build_api_from_env()?;
-        let crd_group =
-            env::var("VOLGA_CRD_GROUP").unwrap_or_else(|_| panic!("VOLGA_CRD_GROUP is required"));
-        let crd_version =
-            env::var("VOLGA_CRD_VERSION").unwrap_or_else(|_| panic!("VOLGA_CRD_VERSION is required"));
-        let crd_plural =
-            env::var("VOLGA_CRD_PLURAL").unwrap_or_else(|_| panic!("VOLGA_CRD_PLURAL is required"));
-        let crd_name =
-            env::var("VOLGA_CRD_NAME").unwrap_or_else(|_| panic!("VOLGA_CRD_NAME is required"));
-        let worker_id_label_key = env::var("VOLGA_WORKER_ID_LABEL")
-            .unwrap_or_else(|_| panic!("VOLGA_WORKER_ID_LABEL is required"));
+        let master_service_addr = env::var("MASTER_SERVICE_ADDR")
+            .or_else(|_| env::var("VOLGA_MASTER_SERVICE_ADDR"))
+            .context("MASTER_SERVICE_ADDR (or VOLGA_MASTER_SERVICE_ADDR) is required")?;
+        let worker_id = env::var("VOLGA_WORKER_ID")
+            .context("VOLGA_WORKER_ID is required to resolve kube worker id")?;
         Ok(Self {
-            api,
-            crd_group,
-            crd_version,
-            crd_plural,
-            crd_name,
-            worker_id_label_key,
+            master_service_addr,
+            worker_id,
         })
-    }
-
-    fn crd_path(&self) -> String {
-        format!(
-            "/apis/{}/{}/namespaces/{}/{}/{}",
-            self.crd_group, self.crd_version, self.api.namespace, self.crd_plural, self.crd_name
-        )
-    }
-
-    async fn get_crd(&self) -> Result<Value> {
-        self.api.get_json(&self.crd_path(), &[]).await
-    }
-
-    async fn resolve_worker_id_internal(&self) -> Result<String> {
-        let pod_name = env::var("POD_NAME")
-            .or_else(|_| env::var("HOSTNAME"))
-            .context("POD_NAME/HOSTNAME is required to resolve kube worker id")?;
-        let path = format!("/api/v1/namespaces/{}/pods/{}", self.api.namespace, pod_name);
-        let pod = self.api.get_json(&path, &[]).await?;
-        if let Some(worker_id) = json_get_path(&pod, &["metadata", "labels", &self.worker_id_label_key])
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
-        {
-            return Ok(worker_id);
-        }
-        if let Some(name) = json_get_path(&pod, &["metadata", "name"])
-            .and_then(|v| v.as_str())
-            .map(ToString::to_string)
-        {
-            return Ok(name);
-        }
-        bail!("failed to resolve worker id from pod metadata")
     }
 }
 
@@ -241,7 +193,10 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
         let path = format!("/api/v1/namespaces/{}/pods", self.api.namespace);
         let pods = match self
             .api
-            .get_json(&path, &[("labelSelector", self.worker_label_selector.as_str())])
+            .get_json(
+                &path,
+                &[("labelSelector", self.worker_label_selector.as_str())],
+            )
             .await
         {
             Ok(v) => v,
@@ -256,14 +211,15 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
                 if pod_ip.is_empty() {
                     continue;
                 }
-                let worker_id = json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
-                    .and_then(|v| v.as_str())
-                    .map(ToString::to_string)
-                    .or_else(|| {
-                        json_get_path(item, &["metadata", "name"])
-                            .and_then(|v| v.as_str())
-                            .map(ToString::to_string)
-                    });
+                let worker_id =
+                    json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
+                        .and_then(|v| v.as_str())
+                        .map(ToString::to_string)
+                        .or_else(|| {
+                            json_get_path(item, &["metadata", "name"])
+                                .and_then(|v| v.as_str())
+                                .map(ToString::to_string)
+                        });
                 if let Some(worker_id) = worker_id {
                     out.insert(
                         worker_id.clone(),
@@ -297,8 +253,10 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
         let spec_json = json_get_path(&crd, &["spec", "pipelineSpec"])
             .or_else(|| json_get_path(&crd, &["status", "pipelineSpec"]))
             .unwrap_or_else(|| panic!("pipelineSpec not found in CRD {}", self.crd_name));
-        serde_json::from_value(spec_json.clone())
-            .unwrap_or_else(|e| panic!("failed to deserialize pipelineSpec from CRD: {}", e))
+        let kube_spec: KubePipelineSpec = serde_json::from_value(spec_json.clone())
+            .unwrap_or_else(|e| panic!("failed to deserialize pipelineSpec from CRD: {}", e));
+        PipelineSpec::try_from(kube_spec)
+            .unwrap_or_else(|e| panic!("failed to convert pipelineSpec from CRD: {}", e))
     }
 
     async fn get_num_expected_workers(&self) -> usize {
@@ -306,7 +264,13 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
             Ok(v) => v,
             Err(e) => panic!("failed to fetch pipeline CRD from kube api: {}", e),
         };
-        if let Some(v) = json_get_usize(&crd, &[&["spec", "expectedWorkers"], &["spec", "workers", "replicas"]]) {
+        if let Some(v) = json_get_usize(
+            &crd,
+            &[
+                &["spec", "expectedWorkers"],
+                &["spec", "workers", "replicas"],
+            ],
+        ) {
             return v;
         }
         let nodes = self.get_worker_nodes().await;
@@ -317,23 +281,10 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
 #[async_trait]
 impl WorkerOrchestrator for KubeWorkerOrchestrator {
     async fn get_master_service_addr(&self) -> String {
-        let crd = match self.get_crd().await {
-            Ok(v) => v,
-            Err(e) => panic!("failed to fetch pipeline CRD from kube api: {}", e),
-        };
-        json_get_string(
-            &crd,
-            &[
-                &["status", "masterServiceAddr"],
-                &["spec", "masterServiceAddr"],
-                &["status", "masterAddr"],
-                &["spec", "masterAddr"],
-            ],
-        )
-        .unwrap_or_else(|| panic!("master service address not found in CRD {}", self.crd_name))
+        self.master_service_addr.clone()
     }
 
     async fn resolve_worker_id(&self) -> Result<String> {
-        self.resolve_worker_id_internal().await
+        Ok(self.worker_id.clone())
     }
 }

@@ -297,11 +297,11 @@ impl Master {
         let mut last_count = usize::MAX;
         loop {
             let workers = self.registered_workers.lock().await;
+
             if workers.len() != last_count {
                 println!(
                     "[MASTER] Registered workers progress: {}/{}",
-                    workers.len(),
-                    expected_workers
+                    workers.len(), expected_workers
                 );
                 last_count = workers.len();
             }
@@ -312,7 +312,42 @@ impl Master {
                 return Ok(worker_ids);
             }
             drop(workers);
-            sleep(Duration::from_millis(100)).await;
+            sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    async fn wait_for_worker_nodes(
+        &self,
+        worker_ids: &[String],
+        timeout: Duration,
+    ) -> anyhow::Result<HashMap<String, WorkerNode>> {
+        let start = tokio::time::Instant::now();
+        let mut last_missing: Vec<String> = Vec::new();
+        loop {
+            let nodes = self.orchestrator.get_worker_nodes().await;
+            let mut missing = worker_ids
+                .iter()
+                .filter(|id| !nodes.contains_key(*id))
+                .cloned()
+                .collect::<Vec<_>>();
+            missing.sort();
+            if missing.is_empty() {
+                return Ok(nodes);
+            }
+            if missing != last_missing {
+                println!(
+                    "[MASTER] Waiting for worker nodes discovery: missing={:?}",
+                    missing
+                );
+                last_missing = missing.clone();
+            }
+            if start.elapsed() > timeout {
+                return Err(anyhow::anyhow!(
+                    "timed out waiting for worker nodes discovery; missing worker_ids={:?}",
+                    missing
+                ));
+            }
+            sleep(Duration::from_millis(500)).await;
         }
     }
 
@@ -378,7 +413,7 @@ impl Master {
             };
 
             let future = async move {
-                let init_payload_bytes = bincode::serialize(&payload)?;
+                let init_payload_bytes = serde_json::to_vec(&payload)?;
                 let mut client = WorkerConfigServiceClient::connect(format!("http://{}", worker_addr))
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to connect to worker {}: {}", worker_id, e))?;
@@ -712,7 +747,9 @@ impl Master {
         // 1. Wait for workers to register.
         let worker_ids_sorted = self.wait_for_workers_registration(expected_workers).await?;
         let pipeline_id = self.orchestrator.get_pipeline_id().await;
-        let worker_nodes = self.orchestrator.get_worker_nodes().await;
+        let worker_nodes = self
+            .wait_for_worker_nodes(&worker_ids_sorted, Duration::from_secs(30))
+            .await?;
 
         // 2. Configure workers from pipeline spec.
         let worker_ids_sorted = self

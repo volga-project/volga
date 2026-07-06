@@ -2,27 +2,28 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow::datatypes::Schema;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
-use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::api::spec::storage::StorageSpec;
+use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
+use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::transport::transport_spec::OperatorTransportSpec;
-use crate::storage::StorageBudgetConfig;
 use crate::runtime::operators::window::TimeGranularity;
-use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
+use crate::storage::StorageBudgetConfig;
+use crate::transport::transport_spec::OperatorTransportSpec;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum ExecutionMode {
     Request,
     Streaming,
     Batch,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub enum ExecutionProfile {
     SingleWorker { num_threads_per_task: usize },
     MasterWorker { num_threads_per_task: usize },
@@ -101,11 +102,19 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_operator_transport_queue_records(mut self, operator_id: &str, queue_records: u32) -> Self {
-        self.spec.operator_overrides.per_operator
+    pub fn with_operator_transport_queue_records(
+        mut self,
+        operator_id: &str,
+        queue_records: u32,
+    ) -> Self {
+        self.spec
+            .operator_overrides
+            .per_operator
             .entry(operator_id.to_string())
             .or_insert_with(OperatorOverride::default)
-            .transport = Some(OperatorTransportSpec { queue_records: Some(queue_records.max(1)) });
+            .transport = Some(OperatorTransportSpec {
+            queue_records: Some(queue_records.max(1)),
+        });
         self
     }
 
@@ -125,7 +134,10 @@ impl PipelineSpecBuilder {
     }
 
     pub fn with_inmem_store_bucket_granularity(mut self, g: TimeGranularity) -> Self {
-        self.spec.worker_runtime.storage.inmem_store_bucket_granularity = g;
+        self.spec
+            .worker_runtime
+            .storage
+            .inmem_store_bucket_granularity = g;
         self
     }
 
@@ -134,7 +146,11 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_operator_type_storage_spec(mut self, operator_type: &str, spec: StorageSpec) -> Self {
+    pub fn with_operator_type_storage_spec(
+        mut self,
+        operator_type: &str,
+        spec: StorageSpec,
+    ) -> Self {
         self.spec
             .operator_type_storage
             .insert(operator_type.to_string(), spec);
@@ -150,7 +166,11 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_operator_override(mut self, operator_id: &str, override_spec: OperatorOverride) -> Self {
+    pub fn with_operator_override(
+        mut self,
+        operator_id: &str,
+        override_spec: OperatorOverride,
+    ) -> Self {
         self.spec
             .operator_overrides
             .per_operator
@@ -163,14 +183,25 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_node_assignment_strategy(mut self, strategy: TaskWorkerAssignmentStrategyType) -> Self {
+    pub fn with_node_assignment_strategy(
+        mut self,
+        strategy: TaskWorkerAssignmentStrategyType,
+    ) -> Self {
         self.spec.node_assignment_strategy = Some(strategy);
         self
     }
 
     pub fn with_source(mut self, src: SourceSpec) -> Self {
-        if self.spec.sources.iter().any(|s| s.table_name == src.table_name) {
-            panic!("Duplicate source table_name in PipelineSpecBuilder::with_source: {}", src.table_name);
+        if self
+            .spec
+            .sources
+            .iter()
+            .any(|s| s.table_name == src.table_name)
+        {
+            panic!(
+                "Duplicate source table_name in PipelineSpecBuilder::with_source: {}",
+                src.table_name
+            );
         }
         self.spec.sources.push(src);
         self
@@ -210,4 +241,3 @@ impl PipelineSpec {
         self.operator_type_storage.clone()
     }
 }
-

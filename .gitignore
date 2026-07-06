@@ -1,6 +1,8 @@
 /target
-
+.vscode/
 .envrc
+go.work
+go.work.sum
 
 /Cargo.lock
 /arroyo/

@@ -2,24 +2,25 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::Duration;
 
 use anyhow::Result;
+use arrow_integration_test::schema_to_json;
 use datafusion::common::ScalarValue;
 use uuid::Uuid;
 
+use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc};
-use crate::api::{ExecutionMode, PipelineSpecBuilder, compile_logical_graph};
+use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
-use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-use crate::runtime::worker::{Worker, WorkerConfig};
-use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
-use crate::transport::transport_backend_actor::TransportBackendType;
+use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::tests::test_utils::{
     create_window_input_schema, wait_for_status, window_rows_from_messages, WindowOutputRow,
 };
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
+use crate::runtime::worker::{Worker, WorkerConfig};
+use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
+use crate::transport::transport_backend_actor::TransportBackendType;
 
 fn parse_task_index_from_key(key: &str) -> Option<i32> {
     // Keys come from datagen as "key-{task_index}-{key_id}" when using FieldGenerator::Key.
@@ -42,10 +43,8 @@ pub(crate) async fn run_watermark_window_pipeline(
     step_ms: i64,
     rate: Option<f32>,
 ) -> Result<Vec<WindowOutputRow>> {
-    crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(
-        true,
-        std::sync::atomic::Ordering::Relaxed,
-    );
+    crate::runtime::stream_task::MESSAGE_TRACE_ENABLED
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     let mut storage_server = InMemoryStorageServer::new();
@@ -65,10 +64,7 @@ pub(crate) async fn run_watermark_window_pipeline(
     let mut fields = HashMap::new();
     fields.insert(
         "timestamp".to_string(),
-        FieldGenerator::IncrementalTimestamp {
-            start_ms,
-            step_ms,
-        },
+        FieldGenerator::IncrementalTimestamp { start_ms, step_ms },
     );
     fields.insert(
         "partition_key".to_string(),
@@ -79,28 +75,35 @@ pub(crate) async fn run_watermark_window_pipeline(
     fields.insert(
         "value".to_string(),
         FieldGenerator::Values {
-            values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))],
+            values: vec![
+                ScalarValue::Float64(Some(1.0)),
+                ScalarValue::Float64(Some(2.0)),
+            ],
         },
     );
 
     let datagen_spec = DatagenSpec {
-            rate,
-            limit: Some(total_records),
-            run_for_s: None,
-            batch_size: 256,
-            fields,
-            replayable: true,
-        };
+        rate,
+        limit: Some(total_records),
+        run_for_s: None,
+        batch_size: 256,
+        fields,
+        replayable: true,
+    };
 
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Streaming)
-        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
-        .with_source(SourceSpec {
-            table_name: "datagen_source".to_string(),
-            schema_ipc: schema_to_ipc(&schema),
-            source: SourceSpecKind::Datagen(datagen_spec),
+        .with_execution_profile(ExecutionProfile::SingleWorker {
+            num_threads_per_task: 4,
         })
+        .with_source(
+            SourceSpec::new(
+                "datagen_source",
+                SourceSpecKind::Datagen(datagen_spec),
+                schema_to_json(&schema),
+            ),
+        )
         .with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: format!("http://{}", storage_server_addr),
         })
@@ -167,7 +170,6 @@ pub(crate) async fn run_watermark_window_pipeline(
     Ok(rows)
 }
 
-
 #[tokio::test]
 async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Result<()> {
     let parallelism: usize = 1;
@@ -179,10 +181,10 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
 
     let mut rows = run_watermark_window_pipeline(
         parallelism,
-        1,    // one key total
+        1, // one key total
         total_records,
-        0,    // no disorder
-        250,  // lateness delay (ms) - still expect exact final results after terminal watermark
+        0,   // no disorder
+        250, // lateness delay (ms) - still expect exact final results after terminal watermark
         step_ms,
         None,
     )
@@ -201,11 +203,7 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
         *counts.entry(k).or_insert(0) += 1;
     }
     let dup = counts.iter().find(|(_, c)| **c != 1);
-    assert!(
-        dup.is_none(),
-        "expected no duplicates; found {:?}",
-        dup
-    );
+    assert!(dup.is_none(), "expected no duplicates; found {:?}", dup);
     assert_eq!(
         counts.len(),
         total_records,
@@ -213,10 +211,15 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
     );
 
     // 2) Per-key timestamp semantics: strictly increasing and within expected range for that task.
-    rows.sort_by(|a, b| (a.partition_key.as_str(), a.timestamp_ms).cmp(&(b.partition_key.as_str(), b.timestamp_ms)));
+    rows.sort_by(|a, b| {
+        (a.partition_key.as_str(), a.timestamp_ms).cmp(&(b.partition_key.as_str(), b.timestamp_ms))
+    });
     let mut per_key: HashMap<String, Vec<i64>> = HashMap::new();
     for r in &rows {
-        per_key.entry(r.partition_key.clone()).or_default().push(r.timestamp_ms);
+        per_key
+            .entry(r.partition_key.clone())
+            .or_default()
+            .push(r.timestamp_ms);
     }
     assert_eq!(per_key.len(), 1, "expected a single key");
     for (k, ts_list) in &per_key {
@@ -229,9 +232,17 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
             k
         );
         for w in ts_list.windows(2) {
-            assert!(w[0] < w[1], "timestamps not strictly increasing for key={}", k);
+            assert!(
+                w[0] < w[1],
+                "timestamps not strictly increasing for key={}",
+                k
+            );
         }
-        assert_eq!(ts_list[0], start_ms, "unexpected start timestamp for key={}", k);
+        assert_eq!(
+            ts_list[0], start_ms,
+            "unexpected start timestamp for key={}",
+            k
+        );
         assert_eq!(
             *ts_list.last().unwrap(),
             start_ms + (expected as i64) - 1,
@@ -258,7 +269,11 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
         let exp_sum = entry.1;
         let exp_avg = exp_sum / (exp_cnt as f64);
 
-        assert_eq!(r.cnt, exp_cnt, "cnt mismatch for key={} ts={}", r.partition_key, r.timestamp_ms);
+        assert_eq!(
+            r.cnt, exp_cnt,
+            "cnt mismatch for key={} ts={}",
+            r.partition_key, r.timestamp_ms
+        );
         assert!(
             (r.sum - exp_sum).abs() < 1e-9,
             "sum mismatch for key={} ts={} got={} expected={}",
@@ -280,4 +295,3 @@ async fn test_watermark_streaming_window_e2e_serial_exact_correctness() -> Resul
 }
 
 // parallel bounded-loss scenario moved to `watermark_streaming_benchmark_test.rs`
-

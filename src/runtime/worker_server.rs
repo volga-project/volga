@@ -1,4 +1,5 @@
 use tonic::{Request, Response, Status};
+use tonic::transport::Endpoint;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
@@ -24,6 +25,15 @@ use worker_service::{
     CloseWorkerRequest, CloseWorkerResponse,
     TriggerCheckpointRequest, TriggerCheckpointResponse,
 };
+
+fn bytes_preview(bytes: &[u8], n: usize) -> String {
+    bytes
+        .iter()
+        .take(n)
+        .map(|b| format!("{:02x}", b))
+        .collect::<Vec<_>>()
+        .join("")
+}
 
 /// Server implementation of the WorkerService
 pub struct WorkerServiceImpl {
@@ -54,8 +64,15 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<ConfigureWorkerRequest>,
     ) -> Result<Response<ConfigureWorkerResponse>, Status> {
         let req = request.into_inner();
-        let payload: WorkerInitPayload = bincode::deserialize(&req.init_payload_bytes)
-            .map_err(|e| Status::invalid_argument(format!("Invalid worker init payload bytes: {}", e)))?;
+        let payload_len = req.init_payload_bytes.len();
+        let payload_first16 = bytes_preview(&req.init_payload_bytes, 16);
+        let payload: WorkerInitPayload = serde_json::from_slice(&req.init_payload_bytes)
+            .map_err(|e| {
+                Status::invalid_argument(format!(
+                    "Invalid worker init payload bytes: {} (len={} first16={})",
+                    e, payload_len, payload_first16
+                ))
+            })?;
         let spec = payload.pipeline_spec.clone();
         let execution_graph = build_execution_graph(&spec, &payload.task_worker_mapping);
         let execution_graph_signature = execution_graph.signature();
@@ -88,6 +105,13 @@ impl WorkerService for WorkerServiceImpl {
         worker_config.operator_type_storage_overrides = spec.operator_type_storage_overrides();
 
         let mut worker_guard = self.worker.lock().await;
+        if worker_guard.is_running() {
+            return Ok(Response::new(ConfigureWorkerResponse {
+                success: false,
+                error_message: "Worker is already running; reconfigure is not supported".to_string(),
+                execution_graph_signature: String::new(),
+            }));
+        }
         worker_guard.configure(worker_config);
 
         Ok(Response::new(ConfigureWorkerResponse {
@@ -238,8 +262,10 @@ impl WorkerServer {
     }
 
     pub async fn register_with_master(&mut self) -> anyhow::Result<()> {
-        const MAX_RETRIES: u32 = 10;
+        const MAX_RETRIES: u32 = 60;
         const RETRY_DELAY_MS: u64 = 500;
+        const CONNECT_TIMEOUT_MS: u64 = 3000;
+        const RPC_TIMEOUT_MS: u64 = 3000;
 
         let master_addr = self.orchestrator.get_master_service_addr().await;
         if master_addr.is_empty() {
@@ -254,15 +280,21 @@ impl WorkerServer {
             self.worker_id, master_addr
         );
         let endpoint = format!("http://{}", master_addr);
+        let endpoint = Endpoint::from_shared(endpoint)?.connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS));
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..MAX_RETRIES {
             let req = crate::runtime::master_server::master_service::RegisterWorkerRequest {
                 worker_id: self.worker_id.clone(),
             };
 
-            match MasterServiceClient::connect(endpoint.clone()).await {
-                Ok(mut client) => match client.register_worker(tonic::Request::new(req)).await {
-                    Ok(resp) => {
+            match endpoint.clone().connect().await {
+                Ok(channel) => match tokio::time::timeout(
+                    Duration::from_millis(RPC_TIMEOUT_MS),
+                    MasterServiceClient::new(channel).register_worker(tonic::Request::new(req)),
+                )
+                .await
+                {
+                    Ok(Ok(resp)) => {
                         let resp = resp.into_inner();
                         if !resp.success {
                             return Err(anyhow::anyhow!(
@@ -276,10 +308,18 @@ impl WorkerServer {
                         );
                         return Ok(());
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         last_err = Some(anyhow::anyhow!(
                             "register_worker RPC failed on attempt {}: {}",
                             attempt + 1,
+                            e
+                        ));
+                    }
+                    Err(e) => {
+                        last_err = Some(anyhow::anyhow!(
+                            "register_worker RPC timeout on attempt {} after {}ms: {}",
+                            attempt + 1,
+                            RPC_TIMEOUT_MS,
                             e
                         ));
                     }

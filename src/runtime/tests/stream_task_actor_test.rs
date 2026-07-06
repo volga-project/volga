@@ -1,16 +1,16 @@
 use crate::api::LogicalGraph;
-use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
-use crate::runtime::operators::operator::OperatorConfig;
-use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
-use crate::runtime::stream_task::StreamTask;
-use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
 use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
-use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
+use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
+use crate::runtime::functions::map::MapFunction;
+use crate::runtime::operators::operator::OperatorConfig;
+use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::stream_task::StreamTask;
+use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::transport::channel::Channel;
-use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
-use crate::runtime::functions::{
-    map::MapFunction,
+use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
+use crate::transport::transport_backend_actor::{
+    TransportBackendActor, TransportBackendActorMessage,
 };
 use crate::transport::{InMemoryTransportBackend, TransportBackend};
 use anyhow::Result;
@@ -23,9 +23,24 @@ fn test_stream_task_actor() -> Result<()> {
     runtime.block_on(async {
         // Create test data
         let mut test_messages = vec![
-            Message::new(None, create_test_string_batch(vec!["test1".to_string()]), Some(1), None),
-            Message::new(None, create_test_string_batch(vec!["test2".to_string()]), Some(2), None),
-            Message::new(None, create_test_string_batch(vec!["test3".to_string()]), Some(3), None),
+            Message::new(
+                None,
+                create_test_string_batch(vec!["test1".to_string()]),
+                Some(1),
+                None,
+            ),
+            Message::new(
+                None,
+                create_test_string_batch(vec!["test2".to_string()]),
+                Some(2),
+                None,
+            ),
+            Message::new(
+                None,
+                create_test_string_batch(vec!["test3".to_string()]),
+                Some(3),
+                None,
+            ),
         ];
 
         let num_messages = test_messages.len();
@@ -41,7 +56,11 @@ fn test_stream_task_actor() -> Result<()> {
         let mut graph = logical_graph.to_execution_graph();
         graph.configure_channels(None, None);
 
-        let mut vertex_ids = graph.get_vertices().keys().cloned().collect::<Vec<crate::runtime::VertexId>>();
+        let mut vertex_ids = graph
+            .get_vertices()
+            .keys()
+            .cloned()
+            .collect::<Vec<crate::runtime::VertexId>>();
         vertex_ids.sort();
 
         let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
@@ -64,14 +83,7 @@ fn test_stream_task_actor() -> Result<()> {
             task_vertex_id.clone(),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
             configs.remove(task_vertex_id.as_ref()).unwrap(),
-            RuntimeContext::new(
-                task_vertex_id.clone(),
-                0,
-                1,
-                None,
-                None,
-                None
-            ),
+            RuntimeContext::new(task_vertex_id.clone(), 0, 1, None, None, None),
             graph.clone(),
         );
 
@@ -80,8 +92,14 @@ fn test_stream_task_actor() -> Result<()> {
         let backend_ref = spawn(backend_actor);
 
         // Create external writer and reader actors
-        let input_actor = TestDataWriterActor::new(input_vertex_id.clone(), configs.remove(input_vertex_id.as_ref()).unwrap());
-        let output_actor = TestDataReaderActor::new(output_vertex_id.clone(), configs.remove(output_vertex_id.as_ref()).unwrap());
+        let input_actor = TestDataWriterActor::new(
+            input_vertex_id.clone(),
+            configs.remove(input_vertex_id.as_ref()).unwrap(),
+        );
+        let output_actor = TestDataReaderActor::new(
+            output_vertex_id.clone(),
+            configs.remove(output_vertex_id.as_ref()).unwrap(),
+        );
         let task_actor = StreamTaskActor::new(task);
 
         let input_ref = spawn(input_actor);
@@ -105,16 +123,22 @@ fn test_stream_task_actor() -> Result<()> {
                 input_vertex_id.as_ref().to_string(),
                 task_vertex_id.as_ref().to_string(),
             );
-            input_ref.ask(crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
-                channel,
-                message: message.clone(),
-            }).await?;
+            input_ref
+                .ask(
+                    crate::transport::test_utils::TestDataWriterMessage::WriteMessage {
+                        channel,
+                        message: message.clone(),
+                    },
+                )
+                .await?;
         }
 
         // Read and verify output using external reader
         let mut received_messages: Vec<Message> = Vec::new();
         for _ in 0..test_messages.len() {
-            let result = output_ref.ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage).await?;
+            let result = output_ref
+                .ask(crate::transport::test_utils::TestDataReaderMessage::ReadMessage)
+                .await?;
             if let Some(message) = result {
                 received_messages.push(message);
             }
@@ -138,4 +162,4 @@ fn test_stream_task_actor() -> Result<()> {
 
         Ok(())
     })
-} 
+}

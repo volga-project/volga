@@ -2,34 +2,38 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
-use datafusion::common::ScalarValue;
-use uuid::Uuid;
+use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::orchestrator::local::LocalMasterOrchestrator;
-use crate::orchestrator::orchestrator::MasterOrchestrator;
+use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
-use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
-use crate::runtime::master::{Master, MasterConfig};
-use crate::runtime::master_server::MasterServer;
-use crate::runtime::operators::operator::OperatorConfig;
-use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-use crate::runtime::worker::{Worker, WorkerConfig};
-use crate::transport::transport_backend_actor::TransportBackendType;
-use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc};
-use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
+use crate::orchestrator::local::LocalMasterOrchestrator;
+use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
+use crate::runtime::master::{Master, MasterConfig};
+use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::master_server::MasterServer;
+use crate::runtime::observability::snapshot_types::StreamTaskStatus;
+use crate::runtime::operators::operator::OperatorConfig;
+use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
+use crate::transport::transport_backend_actor::TransportBackendType;
+use anyhow::Result;
+use arrow_integration_test::schema_to_json;
+use datafusion::common::ScalarValue;
+use uuid::Uuid;
 // Watermark assigner placement is done by the planner (see LogicalGraph::to_execution_graph).
 
-use crate::runtime::tests::test_utils::{create_window_input_schema, wait_for_status, window_rows_from_messages};
+use crate::runtime::tests::test_utils::{
+    create_window_input_schema, wait_for_status, window_rows_from_messages,
+};
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 // TODO: This test passes individually but can fail when running the full suite (likely cross-test interference).
 #[tokio::test]
 async fn test_manual_checkpoint_and_restore() -> Result<()> {
-    crate::runtime::stream_task::MESSAGE_TRACE_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    crate::runtime::stream_task::MESSAGE_TRACE_ENABLED
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     let mut storage_server = InMemoryStorageServer::new();
@@ -55,32 +59,55 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
 
     // Datagen deterministic config (replayable)
     let mut fields = HashMap::new();
-    fields.insert("timestamp".to_string(), FieldGenerator::IncrementalTimestamp { start_ms: 1000, step_ms: 1 });
+    fields.insert(
+        "timestamp".to_string(),
+        FieldGenerator::IncrementalTimestamp {
+            start_ms: 1000,
+            step_ms: 1,
+        },
+    );
     // Ensure all tasks get assigned keys so num_unique > parallelism.
-    fields.insert("partition_key".to_string(), FieldGenerator::Key { num_unique: parallelism * 16 });
-    fields.insert("value".to_string(), FieldGenerator::Values { values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))] });
+    fields.insert(
+        "partition_key".to_string(),
+        FieldGenerator::Key {
+            num_unique: parallelism * 16,
+        },
+    );
+    fields.insert(
+        "value".to_string(),
+        FieldGenerator::Values {
+            values: vec![
+                ScalarValue::Float64(Some(1.0)),
+                ScalarValue::Float64(Some(2.0)),
+            ],
+        },
+    );
 
     let total_records: usize = 2_000;
-    let schema_ipc = schema_to_ipc(&schema);
+    let schema_json = schema_to_json(&schema);
     let datagen_spec = DatagenSpec {
-            rate: Some(1_000.0),
-            limit: Some(total_records),
-            run_for_s: None,
-            batch_size: 256,
-            fields,
-            replayable: true,
-        };
+        rate: Some(1_000.0),
+        limit: Some(total_records),
+        run_for_s: None,
+        batch_size: 256,
+        fields,
+        replayable: true,
+    };
 
     let out_of_orderness_ms: u64 = 100;
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Streaming)
-        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
-        .with_source(SourceSpec {
-            table_name: "datagen_source".to_string(),
-            schema_ipc,
-            source: SourceSpecKind::Datagen(datagen_spec),
+        .with_execution_profile(ExecutionProfile::SingleWorker {
+            num_threads_per_task: 4,
         })
+        .with_source(
+            SourceSpec::new(
+                "datagen_source",
+                SourceSpecKind::Datagen(datagen_spec),
+                schema_json,
+            ),
+        )
         .with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: format!("http://{}", storage_server_addr),
         })
@@ -175,8 +202,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         assert!(
             resp.success,
             "expected GetTaskCheckpoint success for {}: {}",
-            task.vertex_id,
-            resp.error_message
+            task.vertex_id, resp.error_message
         );
 
         // Ensure all checkpointable vertices actually reported *something*
@@ -206,7 +232,8 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     worker.kill_for_testing().await;
 
     // Drain storage after worker #1 so worker #2 starts with a clean sink buffer.
-    let mut storage_client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await?;
+    let mut storage_client =
+        InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await?;
     let messages_run1 = storage_client.drain_vector().await?;
 
     // Worker #2 uses fresh channels
@@ -242,11 +269,21 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     for window_vertex_id in &window_vertex_ids {
         let checkpointed_key_count = checkpointed_window_key_counts
             .get(window_vertex_id)
-            .unwrap_or_else(|| panic!("missing checkpointed window key count for {}", window_vertex_id));
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing checkpointed window key count for {}",
+                    window_vertex_id
+                )
+            });
 
         let state_any = op_states
             .get_operator_state(window_vertex_id)
-            .unwrap_or_else(|| panic!("Expected window operator state to be registered for {}", window_vertex_id));
+            .unwrap_or_else(|| {
+                panic!(
+                    "Expected window operator state to be registered for {}",
+                    window_vertex_id
+                )
+            });
 
         let window_state = state_any
             .as_any()
@@ -265,13 +302,19 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
 
     // Continue running worker2 to finish
     worker2.signal_tasks_run().await;
-    wait_for_status(&worker2, StreamTaskStatus::Finished, Duration::from_secs(60)).await;
+    wait_for_status(
+        &worker2,
+        StreamTaskStatus::Finished,
+        Duration::from_secs(60),
+    )
+    .await;
     worker2.signal_tasks_close().await;
     wait_for_status(&worker2, StreamTaskStatus::Closed, Duration::from_secs(10)).await;
     worker2.close().await;
 
     // Drain storage after worker #2.
-    let mut storage_client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await?;
+    let mut storage_client =
+        InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await?;
     let messages_run2 = storage_client.drain_vector().await?;
 
     // Convert to row-level records with metadata for debugging.
@@ -317,5 +360,3 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
 
     Ok(())
 }
-
-

@@ -3,17 +3,17 @@ use std::collections::HashMap;
 use anyhow::Result;
 use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow_integration_test::schema_to_json;
 use datafusion::common::ScalarValue;
 
 use crate::{
     api::{
-        PipelineSpecBuilder, TaskWorkerAssignmentStrategyType, compile_logical_graph,
-        spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc},
+        compile_logical_graph,
+        spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind},
         spec::pipeline::ExecutionProfile,
+        PipelineSpecBuilder, TaskWorkerAssignmentStrategyType,
     },
-    common::{
-        test_utils::gen_unique_grpc_port,
-    },
+    common::test_utils::gen_unique_grpc_port,
     executor::local_master_worker,
     runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator},
     storage::{InMemoryStorageClient, InMemoryStorageServer},
@@ -33,32 +33,33 @@ async fn run_execution(assignment_strategy: TaskWorkerAssignmentStrategyType) ->
     storage_server.start(&storage_server_addr).await?;
 
     let schema = Schema::new(vec![Field::new("value", DataType::Utf8, false)]);
-    let schema_ipc = schema_to_ipc(&schema);
+    let schema_json = schema_to_json(&schema);
     let expected_total_rows = num_messages_per_source * total_parallelism;
     let values = (0..num_messages_per_source)
         .map(|i| ScalarValue::Utf8(Some(format!("value_{}", i))))
         .collect::<Vec<_>>();
     let mut fields = HashMap::new();
-    fields.insert(
-        "value".to_string(),
-        FieldGenerator::Values { values },
+    fields.insert("value".to_string(), FieldGenerator::Values { values });
+    let is_operator_per_worker = matches!(
+        assignment_strategy,
+        TaskWorkerAssignmentStrategyType::OperatorPerWorker
     );
-    let is_operator_per_worker =
-        matches!(assignment_strategy, TaskWorkerAssignmentStrategyType::OperatorPerWorker);
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(total_parallelism)
-        .with_source(SourceSpec {
-            table_name: "test_table".to_string(),
-            schema_ipc,
-            source: SourceSpecKind::Datagen(DatagenSpec {
+        .with_source(
+            SourceSpec::new(
+                "test_table",
+                SourceSpecKind::Datagen(DatagenSpec {
                 rate: None,
                 limit: Some(expected_total_rows),
                 run_for_s: None,
                 batch_size: 64,
                 fields,
                 replayable: true,
-            }),
-        })
+                }),
+                schema_json,
+            )
+        )
         .with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: format!("http://{}", storage_server_addr),
         })
@@ -122,7 +123,8 @@ async fn run_execution(assignment_strategy: TaskWorkerAssignmentStrategyType) ->
         assert!(
             count > 0,
             "Expected value '{}' to appear at least once, got {}",
-            value, count
+            value,
+            count
         );
     }
 

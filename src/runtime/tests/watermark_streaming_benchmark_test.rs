@@ -116,14 +116,15 @@ async fn test_watermark_streaming_parallel_disorder_benchmark_matrix() -> Result
 
     let parallelism_vals = vec![1usize, 4];
     let ooo_late_pairs: Vec<(u64, i64)> = vec![(0, 0), (50, 50), (250, 250)];
-    let rate_step_pairs: Vec<(Option<f32>, i64)> =
-        vec![(None, 1), (Some(6000.0), 1)];
+    let rate_step_pairs: Vec<(Option<f32>, i64)> = vec![(None, 1), (Some(6000.0), 1)];
 
     let mut cases: Vec<BenchCase> = Vec::new();
     for p in parallelism_vals {
         for (ooo, late) in &ooo_late_pairs {
             for (rate, step) in &rate_step_pairs {
-                let rate_tag = rate.map(|r| format!("{:.0}", r)).unwrap_or_else(|| "max".to_string());
+                let rate_tag = rate
+                    .map(|r| format!("{:.0}", r))
+                    .unwrap_or_else(|| "max".to_string());
                 let name = format!(
                     "p{}_ooo{}_lat{}_rate{}_step{}",
                     p, ooo, late, rate_tag, step
@@ -176,11 +177,7 @@ async fn test_watermark_streaming_parallel_disorder_benchmark_matrix() -> Result
             for r in &rows {
                 assert!(r.cnt >= 1, "cnt must be >= 1: {:?}", r);
                 let exp_avg = r.sum / (r.cnt as f64);
-                assert!(
-                    (r.avg - exp_avg).abs() < 1e-9,
-                    "avg mismatch row={:?}",
-                    r
-                );
+                assert!((r.avg - exp_avg).abs() < 1e-9, "avg mismatch row={:?}", r);
             }
 
             let missed = total_records.saturating_sub(rows.len());
@@ -239,4 +236,3 @@ async fn test_watermark_streaming_parallel_disorder_benchmark_matrix() -> Result
 
     Ok(())
 }
-

@@ -190,6 +190,10 @@ impl Worker {
         self.config.is_some()
     }
 
+    pub fn is_running(&self) -> bool {
+        self.running.load(Ordering::SeqCst)
+    }
+
     async fn poll_and_update_tasks_state(
         worker_id: String,
         pipeline_id: PipelineId,

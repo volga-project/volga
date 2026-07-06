@@ -9,7 +9,11 @@ use crate::runtime::worker::Worker;
 
 pub fn create_window_input_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
-        Field::new("timestamp", DataType::Timestamp(TimeUnit::Millisecond, None), false),
+        Field::new(
+            "timestamp",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        ),
         Field::new("value", DataType::Float64, false),
         Field::new("partition_key", DataType::Utf8, false),
     ]))
@@ -23,7 +27,10 @@ pub async fn wait_for_status(worker: &Worker, status: StreamTaskStatus, timeout:
             return;
         }
         if start.elapsed() > timeout {
-            panic!("Timeout waiting for {:?}, state = {:?}", status, st.task_statuses);
+            panic!(
+                "Timeout waiting for {:?}, state = {:?}",
+                status, st.task_statuses
+            );
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
@@ -46,7 +53,9 @@ pub fn parse_task_index_from_vertex_id(vertex_id: &str) -> Option<i32> {
     vertex_id.rsplit('_').next()?.parse::<i32>().ok()
 }
 
-pub fn window_rows_from_messages(messages: Vec<crate::common::message::Message>) -> Vec<WindowOutputRow> {
+pub fn window_rows_from_messages(
+    messages: Vec<crate::common::message::Message>,
+) -> Vec<WindowOutputRow> {
     let mut out = Vec::new();
     for msg in messages {
         let extras = msg.get_extras().unwrap_or_default();
@@ -105,4 +114,3 @@ pub fn window_rows_from_messages(messages: Vec<crate::common::message::Message>)
     }
     out
 }
-

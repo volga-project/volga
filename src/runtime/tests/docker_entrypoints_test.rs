@@ -5,19 +5,20 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
+use arrow_integration_test::schema_to_json;
 use datafusion::common::ScalarValue;
 use testcontainers::clients::Cli;
 use testcontainers::core::WaitFor;
 use testcontainers::{GenericImage, RunnableImage};
 use uuid::Uuid;
 
-use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind, schema_to_ipc};
+use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType, compile_logical_graph};
+use crate::api::{compile_logical_graph, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
-use crate::runtime::master_server::master_service::GetLatestPipelineSnapshotRequest;
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::master_server::master_service::GetLatestPipelineSnapshotRequest;
 use crate::runtime::observability::{PipelineSnapshot, StreamTaskStatus};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
 
@@ -47,18 +48,20 @@ fn build_test_pipeline_spec_json(sink_server_addr: &str) -> Result<(String, usiz
             num_threads_per_task: 4,
         })
         .with_node_assignment_strategy(TaskWorkerAssignmentStrategyType::OperatorPerWorker)
-        .with_source(SourceSpec {
-            table_name: "test_table".to_string(),
-            schema_ipc: schema_to_ipc(&schema),
-            source: SourceSpecKind::Datagen(DatagenSpec {
+        .with_source(
+            SourceSpec::new(
+                "test_table",
+                SourceSpecKind::Datagen(DatagenSpec {
                 rate: Some(1.0),
                 limit: Some(EXPECTED_RECORDS),
                 run_for_s: None,
                 batch_size: BATCH_SIZE,
                 fields,
                 replayable: true,
-            }),
-        })
+                }),
+                schema_to_json(&schema),
+            )
+        )
         .with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: sink_server_addr.to_string(),
         })
@@ -67,8 +70,12 @@ fn build_test_pipeline_spec_json(sink_server_addr: &str) -> Result<(String, usiz
     let logical_graph = compile_logical_graph(&spec, None);
     let expected_workers = logical_graph.get_nodes().count();
     // This query shape is source -> projection -> sink, so OperatorPerWorker needs 3 workers.
-    assert_eq!(expected_workers, 3, "expected 3 logical nodes/workers for test query");
-    let spec_json = serde_json::to_string(&spec).context("failed to serialize test pipeline spec")?;
+    assert_eq!(
+        expected_workers, 3,
+        "expected 3 logical nodes/workers for test query"
+    );
+    let spec_json =
+        serde_json::to_string(&spec).context("failed to serialize test pipeline spec")?;
     Ok((spec_json, expected_workers))
 }
 
@@ -97,7 +104,10 @@ fn read_container_logs(container_id: &str) -> String {
                 container_id, stdout, stderr
             )
         }
-        Err(e) => format!("failed to read docker logs for container {}: {}", container_id, e),
+        Err(e) => format!(
+            "failed to read docker logs for container {}: {}",
+            container_id, e
+        ),
     }
 }
 
@@ -147,11 +157,7 @@ async fn test_docker_master_and_workers_smoke() -> Result<()> {
     let pipeline_id = Uuid::new_v4().to_string();
     let network_name = format!("volga-net-{}", Uuid::new_v4());
     let master_container_name = format!("volga-master-{}", Uuid::new_v4());
-    let worker_host_prefix = format!(
-        "{}{}-",
-        WORKER_HOST_PREFIX_BASE,
-        Uuid::new_v4().simple()
-    );
+    let worker_host_prefix = format!("{}{}-", WORKER_HOST_PREFIX_BASE, Uuid::new_v4().simple());
     let storage_addr_for_workers = format!("http://{}:{}", HOST_DOCKER_INTERNAL, storage_port);
     let (spec_json, expected_workers) = build_test_pipeline_spec_json(&storage_addr_for_workers)?;
     let expected_workers_str = expected_workers.to_string();
@@ -190,12 +196,16 @@ async fn test_docker_master_and_workers_smoke() -> Result<()> {
     let mut workers = Vec::with_capacity(expected_workers);
     for i in 0..expected_workers {
         let worker_container_name = format!("{}{}", worker_host_prefix, i);
-        let container = docker.run(RunnableImage::from((
-            worker_image.clone().with_env_var("VOLGA_WORKER_INDEX", i.to_string()),
-            vec!["volga-worker".to_string()],
-        ))
-        .with_network(network_name.clone())
-        .with_container_name(worker_container_name));
+        let container = docker.run(
+            RunnableImage::from((
+                worker_image
+                    .clone()
+                    .with_env_var("VOLGA_WORKER_INDEX", i.to_string()),
+                vec!["volga-worker".to_string()],
+            ))
+            .with_network(network_name.clone())
+            .with_container_name(worker_container_name),
+        );
         workers.push(container);
     }
 
@@ -278,10 +288,12 @@ async fn test_docker_master_and_workers_smoke() -> Result<()> {
         NUM_BATCHES,
         "storage should contain expected number of output batches"
     );
-    let total_rows: usize = stored_messages.iter().map(|m| m.record_batch().num_rows()).sum();
+    let total_rows: usize = stored_messages
+        .iter()
+        .map(|m| m.record_batch().num_rows())
+        .sum();
     assert_eq!(
-        total_rows,
-        EXPECTED_RECORDS,
+        total_rows, EXPECTED_RECORDS,
         "storage should contain all expected output records"
     );
     for message in stored_messages {

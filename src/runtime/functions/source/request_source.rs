@@ -26,7 +26,6 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use super::source_function::SourceFunctionTrait;
-use crate::api::spec::connectors::schema_ipc;
 use crate::api::SinkSpec;
 
 /// Reserved metadata field names
@@ -39,8 +38,8 @@ pub struct RequestSourceSinkSpec {
     pub bind_address: String,
     pub max_pending_requests: usize,
     pub request_timeout_ms: u64,
-    #[serde(with = "schema_ipc::b64_bytes")]
-    pub schema_ipc: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_json: Option<serde_json::Value>,
     pub sink: Option<SinkSpec>,
 }
 
@@ -457,7 +456,7 @@ mod tests {
             bind_address: format!("127.0.0.1:{}", port),
             max_pending_requests: 2,
             request_timeout_ms: 1000,
-            schema_ipc: vec![],
+            schema_json: None,
             sink: None,
         };
         let mut config = RequestSourceConfig::new(spec);

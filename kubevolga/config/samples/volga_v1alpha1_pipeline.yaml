@@ -1,0 +1,65 @@
+apiVersion: volga.io/v1alpha1
+kind: VolgaPipeline
+metadata:
+  name: sample-pipeline
+  namespace: default
+spec:
+  workers:
+    replicas: 3
+  image: volga:latest
+  imagePullPolicy: IfNotPresent
+  master:
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+  worker:
+    resources:
+      requests:
+        cpu: "500m"
+        memory: "512Mi"
+      limits:
+        cpu: "2"
+        memory: "2Gi"
+  holdOnFinish: true
+  pipelineSpec:
+    execution_mode: Streaming
+    parallelism: 1
+    execution_profile:
+      MasterWorker:
+        num_threads_per_task: 4
+    node_assignment_strategy: OperatorPerWorker
+    sources:
+      - table_name: test_table
+        schema_json: |
+          {
+            "fields": [
+              {
+                "name": "value",
+                "nullable": false,
+                "type": { "name": "utf8" },
+                "children": []
+              }
+            ]
+          }
+        source:
+          Datagen: |
+            {
+              "rate": 1.0,
+              "limit": 10,
+              "run_for_s": null,
+              "batch_size": 5,
+              "fields": {
+                "value": { "Key": { "num_unique": 1 } }
+              },
+              "replayable": true
+            }
+    sink:
+      InMemoryStorageGrpc: |
+        {
+          "server_addr": "http://volga-test-storage.default.svc.cluster.local:50071"
+        }
+    sql: "SELECT value FROM test_table"

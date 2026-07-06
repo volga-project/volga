@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
+use arrow_integration_test::schema_from_json;
 use crate::api::{LogicalGraph, Planner, PlanningContext};
-use crate::api::spec::connectors::{SourceSpecKind, schema_from_ipc};
+use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
 use crate::api::spec::operators::{OperatorOverrides, OperatorTuningSpec};
 use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpec};
 use crate::runtime::functions::source::datagen_source::DatagenSourceConfig;
@@ -11,10 +12,15 @@ use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 
+fn resolve_source_schema(src: &SourceSpec) -> arrow::datatypes::Schema {
+    schema_from_json(&src.schema_json)
+        .expect("failed to parse source.schema_json as Arrow integration schema")
+}
+
 fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
     let mut connector_configs = ConnectorConfigs::default();
     for src in &spec.sources {
-        let schema = Arc::new(schema_from_ipc(&src.schema_ipc));
+        let schema = Arc::new(resolve_source_schema(src));
         let source_config = match &src.source {
             SourceSpecKind::Datagen(cfg) => {
                 SourceConfig::DatagenSourceConfig(DatagenSourceConfig::new(schema.clone(), cfg.clone()))
@@ -31,7 +37,14 @@ fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
             .insert(src.table_name.clone(), (source_config, schema));
     }
     if let Some(req) = &spec.request_source_sink {
-        let schema = Arc::new(schema_from_ipc(&req.schema_ipc));
+        let schema_json = req
+            .schema_json
+            .as_ref()
+            .expect("request_source_sink.schema_json must be set");
+        let schema = Arc::new(
+            schema_from_json(schema_json)
+                .expect("failed to parse request_source_sink.schema_json as Arrow integration schema"),
+        );
         let request_source = RequestSourceConfig::new(req.clone()).set_schema(schema);
         connector_configs.request_source = Some(SourceConfig::HttpRequestSourceConfig(request_source));
         connector_configs.request_sink = req.sink.as_ref().map(|s| s.to_sink_config());

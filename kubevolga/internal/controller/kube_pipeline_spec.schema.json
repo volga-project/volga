@@ -1,0 +1,155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "KubePipelineSpec",
+  "type": "object",
+  "properties": {
+    "execution_mode": {
+      "$ref": "#/$defs/ExecutionMode",
+      "default": "Streaming"
+    },
+    "execution_profile": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ExecutionProfile"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "node_assignment_strategy": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TaskWorkerAssignmentStrategyType"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "operator_overrides": {
+      "default": {
+        "defaults": {
+          "transport": null,
+          "tuning": null
+        },
+        "per_operator": {}
+      }
+    },
+    "operator_type_storage": {
+      "default": {}
+    },
+    "parallelism": {
+      "type": "integer",
+      "format": "uint",
+      "default": 1,
+      "minimum": 0
+    },
+    "request_source_sink": {
+      "default": null
+    },
+    "sink": {
+      "default": null
+    },
+    "sources": {
+      "default": []
+    },
+    "sql": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "worker_runtime": {
+      "default": {
+        "history_retention_window_ms": null,
+        "storage": {
+          "budgets": {
+            "in_mem_limit_bytes": 268435456,
+            "in_mem_low_watermark_per_mille": 700,
+            "load_io_parallelism": 16,
+            "max_inflight_keys": 1,
+            "work_limit_bytes": 268435456
+          },
+          "inmem_store_bucket_granularity": {
+            "Seconds": 1
+          },
+          "inmem_store_lock_pool_size": 4096,
+          "inmem_store_max_batch_size": 1024
+        },
+        "transport": {
+          "default_queue_records": 8192
+        }
+      }
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "ExecutionMode": {
+      "type": "string",
+      "enum": [
+        "Request",
+        "Streaming",
+        "Batch"
+      ]
+    },
+    "ExecutionProfile": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "SingleWorker": {
+              "type": "object",
+              "properties": {
+                "num_threads_per_task": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "num_threads_per_task"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "SingleWorker"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "MasterWorker": {
+              "type": "object",
+              "properties": {
+                "num_threads_per_task": {
+                  "type": "integer",
+                  "format": "uint",
+                  "minimum": 0
+                }
+              },
+              "required": [
+                "num_threads_per_task"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "MasterWorker"
+          ]
+        }
+      ]
+    },
+    "TaskWorkerAssignmentStrategyType": {
+      "type": "string",
+      "enum": [
+        "SingleWorker",
+        "OperatorPerWorker"
+      ]
+    }
+  }
+}
