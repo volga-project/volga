@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
@@ -7,9 +9,6 @@ use arrow::array::StringArray;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow_integration_test::schema_to_json;
 use datafusion::common::ScalarValue;
-use testcontainers::clients::Cli;
-use testcontainers::core::WaitFor;
-use testcontainers::{GenericImage, RunnableImage};
 use uuid::Uuid;
 
 use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
@@ -20,18 +19,16 @@ use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenera
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master_server::master_service::GetLatestPipelineSnapshotRequest;
 use crate::runtime::observability::{PipelineSnapshot, StreamTaskStatus};
-use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
+use crate::storage::InMemoryStorageClient;
 
 const MASTER_CONTAINER_PORT: u16 = 50051;
 const WORKER_CONTROL_PORT: u16 = 50052;
 const WORKER_TRANSPORT_PORT: u16 = 60052;
-const WORKER_HOST_PREFIX_BASE: &str = "volga-worker-";
+const WORKER_HOST_PREFIX_BASE: &str = "worker-";
+const STORAGE_CONTAINER_PORT: u16 = 50071;
 const NUM_BATCHES: usize = 2;
 const BATCH_SIZE: usize = 5;
 const EXPECTED_RECORDS: usize = NUM_BATCHES * BATCH_SIZE;
-
-const BIND_HOST: &str = "0.0.0.0";
-const HOST_DOCKER_INTERNAL: &str = "host.docker.internal";
 
 fn build_test_pipeline_spec_json(sink_server_addr: &str) -> Result<(String, usize)> {
     let schema = Schema::new(vec![Field::new("value", DataType::Utf8, false)]);
@@ -91,29 +88,36 @@ fn ensure_test_image() -> Result<()> {
     Ok(())
 }
 
-fn read_container_logs(container_id: &str) -> String {
+fn read_compose_logs(compose_file: &PathBuf, compose_env_file: &PathBuf, project_name: &str) -> String {
     match Command::new("docker")
-        .args(["logs", "--tail", "200", container_id])
+        .args([
+            "compose",
+            "-f",
+            compose_file.to_str().unwrap(),
+            "--env-file",
+            compose_env_file.to_str().unwrap(),
+            "-p",
+            project_name,
+            "logs",
+            "--tail",
+            "200",
+        ])
         .output()
     {
         Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            format!(
-                "docker logs for container {}:\nstdout:\n{}\nstderr:\n{}",
-                container_id, stdout, stderr
-            )
+            format!("docker compose logs:\nstdout:\n{}\nstderr:\n{}", stdout, stderr)
         }
-        Err(e) => format!(
-            "failed to read docker logs for container {}: {}",
-            container_id, e
-        ),
+        Err(e) => format!("failed to read docker compose logs: {}", e),
     }
 }
 
 async fn connect_master_with_retry(
     master_port: u16,
-    master_container_id: &str,
+    compose_file: &PathBuf,
+    compose_env_file: &PathBuf,
+    project_name: &str,
 ) -> Result<MasterServiceClient<tonic::transport::Channel>> {
     let endpoint = format!("http://127.0.0.1:{}", master_port);
     let start = tokio::time::Instant::now();
@@ -129,7 +133,7 @@ async fn connect_master_with_retry(
             }
             Err(e) => {
                 if start.elapsed() > timeout {
-                    let logs = read_container_logs(master_container_id);
+                    let logs = read_compose_logs(compose_file, compose_env_file, project_name);
                     return Err(anyhow::anyhow!(
                         "failed to connect to master service from host after retries: {}\n{}",
                         e,
@@ -142,83 +146,102 @@ async fn connect_master_with_retry(
     }
 }
 
-// Manual smoke test: requires local Docker daemon and can be slow.
+// Manual smoke test: requires local Docker daemon.
 #[tokio::test]
 #[ignore]
 async fn test_docker_master_and_workers_smoke() -> Result<()> {
     ensure_test_image()?; // comment this if rebuilding the image is not needed
 
+    let master_port = gen_unique_grpc_port();
     let storage_port = gen_unique_grpc_port();
-    let storage_addr = format!("127.0.0.1:{}", storage_port);
-    let mut storage_server = InMemoryStorageServer::new();
-    storage_server.start(&storage_addr).await?;
-
-    let docker = Cli::default();
     let pipeline_id = Uuid::new_v4().to_string();
-    let network_name = format!("volga-net-{}", Uuid::new_v4());
-    let master_container_name = format!("volga-master-{}", Uuid::new_v4());
-    let worker_host_prefix = format!("{}{}-", WORKER_HOST_PREFIX_BASE, Uuid::new_v4().simple());
-    let storage_addr_for_workers = format!("http://{}:{}", HOST_DOCKER_INTERNAL, storage_port);
+    let worker_host_prefix = WORKER_HOST_PREFIX_BASE.to_string();
+    let storage_addr_for_workers = format!("http://storage:{}", STORAGE_CONTAINER_PORT);
     let (spec_json, expected_workers) = build_test_pipeline_spec_json(&storage_addr_for_workers)?;
-    let expected_workers_str = expected_workers.to_string();
-    let master_bind_addr = format!("{}:{}", BIND_HOST, MASTER_CONTAINER_PORT);
-    let worker_bind_addr = format!("{}:{}", BIND_HOST, WORKER_CONTROL_PORT);
-    let worker_control_port_str = WORKER_CONTROL_PORT.to_string();
-    let worker_transport_port_str = WORKER_TRANSPORT_PORT.to_string();
-
-    let master_image = GenericImage::new("volga", "test")
-        .with_exposed_port(MASTER_CONTAINER_PORT)
-        .with_wait_for(WaitFor::seconds(3))
-        .with_env_var("VOLGA_MASTER_BIND_ADDR", &master_bind_addr)
-        .with_env_var("VOLGA_MASTER_HOLD_ON_FINISH", "true")
-        .with_env_var("VOLGA_PIPELINE_ID", &pipeline_id)
-        .with_env_var("VOLGA_WORKER_COUNT", &expected_workers_str)
-        .with_env_var("VOLGA_WORKER_HOST_PREFIX", &worker_host_prefix)
-        .with_env_var("VOLGA_WORKER_PORT", &worker_control_port_str)
-        .with_env_var("VOLGA_WORKER_TRANSPORT_PORT", &worker_transport_port_str)
-        .with_env_var("VOLGA_PIPELINE_SPEC_JSON", &spec_json);
-
-    let master = docker.run(
-        RunnableImage::from((master_image, vec!["volga-master".to_string()]))
-            .with_network(network_name.clone())
-            .with_container_name(master_container_name.clone()),
+    assert_eq!(
+        expected_workers, 3,
+        "docker compose test currently expects 3 worker services"
     );
-    let master_port = master.get_host_port_ipv4(MASTER_CONTAINER_PORT);
-    let master_addr_for_workers = format!("{}:{}", master_container_name, MASTER_CONTAINER_PORT);
+    let expected_workers_str = expected_workers.to_string();
+    let compose_project = format!("volga-smoke-{}", Uuid::new_v4().simple());
+    let compose_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("docker-compose.test.yaml");
+    let compose_env_file = std::env::temp_dir().join(format!("{}-compose.env", compose_project));
+    let spec_file = std::env::temp_dir().join(format!("{}-pipeline-spec.json", compose_project));
+    fs::write(&spec_file, spec_json).context("failed to write pipeline spec file for compose")?;
+    let compose_env = format!(
+        "MASTER_PORT={master_port}\nMASTER_CONTAINER_PORT={master_container_port}\nSPEC_FILE={spec_file}\nPIPELINE_ID={pipeline_id}\nWORKER_COUNT={worker_count}\nWORKER_HOST_PREFIX={worker_host_prefix}\nWORKER_CONTROL_PORT={worker_control_port}\nWORKER_TRANSPORT_PORT={worker_transport_port}\nSTORAGE_PORT={storage_port}\nSTORAGE_CONTAINER_PORT={storage_container_port}\n",
+        master_port = master_port,
+        master_container_port = MASTER_CONTAINER_PORT,
+        spec_file = spec_file.display(),
+        pipeline_id = pipeline_id,
+        worker_count = expected_workers_str,
+        worker_host_prefix = worker_host_prefix,
+        worker_control_port = WORKER_CONTROL_PORT,
+        worker_transport_port = WORKER_TRANSPORT_PORT,
+        storage_port = storage_port,
+        storage_container_port = STORAGE_CONTAINER_PORT,
+    );
+    fs::write(&compose_env_file, compose_env).context("failed to write compose env file")?;
 
-    let worker_image = GenericImage::new("volga", "test")
-        .with_wait_for(WaitFor::seconds(2))
-        .with_env_var("VOLGA_WORKER_BIND_ADDR", &worker_bind_addr)
-        .with_env_var("VOLGA_MASTER_SERVICE_ADDR", &master_addr_for_workers)
-        .with_env_var("VOLGA_WORKER_HOLD_ON_FINISH", "true")
-        .with_env_var("VOLGA_WORKER_HOST_PREFIX", &worker_host_prefix);
-
-    let mut workers = Vec::with_capacity(expected_workers);
-    for i in 0..expected_workers {
-        let worker_container_name = format!("{}{}", worker_host_prefix, i);
-        let container = docker.run(
-            RunnableImage::from((
-                worker_image
-                    .clone()
-                    .with_env_var("VOLGA_WORKER_INDEX", i.to_string()),
-                vec!["volga-worker".to_string()],
-            ))
-            .with_network(network_name.clone())
-            .with_container_name(worker_container_name),
+    let up_output = Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            compose_file.to_str().unwrap(),
+            "--env-file",
+            compose_env_file.to_str().unwrap(),
+            "-p",
+            &compose_project,
+            "up",
+            "-d",
+        ])
+        .output()
+        .context("failed to run docker compose up")?;
+    if !up_output.status.success() {
+        anyhow::bail!(
+            "docker compose up failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&up_output.stdout),
+            String::from_utf8_lossy(&up_output.stderr)
         );
-        workers.push(container);
     }
 
-    let mut master_client = connect_master_with_retry(master_port, master.id()).await?;
+    let mut master_client =
+        connect_master_with_retry(master_port, &compose_file, &compose_env_file, &compose_project)
+            .await?;
     let start = tokio::time::Instant::now();
     let snapshot_timeout = Duration::from_secs(10);
     let mut last_progress_log = tokio::time::Instant::now();
     let snapshot: PipelineSnapshot = loop {
-        let resp = master_client
+        let resp = match master_client
             .get_latest_pipeline_snapshot(tonic::Request::new(GetLatestPipelineSnapshotRequest {}))
             .await
-            .context("master service snapshot request failed")?
-            .into_inner();
+        {
+            Ok(resp) => resp.into_inner(),
+            Err(e) => {
+                if start.elapsed() > snapshot_timeout {
+                    let logs = read_compose_logs(&compose_file, &compose_env_file, &compose_project);
+                    return Err(anyhow::anyhow!(
+                        "master service snapshot request failed after retries: {}\n{}",
+                        e,
+                        logs
+                    ));
+                }
+                println!(
+                    "[DOCKER_TEST] snapshot request failed, reconnecting to master: {}",
+                    e
+                );
+                master_client = connect_master_with_retry(
+                    master_port,
+                    &compose_file,
+                    &compose_env_file,
+                    &compose_project,
+                )
+                .await?;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                continue;
+            }
+        };
         if resp.has_snapshot {
             let snapshot: PipelineSnapshot = bincode::deserialize(&resp.snapshot_bytes)
                 .context("failed to deserialize pipeline snapshot")?;
@@ -264,7 +287,8 @@ async fn test_docker_master_and_workers_smoke() -> Result<()> {
         "all expected workers should be connected and reporting state"
     );
 
-    let mut storage_client = InMemoryStorageClient::new(format!("http://{}", storage_addr)).await?;
+    let mut storage_client =
+        InMemoryStorageClient::new(format!("http://127.0.0.1:{}", storage_port)).await?;
     let storage_start = tokio::time::Instant::now();
     let storage_timeout = Duration::from_secs(10);
     let stored_messages = loop {
@@ -306,8 +330,29 @@ async fn test_docker_master_and_workers_smoke() -> Result<()> {
         assert_eq!(values.value(0), "v");
     }
 
-    drop(workers);
-    drop(master);
-    storage_server.stop().await;
+    let down_output = Command::new("docker")
+        .args([
+            "compose",
+            "-f",
+            compose_file.to_str().unwrap(),
+            "--env-file",
+            compose_env_file.to_str().unwrap(),
+            "-p",
+            &compose_project,
+            "down",
+            "--volumes",
+            "--remove-orphans",
+        ])
+        .output()
+        .context("failed to run docker compose down")?;
+    if !down_output.status.success() {
+        anyhow::bail!(
+            "docker compose down failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&down_output.stdout),
+            String::from_utf8_lossy(&down_output.stderr)
+        );
+    }
+    let _ = fs::remove_file(compose_env_file);
+    let _ = fs::remove_file(spec_file);
     Ok(())
 }

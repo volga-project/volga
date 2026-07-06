@@ -1,0 +1,56 @@
+services:
+  master:
+    image: volga:test
+    command: ["volga-master"]
+    ports:
+      - "${MASTER_PORT}:${MASTER_CONTAINER_PORT}"
+    volumes:
+      - "${SPEC_FILE}:/app/pipeline-spec.json:ro"
+    environment:
+      VOLGA_MASTER_BIND_ADDR: "0.0.0.0:${MASTER_CONTAINER_PORT}"
+      VOLGA_MASTER_HOLD_ON_FINISH: "true"
+      VOLGA_PIPELINE_ID: "${PIPELINE_ID}"
+      VOLGA_WORKER_COUNT: "${WORKER_COUNT}"
+      VOLGA_WORKER_HOST_PREFIX: "${WORKER_HOST_PREFIX}"
+      VOLGA_WORKER_PORT: "${WORKER_CONTROL_PORT}"
+      VOLGA_WORKER_TRANSPORT_PORT: "${WORKER_TRANSPORT_PORT}"
+      VOLGA_PIPELINE_SPEC_PATH: "/app/pipeline-spec.json"
+
+  worker-0:
+    image: volga:test
+    command: ["volga-worker"]
+    depends_on: ["master"]
+    environment:
+      VOLGA_WORKER_BIND_ADDR: "0.0.0.0:${WORKER_CONTROL_PORT}"
+      VOLGA_MASTER_SERVICE_ADDR: "master:${MASTER_CONTAINER_PORT}"
+      VOLGA_WORKER_HOLD_ON_FINISH: "true"
+      VOLGA_WORKER_HOST_PREFIX: "${WORKER_HOST_PREFIX}"
+      VOLGA_WORKER_INDEX: "0"
+
+  worker-1:
+    image: volga:test
+    command: ["volga-worker"]
+    depends_on: ["master"]
+    environment:
+      VOLGA_WORKER_BIND_ADDR: "0.0.0.0:${WORKER_CONTROL_PORT}"
+      VOLGA_MASTER_SERVICE_ADDR: "master:${MASTER_CONTAINER_PORT}"
+      VOLGA_WORKER_HOLD_ON_FINISH: "true"
+      VOLGA_WORKER_HOST_PREFIX: "${WORKER_HOST_PREFIX}"
+      VOLGA_WORKER_INDEX: "1"
+
+  worker-2:
+    image: volga:test
+    command: ["volga-worker"]
+    depends_on: ["master"]
+    environment:
+      VOLGA_WORKER_BIND_ADDR: "0.0.0.0:${WORKER_CONTROL_PORT}"
+      VOLGA_MASTER_SERVICE_ADDR: "master:${MASTER_CONTAINER_PORT}"
+      VOLGA_WORKER_HOLD_ON_FINISH: "true"
+      VOLGA_WORKER_HOST_PREFIX: "${WORKER_HOST_PREFIX}"
+      VOLGA_WORKER_INDEX: "2"
+
+  storage:
+    image: volga:test
+    command: ["volga-test-storage"]
+    ports:
+      - "${STORAGE_PORT}:${STORAGE_CONTAINER_PORT}"

@@ -34,10 +34,13 @@ pub struct PipelineSpec {
     pub execution_profile: Option<ExecutionProfile>,
     pub execution_mode: ExecutionMode,
     pub parallelism: usize,
+    #[serde(default)]
     pub worker_runtime: WorkerRuntimeSpec,
     /// Per-operator-type storage overrides (shared across all instances of that operator type in a worker).
     /// Key is a stable operator-type string (e.g. "window").
+    #[serde(default)]
     pub operator_type_storage: HashMap<String, StorageSpec>,
+    #[serde(default)]
     pub operator_overrides: OperatorOverrides,
     pub sources: Vec<SourceSpec>,
     pub request_source_sink: Option<RequestSourceSinkSpec>,

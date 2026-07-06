@@ -214,6 +214,20 @@ cd volga
 cargo build
 ```
 
+# 🧩 Docker Compose Smoke Run
+
+Build the runtime image and start a demo master/worker pipeline:
+
+```bash
+docker build -t volga:test .
+docker compose up
+```
+
+This uses:
+
+- `docker-compose.yaml`
+- `docker/pipeline_spec.demo.json`
+
 
 # 🙇 Running Locally
 

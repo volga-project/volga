@@ -1,0 +1,49 @@
+{
+  "execution_profile": {
+    "MasterWorker": {
+      "num_threads_per_task": 4
+    }
+  },
+  "execution_mode": "Streaming",
+  "parallelism": 1,
+  "sources": [
+    {
+      "table_name": "test_table",
+      "schema_json": {
+        "fields": [
+          {
+            "name": "value",
+            "nullable": false,
+            "type": {
+              "name": "utf8"
+            },
+            "children": []
+          }
+        ]
+      },
+      "source": {
+        "Datagen": {
+          "rate": 10.0,
+          "limit": 50,
+          "run_for_s": null,
+          "batch_size": 10,
+          "fields": {
+            "value": {
+              "Key": {
+                "num_unique": 1
+              }
+            }
+          },
+          "replayable": true
+        }
+      }
+    }
+  ],
+  "sink": {
+    "InMemoryStorageGrpc": {
+      "server_addr": "http://storage:50071"
+    }
+  },
+  "sql": "SELECT value FROM test_table",
+  "node_assignment_strategy": "OperatorPerWorker"
+}
