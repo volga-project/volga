@@ -212,9 +212,10 @@ ctx.execute()?;
 git clone https://github.com/volga-project/volga
 cd volga
 cargo build
+cargo test
 ```
 
-# 🧩 Docker Compose Smoke Run
+# 🙇 Running Locally
 
 Build the runtime image and start a demo master/worker pipeline:
 
@@ -227,13 +228,6 @@ This uses:
 
 - `docker-compose.yaml`
 - `docker/pipeline_spec.demo.json`
-
-
-# 🙇 Running Locally
-
-```bash
-cargo test
-```
 
 # 🧁 Roadmap
 
