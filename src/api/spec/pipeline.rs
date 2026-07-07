@@ -46,7 +46,7 @@ pub struct PipelineSpec {
     pub request_source_sink: Option<RequestSourceSinkSpec>,
     pub sink: Option<SinkSpec>,
     pub sql: Option<String>,
-    pub node_assignment_strategy: Option<TaskWorkerAssignmentStrategyType>,
+    pub task_assignment_strategy: Option<TaskWorkerAssignmentStrategyType>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -80,7 +80,7 @@ impl PipelineSpecBuilder {
                 request_source_sink: None,
                 sink: None,
                 sql: None,
-                node_assignment_strategy: None,
+                task_assignment_strategy: None,
             },
         }
     }
@@ -186,11 +186,11 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_node_assignment_strategy(
+    pub fn with_task_assignment_strategy(
         mut self,
         strategy: TaskWorkerAssignmentStrategyType,
     ) -> Self {
-        self.spec.node_assignment_strategy = Some(strategy);
+        self.spec.task_assignment_strategy = Some(strategy);
         self
     }
 

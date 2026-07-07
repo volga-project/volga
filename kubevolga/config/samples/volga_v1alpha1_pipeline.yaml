@@ -27,11 +27,13 @@ spec:
   holdOnFinish: true
   pipelineSpec:
     execution_mode: Streaming
-    parallelism: 1
+    parallelism: 6
     execution_profile:
       MasterWorker:
         num_threads_per_task: 4
-    node_assignment_strategy: OperatorPerWorker
+    task_assignment_strategy:
+      Pipelined:
+        slots_per_node: 2
     sources:
       - table_name: test_table
         schema_json: |
@@ -48,12 +50,12 @@ spec:
         source:
           Datagen: |
             {
-              "rate": 1.0,
-              "limit": 10,
+              "rate": null,
+              "limit": 60,
               "run_for_s": null,
               "batch_size": 5,
               "fields": {
-                "value": { "Key": { "num_unique": 1 } }
+                "value": { "Key": { "num_unique": 6 } }
               },
               "replayable": true
             }

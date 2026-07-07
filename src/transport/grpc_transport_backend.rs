@@ -20,17 +20,51 @@ use tokio::sync::oneshot;
 
 use super::transport_client::TransportClientConfig;
 
+type ChannelId = String;
+type NodeId = String;
+type NodeIp = String;
+type TransportPort = i32;
+type RemoteNodeAddr = (NodeId, NodeIp, TransportPort);
+
+type ReaderReceivers = HashMap<ChannelId, BatchReceiver>;
+type WriterSenders = HashMap<ChannelId, BatchSender>;
+
+type RemoteReaderSenders = HashMap<ChannelId, BatchSender>;
+type RemoteWriterReceivers = HashMap<ChannelId, BatchReceiver>;
+
+type LocalChannels = HashMap<ChannelId, (BatchSender, Option<BatchReceiver>)>;
+
+/// gRPC transport backend for workers that have at least one remote edge.
+///
+/// Topology model:
+/// - Local channels are wired directly in `init_channels` (same as in-memory semantics):
+///   source task gets a writer sender, target task gets a reader receiver.
+/// - Remote channels are split into:
+///   - `remote_reader_senders`: ingress queues for remote input channels
+///   - `remote_writer_receivers`: egress queues for remote output channels
+/// - Remote output channels are also indexed by destination node via `channel_to_node`,
+///   and clients are created per destination node in `nodes`.
+/// - This means remote traffic is multiplexed by `channel_id` over shared per-node client
+///   streams/queues (not dedicated task-to-task sockets). Under skew or slow consumers,
+///   this can create cross-channel backpressure / head-of-line effects on shared paths.
+///
+/// Runtime flow:
+/// 1) `start_reading_side` optionally starts a gRPC server (if remote inputs exist) and
+///    routes received `(message, channel_id)` items into `remote_reader_senders`.
+/// 2) `start_writing_side` optionally starts per-node gRPC clients (if remote outputs exist)
+///    and drains `remote_writer_receivers`, routing each channel to its destination node.
+/// 3) `close` stops server/clients/tasks and joins all handles.
 pub struct GrpcTransportBackend {
     server_handle: Option<tokio::task::JoinHandle<()>>,
     client_handles: Vec<tokio::task::JoinHandle<()>>,
     reader_task: Option<tokio::task::JoinHandle<()>>,
     writer_task: Option<tokio::task::JoinHandle<()>>,
 
-    reader_senders: Option<HashMap<String, BatchSender>>,
-    writer_receivers: Option<HashMap<String, BatchReceiver>>,
+    remote_reader_senders: Option<HashMap<ChannelId, BatchSender>>,
+    remote_writer_receivers: Option<HashMap<ChannelId, BatchReceiver>>,
 
-    nodes: Option<Vec<(String, String, i32)>>,
-    channel_to_node: Option<HashMap<String, String>>,
+    nodes: Option<Vec<RemoteNodeAddr>>,
+    channel_to_node: Option<HashMap<ChannelId, NodeId>>,
     port: Option<i32>,
 
     shutdown_tx: Option<oneshot::Sender<()>>,
@@ -49,8 +83,8 @@ impl GrpcTransportBackend {
             client_handles: Vec::new(),
             reader_task: None,
             writer_task: None,
-            reader_senders: None,
-            writer_receivers: None,
+            remote_reader_senders: None,
+            remote_writer_receivers: None,
             nodes: None,
             channel_to_node: None,
             port: None,
@@ -61,60 +95,373 @@ impl GrpcTransportBackend {
     }
 
     fn get_host_port_from_in_channels(&self, in_channels: &[Channel]) -> i32 {
-        if in_channels.len() == 0 {
-            panic!("No channels provided");
-        }
+        let mut ports = in_channels
+            .iter()
+            .map(|channel| match channel {
+                Channel::Remote {
+                    target_transport_port,
+                    ..
+                } => *target_transport_port,
+                Channel::Local { .. } => panic!("Expected only remote channels"),
+            })
+            .collect::<Vec<_>>();
 
-        let mut p: Option<i32> = None;
-        for channel in in_channels {
-            if let Channel::Remote { target_transport_port: port, .. } = channel {
-                if p.is_none() {
-                    p = Some(*port);
-                } else {
-                    if p.unwrap() != *port {
-                        panic!("All ports should be the same, channels: {:?}", in_channels);
-                    }
-                }
-            } else {
-                panic!("Exepected remote channels")
-            }
-        }
-        if p.is_none() {
-            panic!("All ports should be the same {:?}", in_channels)
-        }
+        ports.sort_unstable();
+        ports.dedup();
 
-        return p.unwrap()
+        match ports.as_slice() {
+            [port] => *port,
+            [] => panic!("Expected at least one remote input channel"),
+            _ => panic!("All ports should be the same, channels: {:?}", in_channels),
+        }
     }
 
-    fn get_remote_nodes_from_out_channels(&self, out_channels: &[Channel]) -> (Vec<(String, String, i32)>, HashMap<String, String>) {
-        if out_channels.len() == 0 {
-            panic!("No channels provided");
-        }
-        let mut nodes = HashMap::new();
-        let mut channel_to_node = HashMap::new();
-        
+    fn get_remote_nodes_from_out_channels(
+        &self,
+        out_channels: &[Channel],
+    ) -> (Vec<RemoteNodeAddr>, HashMap<ChannelId, NodeId>) {
+        let mut nodes_by_id: HashMap<NodeId, (NodeIp, TransportPort)> = HashMap::new();
+        let mut channel_to_node: HashMap<ChannelId, NodeId> = HashMap::new();
+
         for channel in out_channels {
-            if let Channel::Remote { target_node_ip, target_node_id, target_transport_port: target_port, .. } = channel {
-                let channel_id = channel.get_channel_id().clone();
-                channel_to_node.insert(channel_id, target_node_id.clone());
-                
-                let ip_and_port = nodes.get(target_node_id);
-                if ip_and_port.is_none() {
-                    nodes.insert(target_node_id.clone(), (target_node_ip.clone(), *target_port));
-                } else {
-                    if ip_and_port.unwrap().0 != *target_node_ip {
+            let (
+                channel_id,
+                target_node_id,
+                target_node_ip,
+                target_port,
+            ) = match channel {
+                Channel::Remote {
+                    channel_id,
+                    target_node_id,
+                    target_node_ip,
+                    target_transport_port,
+                    ..
+                } => (
+                    channel_id.clone(),
+                    target_node_id.clone(),
+                    target_node_ip.clone(),
+                    *target_transport_port,
+                ),
+                Channel::Local { .. } => panic!("Expected only remote channels"),
+            };
+
+            channel_to_node.insert(channel_id, target_node_id.clone());
+
+            match nodes_by_id.entry(target_node_id.clone()) {
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    v.insert((target_node_ip, target_port));
+                }
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    let (existing_ip, _existing_port) = o.get();
+                    if existing_ip != &target_node_ip {
                         panic!("Node id<->ip mismatch");
                     }
                 }
-            } else {
-                panic!("Exepected remote channels")
             }
         }
-        
-        let node_list: Vec<(String, String, i32)> = nodes.into_iter()
+
+        let node_list: Vec<RemoteNodeAddr> = nodes_by_id
+            .into_iter()
             .map(|(node_id, (ip, port))| (node_id, ip, port))
             .collect();
         (node_list, channel_to_node)
+    }
+
+    async fn start_reading_side(
+        &mut self,
+        remote_reader_senders: HashMap<ChannelId, BatchSender>,
+    ) {
+        // Start reading side only when this worker has remote input channels.
+        let Some(port) = self.port else {
+            return;
+        };
+
+        let (server_tx, mut server_rx) = mpsc::channel(Self::GRPC_SERVER_QUEUE_SIZE);
+        let shutdown_rx = self.shutdown_rx.take().unwrap();
+        let server_handle = tokio::spawn(async move {
+            let addr = format!("0.0.0.0:{}", port).parse().unwrap();
+            let service = MessageStreamServiceImpl::new(server_tx);
+            let svc = MessageStreamServiceServer::new(service);
+
+            println!("[GRPC_BACKEND] Starting gRPC server on {}", addr);
+
+            Server::builder()
+                .add_service(svc)
+                .serve_with_shutdown(addr, async {
+                    let _ = shutdown_rx.await;
+                    println!("[SERVER] Received shutdown signal");
+                })
+                .await
+                .unwrap();
+        });
+        self.server_handle = Some(server_handle);
+
+        // Route messages from gRPC server ingress to remote input channel queues.
+        let running = self.running.clone();
+        let reader_task = tokio::spawn(async move {
+            while running.load(std::sync::atomic::Ordering::Relaxed) {
+                match time::timeout(Duration::from_millis(100), server_rx.recv()).await {
+                    Ok(Some((message, channel_id))) => {
+                        // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
+                        let sender = remote_reader_senders.get(&channel_id).unwrap();
+                        while running.load(std::sync::atomic::Ordering::Relaxed) {
+                            match time::timeout(Duration::from_millis(100), sender.send(message.clone()))
+                                .await
+                            {
+                                Ok(Ok(())) => break,
+                                Ok(Err(e)) => {
+                                    panic!(
+                                        "[GRPC_BACKEND] Failed to forward message to channel {}: {}",
+                                        channel_id, e
+                                    );
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        if running.load(std::sync::atomic::Ordering::Relaxed) {
+                            panic!("[GRPC_BACKEND] Server channel closed");
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+        });
+        self.reader_task = Some(reader_task);
+    }
+
+    async fn start_writing_side(
+        &mut self,
+        remote_writer_receivers: HashMap<ChannelId, BatchReceiver>,
+    ) {
+        if remote_writer_receivers.is_empty() {
+            return;
+        }
+
+        let channel_to_node: HashMap<ChannelId, NodeId> =
+            self.channel_to_node.take().expect("Remote channel mapping should be found");
+        let nodes = self.nodes.take().expect("Remote nodes should be found");
+        let mut client_txs: HashMap<NodeId, mpsc::Sender<(Message, ChannelId)>> = HashMap::new();
+
+        for (peer_node_id, peer_node_ip, target_port) in nodes {
+            let server_addr = format!("http://{}:{}", peer_node_ip, target_port);
+            let (client_tx, client_rx) = mpsc::channel(Self::GRPC_CLIENT_QUEUE_SIZE);
+            client_txs.insert(peer_node_id.clone(), client_tx);
+            let client_stream_task = tokio::spawn(async move {
+                let mut client = MessageStreamClient::connect(server_addr).await.unwrap();
+                client.stream_messages(client_rx).await.unwrap();
+            });
+            self.client_handles.push(client_stream_task);
+        }
+
+        // Route remote output channel queues to per-node gRPC clients.
+        let running = self.running.clone();
+        let writer_task = tokio::spawn(async move {
+            let mut receiver_futures = Vec::new();
+
+            for (channel_id, mut receiver) in remote_writer_receivers {
+                let channel_id_clone = channel_id.clone();
+                let client_txs_clone = client_txs.clone();
+                let channel_to_node_clone = channel_to_node.clone();
+
+                let r = running.clone();
+                let future = async move {
+                    while r.load(std::sync::atomic::Ordering::Relaxed) {
+                        match time::timeout(Duration::from_millis(100), receiver.recv()).await {
+                            Ok(Some(message)) => {
+                                let node_id = channel_to_node_clone
+                                    .get(&channel_id_clone)
+                                    .unwrap_or_else(|| {
+                                        panic!(
+                                            "[GRPC_BACKEND] Missing remote target mapping for channel {}",
+                                            channel_id_clone
+                                        )
+                                    });
+                                let client_tx = client_txs_clone.get(node_id).unwrap_or_else(|| {
+                                    panic!(
+                                        "[GRPC_BACKEND] Missing remote client for node {} (channel {})",
+                                        node_id, channel_id_clone
+                                    )
+                                });
+                                while r.load(std::sync::atomic::Ordering::Relaxed) {
+                                    match time::timeout(
+                                        Duration::from_millis(100),
+                                        client_tx.send((message.clone(), channel_id_clone.clone())),
+                                    )
+                                    .await
+                                    {
+                                        Ok(Ok(())) => break,
+                                        Ok(Err(e)) => {
+                                            panic!(
+                                                "[GRPC_BACKEND] Failed to send message to client {}: {}",
+                                                node_id, e
+                                            );
+                                        }
+                                        Err(_) => continue,
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => continue,
+                        }
+                    }
+                };
+
+                receiver_futures.push(Box::pin(future));
+            }
+
+            let _ = futures::future::join_all(receiver_futures).await;
+        });
+        self.writer_task = Some(writer_task);
+    }
+
+    fn derive_remote_connection_args(
+        &self,
+        input_channels: &[Channel],
+        output_channels: &[Channel],
+    ) -> (
+        Option<TransportPort>,
+        Option<HashMap<ChannelId, NodeId>>,
+        Option<Vec<RemoteNodeAddr>>,
+    ) {
+        let remote_input_channels: Vec<Channel> = input_channels
+            .iter()
+            .filter_map(|channel| match channel {
+                Channel::Remote { .. } => Some(channel.clone()),
+                Channel::Local { .. } => None,
+            })
+            .collect();
+        let port = if remote_input_channels.is_empty() {
+            None
+        } else {
+            Some(self.get_host_port_from_in_channels(&remote_input_channels))
+        };
+
+        let remote_output_channels: Vec<Channel> = output_channels
+            .iter()
+            .filter_map(|channel| match channel {
+                Channel::Remote { .. } => Some(channel.clone()),
+                Channel::Local { .. } => None,
+            })
+            .collect();
+        let (channel_to_node, remote_nodes) = if remote_output_channels.is_empty() {
+            (None, None)
+        } else {
+            let (remote_nodes, channel_to_node) =
+                self.get_remote_nodes_from_out_channels(&remote_output_channels);
+            (Some(channel_to_node), Some(remote_nodes))
+        };
+
+        (port, channel_to_node, remote_nodes)
+    }
+
+    fn build_channel_maps(
+        input_channels: &[Channel],
+        output_channels: &[Channel],
+    ) -> (
+        ReaderReceivers,
+        WriterSenders,
+        RemoteReaderSenders,
+        RemoteWriterReceivers,
+    ) {
+        let mut local_channels: LocalChannels = HashMap::new();
+        let mut reader_receivers: ReaderReceivers = HashMap::new();
+        let mut writer_senders: WriterSenders = HashMap::new();
+        let mut remote_reader_senders: RemoteReaderSenders = HashMap::new();
+        let mut remote_writer_receivers: RemoteWriterReceivers = HashMap::new();
+
+        for channel in output_channels.iter().cloned() {
+            let channel_id = channel.get_channel_id();
+            let queue_size = channel.get_queue_size_records();
+            match channel {
+                Channel::Local { .. } => {
+                    let (tx, _rx) = local_channels
+                        .entry(channel_id.clone())
+                        .or_insert_with(|| {
+                            let (tx, rx) = batch_bounded_channel(queue_size);
+                            (tx, Some(rx))
+                        });
+                    writer_senders.insert(channel_id, tx.clone());
+                }
+                Channel::Remote { .. } => {
+                    let (tx, rx) = batch_bounded_channel(queue_size);
+                    writer_senders.insert(channel_id.clone(), tx);
+                    remote_writer_receivers.insert(channel_id, rx);
+                }
+            }
+        }
+
+        for channel in input_channels.iter().cloned() {
+            let channel_id = channel.get_channel_id();
+            let queue_size = channel.get_queue_size_records();
+            match channel {
+                Channel::Local { .. } => {
+                    let (_tx, rx_opt) = local_channels
+                        .entry(channel_id.clone())
+                        .or_insert_with(|| {
+                            let (tx, rx) = batch_bounded_channel(queue_size);
+                            (tx, Some(rx))
+                        });
+                    let rx = rx_opt.take().expect("Local channel receiver should exist");
+                    reader_receivers.insert(channel_id, rx);
+                }
+                Channel::Remote { .. } => {
+                    let (tx, rx) = batch_bounded_channel(queue_size);
+                    remote_reader_senders.insert(channel_id.clone(), tx);
+                    reader_receivers.insert(channel_id, rx);
+                }
+            }
+        }
+
+        (
+            reader_receivers,
+            writer_senders,
+            remote_reader_senders,
+            remote_writer_receivers,
+        )
+    }
+
+    fn build_transport_client_configs(
+        execution_graph: &ExecutionGraph,
+        vertex_ids: &[VertexId],
+        mut reader_receivers: ReaderReceivers,
+        writer_senders: &WriterSenders,
+    ) -> HashMap<VertexId, TransportClientConfig> {
+        let mut transport_client_configs: HashMap<VertexId, TransportClientConfig> = HashMap::new();
+
+        for vertex_id in vertex_ids {
+            let config = transport_client_configs
+                .entry(vertex_id.clone())
+                .or_insert(TransportClientConfig::new(vertex_id.clone()));
+
+            let (input_edges, output_edges) = execution_graph
+                .get_edges_for_vertex(vertex_id.as_ref())
+                .expect("vertex should exist");
+
+            for edge in input_edges {
+                let channel_id = edge.get_channel().get_channel_id();
+                config.add_reader_receiver(
+                    channel_id.clone(),
+                    reader_receivers
+                        .remove(&channel_id)
+                        .expect("reader receiver should exist"),
+                );
+            }
+
+            for edge in output_edges {
+                let channel_id = edge.get_channel().get_channel_id();
+                config.add_writer_sender(
+                    channel_id.clone(),
+                    writer_senders
+                        .get(&channel_id)
+                        .expect("writer sender should exist")
+                        .clone(),
+                );
+            }
+        }
+
+        transport_client_configs
     }
 }
 
@@ -123,156 +470,11 @@ impl TransportBackend for GrpcTransportBackend {
     async fn start(&mut self) {
         self.running.store(true, std::sync::atomic::Ordering::Release);
 
-        let reader_senders = self.reader_senders.take().unwrap();
-        
-        // Start reading side if needed
-        if reader_senders.len() != 0 {
-            // Start server
-            let port = self.port.expect("Port should be found");
-            let (server_tx, mut server_rx) = mpsc::channel(Self::GRPC_SERVER_QUEUE_SIZE);
-            // let (server_tx, mut server_rx) = batch_bounded_channel(...);
-            let shutdown_rx = self.shutdown_rx.take().unwrap();
-            let server_handle = tokio::spawn(async move {
-                let addr = format!("0.0.0.0:{}", port).parse().unwrap();
-                let service = MessageStreamServiceImpl::new(server_tx);
-                let svc = MessageStreamServiceServer::new(service);
+        let remote_reader_senders = self.remote_reader_senders.take().unwrap();
+        self.start_reading_side(remote_reader_senders).await;
 
-                println!("[GRPC_BACKEND] Starting gRPC server on {}", addr);
-                
-                Server::builder()
-                    .add_service(svc)
-                    .serve_with_shutdown(addr, async {
-                        let _ = shutdown_rx.await;
-                        println!("[SERVER] Received shutdown signal");
-                    })
-                    .await
-                    .unwrap();
-            });
-            self.server_handle = Some(server_handle);
-
-            // Start reader task
-            // routes data from server to reader channels
-            let runnning = self.running.clone();
-            let reader_task = tokio::spawn(async move {
-                while runnning.load(std::sync::atomic::Ordering::Relaxed) {
-                    match time::timeout(Duration::from_millis(100), server_rx.recv()).await {
-                        Ok(Some((message, channel_id))) => {
-                            // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
-                            let sender = reader_senders.get(&channel_id).unwrap();
-                            while runnning.load(std::sync::atomic::Ordering::Relaxed) {
-                                match time::timeout(Duration::from_millis(100), sender.send(message.clone())).await {
-                                    Ok(Ok(())) => {
-                                        break;
-                                    }, 
-                                    Ok(Err(e)) => {
-                                        panic!("[GRPC_BACKEND] Failed to forward message to channel {}: {}", channel_id, e);
-                                    },
-                                    Err(_) => {
-                                        // timeout
-                                        continue;
-                                    }
-                                }
-                            }
-                        },
-                        Ok(None) => {
-                            if runnning.load(std::sync::atomic::Ordering::Relaxed) {
-                                panic!("[GRPC_BACKEND] Server channel closed");
-                            }
-                        },
-                        Err(_) => {
-                            // timeout
-                            continue
-                        },
-                    }
-                }
-            });
-            self.reader_task = Some(reader_task);
-        }
-
-        // Start writing side if needed
-        let writer_receivers = self.writer_receivers.take().unwrap();
-        
-        if writer_receivers.len() != 0 {
-
-            // Start clients for each peer node
-            let channel_to_node: HashMap<String, String> = self.channel_to_node.take().expect("Nodes should be found");
-            let nodes = self.nodes.take().expect("Nodes should be found");
-            let mut client_txs: HashMap<String, mpsc::Sender<(Message, String)>> = HashMap::new();
-            
-            // println!("[GRPC_BACKEND] Setting up clients for nodes: {:?}", nodes);
-            // println!("[GRPC_BACKEND] Channel to node mapping: {:?}", channel_to_node);
-            
-            for (peer_node_id, peer_node_ip, target_port) in nodes {
-                let server_addr = format!("http://{}:{}", peer_node_ip, target_port);
-                let (client_tx, client_rx) = mpsc::channel(Self::GRPC_CLIENT_QUEUE_SIZE);
-                client_txs.insert(peer_node_id.clone(), client_tx);
-                // println!("[GRPC_BACKEND] Created client for node_id: {} at {}", node_id, server_addr);
-                let client_stream_task = tokio::spawn(async move {
-                    let mut client = MessageStreamClient::connect(server_addr).await.unwrap();
-                    client.stream_messages(client_rx).await.unwrap();
-                });
-                
-                self.client_handles.push(client_stream_task);
-            }
-
-            let running = self.running.clone();
-            
-            // Start writer task
-            // routes data from writer channels to clients based on peer node<->channel mapping
-            let writer_task = tokio::spawn(async move {
-                let mut receiver_futures = Vec::new();
-                
-                // Create futures for all writer receivers
-                for (channel_id, mut receiver) in writer_receivers {
-                    let channel_id_clone = channel_id.clone();
-                    let client_txs_clone = client_txs.clone();
-                    let channel_to_node_clone = channel_to_node.clone();
-                    
-                    let r = running.clone();
-                    let future = async move {
-                        
-                        // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
-                        while r.load(std::sync::atomic::Ordering::Relaxed) {
-                            match time::timeout(Duration::from_millis(100), receiver.recv()).await {
-                                Ok(Some(message)) => {
-                                    let node_id = channel_to_node_clone.get(&channel_id_clone).unwrap();
-                                    // println!("[GRPC_BACKEND] Looking up client for node_id: {} (channel: {})", node_id, channel_id_clone);
-                                    // println!("[GRPC_BACKEND] Available client_txs keys: {:?}", client_txs_clone.keys().collect::<Vec<_>>());
-                                    let client_tx = client_txs_clone.get(node_id).unwrap();
-                                    while r.load(std::sync::atomic::Ordering::Relaxed) {
-                                        match time::timeout(Duration::from_millis(100), client_tx.send((message.clone(), channel_id_clone.clone()))).await {
-                                            Ok(Ok(())) => {
-                                                break;
-                                            }, 
-                                            Ok(Err(e)) => {
-                                                panic!("[GRPC_BACKEND] Failed to send message to client {}: {}", node_id, e);
-                                            },
-                                            Err(_) => {
-                                                // timeout
-                                                continue;
-                                            }
-                                        }
-                                    }
-                                },
-                                Ok(None) => {
-                                    // Channel closure is expected when task pipelines finish/teardown.
-                                    break;
-                                },
-                                Err(_) => {
-                                    // timeout
-                                    continue
-                                },
-                            }
-                        }
-                    };
-                    
-                    receiver_futures.push(Box::pin(future));
-                }
-                
-                let _ = futures::future::join_all(receiver_futures).await;
-            });
-            self.writer_task = Some(writer_task);
-        }
+        let remote_writer_receivers = self.remote_writer_receivers.take().unwrap();
+        self.start_writing_side(remote_writer_receivers).await;
     }
 
     async fn close(&mut self) {
@@ -283,7 +485,6 @@ impl TransportBackend for GrpcTransportBackend {
             let _ = shutdown_tx.send(());
         }
 
-        // Wait for all tasks to complete
         if let Some(server_handle) = self.server_handle.take() {
             let _ = server_handle.await;
         }
@@ -308,75 +509,38 @@ impl TransportBackend for GrpcTransportBackend {
         execution_graph: &ExecutionGraph,
         vertex_ids: Vec<VertexId>,
     ) -> HashMap<VertexId, TransportClientConfig> {
-        let mut all_input_edges = Vec::new();
-        let mut all_output_edges = Vec::new();
-        
+        let mut input_channels = Vec::new();
+        let mut output_channels = Vec::new();
+
         for vertex_id in &vertex_ids {
-            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()).unwrap();
-            all_input_edges.extend(input_edges);
-            all_output_edges.extend(output_edges);
+            let (input_edges, output_edges) = execution_graph
+                .get_edges_for_vertex(vertex_id.as_ref())
+                .expect("vertex should exist");
+            input_channels.extend(input_edges.iter().map(|edge| edge.get_channel()));
+            output_channels.extend(output_edges.iter().map(|edge| edge.get_channel()));
         }
 
-        let input_channels: Vec<Channel> = all_input_edges.iter().map(|edge| edge.get_channel()).collect();
-        let output_channels: Vec<Channel> = all_output_edges.iter().map(|edge| edge.get_channel()).collect();
-
-        if input_channels.len() != 0 {
-            self.port = Some(self.get_host_port_from_in_channels(&input_channels));
-        }
-
-        if output_channels.len() != 0 {
-            let (remote_nodes, channel_to_node) = self.get_remote_nodes_from_out_channels(&output_channels);
-            self.channel_to_node = Some(channel_to_node);
-            self.nodes = Some(remote_nodes);
-        }
-
-        let mut reader_receivers = HashMap::new();
-        let mut reader_senders = HashMap::new();
-        
-        for edge in &all_input_edges {
-            let channel = edge.get_channel();
-            let channel_id = channel.get_channel_id();
-            let (tx, rx) = batch_bounded_channel(channel.get_queue_size_records());
-            reader_senders.insert(channel_id.clone(), tx);
-            reader_receivers.insert(channel_id.clone(), rx);
-        }
-
-        let mut writer_receivers = HashMap::new();
-        let mut writer_senders = HashMap::new();
-
-        for edge in &all_output_edges {
-            let channel = edge.get_channel();
-            let channel_id = channel.get_channel_id();
-            let (tx, rx) = batch_bounded_channel(channel.get_queue_size_records());
-            writer_senders.insert(channel_id.clone(), tx);
-            writer_receivers.insert(channel_id.clone(), rx);
-        }
-
-        let mut transport_client_configs: HashMap<VertexId, TransportClientConfig> = HashMap::new();
-        
-        for vertex_id in vertex_ids {
-            let config = transport_client_configs
-                .entry(vertex_id.clone())
-                .or_insert(TransportClientConfig::new(vertex_id.clone()));
-            
-            let (input_edges, output_edges) = execution_graph.get_edges_for_vertex(vertex_id.as_ref()).unwrap();
-            
-            for edge in input_edges {
-                let channel = edge.get_channel();
-                let channel_id = channel.get_channel_id();
-                config.add_reader_receiver(channel_id.clone(), reader_receivers.remove(&channel_id).unwrap());
-            }
-
-            for edge in output_edges {
-                let channel = edge.get_channel();
-                let channel_id = channel.get_channel_id();
-                config.add_writer_sender(channel_id.clone(), writer_senders.get(&channel_id).unwrap().clone());
-            }
-        }
+        let (port, channel_to_node, nodes) =
+            self.derive_remote_connection_args(&input_channels, &output_channels);
+        self.port = port;
+        self.channel_to_node = channel_to_node;
+        self.nodes = nodes;
+        let (
+            reader_receivers,
+            writer_senders,
+            remote_reader_senders,
+            remote_writer_receivers,
+        ) = Self::build_channel_maps(&input_channels, &output_channels);
+        let transport_client_configs = Self::build_transport_client_configs(
+            execution_graph,
+            &vertex_ids,
+            reader_receivers,
+            &writer_senders,
+        );
 
         // Store the senders and receivers for the tasks
-        self.reader_senders = Some(reader_senders);
-        self.writer_receivers = Some(writer_receivers);
+        self.remote_reader_senders = Some(remote_reader_senders);
+        self.remote_writer_receivers = Some(remote_writer_receivers);
 
         transport_client_configs
     }

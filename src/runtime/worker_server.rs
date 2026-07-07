@@ -26,15 +26,6 @@ use worker_service::{
     TriggerCheckpointRequest, TriggerCheckpointResponse,
 };
 
-fn bytes_preview(bytes: &[u8], n: usize) -> String {
-    bytes
-        .iter()
-        .take(n)
-        .map(|b| format!("{:02x}", b))
-        .collect::<Vec<_>>()
-        .join("")
-}
-
 /// Server implementation of the WorkerService
 pub struct WorkerServiceImpl {
     worker: Arc<Mutex<Worker>>,
@@ -65,12 +56,11 @@ impl WorkerService for WorkerServiceImpl {
     ) -> Result<Response<ConfigureWorkerResponse>, Status> {
         let req = request.into_inner();
         let payload_len = req.init_payload_bytes.len();
-        let payload_first16 = bytes_preview(&req.init_payload_bytes, 16);
         let payload: WorkerInitPayload = serde_json::from_slice(&req.init_payload_bytes)
             .map_err(|e| {
                 Status::invalid_argument(format!(
-                    "Invalid worker init payload bytes: {} (len={} first16={})",
-                    e, payload_len, payload_first16
+                    "Invalid worker init payload bytes: {} (len={})",
+                    e, payload_len
                 ))
             })?;
         let spec = payload.pipeline_spec.clone();

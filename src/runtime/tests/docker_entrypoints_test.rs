@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
-use crate::api::{compile_logical_graph, PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
+use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
@@ -26,11 +26,15 @@ const WORKER_CONTROL_PORT: u16 = 50052;
 const WORKER_TRANSPORT_PORT: u16 = 60052;
 const WORKER_HOST_PREFIX_BASE: &str = "worker-";
 const STORAGE_CONTAINER_PORT: u16 = 50071;
+const NUM_WORKERS: usize = 3;
+const SLOTS_PER_NODE: usize = 2;
+const PARALLELISM: usize = NUM_WORKERS * SLOTS_PER_NODE;
 const NUM_BATCHES: usize = 2;
 const BATCH_SIZE: usize = 5;
-const EXPECTED_RECORDS: usize = NUM_BATCHES * BATCH_SIZE;
+const EXPECTED_RECORDS_PER_TASK: usize = NUM_BATCHES * BATCH_SIZE;
+const EXPECTED_TOTAL_RECORDS: usize = EXPECTED_RECORDS_PER_TASK * PARALLELISM;
 
-fn build_test_pipeline_spec_json(sink_server_addr: &str) -> Result<(String, usize)> {
+fn build_test_pipeline_spec_json(sink_server_addr: &str) -> Result<String> {
     let schema = Schema::new(vec![Field::new("value", DataType::Utf8, false)]);
     let mut fields = HashMap::new();
     fields.insert(
@@ -40,17 +44,19 @@ fn build_test_pipeline_spec_json(sink_server_addr: &str) -> Result<(String, usiz
         },
     );
     let spec = PipelineSpecBuilder::new()
-        .with_parallelism(1)
+        .with_parallelism(PARALLELISM)
         .with_execution_profile(ExecutionProfile::MasterWorker {
             num_threads_per_task: 4,
         })
-        .with_node_assignment_strategy(TaskWorkerAssignmentStrategyType::OperatorPerWorker)
+        .with_task_assignment_strategy(TaskWorkerAssignmentStrategyType::Pipelined {
+            slots_per_node: SLOTS_PER_NODE,
+        })
         .with_source(
             SourceSpec::new(
                 "test_table",
                 SourceSpecKind::Datagen(DatagenSpec {
-                rate: Some(1.0),
-                limit: Some(EXPECTED_RECORDS),
+                rate: None,
+                limit: Some(EXPECTED_TOTAL_RECORDS),
                 run_for_s: None,
                 batch_size: BATCH_SIZE,
                 fields,
@@ -64,16 +70,9 @@ fn build_test_pipeline_spec_json(sink_server_addr: &str) -> Result<(String, usiz
         })
         .sql("SELECT value FROM test_table")
         .build();
-    let logical_graph = compile_logical_graph(&spec, None);
-    let expected_workers = logical_graph.get_nodes().count();
-    // This query shape is source -> projection -> sink, so OperatorPerWorker needs 3 workers.
-    assert_eq!(
-        expected_workers, 3,
-        "expected 3 logical nodes/workers for test query"
-    );
     let spec_json =
         serde_json::to_string(&spec).context("failed to serialize test pipeline spec")?;
-    Ok((spec_json, expected_workers))
+    Ok(spec_json)
 }
 
 #[allow(dead_code)]
@@ -150,18 +149,15 @@ async fn connect_master_with_retry(
 #[tokio::test]
 #[ignore]
 async fn test_docker_master_and_workers_smoke() -> Result<()> {
-    ensure_test_image()?; // comment this if rebuilding the image is not needed
+    // ensure_test_image()?; // comment this if rebuilding the image is not needed
 
     let master_port = gen_unique_grpc_port();
     let storage_port = gen_unique_grpc_port();
     let pipeline_id = Uuid::new_v4().to_string();
     let worker_host_prefix = WORKER_HOST_PREFIX_BASE.to_string();
     let storage_addr_for_workers = format!("http://storage:{}", STORAGE_CONTAINER_PORT);
-    let (spec_json, expected_workers) = build_test_pipeline_spec_json(&storage_addr_for_workers)?;
-    assert_eq!(
-        expected_workers, 3,
-        "docker compose test currently expects 3 worker services"
-    );
+    let spec_json = build_test_pipeline_spec_json(&storage_addr_for_workers)?;
+    let expected_workers = NUM_WORKERS;
     let expected_workers_str = expected_workers.to_string();
     let compose_project = format!("volga-smoke-{}", Uuid::new_v4().simple());
     let compose_file = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -294,7 +290,7 @@ async fn test_docker_master_and_workers_smoke() -> Result<()> {
     let stored_messages = loop {
         let messages = storage_client.get_vector().await?;
         let total_rows: usize = messages.iter().map(|m| m.record_batch().num_rows()).sum();
-        if total_rows >= EXPECTED_RECORDS {
+        if total_rows >= EXPECTED_TOTAL_RECORDS {
             break messages;
         }
         if storage_start.elapsed() > storage_timeout {
@@ -302,22 +298,21 @@ async fn test_docker_master_and_workers_smoke() -> Result<()> {
                 "timed out waiting for storage records: got {} rows in {} batches, expected {} rows",
                 total_rows,
                 messages.len(),
-                EXPECTED_RECORDS
+                EXPECTED_TOTAL_RECORDS
             );
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     };
-    assert_eq!(
-        stored_messages.len(),
-        NUM_BATCHES,
-        "storage should contain expected number of output batches"
+    assert!(
+        !stored_messages.is_empty(),
+        "storage should contain at least one output batch"
     );
     let total_rows: usize = stored_messages
         .iter()
         .map(|m| m.record_batch().num_rows())
         .sum();
     assert_eq!(
-        total_rows, EXPECTED_RECORDS,
+        total_rows, EXPECTED_TOTAL_RECORDS,
         "storage should contain all expected output records"
     );
     for message in stored_messages {

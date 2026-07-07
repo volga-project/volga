@@ -5,7 +5,7 @@
     }
   },
   "execution_mode": "Streaming",
-  "parallelism": 1,
+  "parallelism": 6,
   "sources": [
     {
       "table_name": "test_table",
@@ -45,5 +45,5 @@
     }
   },
   "sql": "SELECT value FROM test_table",
-  "node_assignment_strategy": "OperatorPerWorker"
+  "task_assignment_strategy": {"Pipelined":{"slots_per_node":2}}
 }

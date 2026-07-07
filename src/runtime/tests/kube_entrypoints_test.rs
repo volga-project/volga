@@ -7,13 +7,17 @@ use anyhow::{bail, Context, Result};
 use arrow::array::StringArray;
 use uuid::Uuid;
 
-use crate::api::{compile_logical_graph, KubePipelineSpec, PipelineSpec};
+use crate::api::{KubePipelineSpec, PipelineSpec};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::storage::InMemoryStorageClient;
 
+const NUM_WORKERS: usize = 3;
+const SLOTS_PER_NODE: usize = 2;
+const PARALLELISM: usize = NUM_WORKERS * SLOTS_PER_NODE;
 const NUM_BATCHES: usize = 2;
 const BATCH_SIZE: usize = 5;
-const EXPECTED_RECORDS: usize = NUM_BATCHES * BATCH_SIZE;
+const EXPECTED_RECORDS_PER_TASK: usize = NUM_BATCHES * BATCH_SIZE;
+const EXPECTED_RECORDS: usize = EXPECTED_RECORDS_PER_TASK * PARALLELISM;
 const TEST_NAMESPACE: &str = "default";
 const TEST_STORAGE_SERVICE: &str = "volga-test-storage";
 const TEST_STORAGE_PORT: u16 = 50071;
@@ -156,6 +160,10 @@ fn configure_pipeline_crd(name: &str, sink_addr: &str) -> Result<serde_json::Val
 
     doc["metadata"]["name"] = serde_json::Value::String(name.to_string());
     doc["metadata"]["namespace"] = serde_json::Value::String(TEST_NAMESPACE.to_string());
+    doc["spec"]["pipelineSpec"]["parallelism"] = serde_json::Value::Number(PARALLELISM.into());
+    doc["spec"]["pipelineSpec"]["task_assignment_strategy"] = serde_json::json!({
+        "Pipelined": { "slots_per_node": SLOTS_PER_NODE }
+    });
 
     let sink = doc["spec"]["pipelineSpec"]["sink"]["InMemoryStorageGrpc"]
         .as_str()
@@ -171,8 +179,11 @@ fn configure_pipeline_crd(name: &str, sink_addr: &str) -> Result<serde_json::Val
         .context("expected sources[0].source.Datagen to be JSON string")?;
     let mut datagen_json: serde_json::Value =
         serde_json::from_str(datagen).context("parse embedded Datagen JSON")?;
+    datagen_json["rate"] = serde_json::Value::Null;
     datagen_json["limit"] = serde_json::Value::Number(EXPECTED_RECORDS.into());
     datagen_json["batch_size"] = serde_json::Value::Number(BATCH_SIZE.into());
+    datagen_json["fields"]["value"]["Key"]["num_unique"] =
+        serde_json::Value::Number(PARALLELISM.into());
     doc["spec"]["pipelineSpec"]["sources"][0]["source"]["Datagen"] = serde_json::Value::String(
         serde_json::to_string(&datagen_json).context("serialize embedded Datagen JSON")?,
     );
@@ -183,12 +194,8 @@ fn configure_pipeline_crd(name: &str, sink_addr: &str) -> Result<serde_json::Val
         .try_into()
         .context("convert KubePipelineSpec into runtime PipelineSpec")?;
 
-    let logical_graph = compile_logical_graph(&spec, None);
-    let expected_workers = logical_graph.get_nodes().count();
-    println!(
-        "[KUBE_SMOKE] computed expected worker replicas from logical graph: {}",
-        expected_workers
-    );
+    let expected_workers = NUM_WORKERS;
+    println!("[KUBE_SMOKE] expected worker replicas for pipelined test: {}", expected_workers);
     doc["spec"]["workers"]["replicas"] = serde_json::Value::Number(expected_workers.into());
     Ok(doc)
 }

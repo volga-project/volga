@@ -1,6 +1,6 @@
 execution_mode: Streaming
 parallelism: 1
-node_assignment_strategy: OperatorPerWorker
+task_assignment_strategy: OperatorPerWorker
 sources:
   - table_name: test_table
     schema_json: |

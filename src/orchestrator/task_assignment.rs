@@ -11,6 +11,9 @@ pub type TaskWorkerMapping = HashMap<String, WorkerNode>;
 pub enum TaskWorkerAssignmentStrategyType {
     SingleWorker,
     OperatorPerWorker,
+    /// Flink-like slot scheduling: each task-index slice across all operators
+    /// is placed into one slot on one worker; `slots_per_node` controls slices per worker.
+    Pipelined { slots_per_node: usize },
 }
 
 // inverse mapping
@@ -47,6 +50,12 @@ pub fn assign_tasks_with_strategy(
         }
         TaskWorkerAssignmentStrategyType::OperatorPerWorker => {
             OperatorPerWorkerStrategy.assign_tasks(execution_graph, nodes)
+        }
+        TaskWorkerAssignmentStrategyType::Pipelined { slots_per_node } => {
+            PipelinedStrategy {
+                slots_per_node: *slots_per_node,
+            }
+            .assign_tasks(execution_graph, nodes)
         }
     }
 }
@@ -128,6 +137,95 @@ impl TaskWorkerAssignStrategy for OperatorPerWorkerStrategy {
     }
 }
 
+/// Flink-like pipelined strategy:
+/// place one end-to-end task slice (same task_index across operators) into one slot,
+/// and place slots on workers in node-filling order.
+pub struct PipelinedStrategy {
+    pub slots_per_node: usize,
+}
+
+impl TaskWorkerAssignStrategy for PipelinedStrategy {
+    fn assign_tasks(
+        &self,
+        execution_graph: &ExecutionGraph,
+        nodes: &[WorkerNode],
+    ) -> TaskWorkerMapping {
+        let mut mapping = TaskWorkerMapping::new();
+
+        if nodes.is_empty() {
+            return mapping;
+        }
+        if self.slots_per_node == 0 {
+            panic!("Pipelined strategy requires slots_per_node > 0");
+        }
+
+        let mut unique_parallelism: Vec<i32> = execution_graph
+            .get_vertices()
+            .values()
+            .map(|v| v.parallelism)
+            .collect();
+        unique_parallelism.sort_unstable();
+        unique_parallelism.dedup();
+
+        if unique_parallelism.is_empty() {
+            return mapping;
+        }
+        if unique_parallelism.len() != 1 {
+            panic!(
+                "Pipelined strategy requires identical parallelism across execution graph, got {:?}",
+                unique_parallelism
+            );
+        }
+
+        let graph_parallelism = unique_parallelism[0];
+        if graph_parallelism <= 0 {
+            panic!(
+                "Pipelined strategy requires positive parallelism, got {}",
+                graph_parallelism
+            );
+        }
+        let graph_parallelism = graph_parallelism as usize;
+
+        let total_slots = nodes.len() * self.slots_per_node;
+        if total_slots < graph_parallelism {
+            panic!(
+                "Not enough worker slots ({}) for graph parallelism ({})",
+                total_slots, graph_parallelism
+            );
+        }
+
+        for (vertex_id, vertex) in execution_graph.get_vertices() {
+            if vertex.parallelism as usize != graph_parallelism {
+                panic!(
+                    "Pipelined strategy requires vertex {} to have parallelism {}, got {}",
+                    vertex_id, graph_parallelism, vertex.parallelism
+                );
+            }
+            if vertex.task_index < 0 {
+                panic!(
+                    "Pipelined strategy requires non-negative task_index, got {} for vertex {}",
+                    vertex.task_index, vertex_id
+                );
+            }
+            let task_index = vertex.task_index as usize;
+            if task_index >= graph_parallelism {
+                panic!(
+                    "Pipelined strategy requires task_index < parallelism ({}), got {} for vertex {}",
+                    graph_parallelism, task_index, vertex_id
+                );
+            }
+
+            let node_index = task_index / self.slots_per_node;
+            let worker_node = nodes
+                .get(node_index)
+                .expect("worker node should exist for computed slot");
+            mapping.insert(vertex_id.as_ref().to_string(), worker_node.clone());
+        }
+
+        mapping
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,14 +233,14 @@ mod tests {
     use crate::runtime::execution_graph::ExecutionGraph;
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
 
-    fn create_test_execution_graph() -> ExecutionGraph {
+    fn create_test_execution_graph(parallelism: usize) -> ExecutionGraph {
         use crate::api::planner::{Planner, PlanningContext};
         use arrow::datatypes::{DataType, Field, Schema};
         use datafusion::execution::context::SessionContext;
         use std::sync::Arc;
 
         let ctx = SessionContext::new();
-        let mut planner = Planner::new(PlanningContext::new(ctx));
+        let mut planner = Planner::new(PlanningContext::new(ctx).with_parallelism(parallelism));
 
         // Register test table
         planner.register_source(
@@ -164,7 +262,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_operator_per_worker_strategy() {
-        let execution_graph = create_test_execution_graph();
+        let execution_graph = create_test_execution_graph(1);
 
         // Group vertices by operator_id
         let mut operator_to_vertices: HashMap<String, Vec<String>> = HashMap::new();
@@ -244,4 +342,47 @@ mod tests {
             operator_to_worker.keys().cloned().collect();
         assert_eq!(expected_operator_ids, mapped_operator_ids);
     }
+
+    #[tokio::test]
+    async fn test_pipelined_strategy_assigns_slices_to_slots() {
+        let parallelism = 4usize;
+        let execution_graph = create_test_execution_graph(parallelism);
+        let nodes = mock_worker_nodes(2);
+        let slots_per_node = 2usize;
+        let strategy = PipelinedStrategy { slots_per_node };
+
+        let mapping = strategy.assign_tasks(&execution_graph, &nodes);
+        assert_eq!(mapping.len(), execution_graph.get_vertices().len());
+
+        // Every task_index slice (across operators) must land on one worker.
+        let mut task_index_to_worker: HashMap<i32, String> = HashMap::new();
+        for (vertex_id, node) in &mapping {
+            let vertex = execution_graph
+                .get_vertices()
+                .get(vertex_id.as_str())
+                .expect("vertex should exist");
+            if let Some(existing_worker) = task_index_to_worker.get(&vertex.task_index) {
+                assert_eq!(
+                    existing_worker, &node.worker_id,
+                    "task_index {} assigned to multiple workers",
+                    vertex.task_index
+                );
+            } else {
+                task_index_to_worker.insert(vertex.task_index, node.worker_id.clone());
+            }
+
+            let expected_worker = &nodes[(vertex.task_index as usize) / slots_per_node].worker_id;
+            assert_eq!(
+                &node.worker_id, expected_worker,
+                "task_index {} expected on worker {}",
+                vertex.task_index, expected_worker
+            );
+        }
+        assert_eq!(
+            task_index_to_worker.len(),
+            parallelism,
+            "all parallel slices should be assigned"
+        );
+    }
+
 }

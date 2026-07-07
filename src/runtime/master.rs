@@ -377,9 +377,9 @@ impl Master {
             node_list.push(node);
         }
         let assignment_strategy = spec
-            .node_assignment_strategy
+            .task_assignment_strategy
             .as_ref()
-            .unwrap_or_else(|| panic!("node_assignment_strategy must be set for master-worker configuration"));
+            .unwrap_or_else(|| panic!("task_assignment_strategy must be set for master-worker configuration"));
         let vertex_to_node = assign_tasks_with_strategy(
             assignment_strategy,
             base_graph,

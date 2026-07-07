@@ -19,13 +19,23 @@ use crate::{
     storage::{InMemoryStorageClient, InMemoryStorageServer},
 };
 
-async fn run_execution(assignment_strategy: TaskWorkerAssignmentStrategyType) -> Result<()> {
-    let num_workers = match assignment_strategy {
+async fn run_execution(
+    assignment_strategy: TaskWorkerAssignmentStrategyType,
+    total_parallelism: usize,
+) -> Result<()> {
+    let num_workers = match &assignment_strategy {
         TaskWorkerAssignmentStrategyType::SingleWorker => 1,
-        TaskWorkerAssignmentStrategyType::OperatorPerWorker => 3,
+        TaskWorkerAssignmentStrategyType::OperatorPerWorker => 3, // should match source->projection->sink logical node count
+        TaskWorkerAssignmentStrategyType::Pipelined { slots_per_node } => {
+            assert!(*slots_per_node > 0, "slots_per_node must be > 0");
+            assert_eq!(
+                total_parallelism % slots_per_node,
+                0,
+                "test requires parallelism to be divisible by slots_per_node"
+            );
+            total_parallelism / slots_per_node
+        }
     };
-
-    let total_parallelism = 4;
     let num_messages_per_source = 10;
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
@@ -67,7 +77,7 @@ async fn run_execution(assignment_strategy: TaskWorkerAssignmentStrategyType) ->
         .with_execution_profile(ExecutionProfile::MasterWorker {
             num_threads_per_task: total_parallelism,
         })
-        .with_node_assignment_strategy(assignment_strategy)
+        .with_task_assignment_strategy(assignment_strategy)
         .build();
     let logical_graph = compile_logical_graph(&spec, None);
     if is_operator_per_worker {
@@ -134,11 +144,20 @@ async fn run_execution(assignment_strategy: TaskWorkerAssignmentStrategyType) ->
 // TODO: These tests pass individually but can fail when running the full suite (likely cross-test interference).
 
 #[tokio::test]
-async fn test_master_single_worker() -> Result<()> {
-    run_execution(TaskWorkerAssignmentStrategyType::SingleWorker).await
+async fn test_master_with_single_worker_strategy() -> Result<()> {
+    run_execution(TaskWorkerAssignmentStrategyType::SingleWorker, 4).await
 }
 
 #[tokio::test]
-async fn test_master_multiple_workers() -> Result<()> {
-    run_execution(TaskWorkerAssignmentStrategyType::OperatorPerWorker).await
+async fn test_master_with_operator_per_worker_strategy() -> Result<()> {
+    run_execution(TaskWorkerAssignmentStrategyType::OperatorPerWorker, 4).await
+}
+
+#[tokio::test]
+async fn test_master_with_pipelined_strategy() -> Result<()> {
+    run_execution(
+        TaskWorkerAssignmentStrategyType::Pipelined { slots_per_node: 2 },
+        4,
+    )
+    .await
 }

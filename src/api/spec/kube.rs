@@ -36,7 +36,8 @@ pub struct KubePipelineSpec {
     #[serde(default)]
     pub sql: Option<String>,
     #[serde(default)]
-    pub node_assignment_strategy: Option<TaskWorkerAssignmentStrategyType>,
+    #[serde(alias = "node_assignment_strategy")]
+    pub task_assignment_strategy: Option<TaskWorkerAssignmentStrategyType>,
 }
 
 fn default_execution_mode() -> ExecutionMode {
@@ -125,7 +126,7 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             request_source_sink,
             sink,
             sql: spec.sql,
-            node_assignment_strategy: spec.node_assignment_strategy,
+            task_assignment_strategy: spec.task_assignment_strategy,
         })
     }
 }
