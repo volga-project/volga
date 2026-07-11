@@ -83,6 +83,22 @@ impl KubeApiClient {
             .context("failed to decode kube api response JSON")?;
         Ok(value)
     }
+
+    async fn delete(&self, path: &str) -> Result<()> {
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
+        let resp = self
+            .client
+            .delete(&url)
+            .send()
+            .await
+            .with_context(|| format!("kube api DELETE failed: {}", url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("kube api DELETE failed: {} body={}", status, body));
+        }
+        Ok(())
+    }
 }
 
 fn json_get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -107,6 +123,35 @@ fn json_get_usize(value: &Value, candidate_paths: &[&[&str]]) -> Option<usize> {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
     })
+}
+
+/// Usable for discovery: Running, Ready, not terminating, has podIP.
+fn worker_pod_ready(pod: &Value) -> bool {
+    if json_get_path(pod, &["metadata", "deletionTimestamp"]).is_some() {
+        return false;
+    }
+    let phase = json_get_path(pod, &["status", "phase"])
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if phase != "Running" {
+        return false;
+    }
+    let ready = json_get_path(pod, &["status", "conditions"])
+        .and_then(|v| v.as_array())
+        .map(|conds| {
+            conds.iter().any(|c| {
+                c.get("type").and_then(|t| t.as_str()) == Some("Ready")
+                    && c.get("status").and_then(|s| s.as_str()) == Some("True")
+            })
+        })
+        .unwrap_or(false);
+    if !ready {
+        return false;
+    }
+    json_get_path(pod, &["status", "podIP"])
+        .and_then(|v| v.as_str())
+        .map(|ip| !ip.is_empty())
+        .unwrap_or(false)
 }
 
 fn build_api_from_env() -> Result<Arc<KubeApiClient>> {
@@ -205,12 +250,12 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
         let mut out = HashMap::new();
         if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
             for item in items {
+                if !worker_pod_ready(item) {
+                    continue;
+                }
                 let pod_ip = json_get_path(item, &["status", "podIP"])
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                if pod_ip.is_empty() {
-                    continue;
-                }
                 let worker_id =
                     json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
                         .and_then(|v| v.as_str())
@@ -275,6 +320,58 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
         }
         let nodes = self.get_worker_nodes().await;
         nodes.len()
+    }
+
+    /// Delete the pods backing the given worker ids so the StatefulSet recreates them.
+    /// The master then re-discovers the replacements via `get_worker_nodes` polling.
+    async fn request_replacement(&self, worker_ids: &[String]) -> Result<()> {
+        if worker_ids.is_empty() {
+            return Ok(());
+        }
+        let target: std::collections::HashSet<&str> =
+            worker_ids.iter().map(|s| s.as_str()).collect();
+        let list_path = format!("/api/v1/namespaces/{}/pods", self.api.namespace);
+        let pods = self
+            .api
+            .get_json(
+                &list_path,
+                &[("labelSelector", self.worker_label_selector.as_str())],
+            )
+            .await?;
+
+        let mut deleted = 0usize;
+        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                let worker_id =
+                    json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
+                        .and_then(|v| v.as_str())
+                        .or_else(|| {
+                            json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str())
+                        });
+                let pod_name = json_get_path(item, &["metadata", "name"]).and_then(|v| v.as_str());
+                if let (Some(worker_id), Some(pod_name)) = (worker_id, pod_name) {
+                    if target.contains(worker_id) {
+                        let delete_path = format!(
+                            "/api/v1/namespaces/{}/pods/{}",
+                            self.api.namespace, pod_name
+                        );
+                        self.api.delete(&delete_path).await?;
+                        deleted += 1;
+                        println!(
+                            "[MASTER] Requested replacement: deleted pod {} (worker_id={})",
+                            pod_name, worker_id
+                        );
+                    }
+                }
+            }
+        }
+        if deleted == 0 {
+            println!(
+                "[MASTER] request_replacement: no pods matched worker_ids={:?}",
+                worker_ids
+            );
+        }
+        Ok(())
     }
 }
 

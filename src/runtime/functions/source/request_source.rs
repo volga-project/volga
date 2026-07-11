@@ -632,7 +632,6 @@ mod tests {
         
         // Get the actual bound address after server starts
         let bind_address = processor.config.spec.bind_address.clone();
-        let bind_address = processor.config.spec.bind_address.clone();
         let max_pending = processor.config.spec.max_pending_requests;
         
         // Wait a bit for server to start

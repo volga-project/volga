@@ -28,6 +28,7 @@ use tokio::sync::mpsc;
 pub struct WorkerConfig {
     pub worker_id: String,
     pub pipeline_id: PipelineId,
+    pub execution_attempt_id: u64,
     pub graph: ExecutionGraph,
     pub vertex_ids: Vec<VertexId>,
     pub num_threads_per_task: usize,
@@ -53,6 +54,7 @@ impl WorkerConfig {
         Self {
             worker_id,
             pipeline_id,
+            execution_attempt_id: 0,
             graph,
             vertex_ids,
             num_threads_per_task,
@@ -91,6 +93,9 @@ pub struct Worker {
     operator_states: Arc<OperatorStates>,
     running: Arc<AtomicBool>,
     tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
+    // Watches the process health bus; on a fatal event it quiesces tasks so a broken
+    // worker stops producing while the master drives a recovery reset.
+    fatal_watcher_handle: Option<tokio::task::JoinHandle<()>>,
 
     // if RequestSource/Sink is configured, run processor - shared between tasks
     request_source_processor: Option<RequestSourceProcessor>,
@@ -115,6 +120,7 @@ impl Worker {
             operator_states: Arc::new(OperatorStates::new()),
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None,
+            fatal_watcher_handle: None,
             request_source_processor: None,
             request_source_processor_runtime: None,
         }
@@ -130,6 +136,9 @@ impl Worker {
         if self.running.load(Ordering::SeqCst) {
             panic!("Cannot configure worker while it is running");
         }
+        // Fresh incarnation: drop any sticky fatal from a previous execution attempt so this
+        // worker is not immediately reported unhealthy after a recovery reset.
+        crate::runtime::health::clear_worker_fatal();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
         println!(
@@ -181,6 +190,7 @@ impl Worker {
         self.operator_states = Arc::new(OperatorStates::new());
         self.running = Arc::new(AtomicBool::new(false));
         self.tasks_state_polling_handle = None;
+        self.fatal_watcher_handle = None;
         self.request_source_processor = None;
         self.request_source_processor_runtime = request_source_processor_runtime;
         self.config = Some(config);
@@ -192,6 +202,23 @@ impl Worker {
 
     pub fn is_running(&self) -> bool {
         self.running.load(Ordering::SeqCst)
+    }
+
+    pub fn worker_id(&self) -> String {
+        self.worker_id.clone()
+    }
+
+    pub fn pipeline_id(&self) -> Option<String> {
+        self.config
+            .as_ref()
+            .map(|cfg| cfg.pipeline_id.0.clone())
+    }
+
+    pub fn execution_attempt_id(&self) -> u64 {
+        self.config
+            .as_ref()
+            .map(|cfg| cfg.execution_attempt_id)
+            .unwrap_or_default()
     }
 
     async fn poll_and_update_tasks_state(
@@ -479,7 +506,49 @@ impl Worker {
 
         self.tasks_state_polling_handle = Some(polling_handle);
 
+        self.spawn_fatal_watcher();
+
         println!("[WORKER] Started all tasks");
+    }
+
+    /// Watch the process-wide health bus. On the first fatal event, quiesce all tasks
+    /// (send Close) so a broken worker stops producing. The master observes the worker
+    /// as unhealthy (via heartbeat) and drives a recovery reset independently.
+    fn spawn_fatal_watcher(&mut self) {
+        let task_actors = self.task_actors.clone();
+        let task_runtime_handles: HashMap<VertexId, Handle> = self
+            .task_runtimes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.handle().clone()))
+            .collect();
+
+        let handle = tokio::spawn(async move {
+            let mut fatal_events = crate::runtime::health::subscribe_worker_fatal_events();
+            // A fatal may already be present (e.g. reported just before subscribing).
+            if crate::runtime::health::get_last_worker_fatal().is_none() {
+                loop {
+                    match fatal_events.recv().await {
+                        Ok(_) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    }
+                }
+            }
+
+            println!("[WORKER] Fatal detected, quiescing tasks");
+            for (vertex_id, handle) in &task_runtime_handles {
+                if let Some(task_ref) = task_actors.get(vertex_id) {
+                    let task_ref = task_ref.clone();
+                    let _ = handle
+                        .spawn(async move {
+                            let _ = task_ref.ask(StreamTaskMessage::Close).await;
+                        })
+                        .await;
+                }
+            }
+        });
+
+        self.fatal_watcher_handle = Some(handle);
     }
 
     async fn start_transport_backend(&mut self) {
@@ -583,14 +652,27 @@ impl Worker {
 
     async fn cleanup(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.fatal_watcher_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
         if let Some(handle) = self.tasks_state_polling_handle.take() {
             if let Err(e) = handle.await {
                 eprintln!("Polling task failed: {:?}", e);
             }
         }
 
-        // Shutdown transport backend runtime
+        // Gracefully close the transport backend (stops the gRPC server, releases the
+        // listen port, and closes outbound client streams) before tearing down its runtime.
+        // Without this the port may not be released in time for an in-place reconfigure.
         if let Some(backend_runtime) = self.transport_backend_runtime.take() {
+            if let Some(backend_actor) = self.backend_actor.take() {
+                let _ = backend_runtime
+                    .spawn(async move {
+                        let _ = backend_actor.ask(TransportBackendActorMessage::Close).await;
+                    })
+                    .await;
+            }
             backend_runtime.shutdown_background();
         }
 
@@ -668,6 +750,10 @@ impl Worker {
     // Test-only "crash": abort runtimes without graceful close.
     pub async fn kill_for_testing(&mut self) {
         self.running.store(false, Ordering::SeqCst);
+
+        if let Some(handle) = self.fatal_watcher_handle.take() {
+            handle.abort();
+        }
 
         // Best-effort: stop request source processor (if any) to avoid background noise in tests.
         self.stop_request_source_processor_if_needed().await;

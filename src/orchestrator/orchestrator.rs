@@ -30,6 +30,15 @@ pub trait MasterOrchestrator: Send + Sync {
     async fn get_pipeline_id(&self) -> String;
     async fn get_spec(&self) -> PipelineSpec;
     async fn get_num_expected_workers(&self) -> usize;
+
+    /// Request the orchestrator to physically replace the given workers (e.g. a dead pod).
+    ///
+    /// Default is a no-op: recovery reuses the existing worker process in-place, so this
+    /// is only needed for workers the orchestrator reports as gone. Orchestrators that own
+    /// pod lifecycle (Kubernetes) override this to delete the pods so they are recreated.
+    async fn request_replacement(&self, _worker_ids: &[String]) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]

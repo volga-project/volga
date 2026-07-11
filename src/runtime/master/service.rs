@@ -1,24 +1,18 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
+
 use crate::orchestrator::orchestrator::MasterOrchestrator;
-use crate::runtime::master::{Master, MasterConfig};
-use crate::runtime::master_checkpoint::TaskKey;
-use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
-
-pub mod master_service {
-    tonic::include_proto!("master_service");
-}
-
-use master_service::{
-    master_service_server::MasterService,
-    RegisterWorkerRequest, RegisterWorkerResponse,
-    ReportCheckpointRequest, ReportCheckpointResponse,
-    GetTaskCheckpointRequest, GetTaskCheckpointResponse, StateBlob,
-    GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
-    GetLatestPipelineSnapshotRequest, GetLatestPipelineSnapshotResponse,
+use crate::runtime::master::checkpoint::TaskKey;
+use crate::runtime::master::server::master_service::{
+    master_service_server::MasterService, GetLatestCompleteCheckpointRequest,
+    GetLatestCompleteCheckpointResponse, GetLatestPipelineSnapshotRequest,
+    GetLatestPipelineSnapshotResponse, GetTaskCheckpointRequest, GetTaskCheckpointResponse,
+    RegisterWorkerRequest, RegisterWorkerResponse, ReportCheckpointRequest,
+    ReportCheckpointResponse, StateBlob,
 };
+use crate::runtime::master::Master;
+use crate::runtime::observability::PipelineSnapshot;
 
 /// Server implementation of MasterService
 #[derive(Clone)]
@@ -31,6 +25,10 @@ impl MasterServiceImpl {
         Self {
             master: Arc::new(Master::new(orchestrator)),
         }
+    }
+
+    pub fn master(&self) -> Arc<Master> {
+        self.master.clone()
     }
 }
 
@@ -125,11 +123,15 @@ impl MasterService for MasterServiceImpl {
         &self,
         _request: Request<GetLatestPipelineSnapshotRequest>,
     ) -> Result<Response<GetLatestPipelineSnapshotResponse>, Status> {
-        let snapshot_opt: Option<PipelineSnapshot> = self.master.get_latest_pipeline_snapshot().await;
+        let snapshot_opt: Option<PipelineSnapshot> =
+            self.master.get_latest_pipeline_snapshot().await;
 
         if let Some(snapshot) = snapshot_opt {
             let snapshot_bytes = bincode::serialize(&snapshot).map_err(|e| {
-                Status::internal(format!("Failed to serialize latest pipeline snapshot: {}", e))
+                Status::internal(format!(
+                    "Failed to serialize latest pipeline snapshot: {}",
+                    e
+                ))
             })?;
             Ok(Response::new(GetLatestPipelineSnapshotResponse {
                 has_snapshot: true,
@@ -147,63 +149,3 @@ impl MasterService for MasterServiceImpl {
         }
     }
 }
-
-/// Server that hosts MasterService
-pub struct MasterServer {
-    service: MasterServiceImpl,
-    server_handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_sender: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl MasterServer {
-    pub fn new(orchestrator: Arc<dyn MasterOrchestrator>) -> Self {
-        Self {
-            service: MasterServiceImpl::new(orchestrator),
-            server_handle: None,
-            shutdown_sender: None,
-        }
-    }
-
-    pub async fn configure(&self, config: MasterConfig) {
-        self.service.master.configure(config).await;
-    }
-
-    pub async fn execute(&mut self) -> anyhow::Result<()> {
-        self.service.master.execute().await
-    }
-
-    pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
-        self.service.master.get_worker_states().await
-    }
-
-    pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
-        let addr = addr.parse()?;
-        let service = master_service::master_service_server::MasterServiceServer::new(self.service.clone());
-
-        println!("[MASTER_SERVER] Starting MasterService server on {}", addr);
-
-        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
-        let server_handle = tokio::spawn(async move {
-            let _ = tonic::transport::Server::builder()
-                .add_service(service)
-                .serve_with_shutdown(addr, async {
-                    shutdown_receiver.await.ok();
-                })
-                .await;
-        });
-
-        self.server_handle = Some(server_handle);
-        self.shutdown_sender = Some(shutdown_sender);
-        Ok(())
-    }
-
-    pub async fn stop(&mut self) {
-        if let Some(shutdown_sender) = self.shutdown_sender.take() {
-            let _ = shutdown_sender.send(());
-        }
-        if let Some(handle) = self.server_handle.take() {
-            let _ = handle.await;
-        }
-    }
-}
-

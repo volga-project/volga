@@ -3,6 +3,7 @@ use crate::{
     runtime::{
         collector::Collector,
         execution_graph::ExecutionGraph,
+        health::{report_worker_fatal, WorkerFatalReason},
         metrics::{
             get_stream_task_metrics, init_metrics, MetricsLabels,
             LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
@@ -20,7 +21,7 @@ use crate::{
     transport::transport_client::TransportClientConfig,
 };
 use anyhow::Result;
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use async_stream::stream;
 use metrics::{counter, histogram};
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch, sync::mpsc};
@@ -30,7 +31,7 @@ use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 // serde imports removed; this module does not define serializable DTOs directly.
-use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
 use crate::runtime::watermark::WatermarkAssignConfig;
@@ -194,7 +195,7 @@ impl StreamTask {
             vertex_id, task_index, restore_checkpoint_id
         );
 
-        let req = crate::runtime::master_server::master_service::GetTaskCheckpointRequest {
+        let req = crate::runtime::master::server::master_service::GetTaskCheckpointRequest {
             checkpoint_id: restore_checkpoint_id,
             vertex_id: vertex_id.to_string(),
             task_index,
@@ -479,7 +480,8 @@ impl StreamTask {
         
         // Main stream task lifecycle loop
         let metrics_labels = self.metrics_labels.clone();
-        let run_loop_handle = tokio::spawn(async move {
+        let task_vertex_id = vertex_id.clone();
+        let run_loop = async move {
             let mut operator = create_operator(operator_config);
             
             let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
@@ -675,13 +677,13 @@ impl StreamTask {
                                     .as_mut()
                                     .expect("Master client not initialized")
                                     .report_checkpoint(tonic::Request::new(
-                                        crate::runtime::master_server::master_service::ReportCheckpointRequest {
+                                        crate::runtime::master::server::master_service::ReportCheckpointRequest {
                                             checkpoint_id,
                                             vertex_id: vertex_id.as_ref().to_string(),
                                             task_index: runtime_context.task_index(),
                                             blobs: blobs
                                                 .into_iter()
-                                                .map(|(name, bytes)| crate::runtime::master_server::master_service::StateBlob { name, bytes })
+                                                .map(|(name, bytes)| crate::runtime::master::server::master_service::StateBlob { name, bytes })
                                                 .collect(),
                                         },
                                     ))
@@ -800,7 +802,16 @@ impl StreamTask {
             println!("{:?} StreamTask {:?} closed", timestamp(), vertex_id);
             
             Ok(())
-        });
+        };
+        let run_loop_handle = tokio::spawn(run_loop.map(move |result| {
+            if let Err(error) = &result {
+                report_worker_fatal(
+                    WorkerFatalReason::TaskFailure,
+                    format!("StreamTask {} failed: {}", task_vertex_id, error),
+                );
+            }
+            result
+        }));
         
         self.run_loop_handle = Some(run_loop_handle);
     }

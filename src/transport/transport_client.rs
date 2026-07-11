@@ -1,7 +1,7 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{health::{report_worker_fatal, WorkerFatalReason}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
@@ -273,7 +273,14 @@ impl DataWriter {
                         return (true, start_time.elapsed().as_millis() as u32)
                     }
                     Ok(Err(_)) => {
-                        panic!("DataWriter {:?} channel {} closed", self.vertex_id, channel_id);
+                        report_worker_fatal(
+                            WorkerFatalReason::TransportDisconnect,
+                            format!(
+                                "DataWriter {:?} channel {} closed",
+                                self.vertex_id, channel_id
+                            ),
+                        );
+                        return (false, start_time.elapsed().as_millis() as u32);
                     }
                     Err(_) => {
                         println!("DataWriter {:?} timeout", self.vertex_id);

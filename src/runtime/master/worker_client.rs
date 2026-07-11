@@ -1,0 +1,331 @@
+use std::fmt;
+
+use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
+use tonic::Code;
+
+use crate::api::PipelineSpec;
+use crate::orchestrator::task_assignment::TaskWorkerMapping;
+use crate::runtime::observability::snapshot_types::WorkerSnapshot;
+use crate::runtime::worker_config_utils::WorkerInitPayload;
+
+use super::failure::FailureEvent;
+use super::heartbeat::WorkerHeartbeatMonitor;
+use super::worker_service::{
+    worker_service_client::WorkerServiceClient, CloseWorkerRequest, CloseWorkerTasksRequest,
+    ConfigureWorkerRequest, GetWorkerStateRequest, RunWorkerTasksRequest, StartWorkerRequest,
+    TriggerCheckpointRequest,
+};
+
+const MAX_RETRIES: u32 = 5;
+const RETRY_DELAY_MS: u64 = 1000;
+
+enum Attempt<T> {
+    Done(T),
+    Retry(String),
+    Fail(WorkerCallError),
+}
+
+#[derive(Debug)]
+pub enum WorkerCallError {
+    Rejected(String),
+    Unreachable(String),
+}
+
+impl WorkerCallError {
+    pub(super) fn requires_replacement(&self) -> bool {
+        matches!(self, Self::Unreachable(_))
+    }
+}
+
+impl fmt::Display for WorkerCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Rejected(detail) => write!(f, "rejected: {}", detail),
+            Self::Unreachable(detail) => write!(f, "unreachable: {}", detail),
+        }
+    }
+}
+
+impl std::error::Error for WorkerCallError {}
+
+fn retry_delay(attempt: u32) -> Duration {
+    Duration::from_millis(RETRY_DELAY_MS * (attempt + 1) as u64)
+}
+
+fn is_retryable_status(status: &tonic::Status) -> bool {
+    matches!(
+        status.code(),
+        Code::Unavailable
+            | Code::DeadlineExceeded
+            | Code::ResourceExhausted
+            | Code::Aborted
+            | Code::Unknown
+    )
+}
+
+fn status_attempt<T>(status: tonic::Status) -> Attempt<T> {
+    if is_retryable_status(&status) {
+        Attempt::Retry(status.to_string())
+    } else {
+        Attempt::Fail(WorkerCallError::Rejected(status.to_string()))
+    }
+}
+
+async fn with_retry<T, F, Fut>(op_name: &str, target: &str, mut op: F) -> Result<T, WorkerCallError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Attempt<T>>,
+{
+    let mut last_error = None;
+    for attempt in 0..MAX_RETRIES {
+        match op().await {
+            Attempt::Done(v) => return Ok(v),
+            Attempt::Fail(e) => return Err(e),
+            Attempt::Retry(msg) => {
+                println!(
+                    "[MASTER] {} attempt {} on {} failed (retryable): {}",
+                    op_name,
+                    attempt + 1,
+                    target,
+                    msg
+                );
+                last_error = Some(msg);
+                if attempt < MAX_RETRIES - 1 {
+                    sleep(retry_delay(attempt)).await;
+                }
+            }
+        }
+    }
+    Err(WorkerCallError::Unreachable(format!(
+        "{} failed on {} after {} attempts: {:?}",
+        op_name, target, MAX_RETRIES, last_error
+    )))
+}
+
+async fn dial(addr: &str) -> Attempt<WorkerServiceClient<tonic::transport::Channel>> {
+    match WorkerServiceClient::connect(format!("http://{}", addr)).await {
+        Ok(client) => Attempt::Done(client),
+        Err(e) => Attempt::Retry(format!("dial failed: {}", e)),
+    }
+}
+
+/// Low-level gRPC + heartbeat session to one worker.
+pub struct WorkerClient {
+    client: WorkerServiceClient<tonic::transport::Channel>,
+    worker_ip: String,
+    _heartbeat_monitor: WorkerHeartbeatMonitor,
+    execution_attempt_id: u64,
+}
+
+impl WorkerClient {
+    pub async fn connect(
+        worker_id: String,
+        worker_ip: String,
+        execution_attempt_id: u64,
+        failure_tx: mpsc::Sender<FailureEvent>,
+    ) -> Result<Self, WorkerCallError> {
+        let client = with_retry("connect", &worker_ip, || dial(&worker_ip)).await?;
+        let heartbeat_monitor = WorkerHeartbeatMonitor::spawn(
+            worker_id.clone(),
+            worker_ip.clone(),
+            execution_attempt_id,
+            client.clone(),
+            failure_tx,
+        );
+        println!("[MASTER] Connected to worker {} ({})", worker_id, worker_ip);
+        Ok(Self {
+            client,
+            worker_ip,
+            _heartbeat_monitor: heartbeat_monitor,
+            execution_attempt_id,
+        })
+    }
+
+    /// Soft reject (`success=false`) is not retried; dial/transport errors are.
+    pub async fn configure(
+        worker_id: String,
+        worker_addr: String,
+        pipeline_id: String,
+        execution_attempt_id: u64,
+        spec: PipelineSpec,
+        vertex_ids: Vec<String>,
+        task_worker_mapping: TaskWorkerMapping,
+        restore_checkpoint_id: Option<u64>,
+    ) -> Result<String, WorkerCallError> {
+        let payload = WorkerInitPayload {
+            worker_id: worker_id.clone(),
+            pipeline_id,
+            pipeline_spec: spec,
+            vertex_ids,
+            task_worker_mapping,
+            restore_checkpoint_id,
+        };
+        let init_payload_bytes =
+            serde_json::to_vec(&payload).map_err(|e| WorkerCallError::Rejected(e.to_string()))?;
+
+        with_retry("configure", &worker_id, || {
+            let worker_id = worker_id.clone();
+            let worker_addr = worker_addr.clone();
+            let init_payload_bytes = init_payload_bytes.clone();
+            async move {
+                let mut client = match dial(&worker_addr).await {
+                    Attempt::Done(c) => c,
+                    Attempt::Retry(msg) => return Attempt::Retry(msg),
+                    Attempt::Fail(e) => return Attempt::Fail(e),
+                };
+                match client
+                    .configure_worker(tonic::Request::new(ConfigureWorkerRequest {
+                        init_payload_bytes,
+                        execution_attempt_id,
+                    }))
+                    .await
+                {
+                    Ok(resp) => {
+                        let resp = resp.into_inner();
+                        if !resp.success {
+                            Attempt::Fail(WorkerCallError::Rejected(format!(
+                                "worker {}: {}",
+                                worker_id, resp.error_message
+                            )))
+                        } else {
+                            Attempt::Done(resp.execution_graph_signature)
+                        }
+                    }
+                    Err(status) => status_attempt(status),
+                }
+            }
+        })
+        .await
+    }
+
+    async fn rpc<T, F, Fut>(&self, op_name: &str, mut op: F) -> Result<T, WorkerCallError>
+    where
+        F: FnMut(WorkerServiceClient<tonic::transport::Channel>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+    {
+        with_retry(op_name, &self.worker_ip, || {
+            let fut = op(self.client.clone());
+            async move {
+                match fut.await {
+                    Ok(v) => Attempt::Done(v),
+                    Err(status) => status_attempt(status),
+                }
+            }
+        })
+        .await
+    }
+
+    pub async fn start_worker(&self) -> Result<(), WorkerCallError> {
+        let execution_attempt_id = self.execution_attempt_id;
+        let response = self
+            .rpc("start_worker", |mut client| async move {
+                client
+                    .start_worker(tonic::Request::new(StartWorkerRequest {
+                        execution_attempt_id,
+                    }))
+                    .await
+            })
+            .await?
+            .into_inner();
+        response_result("start", response.success, response.error_message)
+    }
+
+    pub async fn run_worker_tasks(&self) -> Result<(), WorkerCallError> {
+        let execution_attempt_id = self.execution_attempt_id;
+        let response = self
+            .rpc("run_worker_tasks", |mut client| async move {
+                client
+                    .run_worker_tasks(tonic::Request::new(RunWorkerTasksRequest {
+                        execution_attempt_id,
+                    }))
+                    .await
+            })
+            .await?
+            .into_inner();
+        response_result("run", response.success, response.error_message)
+    }
+
+    pub async fn close_worker_tasks(&self) -> anyhow::Result<bool> {
+        let execution_attempt_id = self.execution_attempt_id;
+        Ok(self
+            .rpc("close_worker_tasks", |mut client| async move {
+                client
+                    .close_worker_tasks(tonic::Request::new(CloseWorkerTasksRequest {
+                        execution_attempt_id,
+                    }))
+                    .await
+            })
+            .await
+            .map_err(anyhow::Error::new)?
+            .into_inner()
+            .success)
+    }
+
+    pub async fn close_worker(&self, is_final: bool) -> anyhow::Result<bool> {
+        let execution_attempt_id = self.execution_attempt_id;
+        Ok(self
+            .rpc("close_worker", |mut client| async move {
+                client
+                    .close_worker(tonic::Request::new(CloseWorkerRequest {
+                        execution_attempt_id,
+                        is_final,
+                    }))
+                    .await
+            })
+            .await
+            .map_err(anyhow::Error::new)?
+            .into_inner()
+            .success)
+    }
+
+    pub async fn get_worker_state(&self) -> Result<WorkerSnapshot, WorkerCallError> {
+        let state_bytes = self
+            .rpc("get_worker_state", |mut client| async move {
+                client
+                    .get_worker_state(tonic::Request::new(GetWorkerStateRequest {}))
+                    .await
+            })
+            .await?
+            .into_inner()
+            .worker_state_bytes;
+        if state_bytes.is_empty() {
+            return Err(WorkerCallError::Rejected(
+                "worker state is empty".to_string(),
+            ));
+        }
+        WorkerSnapshot::from_bytes(&state_bytes)
+            .map_err(|error| WorkerCallError::Rejected(error.to_string()))
+    }
+
+    #[allow(dead_code)]
+    pub async fn trigger_checkpoint(&self, checkpoint_id: u64) -> anyhow::Result<bool> {
+        Ok(self
+            .rpc("trigger_checkpoint", |mut client| async move {
+                client
+                    .trigger_checkpoint(tonic::Request::new(TriggerCheckpointRequest {
+                        checkpoint_id,
+                    }))
+                    .await
+            })
+            .await
+            .map_err(anyhow::Error::new)?
+            .into_inner()
+            .success)
+    }
+}
+
+fn response_result(
+    operation: &str,
+    success: bool,
+    error_message: String,
+) -> Result<(), WorkerCallError> {
+    if success {
+        Ok(())
+    } else {
+        Err(WorkerCallError::Rejected(format!(
+            "{}: {}",
+            operation, error_message
+        )))
+    }
+}

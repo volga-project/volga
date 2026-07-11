@@ -1,13 +1,19 @@
 use tonic::{Request, Response, Status};
 use tonic::transport::Endpoint;
 use std::sync::Arc;
+use std::pin::Pin;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::Stream;
 
 use crate::orchestrator::orchestrator::WorkerOrchestrator;
 use crate::common::types::PipelineId;
-use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::health::{
+    get_last_worker_fatal, subscribe_worker_fatal_events, WorkerFatalReason,
+};
+use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::worker_config_utils::{build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type, WorkerInitPayload};
 use crate::runtime::worker::{Worker, WorkerConfig};
 
@@ -24,6 +30,8 @@ use worker_service::{
     CloseWorkerTasksRequest, CloseWorkerTasksResponse,
     CloseWorkerRequest, CloseWorkerResponse,
     TriggerCheckpointRequest, TriggerCheckpointResponse,
+    MasterHeartbeatMessage, WorkerHeartbeatMessage,
+    WorkerFatalReason as WorkerFatalReasonProto,
 };
 
 /// Server implementation of the WorkerService
@@ -46,10 +54,27 @@ impl WorkerServiceImpl {
             close_worker_notify,
         }
     }
+
+    async fn validate_execution_attempt(
+        &self,
+        execution_attempt_id: u64,
+    ) -> Result<(), Status> {
+        let worker_guard = self.worker.lock().await;
+        let current_execution_attempt_id = worker_guard.execution_attempt_id();
+        if execution_attempt_id != current_execution_attempt_id {
+            return Err(Status::failed_precondition(format!(
+                "stale worker command execution attempt: got {}, current {}",
+                execution_attempt_id, current_execution_attempt_id
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[tonic::async_trait]
 impl WorkerService for WorkerServiceImpl {
+    type StreamHeartbeatStream =
+        Pin<Box<dyn Stream<Item = Result<WorkerHeartbeatMessage, Status>> + Send + 'static>>;
     async fn configure_worker(
         &self,
         request: Request<ConfigureWorkerRequest>,
@@ -84,6 +109,8 @@ impl WorkerService for WorkerServiceImpl {
             num_threads_per_task.max(1),
             transport_backend_type,
         );
+        worker_config.execution_attempt_id = req.execution_attempt_id;
+        worker_config.restore_checkpoint_id = payload.restore_checkpoint_id;
         let master_addr = self.orchestrator.get_master_service_addr().await;
         if !master_addr.is_empty() {
             worker_config.master_addr = Some(master_addr);
@@ -102,6 +129,15 @@ impl WorkerService for WorkerServiceImpl {
                 execution_graph_signature: String::new(),
             }));
         }
+        // Recreate the worker instance so every (re)configure starts from clean state:
+        // fresh runtimes, transport backend, and actors. If a previous incarnation was
+        // configured (e.g. recovery reset), close it first to release its runtimes
+        // gracefully before it is dropped.
+        if worker_guard.is_configured() {
+            worker_guard.close().await;
+        }
+        let worker_id = worker_guard.worker_id();
+        *worker_guard = Worker::new(worker_id);
         worker_guard.configure(worker_config);
 
         Ok(Response::new(ConfigureWorkerResponse {
@@ -128,8 +164,10 @@ impl WorkerService for WorkerServiceImpl {
 
     async fn start_worker(
         &self,
-        _request: Request<StartWorkerRequest>,
+        request: Request<StartWorkerRequest>,
     ) -> Result<Response<StartWorkerResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
         let mut worker_guard = self.worker.lock().await;
         if !worker_guard.is_configured() {
             return Ok(Response::new(StartWorkerResponse {
@@ -147,8 +185,10 @@ impl WorkerService for WorkerServiceImpl {
 
     async fn run_worker_tasks(
         &self,
-        _request: Request<RunWorkerTasksRequest>,
+        request: Request<RunWorkerTasksRequest>,
     ) -> Result<Response<RunWorkerTasksResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
         let mut worker_guard = self.worker.lock().await;
         worker_guard.signal_tasks_run().await;
         println!("[WORKER_SERVER] Tasks started successfully");
@@ -160,18 +200,29 @@ impl WorkerService for WorkerServiceImpl {
 
     async fn close_worker(
         &self,
-        _request: Request<CloseWorkerRequest>,
+        request: Request<CloseWorkerRequest>,
     ) -> Result<Response<CloseWorkerResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
+        let is_final = request.get_ref().is_final;
         let mut worker_guard = self.worker.lock().await;
         worker_guard.close().await;
-        
-        println!("[WORKER_SERVER] Worker closed successfully");
+        drop(worker_guard);
 
-        let mut notify_guard = self.close_worker_notify.lock().await;
-        if let Some(tx) = notify_guard.take() {
-            let _ = tx.send(());
+        println!(
+            "[WORKER_SERVER] Worker closed successfully (is_final={})",
+            is_final
+        );
+
+        // Only signal the process to exit on a final shutdown. A non-final close is a
+        // recovery reset: keep the process (and WorkerService) alive to be reconfigured.
+        if is_final {
+            let mut notify_guard = self.close_worker_notify.lock().await;
+            if let Some(tx) = notify_guard.take() {
+                let _ = tx.send(());
+            }
         }
-        
+
         Ok(Response::new(CloseWorkerResponse {
             success: true,
             error_message: String::new(),
@@ -180,8 +231,10 @@ impl WorkerService for WorkerServiceImpl {
 
     async fn close_worker_tasks(
         &self,
-        _request: Request<CloseWorkerTasksRequest>,
+        request: Request<CloseWorkerTasksRequest>,
     ) -> Result<Response<CloseWorkerTasksResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
         let mut worker_guard = self.worker.lock().await;
         worker_guard.signal_tasks_close().await;
         println!("[WORKER_SERVER] Tasks closed successfully");
@@ -202,6 +255,115 @@ impl WorkerService for WorkerServiceImpl {
             success: true,
             error_message: String::new(),
         }))
+    }
+
+    async fn stream_heartbeat(
+        &self,
+        request: Request<tonic::Streaming<MasterHeartbeatMessage>>,
+    ) -> Result<Response<Self::StreamHeartbeatStream>, Status> {
+        let mut inbound = request.into_inner();
+        let mut fatal_events = subscribe_worker_fatal_events();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<WorkerHeartbeatMessage, Status>>(32);
+        let worker = self.worker.clone();
+
+        tokio::spawn(async move {
+            let mut last_master_msg_at = std::time::Instant::now();
+            let tick = Duration::from_secs(1);
+            let mut interval = tokio::time::interval(tick);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        let (worker_id, pipeline_id, execution_attempt_id) = {
+                            let worker_guard = worker.lock().await;
+                            (
+                                worker_guard.worker_id(),
+                                worker_guard.pipeline_id().unwrap_or_default(),
+                                worker_guard.execution_attempt_id(),
+                            )
+                        };
+                        let fatal = get_last_worker_fatal();
+                        let (healthy, fatal_reason, fatal_message) = match fatal {
+                            Some(f) => (
+                                false,
+                                match f.reason {
+                                    WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
+                                    WorkerFatalReason::TransportDisconnect => WorkerFatalReasonProto::TransportDisconnect as i32,
+                                    WorkerFatalReason::TaskFailure => WorkerFatalReasonProto::TaskFailure as i32,
+                                },
+                                f.message,
+                            ),
+                            None => (
+                                true,
+                                WorkerFatalReasonProto::Unspecified as i32,
+                                String::new(),
+                            ),
+                        };
+                        if tx.send(Ok(WorkerHeartbeatMessage {
+                            worker_id,
+                            pipeline_id,
+                            sent_at_ms: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_millis() as u64,
+                            healthy,
+                            fatal_reason,
+                            fatal_message,
+                            execution_attempt_id,
+                        })).await.is_err() {
+                            break;
+                        }
+
+                        // If master stops talking for too long, stop this stream loop.
+                        // Worker shutdown-on-master-loss policy will be added separately.
+                        if last_master_msg_at.elapsed() > Duration::from_secs(30) {
+                            break;
+                        }
+                    }
+                    event = fatal_events.recv() => {
+                        if let Ok(fatal) = event {
+                            let (worker_id, pipeline_id, execution_attempt_id) = {
+                                let worker_guard = worker.lock().await;
+                                (
+                                    worker_guard.worker_id(),
+                                    worker_guard.pipeline_id().unwrap_or_default(),
+                                    worker_guard.execution_attempt_id(),
+                                )
+                            };
+                            let fatal_reason = match fatal.reason {
+                                WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
+                                WorkerFatalReason::TransportDisconnect => WorkerFatalReasonProto::TransportDisconnect as i32,
+                                WorkerFatalReason::TaskFailure => WorkerFatalReasonProto::TaskFailure as i32,
+                            };
+                            let _ = tx.send(Ok(WorkerHeartbeatMessage {
+                                worker_id,
+                                pipeline_id,
+                                sent_at_ms: std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                                healthy: false,
+                                fatal_reason,
+                                fatal_message: fatal.message,
+                                execution_attempt_id,
+                            })).await;
+                        }
+                    }
+                    msg = inbound.message() => {
+                        match msg {
+                            Ok(Some(_)) => {
+                                last_master_msg_at = std::time::Instant::now();
+                            }
+                            Ok(None) => break,
+                            Err(_) => break,
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 }
 
@@ -273,7 +435,7 @@ impl WorkerServer {
         let endpoint = Endpoint::from_shared(endpoint)?.connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS));
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..MAX_RETRIES {
-            let req = crate::runtime::master_server::master_service::RegisterWorkerRequest {
+            let req = crate::runtime::master::server::master_service::RegisterWorkerRequest {
                 worker_id: self.worker_id.clone(),
             };
 

@@ -22,10 +22,14 @@ service WorkerService {
 
   // Trigger a checkpoint. Only source tasks should inject barriers.
   rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
+
+  // Bidirectional health/heartbeat stream between master and worker.
+  rpc StreamHeartbeat(stream MasterHeartbeatMessage) returns (stream WorkerHeartbeatMessage);
 }
 
 message ConfigureWorkerRequest {
   bytes init_payload_bytes = 1;
+  uint64 execution_attempt_id = 2;
 }
 
 message ConfigureWorkerResponse {
@@ -46,7 +50,7 @@ message GetWorkerStateResponse {
 
 // Request message for StartWorker
 message StartWorkerRequest {
-  // Empty request - no parameters needed
+  uint64 execution_attempt_id = 1;
 }
 
 // Response message for StartWorker
@@ -57,7 +61,7 @@ message StartWorkerResponse {
 
 // Request message for RunWorkerTasks
 message RunWorkerTasksRequest {
-  // Empty request - no parameters needed
+  uint64 execution_attempt_id = 1;
 }
 
 // Response message for RunWorkerTasks
@@ -68,7 +72,7 @@ message RunWorkerTasksResponse {
 
 // Request message for CloseWorkerTasks
 message CloseWorkerTasksRequest {
-  // Empty request - no parameters needed
+  uint64 execution_attempt_id = 1;
 }
 
 // Response message for CloseWorkerTasks
@@ -79,7 +83,11 @@ message CloseWorkerTasksResponse {
 
 // Request message for CloseWorker
 message CloseWorkerRequest {
-  // Empty request - no parameters needed
+  uint64 execution_attempt_id = 1;
+  // When true, the worker process should exit after teardown (final pipeline shutdown).
+  // When false, the worker tears down its runtime but keeps the process alive so it can
+  // be reconfigured in-place (recovery reset).
+  bool is_final = 2;
 }
 
 // Response message for CloseWorker
@@ -95,4 +103,26 @@ message TriggerCheckpointRequest {
 message TriggerCheckpointResponse {
   bool success = 1;
   string error_message = 2;
+}
+
+enum WorkerFatalReason {
+  WORKER_FATAL_REASON_UNSPECIFIED = 0;
+  WORKER_FATAL_REASON_PANIC = 1;
+  WORKER_FATAL_REASON_TRANSPORT_DISCONNECT = 2;
+  WORKER_FATAL_REASON_TASK_FAILURE = 3;
+}
+
+message MasterHeartbeatMessage {
+  uint64 sent_at_ms = 1;
+  uint64 execution_attempt_id = 2;
+}
+
+message WorkerHeartbeatMessage {
+  string worker_id = 1;
+  string pipeline_id = 2;
+  uint64 sent_at_ms = 3;
+  bool healthy = 4;
+  WorkerFatalReason fatal_reason = 5;
+  string fatal_message = 6;
+  uint64 execution_attempt_id = 7;
 }

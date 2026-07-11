@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::health::{report_worker_fatal, WorkerFatalReason};
 use crate::runtime::VertexId;
 use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
@@ -177,9 +178,14 @@ impl GrpcTransportBackend {
         };
 
         let (server_tx, mut server_rx) = mpsc::channel(Self::GRPC_SERVER_QUEUE_SIZE);
-        let shutdown_rx = self.shutdown_rx.take().unwrap();
+        let shutdown_rx = self
+            .shutdown_rx
+            .take()
+            .expect("[GRPC_BACKEND] missing shutdown receiver");
         let server_handle = tokio::spawn(async move {
-            let addr = format!("0.0.0.0:{}", port).parse().unwrap();
+            let addr = format!("0.0.0.0:{}", port)
+                .parse()
+                .expect("[GRPC_BACKEND] invalid listen address");
             let service = MessageStreamServiceImpl::new(server_tx);
             let svc = MessageStreamServiceServer::new(service);
 
@@ -192,7 +198,7 @@ impl GrpcTransportBackend {
                     println!("[SERVER] Received shutdown signal");
                 })
                 .await
-                .unwrap();
+                .expect("[GRPC_BACKEND] gRPC server failed");
         });
         self.server_handle = Some(server_handle);
 
@@ -210,10 +216,14 @@ impl GrpcTransportBackend {
                             {
                                 Ok(Ok(())) => break,
                                 Ok(Err(e)) => {
-                                    panic!(
-                                        "[GRPC_BACKEND] Failed to forward message to channel {}: {}",
-                                        channel_id, e
+                                    report_worker_fatal(
+                                        WorkerFatalReason::TransportDisconnect,
+                                        format!(
+                                            "[GRPC_BACKEND] Failed to forward message to channel {}: {}",
+                                            channel_id, e
+                                        ),
                                     );
+                                    return;
                                 }
                                 Err(_) => continue,
                             }
@@ -221,7 +231,11 @@ impl GrpcTransportBackend {
                     }
                     Ok(None) => {
                         if running.load(std::sync::atomic::Ordering::Relaxed) {
-                            panic!("[GRPC_BACKEND] Server channel closed");
+                            report_worker_fatal(
+                                WorkerFatalReason::TransportDisconnect,
+                                "[GRPC_BACKEND] Server channel closed".to_string(),
+                            );
+                            return;
                         }
                     }
                     Err(_) => continue,
@@ -249,8 +263,25 @@ impl GrpcTransportBackend {
             let (client_tx, client_rx) = mpsc::channel(Self::GRPC_CLIENT_QUEUE_SIZE);
             client_txs.insert(peer_node_id.clone(), client_tx);
             let client_stream_task = tokio::spawn(async move {
-                let mut client = MessageStreamClient::connect(server_addr).await.unwrap();
-                client.stream_messages(client_rx).await.unwrap();
+                let mut client = match MessageStreamClient::connect(server_addr.clone()).await {
+                    Ok(client) => client,
+                    Err(e) => {
+                        report_worker_fatal(
+                            WorkerFatalReason::TransportDisconnect,
+                            format!(
+                                "[GRPC_BACKEND] failed to connect remote node {}: {}",
+                                server_addr, e
+                            ),
+                        );
+                        return;
+                    }
+                };
+                if let Err(e) = client.stream_messages(client_rx).await {
+                    report_worker_fatal(
+                        WorkerFatalReason::TransportDisconnect,
+                        format!("[GRPC_BACKEND] remote stream_messages failed: {}", e),
+                    );
+                }
             });
             self.client_handles.push(client_stream_task);
         }
@@ -293,10 +324,14 @@ impl GrpcTransportBackend {
                                     {
                                         Ok(Ok(())) => break,
                                         Ok(Err(e)) => {
-                                            panic!(
-                                                "[GRPC_BACKEND] Failed to send message to client {}: {}",
-                                                node_id, e
+                                            report_worker_fatal(
+                                                WorkerFatalReason::TransportDisconnect,
+                                                format!(
+                                                    "[GRPC_BACKEND] Failed to send message to client {}: {}",
+                                                    node_id, e
+                                                ),
                                             );
+                                            return;
                                         }
                                         Err(_) => continue,
                                     }

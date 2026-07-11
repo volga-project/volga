@@ -12,18 +12,16 @@ pub struct WorkerInitPayload {
     pub pipeline_spec: PipelineSpec,
     pub vertex_ids: Vec<String>,
     pub task_worker_mapping: TaskWorkerMapping,
-}
-
-pub fn compile_execution_graph(spec: &PipelineSpec) -> ExecutionGraph {
-    let logical_graph = compile_logical_graph(spec, None);
-    logical_graph.to_execution_graph()
+    /// If set, restore operator state from this completed checkpoint on (re)configure.
+    #[serde(default)]
+    pub restore_checkpoint_id: Option<u64>,
 }
 
 pub fn build_execution_graph(
     spec: &PipelineSpec,
     vertex_to_node: &TaskWorkerMapping,
 ) -> ExecutionGraph {
-    let mut execution_graph = compile_execution_graph(spec);
+    let mut execution_graph = compile_logical_graph(spec, None).to_execution_graph();
     execution_graph.configure_channels(Some(vertex_to_node), Some(spec));
     execution_graph
 }

@@ -36,7 +36,8 @@ pub struct MasterCheckpointStore {
 
 impl MasterCheckpointStore {
     pub fn put(&mut self, checkpoint_id: u64, task: TaskKey, blobs: Vec<(String, Vec<u8>)>) {
-        self.checkpoint_snapshots.insert((checkpoint_id, task), blobs);
+        self.checkpoint_snapshots
+            .insert((checkpoint_id, task), blobs);
     }
 }
 

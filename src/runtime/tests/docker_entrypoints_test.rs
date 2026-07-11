@@ -16,8 +16,8 @@ use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
-use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
-use crate::runtime::master_server::master_service::GetLatestPipelineSnapshotRequest;
+use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest;
 use crate::runtime::observability::{PipelineSnapshot, StreamTaskStatus};
 use crate::storage::InMemoryStorageClient;
 

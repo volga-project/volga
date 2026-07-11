@@ -7,7 +7,7 @@ use volga::orchestrator::docker::DockerMasterOrchestrator;
 use volga::orchestrator::kube::KubeMasterOrchestrator;
 use volga::orchestrator::orchestrator::MasterOrchestrator;
 use volga::runtime::master::MasterConfig;
-use volga::runtime::master_server::MasterServer;
+use volga::runtime::master::server::MasterServer;
 
 async fn shutdown_signal() {
     #[cfg(unix)]

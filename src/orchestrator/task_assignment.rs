@@ -1,3 +1,4 @@
+use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::WorkerNode;
 use crate::runtime::execution_graph::ExecutionGraph;
 use schemars::JsonSchema;
@@ -13,7 +14,9 @@ pub enum TaskWorkerAssignmentStrategyType {
     OperatorPerWorker,
     /// Flink-like slot scheduling: each task-index slice across all operators
     /// is placed into one slot on one worker; `slots_per_node` controls slices per worker.
-    Pipelined { slots_per_node: usize },
+    Pipelined {
+        slots_per_node: usize,
+    },
 }
 
 // inverse mapping
@@ -51,13 +54,29 @@ pub fn assign_tasks_with_strategy(
         TaskWorkerAssignmentStrategyType::OperatorPerWorker => {
             OperatorPerWorkerStrategy.assign_tasks(execution_graph, nodes)
         }
-        TaskWorkerAssignmentStrategyType::Pipelined { slots_per_node } => {
-            PipelinedStrategy {
-                slots_per_node: *slots_per_node,
-            }
-            .assign_tasks(execution_graph, nodes)
+        TaskWorkerAssignmentStrategyType::Pipelined { slots_per_node } => PipelinedStrategy {
+            slots_per_node: *slots_per_node,
         }
+        .assign_tasks(execution_graph, nodes),
     }
+}
+
+pub fn build_mapping(
+    spec: &PipelineSpec,
+    execution_graph: &ExecutionGraph,
+    nodes: &HashMap<String, WorkerNode>,
+) -> anyhow::Result<TaskWorkerMapping> {
+    let mut node_list: Vec<_> = nodes.values().cloned().collect();
+    node_list.sort_by(|left, right| left.worker_id.cmp(&right.worker_id));
+    let strategy = spec
+        .task_assignment_strategy
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("task_assignment_strategy must be set"))?;
+    Ok(assign_tasks_with_strategy(
+        strategy,
+        execution_graph,
+        &node_list,
+    ))
 }
 
 /// Strategy that assigns all vertices to the first (single) worker node.
@@ -121,16 +140,15 @@ impl TaskWorkerAssignStrategy for OperatorPerWorkerStrategy {
         }
 
         // Assign each operator group to a worker node
-        let mut node_index = 0;
-        for (_operator_id, vertex_ids) in operator_to_vertices {
+        let mut operator_groups: Vec<_> = operator_to_vertices.into_iter().collect();
+        operator_groups.sort_by(|(left, _), (right, _)| left.cmp(right));
+        for (node_index, (_operator_id, vertex_ids)) in operator_groups.into_iter().enumerate() {
             let worker_node = &nodes[node_index % nodes.len()];
 
             // Assign all vertices of this operator to the same node
             for vertex_id in vertex_ids {
                 mapping.insert(vertex_id, worker_node.clone());
             }
-
-            node_index += 1;
         }
 
         mapping
@@ -384,5 +402,4 @@ mod tests {
             "all parallel slices should be assigned"
         );
     }
-
 }

@@ -11,8 +11,8 @@ use crate::orchestrator::local::LocalMasterOrchestrator;
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::master::{Master, MasterConfig};
-use crate::runtime::master_server::master_service::master_service_client::MasterServiceClient;
-use crate::runtime::master_server::MasterServer;
+use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::master::server::MasterServer;
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::worker::{Worker, WorkerConfig};
@@ -173,7 +173,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     loop {
         let resp = master_client
             .get_latest_complete_checkpoint(tonic::Request::new(
-                crate::runtime::master_server::master_service::GetLatestCompleteCheckpointRequest {},
+                crate::runtime::master::server::master_service::GetLatestCompleteCheckpointRequest {},
             ))
             .await?
             .into_inner();
@@ -191,7 +191,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     for task in &expected_tasks {
         let resp = master_client
             .get_task_checkpoint(tonic::Request::new(
-                crate::runtime::master_server::master_service::GetTaskCheckpointRequest {
+                crate::runtime::master::server::master_service::GetTaskCheckpointRequest {
                     checkpoint_id: 1,
                     vertex_id: task.vertex_id.clone(),
                     task_index: task.task_index,

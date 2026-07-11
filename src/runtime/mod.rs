@@ -7,14 +7,13 @@ pub mod worker;
 pub mod worker_config_utils;
 pub mod worker_server;
 pub mod master;
-pub mod master_checkpoint;
-pub mod master_server;
 pub mod functions;
 pub mod metrics;
 pub mod observability;
 pub mod state;
 pub mod utils;
 pub mod watermark;
+pub mod health;
 
 use std::sync::Arc;
 

@@ -8,7 +8,7 @@ use crate::orchestrator::local::{LocalMasterOrchestrator, LocalWorkerOrchestrato
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master::MasterConfig;
-use crate::runtime::master_server::MasterServer;
+use crate::runtime::master::server::MasterServer;
 use crate::runtime::observability::PipelineSnapshot;
 use crate::runtime::worker_server::WorkerServer;
 
