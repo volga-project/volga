@@ -10,9 +10,7 @@ use tokio_stream::Stream;
 
 use crate::orchestrator::orchestrator::WorkerOrchestrator;
 use crate::common::types::PipelineId;
-use crate::runtime::health::{
-    get_last_worker_fatal, subscribe_worker_fatal_events, WorkerFatalReason,
-};
+use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::worker_config_utils::{build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type, WorkerInitPayload};
 use crate::runtime::worker::{Worker, WorkerConfig};
@@ -262,7 +260,11 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<tonic::Streaming<MasterHeartbeatMessage>>,
     ) -> Result<Response<Self::StreamHeartbeatStream>, Status> {
         let mut inbound = request.into_inner();
-        let mut fatal_events = subscribe_worker_fatal_events();
+        let health = {
+            let worker_guard = self.worker.lock().await;
+            worker_guard.health()
+        };
+        let mut fatal_events = health.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<WorkerHeartbeatMessage, Status>>(32);
         let worker = self.worker.clone();
 
@@ -283,7 +285,7 @@ impl WorkerService for WorkerServiceImpl {
                                 worker_guard.execution_attempt_id(),
                             )
                         };
-                        let fatal = get_last_worker_fatal();
+                        let fatal = health.last_fatal();
                         let (healthy, fatal_reason, fatal_message) = match fatal {
                             Some(f) => (
                                 false,
@@ -507,6 +509,10 @@ impl WorkerServer {
         if let Some(rx) = self.close_worker_rx.take() {
             let _ = rx.await;
         }
+    }
+
+    pub async fn worker_health(&self) -> Arc<crate::runtime::health::WorkerHealth> {
+        self.service.worker.lock().await.health()
     }
 
     /// Stop the gRPC server

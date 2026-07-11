@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 use tokio::time;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::health::{report_worker_fatal, WorkerFatalReason};
+use crate::runtime::health::{WorkerFatalReason, WorkerHealth};
 use crate::runtime::VertexId;
 use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
@@ -71,13 +71,14 @@ pub struct GrpcTransportBackend {
     shutdown_tx: Option<oneshot::Sender<()>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
     running: Arc<AtomicBool>,
+    worker_health: Arc<WorkerHealth>,
 }
 
 impl GrpcTransportBackend {
     const GRPC_SERVER_QUEUE_SIZE: usize = 10; // single mpsc channel reading from grpc server and forwarding to local clients (readers)
     const GRPC_CLIENT_QUEUE_SIZE: usize = 10; // mpsc channel per peer node, reading local client (writers) and forwarding to remote grpc clients
 
-    pub fn new() -> Self {
+    pub fn new(worker_health: Arc<WorkerHealth>) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         Self {
             server_handle: None,
@@ -91,7 +92,8 @@ impl GrpcTransportBackend {
             port: None,
             shutdown_tx: Some(shutdown_tx),
             shutdown_rx: Some(shutdown_rx),
-            running: Arc::new(AtomicBool::new(false))
+            running: Arc::new(AtomicBool::new(false)),
+            worker_health,
         }
     }
 
@@ -204,6 +206,7 @@ impl GrpcTransportBackend {
 
         // Route messages from gRPC server ingress to remote input channel queues.
         let running = self.running.clone();
+        let worker_health = self.worker_health.clone();
         let reader_task = tokio::spawn(async move {
             while running.load(std::sync::atomic::Ordering::Relaxed) {
                 match time::timeout(Duration::from_millis(100), server_rx.recv()).await {
@@ -216,7 +219,7 @@ impl GrpcTransportBackend {
                             {
                                 Ok(Ok(())) => break,
                                 Ok(Err(e)) => {
-                                    report_worker_fatal(
+                                    worker_health.report_fatal(
                                         WorkerFatalReason::TransportDisconnect,
                                         format!(
                                             "[GRPC_BACKEND] Failed to forward message to channel {}: {}",
@@ -231,7 +234,7 @@ impl GrpcTransportBackend {
                     }
                     Ok(None) => {
                         if running.load(std::sync::atomic::Ordering::Relaxed) {
-                            report_worker_fatal(
+                            worker_health.report_fatal(
                                 WorkerFatalReason::TransportDisconnect,
                                 "[GRPC_BACKEND] Server channel closed".to_string(),
                             );
@@ -256,17 +259,19 @@ impl GrpcTransportBackend {
         let channel_to_node: HashMap<ChannelId, NodeId> =
             self.channel_to_node.take().expect("Remote channel mapping should be found");
         let nodes = self.nodes.take().expect("Remote nodes should be found");
+        let worker_health = self.worker_health.clone();
         let mut client_txs: HashMap<NodeId, mpsc::Sender<(Message, ChannelId)>> = HashMap::new();
 
         for (peer_node_id, peer_node_ip, target_port) in nodes {
             let server_addr = format!("http://{}:{}", peer_node_ip, target_port);
             let (client_tx, client_rx) = mpsc::channel(Self::GRPC_CLIENT_QUEUE_SIZE);
             client_txs.insert(peer_node_id.clone(), client_tx);
+            let worker_health = worker_health.clone();
             let client_stream_task = tokio::spawn(async move {
                 let mut client = match MessageStreamClient::connect(server_addr.clone()).await {
                     Ok(client) => client,
                     Err(e) => {
-                        report_worker_fatal(
+                        worker_health.report_fatal(
                             WorkerFatalReason::TransportDisconnect,
                             format!(
                                 "[GRPC_BACKEND] failed to connect remote node {}: {}",
@@ -277,7 +282,7 @@ impl GrpcTransportBackend {
                     }
                 };
                 if let Err(e) = client.stream_messages(client_rx).await {
-                    report_worker_fatal(
+                    worker_health.report_fatal(
                         WorkerFatalReason::TransportDisconnect,
                         format!("[GRPC_BACKEND] remote stream_messages failed: {}", e),
                     );
@@ -288,6 +293,7 @@ impl GrpcTransportBackend {
 
         // Route remote output channel queues to per-node gRPC clients.
         let running = self.running.clone();
+        let worker_health = self.worker_health.clone();
         let writer_task = tokio::spawn(async move {
             let mut receiver_futures = Vec::new();
 
@@ -295,6 +301,7 @@ impl GrpcTransportBackend {
                 let channel_id_clone = channel_id.clone();
                 let client_txs_clone = client_txs.clone();
                 let channel_to_node_clone = channel_to_node.clone();
+                let worker_health = worker_health.clone();
 
                 let r = running.clone();
                 let future = async move {
@@ -324,7 +331,7 @@ impl GrpcTransportBackend {
                                     {
                                         Ok(Ok(())) => break,
                                         Ok(Err(e)) => {
-                                            report_worker_fatal(
+                                            worker_health.report_fatal(
                                                 WorkerFatalReason::TransportDisconnect,
                                                 format!(
                                                     "[GRPC_BACKEND] Failed to send message to client {}: {}",

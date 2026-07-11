@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 use volga::orchestrator::docker::DockerWorkerOrchestrator;
 use volga::orchestrator::kube::KubeWorkerOrchestrator;
 use volga::orchestrator::orchestrator::WorkerOrchestrator;
-use volga::runtime::health::{init_worker_health_bus, report_worker_fatal, WorkerFatalReason};
+use volga::runtime::health::WorkerFatalReason;
 use volga::runtime::worker_server::WorkerServer;
 
 async fn shutdown_signal() {
@@ -48,17 +48,6 @@ async fn build_worker_bootstrap() -> Result<(String, Arc<dyn WorkerOrchestrator>
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    init_worker_health_bus();
-    std::panic::set_hook(Box::new(|panic_info| {
-        let panic_msg = panic_info.to_string();
-        let reason = if panic_msg.contains("[GRPC_BACKEND]") {
-            WorkerFatalReason::TransportDisconnect
-        } else {
-            WorkerFatalReason::Panic
-        };
-        report_worker_fatal(reason, panic_msg);
-    }));
-
     let bind_addr =
         env::var("VOLGA_WORKER_BIND_ADDR").expect("VOLGA_WORKER_BIND_ADDR is not set");
     let hold_on_finish = env::var("VOLGA_WORKER_HOLD_ON_FINISH")
@@ -67,6 +56,16 @@ async fn main() -> Result<()> {
         .unwrap_or(false);
     let (worker_id, orchestrator) = build_worker_bootstrap().await?;
     let mut worker_server = WorkerServer::new(worker_id.clone(), orchestrator);
+    let worker_health = worker_server.worker_health().await;
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let panic_msg = panic_info.to_string();
+        let reason = if panic_msg.contains("[GRPC_BACKEND]") {
+            WorkerFatalReason::TransportDisconnect
+        } else {
+            WorkerFatalReason::Panic
+        };
+        worker_health.report_fatal(reason, panic_msg);
+    }));
     worker_server.start(&bind_addr).await?;
     worker_server.register_with_master().await?;
 

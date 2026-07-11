@@ -2,6 +2,7 @@ use crate::{common::types::PipelineId, runtime::{
     execution_graph::ExecutionGraph, functions::source::request_source::{RequestSourceProcessor, extract_request_source_config}, metrics::emit_poll_derived_gauges, observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot}, runtime_context::RuntimeContext, state::OperatorStates, stream_task::StreamTask, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
 }};
 use crate::runtime::VertexId;
+use crate::runtime::health::WorkerHealth;
 use crate::runtime::metrics::{MetricsLabels, TaskMetrics, WorkerAggregateMetrics};
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
 use crate::transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
@@ -84,6 +85,7 @@ impl WorkerConfig {
 
 pub struct Worker {
     worker_id: String,
+    health: Arc<WorkerHealth>,
     config: Option<WorkerConfig>,
     task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
@@ -108,6 +110,7 @@ impl Worker {
     pub fn new(worker_id: String) -> Self {
         Self {
             worker_id: worker_id.clone(),
+            health: Arc::new(WorkerHealth::new()),
             config: None,
             task_actors: HashMap::new(),
             backend_actor: None,
@@ -138,7 +141,7 @@ impl Worker {
         }
         // Fresh incarnation: drop any sticky fatal from a previous execution attempt so this
         // worker is not immediately reported unhealthy after a recovery reset.
-        crate::runtime::health::clear_worker_fatal();
+        self.health.clear();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
         println!(
@@ -194,6 +197,10 @@ impl Worker {
         self.request_source_processor = None;
         self.request_source_processor_runtime = request_source_processor_runtime;
         self.config = Some(config);
+    }
+
+    pub fn health(&self) -> Arc<WorkerHealth> {
+        self.health.clone()
     }
 
     pub fn is_configured(&self) -> bool {
@@ -342,7 +349,7 @@ impl Worker {
         let mut storage_by_type: HashMap<String, Arc<WorkerStorageContext>> = HashMap::new();
 
         let mut backend: Box<dyn TransportBackend> = match config.transport_backend_type {
-            TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new()),
+            TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new(self.health.clone())),
             TransportBackendType::InMemory => Box::new(InMemoryTransportBackend::new()),
         };
         let mut transport_client_configs = backend.init_channels(&config.graph, config.vertex_ids.clone());
@@ -421,6 +428,7 @@ impl Worker {
                 transport_cfg,
                 runtime_context,
                 config.graph.clone(),
+                self.health.clone(),
             );
             let task_actor = StreamTaskActor::new(task);
             let task_ref = task_runtime.spawn(async{
@@ -511,7 +519,7 @@ impl Worker {
         println!("[WORKER] Started all tasks");
     }
 
-    /// Watch the process-wide health bus. On the first fatal event, quiesce all tasks
+    /// Watch the worker-scoped health bus. On the first fatal event, quiesce all tasks
     /// (send Close) so a broken worker stops producing. The master observes the worker
     /// as unhealthy (via heartbeat) and drives a recovery reset independently.
     fn spawn_fatal_watcher(&mut self) {
@@ -522,10 +530,11 @@ impl Worker {
             .map(|(k, v)| (k.clone(), v.handle().clone()))
             .collect();
 
+        let health = self.health.clone();
         let handle = tokio::spawn(async move {
-            let mut fatal_events = crate::runtime::health::subscribe_worker_fatal_events();
+            let mut fatal_events = health.subscribe();
             // A fatal may already be present (e.g. reported just before subscribing).
-            if crate::runtime::health::get_last_worker_fatal().is_none() {
+            if health.last_fatal().is_none() {
                 loop {
                     match fatal_events.recv().await {
                         Ok(_) => break,

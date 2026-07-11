@@ -4,6 +4,7 @@ use kameo::Actor;
 use kameo::message::Context;
 use crate::common::message::Message;
 use crate::runtime::VertexId;
+use crate::runtime::health::WorkerHealth;
 use crate::runtime::operators::operator::MessageStream;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client::{DataReader, DataWriter};
@@ -64,6 +65,7 @@ impl TestDataWriterActor {
                 vertex_id,
                 transport_client_config.writer_senders.unwrap(),
                 transport_client_config.metrics_labels,
+                std::sync::Arc::new(WorkerHealth::new()),
             ),
         }
     }

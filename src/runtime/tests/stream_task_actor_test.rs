@@ -3,6 +3,7 @@ use crate::common::message::Message;
 use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
 use crate::common::{WatermarkMessage, MAX_WATERMARK_VALUE};
 use crate::runtime::functions::map::MapFunction;
+use crate::runtime::health::WorkerHealth;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::stream_task::StreamTask;
@@ -85,6 +86,7 @@ fn test_stream_task_actor() -> Result<()> {
             configs.remove(task_vertex_id.as_ref()).unwrap(),
             RuntimeContext::new(task_vertex_id.clone(), 0, 1, None, None, None),
             graph.clone(),
+            std::sync::Arc::new(WorkerHealth::new()),
         );
 
         // Create transport backend actor

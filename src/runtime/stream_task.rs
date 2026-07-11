@@ -3,7 +3,7 @@ use crate::{
     runtime::{
         collector::Collector,
         execution_graph::ExecutionGraph,
-        health::{report_worker_fatal, WorkerFatalReason},
+        health::{WorkerFatalReason, WorkerHealth},
         metrics::{
             get_stream_task_metrics, init_metrics, MetricsLabels,
             LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
@@ -117,6 +117,7 @@ pub struct StreamTask {
     current_watermark: Arc<AtomicU64>,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
+    worker_health: Arc<WorkerHealth>,
 }
 
 impl StreamTask {
@@ -126,6 +127,7 @@ impl StreamTask {
         transport_client_config: TransportClientConfig,
         runtime_context: RuntimeContext,
         execution_graph: ExecutionGraph,
+        worker_health: Arc<WorkerHealth>,
     ) -> Self {
         init_metrics();
         let master_addr = runtime_context
@@ -173,6 +175,7 @@ impl StreamTask {
             current_watermark: Arc::new(AtomicU64::new(0)),
             master_addr,
             restore_checkpoint_id,
+            worker_health,
         }
     }
 
@@ -453,6 +456,8 @@ impl StreamTask {
         let execution_graph = self.execution_graph.clone();
         let master_addr = self.master_addr.clone();
         let restore_checkpoint_id = self.restore_checkpoint_id;
+        let worker_health = self.worker_health.clone();
+        let run_loop_health = worker_health.clone();
         
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
@@ -484,7 +489,11 @@ impl StreamTask {
         let run_loop = async move {
             let mut operator = create_operator(operator_config);
             
-            let mut transport_client = TransportClient::new(vertex_id.clone(), transport_client_config);
+            let mut transport_client = TransportClient::new(
+                vertex_id.clone(),
+                transport_client_config,
+                run_loop_health,
+            );
             
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
@@ -805,7 +814,7 @@ impl StreamTask {
         };
         let run_loop_handle = tokio::spawn(run_loop.map(move |result| {
             if let Err(error) = &result {
-                report_worker_fatal(
+                worker_health.report_fatal(
                     WorkerFatalReason::TaskFailure,
                     format!("StreamTask {} failed: {}", task_vertex_id, error),
                 );

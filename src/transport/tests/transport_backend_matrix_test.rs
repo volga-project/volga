@@ -1,5 +1,7 @@
 use std::time::Duration;
+use std::sync::Arc;
 
+use crate::runtime::health::WorkerHealth;
 use crate::transport::{GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
 
 use super::many_to_many_harness::{run_many_to_many_case, MeshChannelMode, MeshTestConfig};
@@ -39,7 +41,7 @@ async fn test_grpc_many_to_many_remote_only_harness() {
     };
 
     run_many_to_many_case(config, || -> Box<dyn TransportBackend> {
-        Box::new(GrpcTransportBackend::new())
+        Box::new(GrpcTransportBackend::new(Arc::new(WorkerHealth::new())))
     })
     .await;
 }
@@ -59,7 +61,7 @@ async fn test_grpc_many_to_many_mixed_local_remote_harness() {
     };
 
     run_many_to_many_case(config, || -> Box<dyn TransportBackend> {
-        Box::new(GrpcTransportBackend::new())
+        Box::new(GrpcTransportBackend::new(Arc::new(WorkerHealth::new())))
     })
     .await;
 }

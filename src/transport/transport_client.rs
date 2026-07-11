@@ -1,7 +1,7 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{health::{report_worker_fatal, WorkerFatalReason}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
@@ -180,6 +180,7 @@ pub struct DataWriter {
     pub vertex_id: VertexId,
     pub senders: HashMap<String, BatchSender>,
     metrics_labels: Option<MetricsLabels>,
+    worker_health: Arc<WorkerHealth>,
     // batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
@@ -187,7 +188,12 @@ pub struct DataWriter {
 }
 
 impl DataWriter {
-    pub fn new(vertex_id: VertexId, senders: HashMap<String, BatchSender>, metrics_labels: Option<MetricsLabels>) -> Self {
+    pub fn new(
+        vertex_id: VertexId,
+        senders: HashMap<String, BatchSender>,
+        metrics_labels: Option<MetricsLabels>,
+        worker_health: Arc<WorkerHealth>,
+    ) -> Self {
         let batching_config = BatcherConfig::default();
         // let batcher = Batcher::new(batching_config.clone(), senders.clone());
         
@@ -195,6 +201,7 @@ impl DataWriter {
             vertex_id,
             senders,
             metrics_labels,
+            worker_health,
             // batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
@@ -273,7 +280,7 @@ impl DataWriter {
                         return (true, start_time.elapsed().as_millis() as u32)
                     }
                     Ok(Err(_)) => {
-                        report_worker_fatal(
+                        self.worker_health.report_fatal(
                             WorkerFatalReason::TransportDisconnect,
                             format!(
                                 "DataWriter {:?} channel {} closed",
@@ -309,7 +316,7 @@ pub struct TransportClient {
 }
 
 impl TransportClient {
-    pub fn new(vertex_id: VertexId, config: TransportClientConfig) -> Self {
+    pub fn new(vertex_id: VertexId, config: TransportClientConfig, worker_health: Arc<WorkerHealth>) -> Self {
         let mut reader: Option<DataReader> = None;
         let mut writer: Option<DataWriter> = None;
 
@@ -319,7 +326,12 @@ impl TransportClient {
             reader = Some(DataReader::new(vertex_id.clone(), receivers));
         }
         if let Some(senders) = writer_senders {
-            writer = Some(DataWriter::new(vertex_id.clone(), senders, metrics_labels));
+            writer = Some(DataWriter::new(
+                vertex_id.clone(),
+                senders,
+                metrics_labels,
+                worker_health,
+            ));
         }
 
         Self {
