@@ -13,7 +13,7 @@ use crate::transport::test_utils::{TestDataReaderActor, TestDataWriterActor};
 use crate::transport::transport_backend_actor::{
     TransportBackendActor, TransportBackendActorMessage,
 };
-use crate::transport::{InMemoryTransportBackend, TransportBackend};
+use crate::transport::{TransportBackend, TransportBackendTrait};
 use anyhow::Result;
 use kameo::spawn;
 use tokio::runtime::Runtime;
@@ -64,7 +64,8 @@ fn test_stream_task_actor() -> Result<()> {
             .collect::<Vec<crate::runtime::VertexId>>();
         vertex_ids.sort();
 
-        let mut backend: Box<dyn TransportBackend> = Box::new(InMemoryTransportBackend::new());
+        let mut backend: Box<dyn TransportBackendTrait> =
+            Box::new(TransportBackend::new(std::sync::Arc::new(WorkerHealth::new())));
         let mut configs = backend.init_channels(&graph, vertex_ids.clone());
 
         let input_vertex_id = vertex_ids[0].clone();

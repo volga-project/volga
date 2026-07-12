@@ -34,7 +34,7 @@ pub async fn execute_with_state_updates(
         execution_graph,
         vertex_ids,
         num_threads_per_task,
-        TransportBackendType::InMemory,
+        TransportBackendType::Grpc,
     );
     worker_config.storage_budgets = spec.worker_runtime.storage.budgets.clone();
     worker_config.inmem_store_lock_pool_size = spec.worker_runtime.storage.inmem_store_lock_pool_size;

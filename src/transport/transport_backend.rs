@@ -13,7 +13,7 @@ use crate::transport::grpc::grpc_streaming_service::{
     MessageStreamClient, MessageStreamServiceImpl,
     message_stream::message_stream_service_server::MessageStreamServiceServer,
 };
-use crate::transport::TransportBackend;
+use crate::transport::TransportBackendTrait;
 use async_trait::async_trait;
 use tonic::transport::Server;
 use std::sync::Arc;
@@ -35,7 +35,9 @@ type RemoteWriterReceivers = HashMap<ChannelId, BatchReceiver>;
 
 type LocalChannels = HashMap<ChannelId, (BatchSender, Option<BatchReceiver>)>;
 
-/// gRPC transport backend for workers that have at least one remote edge.
+/// Unified transport backend:
+/// - local channels are in-proc queue wiring
+/// - remote channels are bridged over gRPC
 ///
 /// Topology model:
 /// - Local channels are wired directly in `init_channels` (same as in-memory semantics):
@@ -55,7 +57,7 @@ type LocalChannels = HashMap<ChannelId, (BatchSender, Option<BatchReceiver>)>;
 /// 2) `start_writing_side` optionally starts per-node gRPC clients (if remote outputs exist)
 ///    and drains `remote_writer_receivers`, routing each channel to its destination node.
 /// 3) `close` stops server/clients/tasks and joins all handles.
-pub struct GrpcTransportBackend {
+pub struct TransportBackend {
     server_handle: Option<tokio::task::JoinHandle<()>>,
     client_handles: Vec<tokio::task::JoinHandle<()>>,
     reader_task: Option<tokio::task::JoinHandle<()>>,
@@ -67,6 +69,7 @@ pub struct GrpcTransportBackend {
     nodes: Option<Vec<RemoteNodeAddr>>,
     channel_to_node: Option<HashMap<ChannelId, NodeId>>,
     port: Option<i32>,
+    has_remote_channels: bool,
 
     shutdown_tx: Option<oneshot::Sender<()>>,
     shutdown_rx: Option<oneshot::Receiver<()>>,
@@ -74,7 +77,7 @@ pub struct GrpcTransportBackend {
     worker_health: Arc<WorkerHealth>,
 }
 
-impl GrpcTransportBackend {
+impl TransportBackend {
     const GRPC_SERVER_QUEUE_SIZE: usize = 10; // single mpsc channel reading from grpc server and forwarding to local clients (readers)
     const GRPC_CLIENT_QUEUE_SIZE: usize = 10; // mpsc channel per peer node, reading local client (writers) and forwarding to remote grpc clients
 
@@ -90,6 +93,7 @@ impl GrpcTransportBackend {
             nodes: None,
             channel_to_node: None,
             port: None,
+            has_remote_channels: false,
             shutdown_tx: Some(shutdown_tx),
             shutdown_rx: Some(shutdown_rx),
             running: Arc::new(AtomicBool::new(false)),
@@ -508,9 +512,15 @@ impl GrpcTransportBackend {
 }
 
 #[async_trait]
-impl TransportBackend for GrpcTransportBackend {
+impl TransportBackendTrait for TransportBackend {
     async fn start(&mut self) {
         self.running.store(true, std::sync::atomic::Ordering::Release);
+
+        // Local-only topology: channel wiring is already done in init_channels.
+        // No gRPC server/client tasks are needed.
+        if !self.has_remote_channels {
+            return;
+        }
 
         let remote_reader_senders = self.remote_reader_senders.take().unwrap();
         self.start_reading_side(remote_reader_senders).await;
@@ -564,6 +574,7 @@ impl TransportBackend for GrpcTransportBackend {
 
         let (port, channel_to_node, nodes) =
             self.derive_remote_connection_args(&input_channels, &output_channels);
+        self.has_remote_channels = port.is_some() || nodes.is_some();
         self.port = port;
         self.channel_to_node = channel_to_node;
         self.nodes = nodes;

@@ -150,7 +150,7 @@ pub(crate) async fn run_watermark_window_pipeline(
         exec_graph,
         vertex_ids,
         2,
-        TransportBackendType::InMemory,
+        TransportBackendType::Grpc,
     ));
 
     worker.start().await;

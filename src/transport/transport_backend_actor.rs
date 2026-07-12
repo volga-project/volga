@@ -9,7 +9,7 @@ use anyhow::Result;
 use tonic::async_trait;
 
 #[async_trait]
-pub trait TransportBackend: Send + Sync {
+pub trait TransportBackendTrait: Send + Sync {
     async fn start(&mut self);
     async fn close(&mut self);
     fn init_channels(
@@ -28,16 +28,15 @@ pub enum TransportBackendActorMessage {
 #[derive(Debug, Clone)]
 pub enum TransportBackendType {
     Grpc,
-    InMemory,
 }
 
 #[derive(Actor)]
 pub struct TransportBackendActor {
-    backend: Box<dyn TransportBackend + Send + 'static>,
+    backend: Box<dyn TransportBackendTrait + Send + 'static>,
 }
 
 impl TransportBackendActor {
-    pub fn new(backend: Box<dyn TransportBackend + Send + 'static>) -> Self {
+    pub fn new(backend: Box<dyn TransportBackendTrait + Send + 'static>) -> Self {
         Self {
             backend,
         }

@@ -157,7 +157,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             exec_graph1,
             vertex_ids_1,
             2,
-            TransportBackendType::InMemory,
+            TransportBackendType::Grpc,
         )
         .with_master_addr(master_addr.clone()),
     );
@@ -256,7 +256,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             exec_graph2,
             vertex_ids_2,
             2,
-            TransportBackendType::InMemory,
+            TransportBackendType::Grpc,
         )
         .with_master_addr(master_addr.clone())
         .with_restore_checkpoint_id(1),

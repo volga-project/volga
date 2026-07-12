@@ -1,7 +1,6 @@
 use crate::api::{compile_logical_graph, PipelineSpec};
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::transport::channel::Channel;
 use crate::transport::transport_backend_actor::TransportBackendType;
 use serde::{Deserialize, Serialize};
 
@@ -35,23 +34,8 @@ pub fn resolve_num_threads_per_task(spec: &PipelineSpec) -> usize {
 }
 
 pub fn resolve_transport_backend_type(
-    execution_graph: &ExecutionGraph,
-    vertex_ids: &[String],
+    _execution_graph: &ExecutionGraph,
+    _vertex_ids: &[String],
 ) -> TransportBackendType {
-    let has_remote_channels = vertex_ids.iter().any(|vertex_id| {
-        if let Some((in_edges, out_edges)) = execution_graph.get_edges_for_vertex(vertex_id) {
-            in_edges
-                .iter()
-                .chain(out_edges.iter())
-                .any(|e| matches!(e.channel.as_ref(), Some(Channel::Remote { .. })))
-        } else {
-            false
-        }
-    });
-
-    if has_remote_channels {
-        TransportBackendType::Grpc
-    } else {
-        TransportBackendType::InMemory
-    }
+    TransportBackendType::Grpc
 }

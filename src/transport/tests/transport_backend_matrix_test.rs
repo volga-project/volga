@@ -2,12 +2,12 @@ use std::time::Duration;
 use std::sync::Arc;
 
 use crate::runtime::health::WorkerHealth;
-use crate::transport::{GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
+use crate::transport::{TransportBackend, TransportBackendTrait};
 
 use super::many_to_many_harness::{run_many_to_many_case, MeshChannelMode, MeshTestConfig};
 
 #[tokio::test]
-async fn test_in_memory_many_to_many_local_only_harness() {
+async fn test_many_to_many_local_only_harness() {
     let config = MeshTestConfig {
         num_writer_nodes: 1,
         num_reader_nodes: 1,
@@ -20,14 +20,14 @@ async fn test_in_memory_many_to_many_local_only_harness() {
         read_timeout: Duration::from_secs(5),
     };
 
-    run_many_to_many_case(config, || -> Box<dyn TransportBackend> {
-        Box::new(InMemoryTransportBackend::new())
+    run_many_to_many_case(config, || -> Box<dyn TransportBackendTrait> {
+        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new())))
     })
     .await;
 }
 
 #[tokio::test]
-async fn test_grpc_many_to_many_remote_only_harness() {
+async fn test_many_to_many_remote_only_harness() {
     let config = MeshTestConfig {
         num_writer_nodes: 2,
         num_reader_nodes: 2,
@@ -40,14 +40,14 @@ async fn test_grpc_many_to_many_remote_only_harness() {
         read_timeout: Duration::from_secs(10),
     };
 
-    run_many_to_many_case(config, || -> Box<dyn TransportBackend> {
-        Box::new(GrpcTransportBackend::new(Arc::new(WorkerHealth::new())))
+    run_many_to_many_case(config, || -> Box<dyn TransportBackendTrait> {
+        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new())))
     })
     .await;
 }
 
 #[tokio::test]
-async fn test_grpc_many_to_many_mixed_local_remote_harness() {
+async fn test_many_to_many_mixed_local_remote_harness() {
     let config = MeshTestConfig {
         num_writer_nodes: 2,
         num_reader_nodes: 2,
@@ -60,8 +60,8 @@ async fn test_grpc_many_to_many_mixed_local_remote_harness() {
         read_timeout: Duration::from_secs(10),
     };
 
-    run_many_to_many_case(config, || -> Box<dyn TransportBackend> {
-        Box::new(GrpcTransportBackend::new(Arc::new(WorkerHealth::new())))
+    run_many_to_many_case(config, || -> Box<dyn TransportBackendTrait> {
+        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new())))
     })
     .await;
 }

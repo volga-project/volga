@@ -5,7 +5,7 @@ use crate::runtime::VertexId;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::metrics::{MetricsLabels, TaskMetrics, WorkerAggregateMetrics};
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-use crate::transport::{transport_backend_actor::TransportBackendType, GrpcTransportBackend, InMemoryTransportBackend, TransportBackend};
+use crate::transport::{transport_backend_actor::TransportBackendType, TransportBackend, TransportBackendTrait};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
@@ -348,9 +348,8 @@ impl Worker {
         // Backend selection (SlateDB) will be added later; for now use InMemBatchStore.
         let mut storage_by_type: HashMap<String, Arc<WorkerStorageContext>> = HashMap::new();
 
-        let mut backend: Box<dyn TransportBackend> = match config.transport_backend_type {
-            TransportBackendType::Grpc => Box::new(GrpcTransportBackend::new(self.health.clone())),
-            TransportBackendType::InMemory => Box::new(InMemoryTransportBackend::new()),
+        let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
+            TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health.clone())),
         };
         let mut transport_client_configs = backend.init_channels(&config.graph, config.vertex_ids.clone());
 

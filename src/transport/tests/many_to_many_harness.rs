@@ -10,7 +10,7 @@ use crate::transport::test_utils::{
     TestDataReaderActor, TestDataReaderMessage, TestDataWriterActor, TestDataWriterMessage,
 };
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
-use crate::transport::TransportBackend;
+use crate::transport::TransportBackendTrait;
 use arrow::array::StringArray;
 use kameo::spawn;
 use std::collections::{HashMap, HashSet};
@@ -154,7 +154,7 @@ fn build_mesh_graph(config: &MeshTestConfig) -> MeshGraph {
 
 pub async fn run_many_to_many_case<F>(config: MeshTestConfig, backend_factory: F)
 where
-    F: Fn() -> Box<dyn TransportBackend>,
+    F: Fn() -> Box<dyn TransportBackendTrait>,
 {
     let mesh = build_mesh_graph(&config);
     let writer_vertex_set: HashSet<String> = mesh.writer_vertex_ids.iter().cloned().collect();

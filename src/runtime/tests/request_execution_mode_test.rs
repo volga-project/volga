@@ -282,7 +282,7 @@ async fn test_request_execution_mode() {
         exec_graph,
         vertex_ids,
         2,
-        TransportBackendType::InMemory,
+        TransportBackendType::Grpc,
     ));
     worker.start().await;
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;
