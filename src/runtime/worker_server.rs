@@ -26,7 +26,7 @@ use worker_service::{
     StartWorkerRequest, StartWorkerResponse,
     RunWorkerTasksRequest, RunWorkerTasksResponse,
     CloseWorkerTasksRequest, CloseWorkerTasksResponse,
-    CloseWorkerRequest, CloseWorkerResponse,
+    ResetWorkerRequest, ResetWorkerResponse, ShutdownWorkerRequest, ShutdownWorkerResponse,
     TriggerCheckpointRequest, TriggerCheckpointResponse,
     MasterHeartbeatMessage, WorkerHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
@@ -196,32 +196,41 @@ impl WorkerService for WorkerServiceImpl {
         }))
     }
 
-    async fn close_worker(
+    async fn reset_worker(
         &self,
-        request: Request<CloseWorkerRequest>,
-    ) -> Result<Response<CloseWorkerResponse>, Status> {
+        request: Request<ResetWorkerRequest>,
+    ) -> Result<Response<ResetWorkerResponse>, Status> {
         self.validate_execution_attempt(request.get_ref().execution_attempt_id)
             .await?;
-        let is_final = request.get_ref().is_final;
         let mut worker_guard = self.worker.lock().await;
         worker_guard.close().await;
         drop(worker_guard);
 
-        println!(
-            "[WORKER_SERVER] Worker closed successfully (is_final={})",
-            is_final
-        );
+        println!("[WORKER_SERVER] Worker reset successfully");
 
-        // Only signal the process to exit on a final shutdown. A non-final close is a
-        // recovery reset: keep the process (and WorkerService) alive to be reconfigured.
-        if is_final {
-            let mut notify_guard = self.close_worker_notify.lock().await;
-            if let Some(tx) = notify_guard.take() {
-                let _ = tx.send(());
-            }
+        Ok(Response::new(ResetWorkerResponse {
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn shutdown_worker(
+        &self,
+        request: Request<ShutdownWorkerRequest>,
+    ) -> Result<Response<ShutdownWorkerResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
+        let mut worker_guard = self.worker.lock().await;
+        worker_guard.close().await;
+        drop(worker_guard);
+
+        let mut notify_guard = self.close_worker_notify.lock().await;
+        if let Some(tx) = notify_guard.take() {
+            let _ = tx.send(());
         }
+        println!("[WORKER_SERVER] Worker shut down successfully");
 
-        Ok(Response::new(CloseWorkerResponse {
+        Ok(Response::new(ShutdownWorkerResponse {
             success: true,
             error_message: String::new(),
         }))
@@ -439,6 +448,7 @@ impl WorkerServer {
         for attempt in 0..MAX_RETRIES {
             let req = crate::runtime::master::server::master_service::RegisterWorkerRequest {
                 worker_id: self.worker_id.clone(),
+                ..Default::default()
             };
 
             match endpoint.clone().connect().await {
@@ -528,6 +538,17 @@ impl WorkerServer {
             let _ = handle.await;
         }
         println!("[WORKER_SERVER] WorkerService server stopped");
+    }
+
+    pub async fn crash_for_testing(&mut self) {
+        {
+            let mut worker = self.service.worker.lock().await;
+            worker.kill_for_testing().await;
+        }
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+            let _ = handle.await;
+        }
     }
 }
 

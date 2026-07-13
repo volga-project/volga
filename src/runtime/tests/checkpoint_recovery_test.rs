@@ -7,7 +7,7 @@ use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
-use crate::orchestrator::local::LocalMasterOrchestrator;
+use crate::orchestrator::local::LocalTestOrchestrator;
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::master::{Master, MasterConfig};
@@ -42,7 +42,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     // Start master server
     let master_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
     let orchestrator: Arc<dyn MasterOrchestrator> =
-        Arc::new(LocalMasterOrchestrator::new(1, Uuid::new_v4().to_string()));
+        Arc::new(LocalTestOrchestrator::new(1, Uuid::new_v4().to_string()));
     let mut master_server = MasterServer::new(orchestrator);
 
     // Build spec: datagen -> window -> sink

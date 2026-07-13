@@ -12,6 +12,7 @@ pub mod worker_service {
 }
 
 pub mod checkpoint;
+pub mod events;
 pub mod server;
 mod service;
 
@@ -24,6 +25,7 @@ mod worker_client;
 
 use lifecycle::MasterLifecycle;
 use state::MasterState;
+pub use events::{LifecycleEvent, LifecycleEventRecord};
 
 /// Master that orchestrates multiple worker servers.
 pub struct Master {
@@ -107,6 +109,16 @@ impl Master {
 
     pub async fn get_latest_pipeline_snapshot(&self) -> Option<PipelineSnapshot> {
         self.state.latest_pipeline_snapshot().await
+    }
+
+    pub async fn lifecycle_events_since(&self, sequence: u64) -> Vec<LifecycleEventRecord> {
+        self.state.lifecycle_events_since(sequence).await
+    }
+
+    pub fn subscribe_lifecycle_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<LifecycleEventRecord> {
+        self.state.subscribe_lifecycle_events()
     }
 
     /// Run execution attempts until the pipeline finishes or recovery is exhausted.

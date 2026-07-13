@@ -8,6 +8,7 @@ service MasterService {
   rpc GetTaskCheckpoint(GetTaskCheckpointRequest) returns (GetTaskCheckpointResponse);
   rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
   rpc GetLatestPipelineSnapshot(GetLatestPipelineSnapshotRequest) returns (GetLatestPipelineSnapshotResponse);
+  rpc GetLifecycleEvents(GetLifecycleEventsRequest) returns (GetLifecycleEventsResponse);
 }
 
 message RegisterWorkerRequest {
@@ -66,6 +67,19 @@ message GetLatestPipelineSnapshotResponse {
   bytes snapshot_bytes = 2;
   uint64 ts_ms = 3;
   uint64 seq = 4;
+}
+
+message GetLifecycleEventsRequest {
+  uint64 after_sequence = 1;
+}
+
+message LifecycleEventRecord {
+  uint64 sequence = 1;
+  bytes event_bytes = 2;
+}
+
+message GetLifecycleEventsResponse {
+  repeated LifecycleEventRecord events = 1;
 }
 
 

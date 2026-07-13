@@ -3,17 +3,18 @@ use std::collections::{HashMap, HashSet};
 use crate::orchestrator::orchestrator::WorkerNode;
 use crate::orchestrator::task_assignment::{build_mapping, worker_to_tasks, TaskWorkerMapping};
 use crate::runtime::observability::StreamTaskStatus;
+use crate::runtime::consts::{runtime_consts, MASTER_DISCOVERY_TIMEOUT, MASTER_REPLACEMENT_TIMEOUT};
 
-use super::super::state::{DISCOVERY_TIMEOUT, REPLACEMENT_TIMEOUT};
+use super::super::events::LifecycleEvent;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
 use super::{ExecutionAttempt, ScheduleError};
 
 impl ExecutionAttempt {
     pub(in crate::runtime::master) async fn schedule(&mut self) -> Result<(), ScheduleError> {
         let readiness_timeout = if self.id == 0 {
-            DISCOVERY_TIMEOUT
+            runtime_consts().duration(MASTER_DISCOVERY_TIMEOUT)
         } else {
-            REPLACEMENT_TIMEOUT
+            runtime_consts().duration(MASTER_REPLACEMENT_TIMEOUT)
         };
         let nodes = match self
             .state
@@ -36,7 +37,6 @@ impl ExecutionAttempt {
             self.id,
             self.restore_checkpoint_id
         );
-
         let mapping = build_mapping(&self.pipeline.spec, &self.pipeline.execution_graph, &nodes)
             .map_err(|error| ScheduleError::Terminal(error.to_string()))?;
         self.configure_all(&nodes, &mapping).await?;
@@ -45,7 +45,21 @@ impl ExecutionAttempt {
         self.connect_all(&nodes).await?;
         self.start_all().await?;
         self.wait_opened().await?;
-        self.run_all().await
+        self.run_all().await?;
+        let worker_ids: Vec<String> = nodes.keys().cloned().collect();
+        self.state
+            .record_lifecycle_event(LifecycleEvent::AttemptScheduled {
+                attempt_id: self.id,
+                worker_ids: worker_ids.clone(),
+            })
+            .await;
+        self.state
+            .record_lifecycle_event(LifecycleEvent::AttemptRunning {
+                attempt_id: self.id,
+                worker_ids,
+            })
+            .await;
+        Ok(())
     }
 
     async fn configure_all(

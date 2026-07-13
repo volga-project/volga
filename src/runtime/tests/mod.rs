@@ -1,9 +1,9 @@
 #![cfg(test)]
 
 pub mod checkpoint_recovery_test;
-pub mod docker_entrypoints_test;
-pub mod kube_entrypoints_test;
-pub mod master_worker_execution_test;
+pub mod cluster_tests;
+pub mod cluster_harness;
+pub mod pipeline_exec;
 pub mod request_execution_mode_test;
 pub mod request_source_e2e_test;
 pub mod stream_task_actor_test;

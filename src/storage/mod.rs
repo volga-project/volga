@@ -1,5 +1,6 @@
 pub mod in_memory_storage_grpc_server;
 pub mod in_memory_storage_grpc_client;
+pub mod in_memory_storage_snapshot;
 pub mod batch_store;
 pub mod batch_pins;
 pub mod batch_retirement;
@@ -14,6 +15,7 @@ pub mod worker_storage_context;
 
 pub use in_memory_storage_grpc_server::{InMemoryStorageServer, InMemoryStorageServiceImpl};
 pub use in_memory_storage_grpc_client::InMemoryStorageClient; 
+pub use in_memory_storage_snapshot::InMemoryStorageSnapshot;
 pub use in_mem_batch_cache::InMemBatchCache;
 pub use budget::StorageBudgetConfig;
 pub use stats::{StorageStats, StorageStatsSnapshot};

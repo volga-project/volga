@@ -4,6 +4,7 @@ use std::sync::Arc;
 use super::service::MasterServiceImpl;
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::master::MasterConfig;
+use crate::runtime::master::LifecycleEventRecord;
 use crate::runtime::observability::WorkerSnapshot;
 
 pub mod master_service {
@@ -34,8 +35,22 @@ impl MasterServer {
         self.service.master().execute().await
     }
 
+    pub fn master(&self) -> Arc<super::Master> {
+        self.service.master()
+    }
+
     pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
         self.service.master().get_worker_states().await
+    }
+
+    pub async fn lifecycle_events_since(&self, sequence: u64) -> Vec<LifecycleEventRecord> {
+        self.service.master().lifecycle_events_since(sequence).await
+    }
+
+    pub fn subscribe_lifecycle_events(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<LifecycleEventRecord> {
+        self.service.master().subscribe_lifecycle_events()
     }
 
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {

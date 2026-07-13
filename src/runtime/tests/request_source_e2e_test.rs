@@ -4,7 +4,7 @@ use crate::{
         Planner, PlanningContext,
     },
     common::test_utils::{gen_unique_grpc_port, IdentityMapFunction},
-    executor::local_single_worker,
+    runtime::tests::pipeline_exec,
     runtime::{
         functions::{
             key_by::{key_by_function::extract_datafusion_window_exec, KeyByFunction},
@@ -373,7 +373,7 @@ async fn test_request_source_sink_e2e() {
     // Start pipeline execution in background
     // TODO implement stop
     let _pipeline_handle = tokio::spawn(async move {
-        local_single_worker::execute(spec, logical_graph)
+        pipeline_exec::execute(spec, logical_graph)
             .await
             .unwrap();
     });

@@ -7,7 +7,7 @@ use crate::{
         message::Message,
         test_utils::{gen_unique_grpc_port, print_pipeline_state},
     },
-    executor::local_single_worker,
+    runtime::tests::pipeline_exec,
     runtime::{
         functions::{
             key_by::KeyByFunction,
@@ -76,7 +76,7 @@ fn test_word_count() -> Result<()> {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
 
-        let pipeline_state = local_single_worker::execute(spec, logical_graph)
+        let pipeline_state = pipeline_exec::execute(spec, logical_graph)
             .await
             .unwrap();
 

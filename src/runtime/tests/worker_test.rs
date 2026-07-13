@@ -12,7 +12,7 @@ use crate::{
         },
         WatermarkMessage, MAX_WATERMARK_VALUE,
     },
-    executor::local_single_worker,
+    runtime::tests::pipeline_exec,
     runtime::operators::{
         sink::sink_operator::SinkConfig,
         source::source_operator::{SourceConfig, VectorSourceConfig},
@@ -92,7 +92,7 @@ fn test_worker_execution() -> Result<()> {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
 
-        local_single_worker::execute(spec, logical_graph)
+        pipeline_exec::execute(spec, logical_graph)
             .await
             .unwrap();
 

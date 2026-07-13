@@ -32,6 +32,7 @@ type VolgaPipelineStatus struct {
 	Phase             string             `json:"phase,omitempty"`
 	MasterServiceAddr string             `json:"masterServiceAddr,omitempty"`
 	Conditions        []metav1.Condition `json:"conditions,omitempty"`
+	LifecycleEvents   []json.RawMessage  `json:"lifecycleEvents,omitempty"`
 }
 
 // +kubebuilder:object:root=true
@@ -69,6 +70,12 @@ func (in *VolgaPipeline) DeepCopyInto(out *VolgaPipeline) {
 	if in.Status.Conditions != nil {
 		out.Status.Conditions = make([]metav1.Condition, len(in.Status.Conditions))
 		copy(out.Status.Conditions, in.Status.Conditions)
+	}
+	if in.Status.LifecycleEvents != nil {
+		out.Status.LifecycleEvents = make([]json.RawMessage, len(in.Status.LifecycleEvents))
+		for i := range in.Status.LifecycleEvents {
+			out.Status.LifecycleEvents[i] = append(json.RawMessage(nil), in.Status.LifecycleEvents[i]...)
+		}
 	}
 }
 

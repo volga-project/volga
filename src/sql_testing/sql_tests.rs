@@ -1,5 +1,5 @@
 use crate::{
-    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{MAX_WATERMARK_VALUE, WatermarkMessage, message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}}, executor::local_single_worker, runtime::operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, storage::{InMemoryStorageClient, InMemoryStorageServer}
+    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{MAX_WATERMARK_VALUE, WatermarkMessage, message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}}, runtime::{operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, tests::pipeline_exec}, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 
@@ -511,7 +511,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();
     
-    local_single_worker::execute(spec, logical_graph).await.unwrap();
+    pipeline_exec::execute(spec, logical_graph).await.unwrap();
     
     let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
     let actual_messages = client.get_vector().await.unwrap();

@@ -1,6 +1,7 @@
 use tonic::transport::Channel;
 use std::collections::HashMap;
 use crate::common::message::Message;
+use super::in_memory_storage_snapshot::InMemoryStorageSnapshot;
 use anyhow::Result;
 use tokio::time::{Duration, sleep};
 
@@ -170,6 +171,15 @@ impl InMemoryStorageClient {
         }
         
         Ok(keyed_messages)
+    }
+
+    pub async fn snapshot(&mut self) -> Result<InMemoryStorageSnapshot> {
+        let vector_messages = self.get_vector().await?;
+        let keyed_messages = self.get_map().await?;
+        Ok(InMemoryStorageSnapshot::new(
+            vector_messages,
+            keyed_messages,
+        ))
     }
 
     /// Drain (get + clear) all messages from vector storage

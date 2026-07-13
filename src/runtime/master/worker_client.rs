@@ -8,17 +8,16 @@ use crate::api::PipelineSpec;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::worker_config_utils::WorkerInitPayload;
+use crate::runtime::consts::{runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY};
 
 use super::failure::FailureEvent;
 use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
-    worker_service_client::WorkerServiceClient, CloseWorkerRequest, CloseWorkerTasksRequest,
+    worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
+    ShutdownWorkerRequest,
     ConfigureWorkerRequest, GetWorkerStateRequest, RunWorkerTasksRequest, StartWorkerRequest,
     TriggerCheckpointRequest,
 };
-
-const MAX_RETRIES: u32 = 5;
-const RETRY_DELAY_MS: u64 = 1000;
 
 enum Attempt<T> {
     Done(T),
@@ -50,7 +49,7 @@ impl fmt::Display for WorkerCallError {
 impl std::error::Error for WorkerCallError {}
 
 fn retry_delay(attempt: u32) -> Duration {
-    Duration::from_millis(RETRY_DELAY_MS * (attempt + 1) as u64)
+    runtime_consts().duration(MASTER_RPC_RETRY_DELAY) * (attempt + 1)
 }
 
 fn is_retryable_status(status: &tonic::Status) -> bool {
@@ -72,13 +71,17 @@ fn status_attempt<T>(status: tonic::Status) -> Attempt<T> {
     }
 }
 
-async fn with_retry<T, F, Fut>(op_name: &str, target: &str, mut op: F) -> Result<T, WorkerCallError>
+async fn with_retry<T, F, Fut>(
+    op_name: &str,
+    target: &str,
+    mut op: F,
+) -> Result<T, WorkerCallError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Attempt<T>>,
 {
     let mut last_error = None;
-    for attempt in 0..MAX_RETRIES {
+    for attempt in 0..runtime_consts().u64(MASTER_RPC_MAX_RETRIES) as u32 {
         match op().await {
             Attempt::Done(v) => return Ok(v),
             Attempt::Fail(e) => return Err(e),
@@ -91,7 +94,7 @@ where
                     msg
                 );
                 last_error = Some(msg);
-                if attempt < MAX_RETRIES - 1 {
+                if attempt + 1 < runtime_consts().u64(MASTER_RPC_MAX_RETRIES) as u32 {
                     sleep(retry_delay(attempt)).await;
                 }
             }
@@ -99,7 +102,7 @@ where
     }
     Err(WorkerCallError::Unreachable(format!(
         "{} failed on {} after {} attempts: {:?}",
-        op_name, target, MAX_RETRIES, last_error
+        op_name, target, runtime_consts().u64(MASTER_RPC_MAX_RETRIES), last_error
     )))
 }
 
@@ -262,19 +265,33 @@ impl WorkerClient {
             .success)
     }
 
-    pub async fn close_worker(&self, is_final: bool) -> anyhow::Result<bool> {
+    pub async fn reset_worker(&self) -> anyhow::Result<bool> {
         let execution_attempt_id = self.execution_attempt_id;
         Ok(self
-            .rpc("close_worker", |mut client| async move {
+            .rpc("reset_worker", |mut client| async move {
                 client
-                    .close_worker(tonic::Request::new(CloseWorkerRequest {
+                    .reset_worker(tonic::Request::new(ResetWorkerRequest {
                         execution_attempt_id,
-                        is_final,
                     }))
                     .await
             })
             .await
             .map_err(anyhow::Error::new)?
+            .into_inner()
+            .success)
+    }
+
+    pub async fn shutdown_worker(&self) -> anyhow::Result<bool> {
+        let execution_attempt_id = self.execution_attempt_id;
+        Ok(self
+            .rpc("shutdown_worker", |mut client| async move {
+                client
+                    .shutdown_worker(tonic::Request::new(ShutdownWorkerRequest {
+                        execution_attempt_id,
+                    }))
+                    .await
+            })
+            .await?
             .into_inner()
             .success)
     }

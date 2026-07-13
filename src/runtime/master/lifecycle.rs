@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use super::attempt::{AttemptOutcome, ExecutionAttempt, ScheduleError};
+use super::events::LifecycleEvent;
 use super::state::{MasterState, PipelineContext};
-
-const RECOVERY_BUDGET: u64 = 20;
+use crate::runtime::consts::{runtime_consts, MASTER_RECOVERY_BUDGET};
 
 pub(super) struct MasterLifecycle {
     state: Arc<MasterState>,
@@ -24,6 +24,12 @@ impl MasterLifecycle {
         let pipeline = Arc::new(pipeline);
 
         loop {
+            self.state
+                .record_lifecycle_event(LifecycleEvent::AttemptStarted {
+                    attempt_id: execution_attempt_id,
+                    restore_checkpoint_id,
+                })
+                .await;
             let mut attempt = ExecutionAttempt::new(
                 execution_attempt_id,
                 restore_checkpoint_id,
@@ -36,6 +42,11 @@ impl MasterLifecycle {
                     attempt.run().await?
                 }
                 Err(ScheduleError::Terminal(detail)) => {
+                    self.state
+                        .record_lifecycle_event(LifecycleEvent::PipelineFailed {
+                            detail: detail.clone(),
+                        })
+                        .await;
                     return Err(anyhow::anyhow!("terminal scheduling failure: {}", detail));
                 }
                 Err(ScheduleError::Recoverable { replace, detail }) => {
@@ -50,21 +61,31 @@ impl MasterLifecycle {
             match schedule_outcome {
                 AttemptOutcome::Finished => {
                     attempt.finish().await;
+                    self.state
+                        .record_lifecycle_event(LifecycleEvent::PipelineFinished)
+                        .await;
                     println!("[MASTER] Pipeline finished");
                     return Ok(());
                 }
                 AttemptOutcome::Recover(replace) => {
-                    if execution_attempt_id >= RECOVERY_BUDGET {
+                    if execution_attempt_id >= runtime_consts().u64(MASTER_RECOVERY_BUDGET) {
                         return Err(anyhow::anyhow!(
                             "recovery budget exhausted after {} attempts",
-                            RECOVERY_BUDGET
+                            runtime_consts().u64(MASTER_RECOVERY_BUDGET)
                         ));
                     }
 
+                    let replacement_worker_ids = replace.iter().cloned().collect();
+                    self.state
+                        .record_lifecycle_event(LifecycleEvent::RecoveryStarted {
+                            attempt_id: execution_attempt_id,
+                            replacement_worker_ids,
+                        })
+                        .await;
                     println!(
                         "[MASTER] Recovering {}/{} after execution attempt {} replace={:?}",
                         execution_attempt_id + 1,
-                        RECOVERY_BUDGET,
+                        runtime_consts().u64(MASTER_RECOVERY_BUDGET),
                         execution_attempt_id,
                         replace
                     );

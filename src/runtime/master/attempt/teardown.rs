@@ -13,39 +13,39 @@ impl ExecutionAttempt {
         &mut self,
         mut replace: HashSet<String>,
     ) -> anyhow::Result<()> {
-        let close_futures: Vec<_> = self
+        let reset_futures: Vec<_> = self
             .clients
             .drain()
             .map(|(worker_id, client)| async move {
                 (
                     worker_id,
-                    timeout(CLOSE_TIMEOUT, client.close_worker(false)).await,
+                    timeout(CLOSE_TIMEOUT, client.reset_worker()).await,
                 )
             })
             .collect();
 
-        for (worker_id, result) in futures::future::join_all(close_futures).await {
+        for (worker_id, result) in futures::future::join_all(reset_futures).await {
             match result {
                 Ok(Ok(true)) => {
                     replace.remove(&worker_id);
                 }
                 Ok(Ok(false)) => {
                     println!(
-                        "[MASTER] close_worker rejected for {}; replacing",
+                        "[MASTER] reset_worker rejected for {}; replacing",
                         worker_id
                     );
                     replace.insert(worker_id);
                 }
                 Ok(Err(error)) => {
                     println!(
-                        "[MASTER] close_worker failed for {}: {}; replacing",
+                        "[MASTER] reset_worker failed for {}: {}; replacing",
                         worker_id, error
                     );
                     replace.insert(worker_id);
                 }
                 Err(_) => {
                     println!(
-                        "[MASTER] close_worker timed out for {}; replacing",
+                        "[MASTER] reset_worker timed out for {}; replacing",
                         worker_id
                     );
                     replace.insert(worker_id);
@@ -86,14 +86,14 @@ impl ExecutionAttempt {
             );
         }
 
-        let close_workers: Vec<_> = self
+        let shutdown_workers: Vec<_> = self
             .clients
             .drain()
             .map(|(worker_id, client)| async move {
-                log_close("close_worker", &worker_id, client.close_worker(true).await);
+                log_close("shutdown_worker", &worker_id, client.shutdown_worker().await);
             })
             .collect();
-        futures::future::join_all(close_workers).await;
+        futures::future::join_all(shutdown_workers).await;
     }
 }
 

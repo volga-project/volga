@@ -10,7 +10,6 @@ use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
 
-// Locally simulates a single worker executing a pipeline, used locally
 pub async fn execute_with_state_updates(
     spec: PipelineSpec,
     logical_graph: LogicalGraph,
@@ -22,8 +21,7 @@ pub async fn execute_with_state_updates(
     let vertex_ids = execution_graph.get_vertices().keys().cloned().collect();
     let worker_id = "single_worker".to_string();
 
-    let execution_profile = spec.execution_profile.clone().unwrap();
-    let num_threads_per_task = match execution_profile {
+    let num_threads_per_task = match spec.execution_profile.clone().unwrap() {
         ExecutionProfile::SingleWorker { num_threads_per_task } => num_threads_per_task,
         _ => panic!("Execution profile must be SingleWorker"),
     };
@@ -51,11 +49,9 @@ pub async fn execute_with_state_updates(
             while let Some(worker_state) = worker_state_receiver.recv().await {
                 let mut worker_states = StdHashMap::new();
                 worker_states.insert(worker_id_clone.clone(), worker_state);
-                let pipeline_state = PipelineSnapshot::new(worker_states);
-                let _ = pipeline_sender.send(pipeline_state).await;
+                let _ = pipeline_sender.send(PipelineSnapshot::new(worker_states)).await;
             }
         });
-
         worker
             .execute_worker_lifecycle_for_testing_with_state_updates(worker_state_sender)
             .await;

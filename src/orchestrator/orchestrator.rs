@@ -39,6 +39,14 @@ pub trait MasterOrchestrator: Send + Sync {
     async fn request_replacement(&self, _worker_ids: &[String]) -> Result<()> {
         Ok(())
     }
+
+    async fn record_lifecycle_event(
+        &self,
+        _sequence: u64,
+        _event_json: &str,
+    ) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]

@@ -6,7 +6,7 @@ use crate::{
         ExecutionMode, PipelineSpecBuilder,
     },
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    executor::local_single_worker,
+    runtime::tests::pipeline_exec,
     runtime::{
         functions::source::{
             datagen_source::{DatagenSourceConfig, FieldGenerator},
@@ -416,7 +416,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     // Spawn execution task
     let execution_task = tokio::spawn(async move {
-        local_single_worker::execute_with_state_updates(
+        pipeline_exec::execute_with_state_updates(
             spec,
             logical_graph,
             Some(state_updates_sender),

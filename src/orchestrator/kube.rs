@@ -99,6 +99,24 @@ impl KubeApiClient {
         }
         Ok(())
     }
+
+    async fn patch_json(&self, path: &str, body: &Value) -> Result<()> {
+        let url = format!("{}{}", self.base_url.trim_end_matches('/'), path);
+        let resp = self
+            .client
+            .patch(&url)
+            .header(CONTENT_TYPE, "application/merge-patch+json")
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("kube api PATCH failed: {}", url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("kube api PATCH failed: {} body={}", status, body));
+        }
+        Ok(())
+    }
 }
 
 fn json_get_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
@@ -372,6 +390,35 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
             );
         }
         Ok(())
+    }
+
+    async fn record_lifecycle_event(&self, sequence: u64, event_json: &str) -> Result<()> {
+        const MAX_STATUS_EVENTS: usize = 64;
+
+        let crd = self.get_crd().await?;
+        let mut events = json_get_path(&crd, &["status", "lifecycleEvents"])
+            .and_then(|value| value.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let event = serde_json::from_str(event_json)
+            .unwrap_or_else(|_| Value::String(event_json.to_string()));
+        events.push(serde_json::json!({
+            "sequence": sequence,
+            "event": event,
+        }));
+        if events.len() > MAX_STATUS_EVENTS {
+            events.drain(..events.len() - MAX_STATUS_EVENTS);
+        }
+        self.api
+            .patch_json(
+                &format!("{}/status", self.crd_path()),
+                &serde_json::json!({
+                    "status": {
+                        "lifecycleEvents": events,
+                    }
+                }),
+            )
+            .await
     }
 }
 

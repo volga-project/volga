@@ -6,6 +6,7 @@ use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnap
 use crate::runtime::observability::StreamTaskStatus;
 
 use super::super::state::MasterState;
+use super::super::events::LifecycleEvent;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
 use super::{AttemptOutcome, ExecutionAttempt};
 
@@ -55,6 +56,14 @@ impl ExecutionAttempt {
                 failure = self.failure_rx.recv() => {
                     let failure =
                         failure.ok_or_else(|| anyhow::anyhow!("failure channel closed"))?;
+                    self.state
+                        .record_lifecycle_event(LifecycleEvent::WorkerFailure {
+                            attempt_id: self.id,
+                            worker_id: failure.worker_id.clone(),
+                            kind: format!("{:?}", failure.kind),
+                            detail: failure.detail.clone(),
+                        })
+                        .await;
                     // TODO: We may have a race where pipeline is finished and at the same time we somehow get failure signal
                     // resulting in unnecesery pipeline restart
                     println!(
@@ -75,6 +84,16 @@ impl ExecutionAttempt {
                     poll_client_states(&self.clients, &self.state).await
                 } => {
                     if !state_poll.failures.is_empty() {
+                        for (worker_id, error) in &state_poll.failures {
+                            self.state
+                                .record_lifecycle_event(LifecycleEvent::WorkerFailure {
+                                    attempt_id: self.id,
+                                    worker_id: worker_id.clone(),
+                                    kind: "StatePoll".to_string(),
+                                    detail: error.to_string(),
+                                })
+                                .await;
+                        }
                         let replace = state_poll
                             .failures
                             .iter()

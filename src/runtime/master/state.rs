@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
+use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::api::PipelineSpec;
@@ -12,10 +13,9 @@ use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnap
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 use super::checkpoint::{MasterCheckpointRegistry, TaskKey};
+use super::events::{LifecycleEvent, LifecycleEventRecord, LifecycleJournal};
 use super::MasterConfig;
 
-pub(super) const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
-pub(super) const REPLACEMENT_TIMEOUT: Duration = Duration::from_secs(120);
 const WAIT_TICK: Duration = Duration::from_millis(500);
 
 pub(super) struct PipelineContext {
@@ -125,16 +125,21 @@ pub(super) struct MasterState {
     pub orchestrator: Arc<dyn MasterOrchestrator>,
     workers: Mutex<WorkerRegistry>,
     latest_pipeline_snapshot: Mutex<Option<PipelineSnapshot>>,
+    lifecycle_events: Mutex<LifecycleJournal>,
+    lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
 }
 
 impl MasterState {
     pub(super) fn new(orchestrator: Arc<dyn MasterOrchestrator>) -> Self {
+        let (lifecycle_event_tx, _) = broadcast::channel(256);
         Self {
             config: Mutex::new(None),
             checkpoint_registry: Mutex::new(MasterCheckpointRegistry::default()),
             orchestrator,
             workers: Mutex::new(WorkerRegistry::default()),
             latest_pipeline_snapshot: Mutex::new(None),
+            lifecycle_events: Mutex::new(LifecycleJournal::default()),
+            lifecycle_event_tx,
         }
     }
 
@@ -175,7 +180,9 @@ impl MasterState {
     }
 
     pub(super) async fn register_worker(&self, worker_id: String) {
-        self.workers.lock().await.register(worker_id);
+        self.workers.lock().await.register(worker_id.clone());
+        self.record_lifecycle_event(LifecycleEvent::WorkerRegistered { worker_id })
+            .await;
     }
 
     pub(super) async fn wait_for_ready_workers(
@@ -209,7 +216,35 @@ impl MasterState {
 
     pub(super) async fn request_replacement(&self, worker_ids: &[String]) -> anyhow::Result<()> {
         self.workers.lock().await.mark_replacing(worker_ids);
+        self.record_lifecycle_event(LifecycleEvent::ReplacementRequested {
+            worker_ids: worker_ids.to_vec(),
+        })
+        .await;
         self.orchestrator.request_replacement(worker_ids).await
+    }
+
+    pub(super) async fn record_lifecycle_event(&self, event: LifecycleEvent) {
+        let record = self.lifecycle_events.lock().await.record(event);
+        let _ = self.lifecycle_event_tx.send(record.clone());
+        if let Ok(event_json) = serde_json::to_string(&record.event) {
+            let orchestrator = self.orchestrator.clone();
+            tokio::spawn(async move {
+                let _ = orchestrator
+                    .record_lifecycle_event(record.sequence, &event_json)
+                    .await;
+            });
+        }
+    }
+
+    pub(super) async fn lifecycle_events_since(
+        &self,
+        sequence: u64,
+    ) -> Vec<LifecycleEventRecord> {
+        self.lifecycle_events.lock().await.since(sequence)
+    }
+
+    pub(super) fn subscribe_lifecycle_events(&self) -> broadcast::Receiver<LifecycleEventRecord> {
+        self.lifecycle_event_tx.subscribe()
     }
 
     pub(super) async fn publish_snapshot(&self, snapshot: PipelineSnapshot) {
@@ -236,11 +271,17 @@ impl MasterState {
         blobs: Vec<(String, Vec<u8>)>,
     ) {
         let mut registry = self.checkpoint_registry.lock().await;
+        let was_complete = registry.coordinator.latest_complete() == Some(checkpoint_id);
         registry.store.put(checkpoint_id, task.clone(), blobs);
         let expected_count = registry.expected_tasks.len();
         registry
             .coordinator
             .ack(checkpoint_id, task, expected_count);
+        if !was_complete && registry.coordinator.latest_complete() == Some(checkpoint_id) {
+            drop(registry);
+            self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
+                .await;
+        }
     }
 
     pub(super) async fn task_checkpoint(

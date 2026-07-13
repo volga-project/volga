@@ -17,8 +17,11 @@ service WorkerService {
   // Close all tasks in the worker
   rpc CloseWorkerTasks(CloseWorkerTasksRequest) returns (CloseWorkerTasksResponse);
   
-  // Close the worker and cleanup all resources
-  rpc CloseWorker(CloseWorkerRequest) returns (CloseWorkerResponse);
+  // Reset the current attempt while keeping the worker available for reconfiguration.
+  rpc ResetWorker(ResetWorkerRequest) returns (ResetWorkerResponse);
+
+  // Shut down the worker after final pipeline teardown.
+  rpc ShutdownWorker(ShutdownWorkerRequest) returns (ShutdownWorkerResponse);
 
   // Trigger a checkpoint. Only source tasks should inject barriers.
   rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
@@ -81,17 +84,20 @@ message CloseWorkerTasksResponse {
   string error_message = 2;
 }
 
-// Request message for CloseWorker
-message CloseWorkerRequest {
+message ResetWorkerRequest {
   uint64 execution_attempt_id = 1;
-  // When true, the worker process should exit after teardown (final pipeline shutdown).
-  // When false, the worker tears down its runtime but keeps the process alive so it can
-  // be reconfigured in-place (recovery reset).
-  bool is_final = 2;
 }
 
-// Response message for CloseWorker
-message CloseWorkerResponse {
+message ResetWorkerResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message ShutdownWorkerRequest {
+  uint64 execution_attempt_id = 1;
+}
+
+message ShutdownWorkerResponse {
   bool success = 1;
   string error_message = 2;
 }

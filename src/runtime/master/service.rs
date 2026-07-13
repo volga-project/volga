@@ -7,7 +7,9 @@ use crate::runtime::master::checkpoint::TaskKey;
 use crate::runtime::master::server::master_service::{
     master_service_server::MasterService, GetLatestCompleteCheckpointRequest,
     GetLatestCompleteCheckpointResponse, GetLatestPipelineSnapshotRequest,
-    GetLatestPipelineSnapshotResponse, GetTaskCheckpointRequest, GetTaskCheckpointResponse,
+    GetLatestPipelineSnapshotResponse, GetLifecycleEventsRequest,
+    GetLifecycleEventsResponse, GetTaskCheckpointRequest, GetTaskCheckpointResponse,
+    LifecycleEventRecord,
     RegisterWorkerRequest, RegisterWorkerResponse, ReportCheckpointRequest,
     ReportCheckpointResponse, StateBlob,
 };
@@ -147,5 +149,25 @@ impl MasterService for MasterServiceImpl {
                 seq: 0,
             }))
         }
+    }
+
+    async fn get_lifecycle_events(
+        &self,
+        request: Request<GetLifecycleEventsRequest>,
+    ) -> Result<Response<GetLifecycleEventsResponse>, Status> {
+        let events = self
+            .master
+            .lifecycle_events_since(request.into_inner().after_sequence)
+            .await
+            .into_iter()
+            .map(|record| {
+                Ok(LifecycleEventRecord {
+                    sequence: record.sequence,
+                    event_bytes: bincode::serialize(&record.event)
+                        .map_err(|error| Status::internal(error.to_string()))?,
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        Ok(Response::new(GetLifecycleEventsResponse { events }))
     }
 }
