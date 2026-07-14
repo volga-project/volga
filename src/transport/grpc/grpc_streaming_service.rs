@@ -2,6 +2,9 @@ use tonic::{Request, Response, Status};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use crate::common::message::Message;
+use crate::runtime::consts::{
+    runtime_consts, TRANSPORT_GRPC_CONNECT_MAX_RETRIES, TRANSPORT_GRPC_CONNECT_RETRY_DELAY,
+};
 
 pub mod message_stream {
     tonic::include_proto!("message_stream");
@@ -63,7 +66,9 @@ pub struct MessageStreamClient {
 
 impl MessageStreamClient {
     pub async fn connect(addr: String) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::connect_with_retry(addr, 10, Duration::from_millis(1000)).await
+        let max_retries = runtime_consts().u64(TRANSPORT_GRPC_CONNECT_MAX_RETRIES) as u32;
+        let delay = runtime_consts().duration(TRANSPORT_GRPC_CONNECT_RETRY_DELAY);
+        Self::connect_with_retry(addr, max_retries, delay).await
     }
 
     pub async fn connect_with_retry(

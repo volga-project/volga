@@ -7,6 +7,13 @@ pub const MASTER_REPLACEMENT_TIMEOUT: &str = "master.replacement_timeout";
 pub const MASTER_RECOVERY_BUDGET: &str = "master.recovery_budget";
 pub const MASTER_RPC_MAX_RETRIES: &str = "master.rpc_max_retries";
 pub const MASTER_RPC_RETRY_DELAY: &str = "master.rpc_retry_delay";
+/// After the first fatal during an attempt, wait this long for cascade fatals
+/// before grouping by worker and deciding replace vs reuse.
+pub const MASTER_FAILURE_AGGREGATION_WINDOW: &str = "master.failure_aggregation_window";
+pub const MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS: &str = "master.heartbeat_max_stream_attempts";
+pub const MASTER_HEARTBEAT_RECONNECT_DELAY: &str = "master.heartbeat_reconnect_delay";
+pub const TRANSPORT_GRPC_CONNECT_MAX_RETRIES: &str = "transport.grpc_connect_max_retries";
+pub const TRANSPORT_GRPC_CONNECT_RETRY_DELAY: &str = "transport.grpc_connect_retry_delay";
 
 #[derive(Clone, Debug)]
 pub enum RuntimeValue {
@@ -27,6 +34,11 @@ impl RuntimeConsts {
             (MASTER_RECOVERY_BUDGET, RuntimeValue::U64(20)),
             (MASTER_RPC_MAX_RETRIES, RuntimeValue::U64(5)),
             (MASTER_RPC_RETRY_DELAY, RuntimeValue::Duration(Duration::from_secs(1))),
+            (MASTER_FAILURE_AGGREGATION_WINDOW, RuntimeValue::Duration(Duration::from_secs(1))),
+            (MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS, RuntimeValue::U64(5)),
+            (MASTER_HEARTBEAT_RECONNECT_DELAY, RuntimeValue::Duration(Duration::from_secs(1))),
+            (TRANSPORT_GRPC_CONNECT_MAX_RETRIES, RuntimeValue::U64(10)),
+            (TRANSPORT_GRPC_CONNECT_RETRY_DELAY, RuntimeValue::Duration(Duration::from_secs(1))),
         ])
     }
 
@@ -37,6 +49,11 @@ impl RuntimeConsts {
             (MASTER_RECOVERY_BUDGET, RuntimeValue::U64(5)),
             (MASTER_RPC_MAX_RETRIES, RuntimeValue::U64(2)),
             (MASTER_RPC_RETRY_DELAY, RuntimeValue::Duration(Duration::from_millis(50))),
+            (MASTER_FAILURE_AGGREGATION_WINDOW, RuntimeValue::Duration(Duration::from_millis(500))),
+            (MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS, RuntimeValue::U64(2)),
+            (MASTER_HEARTBEAT_RECONNECT_DELAY, RuntimeValue::Duration(Duration::from_millis(50))),
+            (TRANSPORT_GRPC_CONNECT_MAX_RETRIES, RuntimeValue::U64(2)),
+            (TRANSPORT_GRPC_CONNECT_RETRY_DELAY, RuntimeValue::Duration(Duration::from_millis(50))),
         ])
     }
 

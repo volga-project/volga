@@ -542,20 +542,21 @@ impl WorkerServer {
     }
 
     /// Local test kill. When `inject_panic` is true, reports `WorkerFatalReason::Panic`
-    /// first so the master can observe `WorkerPanic`; otherwise tears down abruptly
-    /// (master typically sees `HeartbeatUnavailable`).
+    /// and keeps the control gRPC server up long enough for heartbeat to deliver it
+    /// (master sees `WorkerPanic`); then tears down. Otherwise aborts immediately
+    /// (master typically sees slow `HeartbeatUnavailable` / reset-probe replace).
     pub async fn kill_for_testing(&mut self, inject_panic: bool) {
         if inject_panic {
             {
-                // optimistic; may not go through if grpc server aborts first
                 let worker = self.service.worker.lock().await;
                 worker.health().report_fatal(
                     WorkerFatalReason::Panic,
                     "local test worker crash",
                 );
             }
-            // Give the heartbeat stream a chance to push the fatal before we abort gRPC.
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Heartbeat pushes on broadcast + 1s tick; keep the server alive so the
+            // unhealthy payload can reach the master before we drop the stream.
+            tokio::time::sleep(Duration::from_millis(1000)).await;
         }
         if let Some(handle) = self.server_handle.take() {
             handle.abort();

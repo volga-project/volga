@@ -15,7 +15,7 @@ use crate::runtime::worker_server::WorkerServer;
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer, InMemoryStorageSnapshot};
 
 const WORKER_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
-const WORKER_CRASH_TIMEOUT: Duration = Duration::from_secs(2);
+const WORKER_CRASH_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct LocalStorage {
     pub(super) addr: String,

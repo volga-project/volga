@@ -629,11 +629,11 @@ impl Worker {
     }
 
     pub async fn get_state(&self) -> WorkerSnapshot {
-        let config = self
-            .config
-            .as_ref()
-            .expect("Worker must be configured before use");
         if self.running.load(Ordering::SeqCst) {
+            let config = self
+                .config
+                .as_ref()
+                .expect("Worker must be configured before use");
             let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
                 .map(|(k, v)| (k.clone(), v.handle().clone()))
                 .collect();
@@ -684,8 +684,15 @@ impl Worker {
                         .ask(TransportBackendActorMessage::Close)
                         .await;
                 };
+                // Cannot `block_in_place` on current-thread runtimes (e.g. default
+                // `#[tokio::test]`); always offload when a Tokio context is entered.
                 if tokio::runtime::Handle::try_current().is_ok() {
-                    tokio::task::block_in_place(|| handle.block_on(close));
+                    if let Ok(join) = std::thread::Builder::new()
+                        .name("worker-transport-close".into())
+                        .spawn(move || handle.block_on(close))
+                    {
+                        let _ = join.join();
+                    }
                 } else {
                     handle.block_on(close);
                 }

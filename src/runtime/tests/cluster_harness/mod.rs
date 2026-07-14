@@ -12,7 +12,7 @@ pub mod oracle;
 
 pub use cluster::TestCluster;
 pub use handles::{MasterHandle, StorageHandle, WorkerHandle};
-pub use oracle::{LifecycleOracle, OutputOracle};
+pub use oracle::{LifecycleOracle, OutputOracle, RecoveryAttemptReport, RecoveryReport};
 
 pub(crate) use docker::DockerCluster;
 pub(crate) use kube::KubeCluster;

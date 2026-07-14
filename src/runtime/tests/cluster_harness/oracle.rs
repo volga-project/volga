@@ -1,5 +1,5 @@
+use std::collections::{BTreeMap, HashSet};
 use std::time::Duration;
-use std::collections::HashSet;
 
 use anyhow::{anyhow, Result};
 use arrow::array::StringArray;
@@ -114,19 +114,40 @@ impl LifecycleOracle {
         }
     }
 
-    /// Print FT summary grouped by attempt (trigger, per-worker events, replaced/reused).
-    pub fn print_ft_stats(events: &[LifecycleEventRecord]) {
-        #[derive(Default)]
-        struct Attempt {
-            trigger: String,
-            workers: Vec<String>,
-            lines: Vec<String>,
-            replaced: Vec<String>,
-            reused: Vec<String>,
-            recovered: bool,
-        }
+    pub fn print_recovery_stats(events: &[LifecycleEventRecord]) {
+        RecoveryReport::from_events(events).print();
+    }
+}
 
-        let mut by_attempt: std::collections::BTreeMap<u64, Attempt> = Default::default();
+#[derive(Debug, Clone)]
+pub struct RecoveryFailure {
+    pub worker_id: String,
+    pub kind: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryAttemptReport {
+    pub attempt_id: u64,
+    pub trigger: String,
+    pub workers: Vec<String>,
+    pub failures: Vec<RecoveryFailure>,
+    pub initial_replace: Vec<String>,
+    pub replaced: Vec<String>,
+    pub reused: Vec<String>,
+    pub recovered: bool,
+    pub events: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RecoveryReport {
+    pub attempts: BTreeMap<u64, RecoveryAttemptReport>,
+    pub outcome: String,
+}
+
+impl RecoveryReport {
+    pub fn from_events(events: &[LifecycleEventRecord]) -> Self {
+        let mut by_attempt: BTreeMap<u64, RecoveryAttemptReport> = BTreeMap::new();
         let mut current: Option<u64> = None;
         let mut pending_recovery: Option<u64> = None;
         let mut outcome = String::new();
@@ -145,10 +166,14 @@ impl LifecycleOracle {
                         let prev_failures: Vec<String> = by_attempt
                             .get(&prev)
                             .map(|a| {
-                                a.lines
+                                a.failures
                                     .iter()
-                                    .filter(|l| l.starts_with("failure "))
-                                    .cloned()
+                                    .map(|f| {
+                                        format!(
+                                            "failure worker={} kind={} detail={}",
+                                            f.worker_id, f.kind, f.detail
+                                        )
+                                    })
                                     .collect()
                             })
                             .unwrap_or_default();
@@ -163,14 +188,14 @@ impl LifecycleOracle {
                             )
                         }
                     };
-                    by_attempt.entry(*attempt_id).or_default().trigger = trigger;
+                    attempt_entry(&mut by_attempt, *attempt_id).trigger = trigger;
                 }
                 LifecycleEvent::AttemptScheduled { attempt_id, worker_ids }
                 | LifecycleEvent::AttemptRunning { attempt_id, worker_ids } => {
                     current = Some(*attempt_id);
-                    let entry = by_attempt.entry(*attempt_id).or_default();
+                    let entry = attempt_entry(&mut by_attempt, *attempt_id);
                     entry.workers = worker_ids.clone();
-                    entry.lines.push(format!(
+                    entry.events.push(format!(
                         "{} workers={worker_ids:?}",
                         match &record.event {
                             LifecycleEvent::AttemptScheduled { .. } => "scheduled",
@@ -185,7 +210,13 @@ impl LifecycleOracle {
                     detail,
                 } => {
                     current = Some(*attempt_id);
-                    by_attempt.entry(*attempt_id).or_default().lines.push(format!(
+                    let entry = attempt_entry(&mut by_attempt, *attempt_id);
+                    entry.failures.push(RecoveryFailure {
+                        worker_id: worker_id.clone(),
+                        kind: kind.clone(),
+                        detail: detail.clone(),
+                    });
+                    entry.events.push(format!(
                         "failure worker={worker_id} kind={kind} detail={detail}"
                     ));
                 }
@@ -194,16 +225,15 @@ impl LifecycleOracle {
                     replacement_worker_ids,
                 } => {
                     pending_recovery = Some(*attempt_id);
-                    by_attempt.entry(*attempt_id).or_default().lines.push(format!(
+                    let entry = attempt_entry(&mut by_attempt, *attempt_id);
+                    entry.initial_replace = replacement_worker_ids.clone();
+                    entry.events.push(format!(
                         "recovery_started initial_replace={replacement_worker_ids:?}"
                     ));
                 }
                 LifecycleEvent::ReplacementRequested { worker_ids } => {
-                    let attempt_id = pending_recovery
-                        .take()
-                        .or(current)
-                        .unwrap_or(0);
-                    let entry = by_attempt.entry(attempt_id).or_default();
+                    let attempt_id = pending_recovery.take().or(current).unwrap_or(0);
+                    let entry = attempt_entry(&mut by_attempt, attempt_id);
                     let reused: Vec<_> = entry
                         .workers
                         .iter()
@@ -213,15 +243,15 @@ impl LifecycleOracle {
                     entry.replaced = worker_ids.clone();
                     entry.reused = reused.clone();
                     entry.recovered = true;
-                    entry.lines.push(format!(
+                    entry.events.push(format!(
                         "replacement_requested replaced={worker_ids:?} reused={reused:?}"
                     ));
                 }
                 LifecycleEvent::WorkerRegistered { worker_id } => {
                     if let Some(attempt_id) = current {
-                        by_attempt.entry(attempt_id).or_default().lines.push(format!(
-                            "worker_registered {worker_id}"
-                        ));
+                        attempt_entry(&mut by_attempt, attempt_id)
+                            .events
+                            .push(format!("worker_registered {worker_id}"));
                     }
                 }
                 LifecycleEvent::PipelineFinished => {
@@ -232,36 +262,173 @@ impl LifecycleOracle {
                 }
                 LifecycleEvent::CheckpointCompleted { checkpoint_id } => {
                     if let Some(attempt_id) = current {
-                        by_attempt.entry(attempt_id).or_default().lines.push(format!(
-                            "checkpoint_completed {checkpoint_id}"
-                        ));
+                        attempt_entry(&mut by_attempt, attempt_id)
+                            .events
+                            .push(format!("checkpoint_completed {checkpoint_id}"));
                     }
                 }
             }
         }
 
-        println!("[FT] ---- fault tolerance summary ----");
-        println!("[FT] attempts={}", by_attempt.len());
-        for (attempt_id, attempt) in &by_attempt {
-            println!("[FT] attempt {attempt_id}");
-            println!("[FT]   trigger: {}", attempt.trigger);
-            println!("[FT]   workers: {:?}", attempt.workers);
-            if attempt.lines.is_empty() {
-                println!("[FT]   events: (none)");
+        Self {
+            attempts: by_attempt,
+            outcome,
+        }
+    }
+
+    pub fn print(&self) {
+        println!("[RECOVERY] ---- recovery summary ----");
+        println!("[RECOVERY] attempts={}", self.attempts.len());
+        for (attempt_id, attempt) in &self.attempts {
+            println!("[RECOVERY] attempt {attempt_id}");
+            println!("[RECOVERY]   trigger: {}", attempt.trigger);
+            println!("[RECOVERY]   workers: {:?}", attempt.workers);
+            if attempt.events.is_empty() {
+                println!("[RECOVERY]   events: (none)");
             } else {
-                println!("[FT]   events:");
-                for line in &attempt.lines {
-                    println!("[FT]     - {line}");
+                println!("[RECOVERY]   events:");
+                for line in &attempt.events {
+                    println!("[RECOVERY]     - {line}");
                 }
             }
+            println!(
+                "[RECOVERY]   initial_replace: {:?}",
+                attempt.initial_replace
+            );
             if attempt.recovered {
-                println!("[FT]   replaced: {:?}", attempt.replaced);
-                println!("[FT]   reused:   {:?}", attempt.reused);
+                println!("[RECOVERY]   replaced: {:?}", attempt.replaced);
+                println!("[RECOVERY]   reused:   {:?}", attempt.reused);
             }
         }
-        if !outcome.is_empty() {
-            println!("[FT] pipeline outcome: {outcome}");
+        if !self.outcome.is_empty() {
+            println!("[RECOVERY] pipeline outcome: {}", self.outcome);
         }
-        println!("[FT] --------------------------------");
+        println!("[RECOVERY] --------------------------------");
     }
+
+    pub fn assert_attempt_count(&self, expected: usize) -> Result<()> {
+        if self.attempts.len() != expected {
+            return Err(anyhow!(
+                "expected {expected} attempts, got {}",
+                self.attempts.len()
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn attempt(&self, attempt_id: u64) -> Result<&RecoveryAttemptReport> {
+        self.attempts
+            .get(&attempt_id)
+            .ok_or_else(|| anyhow!("missing attempt {attempt_id}"))
+    }
+}
+
+impl RecoveryAttemptReport {
+    pub fn assert_has_failure(&self, worker_id: &str, kind: &str) -> Result<()> {
+        if self
+            .failures
+            .iter()
+            .any(|f| f.worker_id == worker_id && f.kind == kind)
+        {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "attempt {}: expected failure worker={worker_id} kind={kind}, got {:?}",
+            self.attempt_id,
+            self.failures
+                .iter()
+                .map(|f| format!("{}:{}", f.worker_id, f.kind))
+                .collect::<Vec<_>>()
+        ))
+    }
+
+    /// Assert exactly `expected` distinct workers have a failure of `kind`.
+    pub fn assert_failure_kind_distinct_workers(
+        &self,
+        kind: &str,
+        expected: usize,
+    ) -> Result<()> {
+        let workers: HashSet<_> = self
+            .failures
+            .iter()
+            .filter(|f| f.kind == kind)
+            .map(|f| f.worker_id.as_str())
+            .collect();
+        if workers.len() == expected {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "attempt {}: expected {expected} distinct workers with kind={kind}, got {} ({:?})",
+            self.attempt_id,
+            workers.len(),
+            workers
+        ))
+    }
+
+    pub fn assert_initial_replace_eq(&self, expected: &[&str]) -> Result<()> {
+        assert_sorted_ids_eq(
+            self.attempt_id,
+            "initial_replace",
+            &self.initial_replace,
+            expected,
+        )
+    }
+
+    pub fn assert_replaced_eq(&self, expected: &[&str]) -> Result<()> {
+        assert_sorted_ids_eq(self.attempt_id, "replaced", &self.replaced, expected)
+    }
+
+    pub fn assert_reused_eq(&self, expected: &[&str]) -> Result<()> {
+        assert_sorted_ids_eq(self.attempt_id, "reused", &self.reused, expected)
+    }
+
+    pub fn assert_initial_replace_contains(&self, worker_id: &str) -> Result<()> {
+        if self.initial_replace.iter().any(|id| id == worker_id) {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "attempt {}: expected initial_replace to contain {worker_id}, got {:?}",
+            self.attempt_id,
+            self.initial_replace
+        ))
+    }
+
+    pub fn assert_replaced_contains(&self, worker_id: &str) -> Result<()> {
+        if self.replaced.iter().any(|id| id == worker_id) {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "attempt {}: expected replaced to contain {worker_id}, got {:?}",
+            self.attempt_id,
+            self.replaced
+        ))
+    }
+}
+
+fn assert_sorted_ids_eq(
+    attempt_id: u64,
+    label: &str,
+    actual: &[String],
+    expected: &[&str],
+) -> Result<()> {
+    let mut actual_sorted = actual.to_vec();
+    actual_sorted.sort();
+    let mut expected_sorted: Vec<String> = expected.iter().map(|s| (*s).to_string()).collect();
+    expected_sorted.sort();
+    if actual_sorted == expected_sorted {
+        return Ok(());
+    }
+    Err(anyhow!(
+        "attempt {attempt_id}: {label} mismatch: expected {expected_sorted:?}, got {actual_sorted:?}"
+    ))
+}
+
+fn attempt_entry(
+    by_attempt: &mut BTreeMap<u64, RecoveryAttemptReport>,
+    attempt_id: u64,
+) -> &mut RecoveryAttemptReport {
+    by_attempt.entry(attempt_id).or_insert_with(|| RecoveryAttemptReport {
+        attempt_id,
+        ..Default::default()
+    })
 }

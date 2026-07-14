@@ -2,14 +2,15 @@ use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 
+use crate::runtime::consts::{
+    runtime_consts, MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS, MASTER_HEARTBEAT_RECONNECT_DELAY,
+};
+
 use super::failure::{FailureEvent, FailureKind};
 use super::worker_service::{
     worker_service_client::WorkerServiceClient, MasterHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
 };
-
-const MAX_STREAM_ATTEMPTS: u32 = 5;
-const RECONNECT_DELAY_MS: u64 = 1000;
 
 enum StreamOutcome {
     /// Worker reported unhealthy via heartbeat payload — do not reconnect.
@@ -73,18 +74,20 @@ impl WorkerHeartbeatMonitor {
         mut client: WorkerServiceClient<tonic::transport::Channel>,
         failure_tx: mpsc::Sender<FailureEvent>,
     ) {
+        let max_attempts = runtime_consts().u64(MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS);
+        let reconnect_delay = runtime_consts().duration(MASTER_HEARTBEAT_RECONNECT_DELAY);
         let mut last_detail = String::new();
 
-        for attempt in 0..MAX_STREAM_ATTEMPTS {
+        for attempt in 0..max_attempts {
             if attempt > 0 {
                 println!(
                     "[MASTER] Heartbeat reconnect {}/{} for {} ({})",
                     attempt + 1,
-                    MAX_STREAM_ATTEMPTS,
+                    max_attempts,
                     worker_id,
                     worker_ip
                 );
-                sleep(Duration::from_millis(RECONNECT_DELAY_MS * attempt as u64)).await;
+                sleep(reconnect_delay.saturating_mul(attempt as u32)).await;
                 // Re-dial in case the underlying channel is dead.
                 match WorkerServiceClient::connect(format!("http://{}", worker_ip)).await {
                     Ok(c) => client = c,
@@ -115,7 +118,7 @@ impl WorkerHeartbeatMonitor {
             FailureKind::HeartbeatUnavailable,
             format!(
                 "heartbeat stream failed after {} attempts: {}",
-                MAX_STREAM_ATTEMPTS, last_detail
+                max_attempts, last_detail
             ),
         )
         .await;

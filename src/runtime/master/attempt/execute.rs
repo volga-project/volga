@@ -1,10 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use tokio::time::{interval_at, sleep, Duration, Instant};
+use tokio::time::{interval_at, sleep, timeout, Duration, Instant};
 
+use crate::runtime::consts::{runtime_consts, MASTER_FAILURE_AGGREGATION_WINDOW};
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
 
+use super::super::failure::{workers_to_replace, FailureEvent, FailureKind};
 use super::super::state::MasterState;
 use super::super::events::LifecycleEvent;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
@@ -41,28 +43,9 @@ impl ExecutionAttempt {
                 failure = self.failure_rx.recv() => {
                     let failure =
                         failure.ok_or_else(|| anyhow::anyhow!("failure channel closed"))?;
-                    self.state
-                        .record_lifecycle_event(LifecycleEvent::WorkerFailure {
-                            attempt_id: self.id,
-                            worker_id: failure.worker_id.clone(),
-                            kind: format!("{:?}", failure.kind),
-                            detail: failure.detail.clone(),
-                        })
-                        .await;
                     // TODO: We may have a race where pipeline is finished and at the same time we somehow get failure signal
                     // resulting in unnecesery pipeline restart
-                    println!(
-                        "[MASTER] Failure worker={} attempt={} ({})",
-                        failure.worker_id,
-                        self.id,
-                        failure.detail
-                    );
-                    let mut replace = HashSet::new();
-                    if failure.kind.requires_replacement() {
-                        self.clients.remove(&failure.worker_id);
-                        replace.insert(failure.worker_id);
-                    }
-                    return Ok(AttemptOutcome::Recover(replace));
+                    return Ok(self.await_failure_window_and_recover(failure).await);
                 }
                 state_poll = async {
                     poll.tick().await;
@@ -70,20 +53,13 @@ impl ExecutionAttempt {
                 } => {
                     if !state_poll.failures.is_empty() {
                         for (worker_id, error) in &state_poll.failures {
-                            self.state
-                                .record_lifecycle_event(LifecycleEvent::WorkerFailure {
-                                    attempt_id: self.id,
-                                    worker_id: worker_id.clone(),
-                                    kind: "StatePoll".to_string(),
-                                    detail: error.to_string(),
-                                })
-                                .await;
+                            self.record_failure(&FailureEvent {
+                                worker_id: worker_id.clone(),
+                                kind: FailureKind::StatePoll,
+                                detail: error.to_string(),
+                            })
+                            .await;
                         }
-                        println!(
-                            "[MASTER] Worker state polling failed attempt={}: {}",
-                            self.id,
-                            format_failures(&state_poll.failures)
-                        );
                         return Ok(execution_poll_outcome(&state_poll.failures));
                     }
                     if all_have_status(
@@ -96,6 +72,65 @@ impl ExecutionAttempt {
                 }
             }
         }
+    }
+
+    /// Record the first failure, wait the aggregation window for cascade fatals, then decide.
+    async fn await_failure_window_and_recover(
+        &mut self,
+        first: FailureEvent,
+    ) -> AttemptOutcome {
+        let mut events = Vec::new();
+        self.record_failure(&first).await;
+        events.push(first);
+
+        let window = runtime_consts().duration(MASTER_FAILURE_AGGREGATION_WINDOW);
+        let deadline = Instant::now() + window;
+        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+            if remaining.is_zero() {
+                break;
+            }
+            match timeout(remaining, self.failure_rx.recv()).await {
+                Ok(Some(failure)) => {
+                    self.record_failure(&failure).await;
+                    events.push(failure);
+                }
+                Ok(None) => break,
+                Err(_) => break,
+            }
+        }
+
+        let replace = workers_to_replace(&events);
+        let involved: HashSet<_> = events.iter().map(|e| e.worker_id.clone()).collect();
+        let reused: Vec<_> = involved
+            .into_iter()
+            .filter(|id| !replace.contains(id))
+            .collect();
+        println!(
+            "[MASTER] Failure window done attempt={} events={} replace={:?} reusable={:?}",
+            self.id,
+            events.len(),
+            replace,
+            reused
+        );
+        for worker_id in &replace {
+            self.clients.remove(worker_id);
+        }
+        AttemptOutcome::Recover(replace)
+    }
+
+    async fn record_failure(&self, failure: &FailureEvent) {
+        self.state
+            .record_lifecycle_event(LifecycleEvent::WorkerFailure {
+                attempt_id: self.id,
+                worker_id: failure.worker_id.clone(),
+                kind: format!("{:?}", failure.kind),
+                detail: failure.detail.clone(),
+            })
+            .await;
+        println!(
+            "[MASTER] Failure worker={} attempt={} kind={:?} ({})",
+            failure.worker_id, self.id, failure.kind, failure.detail
+        );
     }
 }
 
@@ -184,12 +219,4 @@ fn all_have_status(
                 .map(|state| !state.task_statuses.is_empty() && state.all_tasks_have_status(status))
                 .unwrap_or(false)
         })
-}
-
-fn format_failures(failures: &[(String, WorkerCallError)]) -> String {
-    failures
-        .iter()
-        .map(|(worker_id, error)| format!("{}: {}", worker_id, error))
-        .collect::<Vec<_>>()
-        .join("; ")
 }
