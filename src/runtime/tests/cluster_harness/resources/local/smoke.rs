@@ -12,8 +12,7 @@ use crate::runtime::master::MasterConfig;
 use crate::runtime::master::LifecycleEventRecord;
 use crate::storage::InMemoryStorageSnapshot;
 use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
-use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
-use crate::runtime::tests::cluster_harness::FaultAction;
+use crate::runtime::tests::cluster_harness::{FaultAction, PipelineLaunchSpec, WorkerKillMode};
 use async_trait::async_trait;
 use anyhow::Context;
 
@@ -92,7 +91,9 @@ impl ClusterBackend for LocalCluster {
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_mut().context("local cluster is not launched")?;
         match fault {
-            FaultAction::KillWorker { worker_id } => resources.kill_worker(&worker_id).await,
+            FaultAction::KillWorker { worker_id, mode } => {
+                resources.kill_worker(&worker_id, mode).await
+            }
             FaultAction::RestartWorker { worker_id } => resources.restart_worker(&worker_id).await,
             FaultAction::KillMaster => {
                 resources.kill_master().await;
@@ -179,8 +180,8 @@ impl LocalClusterResources {
         self.storage.snapshot().await
     }
 
-    pub async fn kill_worker(&mut self, worker_id: &str) -> Result<()> {
-        self.workers.crash(worker_id).await
+    pub async fn kill_worker(&mut self, worker_id: &str, mode: WorkerKillMode) -> Result<()> {
+        self.workers.crash(worker_id, mode).await
     }
 
     pub async fn restart_worker(&mut self, worker_id: &str) -> Result<()> {

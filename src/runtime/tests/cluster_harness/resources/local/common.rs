@@ -10,6 +10,7 @@ use crate::common::test_utils::gen_unique_grpc_port;
 use crate::orchestrator::local::LocalWorkerReplacement;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::server::MasterServer;
+use crate::runtime::tests::cluster_harness::WorkerKillMode;
 use crate::runtime::worker_server::WorkerServer;
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer, InMemoryStorageSnapshot};
 
@@ -68,7 +69,7 @@ pub(super) struct WorkerServerSlot {
     pub(super) addr: String,
     process: Option<JoinHandle<()>>,
     shutdown_tx: Option<oneshot::Sender<()>>,
-    crash_tx: Option<oneshot::Sender<()>>,
+    crash_tx: Option<oneshot::Sender<bool>>,
 }
 
 impl WorkerServerSlot {
@@ -110,12 +111,13 @@ impl WorkerServerSlot {
         }
     }
 
-    pub(super) async fn crash(&mut self) {
+    pub(super) async fn crash(&mut self, mode: WorkerKillMode) {
         if self.process.is_none() {
             return;
         }
         if let Some(tx) = self.crash_tx.take() {
-            let _ = tx.send(());
+            let inject_panic = matches!(mode, WorkerKillMode::Panic);
+            let _ = tx.send(inject_panic);
         }
         self.shutdown_tx.take();
         if let Some(handle) = self.process.take() {
@@ -135,7 +137,7 @@ fn spawn_worker_thread(
     worker_id: String,
     addr: String,
     orchestrator: Arc<dyn WorkerOrchestrator>,
-) -> Result<(JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<()>)> {
+) -> Result<(JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<bool>)> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (crash_tx, crash_rx) = oneshot::channel();
     let thread_name = format!("volga-worker-{worker_id}");
@@ -169,7 +171,7 @@ async fn run_worker_process(
     addr: String,
     orchestrator: Arc<dyn WorkerOrchestrator>,
     shutdown_rx: oneshot::Receiver<()>,
-    crash_rx: oneshot::Receiver<()>,
+    crash_rx: oneshot::Receiver<bool>,
 ) {
     let mut server = WorkerServer::new(worker_id, orchestrator);
     if let Err(error) = server.start(&addr).await {
@@ -214,9 +216,9 @@ impl LocalWorkerPool {
         }
     }
 
-    pub(super) async fn crash(&self, worker_id: &str) -> Result<()> {
+    pub(super) async fn crash(&self, worker_id: &str, mode: WorkerKillMode) -> Result<()> {
         let mut workers = self.workers.lock().await;
-        self.worker_mut(&mut workers, worker_id)?.crash().await;
+        self.worker_mut(&mut workers, worker_id)?.crash(mode).await;
         Ok(())
     }
 

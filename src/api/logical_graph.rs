@@ -270,7 +270,8 @@ impl LogicalGraph {
 
             let partition_type = logical_edge.partition_type.clone();
 
-            // Connect each source execution vertex to each target execution vertex
+            // TODO: Full bipartite mesh is only needed for Hash/RoundRobin/Broadcast, but is wrong for embarrassingly parallel / Forward
+            // https://github.com/volga-project/volga/issues/143
             for source_execution_vertex_id in source_execution_vertices {
                 for target_execution_vertex_id in target_execution_vertices {
                     let execution_edge = ExecutionEdge::new(
@@ -586,10 +587,11 @@ pub fn determine_partition_type(source_config: &OperatorConfig, target_config: &
             if has_key_by {
                 PartitionType::Hash
             } else {
+                // TODO: Use Forward 
                 PartitionType::RoundRobin
             }
         }
-        // All other cases use round-robin
+        // TODO: use Forward https://github.com/volga-project/volga/issues/142
         _ => PartitionType::RoundRobin,
     }
 }

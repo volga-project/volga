@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 use super::cluster::ClusterInner;
-use super::FaultAction;
+use super::{FaultAction, WorkerKillMode};
 use crate::runtime::master::LifecycleEventRecord;
 use crate::storage::InMemoryStorageSnapshot;
 
@@ -64,12 +64,17 @@ impl WorkerHandle {
     }
 
     pub async fn kill(&self) -> Result<()> {
+        self.kill_with(WorkerKillMode::Abrupt).await
+    }
+
+    pub async fn kill_with(&self, mode: WorkerKillMode) -> Result<()> {
         self.inner
             .backend
             .lock()
             .await
             .apply_fault(FaultAction::KillWorker {
                 worker_id: self.worker_id.clone(),
+                mode,
             })
             .await
     }

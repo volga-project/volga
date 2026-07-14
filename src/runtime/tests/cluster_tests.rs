@@ -102,7 +102,13 @@ async fn test_local_worker_crash_recovers() -> Result<()> {
     )
     .await?;
 
+    let events = cluster.master().lifecycle_events_since(0).await?;
+    
     cluster.shutdown().await?;
+
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    LifecycleOracle::print_ft_stats(&events);
+
     Ok(())
 }
 

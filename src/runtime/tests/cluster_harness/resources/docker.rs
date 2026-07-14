@@ -173,7 +173,7 @@ impl ClusterBackend for DockerCluster {
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_ref().context("docker cluster is not launched")?;
         match fault {
-            FaultAction::KillWorker { worker_id } => resources.kill(&worker_id),
+            FaultAction::KillWorker { worker_id, mode: _ } => resources.kill(&worker_id),
             FaultAction::RestartWorker { worker_id } => resources.restart(&worker_id),
             FaultAction::KillMaster => resources.kill("master"),
             FaultAction::RestartMaster => resources.restart("master"),

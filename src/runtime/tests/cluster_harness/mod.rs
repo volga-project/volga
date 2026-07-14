@@ -27,9 +27,22 @@ pub enum RuntimeEnv {
     Kube,
 }
 
+/// How a local worker kill is simulated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WorkerKillMode {
+    /// Tear down without reporting Panic (master sees HeartbeatUnavailable).
+    #[default]
+    Abrupt,
+    /// Report `WorkerFatalReason::Panic` before teardown (master sees WorkerPanic).
+    Panic,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FaultAction {
-    KillWorker { worker_id: String },
+    KillWorker {
+        worker_id: String,
+        mode: WorkerKillMode,
+    },
     RestartWorker { worker_id: String },
     KillMaster,
     RestartMaster,

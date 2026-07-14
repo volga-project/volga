@@ -530,29 +530,39 @@ impl WorkerServer {
     pub async fn run_until_stopped(
         &mut self,
         mut shutdown_rx: oneshot::Receiver<()>,
-        mut crash_rx: oneshot::Receiver<()>,
+        mut crash_rx: oneshot::Receiver<bool>,
     ) {
         tokio::select! {
             _ = &mut shutdown_rx => self.stop().await,
-            _ = &mut crash_rx => self.hard_kill_for_testing().await,
+            result = &mut crash_rx => {
+                let inject_panic = result.unwrap_or(false);
+                self.kill_for_testing(inject_panic).await;
+            }
         }
     }
 
-    pub async fn hard_kill_for_testing(&mut self) {
-        {
-            let worker = self.service.worker.lock().await;
-            worker.health().report_fatal(
-                crate::runtime::health::WorkerFatalReason::Panic,
-                "local test worker crash",
-            );
+    /// Local test kill. When `inject_panic` is true, reports `WorkerFatalReason::Panic`
+    /// first so the master can observe `WorkerPanic`; otherwise tears down abruptly
+    /// (master typically sees `HeartbeatUnavailable`).
+    pub async fn kill_for_testing(&mut self, inject_panic: bool) {
+        if inject_panic {
+            {
+                // optimistic; may not go through if grpc server aborts first
+                let worker = self.service.worker.lock().await;
+                worker.health().report_fatal(
+                    WorkerFatalReason::Panic,
+                    "local test worker crash",
+                );
+            }
+            // Give the heartbeat stream a chance to push the fatal before we abort gRPC.
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
             let _ = handle.await;
         }
         let mut worker = self.service.worker.lock().await;
-        let worker_id = worker.worker_id();
-        *worker = Worker::new(worker_id);
+        worker.close();
     }
 }
 

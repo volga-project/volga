@@ -114,7 +114,7 @@ impl ClusterBackend for KubeCluster {
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_ref().context("kube cluster is not launched")?;
         match fault {
-            FaultAction::KillWorker { worker_id }
+            FaultAction::KillWorker { worker_id, mode: _ }
             | FaultAction::RestartWorker { worker_id } => resources.kill_worker(&worker_id),
             FaultAction::KillMaster | FaultAction::RestartMaster => resources.kill_master(),
         }
