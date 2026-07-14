@@ -39,7 +39,17 @@ impl MasterLifecycle {
             let schedule_outcome = match attempt.schedule().await {
                 Ok(()) => {
                     println!("[MASTER] Scheduling ok attempt={}", execution_attempt_id);
-                    attempt.run().await?
+                    match attempt.run().await {
+                        Ok(outcome) => outcome,
+                        Err(error) => {
+                            self.state
+                                .record_lifecycle_event(LifecycleEvent::PipelineFailed {
+                                    detail: error.to_string(),
+                                })
+                                .await;
+                            return Err(error);
+                        }
+                    }
                 }
                 Err(ScheduleError::Terminal(detail)) => {
                     self.state
@@ -47,6 +57,7 @@ impl MasterLifecycle {
                             detail: detail.clone(),
                         })
                         .await;
+                    // TODO AttemptOutcome terminal here
                     return Err(anyhow::anyhow!("terminal scheduling failure: {}", detail));
                 }
                 Err(ScheduleError::Recoverable { replace, detail }) => {

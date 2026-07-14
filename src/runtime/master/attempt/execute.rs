@@ -19,32 +19,17 @@ pub(super) struct StatePoll {
 }
 
 impl ExecutionAttempt {
-    pub(super) async fn poll_states(&self) -> StatePoll {
-        poll_client_states(&self.clients, &self.state).await
-    }
-
-    pub(super) async fn wait_status(&self, status: StreamTaskStatus) -> anyhow::Result<()> {
-        let start = Instant::now();
-        loop {
-            let poll = self.poll_states().await;
-            if !poll.failures.is_empty() {
-                return Err(anyhow::anyhow!(
-                    "worker state polling failed: {}",
-                    format_failures(&poll.failures)
-                ));
-            }
-            if all_have_status(&poll.states, &self.clients, status) {
-                return Ok(());
-            }
-            if start.elapsed() > STATUS_TIMEOUT {
-                return Err(anyhow::anyhow!(
-                    "timed out waiting for {:?} on {:?}",
-                    status,
-                    self.clients.keys().collect::<Vec<_>>()
-                ));
-            }
-            sleep(POLL).await;
-        }
+    pub(super) async fn wait_status(
+        &self,
+        status: StreamTaskStatus,
+    ) -> Result<(), HashSet<String>> {
+        wait_for_status(
+            &self.clients,
+            &self.state,
+            status,
+            Some(STATUS_TIMEOUT),
+        )
+        .await
     }
 
     pub(in crate::runtime::master) async fn run(&mut self) -> anyhow::Result<AttemptOutcome> {
@@ -94,18 +79,12 @@ impl ExecutionAttempt {
                                 })
                                 .await;
                         }
-                        let replace = state_poll
-                            .failures
-                            .iter()
-                            .filter(|(_, error)| error.requires_replacement())
-                            .map(|(worker_id, _)| worker_id.clone())
-                            .collect();
                         println!(
                             "[MASTER] Worker state polling failed attempt={}: {}",
                             self.id,
                             format_failures(&state_poll.failures)
                         );
-                        return Ok(AttemptOutcome::Recover(replace));
+                        return Ok(execution_poll_outcome(&state_poll.failures));
                     }
                     if all_have_status(
                         &state_poll.states,
@@ -118,6 +97,55 @@ impl ExecutionAttempt {
             }
         }
     }
+}
+
+async fn wait_for_status(
+    clients: &HashMap<String, WorkerClient>,
+    state: &MasterState,
+    status: StreamTaskStatus,
+    timeout: Option<Duration>,
+) -> Result<(), HashSet<String>> {
+    let start = Instant::now();
+    loop {
+        let poll = poll_client_states(clients, state).await;
+        if !poll.failures.is_empty() {
+            return Err(poll
+                .failures
+                .into_iter()
+                .map(|(worker_id, _)| worker_id)
+                .collect());
+        }
+        if all_have_status(&poll.states, clients, status) {
+            return Ok(());
+        }
+        if let Some(timeout) = timeout {
+            if start.elapsed() > timeout {
+                return Err(clients
+                    .keys()
+                    .filter(|worker_id| {
+                        !poll
+                            .states
+                            .get(*worker_id)
+                            .map(|worker_state| {
+                                !worker_state.task_statuses.is_empty()
+                                    && worker_state.all_tasks_have_status(status)
+                            })
+                            .unwrap_or(false)
+                    })
+                    .cloned()
+                    .collect());
+            }
+        }
+        sleep(POLL).await;
+    }
+}
+
+fn execution_poll_outcome(failures: &[(String, WorkerCallError)]) -> AttemptOutcome {
+    let replace = failures
+        .iter()
+        .map(|(worker_id, _)| worker_id.clone())
+        .collect();
+    AttemptOutcome::Recover(replace)
 }
 
 async fn poll_client_states(

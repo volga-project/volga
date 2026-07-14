@@ -31,12 +31,6 @@ pub enum WorkerCallError {
     Unreachable(String),
 }
 
-impl WorkerCallError {
-    pub(super) fn requires_replacement(&self) -> bool {
-        matches!(self, Self::Unreachable(_))
-    }
-}
-
 impl fmt::Display for WorkerCallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -113,44 +107,48 @@ async fn dial(addr: &str) -> Attempt<WorkerServiceClient<tonic::transport::Chann
     }
 }
 
-/// Low-level gRPC + heartbeat session to one worker.
+/// Control session to one worker.
 pub struct WorkerClient {
     client: WorkerServiceClient<tonic::transport::Channel>,
     worker_ip: String,
-    _heartbeat_monitor: WorkerHeartbeatMonitor,
+    _heartbeat_monitor: Option<WorkerHeartbeatMonitor>,
     execution_attempt_id: u64,
 }
 
 impl WorkerClient {
-    pub async fn connect(
-        worker_id: String,
+    pub async fn open(
+        worker_id: &str,
         worker_ip: String,
         execution_attempt_id: u64,
-        failure_tx: mpsc::Sender<FailureEvent>,
     ) -> Result<Self, WorkerCallError> {
         let client = with_retry("connect", &worker_ip, || dial(&worker_ip)).await?;
-        let heartbeat_monitor = WorkerHeartbeatMonitor::spawn(
-            worker_id.clone(),
-            worker_ip.clone(),
-            execution_attempt_id,
-            client.clone(),
-            failure_tx,
-        );
         println!("[MASTER] Connected to worker {} ({})", worker_id, worker_ip);
         Ok(Self {
             client,
             worker_ip,
-            _heartbeat_monitor: heartbeat_monitor,
+            _heartbeat_monitor: None,
             execution_attempt_id,
         })
     }
 
-    /// Soft reject (`success=false`) is not retried; dial/transport errors are.
-    pub async fn configure(
+    pub fn start_heartbeat(
+        &mut self,
         worker_id: String,
-        worker_addr: String,
+        failure_tx: mpsc::Sender<FailureEvent>,
+    ) {
+        self._heartbeat_monitor = Some(WorkerHeartbeatMonitor::spawn(
+            worker_id,
+            self.worker_ip.clone(),
+            self.execution_attempt_id,
+            self.client.clone(),
+            failure_tx,
+        ));
+    }
+
+    pub async fn configure(
+        &self,
+        worker_id: String,
         pipeline_id: String,
-        execution_attempt_id: u64,
         spec: PipelineSpec,
         vertex_ids: Vec<String>,
         task_worker_mapping: TaskWorkerMapping,
@@ -167,39 +165,26 @@ impl WorkerClient {
         let init_payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| WorkerCallError::Rejected(e.to_string()))?;
 
-        with_retry("configure", &worker_id, || {
-            let worker_id = worker_id.clone();
-            let worker_addr = worker_addr.clone();
+        let execution_attempt_id = self.execution_attempt_id;
+        let response = self
+            .rpc("configure", |mut client| {
             let init_payload_bytes = init_payload_bytes.clone();
             async move {
-                let mut client = match dial(&worker_addr).await {
-                    Attempt::Done(c) => c,
-                    Attempt::Retry(msg) => return Attempt::Retry(msg),
-                    Attempt::Fail(e) => return Attempt::Fail(e),
-                };
-                match client
-                    .configure_worker(tonic::Request::new(ConfigureWorkerRequest {
+                client.configure_worker(tonic::Request::new(ConfigureWorkerRequest {
                         init_payload_bytes,
                         execution_attempt_id,
-                    }))
-                    .await
-                {
-                    Ok(resp) => {
-                        let resp = resp.into_inner();
-                        if !resp.success {
-                            Attempt::Fail(WorkerCallError::Rejected(format!(
-                                "worker {}: {}",
-                                worker_id, resp.error_message
-                            )))
-                        } else {
-                            Attempt::Done(resp.execution_graph_signature)
-                        }
-                    }
-                    Err(status) => status_attempt(status),
-                }
+                    })).await
             }
-        })
-        .await
+            })
+            .await?
+            .into_inner();
+        if !response.success {
+            return Err(WorkerCallError::Rejected(format!(
+                "worker {}: {}",
+                worker_id, response.error_message
+            )));
+        }
+        Ok(response.execution_graph_signature)
     }
 
     async fn rpc<T, F, Fut>(&self, op_name: &str, mut op: F) -> Result<T, WorkerCallError>

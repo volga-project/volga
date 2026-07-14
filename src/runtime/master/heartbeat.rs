@@ -175,7 +175,7 @@ impl WorkerHeartbeatMonitor {
                                     Ok(WorkerFatalReasonProto::TransportDisconnect) => {
                                         FailureKind::TransportDisconnect
                                     }
-                                    _ => FailureKind::WorkerUnhealthy,
+                                    _ => panic!("unknown fatal reason: {:?}", heartbeat.fatal_reason),
                                 };
                                 return StreamOutcome::WorkerFatal(kind, heartbeat.fatal_message);
                             }

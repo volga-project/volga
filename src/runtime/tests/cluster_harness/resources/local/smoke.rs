@@ -123,11 +123,10 @@ impl LocalClusterResources {
             Arc::new(LocalWorkerOrchestrator::new(master_addr.clone()));
         let workers = worker_nodes
             .values()
-            .map(|node| WorkerServerSlot {
-                id: node.worker_id.clone(),
-                addr: format!("{}:{}", node.worker_ip, node.worker_port),
-                server: None,
-            })
+            .map(|node| WorkerServerSlot::new(
+                node.worker_id.clone(),
+                format!("{}:{}", node.worker_ip, node.worker_port),
+            ))
             .collect::<Vec<_>>();
         let worker_ids = workers.iter().map(|worker| worker.id.clone()).collect();
         let workers = Arc::new(LocalWorkerPool::new(workers, worker_orchestrator));

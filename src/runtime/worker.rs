@@ -762,16 +762,19 @@ impl Worker {
         if let Some(handle) = self.fatal_watcher_handle.take() {
             handle.abort();
         }
+        if let Some(handle) = self.tasks_state_polling_handle.take() {
+            handle.abort();
+        }
 
-        // Best-effort: stop request source processor (if any) to avoid background noise in tests.
-        self.stop_request_source_processor_if_needed().await;
+        self.request_source_processor.take();
+        if let Some(rt) = self.request_source_processor_runtime.take() {
+            rt.shutdown_background();
+        }
 
-        // Drop actors + abort task runtimes quickly.
         self.task_actors.clear();
         self.backend_actor = None;
 
         for (_id, rt) in self.task_runtimes.drain() {
-            // Important: do not use shutdown_timeout() here (it blocks), as this is called from async tests.
             rt.shutdown_background();
         }
         if let Some(rt) = self.transport_backend_runtime.take() {

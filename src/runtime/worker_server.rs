@@ -121,11 +121,9 @@ impl WorkerService for WorkerServiceImpl {
 
         let mut worker_guard = self.worker.lock().await;
         if worker_guard.is_running() {
-            return Ok(Response::new(ConfigureWorkerResponse {
-                success: false,
-                error_message: "Worker is already running; reconfigure is not supported".to_string(),
-                execution_graph_signature: String::new(),
-            }));
+            return Err(Status::failed_precondition(
+                "Worker is already running; reconfigure is not supported",
+            ));
         }
         // Recreate the worker instance so every (re)configure starts from clean state:
         // fresh runtimes, transport backend, and actors. If a previous incarnation was
@@ -168,10 +166,7 @@ impl WorkerService for WorkerServiceImpl {
             .await?;
         let mut worker_guard = self.worker.lock().await;
         if !worker_guard.is_configured() {
-            return Ok(Response::new(StartWorkerResponse {
-                success: false,
-                error_message: "Worker is not configured yet".to_string(),
-            }));
+            return Err(Status::failed_precondition("Worker is not configured yet"));
         }
         worker_guard.start().await;
         println!("[WORKER_SERVER] Worker started successfully");
@@ -540,15 +535,31 @@ impl WorkerServer {
         println!("[WORKER_SERVER] WorkerService server stopped");
     }
 
-    pub async fn crash_for_testing(&mut self) {
+    pub async fn run_until_stopped(
+        &mut self,
+        mut shutdown_rx: oneshot::Receiver<()>,
+        mut crash_rx: oneshot::Receiver<()>,
+    ) {
+        tokio::select! {
+            _ = &mut shutdown_rx => self.stop().await,
+            _ = &mut crash_rx => self.hard_kill_for_testing().await,
+        }
+    }
+
+    pub async fn hard_kill_for_testing(&mut self) {
         {
-            let mut worker = self.service.worker.lock().await;
-            worker.kill_for_testing().await;
+            let worker = self.service.worker.lock().await;
+            worker.health().report_fatal(
+                crate::runtime::health::WorkerFatalReason::Panic,
+                "local test worker crash",
+            );
         }
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
             let _ = handle.await;
         }
+        let mut worker = self.service.worker.lock().await;
+        worker.kill_for_testing().await;
     }
 }
 

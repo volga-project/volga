@@ -39,12 +39,11 @@ impl ExecutionAttempt {
         );
         let mapping = build_mapping(&self.pipeline.spec, &self.pipeline.execution_graph, &nodes)
             .map_err(|error| ScheduleError::Terminal(error.to_string()))?;
-        self.configure_all(&nodes, &mapping).await?;
-
-        self.clients.clear();
         self.connect_all(&nodes).await?;
+        self.configure_all(&mapping).await?;
         self.start_all().await?;
         self.wait_opened().await?;
+        self.start_heartbeats();
         self.run_all().await?;
         let worker_ids: Vec<String> = nodes.keys().cloned().collect();
         self.state
@@ -64,23 +63,19 @@ impl ExecutionAttempt {
 
     async fn configure_all(
         &self,
-        nodes: &HashMap<String, WorkerNode>,
         mapping: &TaskWorkerMapping,
     ) -> Result<(), ScheduleError> {
         let worker_tasks = worker_to_tasks(mapping);
-        let futures = nodes.iter().map(|(worker_id, node)| {
+        let futures = self.clients.iter().map(|(worker_id, client)| {
             let worker_id = worker_id.clone();
-            let worker_addr = format!("{}:{}", node.worker_ip, node.worker_port);
             let pipeline_id = self.pipeline.pipeline_id.clone();
             let spec = self.pipeline.spec.clone();
             let vertex_ids = worker_tasks.get(&worker_id).cloned().unwrap_or_default();
             let mapping = mapping.clone();
             async move {
-                let result = WorkerClient::configure(
+                let result = client.configure(
                     worker_id.clone(),
-                    worker_addr,
                     pipeline_id,
-                    self.id,
                     spec,
                     vertex_ids,
                     mapping,
@@ -109,7 +104,10 @@ impl ExecutionAttempt {
                         worker_id, detail
                     )));
                 }
-                Err(error) => errors.push(Err(recoverable(&worker_id, error))),
+                Err(error) => errors.push(Err(ScheduleError::Recoverable {
+                    replace: HashSet::from([worker_id.clone()]),
+                    detail: format!("{}: {}", worker_id, error),
+                })),
             }
         }
         merge_errors(errors)?;
@@ -126,18 +124,16 @@ impl ExecutionAttempt {
         &mut self,
         nodes: &HashMap<String, WorkerNode>,
     ) -> Result<(), ScheduleError> {
-        let failure_tx = self.failure_tx.clone();
+        self.clients.clear();
         let execution_attempt_id = self.id;
         let futures = nodes.iter().map(|(worker_id, node)| {
             let worker_id = worker_id.clone();
             let worker_addr = format!("{}:{}", node.worker_ip, node.worker_port);
-            let failure_tx = failure_tx.clone();
             async move {
-                let result = WorkerClient::connect(
-                    worker_id.clone(),
+                let result = WorkerClient::open(
+                    &worker_id,
                     worker_addr,
                     execution_attempt_id,
-                    failure_tx,
                 )
                 .await;
                 (worker_id, result)
@@ -150,10 +146,19 @@ impl ExecutionAttempt {
                 Ok(client) => {
                     self.clients.insert(worker_id, client);
                 }
-                Err(error) => errors.push(Err(recoverable(&worker_id, error))),
+                Err(error) => errors.push(Err(ScheduleError::Recoverable {
+                    replace: HashSet::from([worker_id.clone()]),
+                    detail: format!("{}: {}", worker_id, error),
+                })),
             }
         }
         merge_errors(errors)
+    }
+
+    fn start_heartbeats(&mut self) {
+        for (worker_id, client) in &mut self.clients {
+            client.start_heartbeat(worker_id.clone(), self.failure_tx.clone());
+        }
     }
 
     async fn start_all(&self) -> Result<(), ScheduleError> {
@@ -161,27 +166,22 @@ impl ExecutionAttempt {
             client
                 .start_worker()
                 .await
-                .map_err(|error| recoverable(worker_id, error))
+                .map_err(|error| ScheduleError::Recoverable {
+                    replace: HashSet::from([worker_id.clone()]),
+                    detail: format!("{}: {}", worker_id, error),
+                })
         });
         merge_errors(futures::future::join_all(futures).await)
     }
 
     async fn wait_opened(&self) -> Result<(), ScheduleError> {
-        let Err(error) = self.wait_status(StreamTaskStatus::Opened).await else {
-            return Ok(());
-        };
-
-        let poll = self.poll_states().await;
-        let replace = poll
-            .failures
-            .iter()
-            .filter(|(_, error)| error.requires_replacement())
-            .map(|(worker_id, _)| worker_id.clone())
-            .collect();
-        Err(ScheduleError::Recoverable {
-            replace,
-            detail: error.to_string(),
-        })
+        match self.wait_status(StreamTaskStatus::Opened).await {
+            Ok(()) => Ok(()),
+            Err(workers) => Err(ScheduleError::Recoverable {
+                replace: workers,
+                detail: format!("workers did not reach {:?}", StreamTaskStatus::Opened),
+            }),
+        }
     }
 
     async fn run_all(&self) -> Result<(), ScheduleError> {
@@ -189,20 +189,12 @@ impl ExecutionAttempt {
             client
                 .run_worker_tasks()
                 .await
-                .map_err(|error| recoverable(worker_id, error))
+                .map_err(|error| ScheduleError::Recoverable {
+                    replace: HashSet::from([worker_id.clone()]),
+                    detail: format!("{}: {}", worker_id, error),
+                })
         });
         merge_errors(futures::future::join_all(futures).await)
-    }
-}
-
-fn recoverable(worker_id: &str, error: WorkerCallError) -> ScheduleError {
-    let mut replace = HashSet::new();
-    if error.requires_replacement() {
-        replace.insert(worker_id.to_string());
-    }
-    ScheduleError::Recoverable {
-        replace,
-        detail: format!("{}: {}", worker_id, error),
     }
 }
 

@@ -1,14 +1,20 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio::sync::{oneshot, Mutex};
+use tokio::task::JoinHandle;
+
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::orchestrator::local::LocalWorkerReplacement;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::server::MasterServer;
 use crate::runtime::worker_server::WorkerServer;
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer, InMemoryStorageSnapshot};
-use tokio::sync::Mutex;
+
+const WORKER_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
+const WORKER_CRASH_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(super) struct LocalStorage {
     pub(super) addr: String,
@@ -37,7 +43,6 @@ impl LocalStorage {
     pub(super) async fn stop(&mut self) {
         self.server.stop().await;
     }
-
 }
 
 pub(super) struct LocalMaster {
@@ -61,32 +66,94 @@ impl LocalMaster {
 pub(super) struct WorkerServerSlot {
     pub(super) id: String,
     pub(super) addr: String,
-    pub(super) server: Option<WorkerServer>,
+    process: Option<JoinHandle<()>>,
+    shutdown_tx: Option<oneshot::Sender<()>>,
+    crash_tx: Option<oneshot::Sender<()>>,
 }
 
 impl WorkerServerSlot {
+    pub(super) fn new(id: String, addr: String) -> Self {
+        Self {
+            id,
+            addr,
+            process: None,
+            shutdown_tx: None,
+            crash_tx: None,
+        }
+    }
+
     pub(super) async fn start(
         &mut self,
         orchestrator: Arc<dyn WorkerOrchestrator>,
     ) -> Result<()> {
-        let mut server = WorkerServer::new(self.id.clone(), orchestrator);
-        server.start(&self.addr).await?;
-        server.register_with_master().await?;
-        self.server = Some(server);
+        if self.process.is_some() {
+            return Ok(());
+        }
+        let (process, shutdown_tx, crash_tx) =
+            spawn_worker_process(self.id.clone(), self.addr.clone(), orchestrator);
+        self.process = Some(process);
+        self.shutdown_tx = Some(shutdown_tx);
+        self.crash_tx = Some(crash_tx);
         Ok(())
     }
 
     pub(super) async fn stop(&mut self) {
-        if let Some(mut server) = self.server.take() {
-            server.stop().await;
+        if self.process.is_none() {
+            return;
         }
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(handle) = self.process.take() {
+            let _ = tokio::time::timeout(WORKER_TASK_STOP_TIMEOUT, handle).await;
+        }
+        self.crash_tx.take();
     }
 
     pub(super) async fn crash(&mut self) {
-        if let Some(mut server) = self.server.take() {
-            server.crash_for_testing().await;
+        if self.process.is_none() {
+            return;
+        }
+        if let Some(tx) = self.crash_tx.take() {
+            let _ = tx.send(());
+        }
+        self.shutdown_tx.take();
+        if let Some(handle) = self.process.take() {
+            let _ = tokio::time::timeout(WORKER_CRASH_TIMEOUT, handle).await;
         }
     }
+}
+
+fn spawn_worker_process(
+    worker_id: String,
+    addr: String,
+    orchestrator: Arc<dyn WorkerOrchestrator>,
+) -> (JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<()>) {
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (crash_tx, crash_rx) = oneshot::channel();
+    let handle = tokio::spawn(async move {
+        run_worker_process(worker_id, addr, orchestrator, shutdown_rx, crash_rx).await;
+    });
+    (handle, shutdown_tx, crash_tx)
+}
+
+async fn run_worker_process(
+    worker_id: String,
+    addr: String,
+    orchestrator: Arc<dyn WorkerOrchestrator>,
+    shutdown_rx: oneshot::Receiver<()>,
+    crash_rx: oneshot::Receiver<()>,
+) {
+    let mut server = WorkerServer::new(worker_id, orchestrator);
+    if let Err(error) = server.start(&addr).await {
+        eprintln!("[WORKER_SERVER] failed to start on {addr}: {error}");
+        return;
+    }
+    if let Err(error) = server.register_with_master().await {
+        eprintln!("[WORKER_SERVER] failed to register on {addr}: {error}");
+        return;
+    }
+    server.run_until_stopped(shutdown_rx, crash_rx).await;
 }
 
 pub(super) struct LocalWorkerPool {

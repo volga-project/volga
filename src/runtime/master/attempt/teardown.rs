@@ -26,9 +26,7 @@ impl ExecutionAttempt {
 
         for (worker_id, result) in futures::future::join_all(reset_futures).await {
             match result {
-                Ok(Ok(true)) => {
-                    replace.remove(&worker_id);
-                }
+                Ok(Ok(true)) => {}
                 Ok(Ok(false)) => {
                     println!(
                         "[MASTER] reset_worker rejected for {}; replacing",
@@ -79,10 +77,10 @@ impl ExecutionAttempt {
             .collect();
         futures::future::join_all(close_tasks).await;
 
-        if let Err(error) = self.wait_status(StreamTaskStatus::Closed).await {
+        if let Err(workers) = self.wait_status(StreamTaskStatus::Closed).await {
             println!(
-                "[MASTER] finish: wait Closed timed out (continuing cleanup): {}",
-                error
+                "[MASTER] finish: workers did not reach Closed (continuing cleanup): {:?}",
+                workers
             );
         }
 
