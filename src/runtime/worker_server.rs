@@ -122,15 +122,8 @@ impl WorkerService for WorkerServiceImpl {
         let mut worker_guard = self.worker.lock().await;
         if worker_guard.is_running() {
             return Err(Status::failed_precondition(
-                "Worker is already running; reconfigure is not supported",
+                "Worker is already running; reset before reconfigure",
             ));
-        }
-        // Recreate the worker instance so every (re)configure starts from clean state:
-        // fresh runtimes, transport backend, and actors. If a previous incarnation was
-        // configured (e.g. recovery reset), close it first to release its runtimes
-        // gracefully before it is dropped.
-        if worker_guard.is_configured() {
-            worker_guard.close().await;
         }
         let worker_id = worker_guard.worker_id();
         *worker_guard = Worker::new(worker_id);
@@ -195,10 +188,11 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<ResetWorkerRequest>,
     ) -> Result<Response<ResetWorkerResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
+        let _ = request;
+        // Reuse probe: drop current Worker (Drop → shutdown) and leave an empty shell.
         let mut worker_guard = self.worker.lock().await;
-        worker_guard.close().await;
+        let worker_id = worker_guard.worker_id();
+        *worker_guard = Worker::new(worker_id);
         drop(worker_guard);
 
         println!("[WORKER_SERVER] Worker reset successfully");
@@ -216,7 +210,7 @@ impl WorkerService for WorkerServiceImpl {
         self.validate_execution_attempt(request.get_ref().execution_attempt_id)
             .await?;
         let mut worker_guard = self.worker.lock().await;
-        worker_guard.close().await;
+        worker_guard.close();
         drop(worker_guard);
 
         let mut notify_guard = self.close_worker_notify.lock().await;
@@ -522,11 +516,9 @@ impl WorkerServer {
 
     /// Stop the gRPC server
     pub async fn stop(&mut self) {
-        // Ensure we shut down the worker runtimes cleanly; otherwise dropping tokio runtimes
-        // inside async contexts can panic.
         {
             let mut worker_guard = self.service.worker.lock().await;
-            worker_guard.close().await;
+            worker_guard.close();
         }
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
@@ -559,7 +551,8 @@ impl WorkerServer {
             let _ = handle.await;
         }
         let mut worker = self.service.worker.lock().await;
-        worker.kill_for_testing().await;
+        let worker_id = worker.worker_id();
+        *worker = Worker::new(worker_id);
     }
 }
 

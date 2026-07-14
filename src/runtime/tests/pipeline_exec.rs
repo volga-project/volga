@@ -60,7 +60,7 @@ pub async fn execute_with_state_updates(
     }
 
     let worker_state = worker.get_state().await;
-    worker.close().await;
+    worker.close();
 
     let mut worker_states = StdHashMap::new();
     worker_states.insert(worker_id, worker_state);

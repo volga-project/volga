@@ -159,7 +159,7 @@ pub(crate) async fn run_watermark_window_pipeline(
     wait_for_status(&worker, StreamTaskStatus::Finished, Duration::from_secs(60)).await;
     worker.signal_tasks_close().await;
     wait_for_status(&worker, StreamTaskStatus::Closed, Duration::from_secs(10)).await;
-    worker.close().await;
+    worker.close();
 
     let mut storage_client =
         InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await?;

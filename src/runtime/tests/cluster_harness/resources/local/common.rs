@@ -1,10 +1,10 @@
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Mutex};
-use tokio::task::JoinHandle;
 
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::orchestrator::local::LocalWorkerReplacement;
@@ -90,7 +90,7 @@ impl WorkerServerSlot {
             return Ok(());
         }
         let (process, shutdown_tx, crash_tx) =
-            spawn_worker_process(self.id.clone(), self.addr.clone(), orchestrator);
+            spawn_worker_thread(self.id.clone(), self.addr.clone(), orchestrator)?;
         self.process = Some(process);
         self.shutdown_tx = Some(shutdown_tx);
         self.crash_tx = Some(crash_tx);
@@ -104,10 +104,10 @@ impl WorkerServerSlot {
         if let Some(tx) = self.shutdown_tx.take() {
             let _ = tx.send(());
         }
-        if let Some(handle) = self.process.take() {
-            let _ = tokio::time::timeout(WORKER_TASK_STOP_TIMEOUT, handle).await;
-        }
         self.crash_tx.take();
+        if let Some(handle) = self.process.take() {
+            join_thread(handle, WORKER_TASK_STOP_TIMEOUT).await;
+        }
     }
 
     pub(super) async fn crash(&mut self) {
@@ -119,22 +119,49 @@ impl WorkerServerSlot {
         }
         self.shutdown_tx.take();
         if let Some(handle) = self.process.take() {
-            let _ = tokio::time::timeout(WORKER_CRASH_TIMEOUT, handle).await;
+            join_thread(handle, WORKER_CRASH_TIMEOUT).await;
         }
     }
 }
 
-fn spawn_worker_process(
+async fn join_thread(handle: JoinHandle<()>, timeout: Duration) {
+    let join = tokio::task::spawn_blocking(move || {
+        let _ = handle.join();
+    });
+    let _ = tokio::time::timeout(timeout, join).await;
+}
+
+fn spawn_worker_thread(
     worker_id: String,
     addr: String,
     orchestrator: Arc<dyn WorkerOrchestrator>,
-) -> (JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<()>) {
+) -> Result<(JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<()>)> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (crash_tx, crash_rx) = oneshot::channel();
-    let handle = tokio::spawn(async move {
-        run_worker_process(worker_id, addr, orchestrator, shutdown_rx, crash_rx).await;
-    });
-    (handle, shutdown_tx, crash_tx)
+    let thread_name = format!("volga-worker-{worker_id}");
+    let handle = std::thread::Builder::new()
+        .name(thread_name.clone())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name(format!("{thread_name}-rt"))
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("[WORKER_SERVER] failed to build runtime for {worker_id}: {error}");
+                    return;
+                }
+            };
+            runtime.block_on(run_worker_process(
+                worker_id,
+                addr,
+                orchestrator,
+                shutdown_rx,
+                crash_rx,
+            ));
+        })?;
+    Ok((handle, shutdown_tx, crash_tx))
 }
 
 async fn run_worker_process(

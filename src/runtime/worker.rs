@@ -658,47 +658,66 @@ impl Worker {
         self.operator_states.clone()
     }
 
-    async fn cleanup(&mut self) {
+    /// Tear down nested runtimes. Safe to call from async (blocking work uses
+    /// `block_in_place` / a disposer thread). Idempotent.
+    /// Prefer replacing with `Worker::new` when possible — `Drop` calls this.
+    pub fn close(&mut self) {
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.fatal_watcher_handle.take() {
             handle.abort();
-            let _ = handle.await;
         }
         if let Some(handle) = self.tasks_state_polling_handle.take() {
-            if let Err(e) = handle.await {
-                eprintln!("Polling task failed: {:?}", e);
-            }
+            handle.abort();
         }
-
-        // Gracefully close the transport backend (stops the gRPC server, releases the
-        // listen port, and closes outbound client streams) before tearing down its runtime.
-        // Without this the port may not be released in time for an in-place reconfigure.
-        if let Some(backend_runtime) = self.transport_backend_runtime.take() {
-            if let Some(backend_actor) = self.backend_actor.take() {
-                let _ = backend_runtime
-                    .spawn(async move {
-                        let _ = backend_actor.ask(TransportBackendActorMessage::Close).await;
-                    })
-                    .await;
-            }
-            backend_runtime.shutdown_background();
-        }
-
-        // Shutdown request source processor runtime
-        if let Some(request_runtime) = self.request_source_processor_runtime.take() {
-            request_runtime.shutdown_background();
-        }
-
-        // Shutdown task runtimes
-        for (_, task_runtime) in self.task_runtimes.drain() {
-            task_runtime.shutdown_background();
-        }
-
-        // Clear actor references
-        // TODO destroy actors
-        self.backend_actor = None;
+        self.request_source_processor.take();
         self.task_actors.clear();
+        self.config = None;
+        self.health.clear();
 
+        // Run transport Close on its runtime before disposing it — backend cleanup
+        // (stop gRPC server, drain client/reader/writer tasks) lives on that message.
+        if let Some(backend_runtime) = self.transport_backend_runtime.as_ref() {
+            if let Some(backend_actor) = self.backend_actor.take() {
+                let handle = backend_runtime.handle().clone();
+                let close = async move {
+                    let _ = backend_actor
+                        .ask(TransportBackendActorMessage::Close)
+                        .await;
+                };
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    tokio::task::block_in_place(|| handle.block_on(close));
+                } else {
+                    handle.block_on(close);
+                }
+            }
+        }
+        self.backend_actor = None;
+
+        let mut runtimes = Vec::new();
+        if let Some(runtime) = self.transport_backend_runtime.take() {
+            runtimes.push(runtime);
+        }
+        if let Some(runtime) = self.request_source_processor_runtime.take() {
+            runtimes.push(runtime);
+        }
+        for (_, runtime) in self.task_runtimes.drain() {
+            runtimes.push(runtime);
+        }
+        if runtimes.is_empty() {
+            return;
+        }
+        // Never Drop a Runtime while a Tokio runtime is entered on this thread.
+        let Ok(handle) = std::thread::Builder::new()
+            .name("worker-runtime-dispose".into())
+            .spawn(move || {
+                for runtime in runtimes {
+                    runtime.shutdown_background();
+                }
+            })
+        else {
+            return;
+        };
+        let _ = handle.join();
         println!("[WORKER] Cleanup completed");
     }
 
@@ -747,38 +766,6 @@ impl Worker {
                 let _ = task_ref.ask(StreamTaskMessage::TriggerCheckpoint(checkpoint_id)).await;
             });
             let _ = fut.await;
-        }
-    }
-
-    pub async fn close(&mut self) {
-        self.stop_request_source_processor_if_needed().await;
-        self.cleanup().await;
-    }
-
-    // Test-only "crash": abort runtimes without graceful close.
-    pub async fn kill_for_testing(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
-
-        if let Some(handle) = self.fatal_watcher_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.tasks_state_polling_handle.take() {
-            handle.abort();
-        }
-
-        self.request_source_processor.take();
-        if let Some(rt) = self.request_source_processor_runtime.take() {
-            rt.shutdown_background();
-        }
-
-        self.task_actors.clear();
-        self.backend_actor = None;
-
-        for (_id, rt) in self.task_runtimes.drain() {
-            rt.shutdown_background();
-        }
-        if let Some(rt) = self.transport_backend_runtime.take() {
-            rt.shutdown_background();
         }
     }
 
@@ -850,9 +837,14 @@ impl Worker {
 
         println!("[WORKER] All tasks closed, cleaning up");
         
-        // Cleanup
-        self.close().await;
+        self.close();
 
         println!("[WORKER] Worker execution completed");
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.close();
     }
 }

@@ -229,7 +229,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(1000)).await;
     // Best-effort: allow sink to flush buffered output before crash.
     tokio::time::sleep(Duration::from_millis(250)).await;
-    worker.kill_for_testing().await;
+    worker.close();
 
     // Drain storage after worker #1 so worker #2 starts with a clean sink buffer.
     let mut storage_client =
@@ -310,7 +310,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     .await;
     worker2.signal_tasks_close().await;
     wait_for_status(&worker2, StreamTaskStatus::Closed, Duration::from_secs(10)).await;
-    worker2.close().await;
+    worker2.close();
 
     // Drain storage after worker #2.
     let mut storage_client =

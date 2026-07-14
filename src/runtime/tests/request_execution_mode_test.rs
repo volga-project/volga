@@ -479,5 +479,5 @@ async fn test_request_execution_mode() {
     );
 
     worker.signal_tasks_close().await;
-    worker.close().await;
+    worker.close();
 }
