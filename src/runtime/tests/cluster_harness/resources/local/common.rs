@@ -1,8 +1,9 @@
+use std::net::TcpStream;
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Mutex};
 
@@ -16,6 +17,7 @@ use crate::storage::{InMemoryStorageClient, InMemoryStorageServer, InMemoryStora
 
 const WORKER_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_CRASH_TIMEOUT: Duration = Duration::from_secs(5);
+const ADDR_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct LocalStorage {
     pub(super) addr: String,
@@ -124,6 +126,91 @@ impl WorkerServerSlot {
             join_thread(handle, WORKER_CRASH_TIMEOUT).await;
         }
     }
+
+    /// Kill the running worker, then bring up a fresh unconfigured process on the same
+    /// listen address. Returns only once the new process is accepting connections so the
+    /// master's heartbeat reconnect can hit the unbound peer (fencing), not only
+    /// connection-refused during the gap.
+    pub(super) async fn same_addr_restart(
+        &mut self,
+        orchestrator: Arc<dyn WorkerOrchestrator>,
+    ) -> Result<()> {
+        if self.process.is_none() {
+            return Err(anyhow!(
+                "SameAddrRestart: worker {} has no running process",
+                self.id
+            ));
+        }
+        let addr = self.addr.clone();
+        println!(
+            "[local-harness] SameAddrRestart: crashing worker={} addr={}",
+            self.id, addr
+        );
+        if let Some(tx) = self.crash_tx.take() {
+            let _ = tx.send(false);
+        }
+        self.shutdown_tx.take();
+        let old_handle = self.process.take();
+
+        wait_until_addr_free(&addr, ADDR_WAIT_TIMEOUT)
+            .await
+            .with_context(|| format!("SameAddrRestart: waiting for {addr} to free after crash"))?;
+
+        // Start replacement before joining the old thread so the master can reconnect
+        // while the old runtime is still unwinding.
+        self.start(orchestrator)
+            .await
+            .with_context(|| format!("SameAddrRestart: starting unbound worker on {addr}"))?;
+        wait_until_addr_listening(&addr, ADDR_WAIT_TIMEOUT)
+            .await
+            .with_context(|| format!("SameAddrRestart: waiting for listen on {addr}"))?;
+        println!(
+            "[local-harness] SameAddrRestart: unbound peer listening worker={} addr={}",
+            self.id, addr
+        );
+
+        if let Some(handle) = old_handle {
+            join_thread(handle, WORKER_CRASH_TIMEOUT).await;
+        }
+        Ok(())
+    }
+}
+
+async fn wait_until_addr_free(addr: &str, timeout: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        match std::net::TcpListener::bind(addr) {
+            Ok(listener) => {
+                drop(listener);
+                return Ok(());
+            }
+            Err(_) if start.elapsed() < timeout => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(e) => {
+                return Err(anyhow!(
+                    "addr {addr} still bound after {:?}: {e}",
+                    start.elapsed()
+                ));
+            }
+        }
+    }
+}
+
+async fn wait_until_addr_listening(addr: &str, timeout: Duration) -> Result<()> {
+    let start = Instant::now();
+    loop {
+        if TcpStream::connect(addr).is_ok() {
+            return Ok(());
+        }
+        if start.elapsed() >= timeout {
+            return Err(anyhow!(
+                "addr {addr} not accepting connections after {:?}",
+                start.elapsed()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
 }
 
 async fn join_thread(handle: JoinHandle<()>, timeout: Duration) {
@@ -218,8 +305,18 @@ impl LocalWorkerPool {
 
     pub(super) async fn crash(&self, worker_id: &str, mode: WorkerKillMode) -> Result<()> {
         let mut workers = self.workers.lock().await;
-        self.worker_mut(&mut workers, worker_id)?.crash(mode).await;
-        Ok(())
+        let worker = self.worker_mut(&mut workers, worker_id)?;
+        match mode {
+            WorkerKillMode::SameAddrRestart => {
+                worker
+                    .same_addr_restart(self.worker_orchestrator.clone())
+                    .await
+            }
+            other => {
+                worker.crash(other).await;
+                Ok(())
+            }
+        }
     }
 
     pub(super) async fn restart(&self, worker_id: &str) -> Result<()> {

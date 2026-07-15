@@ -138,9 +138,16 @@ impl WorkerService for WorkerServiceImpl {
 
     async fn get_worker_state(
         &self,
-        _request: Request<GetWorkerStateRequest>,
+        request: Request<GetWorkerStateRequest>,
     ) -> Result<Response<GetWorkerStateResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
         let worker_guard = self.worker.lock().await;
+        if !worker_guard.is_configured() {
+            return Err(Status::failed_precondition(
+                "worker is not configured for this attempt",
+            ));
+        }
         let state = worker_guard.get_state().await;
         let state_bytes = bincode::serialize(&state).map_err(|e| {
             Status::internal(format!("Failed to serialize worker state: {}", e))
@@ -275,12 +282,13 @@ impl WorkerService for WorkerServiceImpl {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let (worker_id, pipeline_id, execution_attempt_id) = {
+                        let (worker_id, pipeline_id, execution_attempt_id, configured) = {
                             let worker_guard = worker.lock().await;
                             (
                                 worker_guard.worker_id(),
                                 worker_guard.pipeline_id().unwrap_or_default(),
                                 worker_guard.execution_attempt_id(),
+                                worker_guard.is_configured(),
                             )
                         };
                         let fatal = health.last_fatal();
@@ -311,6 +319,7 @@ impl WorkerService for WorkerServiceImpl {
                             fatal_reason,
                             fatal_message,
                             execution_attempt_id,
+                            configured,
                         })).await.is_err() {
                             break;
                         }
@@ -323,12 +332,13 @@ impl WorkerService for WorkerServiceImpl {
                     }
                     event = fatal_events.recv() => {
                         if let Ok(fatal) = event {
-                            let (worker_id, pipeline_id, execution_attempt_id) = {
+                            let (worker_id, pipeline_id, execution_attempt_id, configured) = {
                                 let worker_guard = worker.lock().await;
                                 (
                                     worker_guard.worker_id(),
                                     worker_guard.pipeline_id().unwrap_or_default(),
                                     worker_guard.execution_attempt_id(),
+                                    worker_guard.is_configured(),
                                 )
                             };
                             let fatal_reason = match fatal.reason {
@@ -347,6 +357,7 @@ impl WorkerService for WorkerServiceImpl {
                                 fatal_reason,
                                 fatal_message: fatal.message,
                                 execution_attempt_id,
+                                configured,
                             })).await;
                         }
                     }

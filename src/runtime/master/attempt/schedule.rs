@@ -22,14 +22,16 @@ impl ExecutionAttempt {
             .await
         {
             Ok(nodes) => nodes,
-            Err(error) if !error.replacement_candidates.is_empty() => {
+            // Always recoverable: named peers get replaced; empty candidates means
+            // "nobody Ready yet" (e.g. kube STS gap) — retry another wait window
+            // under the recovery budget instead of failing the pipeline.
+            Err(error) => {
                 let detail = error.to_string();
                 return Err(ScheduleError::Recoverable {
                     replace: error.replacement_candidates,
                     detail,
                 });
             }
-            Err(error) => return Err(ScheduleError::Terminal(error.to_string())),
         };
         println!(
             "[MASTER] Scheduling workers={} attempt={} restore={:?}",

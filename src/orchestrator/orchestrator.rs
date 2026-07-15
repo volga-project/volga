@@ -1,7 +1,14 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
+use std::time::Duration;
+
 use anyhow::Result;
 use async_trait::async_trait;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
 use crate::api::PipelineSpec;
+use crate::common::failure::FailureEvent;
 use crate::common::test_utils::gen_unique_grpc_port;
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +28,23 @@ impl WorkerNode {
             worker_port,
             transport_port,
         }
+    }
+}
+
+/// Aborts a background health-poll task when dropped.
+pub struct WorkerHealthWatchHandle {
+    join: JoinHandle<()>,
+}
+
+impl WorkerHealthWatchHandle {
+    pub fn new(join: JoinHandle<()>) -> Self {
+        Self { join }
+    }
+}
+
+impl Drop for WorkerHealthWatchHandle {
+    fn drop(&mut self) {
+        self.join.abort();
     }
 }
 
@@ -47,6 +71,21 @@ pub trait MasterOrchestrator: Send + Sync {
     ) -> Result<()> {
         Ok(())
     }
+
+    /// Kube-only: poll worker pod health and send [`FailureEvent`]s. Default: no-op.
+    /// Drop the handle to stop polling (end of attempt `run`).
+    fn run_health_poll(
+        &self,
+        _worker_ids: HashSet<String>,
+        _failure_tx: mpsc::Sender<FailureEvent>,
+    ) -> Option<WorkerHealthWatchHandle> {
+        None
+    }
+
+    /// Apply launch-time tuning from the environment / pipeline metadata before execute.
+    async fn bootstrap(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -57,11 +96,22 @@ pub trait WorkerOrchestrator: Send + Sync {
 
 pub fn mock_worker_nodes(num_nodes: usize) -> Vec<WorkerNode> {
     (0..num_nodes)
-        .map(|i| WorkerNode::new(
-            format!("worker-{}", i + 1),
-            "127.0.0.1".to_string(),
-            gen_unique_grpc_port(),
-            gen_unique_grpc_port(),
-        ))
+        .map(|i| {
+            WorkerNode::new(
+                format!("worker-{}", i + 1),
+                "127.0.0.1".to_string(),
+                gen_unique_grpc_port(),
+                gen_unique_grpc_port(),
+            )
+        })
         .collect()
+}
+
+/// Default kube health poll interval (tests use a shorter value via cfg).
+pub fn worker_health_poll_interval() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(250)
+    } else {
+        Duration::from_millis(500)
+    }
 }

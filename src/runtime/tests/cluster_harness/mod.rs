@@ -27,14 +27,21 @@ pub enum RuntimeEnv {
     Kube,
 }
 
-/// How a local worker kill is simulated.
+/// How a worker kill is simulated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum WorkerKillMode {
-    /// Tear down without reporting Panic (master sees HeartbeatUnavailable).
+    /// Tear down without reporting Panic (master sees HeartbeatUnavailable / StatePoll).
+    /// Local: abort worker server. Kube: `kubectl delete pod`.
     #[default]
     Abrupt,
     /// Report `WorkerFatalReason::Panic` before teardown (master sees WorkerPanic).
+    /// Local-only; kube ignores and falls back to Abrupt pod delete.
     Panic,
+    /// Local-only: kill the worker process and start a new one on the **same listen
+    /// address** without configuring it for the current attempt (kube IP-reuse analogue).
+    /// Exercises attempt fencing: master must reject the unbound peer (not only treat
+    /// a dead dial as failure). Kube: same as Abrupt pod delete.
+    SameAddrRestart,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +60,13 @@ pub struct PipelineLaunchSpec {
     pub pipeline: PipelineSpec,
     pub worker_count: usize,
     pub expected_output_rows: usize,
+    /// Kube only: sets `volga.io/kube-worker-health-poll` on the pipeline CR.
+    /// Master reads it at poll start (env overrides). Default `true`.
+    pub kube_worker_health_poll: bool,
+    /// Kube only: sets `volga.io/use-test-consts` so master loads `runtime_consts.test.json`.
+    /// Default `false` — kube needs production discovery/replacement budgets; local
+    /// in-process masters already use `cfg!(test)` consts.
+    pub use_test_consts: bool,
 }
 
 impl PipelineLaunchSpec {
@@ -61,6 +75,18 @@ impl PipelineLaunchSpec {
             pipeline,
             worker_count,
             expected_output_rows,
+            kube_worker_health_poll: true,
+            use_test_consts: false,
         }
+    }
+
+    pub fn with_kube_worker_health_poll(mut self, enabled: bool) -> Self {
+        self.kube_worker_health_poll = enabled;
+        self
+    }
+
+    pub fn with_use_test_consts(mut self, enabled: bool) -> Self {
+        self.use_test_consts = enabled;
+        self
     }
 }

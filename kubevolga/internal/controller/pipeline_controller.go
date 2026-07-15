@@ -425,7 +425,8 @@ func (r *PipelineReconciler) reconcileRuntimeRole(
 				{
 					APIGroups: []string{""},
 					Resources: []string{"pods"},
-					Verbs:     []string{"get", "list", "watch"},
+					// delete: master request_replacement tears down failed worker pods
+					Verbs: []string{"get", "list", "watch", "delete"},
 				},
 			}
 			return nil

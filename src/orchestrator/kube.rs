@@ -1,22 +1,44 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, CONTENT_TYPE};
 use reqwest::Client;
 use serde_json::Value;
+use tokio::sync::mpsc;
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::api::{KubePipelineSpec, PipelineSpec};
+use crate::common::failure::{FailureEvent, FailureKind};
 
-use super::orchestrator::{MasterOrchestrator, WorkerNode, WorkerOrchestrator};
+use super::orchestrator::{
+    worker_health_poll_interval, MasterOrchestrator, WorkerHealthWatchHandle, WorkerNode,
+    WorkerOrchestrator,
+};
 
 const VOLGA_CRD_GROUP: &str = "volga.io";
 const VOLGA_CRD_VERSION: &str = "v1alpha1";
 const VOLGA_CRD_PLURAL: &str = "volgapipelines";
+/// Pipeline annotation; harness sets this so master can enable/disable Ready polling
+/// without CRD/operator env plumbing. Env `VOLGA_KUBE_WORKER_HEALTH_POLL` overrides.
+pub const KUBE_WORKER_HEALTH_POLL_ANNOTATION: &str = "volga.io/kube-worker-health-poll";
+/// Pipeline annotation → master loads `runtime_consts.test.json` (same as `VOLGA_USE_TEST_CONSTS`).
+pub const USE_TEST_CONSTS_ANNOTATION: &str = "volga.io/use-test-consts";
+/// Consecutive unhealthy polls before emitting a failure (filters Ready flaps).
+const WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: u32 = 2;
+
+fn parse_boolish(value: &str) -> Option<bool> {
+    match value {
+        "1" | "true" | "TRUE" | "yes" => Some(true),
+        "0" | "false" | "FALSE" | "no" => Some(false),
+        _ => None,
+    }
+}
 
 #[derive(Clone)]
 struct KubeApiClient {
@@ -92,12 +114,13 @@ impl KubeApiClient {
             .send()
             .await
             .with_context(|| format!("kube api DELETE failed: {}", url))?;
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("kube api DELETE failed: {} body={}", status, body));
+        let status = resp.status();
+        // Already gone is fine for replacement (STS may have recreated / test deleted first).
+        if status.is_success() || status.as_u16() == 404 {
+            return Ok(());
         }
-        Ok(())
+        let body = resp.text().await.unwrap_or_default();
+        Err(anyhow!("kube api DELETE failed: {} body={}", status, body))
     }
 
     async fn patch_json(&self, path: &str, body: &Value) -> Result<()> {
@@ -181,6 +204,57 @@ fn build_api_from_env() -> Result<Arc<KubeApiClient>> {
     Ok(Arc::new(KubeApiClient::in_cluster(namespace)?))
 }
 
+enum PodHealth {
+    Ready,
+    Unhealthy(String),
+}
+
+fn describe_unhealthy_pod(pod: &Value) -> String {
+    if json_get_path(pod, &["metadata", "deletionTimestamp"]).is_some() {
+        return "pod terminating".to_string();
+    }
+    let phase = json_get_path(pod, &["status", "phase"])
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    if let Some(reason) = json_get_path(pod, &["status", "reason"]).and_then(|v| v.as_str()) {
+        if !reason.is_empty() {
+            return format!("phase={phase} reason={reason}");
+        }
+    }
+    if let Some(statuses) = json_get_path(pod, &["status", "containerStatuses"]).and_then(|v| v.as_array())
+    {
+        for status in statuses {
+            if let Some(terminated) = json_get_path(status, &["state", "terminated"]) {
+                let reason = terminated
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Terminated");
+                let exit_code = terminated
+                    .get("exitCode")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(-1);
+                return format!("container terminated reason={reason} exit={exit_code}");
+            }
+            if let Some(waiting) = json_get_path(status, &["state", "waiting"]) {
+                let reason = waiting
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("Waiting");
+                if matches!(
+                    reason,
+                    "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull" | "CreateContainerError"
+                ) {
+                    return format!("container waiting reason={reason}");
+                }
+            }
+        }
+    }
+    if phase != "Running" {
+        return format!("phase={phase}");
+    }
+    "not ready".to_string()
+}
+
 #[derive(Clone)]
 pub struct KubeMasterOrchestrator {
     api: Arc<KubeApiClient>,
@@ -234,6 +308,138 @@ impl KubeMasterOrchestrator {
     async fn get_crd(&self) -> Result<Value> {
         self.api.get_json(&self.crd_path(), &[]).await
     }
+
+    fn worker_id_from_pod(&self, pod: &Value) -> Option<String> {
+        json_get_path(pod, &["metadata", "labels", &self.worker_id_label_key])
+            .and_then(|v| v.as_str())
+            .map(ToString::to_string)
+            .or_else(|| {
+                json_get_path(pod, &["metadata", "name"])
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+            })
+    }
+
+    /// List matching worker pods and classify Ready vs unhealthy (includes non-ready pods).
+    async fn inspect_worker_pod_health(&self) -> Result<HashMap<String, PodHealth>> {
+        let path = format!("/api/v1/namespaces/{}/pods", self.api.namespace);
+        let pods = self
+            .api
+            .get_json(
+                &path,
+                &[("labelSelector", self.worker_label_selector.as_str())],
+            )
+            .await?;
+        let mut out = HashMap::new();
+        if let Some(items) = pods.get("items").and_then(|v| v.as_array()) {
+            for item in items {
+                let Some(worker_id) = self.worker_id_from_pod(item) else {
+                    continue;
+                };
+                let health = if worker_pod_ready(item) {
+                    PodHealth::Ready
+                } else {
+                    PodHealth::Unhealthy(describe_unhealthy_pod(item))
+                };
+                out.insert(worker_id, health);
+            }
+        }
+        Ok(out)
+    }
+
+    fn spawn_health_poll_task(
+        &self,
+        worker_ids: HashSet<String>,
+        failure_tx: mpsc::Sender<FailureEvent>,
+        poll_interval: Duration,
+    ) -> WorkerHealthWatchHandle {
+        let orch = self.clone();
+        let join = tokio::spawn(async move {
+            if !orch.worker_health_poll_enabled().await {
+                println!("[MASTER] kube worker health poll disabled");
+                return;
+            }
+            if worker_ids.is_empty() {
+                return;
+            }
+            let mut ticker = interval(poll_interval);
+            ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            let mut unhealthy_ticks: HashMap<String, u32> = HashMap::new();
+            let mut emitted: HashSet<String> = HashSet::new();
+
+            loop {
+                ticker.tick().await;
+                let health = match orch.inspect_worker_pod_health().await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        println!("[MASTER] kube worker health poll failed: {e}");
+                        continue;
+                    }
+                };
+
+                for worker_id in &worker_ids {
+                    if emitted.contains(worker_id) {
+                        continue;
+                    }
+                    let detail = match health.get(worker_id) {
+                        Some(PodHealth::Ready) => {
+                            unhealthy_ticks.remove(worker_id);
+                            continue;
+                        }
+                        Some(PodHealth::Unhealthy(detail)) => detail.clone(),
+                        None => "pod missing".to_string(),
+                    };
+                    let ticks = unhealthy_ticks.entry(worker_id.clone()).or_insert(0);
+                    *ticks = ticks.saturating_add(1);
+                    if *ticks < WORKER_HEALTH_UNHEALTHY_GRACE_TICKS {
+                        continue;
+                    }
+                    emitted.insert(worker_id.clone());
+                    println!("[MASTER] kube worker unhealthy worker={worker_id} ({detail})");
+                    if failure_tx
+                        .send(FailureEvent {
+                            worker_id: worker_id.clone(),
+                            kind: FailureKind::PodUnhealthy,
+                            detail,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        });
+        WorkerHealthWatchHandle::new(join)
+    }
+
+    /// Env overrides annotation. Annotation absent → enabled (default).
+    async fn worker_health_poll_enabled(&self) -> bool {
+        if let Ok(v) = env::var("VOLGA_KUBE_WORKER_HEALTH_POLL") {
+            if let Some(enabled) = parse_boolish(&v) {
+                return enabled;
+            }
+        }
+        match self.get_crd().await {
+            Ok(crd) => {
+                let annotation = json_get_path(
+                    &crd,
+                    &["metadata", "annotations", KUBE_WORKER_HEALTH_POLL_ANNOTATION],
+                )
+                .and_then(|v| v.as_str());
+                match annotation.and_then(parse_boolish) {
+                    Some(enabled) => enabled,
+                    None => true,
+                }
+            }
+            Err(e) => {
+                println!(
+                    "[MASTER] failed reading health-poll annotation, defaulting to enabled: {e}"
+                );
+                true
+            }
+        }
+    }
 }
 
 impl KubeWorkerOrchestrator {
@@ -274,16 +480,7 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
                 let pod_ip = json_get_path(item, &["status", "podIP"])
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                let worker_id =
-                    json_get_path(item, &["metadata", "labels", &self.worker_id_label_key])
-                        .and_then(|v| v.as_str())
-                        .map(ToString::to_string)
-                        .or_else(|| {
-                            json_get_path(item, &["metadata", "name"])
-                                .and_then(|v| v.as_str())
-                                .map(ToString::to_string)
-                        });
-                if let Some(worker_id) = worker_id {
+                if let Some(worker_id) = self.worker_id_from_pod(item) {
                     out.insert(
                         worker_id.clone(),
                         WorkerNode::new(
@@ -297,6 +494,44 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
             }
         }
         out
+    }
+
+    fn run_health_poll(
+        &self,
+        worker_ids: HashSet<String>,
+        failure_tx: mpsc::Sender<FailureEvent>,
+    ) -> Option<WorkerHealthWatchHandle> {
+        // Task checks env / pipeline annotation and no-ops when disabled.
+        Some(self.spawn_health_poll_task(
+            worker_ids,
+            failure_tx,
+            worker_health_poll_interval(),
+        ))
+    }
+
+    async fn bootstrap(&self) -> Result<()> {
+        // Env wins if already set on the pod; else pipeline annotation.
+        if env::var("VOLGA_USE_TEST_CONSTS")
+            .ok()
+            .as_deref()
+            .and_then(parse_boolish)
+            == Some(true)
+        {
+            crate::runtime::consts::init_test_runtime_consts();
+            return Ok(());
+        }
+        let crd = self.get_crd().await?;
+        let enabled = json_get_path(
+            &crd,
+            &["metadata", "annotations", USE_TEST_CONSTS_ANNOTATION],
+        )
+        .and_then(|v| v.as_str())
+        .and_then(parse_boolish)
+        .unwrap_or(false);
+        if enabled {
+            crate::runtime::consts::init_test_runtime_consts();
+        }
+        Ok(())
     }
 
     async fn get_pipeline_id(&self) -> String {

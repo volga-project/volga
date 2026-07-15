@@ -342,6 +342,48 @@ impl RecoveryAttemptReport {
         ))
     }
 
+    pub fn assert_has_any_failure(&self, worker_id: &str, kinds: &[&str]) -> Result<()> {
+        if self
+            .failures
+            .iter()
+            .any(|f| f.worker_id == worker_id && kinds.iter().any(|k| f.kind == *k))
+        {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "attempt {}: expected failure worker={worker_id} kind in {kinds:?}, got {:?}",
+            self.attempt_id,
+            self.failures
+                .iter()
+                .map(|f| format!("{}:{}", f.worker_id, f.kind))
+                .collect::<Vec<_>>()
+        ))
+    }
+
+    /// Failure kind in `kinds` whose detail contains `detail_substr` (fence / cause check).
+    pub fn assert_has_failure_detail_contains(
+        &self,
+        worker_id: &str,
+        kinds: &[&str],
+        detail_substr: &str,
+    ) -> Result<()> {
+        if self.failures.iter().any(|f| {
+            f.worker_id == worker_id
+                && kinds.iter().any(|k| f.kind == *k)
+                && f.detail.contains(detail_substr)
+        }) {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "attempt {}: expected failure worker={worker_id} kind in {kinds:?} detail containing {detail_substr:?}, got {:?}",
+            self.attempt_id,
+            self.failures
+                .iter()
+                .map(|f| format!("{}:{} ({})", f.worker_id, f.kind, f.detail))
+                .collect::<Vec<_>>()
+        ))
+    }
+
     /// Assert exactly `expected` distinct workers have a failure of `kind`.
     pub fn assert_failure_kind_distinct_workers(
         &self,
