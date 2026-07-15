@@ -8,6 +8,7 @@ use tokio::time::{sleep, Duration, Instant};
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode};
+use crate::runtime::consts::{runtime_consts, MASTER_REGISTRY_WAIT_TICK};
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
@@ -15,8 +16,6 @@ use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use super::checkpoint::{MasterCheckpointRegistry, TaskKey};
 use super::events::{LifecycleEvent, LifecycleEventRecord, LifecycleJournal};
 use super::MasterConfig;
-
-const WAIT_TICK: Duration = Duration::from_millis(500);
 
 pub(super) struct PipelineContext {
     pub pipeline_id: String,
@@ -210,7 +209,7 @@ impl MasterState {
                 }
                 WorkerReadiness::Waiting { .. } => {}
             }
-            sleep(WAIT_TICK).await;
+            sleep(runtime_consts().duration(MASTER_REGISTRY_WAIT_TICK)).await;
         }
     }
 

@@ -1,12 +1,11 @@
 use std::collections::HashSet;
 
-use tokio::time::{timeout, Duration};
+use tokio::time::timeout;
 
+use crate::runtime::consts::{runtime_consts, MASTER_RESET_WORKER_TIMEOUT};
 use crate::runtime::observability::StreamTaskStatus;
 
 use super::ExecutionAttempt;
-
-const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 impl ExecutionAttempt {
     pub(in crate::runtime::master) async fn recover(
@@ -19,7 +18,11 @@ impl ExecutionAttempt {
             .map(|(worker_id, client)| async move {
                 (
                     worker_id,
-                    timeout(CLOSE_TIMEOUT, client.reset_worker()).await,
+                    timeout(
+                        runtime_consts().duration(MASTER_RESET_WORKER_TIMEOUT),
+                        client.reset_worker(),
+                    )
+                    .await,
                 )
             })
             .collect();

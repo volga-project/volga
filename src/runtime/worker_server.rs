@@ -10,6 +10,11 @@ use tokio_stream::Stream;
 
 use crate::orchestrator::orchestrator::WorkerOrchestrator;
 use crate::common::types::PipelineId;
+use crate::runtime::consts::{
+    runtime_consts, WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT, WORKER_HEARTBEAT_SEND_INTERVAL,
+    WORKER_REGISTER_CONNECT_TIMEOUT, WORKER_REGISTER_MAX_RETRIES, WORKER_REGISTER_RETRY_DELAY,
+    WORKER_REGISTER_RPC_TIMEOUT,
+};
 use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::worker_config_utils::{build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type, WorkerInitPayload};
@@ -275,7 +280,8 @@ impl WorkerService for WorkerServiceImpl {
 
         tokio::spawn(async move {
             let mut last_master_msg_at = std::time::Instant::now();
-            let tick = Duration::from_secs(1);
+            let tick = runtime_consts().duration(WORKER_HEARTBEAT_SEND_INTERVAL);
+            let master_silence = runtime_consts().duration(WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT);
             let mut interval = tokio::time::interval(tick);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -326,7 +332,7 @@ impl WorkerService for WorkerServiceImpl {
 
                         // If master stops talking for too long, stop this stream loop.
                         // Worker shutdown-on-master-loss policy will be added separately.
-                        if last_master_msg_at.elapsed() > Duration::from_secs(30) {
+                        if last_master_msg_at.elapsed() > master_silence {
                             break;
                         }
                     }
@@ -425,10 +431,10 @@ impl WorkerServer {
     }
 
     pub async fn register_with_master(&mut self) -> anyhow::Result<()> {
-        const MAX_RETRIES: u32 = 60;
-        const RETRY_DELAY_MS: u64 = 500;
-        const CONNECT_TIMEOUT_MS: u64 = 3000;
-        const RPC_TIMEOUT_MS: u64 = 3000;
+        let max_retries = runtime_consts().u64(WORKER_REGISTER_MAX_RETRIES) as u32;
+        let retry_delay = runtime_consts().duration(WORKER_REGISTER_RETRY_DELAY);
+        let connect_timeout = runtime_consts().duration(WORKER_REGISTER_CONNECT_TIMEOUT);
+        let rpc_timeout = runtime_consts().duration(WORKER_REGISTER_RPC_TIMEOUT);
 
         let master_addr = self.orchestrator.get_master_service_addr().await;
         if master_addr.is_empty() {
@@ -443,9 +449,9 @@ impl WorkerServer {
             self.worker_id, master_addr
         );
         let endpoint = format!("http://{}", master_addr);
-        let endpoint = Endpoint::from_shared(endpoint)?.connect_timeout(Duration::from_millis(CONNECT_TIMEOUT_MS));
+        let endpoint = Endpoint::from_shared(endpoint)?.connect_timeout(connect_timeout);
         let mut last_err: Option<anyhow::Error> = None;
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..max_retries {
             let req = crate::runtime::master::server::master_service::RegisterWorkerRequest {
                 worker_id: self.worker_id.clone(),
                 ..Default::default()
@@ -453,7 +459,7 @@ impl WorkerServer {
 
             match endpoint.clone().connect().await {
                 Ok(channel) => match tokio::time::timeout(
-                    Duration::from_millis(RPC_TIMEOUT_MS),
+                    rpc_timeout,
                     MasterServiceClient::new(channel).register_worker(tonic::Request::new(req)),
                 )
                 .await
@@ -481,9 +487,9 @@ impl WorkerServer {
                     }
                     Err(e) => {
                         last_err = Some(anyhow::anyhow!(
-                            "register_worker RPC timeout on attempt {} after {}ms: {}",
+                            "register_worker RPC timeout on attempt {} after {:?}: {}",
                             attempt + 1,
-                            RPC_TIMEOUT_MS,
+                            rpc_timeout,
                             e
                         ));
                     }
@@ -497,14 +503,14 @@ impl WorkerServer {
                 }
             }
 
-            if attempt + 1 < MAX_RETRIES {
+            if attempt + 1 < max_retries {
                 println!(
                     "[WORKER_SERVER] Registration retry: worker_id={} attempt={}/{}",
                     self.worker_id,
                     attempt + 1,
-                    MAX_RETRIES
+                    max_retries
                 );
-                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS * (attempt as u64 + 1))).await;
+                tokio::time::sleep(retry_delay.saturating_mul(attempt as u32 + 1)).await;
             }
         }
 

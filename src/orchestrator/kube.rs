@@ -17,8 +17,7 @@ use crate::api::{KubePipelineSpec, PipelineSpec};
 use crate::common::failure::{FailureEvent, FailureKind};
 
 use super::orchestrator::{
-    worker_health_poll_interval, MasterOrchestrator, WorkerHealthWatchHandle, WorkerNode,
-    WorkerOrchestrator,
+    MasterOrchestrator, WorkerHealthWatchHandle, WorkerNode, WorkerOrchestrator,
 };
 
 const VOLGA_CRD_GROUP: &str = "volga.io";
@@ -27,10 +26,10 @@ const VOLGA_CRD_PLURAL: &str = "volgapipelines";
 /// Pipeline annotation; harness sets this so master can enable/disable Ready polling
 /// without CRD/operator env plumbing. Env `VOLGA_KUBE_WORKER_HEALTH_POLL` overrides.
 pub const KUBE_WORKER_HEALTH_POLL_ANNOTATION: &str = "volga.io/kube-worker-health-poll";
-/// Pipeline annotation → master loads `runtime_consts.test.json` (same as `VOLGA_USE_TEST_CONSTS`).
+/// Pipeline annotation → `local_test` | `kube_test` | `prod` (see `RuntimeConstsProfile`).
+pub const RUNTIME_CONSTS_PROFILE_ANNOTATION: &str = "volga.io/runtime-consts-profile";
+/// Deprecated: `true` → profile=`local_test`. Prefer [`RUNTIME_CONSTS_PROFILE_ANNOTATION`].
 pub const USE_TEST_CONSTS_ANNOTATION: &str = "volga.io/use-test-consts";
-/// Consecutive unhealthy polls before emitting a failure (filters Ready flaps).
-const WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: u32 = 2;
 
 fn parse_boolish(value: &str) -> Option<bool> {
     match value {
@@ -391,7 +390,9 @@ impl KubeMasterOrchestrator {
                     };
                     let ticks = unhealthy_ticks.entry(worker_id.clone()).or_insert(0);
                     *ticks = ticks.saturating_add(1);
-                    if *ticks < WORKER_HEALTH_UNHEALTHY_GRACE_TICKS {
+                    let grace = crate::runtime::consts::runtime_consts()
+                        .u64(crate::runtime::consts::KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS);
+                    if (*ticks as u64) < grace {
                         continue;
                     }
                     emitted.insert(worker_id.clone());
@@ -502,34 +503,54 @@ impl MasterOrchestrator for KubeMasterOrchestrator {
         failure_tx: mpsc::Sender<FailureEvent>,
     ) -> Option<WorkerHealthWatchHandle> {
         // Task checks env / pipeline annotation and no-ops when disabled.
-        Some(self.spawn_health_poll_task(
-            worker_ids,
-            failure_tx,
-            worker_health_poll_interval(),
-        ))
+        let poll_interval = crate::runtime::consts::runtime_consts()
+            .duration(crate::runtime::consts::KUBE_WORKER_HEALTH_POLL_INTERVAL);
+        Some(self.spawn_health_poll_task(worker_ids, failure_tx, poll_interval))
     }
 
     async fn bootstrap(&self) -> Result<()> {
-        // Env wins if already set on the pod; else pipeline annotation.
-        if env::var("VOLGA_USE_TEST_CONSTS")
+        use crate::runtime::consts::{
+            init_runtime_consts_profile, RuntimeConstsProfile, VOLGA_RUNTIME_CONSTS_PROFILE_ENV,
+            VOLGA_USE_TEST_CONSTS_ENV,
+        };
+
+        // Env wins if already set on the pod.
+        if let Ok(raw) = env::var(VOLGA_RUNTIME_CONSTS_PROFILE_ENV) {
+            if let Some(profile) = RuntimeConstsProfile::parse(&raw) {
+                init_runtime_consts_profile(profile);
+                return Ok(());
+            }
+        }
+        if env::var(VOLGA_USE_TEST_CONSTS_ENV)
             .ok()
             .as_deref()
             .and_then(parse_boolish)
             == Some(true)
         {
-            crate::runtime::consts::init_test_runtime_consts();
+            init_runtime_consts_profile(RuntimeConstsProfile::LocalTest);
             return Ok(());
         }
+
         let crd = self.get_crd().await?;
-        let enabled = json_get_path(
+        if let Some(profile) = json_get_path(
+            &crd,
+            &["metadata", "annotations", RUNTIME_CONSTS_PROFILE_ANNOTATION],
+        )
+        .and_then(|v| v.as_str())
+        .and_then(RuntimeConstsProfile::parse)
+        {
+            init_runtime_consts_profile(profile);
+            return Ok(());
+        }
+        let use_local = json_get_path(
             &crd,
             &["metadata", "annotations", USE_TEST_CONSTS_ANNOTATION],
         )
         .and_then(|v| v.as_str())
         .and_then(parse_boolish)
         .unwrap_or(false);
-        if enabled {
-            crate::runtime::consts::init_test_runtime_consts();
+        if use_local {
+            init_runtime_consts_profile(RuntimeConstsProfile::LocalTest);
         }
         Ok(())
     }

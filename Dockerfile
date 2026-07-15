@@ -50,7 +50,7 @@ COPY --from=builder /app/target/release/volga-master /usr/local/bin/volga-master
 COPY --from=builder /app/target/release/volga-worker /usr/local/bin/volga-worker
 COPY --from=builder /app/target/release/volga-test-storage /usr/local/bin/volga-test-storage
 # Runtime-tunable timeouts (override without rebuilding the binary; or set
-# VOLGA_RUNTIME_CONSTS_PATH / VOLGA_RUNTIME_CONSTS_DIR).
-COPY config/runtime_consts.production.json config/runtime_consts.test.json /etc/volga/
+# VOLGA_RUNTIME_CONSTS_PATH / VOLGA_RUNTIME_CONSTS_DIR / VOLGA_RUNTIME_CONSTS_PROFILE).
+COPY config/runtime_consts.local_test.json config/runtime_consts.kube_test.json config/runtime_consts.prod.json /etc/volga/
 
 ENV RUST_LOG=info

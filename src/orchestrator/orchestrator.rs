@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::time::Duration;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -105,13 +104,4 @@ pub fn mock_worker_nodes(num_nodes: usize) -> Vec<WorkerNode> {
             )
         })
         .collect()
-}
-
-/// Default kube health poll interval (tests use a shorter value via cfg).
-pub fn worker_health_poll_interval() -> Duration {
-    if cfg!(test) {
-        Duration::from_millis(250)
-    } else {
-        Duration::from_millis(500)
-    }
 }

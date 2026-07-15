@@ -1,9 +1,10 @@
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::runtime::consts::{
     runtime_consts, MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS, MASTER_HEARTBEAT_RECONNECT_DELAY,
+    MASTER_HEARTBEAT_SEND_INTERVAL,
 };
 use super::worker_client::connect_worker_client;
 
@@ -144,7 +145,8 @@ impl WorkerHeartbeatMonitor {
         };
 
         let mut inbound = response.into_inner();
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut interval =
+            tokio::time::interval(runtime_consts().duration(MASTER_HEARTBEAT_SEND_INTERVAL));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
