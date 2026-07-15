@@ -17,7 +17,6 @@ pub mod server;
 mod service;
 
 mod attempt;
-mod failure;
 mod heartbeat;
 mod lifecycle;
 mod state;

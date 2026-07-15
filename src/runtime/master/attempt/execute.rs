@@ -2,17 +2,19 @@ use std::collections::{HashMap, HashSet};
 
 use tokio::time::{interval_at, sleep, timeout, Duration, Instant};
 
-use crate::runtime::consts::{runtime_consts, MASTER_FAILURE_AGGREGATION_WINDOW};
+use crate::runtime::consts::{
+    runtime_consts, MASTER_FAILURE_AGGREGATION_WINDOW, MASTER_STATE_POLL_INTERVAL,
+};
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
 
-use super::super::failure::{workers_to_replace, FailureEvent, FailureKind};
+use crate::common::failure::{workers_to_replace, FailureEvent, FailureKind};
 use super::super::state::MasterState;
 use super::super::events::LifecycleEvent;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
 use super::{AttemptOutcome, ExecutionAttempt};
 
-const POLL: Duration = Duration::from_millis(100);
+const STATUS_POLL: Duration = Duration::from_millis(100);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub(super) struct StatePoll {
@@ -35,7 +37,12 @@ impl ExecutionAttempt {
     }
 
     pub(in crate::runtime::master) async fn run(&mut self) -> anyhow::Result<AttemptOutcome> {
-        let mut poll = interval_at(Instant::now() + POLL, POLL);
+        let _health_poll = self.state.orchestrator.run_health_poll(
+            self.clients.keys().cloned().collect(),
+            self.failure_tx.clone(),
+        );
+        let poll_interval = runtime_consts().duration(MASTER_STATE_POLL_INTERVAL);
+        let mut poll = interval_at(Instant::now() + poll_interval, poll_interval);
         loop {
             tokio::select! {
                 biased;
@@ -55,7 +62,7 @@ impl ExecutionAttempt {
                         for (worker_id, error) in &state_poll.failures {
                             self.record_failure(&FailureEvent {
                                 worker_id: worker_id.clone(),
-                                kind: FailureKind::StatePoll,
+                                kind: FailureKind::StatePollFailure,
                                 detail: error.to_string(),
                             })
                             .await;
@@ -171,7 +178,7 @@ async fn wait_for_status(
                     .collect());
             }
         }
-        sleep(POLL).await;
+        sleep(STATUS_POLL).await;
     }
 }
 

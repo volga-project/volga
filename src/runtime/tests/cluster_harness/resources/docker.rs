@@ -11,6 +11,7 @@ use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest;
 use crate::runtime::master::server::master_service::GetLifecycleEventsRequest;
+use crate::runtime::master::LifecycleEvent;
 use crate::runtime::master::LifecycleEventRecord;
 use crate::runtime::observability::{PipelineSnapshot, StreamTaskStatus};
 use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
@@ -295,6 +296,19 @@ async fn fetch_lifecycle_events(
         .into_inner()
         .events
         .into_iter()
-        .map(|record| bincode::deserialize(&record.event_bytes).map_err(Into::into))
+        .map(|record| {
+            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
+                .with_context(|| {
+                    format!(
+                        "failed to decode lifecycle event sequence={} bytes={}",
+                        record.sequence,
+                        record.event_bytes.len()
+                    )
+                })?;
+            Ok(LifecycleEventRecord {
+                sequence: record.sequence,
+                event,
+            })
+        })
         .collect()
 }

@@ -2,15 +2,18 @@ use std::fmt;
 
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
+use tonic::transport::Endpoint;
 use tonic::Code;
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::worker_config_utils::WorkerInitPayload;
-use crate::runtime::consts::{runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY};
+use crate::runtime::consts::{
+    runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY, MASTER_WORKER_CONNECT_TIMEOUT,
+};
 
-use super::failure::FailureEvent;
+use crate::common::failure::FailureEvent;
 use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
     worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
@@ -100,10 +103,25 @@ where
     )))
 }
 
+/// Dial worker control gRPC with a bounded connect timeout (see `MASTER_WORKER_CONNECT_TIMEOUT`).
+pub(super) async fn connect_worker_client(
+    addr: &str,
+) -> Result<WorkerServiceClient<tonic::transport::Channel>, String> {
+    let connect_timeout = runtime_consts().duration(MASTER_WORKER_CONNECT_TIMEOUT);
+    let endpoint = Endpoint::from_shared(format!("http://{addr}"))
+        .map_err(|e| format!("invalid worker endpoint {addr}: {e}"))?
+        .connect_timeout(connect_timeout);
+    endpoint
+        .connect()
+        .await
+        .map(WorkerServiceClient::new)
+        .map_err(|e| format!("connect to {addr} failed: {e}"))
+}
+
 async fn dial(addr: &str) -> Attempt<WorkerServiceClient<tonic::transport::Channel>> {
-    match WorkerServiceClient::connect(format!("http://{}", addr)).await {
+    match connect_worker_client(addr).await {
         Ok(client) => Attempt::Done(client),
-        Err(e) => Attempt::Retry(format!("dial failed: {}", e)),
+        Err(e) => Attempt::Retry(e),
     }
 }
 
@@ -282,10 +300,13 @@ impl WorkerClient {
     }
 
     pub async fn get_worker_state(&self) -> Result<WorkerSnapshot, WorkerCallError> {
+        let execution_attempt_id = self.execution_attempt_id;
         let state_bytes = self
             .rpc("get_worker_state", |mut client| async move {
                 client
-                    .get_worker_state(tonic::Request::new(GetWorkerStateRequest {}))
+                    .get_worker_state(tonic::Request::new(GetWorkerStateRequest {
+                        execution_attempt_id,
+                    }))
                     .await
             })
             .await?

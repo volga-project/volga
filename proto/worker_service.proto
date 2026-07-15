@@ -43,7 +43,7 @@ message ConfigureWorkerResponse {
 
 // Request message for GetWorkerState
 message GetWorkerStateRequest {
-  // Empty request - no parameters needed
+  uint64 execution_attempt_id = 1;
 }
 
 // Response message for GetWorkerState
@@ -131,4 +131,6 @@ message WorkerHeartbeatMessage {
   WorkerFatalReason fatal_reason = 5;
   string fatal_message = 6;
   uint64 execution_attempt_id = 7;
+  // False until configure binds this process to an attempt (fences unbound peers).
+  bool configured = 8;
 }

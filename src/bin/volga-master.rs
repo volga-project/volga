@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("yes"))
         .unwrap_or(false);
     let orchestrator = build_orchestrator()?;
+    orchestrator.bootstrap().await?;
 
     let spec = orchestrator.get_spec().await;
     let logical_graph = compile_logical_graph(&spec, None);

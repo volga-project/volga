@@ -220,7 +220,7 @@ cargo test
 Build the runtime image and start a demo master/worker pipeline:
 
 ```bash
-docker build -t volga:test .
+docker build -t volga:latest .
 docker compose up
 ```
 

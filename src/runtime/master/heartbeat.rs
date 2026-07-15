@@ -5,8 +5,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::runtime::consts::{
     runtime_consts, MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS, MASTER_HEARTBEAT_RECONNECT_DELAY,
 };
+use super::worker_client::connect_worker_client;
 
-use super::failure::{FailureEvent, FailureKind};
+use crate::common::failure::{FailureEvent, FailureKind};
 use super::worker_service::{
     worker_service_client::WorkerServiceClient, MasterHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
@@ -89,10 +90,10 @@ impl WorkerHeartbeatMonitor {
                 );
                 sleep(reconnect_delay.saturating_mul(attempt as u32)).await;
                 // Re-dial in case the underlying channel is dead.
-                match WorkerServiceClient::connect(format!("http://{}", worker_ip)).await {
+                match connect_worker_client(&worker_ip).await {
                     Ok(c) => client = c,
                     Err(e) => {
-                        last_detail = format!("heartbeat re-dial failed: {}", e);
+                        last_detail = format!("heartbeat re-dial failed: {e}");
                         continue;
                     }
                 }
@@ -164,8 +165,22 @@ impl WorkerHeartbeatMonitor {
                 msg = inbound.message() => {
                     match msg {
                         Ok(Some(heartbeat)) => {
-                            if heartbeat.execution_attempt_id != execution_attempt_id {
-                                continue;
+                            if !heartbeat.configured
+                                || heartbeat.execution_attempt_id != execution_attempt_id
+                            {
+                                // Same-addr restart / IP reuse: peer is reachable but not
+                                // bound to this attempt — fail like an unavailable heartbeat
+                                // so recovery runs (do not ignore / hang on healthy-looking HB).
+                                return StreamOutcome::WorkerFatal(
+                                    FailureKind::HeartbeatUnavailable,
+                                    format!(
+                                        "{} {}: configured={} worker_attempt={}",
+                                        crate::common::failure::HEARTBEAT_FENCE_ERR_MSG,
+                                        execution_attempt_id,
+                                        heartbeat.configured,
+                                        heartbeat.execution_attempt_id
+                                    ),
+                                );
                             }
                             if !heartbeat.healthy {
                                 let kind = match WorkerFatalReasonProto::try_from(

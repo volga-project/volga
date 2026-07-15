@@ -1,0 +1,14 @@
+{
+  "master.discovery_timeout": "2s",
+  "master.replacement_timeout": "2s",
+  "master.recovery_budget": 5,
+  "master.rpc_max_retries": 2,
+  "master.rpc_retry_delay": "50ms",
+  "master.failure_aggregation_window": "500ms",
+  "master.heartbeat_max_stream_attempts": 3,
+  "master.heartbeat_reconnect_delay": "50ms",
+  "master.worker_connect_timeout": "200ms",
+  "master.state_poll_interval": "100ms",
+  "transport.grpc_connect_max_retries": 2,
+  "transport.grpc_connect_retry_delay": "50ms"
+}

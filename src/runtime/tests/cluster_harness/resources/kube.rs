@@ -14,6 +14,7 @@ use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
 use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
 use crate::runtime::tests::cluster_harness::FaultAction;
 use crate::storage::InMemoryStorageSnapshot;
+use crate::runtime::master::LifecycleEvent;
 use crate::runtime::master::LifecycleEventRecord;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master::server::master_service::GetLifecycleEventsRequest;
@@ -115,7 +116,7 @@ impl ClusterBackend for KubeCluster {
         let resources = self.resources.as_ref().context("kube cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode: _ }
-            | FaultAction::RestartWorker { worker_id } => resources.kill_worker(&worker_id),
+            | FaultAction::RestartWorker { worker_id } => resources.delete_worker_pod(&worker_id),
             FaultAction::KillMaster | FaultAction::RestartMaster => resources.kill_master(),
         }
     }
@@ -127,12 +128,19 @@ impl KubeClusterResources {
         let storage_port = gen_unique_grpc_port();
         let storage_port_forward = start_storage_port_forward(storage_port)?;
         let pipeline_name = format!("kube-harness-{}", Uuid::new_v4().simple());
-        let manifest_path =
-            write_pipeline_manifest(&pipeline_name, launch.pipeline, launch.worker_count)?;
+        let manifest_path = write_pipeline_manifest(
+            &pipeline_name,
+            launch.pipeline,
+            launch.worker_count,
+            launch.kube_worker_health_poll,
+            launch.use_test_consts,
+        )?;
         kubectl(&["apply", "-f", manifest_path.to_str().unwrap()])?;
         wait_for_pipeline(&pipeline_name)?;
         let master_port = gen_unique_grpc_port();
         let master_port_forward = start_master_port_forward(&pipeline_name, master_port)?;
+        wait_for_local_port(storage_port, Duration::from_secs(30))?;
+        wait_for_local_port(master_port, Duration::from_secs(30))?;
 
         Ok(Self {
             resources: Some(KubeResources {
@@ -174,7 +182,7 @@ impl KubeClusterResources {
             .await
     }
 
-    pub fn kill_worker(&self, worker_id: &str) -> Result<()> {
+    pub fn delete_worker_pod(&self, worker_id: &str) -> Result<()> {
         kubectl(&["-n", "default", "delete", "pod", worker_id])?;
         Ok(())
     }
@@ -230,6 +238,8 @@ fn write_pipeline_manifest(
     pipeline_name: &str,
     mut pipeline: PipelineSpec,
     worker_count: usize,
+    kube_worker_health_poll: bool,
+    use_test_consts: bool,
 ) -> Result<PathBuf> {
     pipeline.sink = Some(SinkSpec::InMemoryStorageGrpc {
         server_addr: "http://volga-test-storage.default.svc.cluster.local:50071".to_string(),
@@ -239,6 +249,26 @@ fn write_pipeline_manifest(
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;
     manifest["metadata"]["name"] = Value::String(pipeline_name.to_string());
     manifest["metadata"]["namespace"] = Value::String("default".to_string());
+    if !manifest["metadata"]["annotations"].is_object() {
+        manifest["metadata"]["annotations"] = Value::Object(Default::default());
+    }
+    let annotations = manifest["metadata"]["annotations"].as_object_mut().unwrap();
+    annotations.insert(
+        crate::orchestrator::kube::KUBE_WORKER_HEALTH_POLL_ANNOTATION.to_string(),
+        Value::String(if kube_worker_health_poll {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
+    );
+    annotations.insert(
+        crate::orchestrator::kube::USE_TEST_CONSTS_ANNOTATION.to_string(),
+        Value::String(if use_test_consts {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        }),
+    );
     manifest["spec"]["pipelineSpec"] = serde_json::to_value(pipeline)?;
     manifest["spec"]["workers"]["replicas"] = Value::Number(worker_count.into());
 
@@ -290,13 +320,28 @@ fn start_master_port_forward(pipeline_name: &str, local_port: u16) -> Result<Chi
             "-n",
             "default",
             "port-forward",
-            &format!("svc/{pipeline_name}-master"),
+            &format!("pod/{pipeline_name}-master"),
             &format!("{local_port}:50051"),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
         .context("failed to start master port-forward")
+}
+
+fn wait_for_local_port(port: u16, timeout: Duration) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+            return Ok(());
+        }
+        if start.elapsed() > timeout {
+            return Err(anyhow!(
+                "timeout waiting for local port-forward 127.0.0.1:{port}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 async fn fetch_lifecycle_events(
@@ -313,7 +358,20 @@ async fn fetch_lifecycle_events(
         .into_inner()
         .events
         .into_iter()
-        .map(|record| bincode::deserialize(&record.event_bytes).map_err(Into::into))
+        .map(|record| {
+            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
+                .with_context(|| {
+                    format!(
+                        "failed to decode lifecycle event sequence={} bytes={}",
+                        record.sequence,
+                        record.event_bytes.len()
+                    )
+                })?;
+            Ok(LifecycleEventRecord {
+                sequence: record.sequence,
+                event,
+            })
+        })
         .collect()
 }
 
