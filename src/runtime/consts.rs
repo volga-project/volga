@@ -15,18 +15,36 @@ pub const MASTER_RPC_RETRY_DELAY: &str = "master.rpc_retry_delay";
 pub const MASTER_FAILURE_AGGREGATION_WINDOW: &str = "master.failure_aggregation_window";
 pub const MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS: &str = "master.heartbeat_max_stream_attempts";
 pub const MASTER_HEARTBEAT_RECONNECT_DELAY: &str = "master.heartbeat_reconnect_delay";
+/// How often master sends a heartbeat tick on an open control stream.
+pub const MASTER_HEARTBEAT_SEND_INTERVAL: &str = "master.heartbeat_send_interval";
 /// TCP/HTTP connect timeout for master → worker control dials (HB re-dial, open, channel reconnect).
 pub const MASTER_WORKER_CONNECT_TIMEOUT: &str = "master.worker_connect_timeout";
 /// How often `run()` polls `get_worker_state` (completion + unreachable detection).
 pub const MASTER_STATE_POLL_INTERVAL: &str = "master.state_poll_interval";
+/// Bound on `reset_worker` RPCs during attempt teardown (failed → expand replace set).
+pub const MASTER_RESET_WORKER_TIMEOUT: &str = "master.reset_worker_timeout";
+/// Sleep between worker-registry readiness polls (discovery / replacement wait).
+pub const MASTER_REGISTRY_WAIT_TICK: &str = "master.registry_wait_tick";
+pub const KUBE_WORKER_HEALTH_POLL_INTERVAL: &str = "kube.worker_health_poll_interval";
+pub const KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: &str =
+    "kube.worker_health_unhealthy_grace_ticks";
+pub const WORKER_HEARTBEAT_SEND_INTERVAL: &str = "worker.heartbeat_send_interval";
+pub const WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT: &str =
+    "worker.heartbeat_master_silence_timeout";
+pub const WORKER_REGISTER_MAX_RETRIES: &str = "worker.register_max_retries";
+pub const WORKER_REGISTER_RETRY_DELAY: &str = "worker.register_retry_delay";
+pub const WORKER_REGISTER_CONNECT_TIMEOUT: &str = "worker.register_connect_timeout";
+pub const WORKER_REGISTER_RPC_TIMEOUT: &str = "worker.register_rpc_timeout";
 pub const TRANSPORT_GRPC_CONNECT_MAX_RETRIES: &str = "transport.grpc_connect_max_retries";
 pub const TRANSPORT_GRPC_CONNECT_RETRY_DELAY: &str = "transport.grpc_connect_retry_delay";
 
-/// When set (`1`/`true`/`yes`), load `runtime_consts.test.json` instead of production.
+/// Explicit profile: `local_test` | `kube_test` | `prod`.
+pub const VOLGA_RUNTIME_CONSTS_PROFILE_ENV: &str = "VOLGA_RUNTIME_CONSTS_PROFILE";
+/// Deprecated alias for profile=`local_test` (`1`/`true`/`yes`).
 pub const VOLGA_USE_TEST_CONSTS_ENV: &str = "VOLGA_USE_TEST_CONSTS";
 /// Explicit path to a consts JSON file (overrides profile selection).
 pub const VOLGA_RUNTIME_CONSTS_PATH_ENV: &str = "VOLGA_RUNTIME_CONSTS_PATH";
-/// Directory containing `runtime_consts.{production,test}.json`.
+/// Directory containing `runtime_consts.{local_test,kube_test,prod}.json`.
 pub const VOLGA_RUNTIME_CONSTS_DIR_ENV: &str = "VOLGA_RUNTIME_CONSTS_DIR";
 
 const DURATION_KEYS: &[&str] = &[
@@ -35,8 +53,17 @@ const DURATION_KEYS: &[&str] = &[
     MASTER_RPC_RETRY_DELAY,
     MASTER_FAILURE_AGGREGATION_WINDOW,
     MASTER_HEARTBEAT_RECONNECT_DELAY,
+    MASTER_HEARTBEAT_SEND_INTERVAL,
     MASTER_WORKER_CONNECT_TIMEOUT,
     MASTER_STATE_POLL_INTERVAL,
+    MASTER_RESET_WORKER_TIMEOUT,
+    MASTER_REGISTRY_WAIT_TICK,
+    KUBE_WORKER_HEALTH_POLL_INTERVAL,
+    WORKER_HEARTBEAT_SEND_INTERVAL,
+    WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT,
+    WORKER_REGISTER_RETRY_DELAY,
+    WORKER_REGISTER_CONNECT_TIMEOUT,
+    WORKER_REGISTER_RPC_TIMEOUT,
     TRANSPORT_GRPC_CONNECT_RETRY_DELAY,
 ];
 
@@ -44,12 +71,51 @@ const U64_KEYS: &[&str] = &[
     MASTER_RECOVERY_BUDGET,
     MASTER_RPC_MAX_RETRIES,
     MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS,
+    KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS,
+    WORKER_REGISTER_MAX_RETRIES,
     TRANSPORT_GRPC_CONNECT_MAX_RETRIES,
 ];
 
-const EMBEDDED_PRODUCTION: &str =
-    include_str!("../../config/runtime_consts.production.json");
-const EMBEDDED_TEST: &str = include_str!("../../config/runtime_consts.test.json");
+const EMBEDDED_LOCAL_TEST: &str = include_str!("../../config/runtime_consts.local_test.json");
+const EMBEDDED_KUBE_TEST: &str = include_str!("../../config/runtime_consts.kube_test.json");
+const EMBEDDED_PROD: &str = include_str!("../../config/runtime_consts.prod.json");
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RuntimeConstsProfile {
+    /// Fast budgets for in-process local tests.
+    LocalTest,
+    /// Cluster budgets (STS ready / register); used by kube harness.
+    KubeTest,
+    /// Default for non-test binaries. Same values as [`Self::KubeTest`].
+    Prod,
+}
+
+impl RuntimeConstsProfile {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalTest => "local_test",
+            Self::KubeTest => "kube_test",
+            Self::Prod => "prod",
+        }
+    }
+
+    pub fn file_name(self) -> &'static str {
+        match self {
+            Self::LocalTest => "runtime_consts.local_test.json",
+            Self::KubeTest => "runtime_consts.kube_test.json",
+            Self::Prod => "runtime_consts.prod.json",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local_test" | "local" | "test" => Some(Self::LocalTest),
+            "kube_test" | "kube" | "kubernetes" => Some(Self::KubeTest),
+            "prod" | "production" => Some(Self::Prod),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum RuntimeValue {
@@ -63,12 +129,20 @@ pub struct RuntimeConsts {
 }
 
 impl RuntimeConsts {
-    pub fn production() -> Self {
-        load_profile(false)
+    pub fn for_profile(profile: RuntimeConstsProfile) -> Self {
+        load_profile(profile)
     }
 
-    pub fn test() -> Self {
-        load_profile(true)
+    pub fn local_test() -> Self {
+        Self::for_profile(RuntimeConstsProfile::LocalTest)
+    }
+
+    pub fn kube_test() -> Self {
+        Self::for_profile(RuntimeConstsProfile::KubeTest)
+    }
+
+    pub fn prod() -> Self {
+        Self::for_profile(RuntimeConstsProfile::Prod)
     }
 
     pub fn duration(&self, key: &'static str) -> Duration {
@@ -86,13 +160,9 @@ impl RuntimeConsts {
     }
 }
 
-fn load_profile(test: bool) -> RuntimeConsts {
-    let name = if test {
-        "runtime_consts.test.json"
-    } else {
-        "runtime_consts.production.json"
-    };
-    if let Some(path) = resolve_consts_path(test) {
+fn load_profile(profile: RuntimeConstsProfile) -> RuntimeConsts {
+    let name = profile.file_name();
+    if let Some(path) = resolve_consts_path(profile) {
         match fs::read_to_string(&path) {
             Ok(raw) => {
                 println!("[MASTER] loaded runtime consts from {}", path.display());
@@ -107,18 +177,18 @@ fn load_profile(test: bool) -> RuntimeConsts {
         }
     }
     println!("[MASTER] using embedded runtime consts ({name})");
-    parse_consts_json(if test { EMBEDDED_TEST } else { EMBEDDED_PRODUCTION })
+    parse_consts_json(match profile {
+        RuntimeConstsProfile::LocalTest => EMBEDDED_LOCAL_TEST,
+        RuntimeConstsProfile::KubeTest => EMBEDDED_KUBE_TEST,
+        RuntimeConstsProfile::Prod => EMBEDDED_PROD,
+    })
 }
 
-fn resolve_consts_path(test: bool) -> Option<PathBuf> {
+fn resolve_consts_path(profile: RuntimeConstsProfile) -> Option<PathBuf> {
     if let Ok(path) = env::var(VOLGA_RUNTIME_CONSTS_PATH_ENV) {
         return Some(PathBuf::from(path));
     }
-    let name = if test {
-        "runtime_consts.test.json"
-    } else {
-        "runtime_consts.production.json"
-    };
+    let name = profile.file_name();
     let mut candidates = Vec::new();
     if let Ok(dir) = env::var(VOLGA_RUNTIME_CONSTS_DIR_ENV) {
         candidates.push(PathBuf::from(dir).join(name));
@@ -211,13 +281,29 @@ fn env_flag_enabled(name: &str) -> bool {
     )
 }
 
-fn select_runtime_consts() -> RuntimeConsts {
-    if cfg!(test) || env_flag_enabled(VOLGA_USE_TEST_CONSTS_ENV) {
-        println!("[MASTER] using test runtime consts");
-        RuntimeConsts::test()
-    } else {
-        RuntimeConsts::production()
+fn profile_from_env() -> Option<RuntimeConstsProfile> {
+    if let Ok(raw) = env::var(VOLGA_RUNTIME_CONSTS_PROFILE_ENV) {
+        return RuntimeConstsProfile::parse(&raw);
     }
+    if env_flag_enabled(VOLGA_USE_TEST_CONSTS_ENV) {
+        return Some(RuntimeConstsProfile::LocalTest);
+    }
+    None
+}
+
+fn select_runtime_consts() -> RuntimeConsts {
+    let profile = profile_from_env().unwrap_or_else(|| {
+        if cfg!(test) {
+            RuntimeConstsProfile::LocalTest
+        } else {
+            RuntimeConstsProfile::Prod
+        }
+    });
+    println!(
+        "[MASTER] using {} runtime consts",
+        profile.as_str()
+    );
+    RuntimeConsts::for_profile(profile)
 }
 
 /// Install consts before first use (e.g. after reading a kube annotation). No-op if already set.
@@ -225,10 +311,27 @@ pub fn init_runtime_consts(consts: RuntimeConsts) {
     let _ = RUNTIME_CONSTS.set(consts);
 }
 
-/// Force test consts from harness/annotation when env was not set on the pod.
+pub fn init_runtime_consts_profile(profile: RuntimeConstsProfile) {
+    println!(
+        "[MASTER] using {} runtime consts (explicit init)",
+        profile.as_str()
+    );
+    init_runtime_consts(RuntimeConsts::for_profile(profile));
+}
+
+/// Force local_test consts from harness/annotation when env was not set on the pod.
+pub fn init_local_test_runtime_consts() {
+    init_runtime_consts_profile(RuntimeConstsProfile::LocalTest);
+}
+
+/// Deprecated name for [`init_local_test_runtime_consts`].
+pub fn init_local_runtime_consts() {
+    init_local_test_runtime_consts();
+}
+
+/// Deprecated name for [`init_local_test_runtime_consts`].
 pub fn init_test_runtime_consts() {
-    init_runtime_consts(RuntimeConsts::test());
-    println!("[MASTER] using test runtime consts (explicit init)");
+    init_local_test_runtime_consts();
 }
 
 pub fn runtime_consts() -> &'static RuntimeConsts {
@@ -241,23 +344,51 @@ mod tests {
 
     #[test]
     fn parses_embedded_profiles() {
-        let prod = parse_consts_json(EMBEDDED_PRODUCTION);
+        let prod = parse_consts_json(EMBEDDED_PROD);
         assert_eq!(prod.duration(MASTER_DISCOVERY_TIMEOUT), Duration::from_secs(30));
         assert_eq!(prod.u64(MASTER_RECOVERY_BUDGET), 20);
-
-        let test = parse_consts_json(EMBEDDED_TEST);
-        assert_eq!(test.duration(MASTER_DISCOVERY_TIMEOUT), Duration::from_secs(2));
         assert_eq!(
-            test.duration(MASTER_WORKER_CONNECT_TIMEOUT),
+            prod.duration(MASTER_FAILURE_AGGREGATION_WINDOW),
+            Duration::from_secs(3)
+        );
+
+        let kube = parse_consts_json(EMBEDDED_KUBE_TEST);
+        assert_eq!(
+            kube.duration(KUBE_WORKER_HEALTH_POLL_INTERVAL),
+            Duration::from_millis(500)
+        );
+        assert_eq!(kube.u64(KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS), 2);
+
+        let local = parse_consts_json(EMBEDDED_LOCAL_TEST);
+        assert_eq!(local.duration(MASTER_DISCOVERY_TIMEOUT), Duration::from_secs(2));
+        assert_eq!(
+            local.duration(MASTER_WORKER_CONNECT_TIMEOUT),
             Duration::from_millis(200)
         );
-        assert_eq!(test.u64(MASTER_RECOVERY_BUDGET), 5);
+        assert_eq!(local.u64(MASTER_RECOVERY_BUDGET), 5);
+    }
+
+    #[test]
+    fn kube_test_matches_prod() {
+        let kube = parse_consts_json(EMBEDDED_KUBE_TEST);
+        let prod = parse_consts_json(EMBEDDED_PROD);
+        for &key in DURATION_KEYS {
+            assert_eq!(
+                kube.duration(key),
+                prod.duration(key),
+                "duration mismatch for {key}"
+            );
+        }
+        for &key in U64_KEYS {
+            assert_eq!(kube.u64(key), prod.u64(key), "u64 mismatch for {key}");
+        }
     }
 
     #[test]
     fn resolve_finds_repo_config() {
-        let path = resolve_consts_path(true).expect("test consts file");
-        assert!(path.ends_with("runtime_consts.test.json"));
+        let path =
+            resolve_consts_path(RuntimeConstsProfile::LocalTest).expect("local_test consts file");
+        assert!(path.ends_with("runtime_consts.local_test.json"));
         assert!(Path::new(&path).is_file());
     }
 }

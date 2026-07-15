@@ -19,6 +19,7 @@ pub(crate) use kube::KubeCluster;
 pub(crate) use local::LocalCluster;
 
 use crate::api::PipelineSpec;
+use crate::runtime::consts::RuntimeConstsProfile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeEnv {
@@ -63,10 +64,9 @@ pub struct PipelineLaunchSpec {
     /// Kube only: sets `volga.io/kube-worker-health-poll` on the pipeline CR.
     /// Master reads it at poll start (env overrides). Default `true`.
     pub kube_worker_health_poll: bool,
-    /// Kube only: sets `volga.io/use-test-consts` so master loads `runtime_consts.test.json`.
-    /// Default `false` — kube needs production discovery/replacement budgets; local
-    /// in-process masters already use `cfg!(test)` consts.
-    pub use_test_consts: bool,
+    /// Kube only: sets `volga.io/runtime-consts-profile`. Default [`RuntimeConstsProfile::KubeTest`].
+    /// In-process local masters already pick `local_test` via `cfg!(test)`.
+    pub runtime_consts_profile: RuntimeConstsProfile,
 }
 
 impl PipelineLaunchSpec {
@@ -76,7 +76,7 @@ impl PipelineLaunchSpec {
             worker_count,
             expected_output_rows,
             kube_worker_health_poll: true,
-            use_test_consts: false,
+            runtime_consts_profile: RuntimeConstsProfile::KubeTest,
         }
     }
 
@@ -85,8 +85,8 @@ impl PipelineLaunchSpec {
         self
     }
 
-    pub fn with_use_test_consts(mut self, enabled: bool) -> Self {
-        self.use_test_consts = enabled;
+    pub fn with_runtime_consts_profile(mut self, profile: RuntimeConstsProfile) -> Self {
+        self.runtime_consts_profile = profile;
         self
     }
 }

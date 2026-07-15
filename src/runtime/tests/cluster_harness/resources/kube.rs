@@ -133,7 +133,7 @@ impl KubeClusterResources {
             launch.pipeline,
             launch.worker_count,
             launch.kube_worker_health_poll,
-            launch.use_test_consts,
+            launch.runtime_consts_profile,
         )?;
         kubectl(&["apply", "-f", manifest_path.to_str().unwrap()])?;
         wait_for_pipeline(&pipeline_name)?;
@@ -239,7 +239,7 @@ fn write_pipeline_manifest(
     mut pipeline: PipelineSpec,
     worker_count: usize,
     kube_worker_health_poll: bool,
-    use_test_consts: bool,
+    runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
 ) -> Result<PathBuf> {
     pipeline.sink = Some(SinkSpec::InMemoryStorageGrpc {
         server_addr: "http://volga-test-storage.default.svc.cluster.local:50071".to_string(),
@@ -262,12 +262,8 @@ fn write_pipeline_manifest(
         }),
     );
     annotations.insert(
-        crate::orchestrator::kube::USE_TEST_CONSTS_ANNOTATION.to_string(),
-        Value::String(if use_test_consts {
-            "true".to_string()
-        } else {
-            "false".to_string()
-        }),
+        crate::orchestrator::kube::RUNTIME_CONSTS_PROFILE_ANNOTATION.to_string(),
+        Value::String(runtime_consts_profile.as_str().to_string()),
     );
     manifest["spec"]["pipelineSpec"] = serde_json::to_value(pipeline)?;
     manifest["spec"]["workers"]["replicas"] = Value::Number(worker_count.into());
