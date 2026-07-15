@@ -1,6 +1,6 @@
 services:
   master:
-    image: volga:test
+    image: volga:latest
     command: ["volga-master"]
     ports:
       - "50051:50051"
@@ -17,7 +17,7 @@ services:
       VOLGA_PIPELINE_SPEC_PATH: "/app/pipeline-spec.json"
 
   worker-0:
-    image: volga:test
+    image: volga:latest
     command: ["volga-worker"]
     depends_on: ["master"]
     environment:
@@ -28,7 +28,7 @@ services:
       VOLGA_WORKER_INDEX: "0"
 
   worker-1:
-    image: volga:test
+    image: volga:latest
     command: ["volga-worker"]
     depends_on: ["master"]
     environment:
@@ -39,7 +39,7 @@ services:
       VOLGA_WORKER_INDEX: "1"
 
   worker-2:
-    image: volga:test
+    image: volga:latest
     command: ["volga-worker"]
     depends_on: ["master"]
     environment:
@@ -50,7 +50,7 @@ services:
       VOLGA_WORKER_INDEX: "2"
 
   storage:
-    image: volga:test
+    image: volga:latest
     command:
       - /bin/sh
       - -lc

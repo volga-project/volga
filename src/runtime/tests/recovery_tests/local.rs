@@ -7,7 +7,8 @@ use crate::runtime::tests::recovery_tests::{
     multi_worker_recovery_launch_spec, run_worker_kill_recovery, single_worker_recovery_launch_spec,
 };
 
-// TODO add a test whete schedule failure leads to recovery and detects replacable workers
+// TODO tests run individually but can fail when running the full suite (likely cross-test interference).
+// TODO add a test where schedule failure leads to recovery and detects replacable workers
 
 #[tokio::test]
 async fn test_local_single_worker_panic_recovers() -> Result<()> {
