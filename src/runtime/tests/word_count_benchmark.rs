@@ -189,6 +189,7 @@ pub async fn run_word_count_benchmark(
         })
         .with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: format!("http://{}", storage_server_addr),
+            dedup: false,
         })
         .build();
     let mut connector_configs = ConnectorConfigs::default();

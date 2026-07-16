@@ -46,6 +46,18 @@ impl MasterHandle {
             .lifecycle_events_since(sequence)
             .await
     }
+
+    pub async fn trigger_checkpoint(&self) -> Result<u64> {
+        self.inner.backend.lock().await.trigger_checkpoint().await
+    }
+
+    pub async fn stop_sources(&self) -> Result<()> {
+        self.inner.backend.lock().await.stop_sources().await
+    }
+
+    pub async fn get_source_stats(&self) -> Result<(Vec<(String, i32, u64)>, u64)> {
+        self.inner.backend.lock().await.get_source_stats().await
+    }
 }
 
 #[derive(Clone)]

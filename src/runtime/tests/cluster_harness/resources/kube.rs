@@ -112,6 +112,36 @@ impl ClusterBackend for KubeCluster {
         fetch_lifecycle_events(master_port, sequence).await
     }
 
+    async fn trigger_checkpoint(&mut self) -> Result<u64> {
+        let master_port = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?
+            .resources()?
+            .master_port;
+        master_trigger_checkpoint(master_port).await
+    }
+
+    async fn stop_sources(&mut self) -> Result<()> {
+        let master_port = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?
+            .resources()?
+            .master_port;
+        master_stop_sources(master_port).await
+    }
+
+    async fn get_source_stats(&mut self) -> Result<(Vec<(String, i32, u64)>, u64)> {
+        let master_port = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?
+            .resources()?
+            .master_port;
+        master_get_source_stats(master_port).await
+    }
+
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_ref().context("kube cluster is not launched")?;
         match fault {
@@ -134,6 +164,7 @@ impl KubeClusterResources {
             launch.worker_count,
             launch.kube_worker_health_poll,
             launch.runtime_consts_profile,
+            launch.dedup_sink,
         )?;
         kubectl(&["apply", "-f", manifest_path.to_str().unwrap()])?;
         wait_for_pipeline(&pipeline_name)?;
@@ -240,9 +271,11 @@ fn write_pipeline_manifest(
     worker_count: usize,
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
+    dedup_sink: bool,
 ) -> Result<PathBuf> {
     pipeline.sink = Some(SinkSpec::InMemoryStorageGrpc {
         server_addr: "http://volga-test-storage.default.svc.cluster.local:50071".to_string(),
+        dedup: dedup_sink,
     });
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
@@ -369,6 +402,56 @@ async fn fetch_lifecycle_events(
             })
         })
         .collect()
+}
+
+async fn master_trigger_checkpoint(master_port: u16) -> Result<u64> {
+    let mut client =
+        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let response = client
+        .trigger_checkpoint(tonic::Request::new(
+            crate::runtime::master::server::master_service::TriggerCheckpointRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!(response.error_message));
+    }
+    Ok(response.checkpoint_id)
+}
+
+async fn master_stop_sources(master_port: u16) -> Result<()> {
+    let mut client =
+        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let response = client
+        .stop_sources(tonic::Request::new(
+            crate::runtime::master::server::master_service::StopSourcesRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!(response.error_message));
+    }
+    Ok(())
+}
+
+async fn master_get_source_stats(master_port: u16) -> Result<(Vec<(String, i32, u64)>, u64)> {
+    let mut client =
+        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let response = client
+        .get_source_stats(tonic::Request::new(
+            crate::runtime::master::server::master_service::GetSourceStatsRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!(response.error_message));
+    }
+    let tasks = response
+        .tasks
+        .into_iter()
+        .map(|task| (task.vertex_id, task.task_index, task.records_generated))
+        .collect();
+    Ok((tasks, response.total_records_generated))
 }
 
 fn kubectl(args: &[&str]) -> Result<String> {

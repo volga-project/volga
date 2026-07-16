@@ -15,8 +15,10 @@ use in_memory_storage_service::{
     AppendManyRequest,
     InsertRequest,
     InsertKeyedManyRequest,
+    UpsertDedupRowsRequest,
     GetVectorRequest,
     GetMapRequest,
+    GetDedupMapRequest,
     DrainVectorRequest,
     DrainMapRequest,
 };
@@ -133,6 +135,25 @@ impl InMemoryStorageClient {
         Ok(true)
     }
 
+    pub async fn upsert_dedup_rows(&mut self, rows: HashMap<String, Message>) -> Result<bool> {
+        let mut payload = HashMap::new();
+        for (key, message) in rows {
+            payload.insert(key, message.to_bytes());
+        }
+        let response = self
+            .client
+            .upsert_dedup_rows(tonic::Request::new(UpsertDedupRowsRequest { rows: payload }))
+            .await?
+            .into_inner();
+        if !response.success {
+            return Err(anyhow::anyhow!(
+                "UpsertDedupRows failed: {}",
+                response.error_message
+            ));
+        }
+        Ok(true)
+    }
+
     /// Get all messages from vector storage
     pub async fn get_vector(&mut self) -> Result<Vec<Message>> {
         let request = tonic::Request::new(GetVectorRequest {});
@@ -173,12 +194,33 @@ impl InMemoryStorageClient {
         Ok(keyed_messages)
     }
 
+    pub async fn get_dedup_map(&mut self) -> Result<HashMap<String, Message>> {
+        let response = self
+            .client
+            .get_dedup_map(tonic::Request::new(GetDedupMapRequest {}))
+            .await?
+            .into_inner();
+        if !response.success {
+            return Err(anyhow::anyhow!(
+                "GetDedupMap failed: {}",
+                response.error_message
+            ));
+        }
+        let mut rows = HashMap::new();
+        for (key, message_bytes) in response.rows {
+            rows.insert(key, Message::from_bytes(&message_bytes));
+        }
+        Ok(rows)
+    }
+
     pub async fn snapshot(&mut self) -> Result<InMemoryStorageSnapshot> {
         let vector_messages = self.get_vector().await?;
         let keyed_messages = self.get_map().await?;
+        let dedup_messages = self.get_dedup_map().await?;
         Ok(InMemoryStorageSnapshot::new(
             vector_messages,
             keyed_messages,
+            dedup_messages,
         ))
     }
 

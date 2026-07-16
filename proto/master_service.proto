@@ -5,10 +5,18 @@ package master_service;
 service MasterService {
   rpc RegisterWorker(RegisterWorkerRequest) returns (RegisterWorkerResponse);
   rpc ReportCheckpoint(ReportCheckpointRequest) returns (ReportCheckpointResponse);
+  // Barrier-propagation progress (diagnosis / timeouts). Never used for checkpoint completion.
+  rpc ReportCheckpointPropagation(ReportCheckpointPropagationRequest) returns (ReportCheckpointPropagationResponse);
   rpc GetTaskCheckpoint(GetTaskCheckpointRequest) returns (GetTaskCheckpointResponse);
   rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
   rpc GetLatestPipelineSnapshot(GetLatestPipelineSnapshotRequest) returns (GetLatestPipelineSnapshotResponse);
   rpc GetLifecycleEvents(GetLifecycleEventsRequest) returns (GetLifecycleEventsResponse);
+  // Force a checkpoint on the current running attempt (single-in-flight; rejected if busy).
+  rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
+  // Request sources to stop generating (datagen). Used by harness after recovery.
+  rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
+  // Aggregate source generation stats across workers.
+  rpc GetSourceStats(GetSourceStatsRequest) returns (GetSourceStatsResponse);
 }
 
 message RegisterWorkerRequest {
@@ -30,9 +38,29 @@ message ReportCheckpointRequest {
   string vertex_id = 2;
   int32 task_index = 3;
   repeated StateBlob blobs = 4;
+  uint64 execution_attempt_id = 5;
 }
 
 message ReportCheckpointResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+enum CheckpointPropagationPhase {
+  CHECKPOINT_PROPAGATION_PHASE_UNSPECIFIED = 0;
+  CHECKPOINT_PROPAGATION_PHASE_BARRIER_INJECTED = 1;
+  CHECKPOINT_PROPAGATION_PHASE_ALIGNED = 2;
+}
+
+message ReportCheckpointPropagationRequest {
+  uint64 checkpoint_id = 1;
+  string vertex_id = 2;
+  int32 task_index = 3;
+  uint64 execution_attempt_id = 4;
+  CheckpointPropagationPhase phase = 5;
+}
+
+message ReportCheckpointPropagationResponse {
   bool success = 1;
   string error_message = 2;
 }
@@ -80,6 +108,39 @@ message LifecycleEventRecord {
 
 message GetLifecycleEventsResponse {
   repeated LifecycleEventRecord events = 1;
+}
+
+message TriggerCheckpointRequest {
+}
+
+message TriggerCheckpointResponse {
+  bool success = 1;
+  string error_message = 2;
+  uint64 checkpoint_id = 3;
+}
+
+message StopSourcesRequest {
+}
+
+message StopSourcesResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message GetSourceStatsRequest {
+}
+
+message SourceTaskStats {
+  string vertex_id = 1;
+  int32 task_index = 2;
+  uint64 records_generated = 3;
+}
+
+message GetSourceStatsResponse {
+  bool success = 1;
+  string error_message = 2;
+  repeated SourceTaskStats tasks = 3;
+  uint64 total_records_generated = 4;
 }
 
 

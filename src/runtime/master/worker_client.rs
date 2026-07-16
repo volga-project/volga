@@ -19,7 +19,7 @@ use super::worker_service::{
     worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
     ShutdownWorkerRequest,
     ConfigureWorkerRequest, GetWorkerStateRequest, RunWorkerTasksRequest, StartWorkerRequest,
-    TriggerCheckpointRequest,
+    TriggerCheckpointBarrierRequest,
 };
 
 enum Attempt<T> {
@@ -321,20 +321,62 @@ impl WorkerClient {
             .map_err(|error| WorkerCallError::Rejected(error.to_string()))
     }
 
-    #[allow(dead_code)]
-    pub async fn trigger_checkpoint(&self, checkpoint_id: u64) -> anyhow::Result<bool> {
+    pub async fn trigger_checkpoint_barrier(&self, checkpoint_id: u64) -> anyhow::Result<bool> {
+        let execution_attempt_id = self.execution_attempt_id;
         Ok(self
-            .rpc("trigger_checkpoint", |mut client| async move {
+            .rpc("trigger_checkpoint_barrier", |mut client| async move {
                 client
-                    .trigger_checkpoint(tonic::Request::new(TriggerCheckpointRequest {
-                        checkpoint_id,
-                    }))
+                    .trigger_checkpoint_barrier(tonic::Request::new(
+                        TriggerCheckpointBarrierRequest {
+                            checkpoint_id,
+                            execution_attempt_id,
+                        },
+                    ))
                     .await
             })
             .await
             .map_err(anyhow::Error::new)?
             .into_inner()
             .success)
+    }
+
+    pub async fn stop_sources(&self) -> Result<(), WorkerCallError> {
+        let execution_attempt_id = self.execution_attempt_id;
+        let response = self
+            .rpc("stop_sources", |mut client| async move {
+                client
+                    .stop_sources(tonic::Request::new(
+                        crate::runtime::master::worker_service::StopSourcesRequest {
+                            execution_attempt_id,
+                        },
+                    ))
+                    .await
+            })
+            .await?
+            .into_inner();
+        response_result("stop_sources", response.success, response.error_message)
+    }
+
+    pub async fn get_source_stats(
+        &self,
+    ) -> Result<Vec<crate::runtime::master::worker_service::SourceTaskStats>, WorkerCallError> {
+        let execution_attempt_id = self.execution_attempt_id;
+        let response = self
+            .rpc("get_source_stats", |mut client| async move {
+                client
+                    .get_source_stats(tonic::Request::new(
+                        crate::runtime::master::worker_service::GetSourceStatsRequest {
+                            execution_attempt_id,
+                        },
+                    ))
+                    .await
+            })
+            .await?
+            .into_inner();
+        if !response.success {
+            return Err(WorkerCallError::Rejected(response.error_message));
+        }
+        Ok(response.tasks)
     }
 }
 

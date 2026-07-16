@@ -12,6 +12,8 @@
   "master.state_poll_interval": "100ms",
   "master.reset_worker_timeout": "2s",
   "master.registry_wait_tick": "50ms",
+  "master.checkpoint_interval": "0s",
+  "master.checkpoint_timeout": "5s",
   "kube.worker_health_poll_interval": "250ms",
   "kube.worker_health_unhealthy_grace_ticks": 2,
   "worker.heartbeat_send_interval": "100ms",

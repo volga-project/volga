@@ -17,6 +17,7 @@ use futures::future::join_all;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
+use crate::runtime::source_control::SourceControlRegistry;
 use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 use crate::runtime::operators::window::TimeGranularity;
@@ -103,6 +104,8 @@ pub struct Worker {
     request_source_processor: Option<RequestSourceProcessor>,
     request_source_processor_runtime: Option<Runtime>,
 
+    source_controls: Arc<SourceControlRegistry>,
+
     // TODO separate backend runtime for request mode channels
 }
 
@@ -126,6 +129,7 @@ impl Worker {
             fatal_watcher_handle: None,
             request_source_processor: None,
             request_source_processor_runtime: None,
+            source_controls: Arc::new(SourceControlRegistry::new()),
         }
     }
 
@@ -142,6 +146,7 @@ impl Worker {
         // Fresh incarnation: drop any sticky fatal from a previous execution attempt so this
         // worker is not immediately reported unhealthy after a recovery reset.
         self.health.clear();
+        self.source_controls.clear();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
         println!(
@@ -396,6 +401,10 @@ impl Worker {
                     if let Some(restore_checkpoint_id) = config.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
                     }
+                    cfg.insert(
+                        "execution_attempt_id".to_string(),
+                        Value::from(config.execution_attempt_id),
+                    );
                     cfg.insert("pipeline_id".to_string(), Value::String(config.pipeline_id.0.clone()));
                     cfg.insert("worker_id".to_string(), Value::String(config.worker_id.clone()));
                     Some(cfg)
@@ -403,6 +412,7 @@ impl Worker {
                 Some(self.operator_states.clone()),
                 Some(config.graph.clone()),
             );
+            runtime_context.set_source_control_registry(self.source_controls.clone());
             if let Some(request_source_processor) = &self.request_source_processor {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
                 runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
@@ -747,8 +757,11 @@ impl Worker {
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
     }
 
-    pub async fn trigger_checkpoint(&mut self, checkpoint_id: u64) {
-        println!("[WORKER] Triggering checkpoint {} on source tasks", checkpoint_id);
+    pub async fn trigger_checkpoint_barrier(&mut self, checkpoint_id: u64) {
+        println!(
+            "[WORKER] Triggering checkpoint barrier {} on source tasks",
+            checkpoint_id
+        );
         let config = self
             .config
             .as_ref()
@@ -768,12 +781,23 @@ impl Worker {
                 }
             }
 
+            self.source_controls.wake_checkpoint(&vertex_id);
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
             let fut = task_runtime.spawn(async move {
-                let _ = task_ref.ask(StreamTaskMessage::TriggerCheckpoint(checkpoint_id)).await;
+                let _ = task_ref
+                    .ask(StreamTaskMessage::TriggerCheckpointBarrier(checkpoint_id))
+                    .await;
             });
             let _ = fut.await;
         }
+    }
+
+    pub fn stop_sources(&self) {
+        self.source_controls.request_stop_all();
+    }
+
+    pub fn source_stats(&self) -> Vec<(crate::runtime::VertexId, i32, u64)> {
+        self.source_controls.snapshot_stats()
     }
 
     // This should only be used for testing - simulates worker execution

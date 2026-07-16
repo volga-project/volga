@@ -67,6 +67,8 @@ pub struct PipelineLaunchSpec {
     /// Kube only: sets `volga.io/runtime-consts-profile`. Default [`RuntimeConstsProfile::KubeTest`].
     /// In-process local masters already pick `local_test` via `cfg!(test)`.
     pub runtime_consts_profile: RuntimeConstsProfile,
+    /// Use in-memory sink dedup map keyed by `(key|event_ts)`.
+    pub dedup_sink: bool,
 }
 
 impl PipelineLaunchSpec {
@@ -77,6 +79,7 @@ impl PipelineLaunchSpec {
             expected_output_rows,
             kube_worker_health_poll: true,
             runtime_consts_profile: RuntimeConstsProfile::KubeTest,
+            dedup_sink: false,
         }
     }
 
@@ -87,6 +90,11 @@ impl PipelineLaunchSpec {
 
     pub fn with_runtime_consts_profile(mut self, profile: RuntimeConstsProfile) -> Self {
         self.runtime_consts_profile = profile;
+        self
+    }
+
+    pub fn with_dedup_sink(mut self, enabled: bool) -> Self {
+        self.dedup_sink = enabled;
         self
     }
 }

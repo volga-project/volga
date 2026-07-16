@@ -13,6 +13,9 @@ pub trait ClusterBackend: Send {
     async fn shutdown(&mut self) -> Result<()>;
     async fn storage_snapshot(&mut self) -> Result<InMemoryStorageSnapshot>;
     async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>>;
+    async fn trigger_checkpoint(&mut self) -> Result<u64>;
+    async fn stop_sources(&mut self) -> Result<()>;
+    async fn get_source_stats(&mut self) -> Result<(Vec<(String, i32, u64)>, u64)>;
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         bail!("fault action {:?} is not supported by this environment", fault)

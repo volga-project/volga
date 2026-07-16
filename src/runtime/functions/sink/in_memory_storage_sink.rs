@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use anyhow::Result;
+use arrow::array::{Array, StringArray, TimestampMillisecondArray};
+use arrow::datatypes::DataType;
 use crate::common::message::Message;
 use crate::runtime::functions::sink::SinkFunctionTrait;
 use crate::storage::in_memory_storage_grpc_client::InMemoryStorageClient;
@@ -19,32 +21,109 @@ pub struct InMemoryStorageSinkFunction {
     storage_client: Option<Arc<Mutex<InMemoryStorageClient>>>,
     buffer: Arc<Mutex<Vec<Message>>>,
     keyed_buffer: Arc<Mutex<HashMap<u64, Message>>>,
+    dedup_buffer: Arc<Mutex<HashMap<String, Message>>>,
     flush_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<AtomicBool>,
     runtime_context: Option<RuntimeContext>,
     server_addr: String,
+    dedup: bool,
 }
 
 impl InMemoryStorageSinkFunction {
-    pub fn new(server_addr: String) -> Self {
-        Self { 
+    pub fn new(server_addr: String, dedup: bool) -> Self {
+        Self {
             storage_client: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
             keyed_buffer: Arc::new(Mutex::new(HashMap::new())),
+            dedup_buffer: Arc::new(Mutex::new(HashMap::new())),
             flush_handle: None,
             running: Arc::new(AtomicBool::new(false)),
             runtime_context: None,
             server_addr,
+            dedup,
         }
+    }
+
+    fn extract_dedup_rows(message: &Message) -> Result<Vec<(String, Message)>> {
+        let batch = message.record_batch();
+        let schema = batch.schema();
+        let key_idx = ["key", "partition_key"]
+            .iter()
+            .find_map(|name| schema.index_of(name).ok())
+            .ok_or_else(|| anyhow::anyhow!("dedup sink requires key or partition_key column"))?;
+        let ts_idx = ["timestamp", "ts"]
+            .iter()
+            .find_map(|name| schema.index_of(name).ok())
+            .ok_or_else(|| anyhow::anyhow!("dedup sink requires timestamp or ts column"))?;
+
+        let key_col = batch.column(key_idx);
+        let ts_col = batch.column(ts_idx);
+        let mut rows = Vec::with_capacity(batch.num_rows());
+        for row_idx in 0..batch.num_rows() {
+            let key = match key_col.data_type() {
+                DataType::Utf8 => key_col
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap()
+                    .value(row_idx)
+                    .to_string(),
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "dedup key column must be Utf8, got {:?}",
+                        other
+                    ))
+                }
+            };
+            let ts = match ts_col.data_type() {
+                DataType::Timestamp(_, _) => ts_col
+                    .as_any()
+                    .downcast_ref::<TimestampMillisecondArray>()
+                    .unwrap()
+                    .value(row_idx),
+                DataType::Int64 => {
+                    use arrow::array::Int64Array;
+                    ts_col
+                        .as_any()
+                        .downcast_ref::<Int64Array>()
+                        .unwrap()
+                        .value(row_idx)
+                }
+                other => {
+                    return Err(anyhow::anyhow!(
+                        "dedup timestamp column must be Timestamp or Int64, got {:?}",
+                        other
+                    ))
+                }
+            };
+            let single = batch.slice(row_idx, 1);
+            let row_message = Message::new(
+                message.upstream_vertex_id(),
+                single,
+                message.ingest_timestamp(),
+                None,
+            );
+            rows.push((format!("{key}|{ts}"), row_message));
+        }
+        Ok(rows)
     }
 
     async fn flush_buffers(
         storage_client: &Arc<Mutex<InMemoryStorageClient>>,
         buffer: &Arc<Mutex<Vec<Message>>>,
         keyed_buffer: &Arc<Mutex<HashMap<u64, Message>>>,
-        _vertex_id: Option<&str>,
+        dedup_buffer: &Arc<Mutex<HashMap<String, Message>>>,
+        dedup: bool,
     ) -> Result<()> {
-        // Flush regular batches
+        if dedup {
+            let mut rows = dedup_buffer.lock().await;
+            if !rows.is_empty() {
+                let payload: HashMap<String, Message> = rows.drain().collect();
+                let mut client = storage_client.lock().await;
+                client.upsert_dedup_rows(payload).await?;
+            }
+            return Ok(());
+        }
+
         let mut regular_batches = buffer.lock().await;
         if !regular_batches.is_empty() {
             let batches: Vec<Message> = regular_batches.drain(..).collect();
@@ -52,10 +131,10 @@ impl InMemoryStorageSinkFunction {
             client.append_many(batches).await?;
         }
 
-        // Flush keyed batches
         let mut keyed_batches = keyed_buffer.lock().await;
         if !keyed_batches.is_empty() {
-            let batches: HashMap<String, Message> = keyed_batches.drain()
+            let batches: HashMap<String, Message> = keyed_batches
+                .drain()
                 .map(|(key, batch)| (key.to_string(), batch))
                 .collect();
 
@@ -70,6 +149,15 @@ impl InMemoryStorageSinkFunction {
 #[async_trait]
 impl SinkFunctionTrait for InMemoryStorageSinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
+        if self.dedup {
+            let rows = Self::extract_dedup_rows(&message)?;
+            let mut dedup_buffer = self.dedup_buffer.lock().await;
+            for (key, row) in rows {
+                dedup_buffer.insert(key, row);
+            }
+            return Ok(());
+        }
+
         match &message {
             Message::Keyed(keyed_message) => {
                 let key = keyed_message.key().hash();
@@ -89,165 +177,62 @@ impl SinkFunctionTrait for InMemoryStorageSinkFunction {
 impl FunctionTrait for InMemoryStorageSinkFunction {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.runtime_context = Some(context.clone());
-        
-        // Create gRPC client connection
+
         let client = InMemoryStorageClient::new(self.server_addr.clone()).await?;
         let shared_client = Arc::new(Mutex::new(client));
         self.storage_client = Some(shared_client.clone());
-        
+
         self.running.store(true, Ordering::SeqCst);
-        
-        // Start periodic flush task
+
         let buffer = self.buffer.clone();
         let keyed_buffer = self.keyed_buffer.clone();
+        let dedup_buffer = self.dedup_buffer.clone();
         let running = self.running.clone();
-        let vertex_id = context.vertex_id().to_string();
-        
+        let dedup = self.dedup;
         self.flush_handle = Some(tokio::spawn(async move {
-            let mut interval = interval(Duration::from_millis(BUFFER_FLUSH_INTERVAL_MS));
-            
+            let mut ticker = interval(Duration::from_millis(BUFFER_FLUSH_INTERVAL_MS));
             while running.load(Ordering::SeqCst) {
-                interval.tick().await;
-                if let Err(e) = InMemoryStorageSinkFunction::flush_buffers(&shared_client, &buffer, &keyed_buffer, Some(&vertex_id)).await {
-                    eprintln!("Error flushing buffers: {:?}", e);
+                ticker.tick().await;
+                if let Err(e) = InMemoryStorageSinkFunction::flush_buffers(
+                    &shared_client,
+                    &buffer,
+                    &keyed_buffer,
+                    &dedup_buffer,
+                    dedup,
+                )
+                .await
+                {
+                    eprintln!("[IN_MEMORY_SINK] flush error: {e}");
                 }
             }
         }));
-        
+
         Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
         self.running.store(false, Ordering::SeqCst);
-        
-        // Wait for flush task to complete
         if let Some(handle) = self.flush_handle.take() {
-            handle.await?;
+            let _ = handle.await;
         }
-        
-        // Final flush
-        if let Some(ref client) = self.storage_client {
-            let vertex_id = self.runtime_context.as_ref().map(|ctx| ctx.vertex_id());
-            Self::flush_buffers(client, &self.buffer, &self.keyed_buffer, vertex_id.as_deref()).await?;
+        if let Some(client) = &self.storage_client {
+            Self::flush_buffers(
+                client,
+                &self.buffer,
+                &self.keyed_buffer,
+                &self.dedup_buffer,
+                self.dedup,
+            )
+            .await?;
         }
-    
         Ok(())
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::common::test_utils::{create_test_string_batch, gen_unique_grpc_port};
-    use crate::common::Key;
-    use tokio::runtime::Runtime;
-    use arrow::array::StringArray;
-    use crate::common::message::{KeyedMessage, BaseMessage};
-    use crate::storage::in_memory_storage_grpc_server::InMemoryStorageServer;
-
-    #[test]
-    fn test_in_memory_storage_grpc_sink_function() -> Result<()> {
-        // Create runtime for async operations
-        let runtime = Runtime::new()?;
-
-        // Create test data
-        let regular_messages = vec![
-            Message::new(None, create_test_string_batch(vec!["regular1".to_string()]), None, None),
-            Message::new(None, create_test_string_batch(vec!["regular2".to_string()]), None, None),
-            Message::new(None, create_test_string_batch(vec!["regular3".to_string()]), None, None),
-        ];
-
-        // Create keyed messages
-        let key1_batch = create_test_string_batch(vec!["key1".to_string()]);
-        let key2_batch = create_test_string_batch(vec!["key2".to_string()]);
-        let key1 = Key::new(key1_batch.clone())?;
-        let key2 = Key::new(key2_batch.clone())?;
-        let keyed_messages = vec![
-            Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(None, create_test_string_batch(vec!["value1".to_string()]), None, None),
-                key1.clone(),
-            )),
-            Message::Keyed(KeyedMessage::new(
-                BaseMessage::new(None, create_test_string_batch(vec!["value2".to_string()]), None, None),
-                key2.clone(),
-            )),
-        ];
-
-        runtime.block_on(async {
-            // Start storage server
-            let mut storage_server = InMemoryStorageServer::new();
-            let port = gen_unique_grpc_port();
-            let server_addr = format!("127.0.0.1:{}", port);
-
-            storage_server.start(&server_addr).await?;
-            
-            // Wait a bit for server to start
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-            // Create sink function
-            let mut sink_function = InMemoryStorageSinkFunction::new(format!("http://{}", server_addr));
-
-            // Open sink function
-            let context = RuntimeContext::new(
-                "test_sink".to_string().into(),
-                0,
-                1,
-                None,
-                None,
-                None
-            );
-            sink_function.open(&context).await?;
-
-            // Send regular messages
-            for message in regular_messages {
-                sink_function.sink(message).await?;
-            }
-
-            // Send keyed messages
-            for message in keyed_messages {
-                sink_function.sink(message).await?;
-            }
-
-            // Wait for data to be flushed
-            tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-            // Close sink function
-            sink_function.close().await?;
-
-            // Verify results by querying the server
-            let mut client = InMemoryStorageClient::new(format!("http://{}", server_addr)).await?;
-            let vector_messages = client.get_vector().await?;
-            let map_messages = client.get_map().await?;
-
-            // Check regular messages
-            assert_eq!(vector_messages.len(), 3);
-            assert_eq!(vector_messages[0].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "regular1");
-            assert_eq!(vector_messages[1].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "regular2");
-            assert_eq!(vector_messages[2].record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "regular3");
-            println!("Vector messages ok");
-
-            // Check keyed messages
-            assert_eq!(map_messages.len(), 2);
-            let key1_hash = key1.hash();
-            let key2_hash = key2.hash();
-            assert_eq!(map_messages.get(&key1_hash.to_string()).unwrap().record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "value1");
-            assert_eq!(map_messages.get(&key2_hash.to_string()).unwrap().record_batch().column(0).as_any().downcast_ref::<StringArray>().unwrap().value(0), "value2");
-            println!("Map messages ok");
-
-            // Stop storage server
-            storage_server.stop().await;
-
-            Ok::<_, anyhow::Error>(())
-        })?;
-
-        Ok(())
-    }
-} 

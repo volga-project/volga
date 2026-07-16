@@ -42,6 +42,14 @@ impl ExecutionAttempt {
         let mapping = build_mapping(&self.pipeline.spec, &self.pipeline.execution_graph, &nodes)
             .map_err(|error| ScheduleError::Terminal(error.to_string()))?;
         self.connect_all(&nodes).await?;
+        let endpoints = nodes
+            .iter()
+            .map(|(worker_id, node)| super::super::state::ActiveWorkerEndpoint {
+                worker_id: worker_id.clone(),
+                worker_ip: format!("{}:{}", node.worker_ip, node.worker_port),
+            })
+            .collect();
+        self.state.set_active_worker_endpoints(endpoints).await;
         self.configure_all(&mapping).await?;
         self.start_all().await?;
         self.wait_opened().await?;

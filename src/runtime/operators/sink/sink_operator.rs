@@ -7,7 +7,10 @@ use async_trait::async_trait;
 
 #[derive(Clone, Debug)]
 pub enum SinkConfig {
-    InMemoryStorageGrpcSinkConfig(String), // server_addr
+    InMemoryStorageGrpcSinkConfig {
+        server_addr: String,
+        dedup: bool,
+    },
     RequestSinkConfig,
     ParquetSinkConfig(ParquetSinkConfig),
 }
@@ -15,7 +18,7 @@ pub enum SinkConfig {
 impl std::fmt::Display for SinkConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SinkConfig::InMemoryStorageGrpcSinkConfig(_) => write!(f, "InMemoryStorageGrpc"),
+            SinkConfig::InMemoryStorageGrpcSinkConfig { .. } => write!(f, "InMemoryStorageGrpc"),
             SinkConfig::RequestSinkConfig => write!(f, "Request"),
             SinkConfig::ParquetSinkConfig(_) => write!(f, "Parquet"),
         }

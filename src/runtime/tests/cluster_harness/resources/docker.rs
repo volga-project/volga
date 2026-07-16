@@ -171,6 +171,36 @@ impl ClusterBackend for DockerCluster {
         fetch_lifecycle_events(resources.master_port, sequence).await
     }
 
+    async fn trigger_checkpoint(&mut self) -> Result<u64> {
+        let port = self
+            .resources
+            .as_ref()
+            .context("docker cluster is not launched")?
+            .resources()?
+            .master_port;
+        docker_master_trigger_checkpoint(port).await
+    }
+
+    async fn stop_sources(&mut self) -> Result<()> {
+        let port = self
+            .resources
+            .as_ref()
+            .context("docker cluster is not launched")?
+            .resources()?
+            .master_port;
+        docker_master_stop_sources(port).await
+    }
+
+    async fn get_source_stats(&mut self) -> Result<(Vec<(String, i32, u64)>, u64)> {
+        let port = self
+            .resources
+            .as_ref()
+            .context("docker cluster is not launched")?
+            .resources()?
+            .master_port;
+        docker_master_get_source_stats(port).await
+    }
+
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_ref().context("docker cluster is not launched")?;
         match fault {
@@ -187,6 +217,7 @@ impl DockerClusterResources {
         let mut spec = launch.pipeline;
         spec.sink = Some(SinkSpec::InMemoryStorageGrpc {
             server_addr: "http://storage:50071".to_string(),
+            dedup: launch.dedup_sink,
         });
         Ok(Self {
             resources: Some(DockerResources::start(
@@ -311,4 +342,51 @@ async fn fetch_lifecycle_events(
             })
         })
         .collect()
+}
+
+async fn docker_master_trigger_checkpoint(port: u16) -> Result<u64> {
+    let mut client = connect_master(port).await?;
+    let response = client
+        .trigger_checkpoint(tonic::Request::new(
+            crate::runtime::master::server::master_service::TriggerCheckpointRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!(response.error_message));
+    }
+    Ok(response.checkpoint_id)
+}
+
+async fn docker_master_stop_sources(port: u16) -> Result<()> {
+    let mut client = connect_master(port).await?;
+    let response = client
+        .stop_sources(tonic::Request::new(
+            crate::runtime::master::server::master_service::StopSourcesRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!(response.error_message));
+    }
+    Ok(())
+}
+
+async fn docker_master_get_source_stats(port: u16) -> Result<(Vec<(String, i32, u64)>, u64)> {
+    let mut client = connect_master(port).await?;
+    let response = client
+        .get_source_stats(tonic::Request::new(
+            crate::runtime::master::server::master_service::GetSourceStatsRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!(response.error_message));
+    }
+    let tasks = response
+        .tasks
+        .into_iter()
+        .map(|task| (task.vertex_id, task.task_index, task.records_generated))
+        .collect();
+    Ok((tasks, response.total_records_generated))
 }

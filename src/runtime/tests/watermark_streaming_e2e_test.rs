@@ -106,6 +106,7 @@ pub(crate) async fn run_watermark_window_pipeline(
         )
         .with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: format!("http://{}", storage_server_addr),
+            dedup: false,
         })
         .sql(sql)
         .build();

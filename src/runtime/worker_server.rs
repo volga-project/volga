@@ -32,7 +32,9 @@ use worker_service::{
     RunWorkerTasksRequest, RunWorkerTasksResponse,
     CloseWorkerTasksRequest, CloseWorkerTasksResponse,
     ResetWorkerRequest, ResetWorkerResponse, ShutdownWorkerRequest, ShutdownWorkerResponse,
-    TriggerCheckpointRequest, TriggerCheckpointResponse,
+    TriggerCheckpointBarrierRequest, TriggerCheckpointBarrierResponse,
+    StopSourcesRequest, StopSourcesResponse,
+    GetSourceStatsRequest, GetSourceStatsResponse, SourceTaskStats,
     MasterHeartbeatMessage, WorkerHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
 };
@@ -252,16 +254,55 @@ impl WorkerService for WorkerServiceImpl {
         }))
     }
 
-    async fn trigger_checkpoint(
+    async fn trigger_checkpoint_barrier(
         &self,
-        request: Request<TriggerCheckpointRequest>,
-    ) -> Result<Response<TriggerCheckpointResponse>, Status> {
+        request: Request<TriggerCheckpointBarrierRequest>,
+    ) -> Result<Response<TriggerCheckpointBarrierResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
         let checkpoint_id = request.get_ref().checkpoint_id;
         let mut worker_guard = self.worker.lock().await;
-        worker_guard.trigger_checkpoint(checkpoint_id).await;
-        Ok(Response::new(TriggerCheckpointResponse {
+        worker_guard.trigger_checkpoint_barrier(checkpoint_id).await;
+        Ok(Response::new(TriggerCheckpointBarrierResponse {
             success: true,
             error_message: String::new(),
+        }))
+    }
+
+    async fn stop_sources(
+        &self,
+        request: Request<StopSourcesRequest>,
+    ) -> Result<Response<StopSourcesResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
+        let worker_guard = self.worker.lock().await;
+        worker_guard.stop_sources();
+        Ok(Response::new(StopSourcesResponse {
+            success: true,
+            error_message: String::new(),
+        }))
+    }
+
+    async fn get_source_stats(
+        &self,
+        request: Request<GetSourceStatsRequest>,
+    ) -> Result<Response<GetSourceStatsResponse>, Status> {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
+            .await?;
+        let worker_guard = self.worker.lock().await;
+        let tasks = worker_guard
+            .source_stats()
+            .into_iter()
+            .map(|(vertex_id, task_index, records_generated)| SourceTaskStats {
+                vertex_id: vertex_id.as_ref().to_string(),
+                task_index,
+                records_generated,
+            })
+            .collect();
+        Ok(Response::new(GetSourceStatsResponse {
+            success: true,
+            error_message: String::new(),
+            tasks,
         }))
     }
 

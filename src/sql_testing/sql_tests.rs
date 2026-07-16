@@ -504,7 +504,7 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
             test_case.schema.clone(),
         ),
     );
-    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr)));
+    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: format!("http://{}", storage_server_addr), dedup: false });
     let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     // Start storage server and execute

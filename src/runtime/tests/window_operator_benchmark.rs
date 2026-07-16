@@ -298,6 +298,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
     } else {
         spec_builder = spec_builder.with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: format!("http://{}", storage_server_addr),
+            dedup: false,
         });
         spec_builder = spec_builder.with_execution_mode(ExecutionMode::Streaming);
     }

@@ -295,7 +295,7 @@ async fn test_chained_operator_type() {
     // Test with sink operator (Sink)
     let sink_configs = vec![
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
-        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("test".to_string())),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "test".to_string(), dedup: false }),
     ];
     let sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(sink_configs));
     assert_eq!(sink_chained.operator_type(), OperatorType::Sink);
@@ -304,7 +304,7 @@ async fn test_chained_operator_type() {
     let source_sink_configs = vec![
         OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
-        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig("test".to_string())),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "test".to_string(), dedup: false }),
     ];
     let source_sink_chained = ChainedOperator::new(OperatorConfig::ChainedConfig(source_sink_configs));
     assert_eq!(source_sink_chained.operator_type(), OperatorType::ChainedSourceSink);
@@ -328,7 +328,7 @@ async fn test_chained_operator_source_map_sink() {
     let configs = vec![
         OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(test_messages))),
         OperatorConfig::MapConfig(MapFunction::new_custom(ToUpperCaseMapFunction)),
-        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig(format!("http://{}", storage_server_addr))),
+        OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: format!("http://{}", storage_server_addr), dedup: false }),
     ];
     
     let mut chained_operator = ChainedOperator::new(OperatorConfig::ChainedConfig(configs));

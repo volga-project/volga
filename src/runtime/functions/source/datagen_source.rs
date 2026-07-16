@@ -11,7 +11,9 @@ use arrow::array::builder::{Float64Builder, Int64Builder, StringBuilder, Timesta
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::collections::HashMap;
+use tokio::sync::Notify;
 use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
 use rand::distributions::Alphanumeric;
@@ -130,6 +132,9 @@ pub struct DatagenSourceFunction {
     per_key_timestamps: HashMap<String, i64>, // Timestamp state per key
     per_key_increments: HashMap<String, HashMap<usize, ScalarValue>>, // Increment state per key per field
     per_key_values_indices: HashMap<String, HashMap<usize, usize>>, // Values indices per key per field
+    stop_flag: Option<Arc<AtomicBool>>,
+    records_generated_shared: Option<Arc<AtomicU64>>,
+    checkpoint_wake: Option<Arc<Notify>>,
 }
 
 impl DatagenSourceFunction {
@@ -152,6 +157,9 @@ impl DatagenSourceFunction {
             per_key_timestamps: HashMap::new(),
             per_key_increments: HashMap::new(),
             per_key_values_indices: HashMap::new(),
+            stop_flag: None,
+            records_generated_shared: None,
+            checkpoint_wake: None,
         }
     }
 
@@ -311,6 +319,9 @@ impl DatagenSourceFunction {
         }
         
         self.records_generated += batch_size;
+        if let Some(shared) = &self.records_generated_shared {
+            shared.store(self.records_generated as u64, Ordering::SeqCst);
+        }
         RecordBatch::try_new(schema.clone(), columns).map_err(Into::into)
     }
 
@@ -485,6 +496,15 @@ impl DatagenSourceFunction {
 
     /// Check if we should generate more records
     fn should_continue(&self) -> bool {
+        if self
+            .stop_flag
+            .as_ref()
+            .map(|flag| flag.load(Ordering::SeqCst))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
         // Check record limit
         if let Some(limit) = self.task_records_limit {
             if self.records_generated >= limit {
@@ -531,12 +551,23 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             return None;
         }
 
-        // Wait for next gen time if rate limiting is enabled
+        // Wait for next gen time if rate limiting is enabled (interruptible by CP trigger).
         if let Some(next_time) = self.next_gen_time {
             if let Ok(sleep_duration) = next_time.duration_since(SystemTime::now()) {
-                tokio::time::sleep(sleep_duration).await;
+                if let Some(wake) = &self.checkpoint_wake {
+                    tokio::select! {
+                        _ = tokio::time::sleep(sleep_duration) => {}
+                        _ = wake.notified() => {
+                            // prefer_control is set by wake_checkpoint; SourceOperator
+                            // returns Continue so StreamTask can inject the barrier next.
+                            return None;
+                        }
+                    }
+                } else {
+                    tokio::time::sleep(sleep_duration).await;
+                }
             }
-            
+
             // Calculate next event time based on the number of events in this batch
             if let Some(interval) = self.gen_interval {
                 self.next_gen_time = Some(next_time + interval * batch_size as u32);
@@ -583,6 +614,9 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         self.per_key_timestamps = pos.per_key_timestamps;
         self.per_key_increments = pos.per_key_increments;
         self.per_key_values_indices = pos.per_key_values_indices;
+        if let Some(shared) = &self.records_generated_shared {
+            shared.store(self.records_generated as u64, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
@@ -627,6 +661,21 @@ impl FunctionTrait for DatagenSourceFunction {
         if let Some((interval, start_time)) = self.calculate_timing() {
             self.gen_interval = Some(interval);
             self.next_gen_time = Some(start_time);
+        }
+
+        if self.config.spec.replayable {
+            if let Some(registry) = ctx.source_control_registry() {
+                let control = Arc::new(
+                    crate::runtime::source_control::SourceTaskControl::new(ctx.task_index()),
+                );
+                self.stop_flag = Some(control.stop.clone());
+                self.records_generated_shared = Some(control.records_generated.clone());
+                self.checkpoint_wake = Some(control.checkpoint_wake.clone());
+                control
+                    .records_generated
+                    .store(self.records_generated as u64, Ordering::SeqCst);
+                registry.register(ctx.vertex_id_arc(), control);
+            }
         }
         
         Ok(())

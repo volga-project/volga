@@ -88,6 +88,42 @@ impl ClusterBackend for LocalCluster {
             .await)
     }
 
+    async fn trigger_checkpoint(&mut self) -> Result<u64> {
+        self.resources
+            .as_ref()
+            .context("local cluster is not launched")?
+            .master
+            .server
+            .master()
+            .force_checkpoint()
+            .await
+            .map_err(|error| anyhow!(error))
+    }
+
+    async fn stop_sources(&mut self) -> Result<()> {
+        self.resources
+            .as_ref()
+            .context("local cluster is not launched")?
+            .master
+            .server
+            .master()
+            .stop_sources()
+            .await
+            .map_err(|error| anyhow!(error))
+    }
+
+    async fn get_source_stats(&mut self) -> Result<(Vec<(String, i32, u64)>, u64)> {
+        self.resources
+            .as_ref()
+            .context("local cluster is not launched")?
+            .master
+            .server
+            .master()
+            .get_source_stats()
+            .await
+            .map_err(|error| anyhow!(error))
+    }
+
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_mut().context("local cluster is not launched")?;
         match fault {
@@ -110,6 +146,7 @@ impl LocalClusterResources {
         let mut spec = launch.pipeline;
         spec.sink = Some(SinkSpec::InMemoryStorageGrpc {
             server_addr: storage.endpoint(),
+            dedup: launch.dedup_sink,
         });
         let logical_graph = compile_logical_graph(&spec, None);
         let local_orchestrator = LocalTestOrchestrator::new(

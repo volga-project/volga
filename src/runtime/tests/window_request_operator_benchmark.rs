@@ -208,6 +208,7 @@ pub async fn run_window_request_benchmark(
             schema_json: Some(schema_to_json(request_datagen_config.schema.as_ref())),
             sink: Some(SinkSpec::InMemoryStorageGrpc {
                 server_addr: format!("http://{}", storage_server_addr),
+                dedup: false,
             }),
         })
         .build();

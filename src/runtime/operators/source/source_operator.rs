@@ -1,6 +1,8 @@
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig, parquet::ParquetSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
 
@@ -126,6 +128,7 @@ impl std::fmt::Display for SourceConfig {
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
+    prefer_control: Option<Arc<AtomicBool>>,
 }
 
 impl SourceOperator {
@@ -137,6 +140,7 @@ impl SourceOperator {
         let source_function = create_source_function(source_config);
         Self {
             base: OperatorBase::new_with_function(source_function, config),
+            prefer_control: None,
         }
     }
 }
@@ -144,7 +148,12 @@ impl SourceOperator {
 #[async_trait]
 impl OperatorTrait for SourceOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        self.base.open(context).await
+        // Datagen registers SourceTaskControl during function open.
+        self.base.open(context).await?;
+        if let Some(registry) = context.source_control_registry() {
+            self.prefer_control = registry.prefer_control_flag(context.vertex_id_arc());
+        }
+        Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -167,11 +176,16 @@ impl OperatorTrait for SourceOperator {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
         let msg = function.fetch().await;
 
-        // TODO test
-        // Apply projection if present
+        // Checkpoint wake interrupted fetch: yield so StreamTask can inject the barrier.
+        if let Some(flag) = &self.prefer_control {
+            if flag.swap(false, Ordering::SeqCst) {
+                return OperatorPollResult::Continue;
+            }
+        }
+
         match msg {
             Some(Message::Watermark(watermark)) => {
-                return OperatorPollResult::Ready(Message::Watermark(watermark));
+                OperatorPollResult::Ready(Message::Watermark(watermark))
             }
             Some(message) => OperatorPollResult::Ready(message),
             None => OperatorPollResult::None,
@@ -181,14 +195,23 @@ impl OperatorTrait for SourceOperator {
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
         let pos = function.snapshot_position().await?;
+        if pos.is_empty() {
+            return Err(anyhow::anyhow!(
+                "checkpointable source produced empty source_position blob"
+            ));
+        }
         Ok(vec![("source_position".to_string(), pos)])
     }
 
     async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        if let Some((_, bytes)) = blobs.iter().find(|(name, _)| name == "source_position") {
-            function.restore_position(bytes).await?;
+        let Some((_, bytes)) = blobs.iter().find(|(name, _)| name == "source_position") else {
+            return Err(anyhow::anyhow!("missing source_position blob on restore"));
+        };
+        if bytes.is_empty() {
+            return Err(anyhow::anyhow!("empty source_position blob on restore"));
         }
+        function.restore_position(bytes).await?;
         Ok(())
     }
 }

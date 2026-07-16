@@ -15,18 +15,27 @@ service InMemoryStorageService {
   
   // Insert multiple keyed messages into map storage
   rpc InsertKeyedMany(InsertKeyedManyRequest) returns (InsertKeyedManyResponse);
-  
+
+  // Upsert rows into dedup map (key = logical uniqueness key, e.g. key|event_ts).
+  rpc UpsertDedupRows(UpsertDedupRowsRequest) returns (UpsertDedupRowsResponse);
+
   // Get all messages from vector storage
   rpc GetVector(GetVectorRequest) returns (GetVectorResponse);
   
   // Get all messages from map storage
   rpc GetMap(GetMapRequest) returns (GetMapResponse);
 
+  // Get dedup-map messages
+  rpc GetDedupMap(GetDedupMapRequest) returns (GetDedupMapResponse);
+
   // Drain (get + clear) all messages from vector storage
   rpc DrainVector(DrainVectorRequest) returns (DrainVectorResponse);
 
   // Drain (get + clear) all messages from map storage
   rpc DrainMap(DrainMapRequest) returns (DrainMapResponse);
+
+  // Drain dedup map
+  rpc DrainDedupMap(DrainDedupMapRequest) returns (DrainDedupMapResponse);
 }
 
 // Request message for Append
@@ -74,6 +83,15 @@ message InsertKeyedManyResponse {
   string error_message = 2;
 }
 
+message UpsertDedupRowsRequest {
+  map<string, bytes> rows = 1;
+}
+
+message UpsertDedupRowsResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
 // Request message for GetVector
 message GetVectorRequest {
   // Empty request - no parameters needed
@@ -96,7 +114,16 @@ message GetMapResponse {
   bool success = 1;
   string error_message = 2;
   map<string, bytes> keyed_messages = 3;
-} 
+}
+
+message GetDedupMapRequest {
+}
+
+message GetDedupMapResponse {
+  bool success = 1;
+  string error_message = 2;
+  map<string, bytes> rows = 3;
+}
 
 // Request message for DrainVector
 message DrainVectorRequest {
@@ -120,4 +147,13 @@ message DrainMapResponse {
   bool success = 1;
   string error_message = 2;
   map<string, bytes> keyed_messages = 3;
+}
+
+message DrainDedupMapRequest {
+}
+
+message DrainDedupMapResponse {
+  bool success = 1;
+  string error_message = 2;
+  map<string, bytes> rows = 3;
 }

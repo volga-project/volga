@@ -72,9 +72,13 @@ impl FunctionTrait for SinkFunction {
 
 pub fn create_sink_function(config: SinkConfig) -> SinkFunction {
     match config {
-        SinkConfig::InMemoryStorageGrpcSinkConfig(server_addr) => {
-            SinkFunction::InMemoryStorageGrpc(InMemoryStorageSinkFunction::new(server_addr))
-        }
+        SinkConfig::InMemoryStorageGrpcSinkConfig {
+            server_addr,
+            dedup,
+        } => SinkFunction::InMemoryStorageGrpc(InMemoryStorageSinkFunction::new(
+            server_addr,
+            dedup,
+        )),
         SinkConfig::RequestSinkConfig => {
             SinkFunction::Request(RequestSinkFunction::new())
         }

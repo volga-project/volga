@@ -59,20 +59,36 @@ impl CheckpointAligner {
         }
     }
 
-    fn on_barrier(&mut self, barrier: &crate::common::message::CheckpointBarrierMessage) -> Option<u64> {
-        let upstream_vertex_id = barrier
-            .metadata
-            .upstream_vertex_id
-            .clone()
-            .expect("Barrier must have upstream vertex id");
+    fn on_barrier(
+        &mut self,
+        barrier: &crate::common::message::CheckpointBarrierMessage,
+        expected_attempt_id: u64,
+    ) -> Result<Option<u64>, String> {
+        if barrier.execution_attempt_id != expected_attempt_id {
+            // Orphan from a previous attempt — drop without failing the new attempt.
+            println!(
+                "[CHECKPOINT] dropping stale barrier checkpoint_id={} attempt={} expected_attempt={}",
+                barrier.checkpoint_id, barrier.execution_attempt_id, expected_attempt_id
+            );
+            return Ok(None);
+        }
+
+        let upstream_vertex_id = barrier.metadata.upstream_vertex_id.clone().ok_or_else(|| {
+            format!(
+                "checkpoint barrier missing upstream_vertex_id checkpoint_id={}",
+                barrier.checkpoint_id
+            )
+        })?;
 
         let checkpoint_id = barrier.checkpoint_id;
         if self.current_checkpoint.is_none() {
             self.current_checkpoint = Some(checkpoint_id);
         }
         if self.current_checkpoint != Some(checkpoint_id) {
-            // Ignore unexpected checkpoint for MVP
-            return None;
+            return Err(format!(
+                "unexpected checkpoint barrier id={} while aligning {:?}",
+                checkpoint_id, self.current_checkpoint
+            ));
         }
 
         self.reader_control.block_upstream(&upstream_vertex_id);
@@ -81,9 +97,9 @@ impl CheckpointAligner {
         if self.seen_upstreams.len() == self.upstream_count {
             self.current_checkpoint = None;
             self.seen_upstreams.clear();
-            return Some(checkpoint_id);
+            return Ok(Some(checkpoint_id));
         }
-        None
+        Ok(None)
     }
 
     // Unblocking is done in StreamTask after checkpointing.
@@ -117,6 +133,7 @@ pub struct StreamTask {
     current_watermark: Arc<AtomicU64>,
     master_addr: Option<String>,
     restore_checkpoint_id: Option<u64>,
+    execution_attempt_id: u64,
     worker_health: Arc<WorkerHealth>,
 }
 
@@ -139,6 +156,11 @@ impl StreamTask {
             .job_config()
             .get("restore_checkpoint_id")
             .and_then(|v| v.as_u64());
+        let execution_attempt_id = runtime_context
+            .job_config()
+            .get("execution_attempt_id")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
 
         let metrics_labels = {
             let cfg = runtime_context.job_config();
@@ -175,6 +197,7 @@ impl StreamTask {
             current_watermark: Arc::new(AtomicU64::new(0)),
             master_addr,
             restore_checkpoint_id,
+            execution_attempt_id,
             worker_health,
         }
     }
@@ -222,11 +245,55 @@ impl StreamTask {
                 .collect::<Vec<_>>();
             operator.restore(&blobs).await?;
             println!("[CHECKPOINT] {} restore applied", vertex_id);
+            Ok(())
+        } else if crate::runtime::operators::operator::operator_config_requires_checkpoint(
+            operator.operator_config(),
+        ) {
+            Err(anyhow::anyhow!(
+                "checkpointable task {} index={} missing blobs for restore checkpoint_id={} success={}",
+                vertex_id,
+                task_index,
+                restore_checkpoint_id,
+                resp.success
+            ))
         } else {
             println!(
                 "[CHECKPOINT] {} restore had no blobs (success={})",
                 vertex_id, resp.success
             );
+            Ok(())
+        }
+    }
+
+    async fn report_checkpoint_propagation(
+        master_client: &mut Option<MasterServiceClient<tonic::transport::Channel>>,
+        checkpoint_id: u64,
+        vertex_id: &str,
+        task_index: i32,
+        execution_attempt_id: u64,
+        phase: crate::runtime::master::server::master_service::CheckpointPropagationPhase,
+    ) -> Result<()> {
+        let Some(client) = master_client.as_mut() else {
+            return Ok(());
+        };
+        let resp = client
+            .report_checkpoint_propagation(tonic::Request::new(
+                crate::runtime::master::server::master_service::ReportCheckpointPropagationRequest {
+                    checkpoint_id,
+                    vertex_id: vertex_id.to_string(),
+                    task_index,
+                    execution_attempt_id,
+                    phase: phase as i32,
+                },
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("report_checkpoint_propagation rpc failed: {e}"))?
+            .into_inner();
+        if !resp.success {
+            return Err(anyhow::anyhow!(
+                "report_checkpoint_propagation rejected: {}",
+                resp.error_message
+            ));
         }
         Ok(())
     }
@@ -328,6 +395,7 @@ impl StreamTask {
         _status: Arc<AtomicU8>,
         mut aligner: CheckpointAligner,
         labels: Option<MetricsLabels>,
+        execution_attempt_id: u64,
     ) -> MessageStream {
         Box::pin(stream! {
             let mut input_stream = input_stream;
@@ -355,14 +423,26 @@ impl StreamTask {
                         }
                     }
                     Message::CheckpointBarrier(barrier) => {
-                        if let Some(checkpoint_id) = aligner.on_barrier(barrier) {
-                            // Once fully aligned, yield a single barrier downstream through the operator.
-                            // StreamTask will intercept this barrier, do synchronous checkpointing, and forward it.
-                            yield Message::CheckpointBarrier(crate::common::message::CheckpointBarrierMessage::new(
-                                vertex_id.as_ref().to_string(),
-                                checkpoint_id,
-                                None,
-                            ));
+                        match aligner.on_barrier(barrier, execution_attempt_id) {
+                            Ok(Some(checkpoint_id)) => {
+                                // Once fully aligned, yield a single barrier downstream through the operator.
+                                yield Message::CheckpointBarrier(
+                                    crate::common::message::CheckpointBarrierMessage::new(
+                                        vertex_id.as_ref().to_string(),
+                                        checkpoint_id,
+                                        execution_attempt_id,
+                                        None,
+                                    ),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => {
+                                panic!(
+                                    "[CHECKPOINT] {} alignment failed: {}",
+                                    vertex_id.as_ref(),
+                                    error
+                                );
+                            }
                         }
                     }
                     _ => {
@@ -456,6 +536,7 @@ impl StreamTask {
         let execution_graph = self.execution_graph.clone();
         let master_addr = self.master_addr.clone();
         let restore_checkpoint_id = self.restore_checkpoint_id;
+        let execution_attempt_id = self.execution_attempt_id;
         let worker_health = self.worker_health.clone();
         let run_loop_health = worker_health.clone();
         
@@ -622,6 +703,7 @@ impl StreamTask {
                     status.clone(),
                     checkpoint_aligner,
                     metrics_labels.clone(),
+                    execution_attempt_id,
                 );
 
                 operator.set_input(Some(preprocessed_stream))
@@ -641,6 +723,7 @@ impl StreamTask {
                                 crate::common::message::CheckpointBarrierMessage::new(
                                     vertex_id.as_ref().to_string(),
                                     checkpoint_id,
+                                    execution_attempt_id,
                                     None,
                                 ),
                             ))
@@ -669,6 +752,20 @@ impl StreamTask {
                         };
                         if let Message::CheckpointBarrier(ref barrier) = message {
                             let checkpoint_id = barrier.checkpoint_id;
+                            let propagation_phase = if is_source {
+                                crate::runtime::master::server::master_service::CheckpointPropagationPhase::BarrierInjected
+                            } else {
+                                crate::runtime::master::server::master_service::CheckpointPropagationPhase::Aligned
+                            };
+                            Self::report_checkpoint_propagation(
+                                &mut master_client,
+                                checkpoint_id,
+                                vertex_id.as_ref(),
+                                runtime_context.task_index(),
+                                execution_attempt_id,
+                                propagation_phase,
+                            )
+                            .await?;
 
                             if crate::runtime::operators::operator::operator_config_requires_checkpoint(operator.operator_config()) {
                                 println!(
@@ -682,7 +779,7 @@ impl StreamTask {
                                     blobs.len()
                                 );
 
-                                master_client
+                                let report_resp = master_client
                                     .as_mut()
                                     .expect("Master client not initialized")
                                     .report_checkpoint(tonic::Request::new(
@@ -694,9 +791,17 @@ impl StreamTask {
                                                 .into_iter()
                                                 .map(|(name, bytes)| crate::runtime::master::server::master_service::StateBlob { name, bytes })
                                                 .collect(),
+                                            execution_attempt_id,
                                         },
                                     ))
-                                    .await?;
+                                    .await?
+                                    .into_inner();
+                                if !report_resp.success {
+                                    return Err(anyhow::anyhow!(
+                                        "report_checkpoint rejected: {}",
+                                        report_resp.error_message
+                                    ));
+                                }
                                 println!(
                                     "[CHECKPOINT] {} reported checkpoint_id={}",
                                     vertex_id, checkpoint_id

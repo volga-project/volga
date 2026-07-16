@@ -10,7 +10,7 @@ pub enum StreamTaskMessage {
     Close,
     GetState,
     Run,
-    TriggerCheckpoint(u64),
+    TriggerCheckpointBarrier(u64),
 }
 
 #[derive(Actor)]
@@ -44,7 +44,7 @@ impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
                 self.task.signal_to_run();
                 Ok(self.task.get_state().await)
             }
-            StreamTaskMessage::TriggerCheckpoint(checkpoint_id) => {
+            StreamTaskMessage::TriggerCheckpointBarrier(checkpoint_id) => {
                 self.task.signal_trigger_checkpoint(checkpoint_id);
                 Ok(self.task.get_state().await)
             }
