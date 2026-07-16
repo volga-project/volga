@@ -203,26 +203,6 @@ impl Master {
         Ok(())
     }
 
-    pub async fn get_source_stats(&self) -> Result<(Vec<(String, i32, u64)>, u64), String> {
-        let clients = self.state.open_active_worker_clients().await;
-        if clients.is_empty() {
-            return Err("no active workers".to_string());
-        }
-        let mut tasks = Vec::new();
-        let mut total = 0u64;
-        for (worker_id, client) in clients {
-            let stats = client
-                .get_source_stats()
-                .await
-                .map_err(|error| format!("{worker_id}: {error}"))?;
-            for task in stats {
-                total += task.records_generated;
-                tasks.push((task.vertex_id, task.task_index, task.records_generated));
-            }
-        }
-        Ok((tasks, total))
-    }
-
     pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
         self.state.worker_states().await
     }

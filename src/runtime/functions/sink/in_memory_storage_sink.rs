@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use anyhow::Result;
-use arrow::array::{Array, StringArray, TimestampMillisecondArray};
+use arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::DataType;
 use crate::common::message::Message;
 use crate::runtime::functions::sink::SinkFunctionTrait;
@@ -20,81 +20,84 @@ const BUFFER_FLUSH_INTERVAL_MS: u64 = 100;
 pub struct InMemoryStorageSinkFunction {
     storage_client: Option<Arc<Mutex<InMemoryStorageClient>>>,
     buffer: Arc<Mutex<Vec<Message>>>,
-    keyed_buffer: Arc<Mutex<HashMap<u64, Message>>>,
-    dedup_buffer: Arc<Mutex<HashMap<String, Message>>>,
+    keyed_buffer: Arc<Mutex<HashMap<String, Message>>>,
     flush_handle: Option<tokio::task::JoinHandle<()>>,
     running: Arc<AtomicBool>,
     runtime_context: Option<RuntimeContext>,
     server_addr: String,
-    dedup: bool,
+    /// When non-empty, explode rows and upsert into the keyed map using these columns.
+    upsert_key_columns: Vec<String>,
 }
 
 impl InMemoryStorageSinkFunction {
-    pub fn new(server_addr: String, dedup: bool) -> Self {
+    pub fn new(server_addr: String, upsert_key_columns: Vec<String>) -> Self {
         Self {
             storage_client: None,
             buffer: Arc::new(Mutex::new(Vec::new())),
             keyed_buffer: Arc::new(Mutex::new(HashMap::new())),
-            dedup_buffer: Arc::new(Mutex::new(HashMap::new())),
             flush_handle: None,
             running: Arc::new(AtomicBool::new(false)),
             runtime_context: None,
             server_addr,
-            dedup,
+            upsert_key_columns,
         }
     }
 
-    fn extract_dedup_rows(message: &Message) -> Result<Vec<(String, Message)>> {
+    fn column_value_as_string(column: &dyn Array, row_idx: usize) -> Result<String> {
+        match column.data_type() {
+            DataType::Utf8 => Ok(column
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(row_idx)
+                .to_string()),
+            DataType::Timestamp(_, _) => Ok(column
+                .as_any()
+                .downcast_ref::<TimestampMillisecondArray>()
+                .unwrap()
+                .value(row_idx)
+                .to_string()),
+            DataType::Int64 => Ok(column
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(row_idx)
+                .to_string()),
+            other => Err(anyhow::anyhow!(
+                "upsert key column type {:?} is not supported (Utf8/Timestamp/Int64)",
+                other
+            )),
+        }
+    }
+
+    fn extract_upsert_rows(
+        message: &Message,
+        key_columns: &[String],
+    ) -> Result<Vec<(String, Message)>> {
+        if key_columns.is_empty() {
+            return Err(anyhow::anyhow!("upsert_key_columns must be non-empty"));
+        }
         let batch = message.record_batch();
         let schema = batch.schema();
-        let key_idx = ["key", "partition_key"]
+        let col_indexes = key_columns
             .iter()
-            .find_map(|name| schema.index_of(name).ok())
-            .ok_or_else(|| anyhow::anyhow!("dedup sink requires key or partition_key column"))?;
-        let ts_idx = ["timestamp", "ts"]
-            .iter()
-            .find_map(|name| schema.index_of(name).ok())
-            .ok_or_else(|| anyhow::anyhow!("dedup sink requires timestamp or ts column"))?;
+            .map(|name| {
+                schema.index_of(name).map_err(|_| {
+                    anyhow::anyhow!("upsert key column '{name}' not found in sink batch schema")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
-        let key_col = batch.column(key_idx);
-        let ts_col = batch.column(ts_idx);
         let mut rows = Vec::with_capacity(batch.num_rows());
         for row_idx in 0..batch.num_rows() {
-            let key = match key_col.data_type() {
-                DataType::Utf8 => key_col
-                    .as_any()
-                    .downcast_ref::<StringArray>()
-                    .unwrap()
-                    .value(row_idx)
-                    .to_string(),
-                other => {
-                    return Err(anyhow::anyhow!(
-                        "dedup key column must be Utf8, got {:?}",
-                        other
-                    ))
-                }
-            };
-            let ts = match ts_col.data_type() {
-                DataType::Timestamp(_, _) => ts_col
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .unwrap()
-                    .value(row_idx),
-                DataType::Int64 => {
-                    use arrow::array::Int64Array;
-                    ts_col
-                        .as_any()
-                        .downcast_ref::<Int64Array>()
-                        .unwrap()
-                        .value(row_idx)
-                }
-                other => {
-                    return Err(anyhow::anyhow!(
-                        "dedup timestamp column must be Timestamp or Int64, got {:?}",
-                        other
-                    ))
-                }
-            };
+            let mut parts = Vec::with_capacity(col_indexes.len());
+            for &col_idx in &col_indexes {
+                parts.push(Self::column_value_as_string(
+                    batch.column(col_idx).as_ref(),
+                    row_idx,
+                )?);
+            }
+            let map_key = parts.join("|");
             let single = batch.slice(row_idx, 1);
             let row_message = Message::new(
                 message.upstream_vertex_id(),
@@ -102,7 +105,7 @@ impl InMemoryStorageSinkFunction {
                 message.ingest_timestamp(),
                 None,
             );
-            rows.push((format!("{key}|{ts}"), row_message));
+            rows.push((map_key, row_message));
         }
         Ok(rows)
     }
@@ -110,20 +113,8 @@ impl InMemoryStorageSinkFunction {
     async fn flush_buffers(
         storage_client: &Arc<Mutex<InMemoryStorageClient>>,
         buffer: &Arc<Mutex<Vec<Message>>>,
-        keyed_buffer: &Arc<Mutex<HashMap<u64, Message>>>,
-        dedup_buffer: &Arc<Mutex<HashMap<String, Message>>>,
-        dedup: bool,
+        keyed_buffer: &Arc<Mutex<HashMap<String, Message>>>,
     ) -> Result<()> {
-        if dedup {
-            let mut rows = dedup_buffer.lock().await;
-            if !rows.is_empty() {
-                let payload: HashMap<String, Message> = rows.drain().collect();
-                let mut client = storage_client.lock().await;
-                client.upsert_dedup_rows(payload).await?;
-            }
-            return Ok(());
-        }
-
         let mut regular_batches = buffer.lock().await;
         if !regular_batches.is_empty() {
             let batches: Vec<Message> = regular_batches.drain(..).collect();
@@ -133,11 +124,7 @@ impl InMemoryStorageSinkFunction {
 
         let mut keyed_batches = keyed_buffer.lock().await;
         if !keyed_batches.is_empty() {
-            let batches: HashMap<String, Message> = keyed_batches
-                .drain()
-                .map(|(key, batch)| (key.to_string(), batch))
-                .collect();
-
+            let batches: HashMap<String, Message> = keyed_batches.drain().collect();
             let mut client = storage_client.lock().await;
             client.insert_keyed_many(batches).await?;
         }
@@ -149,18 +136,18 @@ impl InMemoryStorageSinkFunction {
 #[async_trait]
 impl SinkFunctionTrait for InMemoryStorageSinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
-        if self.dedup {
-            let rows = Self::extract_dedup_rows(&message)?;
-            let mut dedup_buffer = self.dedup_buffer.lock().await;
+        if !self.upsert_key_columns.is_empty() {
+            let rows = Self::extract_upsert_rows(&message, &self.upsert_key_columns)?;
+            let mut keyed_buffer = self.keyed_buffer.lock().await;
             for (key, row) in rows {
-                dedup_buffer.insert(key, row);
+                keyed_buffer.insert(key, row);
             }
             return Ok(());
         }
 
         match &message {
             Message::Keyed(keyed_message) => {
-                let key = keyed_message.key().hash();
+                let key = keyed_message.key().hash().to_string();
                 let mut keyed_buffer = self.keyed_buffer.lock().await;
                 keyed_buffer.insert(key, message);
             }
@@ -186,21 +173,14 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
 
         let buffer = self.buffer.clone();
         let keyed_buffer = self.keyed_buffer.clone();
-        let dedup_buffer = self.dedup_buffer.clone();
         let running = self.running.clone();
-        let dedup = self.dedup;
         self.flush_handle = Some(tokio::spawn(async move {
             let mut ticker = interval(Duration::from_millis(BUFFER_FLUSH_INTERVAL_MS));
             while running.load(Ordering::SeqCst) {
                 ticker.tick().await;
-                if let Err(e) = InMemoryStorageSinkFunction::flush_buffers(
-                    &shared_client,
-                    &buffer,
-                    &keyed_buffer,
-                    &dedup_buffer,
-                    dedup,
-                )
-                .await
+                if let Err(e) =
+                    InMemoryStorageSinkFunction::flush_buffers(&shared_client, &buffer, &keyed_buffer)
+                        .await
                 {
                     eprintln!("[IN_MEMORY_SINK] flush error: {e}");
                 }
@@ -216,14 +196,7 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
             let _ = handle.await;
         }
         if let Some(client) = &self.storage_client {
-            Self::flush_buffers(
-                client,
-                &self.buffer,
-                &self.keyed_buffer,
-                &self.dedup_buffer,
-                self.dedup,
-            )
-            .await?;
+            Self::flush_buffers(client, &self.buffer, &self.keyed_buffer).await?;
         }
         Ok(())
     }

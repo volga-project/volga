@@ -259,11 +259,15 @@ impl Worker {
         let mut task_statuses: HashMap<VertexId, StreamTaskStatus> = HashMap::new();
         let mut task_metrics: HashMap<VertexId, TaskMetrics> = HashMap::new();
         let mut task_operator_metrics: HashMap<VertexId, TaskOperatorMetrics> = HashMap::new();
+        let mut task_metadata: HashMap<VertexId, HashMap<String, String>> = HashMap::new();
 
         for result in task_results {
             if let Ok((vertex_id, state)) = result {
                 task_statuses.insert(vertex_id.clone(), state.status.clone());
                 task_metrics.insert(vertex_id.clone(), state.metrics.clone());
+                if !state.metadata.is_empty() {
+                    task_metadata.insert(vertex_id.clone(), state.metadata.clone());
+                }
 
                 if let Some(op_state) = operator_states.get_operator_state(vertex_id.as_ref()) {
                     if let Some(m) = op_state.task_operator_metrics() {
@@ -287,6 +291,7 @@ impl Worker {
             state_guard.task_statuses = task_statuses;
             state_guard.set_metrics(worker_metrics);
             state_guard.task_operator_metrics = task_operator_metrics;
+            state_guard.task_metadata = task_metadata;
             // state_guard.worker_metrics.set_tasks_metrics(task_metrics.clone());
             if state_update_sender.is_some() {
                 state_update_sender.unwrap().send(state_guard.clone()).await.unwrap();
@@ -794,10 +799,6 @@ impl Worker {
 
     pub fn stop_sources(&self) {
         self.source_controls.request_stop_all();
-    }
-
-    pub fn source_stats(&self) -> Vec<(crate::runtime::VertexId, i32, u64)> {
-        self.source_controls.snapshot_stats()
     }
 
     // This should only be used for testing - simulates worker execution

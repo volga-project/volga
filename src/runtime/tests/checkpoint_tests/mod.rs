@@ -4,27 +4,35 @@ pub mod kube;
 pub mod local;
 
 use anyhow::{anyhow, Result};
+use arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::record_batch::RecordBatch;
 use arrow_integration_test::schema_to_json;
 use datafusion::common::ScalarValue;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
-use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
+use crate::runtime::functions::source::datagen_source::{
+    DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator,
+};
 use crate::runtime::master::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord,
 };
+use crate::runtime::observability::{task_meta, PipelineSnapshot};
 use crate::runtime::tests::cluster_harness::{
     LifecycleOracle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster, WorkerKillMode,
 };
 use crate::runtime::tests::recovery_tests::RecoveryTimeouts;
+use crate::storage::InMemoryStorageSnapshot;
 
-pub fn checkpoint_recovery_launch_spec() -> PipelineLaunchSpec {
-    let parallelism = 2;
-    let schema = Schema::new(vec![
+const CHECKPOINT_PARALLELISM: i32 = 2;
+
+fn checkpoint_datagen_parts() -> (Arc<Schema>, DatagenSpec) {
+    let schema = Arc::new(Schema::new(vec![
         Field::new(
             "timestamp",
             DataType::Timestamp(TimeUnit::Millisecond, None),
@@ -32,7 +40,7 @@ pub fn checkpoint_recovery_launch_spec() -> PipelineLaunchSpec {
         ),
         Field::new("key", DataType::Utf8, false),
         Field::new("value", DataType::Float64, false),
-    ]);
+    ]));
     let mut fields = HashMap::new();
     fields.insert(
         "timestamp".to_string(),
@@ -44,7 +52,7 @@ pub fn checkpoint_recovery_launch_spec() -> PipelineLaunchSpec {
     fields.insert(
         "key".to_string(),
         FieldGenerator::Key {
-            num_unique: parallelism * 8,
+            num_unique: CHECKPOINT_PARALLELISM as usize * 8,
         },
     );
     fields.insert(
@@ -53,9 +61,23 @@ pub fn checkpoint_recovery_launch_spec() -> PipelineLaunchSpec {
             values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))],
         },
     );
+    (
+        schema,
+        DatagenSpec {
+            rate: Some(200.0),
+            limit: None,
+            run_for_s: None,
+            batch_size: 20,
+            fields,
+            replayable: true,
+        },
+    )
+}
 
+pub fn checkpoint_recovery_launch_spec() -> PipelineLaunchSpec {
+    let (schema, datagen) = checkpoint_datagen_parts();
     let pipeline = PipelineSpecBuilder::new()
-        .with_parallelism(parallelism)
+        .with_parallelism(CHECKPOINT_PARALLELISM as usize)
         .with_execution_profile(ExecutionProfile::MasterWorker {
             num_threads_per_task: 2,
         })
@@ -64,20 +86,166 @@ pub fn checkpoint_recovery_launch_spec() -> PipelineLaunchSpec {
         })
         .with_source(SourceSpec::new(
             "datagen_source",
-            SourceSpecKind::Datagen(DatagenSpec {
-                rate: Some(200.0),
-                limit: None,
-                run_for_s: None,
-                batch_size: 20,
-                fields,
-                replayable: true,
-            }),
-            schema_to_json(&schema),
+            SourceSpecKind::Datagen(datagen),
+            schema_to_json(schema.as_ref()),
         ))
         .sql("SELECT timestamp, key, value FROM datagen_source")
         .build();
 
-    PipelineLaunchSpec::new(pipeline, 1, 0).with_dedup_sink(true)
+    PipelineLaunchSpec::new(pipeline, 1, 0).with_upsert_key_columns(vec![
+        "key".to_string(),
+        "timestamp".to_string(),
+    ])
+}
+
+/// Logical sink row identity for upsert-key `(key, timestamp)` plus value for content checks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExpectedUpsertRow {
+    map_key: String,
+    value_bits: u64,
+}
+
+fn row_from_batch(batch: &RecordBatch, row_idx: usize) -> Result<ExpectedUpsertRow> {
+    let key = batch
+        .column_by_name("key")
+        .and_then(|c| c.as_any().downcast_ref::<StringArray>())
+        .ok_or_else(|| anyhow!("missing key column"))?
+        .value(row_idx)
+        .to_string();
+    let ts = batch
+        .column_by_name("timestamp")
+        .and_then(|c| c.as_any().downcast_ref::<TimestampMillisecondArray>())
+        .ok_or_else(|| anyhow!("missing timestamp column"))?
+        .value(row_idx);
+    let value_bits = batch
+        .column_by_name("value")
+        .and_then(|c| c.as_any().downcast_ref::<Float64Array>())
+        .ok_or_else(|| anyhow!("missing value column"))?
+        .value(row_idx)
+        .to_bits();
+    Ok(ExpectedUpsertRow {
+        map_key: format!("{key}|{ts}"),
+        value_bits,
+    })
+}
+
+fn materialize_datagen_for_task(
+    config: DatagenSourceConfig,
+    task_index: i32,
+    parallelism: i32,
+    num_records: usize,
+) -> Result<Vec<RecordBatch>> {
+    use rand::rngs::StdRng;
+    use rand::SeedableRng;
+
+    let mut source = DatagenSourceFunction::new(config);
+    source.task_index = Some(task_index);
+    source.parallelism = Some(parallelism);
+    source.rng = Some(StdRng::seed_from_u64(42 + task_index as u64));
+    source.init_keys();
+    let batch_size = source.config.spec.batch_size.max(1);
+    let mut out = Vec::new();
+    while source.records_generated < num_records {
+        let n = std::cmp::min(batch_size, num_records - source.records_generated);
+        out.push(source.generate_batch(n)?);
+    }
+    Ok(out)
+}
+
+fn expected_rows_offline(task_counts: &[(i32, u64)]) -> Result<HashSet<ExpectedUpsertRow>> {
+    let (schema, spec) = checkpoint_datagen_parts();
+    let config = DatagenSourceConfig::new(schema, spec);
+    let mut expected = HashSet::new();
+    for &(task_index, num_records) in task_counts {
+        let batches = materialize_datagen_for_task(
+            config.clone(),
+            task_index,
+            CHECKPOINT_PARALLELISM,
+            num_records as usize,
+        )?;
+        for batch in batches {
+            for row_idx in 0..batch.num_rows() {
+                expected.insert(row_from_batch(&batch, row_idx)?);
+            }
+        }
+    }
+    Ok(expected)
+}
+
+fn sink_rows(snapshot: &InMemoryStorageSnapshot) -> Result<HashSet<ExpectedUpsertRow>> {
+    let mut actual = HashSet::new();
+    for (map_key, message) in snapshot.keyed_messages() {
+        let batch = message.record_batch();
+        if batch.num_rows() != 1 {
+            return Err(anyhow!(
+                "expected 1-row upsert message for key {map_key}, got {}",
+                batch.num_rows()
+            ));
+        }
+        let row = row_from_batch(batch, 0)?;
+        if row.map_key != *map_key {
+            return Err(anyhow!(
+                "sink map key {map_key} != row-derived {}",
+                row.map_key
+            ));
+        }
+        actual.insert(row);
+    }
+    Ok(actual)
+}
+
+fn task_record_counts(snapshot: &PipelineSnapshot) -> Result<Vec<(i32, u64)>> {
+    let mut counts = Vec::new();
+    for worker in snapshot.worker_states.values() {
+        for (vertex_id, meta) in &worker.task_metadata {
+            let Some(records) = meta.get(task_meta::RECORDS_GENERATED) else {
+                continue;
+            };
+            let task_index = meta
+                .get(task_meta::TASK_INDEX)
+                .ok_or_else(|| anyhow!("missing task_index metadata for {vertex_id}"))?
+                .parse::<i32>()
+                .map_err(|e| anyhow!("bad task_index for {vertex_id}: {e}"))?;
+            let n = records
+                .parse::<u64>()
+                .map_err(|e| anyhow!("bad records_generated for {vertex_id}: {e}"))?;
+            counts.push((task_index, n));
+        }
+    }
+    counts.sort_by_key(|(task_index, _)| *task_index);
+    if counts.is_empty() {
+        return Err(anyhow!(
+            "no task metadata with {} in pipeline snapshot",
+            task_meta::RECORDS_GENERATED
+        ));
+    }
+    Ok(counts)
+}
+
+async fn assert_sink_matches_offline_datagen(
+    master: &crate::runtime::tests::cluster_harness::MasterHandle,
+    storage: &InMemoryStorageSnapshot,
+) -> Result<()> {
+    let snapshot = master
+        .latest_pipeline_snapshot()
+        .await?
+        .ok_or_else(|| anyhow!("missing pipeline snapshot after stop"))?;
+    let task_counts = task_record_counts(&snapshot)?;
+    let total: u64 = task_counts.iter().map(|(_, n)| n).sum();
+    let expected = expected_rows_offline(&task_counts)?;
+    let actual = sink_rows(storage)?;
+    if expected != actual {
+        return Err(anyhow!(
+            "sink/offline datagen set mismatch: expected={} actual={} total_generated={total} task_counts={task_counts:?}",
+            expected.len(),
+            actual.len()
+        ));
+    }
+    println!(
+        "[TEST] sink set equality ok rows={} task_counts={task_counts:?}",
+        actual.len()
+    );
+    Ok(())
 }
 
 async fn wait_until_attempt0_running(
@@ -168,9 +336,10 @@ pub async fn run_checkpoint_worker_kill_recovery(
     // Produce a bit more after restore, then stop and drain.
     tokio::time::sleep(Duration::from_millis(500)).await;
     cluster.master().stop_sources().await?;
-    // Allow in-flight batches to drain to the dedup sink before sampling stats.
+    // Drain sink + allow master state poll to refresh task metadata (before teardown).
     tokio::time::sleep(Duration::from_millis(750)).await;
-    let (_tasks, total_generated) = cluster.master().get_source_stats().await?;
+    let snapshot = cluster.storage().snapshot().await?;
+    assert_sink_matches_offline_datagen(&cluster.master(), &snapshot).await?;
 
     let finish_timeout = match env {
         RuntimeEnv::Local => Duration::from_secs(30),
@@ -180,17 +349,6 @@ pub async fn run_checkpoint_worker_kill_recovery(
         matches!(event, LifecycleEvent::PipelineFinished)
     })
     .await?;
-
-    let snapshot = cluster.storage().snapshot().await?;
-    let dedup_rows = snapshot.dedup_row_count();
-    if dedup_rows == 0 {
-        return Err(anyhow!("expected dedup sink rows after checkpoint recovery"));
-    }
-    if dedup_rows as u64 != total_generated {
-        return Err(anyhow!(
-            "dedup sink rows {dedup_rows} != source stats total {total_generated}"
-        ));
-    }
 
     let events = cluster.master().lifecycle_events_since(0).await?;
     let report = RecoveryReport::from_events(&events);

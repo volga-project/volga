@@ -110,7 +110,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         )
         .with_sink(SinkSpec::InMemoryStorageGrpc {
             server_addr: format!("http://{}", storage_server_addr),
-            dedup: false,
+            upsert_key_columns: vec![],
         })
         .sql(sql)
         .build();

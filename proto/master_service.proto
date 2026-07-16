@@ -15,8 +15,6 @@ service MasterService {
   rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
   // Request sources to stop generating (datagen). Used by harness after recovery.
   rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
-  // Aggregate source generation stats across workers.
-  rpc GetSourceStats(GetSourceStatsRequest) returns (GetSourceStatsResponse);
 }
 
 message RegisterWorkerRequest {
@@ -125,22 +123,6 @@ message StopSourcesRequest {
 message StopSourcesResponse {
   bool success = 1;
   string error_message = 2;
-}
-
-message GetSourceStatsRequest {
-}
-
-message SourceTaskStats {
-  string vertex_id = 1;
-  int32 task_index = 2;
-  uint64 records_generated = 3;
-}
-
-message GetSourceStatsResponse {
-  bool success = 1;
-  string error_message = 2;
-  repeated SourceTaskStats tasks = 3;
-  uint64 total_records_generated = 4;
 }
 
 

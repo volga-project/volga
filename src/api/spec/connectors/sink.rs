@@ -7,9 +7,9 @@ use crate::runtime::operators::sink::sink_operator::SinkConfig;
 pub enum SinkSpec {
     InMemoryStorageGrpc {
         server_addr: String,
-        /// When true, sink upserts rows into a dedup map keyed by `(key|event_ts)`.
+        /// When non-empty, explode rows and upsert into the keyed map by these columns.
         #[serde(default)]
-        dedup: bool,
+        upsert_key_columns: Vec<String>,
     },
     Request,
     Parquet(ParquetSinkSpec),
@@ -20,14 +20,13 @@ impl SinkSpec {
         match self {
             SinkSpec::InMemoryStorageGrpc {
                 server_addr,
-                dedup,
+                upsert_key_columns,
             } => SinkConfig::InMemoryStorageGrpcSinkConfig {
                 server_addr: server_addr.clone(),
-                dedup: *dedup,
+                upsert_key_columns: upsert_key_columns.clone(),
             },
             SinkSpec::Request => SinkConfig::RequestSinkConfig,
             SinkSpec::Parquet(spec) => SinkConfig::ParquetSinkConfig(spec.to_config()),
         }
     }
 }
-

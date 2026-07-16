@@ -8,12 +8,12 @@ use crate::runtime::master::server::master_service::{
     master_service_server::MasterService, CheckpointPropagationPhase as ProtoPropagationPhase,
     GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
     GetLatestPipelineSnapshotRequest, GetLatestPipelineSnapshotResponse,
-    GetLifecycleEventsRequest, GetLifecycleEventsResponse, GetSourceStatsRequest,
-    GetSourceStatsResponse, GetTaskCheckpointRequest, GetTaskCheckpointResponse,
-    LifecycleEventRecord, RegisterWorkerRequest, RegisterWorkerResponse,
-    ReportCheckpointPropagationRequest, ReportCheckpointPropagationResponse,
-    ReportCheckpointRequest, ReportCheckpointResponse, SourceTaskStats, StateBlob,
-    StopSourcesRequest, StopSourcesResponse, TriggerCheckpointRequest, TriggerCheckpointResponse,
+    GetLifecycleEventsRequest, GetLifecycleEventsResponse, GetTaskCheckpointRequest,
+    GetTaskCheckpointResponse, LifecycleEventRecord, RegisterWorkerRequest,
+    RegisterWorkerResponse, ReportCheckpointPropagationRequest,
+    ReportCheckpointPropagationResponse, ReportCheckpointRequest, ReportCheckpointResponse,
+    StateBlob, StopSourcesRequest, StopSourcesResponse, TriggerCheckpointRequest,
+    TriggerCheckpointResponse,
 };
 use crate::runtime::master::{CheckpointPropagationPhase, Master};
 use crate::runtime::observability::PipelineSnapshot;
@@ -253,30 +253,4 @@ impl MasterService for MasterServiceImpl {
         }
     }
 
-    async fn get_source_stats(
-        &self,
-        _request: Request<GetSourceStatsRequest>,
-    ) -> Result<Response<GetSourceStatsResponse>, Status> {
-        match self.master.get_source_stats().await {
-            Ok((tasks, total_records_generated)) => Ok(Response::new(GetSourceStatsResponse {
-                success: true,
-                error_message: String::new(),
-                tasks: tasks
-                    .into_iter()
-                    .map(|(vertex_id, task_index, records_generated)| SourceTaskStats {
-                        vertex_id,
-                        task_index,
-                        records_generated,
-                    })
-                    .collect(),
-                total_records_generated,
-            })),
-            Err(error_message) => Ok(Response::new(GetSourceStatsResponse {
-                success: false,
-                error_message,
-                tasks: Vec::new(),
-                total_records_generated: 0,
-            })),
-        }
-    }
 }

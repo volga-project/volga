@@ -84,7 +84,7 @@ fn test_worker_execution() -> Result<()> {
     );
     connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig {
         server_addr: format!("http://{}", storage_server_addr),
-        dedup: false,
+        upsert_key_columns: vec![],
     });
     let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 

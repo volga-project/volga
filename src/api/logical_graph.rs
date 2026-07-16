@@ -668,7 +668,7 @@ mod tests {
         let projection_index = logical_graph.add_node(projection_node);
 
         // Add sink node
-        let sink_config = crate::runtime::operators::sink::sink_operator::SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "http://127.0.0.1:8080".to_string(), dedup: false };
+        let sink_config = crate::runtime::operators::sink::sink_operator::SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "http://127.0.0.1:8080".to_string(), upsert_key_columns: vec![] };
         let sink_node = LogicalNode::new(
             OperatorConfig::SinkConfig(sink_config),
             1, // sink parallelism
@@ -794,7 +794,7 @@ mod tests {
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
             OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "http://127.0.0.1:8080".to_string(), dedup: false }),
+            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "http://127.0.0.1:8080".to_string(), upsert_key_columns: vec![] }),
         ];
 
         let logical_graph = LogicalGraph::from_linear_operators(operators, 2, true);
@@ -854,7 +854,7 @@ mod tests {
             OperatorConfig::SourceConfig(SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![]))),
             OperatorConfig::KeyByConfig(KeyByFunction::new_arrow_key_by(vec!["value".to_string()])),
             OperatorConfig::MapConfig(MapFunction::new_custom(IdentityMapFunction)),
-            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "http://127.0.0.1:8080".to_string(), dedup: false }),
+            OperatorConfig::SinkConfig(SinkConfig::InMemoryStorageGrpcSinkConfig { server_addr: "http://127.0.0.1:8080".to_string(), upsert_key_columns: vec![] }),
         ];
 
         let logical_graph = LogicalGraph::from_linear_operators(operators, 2, false);

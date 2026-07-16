@@ -9,7 +9,8 @@ use async_trait::async_trait;
 pub enum SinkConfig {
     InMemoryStorageGrpcSinkConfig {
         server_addr: String,
-        dedup: bool,
+        /// When non-empty, explode rows and upsert into the keyed map by these columns.
+        upsert_key_columns: Vec<String>,
     },
     RequestSinkConfig,
     ParquetSinkConfig(ParquetSinkConfig),

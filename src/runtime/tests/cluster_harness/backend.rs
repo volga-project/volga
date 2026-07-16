@@ -3,6 +3,7 @@ use async_trait::async_trait;
 
 use super::{FaultAction, PipelineLaunchSpec};
 use crate::runtime::master::LifecycleEventRecord;
+use crate::runtime::observability::PipelineSnapshot;
 use crate::storage::InMemoryStorageSnapshot;
 
 #[async_trait]
@@ -15,7 +16,7 @@ pub trait ClusterBackend: Send {
     async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>>;
     async fn trigger_checkpoint(&mut self) -> Result<u64>;
     async fn stop_sources(&mut self) -> Result<()>;
-    async fn get_source_stats(&mut self) -> Result<(Vec<(String, i32, u64)>, u64)>;
+    async fn latest_pipeline_snapshot(&mut self) -> Result<Option<PipelineSnapshot>>;
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         bail!("fault action {:?} is not supported by this environment", fault)

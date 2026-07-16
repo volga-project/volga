@@ -108,22 +108,22 @@ struct DatagenSourcePosition {
 /// Datagen source function with deterministic rate coordination
 #[derive(Debug)]
 pub struct DatagenSourceFunction {
-    config: DatagenSourceConfig,
+    pub(crate) config: DatagenSourceConfig,
     
     // Runtime state
-    task_index: Option<i32>,
-    parallelism: Option<i32>,
+    pub(crate) task_index: Option<i32>,
+    pub(crate) parallelism: Option<i32>,
     vertex_id: Option<String>,
     
     // Rate coordination state
     next_gen_time: Option<SystemTime>,
     gen_interval: Option<Duration>,
-    records_generated: usize,
+    pub(crate) records_generated: usize,
     task_records_limit: Option<usize>,
     start_time: Option<SystemTime>, // When datagen started (for run_for_s)
     
     // Generation state
-    rng: Option<StdRng>,
+    pub(crate) rng: Option<StdRng>,
     schema: Arc<Schema>,
     
     // Key-based state tracking
@@ -206,7 +206,7 @@ impl DatagenSourceFunction {
         Some((interval, start_time))
     }
 
-    fn init_keys(&mut self) {
+    pub(crate) fn init_keys(&mut self) {
         let task_index = self.task_index.expect("Task index not set");
         let parallelism = self.parallelism.expect("Parallelism not set");
         
@@ -265,8 +265,7 @@ impl DatagenSourceFunction {
         key_values
     }
 
-    /// Generate a single record batch
-    fn generate_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
+    pub(crate) fn generate_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
         let schema = self.schema.clone();
         let mut columns: Vec<ArrayRef> = Vec::new();
         

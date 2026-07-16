@@ -5,6 +5,7 @@ use anyhow::Result;
 use super::cluster::ClusterInner;
 use super::{FaultAction, WorkerKillMode};
 use crate::runtime::master::LifecycleEventRecord;
+use crate::runtime::observability::PipelineSnapshot;
 use crate::storage::InMemoryStorageSnapshot;
 
 #[derive(Clone)]
@@ -55,8 +56,13 @@ impl MasterHandle {
         self.inner.backend.lock().await.stop_sources().await
     }
 
-    pub async fn get_source_stats(&self) -> Result<(Vec<(String, i32, u64)>, u64)> {
-        self.inner.backend.lock().await.get_source_stats().await
+    pub async fn latest_pipeline_snapshot(&self) -> Result<Option<PipelineSnapshot>> {
+        self.inner
+            .backend
+            .lock()
+            .await
+            .latest_pipeline_snapshot()
+            .await
     }
 }
 

@@ -34,7 +34,6 @@ use worker_service::{
     ResetWorkerRequest, ResetWorkerResponse, ShutdownWorkerRequest, ShutdownWorkerResponse,
     TriggerCheckpointBarrierRequest, TriggerCheckpointBarrierResponse,
     StopSourcesRequest, StopSourcesResponse,
-    GetSourceStatsRequest, GetSourceStatsResponse, SourceTaskStats,
     MasterHeartbeatMessage, WorkerHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
 };
@@ -280,29 +279,6 @@ impl WorkerService for WorkerServiceImpl {
         Ok(Response::new(StopSourcesResponse {
             success: true,
             error_message: String::new(),
-        }))
-    }
-
-    async fn get_source_stats(
-        &self,
-        request: Request<GetSourceStatsRequest>,
-    ) -> Result<Response<GetSourceStatsResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let worker_guard = self.worker.lock().await;
-        let tasks = worker_guard
-            .source_stats()
-            .into_iter()
-            .map(|(vertex_id, task_index, records_generated)| SourceTaskStats {
-                vertex_id: vertex_id.as_ref().to_string(),
-                task_index,
-                records_generated,
-            })
-            .collect();
-        Ok(Response::new(GetSourceStatsResponse {
-            success: true,
-            error_message: String::new(),
-            tasks,
         }))
     }
 

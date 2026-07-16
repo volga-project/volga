@@ -14,20 +14,16 @@ use in_memory_storage_service::{
     AppendManyRequest, AppendManyResponse,
     InsertRequest, InsertResponse,
     InsertKeyedManyRequest, InsertKeyedManyResponse,
-    UpsertDedupRowsRequest, UpsertDedupRowsResponse,
     GetVectorRequest, GetVectorResponse,
     GetMapRequest, GetMapResponse,
-    GetDedupMapRequest, GetDedupMapResponse,
     DrainVectorRequest, DrainVectorResponse,
     DrainMapRequest, DrainMapResponse,
-    DrainDedupMapRequest, DrainDedupMapResponse,
 };
 
 /// Server implementation of the InMemoryStorageService
 pub struct InMemoryStorageServiceImpl {
     vector_storage: Arc<Mutex<Vec<Message>>>,
     map_storage: Arc<Mutex<HashMap<String, Message>>>,
-    dedup_storage: Arc<Mutex<HashMap<String, Message>>>,
 }
 
 impl InMemoryStorageServiceImpl {
@@ -35,7 +31,6 @@ impl InMemoryStorageServiceImpl {
         Self {
             vector_storage: Arc::new(Mutex::new(Vec::new())),
             map_storage: Arc::new(Mutex::new(HashMap::new())),
-            dedup_storage: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -123,23 +118,6 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
         }))
     }
 
-    async fn upsert_dedup_rows(
-        &self,
-        request: Request<UpsertDedupRowsRequest>,
-    ) -> Result<Response<UpsertDedupRowsResponse>, Status> {
-        let req = request.into_inner();
-        let mut rows = HashMap::new();
-        for (key, message_bytes) in req.rows {
-            rows.insert(key, Message::from_bytes(&message_bytes));
-        }
-        let mut storage_guard = self.dedup_storage.lock().await;
-        storage_guard.extend(rows);
-        Ok(Response::new(UpsertDedupRowsResponse {
-            success: true,
-            error_message: String::new(),
-        }))
-    }
-
     async fn get_vector(
         &self,
         _request: Request<GetVectorRequest>,
@@ -215,39 +193,6 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
             keyed_messages,
         }))
     }
-
-    async fn get_dedup_map(
-        &self,
-        _request: Request<GetDedupMapRequest>,
-    ) -> Result<Response<GetDedupMapResponse>, Status> {
-        let storage_guard = self.dedup_storage.lock().await;
-        let mut rows = HashMap::new();
-        for (key, message) in storage_guard.iter() {
-            rows.insert(key.clone(), message.to_bytes());
-        }
-        Ok(Response::new(GetDedupMapResponse {
-            success: true,
-            error_message: String::new(),
-            rows,
-        }))
-    }
-
-    async fn drain_dedup_map(
-        &self,
-        _request: Request<DrainDedupMapRequest>,
-    ) -> Result<Response<DrainDedupMapResponse>, Status> {
-        let mut storage_guard = self.dedup_storage.lock().await;
-        let drained: HashMap<String, Message> = std::mem::take(&mut *storage_guard);
-        let mut rows = HashMap::with_capacity(drained.len());
-        for (key, message) in drained {
-            rows.insert(key, message.to_bytes());
-        }
-        Ok(Response::new(DrainDedupMapResponse {
-            success: true,
-            error_message: String::new(),
-            rows,
-        }))
-    }
 }
 
 /// Server that hosts the InMemoryStorageService
@@ -321,8 +266,6 @@ impl Clone for InMemoryStorageServiceImpl {
         Self {
             vector_storage: self.vector_storage.clone(),
             map_storage: self.map_storage.clone(),
-            dedup_storage: self.dedup_storage.clone(),
         }
     }
 }
- 

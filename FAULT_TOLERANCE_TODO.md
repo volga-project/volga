@@ -9,7 +9,7 @@
 - [x] Prevent overlapping checkpoints (single-in-flight; timeout aborts and recovers).
 - [x] Lifecycle events: `CheckpointStarted` / `CheckpointCompleted` / `CheckpointFailed`.
 - [x] Push barrier-propagation reports (`BarrierInjected` / `Aligned`) — diagnosis only, not completion.
-- [x] Harness e2e: indefinite replayable datagen + dedup sink + stop/stats (local + kube).
+- [x] Harness e2e: timed datagen + keyed upsert sink; oracle via task metadata `records_generated` + offline datagen set equality.
 
 ## Remaining
 

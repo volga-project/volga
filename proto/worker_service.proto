@@ -29,9 +29,6 @@ service WorkerService {
   // Stop generating at sources (datagen stop flag).
   rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
 
-  // Per-task source generation stats for this worker.
-  rpc GetSourceStats(GetSourceStatsRequest) returns (GetSourceStatsResponse);
-
   // Bidirectional health/heartbeat stream between master and worker.
   rpc StreamHeartbeat(stream MasterHeartbeatMessage) returns (stream WorkerHeartbeatMessage);
 }
@@ -125,22 +122,6 @@ message StopSourcesRequest {
 message StopSourcesResponse {
   bool success = 1;
   string error_message = 2;
-}
-
-message GetSourceStatsRequest {
-  uint64 execution_attempt_id = 1;
-}
-
-message SourceTaskStats {
-  string vertex_id = 1;
-  int32 task_index = 2;
-  uint64 records_generated = 3;
-}
-
-message GetSourceStatsResponse {
-  bool success = 1;
-  string error_message = 2;
-  repeated SourceTaskStats tasks = 3;
 }
 
 enum WorkerFatalReason {

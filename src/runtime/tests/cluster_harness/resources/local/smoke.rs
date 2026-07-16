@@ -112,16 +112,18 @@ impl ClusterBackend for LocalCluster {
             .map_err(|error| anyhow!(error))
     }
 
-    async fn get_source_stats(&mut self) -> Result<(Vec<(String, i32, u64)>, u64)> {
-        self.resources
+    async fn latest_pipeline_snapshot(
+        &mut self,
+    ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
+        Ok(self
+            .resources
             .as_ref()
             .context("local cluster is not launched")?
             .master
             .server
             .master()
-            .get_source_stats()
-            .await
-            .map_err(|error| anyhow!(error))
+            .get_latest_pipeline_snapshot()
+            .await)
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
@@ -146,7 +148,7 @@ impl LocalClusterResources {
         let mut spec = launch.pipeline;
         spec.sink = Some(SinkSpec::InMemoryStorageGrpc {
             server_addr: storage.endpoint(),
-            dedup: launch.dedup_sink,
+            upsert_key_columns: launch.upsert_key_columns.clone(),
         });
         let logical_graph = compile_logical_graph(&spec, None);
         let local_orchestrator = LocalTestOrchestrator::new(

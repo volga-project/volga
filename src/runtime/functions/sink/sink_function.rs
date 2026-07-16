@@ -74,10 +74,10 @@ pub fn create_sink_function(config: SinkConfig) -> SinkFunction {
     match config {
         SinkConfig::InMemoryStorageGrpcSinkConfig {
             server_addr,
-            dedup,
+            upsert_key_columns,
         } => SinkFunction::InMemoryStorageGrpc(InMemoryStorageSinkFunction::new(
             server_addr,
-            dedup,
+            upsert_key_columns,
         )),
         SinkConfig::RequestSinkConfig => {
             SinkFunction::Request(RequestSinkFunction::new())

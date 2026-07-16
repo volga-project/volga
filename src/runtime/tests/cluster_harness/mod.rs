@@ -67,8 +67,8 @@ pub struct PipelineLaunchSpec {
     /// Kube only: sets `volga.io/runtime-consts-profile`. Default [`RuntimeConstsProfile::KubeTest`].
     /// In-process local masters already pick `local_test` via `cfg!(test)`.
     pub runtime_consts_profile: RuntimeConstsProfile,
-    /// Use in-memory sink dedup map keyed by `(key|event_ts)`.
-    pub dedup_sink: bool,
+    /// When non-empty, in-memory sink upserts rows into the keyed map by these columns.
+    pub upsert_key_columns: Vec<String>,
 }
 
 impl PipelineLaunchSpec {
@@ -79,7 +79,7 @@ impl PipelineLaunchSpec {
             expected_output_rows,
             kube_worker_health_poll: true,
             runtime_consts_profile: RuntimeConstsProfile::KubeTest,
-            dedup_sink: false,
+            upsert_key_columns: Vec::new(),
         }
     }
 
@@ -93,8 +93,8 @@ impl PipelineLaunchSpec {
         self
     }
 
-    pub fn with_dedup_sink(mut self, enabled: bool) -> Self {
-        self.dedup_sink = enabled;
+    pub fn with_upsert_key_columns(mut self, columns: Vec<String>) -> Self {
+        self.upsert_key_columns = columns;
         self
     }
 }

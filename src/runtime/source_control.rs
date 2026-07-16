@@ -82,19 +82,20 @@ impl SourceControlRegistry {
             .map(|control| control.prefer_control.clone())
     }
 
-    pub fn snapshot_stats(&self) -> Vec<(VertexId, i32, u64)> {
+    pub fn task_metadata(&self, vertex_id: &VertexId) -> HashMap<String, String> {
         let guard = self.inner.lock().unwrap();
-        let mut out: Vec<_> = guard
-            .iter()
-            .map(|(vertex_id, control)| {
-                (
-                    vertex_id.clone(),
-                    control.task_index,
-                    control.records_generated(),
-                )
-            })
-            .collect();
-        out.sort_by(|a, b| a.0.cmp(&b.0));
-        out
+        let Some(control) = guard.get(vertex_id) else {
+            return HashMap::new();
+        };
+        let mut meta = HashMap::new();
+        meta.insert(
+            crate::runtime::observability::task_meta::RECORDS_GENERATED.to_string(),
+            control.records_generated().to_string(),
+        );
+        meta.insert(
+            crate::runtime::observability::task_meta::TASK_INDEX.to_string(),
+            control.task_index.to_string(),
+        );
+        meta
     }
 }

@@ -31,11 +31,19 @@ impl From<u8> for StreamTaskStatus {
     }
 }
 
+/// Convention keys for [`TaskSnapshot::metadata`] / [`WorkerSnapshot::task_metadata`].
+pub mod task_meta {
+    pub const RECORDS_GENERATED: &str = "records_generated";
+    pub const TASK_INDEX: &str = "task_index";
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskSnapshot {
     pub vertex_id: VertexId,
     pub status: StreamTaskStatus,
     pub metrics: TaskMetrics,
+    /// Opaque string KV for harness/debug (e.g. datagen `records_generated`).
+    pub metadata: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +59,7 @@ pub struct WorkerSnapshot {
     pub task_statuses: HashMap<VertexId, StreamTaskStatus>,
     pub worker_metrics: Option<WorkerAggregateMetrics>,
     pub task_operator_metrics: HashMap<VertexId, TaskOperatorMetrics>,
+    pub task_metadata: HashMap<VertexId, HashMap<String, String>>,
 }
 
 impl WorkerSnapshot {
@@ -61,6 +70,7 @@ impl WorkerSnapshot {
             task_statuses: HashMap::new(),
             worker_metrics: None,
             task_operator_metrics: HashMap::new(),
+            task_metadata: HashMap::new(),
         }
     }
 

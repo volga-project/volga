@@ -357,27 +357,6 @@ impl WorkerClient {
         response_result("stop_sources", response.success, response.error_message)
     }
 
-    pub async fn get_source_stats(
-        &self,
-    ) -> Result<Vec<crate::runtime::master::worker_service::SourceTaskStats>, WorkerCallError> {
-        let execution_attempt_id = self.execution_attempt_id;
-        let response = self
-            .rpc("get_source_stats", |mut client| async move {
-                client
-                    .get_source_stats(tonic::Request::new(
-                        crate::runtime::master::worker_service::GetSourceStatsRequest {
-                            execution_attempt_id,
-                        },
-                    ))
-                    .await
-            })
-            .await?
-            .into_inner();
-        if !response.success {
-            return Err(WorkerCallError::Rejected(response.error_message));
-        }
-        Ok(response.tasks)
-    }
 }
 
 fn response_result(
