@@ -47,16 +47,7 @@ impl ExecutionAttempt {
         let mut poll = interval_at(Instant::now() + poll_interval, poll_interval);
         let checkpoint_interval = runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL);
         let checkpoint_timeout = runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT);
-        let mut checkpoint_tick = if checkpoint_interval.is_zero() {
-            None
-        } else {
-            Some(interval_at(
-                Instant::now() + checkpoint_interval,
-                checkpoint_interval,
-            ))
-        };
-        let mut timeout_poll = tokio::time::interval(Duration::from_millis(50));
-        timeout_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut checkpoint_tick = optional_interval(checkpoint_interval);
 
         loop {
             tokio::select! {
@@ -65,40 +56,11 @@ impl ExecutionAttempt {
                 failure = self.failure_rx.recv() => {
                     let failure =
                         failure.ok_or_else(|| anyhow::anyhow!("failure channel closed"))?;
-                    let _ = self
-                        .state
-                        .abort_in_flight_checkpoint(self.id, "attempt failed".to_string())
-                        .await;
+                    self.abort_in_flight("attempt failed").await;
                     return Ok(self.await_failure_window_and_recover(failure).await);
                 }
-                _ = timeout_poll.tick() => {
-                    if let Some(checkpoint_id) = self
-                        .state
-                        .in_flight_checkpoint_timed_out(checkpoint_timeout)
-                        .await
-                    {
-                        let _ = self
-                            .state
-                            .abort_in_flight_checkpoint(
-                                self.id,
-                                format!("checkpoint {checkpoint_id} timed out"),
-                            )
-                            .await;
-                        println!(
-                            "[MASTER] Checkpoint timeout attempt={} checkpoint_id={}",
-                            self.id, checkpoint_id
-                        );
-                        return Ok(AttemptOutcome::Recover(HashSet::new()));
-                    }
-                }
-                _ = async {
-                    if let Some(tick) = checkpoint_tick.as_mut() {
-                        tick.tick().await;
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => {
-                    if let Err(error) = self.begin_and_fanout_checkpoint().await {
+                _ = optional_tick(&mut checkpoint_tick) => {
+                    if let Err(error) = self.begin_checkpoint().await {
                         println!(
                             "[MASTER] Interval checkpoint skipped attempt={}: {}",
                             self.id, error
@@ -118,23 +80,28 @@ impl ExecutionAttempt {
                             })
                             .await;
                         }
-                        let _ = self
-                            .state
-                            .abort_in_flight_checkpoint(self.id, "state poll failure".to_string())
-                            .await;
+                        self.abort_in_flight("state poll failure").await;
                         return Ok(execution_poll_outcome(&state_poll.failures));
+                    }
+                    if let Some(checkpoint_id) = self
+                        .state
+                        .in_flight_checkpoint_timed_out(checkpoint_timeout)
+                        .await
+                    {
+                        self.abort_in_flight(format!("checkpoint {checkpoint_id} timed out"))
+                            .await;
+                        println!(
+                            "[MASTER] Checkpoint timeout attempt={} checkpoint_id={}",
+                            self.id, checkpoint_id
+                        );
+                        return Ok(AttemptOutcome::Recover(HashSet::new()));
                     }
                     if all_have_status(
                         &state_poll.states,
                         &self.clients,
                         StreamTaskStatus::Finished,
                     ) {
-                        let _ = self
-                            .state
-                            .abort_in_flight_checkpoint(
-                                self.id,
-                                "pipeline finished with in-flight checkpoint".to_string(),
-                            )
+                        self.abort_in_flight("pipeline finished with in-flight checkpoint")
                             .await;
                         return Ok(AttemptOutcome::Finished);
                     }
@@ -143,10 +110,15 @@ impl ExecutionAttempt {
         }
     }
 
-    async fn begin_and_fanout_checkpoint(&self) -> Result<u64, String> {
-        if !self.state.has_checkpointable_tasks().await {
-            return Err("no checkpointable tasks".to_string());
-        }
+    async fn abort_in_flight(&self, reason: impl Into<String>) {
+        let _ = self
+            .state
+            .abort_in_flight_checkpoint(self.id, reason.into())
+            .await;
+    }
+
+    /// Start a checkpoint on master and trigger barriers on all workers.
+    async fn begin_checkpoint(&self) -> Result<u64, String> {
         let checkpoint_id = self
             .state
             .begin_checkpoint(self.id)
@@ -173,29 +145,13 @@ impl ExecutionAttempt {
             }
         });
         for (worker_id, result) in futures::future::join_all(futures).await {
-            match result {
-                Ok(true) => {}
-                Ok(false) => {
-                    let _ = self
-                        .state
-                        .abort_in_flight_checkpoint(
-                            self.id,
-                            format!("trigger rejected by {worker_id}"),
-                        )
-                        .await;
-                    return Err(format!("trigger rejected by {worker_id}"));
-                }
-                Err(error) => {
-                    let _ = self
-                        .state
-                        .abort_in_flight_checkpoint(
-                            self.id,
-                            format!("trigger failed on {worker_id}: {error}"),
-                        )
-                        .await;
-                    return Err(format!("trigger failed on {worker_id}: {error}"));
-                }
-            }
+            let err = match result {
+                Ok(true) => continue,
+                Ok(false) => format!("trigger rejected by {worker_id}"),
+                Err(error) => format!("trigger failed on {worker_id}: {error}"),
+            };
+            self.abort_in_flight(err.clone()).await;
+            return Err(err);
         }
         Ok(checkpoint_id)
     }
@@ -307,6 +263,23 @@ fn execution_poll_outcome(failures: &[(String, WorkerCallError)]) -> AttemptOutc
         .map(|(worker_id, _)| worker_id.clone())
         .collect();
     AttemptOutcome::Recover(replace)
+}
+
+fn optional_interval(period: Duration) -> Option<tokio::time::Interval> {
+    if period.is_zero() {
+        None
+    } else {
+        Some(interval_at(Instant::now() + period, period))
+    }
+}
+
+async fn optional_tick(tick: &mut Option<tokio::time::Interval>) {
+    match tick.as_mut() {
+        Some(interval) => {
+            interval.tick().await;
+        }
+        None => std::future::pending::<()>().await,
+    }
 }
 
 async fn poll_client_states(

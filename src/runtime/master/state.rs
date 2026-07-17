@@ -15,8 +15,7 @@ use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 use super::checkpoint::{
-    CheckpointAckOutcome, CheckpointAckReject, CheckpointStartError, MasterCheckpointRegistry,
-    TaskKey,
+    CheckpointAckOutcome, CheckpointStartError, Checkpoints, TaskKey,
 };
 use super::events::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord, LifecycleJournal,
@@ -126,7 +125,7 @@ impl fmt::Display for WorkerReadinessError {
 
 pub(super) struct MasterState {
     config: Mutex<Option<MasterConfig>>,
-    checkpoint_registry: Mutex<MasterCheckpointRegistry>,
+    checkpoints: Mutex<Checkpoints>,
     pub orchestrator: Arc<dyn MasterOrchestrator>,
     workers: Mutex<WorkerRegistry>,
     latest_pipeline_snapshot: Mutex<Option<PipelineSnapshot>>,
@@ -140,7 +139,7 @@ impl MasterState {
         let (lifecycle_event_tx, _) = broadcast::channel(256);
         Self {
             config: Mutex::new(None),
-            checkpoint_registry: Mutex::new(MasterCheckpointRegistry::default()),
+            checkpoints: Mutex::new(Checkpoints::default()),
             orchestrator,
             workers: Mutex::new(WorkerRegistry::default()),
             latest_pipeline_snapshot: Mutex::new(None),
@@ -164,8 +163,10 @@ impl MasterState {
 
     pub(super) async fn configure(&self, config: MasterConfig) {
         let expected_tasks = Self::checkpointable_tasks_for_graph(&config.execution_graph);
-        self.checkpoint_registry.lock().await.expected_tasks =
-            expected_tasks.into_iter().collect();
+        self.checkpoints
+            .lock()
+            .await
+            .configure(expected_tasks.into_iter().collect());
         *self.config.lock().await = Some(config);
     }
 
@@ -205,10 +206,7 @@ impl MasterState {
         &self,
         attempt_id: u64,
     ) -> Result<u64, CheckpointStartError> {
-        let mut registry = self.checkpoint_registry.lock().await;
-        let expected_tasks = registry.expected_tasks.clone();
-        let checkpoint_id = registry.coordinator.start(&expected_tasks)?;
-        drop(registry);
+        let checkpoint_id = self.checkpoints.lock().await.start()?;
         self.record_lifecycle_event(LifecycleEvent::CheckpointStarted {
             checkpoint_id,
             attempt_id,
@@ -222,12 +220,7 @@ impl MasterState {
         attempt_id: u64,
         detail: String,
     ) -> Option<u64> {
-        let checkpoint_id = self
-            .checkpoint_registry
-            .lock()
-            .await
-            .coordinator
-            .abort_in_flight();
+        let checkpoint_id = self.checkpoints.lock().await.abort_in_flight();
         if let Some(checkpoint_id) = checkpoint_id {
             self.record_lifecycle_event(LifecycleEvent::CheckpointFailed {
                 checkpoint_id,
@@ -240,15 +233,10 @@ impl MasterState {
     }
 
     pub(super) async fn in_flight_checkpoint_timed_out(&self, timeout: Duration) -> Option<u64> {
-        let registry = self.checkpoint_registry.lock().await;
-        let Some(started_at) = registry.coordinator.in_flight_started_at() else {
-            return None;
-        };
-        if started_at.elapsed() >= timeout {
-            registry.coordinator.in_flight_id()
-        } else {
-            None
-        }
+        self.checkpoints
+            .lock()
+            .await
+            .in_flight_timed_out(timeout)
     }
 
     /// Journal barrier progress. Never advances checkpoint completion.
@@ -264,11 +252,8 @@ impl MasterState {
         if execution_attempt_id != current {
             return Ok(());
         }
-        {
-            let registry = self.checkpoint_registry.lock().await;
-            if registry.coordinator.in_flight_id() != Some(checkpoint_id) {
-                return Ok(());
-            }
+        if self.checkpoints.lock().await.in_flight_id() != Some(checkpoint_id) {
+            return Ok(());
         }
         self.record_lifecycle_event(LifecycleEvent::CheckpointPropagation {
             checkpoint_id,
@@ -307,17 +292,11 @@ impl MasterState {
             ));
         }
 
-        let mut registry = self.checkpoint_registry.lock().await;
-        if !registry.expected_tasks.contains(&task) {
-            return Err(format!(
-                "unexpected checkpoint task {}:{}",
-                task.vertex_id, task.task_index
-            ));
-        }
-        registry.store.put(checkpoint_id, task.clone(), blobs);
-        let expected = registry.expected_tasks.clone();
-        let outcome = registry.coordinator.ack(checkpoint_id, task, &expected);
-        drop(registry);
+        let outcome = self
+            .checkpoints
+            .lock()
+            .await
+            .report(checkpoint_id, task, blobs);
 
         match outcome {
             CheckpointAckOutcome::Completed => {
@@ -326,17 +305,8 @@ impl MasterState {
                 Ok(())
             }
             CheckpointAckOutcome::Pending => Ok(()),
-            CheckpointAckOutcome::Rejected(CheckpointAckReject::DuplicateTask) => Err(format!(
-                "duplicate checkpoint ack for checkpoint_id={checkpoint_id}"
-            )),
-            CheckpointAckOutcome::Rejected(CheckpointAckReject::UnexpectedTask) => Err(format!(
-                "unexpected checkpoint ack for checkpoint_id={checkpoint_id}"
-            )),
-            CheckpointAckOutcome::Rejected(CheckpointAckReject::NotInFlight) => Err(format!(
-                "checkpoint ack for non-in-flight checkpoint_id={checkpoint_id}"
-            )),
-            CheckpointAckOutcome::Rejected(CheckpointAckReject::AlreadyComplete) => Err(format!(
-                "checkpoint ack for already-complete checkpoint_id={checkpoint_id}"
+            CheckpointAckOutcome::Rejected(reason) => Err(format!(
+                "checkpoint ack rejected for checkpoint_id={checkpoint_id}: {reason:?}"
             )),
         }
     }
@@ -346,31 +316,11 @@ impl MasterState {
         checkpoint_id: u64,
         task: TaskKey,
     ) -> Vec<(String, Vec<u8>)> {
-        self.checkpoint_registry
-            .lock()
-            .await
-            .store
-            .checkpoint_snapshots
-            .get(&(checkpoint_id, task))
-            .cloned()
-            .unwrap_or_default()
+        self.checkpoints.lock().await.get(checkpoint_id, &task)
     }
 
     pub(super) async fn latest_complete_checkpoint(&self) -> Option<u64> {
-        self.checkpoint_registry
-            .lock()
-            .await
-            .coordinator
-            .latest_complete()
-    }
-
-    pub(super) async fn has_checkpointable_tasks(&self) -> bool {
-        !self
-            .checkpoint_registry
-            .lock()
-            .await
-            .expected_tasks
-            .is_empty()
+        self.checkpoints.lock().await.latest_complete()
     }
 
     pub(super) async fn publish_snapshot(&self, snapshot: PipelineSnapshot) {
