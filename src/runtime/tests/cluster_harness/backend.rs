@@ -14,8 +14,6 @@ pub trait ClusterBackend: Send {
     async fn shutdown(&mut self) -> Result<()>;
     async fn storage_snapshot(&mut self) -> Result<InMemoryStorageSnapshot>;
     async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>>;
-    async fn trigger_checkpoint(&mut self) -> Result<u64>;
-    async fn stop_sources(&mut self) -> Result<()>;
     async fn latest_pipeline_snapshot(&mut self) -> Result<Option<PipelineSnapshot>>;
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {

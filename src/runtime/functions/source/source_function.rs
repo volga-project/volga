@@ -6,6 +6,7 @@ use crate::runtime::functions::source::HttpRequestSourceFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
+use crate::runtime::operators::source::{SourceInterrupt, SourceStats};
 use std::any::Any;
 use super::vector_source::VectorSourceFunction;
 use super::word_count_source::WordCountSourceFunction;
@@ -13,9 +14,47 @@ use super::datagen_source::DatagenSourceFunction;
 use super::kafka::KafkaSourceFunction;
 use super::parquet::ParquetSourceFunction;
 
+/// Outcome of a source `fetch` poll.
+#[derive(Debug)]
+pub enum FetchResult {
+    Data(Message),
+    /// No record available (idle / EOF for this poll).
+    Idle,
+    /// Checkpoint (or other control) requested a yield; do not emit data.
+    Interrupted,
+}
+
+impl FetchResult {
+    pub fn from_option(message: Option<Message>) -> Self {
+        match message {
+            Some(message) => Self::Data(message),
+            None => Self::Idle,
+        }
+    }
+
+    pub fn into_message(self) -> Option<Message> {
+        match self {
+            Self::Data(message) => Some(message),
+            Self::Idle | Self::Interrupted => None,
+        }
+    }
+
+    pub fn expect_data(self, context: &str) -> Message {
+        match self {
+            Self::Data(message) => message,
+            Self::Idle => panic!("{context}: FetchResult::Idle"),
+            Self::Interrupted => panic!("{context}: FetchResult::Interrupted"),
+        }
+    }
+}
+
 #[async_trait]
 pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
-    async fn fetch(&mut self) -> Option<Message>;
+    async fn fetch(
+        &mut self,
+        interrupt: Option<&SourceInterrupt>,
+        stats: Option<&SourceStats>,
+    ) -> FetchResult;
 
     async fn snapshot_position(&self) -> Result<Vec<u8>> {
         Ok(vec![])
@@ -51,14 +90,18 @@ impl fmt::Display for SourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for SourceFunction {
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(
+        &mut self,
+        interrupt: Option<&SourceInterrupt>,
+        stats: Option<&SourceStats>,
+    ) -> FetchResult {
         match self {
-            SourceFunction::Vector(f) => f.fetch().await,
-            SourceFunction::WordCount(f) => f.fetch().await,
-            SourceFunction::Datagen(f) => f.fetch().await,
-            SourceFunction::HttpRequest(f) => f.fetch().await,
-            SourceFunction::Kafka(f) => f.fetch().await,
-            SourceFunction::Parquet(f) => f.fetch().await,
+            SourceFunction::Vector(f) => f.fetch(interrupt, stats).await,
+            SourceFunction::WordCount(f) => f.fetch(interrupt, stats).await,
+            SourceFunction::Datagen(f) => f.fetch(interrupt, stats).await,
+            SourceFunction::HttpRequest(f) => f.fetch(interrupt, stats).await,
+            SourceFunction::Kafka(f) => f.fetch(interrupt, stats).await,
+            SourceFunction::Parquet(f) => f.fetch(interrupt, stats).await,
         }
     }
 

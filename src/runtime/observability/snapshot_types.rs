@@ -42,7 +42,7 @@ pub struct TaskSnapshot {
     pub vertex_id: VertexId,
     pub status: StreamTaskStatus,
     pub metrics: TaskMetrics,
-    /// Opaque string KV for harness/debug (e.g. datagen `records_generated`).
+    /// Opaque string KV for harness/debug (e.g. source `records_generated`).
     pub metadata: HashMap<String, String>,
 }
 

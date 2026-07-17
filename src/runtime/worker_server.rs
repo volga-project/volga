@@ -33,7 +33,6 @@ use worker_service::{
     CloseWorkerTasksRequest, CloseWorkerTasksResponse,
     ResetWorkerRequest, ResetWorkerResponse, ShutdownWorkerRequest, ShutdownWorkerResponse,
     TriggerCheckpointBarrierRequest, TriggerCheckpointBarrierResponse,
-    StopSourcesRequest, StopSourcesResponse,
     MasterHeartbeatMessage, WorkerHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
 };
@@ -263,20 +262,6 @@ impl WorkerService for WorkerServiceImpl {
         let mut worker_guard = self.worker.lock().await;
         worker_guard.trigger_checkpoint_barrier(checkpoint_id).await;
         Ok(Response::new(TriggerCheckpointBarrierResponse {
-            success: true,
-            error_message: String::new(),
-        }))
-    }
-
-    async fn stop_sources(
-        &self,
-        request: Request<StopSourcesRequest>,
-    ) -> Result<Response<StopSourcesResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let worker_guard = self.worker.lock().await;
-        worker_guard.stop_sources();
-        Ok(Response::new(StopSourcesResponse {
             success: true,
             error_message: String::new(),
         }))

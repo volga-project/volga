@@ -115,7 +115,7 @@ impl Master {
         self.state.latest_complete_checkpoint().await
     }
 
-    /// Begin a checkpoint without going through the run-loop force flag.
+    /// Begin a checkpoint without going through the run-loop.
     /// Used by tests that drive workers outside `Master::execute`.
     pub async fn start_checkpoint(&self) -> Result<u64, String> {
         self.state
@@ -129,78 +129,6 @@ impl Master {
                     "no checkpointable tasks".to_string()
                 }
             })
-    }
-
-    /// Begin a checkpoint and fan out barrier triggers to active workers immediately.
-    pub async fn force_checkpoint(&self) -> Result<u64, String> {
-        if !self.state.has_checkpointable_tasks().await {
-            return Err("no checkpointable tasks".to_string());
-        }
-        let attempt_id = self.state.current_attempt_id();
-        let checkpoint_id = self
-            .state
-            .begin_checkpoint(attempt_id)
-            .await
-            .map_err(|error| match error {
-                crate::runtime::master::checkpoint::CheckpointStartError::AlreadyInFlight {
-                    checkpoint_id,
-                } => format!("already in flight checkpoint_id={checkpoint_id}"),
-                crate::runtime::master::checkpoint::CheckpointStartError::NoCheckpointableTasks => {
-                    "no checkpointable tasks".to_string()
-                }
-            })?;
-        println!(
-            "[MASTER] Force checkpoint {} attempt={}",
-            checkpoint_id, attempt_id
-        );
-        let clients = self.state.open_active_worker_clients().await;
-        if clients.is_empty() {
-            let _ = self
-                .state
-                .abort_in_flight_checkpoint(attempt_id, "no active workers".to_string())
-                .await;
-            return Err("no active workers".to_string());
-        }
-        for (worker_id, client) in clients {
-            match client.trigger_checkpoint_barrier(checkpoint_id).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    let _ = self
-                        .state
-                        .abort_in_flight_checkpoint(
-                            attempt_id,
-                            format!("trigger rejected by {worker_id}"),
-                        )
-                        .await;
-                    return Err(format!("trigger rejected by {worker_id}"));
-                }
-                Err(error) => {
-                    let _ = self
-                        .state
-                        .abort_in_flight_checkpoint(
-                            attempt_id,
-                            format!("trigger failed on {worker_id}: {error}"),
-                        )
-                        .await;
-                    return Err(format!("trigger failed on {worker_id}: {error}"));
-                }
-            }
-        }
-        Ok(checkpoint_id)
-    }
-
-    pub async fn stop_sources(&self) -> Result<(), String> {
-        let clients = self.state.open_active_worker_clients().await;
-        if clients.is_empty() {
-            return Err("no active workers".to_string());
-        }
-        for (worker_id, client) in clients {
-            client
-                .stop_sources()
-                .await
-                .map_err(|error| format!("{worker_id}: {error}"))?;
-        }
-        Ok(())
     }
 
     pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {

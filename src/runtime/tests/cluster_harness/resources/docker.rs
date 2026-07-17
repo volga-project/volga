@@ -171,26 +171,6 @@ impl ClusterBackend for DockerCluster {
         fetch_lifecycle_events(resources.master_port, sequence).await
     }
 
-    async fn trigger_checkpoint(&mut self) -> Result<u64> {
-        let port = self
-            .resources
-            .as_ref()
-            .context("docker cluster is not launched")?
-            .resources()?
-            .master_port;
-        docker_master_trigger_checkpoint(port).await
-    }
-
-    async fn stop_sources(&mut self) -> Result<()> {
-        let port = self
-            .resources
-            .as_ref()
-            .context("docker cluster is not launched")?
-            .resources()?
-            .master_port;
-        docker_master_stop_sources(port).await
-    }
-
     async fn latest_pipeline_snapshot(
         &mut self,
     ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
@@ -344,34 +324,6 @@ async fn fetch_lifecycle_events(
             })
         })
         .collect()
-}
-
-async fn docker_master_trigger_checkpoint(port: u16) -> Result<u64> {
-    let mut client = connect_master(port).await?;
-    let response = client
-        .trigger_checkpoint(tonic::Request::new(
-            crate::runtime::master::server::master_service::TriggerCheckpointRequest {},
-        ))
-        .await?
-        .into_inner();
-    if !response.success {
-        return Err(anyhow!(response.error_message));
-    }
-    Ok(response.checkpoint_id)
-}
-
-async fn docker_master_stop_sources(port: u16) -> Result<()> {
-    let mut client = connect_master(port).await?;
-    let response = client
-        .stop_sources(tonic::Request::new(
-            crate::runtime::master::server::master_service::StopSourcesRequest {},
-        ))
-        .await?
-        .into_inner();
-    if !response.success {
-        return Err(anyhow!(response.error_message));
-    }
-    Ok(())
 }
 
 async fn docker_master_latest_pipeline_snapshot(

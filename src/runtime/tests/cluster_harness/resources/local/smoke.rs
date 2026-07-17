@@ -88,30 +88,6 @@ impl ClusterBackend for LocalCluster {
             .await)
     }
 
-    async fn trigger_checkpoint(&mut self) -> Result<u64> {
-        self.resources
-            .as_ref()
-            .context("local cluster is not launched")?
-            .master
-            .server
-            .master()
-            .force_checkpoint()
-            .await
-            .map_err(|error| anyhow!(error))
-    }
-
-    async fn stop_sources(&mut self) -> Result<()> {
-        self.resources
-            .as_ref()
-            .context("local cluster is not launched")?
-            .master
-            .server
-            .master()
-            .stop_sources()
-            .await
-            .map_err(|error| anyhow!(error))
-    }
-
     async fn latest_pipeline_snapshot(
         &mut self,
     ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {

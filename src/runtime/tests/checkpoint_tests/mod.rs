@@ -65,7 +65,9 @@ fn checkpoint_datagen_parts() -> (Arc<Schema>, DatagenSpec) {
         schema,
         DatagenSpec {
             rate: Some(200.0),
-            limit: None,
+            // Finite run so PipelineFinished happens without a stop RPC.
+            // Long enough for an interval CP + kill/restore before sources exhaust.
+            limit: Some(800),
             run_for_s: None,
             batch_size: 20,
             fields,
@@ -145,8 +147,8 @@ fn materialize_datagen_for_task(
     source.init_keys();
     let batch_size = source.config.spec.batch_size.max(1);
     let mut out = Vec::new();
-    while source.records_generated < num_records {
-        let n = std::cmp::min(batch_size, num_records - source.records_generated);
+    while source.records_generated() < num_records {
+        let n = std::cmp::min(batch_size, num_records - source.records_generated());
         out.push(source.generate_batch(n)?);
     }
     Ok(out)
@@ -229,7 +231,7 @@ async fn assert_sink_matches_offline_datagen(
     let snapshot = master
         .latest_pipeline_snapshot()
         .await?
-        .ok_or_else(|| anyhow!("missing pipeline snapshot after stop"))?;
+        .ok_or_else(|| anyhow!("missing pipeline snapshot after PipelineFinished"))?;
     let task_counts = task_record_counts(&snapshot)?;
     let total: u64 = task_counts.iter().map(|(_, n)| n).sum();
     let expected = expected_rows_offline(&task_counts)?;
@@ -263,7 +265,29 @@ async fn wait_until_attempt0_running(
     Ok(())
 }
 
-/// Force a checkpoint, kill a worker, recover, stop sources, assert restore + output.
+async fn wait_for_first_checkpoint_completed(
+    master: &crate::runtime::tests::cluster_harness::MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+) -> Result<u64> {
+    let record = LifecycleOracle::wait_for(master, cursor, timeout, |event| {
+        matches!(event, LifecycleEvent::CheckpointCompleted { .. })
+    })
+    .await?;
+    match record.event {
+        LifecycleEvent::CheckpointCompleted { checkpoint_id } => Ok(checkpoint_id),
+        other => Err(anyhow!("expected CheckpointCompleted, got {other:?}")),
+    }
+}
+
+fn finish_timeout(env: RuntimeEnv) -> Duration {
+    match env {
+        RuntimeEnv::Local => Duration::from_secs(30),
+        RuntimeEnv::Kube | RuntimeEnv::Docker => Duration::from_secs(180),
+    }
+}
+
+/// Wait for an interval checkpoint, kill a worker, recover, finish sources, assert restore + output.
 pub async fn run_checkpoint_worker_kill_recovery(
     env: RuntimeEnv,
     launch: PipelineLaunchSpec,
@@ -281,20 +305,10 @@ pub async fn run_checkpoint_worker_kill_recovery(
     cluster.start_execution().await?;
     wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running).await?;
 
-    // Let the source produce some state before checkpointing.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let checkpoint_id = cluster.master().trigger_checkpoint().await?;
-    LifecycleOracle::wait_for(
+    let checkpoint_id = wait_for_first_checkpoint_completed(
         &cluster.master(),
         &mut cursor,
         timeouts.attempt_running,
-        |event| {
-            matches!(
-                event,
-                LifecycleEvent::CheckpointCompleted { checkpoint_id: id } if *id == checkpoint_id
-            )
-        },
     )
     .await?;
 
@@ -333,22 +347,16 @@ pub async fn run_checkpoint_worker_kill_recovery(
     )
     .await?;
 
-    // Produce a bit more after restore, then stop and drain.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    cluster.master().stop_sources().await?;
-    // Drain sink + allow master state poll to refresh task metadata (before teardown).
-    tokio::time::sleep(Duration::from_millis(750)).await;
+    LifecycleOracle::wait_for(
+        &cluster.master(),
+        &mut cursor,
+        finish_timeout(env),
+        |event| matches!(event, LifecycleEvent::PipelineFinished),
+    )
+    .await?;
+
     let snapshot = cluster.storage().snapshot().await?;
     assert_sink_matches_offline_datagen(&cluster.master(), &snapshot).await?;
-
-    let finish_timeout = match env {
-        RuntimeEnv::Local => Duration::from_secs(30),
-        RuntimeEnv::Kube | RuntimeEnv::Docker => Duration::from_secs(180),
-    };
-    LifecycleOracle::wait_for(&cluster.master(), &mut cursor, finish_timeout, |event| {
-        matches!(event, LifecycleEvent::PipelineFinished)
-    })
-    .await?;
 
     let events = cluster.master().lifecycle_events_since(0).await?;
     let report = RecoveryReport::from_events(&events);
@@ -368,7 +376,7 @@ pub fn assert_checkpoint_restore(report: &RecoveryReport, expected_checkpoint_id
     Ok(())
 }
 
-/// Force a checkpoint and verify barrier propagation events precede completion.
+/// Wait for an interval checkpoint and verify barrier propagation precedes completion.
 pub async fn run_checkpoint_barrier_path(
     env: RuntimeEnv,
     launch: PipelineLaunchSpec,
@@ -379,33 +387,23 @@ pub async fn run_checkpoint_barrier_path(
 
     cluster.start_execution().await?;
     wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running).await?;
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let checkpoint_id = cluster.master().trigger_checkpoint().await?;
-    LifecycleOracle::wait_for(
+    let checkpoint_id = wait_for_first_checkpoint_completed(
         &cluster.master(),
         &mut cursor,
         timeouts.attempt_running,
-        |event| {
-            matches!(
-                event,
-                LifecycleEvent::CheckpointCompleted { checkpoint_id: id } if *id == checkpoint_id
-            )
-        },
     )
     .await?;
 
     let events = cluster.master().lifecycle_events_since(0).await?;
     assert_checkpoint_barrier_path(&events, checkpoint_id)?;
 
-    cluster.master().stop_sources().await?;
-    let finish_timeout = match env {
-        RuntimeEnv::Local => Duration::from_secs(30),
-        RuntimeEnv::Kube | RuntimeEnv::Docker => Duration::from_secs(180),
-    };
-    LifecycleOracle::wait_for(&cluster.master(), &mut cursor, finish_timeout, |event| {
-        matches!(event, LifecycleEvent::PipelineFinished)
-    })
+    LifecycleOracle::wait_for(
+        &cluster.master(),
+        &mut cursor,
+        finish_timeout(env),
+        |event| matches!(event, LifecycleEvent::PipelineFinished),
+    )
     .await?;
     Ok(checkpoint_id)
 }

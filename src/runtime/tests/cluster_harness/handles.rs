@@ -48,14 +48,6 @@ impl MasterHandle {
             .await
     }
 
-    pub async fn trigger_checkpoint(&self) -> Result<u64> {
-        self.inner.backend.lock().await.trigger_checkpoint().await
-    }
-
-    pub async fn stop_sources(&self) -> Result<()> {
-        self.inner.backend.lock().await.stop_sources().await
-    }
-
     pub async fn latest_pipeline_snapshot(&self) -> Result<Option<PipelineSnapshot>> {
         self.inner
             .backend

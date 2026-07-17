@@ -7,7 +7,9 @@ pub mod kafka;
 pub mod request_source;
 pub mod json_utils;
 
-pub use source_function::{SourceFunction, SourceFunctionTrait, create_source_function};
+pub use source_function::{
+    create_source_function, FetchResult, SourceFunction, SourceFunctionTrait,
+};
 pub use vector_source::VectorSourceFunction;
 pub use word_count_source::WordCountSourceFunction;
 pub use datagen_source::DatagenSourceFunction;

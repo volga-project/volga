@@ -10,12 +10,15 @@ use arrow::record_batch::RecordBatch;
 use rdkafka::consumer::{Consumer, StreamConsumer};
 use rdkafka::{ClientConfig, Message as KafkaMessage, Offset, TopicPartitionList};
 use serde::{Deserialize, Serialize};
-use tokio::time::{sleep, timeout};
+use tokio::time::timeout;
 
 use crate::common::message::Message;
 use crate::runtime::functions::function_trait::FunctionTrait;
-use crate::runtime::functions::source::source_function::SourceFunctionTrait;
+use crate::runtime::functions::source::source_function::{FetchResult, SourceFunctionTrait};
 use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::operators::source::{
+    race_interruptible, SourceInterrupt, SourceStats,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KafkaSourceSpec {
@@ -214,18 +217,27 @@ impl KafkaSourceFunction {
 
 #[async_trait::async_trait]
 impl SourceFunctionTrait for KafkaSourceFunction {
-    async fn fetch(&mut self) -> Option<Message> {
-        let consumer = self.consumer.as_ref().expect("consumer not initialized");
+    async fn fetch(
+        &mut self,
+        interrupt: Option<&SourceInterrupt>,
+        _stats: Option<&SourceStats>,
+    ) -> FetchResult {
         let max_records = self.config.spec.max_batch_records.unwrap_or(usize::MAX).max(1);
         let max_bytes = self.config.spec.max_batch_bytes.unwrap_or(usize::MAX).max(1);
         let poll_timeout = Duration::from_millis(self.config.spec.poll_timeout_ms.max(1));
 
         loop {
             if self.assigned_partitions.is_empty() {
-                sleep(poll_timeout).await;
+                if race_interruptible(interrupt, tokio::time::sleep(poll_timeout))
+                    .await
+                    .is_err()
+                {
+                    return FetchResult::Interrupted;
+                }
                 continue;
             }
 
+            let consumer = self.consumer.as_ref().expect("consumer not initialized");
             let mut batches: Vec<RecordBatch> = Vec::new();
             let mut total_records: usize = 0;
             let mut total_bytes: usize = 0;
@@ -235,7 +247,15 @@ impl SourceFunctionTrait for KafkaSourceFunction {
                     break;
                 }
 
-                let recv = timeout(poll_timeout, consumer.recv()).await;
+                let recv = match race_interruptible(
+                    interrupt,
+                    timeout(poll_timeout, consumer.recv()),
+                )
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => return FetchResult::Interrupted,
+                };
                 let msg = match recv {
                     Ok(Ok(m)) => m,
                     Ok(Err(_)) => continue,
@@ -267,7 +287,7 @@ impl SourceFunctionTrait for KafkaSourceFunction {
                 } else {
                     concat_batches(&self.config.schema, &batches).expect("concat batches")
                 };
-                return Some(Message::new(None, batch, None, None));
+                return FetchResult::Data(Message::new(None, batch, None, None));
             }
         }
     }

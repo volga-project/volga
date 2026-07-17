@@ -112,26 +112,6 @@ impl ClusterBackend for KubeCluster {
         fetch_lifecycle_events(master_port, sequence).await
     }
 
-    async fn trigger_checkpoint(&mut self) -> Result<u64> {
-        let master_port = self
-            .resources
-            .as_ref()
-            .context("kube cluster is not launched")?
-            .resources()?
-            .master_port;
-        master_trigger_checkpoint(master_port).await
-    }
-
-    async fn stop_sources(&mut self) -> Result<()> {
-        let master_port = self
-            .resources
-            .as_ref()
-            .context("kube cluster is not launched")?
-            .resources()?
-            .master_port;
-        master_stop_sources(master_port).await
-    }
-
     async fn latest_pipeline_snapshot(
         &mut self,
     ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
@@ -404,36 +384,6 @@ async fn fetch_lifecycle_events(
             })
         })
         .collect()
-}
-
-async fn master_trigger_checkpoint(master_port: u16) -> Result<u64> {
-    let mut client =
-        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
-    let response = client
-        .trigger_checkpoint(tonic::Request::new(
-            crate::runtime::master::server::master_service::TriggerCheckpointRequest {},
-        ))
-        .await?
-        .into_inner();
-    if !response.success {
-        return Err(anyhow!(response.error_message));
-    }
-    Ok(response.checkpoint_id)
-}
-
-async fn master_stop_sources(master_port: u16) -> Result<()> {
-    let mut client =
-        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
-    let response = client
-        .stop_sources(tonic::Request::new(
-            crate::runtime::master::server::master_service::StopSourcesRequest {},
-        ))
-        .await?
-        .into_inner();
-    if !response.success {
-        return Err(anyhow!(response.error_message));
-    }
-    Ok(())
 }
 
 async fn master_latest_pipeline_snapshot(

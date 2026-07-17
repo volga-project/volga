@@ -17,7 +17,7 @@ use futures::future::join_all;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
-use crate::runtime::source_control::SourceControlRegistry;
+use crate::runtime::operators::source::SourceHandles;
 use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 use crate::runtime::operators::window::TimeGranularity;
@@ -104,7 +104,7 @@ pub struct Worker {
     request_source_processor: Option<RequestSourceProcessor>,
     request_source_processor_runtime: Option<Runtime>,
 
-    source_controls: Arc<SourceControlRegistry>,
+    source_handles: Arc<SourceHandles>,
 
     // TODO separate backend runtime for request mode channels
 }
@@ -129,7 +129,7 @@ impl Worker {
             fatal_watcher_handle: None,
             request_source_processor: None,
             request_source_processor_runtime: None,
-            source_controls: Arc::new(SourceControlRegistry::new()),
+            source_handles: Arc::new(SourceHandles::new()),
         }
     }
 
@@ -146,7 +146,7 @@ impl Worker {
         // Fresh incarnation: drop any sticky fatal from a previous execution attempt so this
         // worker is not immediately reported unhealthy after a recovery reset.
         self.health.clear();
-        self.source_controls.clear();
+        self.source_handles.clear();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
         println!(
@@ -417,7 +417,7 @@ impl Worker {
                 Some(self.operator_states.clone()),
                 Some(config.graph.clone()),
             );
-            runtime_context.set_source_control_registry(self.source_controls.clone());
+            runtime_context.set_source_handles(self.source_handles.clone());
             if let Some(request_source_processor) = &self.request_source_processor {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
                 runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
@@ -786,7 +786,7 @@ impl Worker {
                 }
             }
 
-            self.source_controls.wake_checkpoint(&vertex_id);
+            self.source_handles.cancel(&vertex_id);
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
             let fut = task_runtime.spawn(async move {
                 let _ = task_ref
@@ -795,10 +795,6 @@ impl Worker {
             });
             let _ = fut.await;
         }
-    }
-
-    pub fn stop_sources(&self) {
-        self.source_controls.request_stop_all();
     }
 
     // This should only be used for testing - simulates worker execution

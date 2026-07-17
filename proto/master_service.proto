@@ -11,10 +11,6 @@ service MasterService {
   rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
   rpc GetLatestPipelineSnapshot(GetLatestPipelineSnapshotRequest) returns (GetLatestPipelineSnapshotResponse);
   rpc GetLifecycleEvents(GetLifecycleEventsRequest) returns (GetLifecycleEventsResponse);
-  // Force a checkpoint on the current running attempt (single-in-flight; rejected if busy).
-  rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
-  // Request sources to stop generating (datagen). Used by harness after recovery.
-  rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
 }
 
 message RegisterWorkerRequest {
@@ -107,22 +103,4 @@ message LifecycleEventRecord {
 message GetLifecycleEventsResponse {
   repeated LifecycleEventRecord events = 1;
 }
-
-message TriggerCheckpointRequest {
-}
-
-message TriggerCheckpointResponse {
-  bool success = 1;
-  string error_message = 2;
-  uint64 checkpoint_id = 3;
-}
-
-message StopSourcesRequest {
-}
-
-message StopSourcesResponse {
-  bool success = 1;
-  string error_message = 2;
-}
-
 

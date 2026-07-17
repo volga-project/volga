@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
-use crate::runtime::source_control::SourceControlRegistry;
+use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::state::OperatorStates;
 use crate::storage::WorkerStorageContext;
 use crate::runtime::VertexId;
@@ -18,7 +18,7 @@ pub struct RuntimeContext {
     operator_states: Option<Arc<OperatorStates>>,
     execution_graph: Option<ExecutionGraph>,
     worker_storage: Option<Arc<WorkerStorageContext>>,
-    source_controls: Option<SourceControlRegistry>,
+    source_handles: Option<SourceHandles>,
 
     // if we have request source+sink configured:
     // shared receiver for source tasks to receive requests from RequestSourceProcessor
@@ -45,7 +45,7 @@ impl RuntimeContext {
             operator_states,
             execution_graph,
             worker_storage: None,
-            source_controls: None,
+            source_handles: None,
             request_sink_source_request_receiver: None,
             request_sink_source_response_sender: None
         }
@@ -67,12 +67,12 @@ impl RuntimeContext {
         self.worker_storage.clone()
     }
 
-    pub fn set_source_control_registry(&mut self, registry: Arc<SourceControlRegistry>) {
-        self.source_controls = Some((*registry).clone());
+    pub fn set_source_handles(&mut self, handles: Arc<SourceHandles>) {
+        self.source_handles = Some((*handles).clone());
     }
 
-    pub fn source_control_registry(&self) -> Option<&SourceControlRegistry> {
-        self.source_controls.as_ref()
+    pub fn source_handles(&self) -> Option<&SourceHandles> {
+        self.source_handles.as_ref()
     }
 
     pub fn set_request_sink_source_request_receiver(&mut self, receiver: Arc<Mutex<mpsc::Receiver<PendingRequest>>>) {

@@ -59,7 +59,7 @@ async fn parquet_source_applies_projection_mask() {
     );
     source.open(&ctx).await.unwrap();
 
-    let msg = source.fetch().await.expect("expected batch");
+    let msg = source.fetch(None, None).await.expect_data("expected batch");
     let batch = msg.record_batch();
     assert_eq!(batch.schema(), projected_schema);
     assert_eq!(batch.num_columns(), 1);

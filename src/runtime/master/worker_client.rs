@@ -340,23 +340,6 @@ impl WorkerClient {
             .success)
     }
 
-    pub async fn stop_sources(&self) -> Result<(), WorkerCallError> {
-        let execution_attempt_id = self.execution_attempt_id;
-        let response = self
-            .rpc("stop_sources", |mut client| async move {
-                client
-                    .stop_sources(tonic::Request::new(
-                        crate::runtime::master::worker_service::StopSourcesRequest {
-                            execution_attempt_id,
-                        },
-                    ))
-                    .await
-            })
-            .await?
-            .into_inner();
-        response_result("stop_sources", response.success, response.error_message)
-    }
-
 }
 
 fn response_result(

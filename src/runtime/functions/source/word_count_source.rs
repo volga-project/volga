@@ -10,7 +10,8 @@ use std::time::SystemTime;
 use arrow::array::{StringArray, Int64Array};
 use arrow::datatypes::{Field, Schema};
 use std::sync::Arc;
-use super::source_function::SourceFunctionTrait;
+use super::source_function::{FetchResult, SourceFunctionTrait};
+use crate::runtime::operators::source::{SourceInterrupt, SourceStats};
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -252,16 +253,14 @@ impl FunctionTrait for WordCountSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for WordCountSourceFunction {
-    async fn fetch(&mut self) -> Option<Message> {
-
-        // Collect words for this batch
+    async fn fetch(
+        &mut self,
+        _interrupt: Option<&SourceInterrupt>,
+        _stats: Option<&SourceStats>,
+    ) -> FetchResult {
         match self.collect_words_for_batch() {
-            Some(words) => {
-                Some(self.create_batch(&words))
-            },
-            None => {
-                None
-            }
+            Some(words) => FetchResult::Data(self.create_batch(&words)),
+            None => FetchResult::Idle,
         }
     }
 }
@@ -291,7 +290,7 @@ async fn test_word_count_source(
     let mut word_counts = HashMap::new();
     
     let start_time = std::time::Instant::now();
-    while let Some(message) = source.fetch().await {
+    while let Some(message) = source.fetch(None, None).await.into_message() {
         match message {
             Message::Regular(_) | Message::Keyed(_) => {
                 let record_batch = message.record_batch();

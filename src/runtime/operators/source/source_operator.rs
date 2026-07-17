@@ -1,11 +1,20 @@
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig, parquet::ParquetSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
-
+use crate::common::Message;
+use crate::runtime::functions::source::{
+    create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig,
+    parquet::ParquetSourceConfig, word_count_source::BatchingMode, FetchResult,
+    RequestSourceConfig, SourceFunction, SourceFunctionTrait,
+};
+use crate::runtime::operators::operator::{
+    operator_config_requires_checkpoint, MessageStream, OperatorBase, OperatorConfig,
+    OperatorPollResult, OperatorTrait, OperatorType,
+};
+use crate::runtime::runtime_context::RuntimeContext;
+use super::source_handles::{SourceInterrupt, SourceStats};
 
 #[derive(Debug, Clone)]
 pub struct VectorSourceConfig {
@@ -128,7 +137,8 @@ impl std::fmt::Display for SourceConfig {
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
-    prefer_control: Option<Arc<AtomicBool>>,
+    interrupt: Option<Arc<SourceInterrupt>>,
+    stats: Option<Arc<SourceStats>>,
 }
 
 impl SourceOperator {
@@ -140,7 +150,8 @@ impl SourceOperator {
         let source_function = create_source_function(source_config);
         Self {
             base: OperatorBase::new_with_function(source_function, config),
-            prefer_control: None,
+            interrupt: None,
+            stats: None,
         }
     }
 }
@@ -148,11 +159,15 @@ impl SourceOperator {
 #[async_trait]
 impl OperatorTrait for SourceOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        // Datagen registers SourceTaskControl during function open.
-        self.base.open(context).await?;
-        if let Some(registry) = context.source_control_registry() {
-            self.prefer_control = registry.prefer_control_flag(context.vertex_id_arc());
+        // Register shared handles before function open (stats for all; interrupt if checkpointable).
+        if let Some(handles) = context.source_handles() {
+            let handle = handles.register(context.vertex_id_arc(), context.task_index());
+            self.stats = Some(handle.stats.clone());
+            if operator_config_requires_checkpoint(self.operator_config()) {
+                self.interrupt = Some(handle.interrupt.clone());
+            }
         }
+        self.base.open(context).await?;
         Ok(())
     }
 
@@ -173,22 +188,35 @@ impl OperatorTrait for SourceOperator {
     }
 
     async fn poll_next(&mut self) -> OperatorPollResult {
-        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        let msg = function.fetch().await;
-
-        // Checkpoint wake interrupted fetch: yield so StreamTask can inject the barrier.
-        if let Some(flag) = &self.prefer_control {
-            if flag.swap(false, Ordering::SeqCst) {
-                return OperatorPollResult::Continue;
-            }
+        // Wake arrived between fetches: yield before pulling more data.
+        if self
+            .interrupt
+            .as_ref()
+            .is_some_and(|interrupt| interrupt.take_canceled())
+        {
+            return OperatorPollResult::Continue;
         }
 
-        match msg {
-            Some(Message::Watermark(watermark)) => {
+        let interrupt = self.interrupt.as_deref();
+        let stats = self.stats.as_deref();
+        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
+        match function.fetch(interrupt, stats).await {
+            FetchResult::Interrupted => OperatorPollResult::Continue,
+            FetchResult::Data(Message::Watermark(watermark)) => {
                 OperatorPollResult::Ready(Message::Watermark(watermark))
             }
-            Some(message) => OperatorPollResult::Ready(message),
-            None => OperatorPollResult::None,
+            FetchResult::Data(message) => {
+                if let Some(stats) = stats {
+                    match &message {
+                        Message::Regular(_) | Message::Keyed(_) => {
+                            stats.add_records(message.num_records());
+                        }
+                        Message::Watermark(_) | Message::CheckpointBarrier(_) => {}
+                    }
+                }
+                OperatorPollResult::Ready(message)
+            }
+            FetchResult::Idle => OperatorPollResult::None,
         }
     }
 

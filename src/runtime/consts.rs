@@ -25,7 +25,7 @@ pub const MASTER_STATE_POLL_INTERVAL: &str = "master.state_poll_interval";
 pub const MASTER_RESET_WORKER_TIMEOUT: &str = "master.reset_worker_timeout";
 /// Sleep between worker-registry readiness polls (discovery / replacement wait).
 pub const MASTER_REGISTRY_WAIT_TICK: &str = "master.registry_wait_tick";
-/// Periodic checkpoint trigger while an attempt is running. `0s` disables interval (force-only).
+/// Periodic checkpoint trigger while an attempt is running. `0s` disables interval checkpoints.
 pub const MASTER_CHECKPOINT_INTERVAL: &str = "master.checkpoint_interval";
 /// Fail the attempt if an in-flight checkpoint does not complete within this budget.
 pub const MASTER_CHECKPOINT_TIMEOUT: &str = "master.checkpoint_timeout";
