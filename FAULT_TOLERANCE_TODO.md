@@ -19,4 +19,4 @@
 - Use propagation events for timeout localization (which task is stuck).
 - [x] Barrier-path test: Started → BarrierInjected → Aligned → Completed (local + kube ignore).
 - [x] Generic source interrupt (`SourceInterrupt` sleep/race + `FetchResult::Interrupted`); registered for checkpointable sources; datagen + Kafka wired.
-- [x] Shared source emit stats (`SourceStats.records_emitted`) owned by registry / incremented by `SourceOperator` for all sources.
+- [x] Shared source emit stats (`SourceStats.records_generated`) owned by registry / incremented by `SourceOperator` for all sources.

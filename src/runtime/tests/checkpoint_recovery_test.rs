@@ -108,10 +108,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
                 schema_json,
             ),
         )
-        .with_sink(SinkSpec::InMemoryStorageGrpc {
-            server_addr: format!("http://{}", storage_server_addr),
-            upsert_key_columns: vec![],
-        })
+        .with_sink(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr)))
         .sql(sql)
         .build();
     let mut logical_graph = compile_logical_graph(&spec, None);

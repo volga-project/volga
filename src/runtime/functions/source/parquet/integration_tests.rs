@@ -98,7 +98,7 @@ async fn parquet_roundtrip_via_sink_and_source(
     source.open(&source_ctx).await.unwrap();
 
     let mut output_rows = Vec::new();
-    while let Some(msg) = source.fetch(None, None).await.into_message() {
+    while let Some(msg) = source.fetch(None).await.into_message() {
         let batch = msg.record_batch();
         let keys = batch
             .column(0)
@@ -182,7 +182,7 @@ async fn parquet_parallel_tasks_consume_all_files() {
         let mut source = ParquetSourceFunction::new(config.clone());
         let ctx = RuntimeContext::new("src".to_string().into(), task_index, 2, None, None, None);
         source.open(&ctx).await.unwrap();
-        while let Some(msg) = source.fetch(None, None).await.into_message() {
+        while let Some(msg) = source.fetch(None).await.into_message() {
             let batch = msg.record_batch();
             let keys = batch
                 .column(0)
@@ -236,7 +236,7 @@ async fn parquet_projection_pushdown_roundtrip() {
     let ctx = RuntimeContext::new("src".to_string().into(), 0, 1, None, None, None);
     source.open(&ctx).await.unwrap();
 
-    let msg = source.fetch(None, None).await.expect_data("expected batch");
+    let msg = source.fetch(None).await.expect_data("expected batch");
     let batch = msg.record_batch();
     assert_eq!(batch.schema(), projected_schema);
     assert_eq!(batch.num_columns(), 1);

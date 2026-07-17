@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
+use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::functions::source::datagen_source::{
@@ -92,12 +92,13 @@ pub fn checkpoint_recovery_launch_spec() -> PipelineLaunchSpec {
             schema_to_json(schema.as_ref()),
         ))
         .sql("SELECT timestamp, key, value FROM datagen_source")
+        .with_sink(SinkSpec::in_memory_upsert(vec![
+            "key".to_string(),
+            "timestamp".to_string(),
+        ]))
         .build();
 
-    PipelineLaunchSpec::new(pipeline, 1, 0).with_upsert_key_columns(vec![
-        "key".to_string(),
-        "timestamp".to_string(),
-    ])
+    PipelineLaunchSpec::new(pipeline, 1, 0)
 }
 
 /// Logical sink row identity for upsert-key `(key, timestamp)` plus value for content checks.
@@ -196,6 +197,13 @@ fn sink_rows(snapshot: &InMemoryStorageSnapshot) -> Result<HashSet<ExpectedUpser
     Ok(actual)
 }
 
+fn task_index_from_vertex_id(vertex_id: &str) -> Result<i32> {
+    vertex_id
+        .rsplit_once('_')
+        .and_then(|(_, idx)| idx.parse().ok())
+        .ok_or_else(|| anyhow!("cannot parse task_index from vertex_id {vertex_id}"))
+}
+
 fn task_record_counts(snapshot: &PipelineSnapshot) -> Result<Vec<(i32, u64)>> {
     let mut counts = Vec::new();
     for worker in snapshot.worker_states.values() {
@@ -203,11 +211,7 @@ fn task_record_counts(snapshot: &PipelineSnapshot) -> Result<Vec<(i32, u64)>> {
             let Some(records) = meta.get(task_meta::RECORDS_GENERATED) else {
                 continue;
             };
-            let task_index = meta
-                .get(task_meta::TASK_INDEX)
-                .ok_or_else(|| anyhow!("missing task_index metadata for {vertex_id}"))?
-                .parse::<i32>()
-                .map_err(|e| anyhow!("bad task_index for {vertex_id}: {e}"))?;
+            let task_index = task_index_from_vertex_id(vertex_id.as_ref())?;
             let n = records
                 .parse::<u64>()
                 .map_err(|e| anyhow!("bad records_generated for {vertex_id}: {e}"))?;

@@ -206,10 +206,7 @@ pub async fn run_window_request_benchmark(
             max_pending_requests: 10_000,
             request_timeout_ms: 30_000,
             schema_json: Some(schema_to_json(request_datagen_config.schema.as_ref())),
-            sink: Some(SinkSpec::InMemoryStorageGrpc {
-                server_addr: format!("http://{}", storage_server_addr),
-                upsert_key_columns: vec![],
-            }),
+            sink: Some(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr))),
         })
         .build();
     let logical_graph = compile_logical_graph(&spec, None);

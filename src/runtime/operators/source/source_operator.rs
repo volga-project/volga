@@ -161,7 +161,7 @@ impl OperatorTrait for SourceOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         // Register shared handles before function open (stats for all; interrupt if checkpointable).
         if let Some(handles) = context.source_handles() {
-            let handle = handles.register(context.vertex_id_arc(), context.task_index());
+            let handle = handles.register(context.vertex_id_arc());
             self.stats = Some(handle.stats.clone());
             if operator_config_requires_checkpoint(self.operator_config()) {
                 self.interrupt = Some(handle.interrupt.clone());
@@ -198,15 +198,14 @@ impl OperatorTrait for SourceOperator {
         }
 
         let interrupt = self.interrupt.as_deref();
-        let stats = self.stats.as_deref();
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        match function.fetch(interrupt, stats).await {
+        match function.fetch(interrupt).await {
             FetchResult::Interrupted => OperatorPollResult::Continue,
             FetchResult::Data(Message::Watermark(watermark)) => {
                 OperatorPollResult::Ready(Message::Watermark(watermark))
             }
             FetchResult::Data(message) => {
-                if let Some(stats) = stats {
+                if let Some(stats) = self.stats.as_ref() {
                     match &message {
                         Message::Regular(_) | Message::Keyed(_) => {
                             stats.add_records(message.num_records());
@@ -240,6 +239,9 @@ impl OperatorTrait for SourceOperator {
             return Err(anyhow::anyhow!("empty source_position blob on restore"));
         }
         function.restore_position(bytes).await?;
+        if let (Some(stats), Some(n)) = (self.stats.as_ref(), function.emit_count()) {
+            stats.set_records_generated(n);
+        }
         Ok(())
     }
 }

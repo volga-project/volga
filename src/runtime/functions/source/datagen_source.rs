@@ -11,9 +11,8 @@ use arrow::array::builder::{Float64Builder, Int64Builder, StringBuilder, Timesta
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::collections::HashMap;
-use crate::runtime::operators::source::{race_interruptible, SourceInterrupt, SourceStats};
+use crate::runtime::operators::source::{race_interruptible, SourceInterrupt};
 use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
 use rand::distributions::Alphanumeric;
@@ -118,8 +117,8 @@ pub struct DatagenSourceFunction {
     // Rate coordination state
     next_gen_time: Option<SystemTime>,
     gen_interval: Option<Duration>,
-    /// Emit counter (bound to [`SourceStats`] under the operator; local Arc in unit tests).
-    records_generated: Arc<AtomicU64>,
+    /// Local generation progress (limits + checkpoint position).
+    records_generated: usize,
     task_records_limit: Option<usize>,
     start_time: Option<SystemTime>, // When datagen started (for run_for_s)
     
@@ -145,7 +144,7 @@ impl DatagenSourceFunction {
             vertex_id: None,
             next_gen_time: None,
             gen_interval: None,
-            records_generated: Arc::new(AtomicU64::new(0)),
+            records_generated: 0,
             task_records_limit: None,
             start_time: None,
             rng: None,
@@ -159,7 +158,7 @@ impl DatagenSourceFunction {
     }
 
     pub(crate) fn records_generated(&self) -> usize {
-        self.records_generated.load(Ordering::SeqCst) as usize
+        self.records_generated
     }
 
     fn validate_replayable_config(&self) {
@@ -267,8 +266,7 @@ impl DatagenSourceFunction {
     /// Build a batch and advance the emit counter (offline materialize / unit helpers).
     pub(crate) fn generate_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
         let batch = self.build_batch(batch_size)?;
-        self.records_generated
-            .fetch_add(batch.num_rows() as u64, Ordering::SeqCst);
+        self.records_generated += batch.num_rows();
         Ok(batch)
     }
 
@@ -325,15 +323,6 @@ impl DatagenSourceFunction {
         }
         
         RecordBatch::try_new(schema.clone(), columns).map_err(Into::into)
-    }
-
-    fn note_emitted(&self, rows: usize, stats: Option<&SourceStats>) {
-        // Under SourceOperator, stats is Some and the operator increments the shared counter.
-        // Standalone fetch (unit tests) counts here.
-        if stats.is_none() {
-            self.records_generated
-                .fetch_add(rows as u64, Ordering::SeqCst);
-        }
     }
 
     /// Generate incremental timestamp column with per-key increment
@@ -531,11 +520,7 @@ impl DatagenSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for DatagenSourceFunction {
-    async fn fetch(
-        &mut self,
-        interrupt: Option<&SourceInterrupt>,
-        stats: Option<&SourceStats>,
-    ) -> FetchResult {
+    async fn fetch(&mut self, interrupt: Option<&SourceInterrupt>) -> FetchResult {
         // If this task has no keys assigned, don't produce anything
         if self.key_values.is_empty() {
             return FetchResult::Idle;
@@ -576,8 +561,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
 
         match self.build_batch(batch_size) {
             Ok(batch) => {
-                let rows = batch.num_rows();
-                self.note_emitted(rows, stats);
+                self.records_generated += batch.num_rows();
                 FetchResult::Data(Message::new(None, batch, None, None))
             }
             Err(e) => {
@@ -611,8 +595,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
             return Ok(());
         }
         let pos: DatagenSourcePosition = bincode::deserialize(bytes)?;
-        self.records_generated
-            .store(pos.records_generated as u64, Ordering::SeqCst);
+        self.records_generated = pos.records_generated;
         self.current_key_index = pos.current_key_index;
         self.task_records_limit = pos.task_records_limit;
         self.key_values = pos.key_values;
@@ -620,6 +603,10 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         self.per_key_increments = pos.per_key_increments;
         self.per_key_values_indices = pos.per_key_values_indices;
         Ok(())
+    }
+
+    fn emit_count(&self) -> Option<u64> {
+        Some(self.records_generated as u64)
     }
 }
 
@@ -665,13 +652,6 @@ impl FunctionTrait for DatagenSourceFunction {
             self.next_gen_time = Some(start_time);
         }
 
-        // Bind to operator-registered shared counter when present.
-        if let Some(handles) = ctx.source_handles() {
-            if let Some(handle) = handles.get(&ctx.vertex_id_arc()) {
-                self.records_generated = handle.stats.records_emitted_arc();
-            }
-        }
-        
         Ok(())
     }
 
@@ -769,7 +749,7 @@ mod tests {
             let mut batch_count = 0;
             
             loop {
-                match source.fetch(None, None).await {
+                match source.fetch(None).await {
                     FetchResult::Data(Message::Regular(base_msg)) => {
                         let batch = &base_msg.record_batch;
                         
@@ -910,7 +890,7 @@ mod tests {
                 let mut batch_count = 0;
                 
                 loop {
-                    match source.fetch(None, None).await {
+                    match source.fetch(None).await {
                         FetchResult::Data(Message::Regular(base_msg)) => {
                             let batch = &base_msg.record_batch;
                             let processing_times = batch.column(0).as_any().downcast_ref::<TimestampMillisecondArray>().unwrap();
@@ -1027,7 +1007,7 @@ mod tests {
                 }
             }
 
-                    match source.fetch(None, None).await {
+                    match source.fetch(None).await {
                 FetchResult::Data(Message::Regular(base_msg)) => {
                     let batch = &base_msg.record_batch;
                     let ts = batch

@@ -26,7 +26,7 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use super::source_function::{FetchResult, SourceFunctionTrait};
-use crate::runtime::operators::source::{SourceInterrupt, SourceStats};
+use crate::runtime::operators::source::SourceInterrupt;
 use crate::api::SinkSpec;
 
 /// Reserved metadata field names
@@ -416,11 +416,7 @@ impl FunctionTrait for HttpRequestSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for HttpRequestSourceFunction {
-    async fn fetch(
-        &mut self,
-        _interrupt: Option<&SourceInterrupt>,
-        _stats: Option<&SourceStats>,
-    ) -> FetchResult {
+    async fn fetch(&mut self, _interrupt: Option<&SourceInterrupt>) -> FetchResult {
         if let Some(shared_rx) = &self.shared_request_rx {
             // Compete with other tasks for messages from the shared queue
             let pending_request = {
@@ -543,7 +539,7 @@ mod tests {
         println!("Fetching message...");
         // Call fetch() to get the message from the HTTP request
         let message = source
-            .fetch(None, None)
+            .fetch(None)
             .await
             .expect_data("Should receive a message from HTTP request");
         

@@ -6,7 +6,6 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use uuid::Uuid;
 
-use crate::api::spec::connectors::SinkSpec;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest;
@@ -197,10 +196,7 @@ impl ClusterBackend for DockerCluster {
 impl DockerClusterResources {
     pub fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
         let mut spec = launch.pipeline;
-        spec.sink = Some(SinkSpec::InMemoryStorageGrpc {
-            server_addr: "http://storage:50071".to_string(),
-            upsert_key_columns: launch.upsert_key_columns.clone(),
-        });
+        super::install_in_memory_sink(&mut spec, "http://storage:50071");
         Ok(Self {
             resources: Some(DockerResources::start(
                 &serde_json::to_string(&spec)?,

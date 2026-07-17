@@ -11,7 +11,7 @@ use arrow::array::{StringArray, Int64Array};
 use arrow::datatypes::{Field, Schema};
 use std::sync::Arc;
 use super::source_function::{FetchResult, SourceFunctionTrait};
-use crate::runtime::operators::source::{SourceInterrupt, SourceStats};
+use crate::runtime::operators::source::SourceInterrupt;
 use std::collections::HashMap;
 
 #[cfg(test)]
@@ -253,11 +253,7 @@ impl FunctionTrait for WordCountSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for WordCountSourceFunction {
-    async fn fetch(
-        &mut self,
-        _interrupt: Option<&SourceInterrupt>,
-        _stats: Option<&SourceStats>,
-    ) -> FetchResult {
+    async fn fetch(&mut self, _interrupt: Option<&SourceInterrupt>) -> FetchResult {
         match self.collect_words_for_batch() {
             Some(words) => FetchResult::Data(self.create_batch(&words)),
             None => FetchResult::Idle,
@@ -290,7 +286,7 @@ async fn test_word_count_source(
     let mut word_counts = HashMap::new();
     
     let start_time = std::time::Instant::now();
-    while let Some(message) = source.fetch(None, None).await.into_message() {
+    while let Some(message) = source.fetch(None).await.into_message() {
         match message {
             Message::Regular(_) | Message::Keyed(_) => {
                 let record_batch = message.record_batch();

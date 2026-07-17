@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master::checkpoint::TaskKey;
-use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
+use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 
 pub mod worker_service {
     tonic::include_proto!("worker_service");
@@ -117,6 +116,7 @@ impl Master {
 
     /// Begin a checkpoint without going through the run-loop.
     /// Used by tests that drive workers outside `Master::execute`.
+    #[cfg(test)]
     pub async fn start_checkpoint(&self) -> Result<u64, String> {
         self.state
             .begin_checkpoint(self.state.current_attempt_id())
@@ -129,10 +129,6 @@ impl Master {
                     "no checkpointable tasks".to_string()
                 }
             })
-    }
-
-    pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
-        self.state.worker_states().await
     }
 
     pub async fn get_latest_pipeline_snapshot(&self) -> Option<PipelineSnapshot> {

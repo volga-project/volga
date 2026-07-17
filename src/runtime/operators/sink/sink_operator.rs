@@ -16,6 +16,25 @@ pub enum SinkConfig {
     ParquetSinkConfig(ParquetSinkConfig),
 }
 
+impl SinkConfig {
+    pub fn in_memory_grpc(server_addr: impl Into<String>) -> Self {
+        Self::InMemoryStorageGrpcSinkConfig {
+            server_addr: server_addr.into(),
+            upsert_key_columns: Vec::new(),
+        }
+    }
+
+    pub fn with_upsert_key_columns(mut self, columns: Vec<String>) -> Self {
+        if let Self::InMemoryStorageGrpcSinkConfig {
+            upsert_key_columns, ..
+        } = &mut self
+        {
+            *upsert_key_columns = columns;
+        }
+        self
+    }
+}
+
 impl std::fmt::Display for SinkConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

@@ -18,6 +18,7 @@ pub(crate) use docker::DockerCluster;
 pub(crate) use kube::KubeCluster;
 pub(crate) use local::LocalCluster;
 
+use crate::api::spec::connectors::SinkSpec;
 use crate::api::PipelineSpec;
 use crate::runtime::consts::RuntimeConstsProfile;
 
@@ -67,8 +68,6 @@ pub struct PipelineLaunchSpec {
     /// Kube only: sets `volga.io/runtime-consts-profile`. Default [`RuntimeConstsProfile::KubeTest`].
     /// In-process local masters already pick `local_test` via `cfg!(test)`.
     pub runtime_consts_profile: RuntimeConstsProfile,
-    /// When non-empty, in-memory sink upserts rows into the keyed map by these columns.
-    pub upsert_key_columns: Vec<String>,
 }
 
 impl PipelineLaunchSpec {
@@ -79,7 +78,6 @@ impl PipelineLaunchSpec {
             expected_output_rows,
             kube_worker_health_poll: true,
             runtime_consts_profile: RuntimeConstsProfile::KubeTest,
-            upsert_key_columns: Vec::new(),
         }
     }
 
@@ -92,9 +90,13 @@ impl PipelineLaunchSpec {
         self.runtime_consts_profile = profile;
         self
     }
+}
 
-    pub fn with_upsert_key_columns(mut self, columns: Vec<String>) -> Self {
-        self.upsert_key_columns = columns;
-        self
-    }
+/// Install/replace the in-memory gRPC sink address, preserving any upsert keys already on the pipeline.
+pub(crate) fn install_in_memory_sink(pipeline: &mut PipelineSpec, server_addr: impl Into<String>) {
+    let server_addr = server_addr.into();
+    pipeline.sink = Some(match pipeline.sink.take() {
+        Some(sink @ SinkSpec::InMemoryStorageGrpc { .. }) => sink.with_server_addr(server_addr),
+        _ => SinkSpec::in_memory_grpc(server_addr),
+    });
 }

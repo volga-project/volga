@@ -16,9 +16,7 @@ use crate::common::message::Message;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::functions::source::source_function::{FetchResult, SourceFunctionTrait};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::operators::source::{
-    race_interruptible, SourceInterrupt, SourceStats,
-};
+use crate::runtime::operators::source::{race_interruptible, SourceInterrupt};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KafkaSourceSpec {
@@ -217,11 +215,7 @@ impl KafkaSourceFunction {
 
 #[async_trait::async_trait]
 impl SourceFunctionTrait for KafkaSourceFunction {
-    async fn fetch(
-        &mut self,
-        interrupt: Option<&SourceInterrupt>,
-        _stats: Option<&SourceStats>,
-    ) -> FetchResult {
+    async fn fetch(&mut self, interrupt: Option<&SourceInterrupt>) -> FetchResult {
         let max_records = self.config.spec.max_batch_records.unwrap_or(usize::MAX).max(1);
         let max_bytes = self.config.spec.max_batch_bytes.unwrap_or(usize::MAX).max(1);
         let poll_timeout = Duration::from_millis(self.config.spec.poll_timeout_ms.max(1));

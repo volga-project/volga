@@ -11,7 +11,7 @@ use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode};
 use crate::runtime::consts::{runtime_consts, MASTER_REGISTRY_WAIT_TICK};
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
+use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 use super::checkpoint::{
@@ -21,7 +21,6 @@ use super::checkpoint::{
 use super::events::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord, LifecycleJournal,
 };
-use super::worker_client::WorkerClient;
 use super::MasterConfig;
 
 pub(super) struct PipelineContext {
@@ -125,12 +124,6 @@ impl fmt::Display for WorkerReadinessError {
     }
 }
 
-#[derive(Clone)]
-pub(super) struct ActiveWorkerEndpoint {
-    pub worker_id: String,
-    pub worker_ip: String,
-}
-
 pub(super) struct MasterState {
     config: Mutex<Option<MasterConfig>>,
     checkpoint_registry: Mutex<MasterCheckpointRegistry>,
@@ -140,8 +133,6 @@ pub(super) struct MasterState {
     lifecycle_events: Mutex<LifecycleJournal>,
     lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
     current_attempt_id: AtomicU64,
-    /// Endpoints for the currently scheduled attempt (for force CP / stop / stats RPCs).
-    active_worker_endpoints: Mutex<Vec<ActiveWorkerEndpoint>>,
 }
 
 impl MasterState {
@@ -156,7 +147,6 @@ impl MasterState {
             lifecycle_events: Mutex::new(LifecycleJournal::default()),
             lifecycle_event_tx,
             current_attempt_id: AtomicU64::new(0),
-            active_worker_endpoints: Mutex::new(Vec::new()),
         }
     }
 
@@ -209,14 +199,6 @@ impl MasterState {
 
     pub(super) fn current_attempt_id(&self) -> u64 {
         self.current_attempt_id.load(Ordering::SeqCst)
-    }
-
-    pub(super) async fn set_active_worker_endpoints(&self, endpoints: Vec<ActiveWorkerEndpoint>) {
-        *self.active_worker_endpoints.lock().await = endpoints;
-    }
-
-    pub(super) async fn clear_active_worker_endpoints(&self) {
-        self.active_worker_endpoints.lock().await.clear();
     }
 
     pub(super) async fn begin_checkpoint(
@@ -391,41 +373,8 @@ impl MasterState {
             .is_empty()
     }
 
-    pub(super) async fn open_active_worker_clients(&self) -> Vec<(String, WorkerClient)> {
-        let endpoints = self.active_worker_endpoints.lock().await.clone();
-        let attempt_id = self.current_attempt_id();
-        let mut clients = Vec::new();
-        for endpoint in endpoints {
-            match WorkerClient::open(
-                &endpoint.worker_id,
-                endpoint.worker_ip.clone(),
-                attempt_id,
-            )
-            .await
-            {
-                Ok(client) => clients.push((endpoint.worker_id, client)),
-                Err(error) => {
-                    println!(
-                        "[MASTER] Failed to open worker {} for control RPC: {}",
-                        endpoint.worker_id, error
-                    );
-                }
-            }
-        }
-        clients
-    }
-
     pub(super) async fn publish_snapshot(&self, snapshot: PipelineSnapshot) {
         *self.latest_pipeline_snapshot.lock().await = Some(snapshot);
-    }
-
-    pub(super) async fn worker_states(&self) -> HashMap<String, WorkerSnapshot> {
-        self.latest_pipeline_snapshot
-            .lock()
-            .await
-            .as_ref()
-            .map(|snapshot| snapshot.worker_states.clone())
-            .unwrap_or_default()
     }
 
     pub(super) async fn latest_pipeline_snapshot(&self) -> Option<PipelineSnapshot> {

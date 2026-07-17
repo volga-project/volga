@@ -82,10 +82,10 @@ fn test_worker_execution() -> Result<()> {
             schema,
         ),
     );
-    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig {
-        server_addr: format!("http://{}", storage_server_addr),
-        upsert_key_columns: vec![],
-    });
+    connector_configs.sink = Some(SinkConfig::in_memory_grpc(format!(
+        "http://{}",
+        storage_server_addr
+    )));
     let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     let vector_messages = runtime.block_on(async {

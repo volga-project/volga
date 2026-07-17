@@ -1,8 +1,7 @@
 //! Per-source interrupt + emit stats for source tasks.
 //!
 //! - [`SourceInterrupt`]: checkpointable sources use `sleep` / `race` for prompt barrier yield.
-//! - [`SourceStats`]: rows emitted (updated by [`super::source_operator::SourceOperator`]);
-//!   exposed as task poll metadata.
+//! - [`SourceStats`]: rows emitted by [`super::source_operator::SourceOperator`]; task metadata.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -50,42 +49,30 @@ impl SourceInterrupt {
     }
 }
 
-/// Shared per-source emit counter (and labels) for snapshots / source logic.
-#[derive(Debug)]
+/// Shared per-source emit counter for task metadata (updated by [`super::source_operator::SourceOperator`]).
+#[derive(Debug, Default)]
 pub struct SourceStats {
-    records_emitted: Arc<AtomicU64>,
-    task_index: i32,
+    records_generated: AtomicU64,
 }
 
 impl SourceStats {
-    pub fn new(task_index: i32) -> Self {
-        Self {
-            records_emitted: Arc::new(AtomicU64::new(0)),
-            task_index,
-        }
+    pub fn new() -> Self {
+        Self::default()
     }
 
-    pub fn task_index(&self) -> i32 {
-        self.task_index
-    }
-
-    pub fn records_emitted(&self) -> u64 {
-        self.records_emitted.load(Ordering::SeqCst)
-    }
-
-    pub fn records_emitted_arc(&self) -> Arc<AtomicU64> {
-        self.records_emitted.clone()
+    pub fn records_generated(&self) -> u64 {
+        self.records_generated.load(Ordering::SeqCst)
     }
 
     pub fn add_records(&self, n: usize) {
         if n > 0 {
-            self.records_emitted
+            self.records_generated
                 .fetch_add(n as u64, Ordering::SeqCst);
         }
     }
 
-    pub fn set_records_emitted(&self, n: u64) {
-        self.records_emitted.store(n, Ordering::SeqCst);
+    pub fn set_records_generated(&self, n: u64) {
+        self.records_generated.store(n, Ordering::SeqCst);
     }
 }
 
@@ -108,10 +95,10 @@ pub struct SourceHandle {
 }
 
 impl SourceHandle {
-    fn new(task_index: i32) -> Self {
+    fn new() -> Self {
         Self {
             interrupt: Arc::new(SourceInterrupt::new()),
-            stats: Arc::new(SourceStats::new(task_index)),
+            stats: Arc::new(SourceStats::new()),
         }
     }
 }
@@ -132,11 +119,11 @@ impl SourceHandles {
     }
 
     /// Get or create the handle for a source vertex.
-    pub fn register(&self, vertex_id: VertexId, task_index: i32) -> Arc<SourceHandle> {
+    pub fn register(&self, vertex_id: VertexId) -> Arc<SourceHandle> {
         let mut guard = self.inner.lock().unwrap();
         guard
             .entry(vertex_id)
-            .or_insert_with(|| Arc::new(SourceHandle::new(task_index)))
+            .or_insert_with(|| Arc::new(SourceHandle::new()))
             .clone()
     }
 
@@ -158,11 +145,7 @@ impl SourceHandles {
         let mut meta = HashMap::new();
         meta.insert(
             crate::runtime::observability::task_meta::RECORDS_GENERATED.to_string(),
-            handle.stats.records_emitted().to_string(),
-        );
-        meta.insert(
-            crate::runtime::observability::task_meta::TASK_INDEX.to_string(),
-            handle.stats.task_index().to_string(),
+            handle.stats.records_generated().to_string(),
         );
         meta
     }

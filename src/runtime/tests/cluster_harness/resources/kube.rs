@@ -7,7 +7,6 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::api::spec::connectors::SinkSpec;
 use crate::api::PipelineSpec;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
@@ -146,7 +145,6 @@ impl KubeClusterResources {
             launch.worker_count,
             launch.kube_worker_health_poll,
             launch.runtime_consts_profile,
-            launch.upsert_key_columns.clone(),
         )?;
         kubectl(&["apply", "-f", manifest_path.to_str().unwrap()])?;
         wait_for_pipeline(&pipeline_name)?;
@@ -253,12 +251,11 @@ fn write_pipeline_manifest(
     worker_count: usize,
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
-    upsert_key_columns: Vec<String>,
 ) -> Result<PathBuf> {
-    pipeline.sink = Some(SinkSpec::InMemoryStorageGrpc {
-        server_addr: "http://volga-test-storage.default.svc.cluster.local:50071".to_string(),
-        upsert_key_columns,
-    });
+    super::install_in_memory_sink(
+        &mut pipeline,
+        "http://volga-test-storage.default.svc.cluster.local:50071",
+    );
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;

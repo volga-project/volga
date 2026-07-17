@@ -6,7 +6,7 @@ use crate::runtime::functions::source::HttpRequestSourceFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
-use crate::runtime::operators::source::{SourceInterrupt, SourceStats};
+use crate::runtime::operators::source::SourceInterrupt;
 use std::any::Any;
 use super::vector_source::VectorSourceFunction;
 use super::word_count_source::WordCountSourceFunction;
@@ -50,11 +50,7 @@ impl FetchResult {
 
 #[async_trait]
 pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
-    async fn fetch(
-        &mut self,
-        interrupt: Option<&SourceInterrupt>,
-        stats: Option<&SourceStats>,
-    ) -> FetchResult;
+    async fn fetch(&mut self, interrupt: Option<&SourceInterrupt>) -> FetchResult;
 
     async fn snapshot_position(&self) -> Result<Vec<u8>> {
         Ok(vec![])
@@ -62,6 +58,11 @@ pub trait SourceFunctionTrait: Send + Sync + fmt::Debug {
 
     async fn restore_position(&mut self, _bytes: &[u8]) -> Result<()> {
         Ok(())
+    }
+
+    /// Local emit progress after restore (for syncing task metadata). Most sources: `None`.
+    fn emit_count(&self) -> Option<u64> {
+        None
     }
 }
 
@@ -90,18 +91,14 @@ impl fmt::Display for SourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for SourceFunction {
-    async fn fetch(
-        &mut self,
-        interrupt: Option<&SourceInterrupt>,
-        stats: Option<&SourceStats>,
-    ) -> FetchResult {
+    async fn fetch(&mut self, interrupt: Option<&SourceInterrupt>) -> FetchResult {
         match self {
-            SourceFunction::Vector(f) => f.fetch(interrupt, stats).await,
-            SourceFunction::WordCount(f) => f.fetch(interrupt, stats).await,
-            SourceFunction::Datagen(f) => f.fetch(interrupt, stats).await,
-            SourceFunction::HttpRequest(f) => f.fetch(interrupt, stats).await,
-            SourceFunction::Kafka(f) => f.fetch(interrupt, stats).await,
-            SourceFunction::Parquet(f) => f.fetch(interrupt, stats).await,
+            SourceFunction::Vector(f) => f.fetch(interrupt).await,
+            SourceFunction::WordCount(f) => f.fetch(interrupt).await,
+            SourceFunction::Datagen(f) => f.fetch(interrupt).await,
+            SourceFunction::HttpRequest(f) => f.fetch(interrupt).await,
+            SourceFunction::Kafka(f) => f.fetch(interrupt).await,
+            SourceFunction::Parquet(f) => f.fetch(interrupt).await,
         }
     }
 
@@ -124,6 +121,13 @@ impl SourceFunctionTrait for SourceFunction {
             SourceFunction::HttpRequest(f) => f.restore_position(bytes).await,
             SourceFunction::Kafka(f) => f.restore_position(bytes).await,
             SourceFunction::Parquet(f) => f.restore_position(bytes).await,
+        }
+    }
+
+    fn emit_count(&self) -> Option<u64> {
+        match self {
+            SourceFunction::Datagen(f) => f.emit_count(),
+            _ => None,
         }
     }
 }

@@ -34,7 +34,6 @@ impl From<u8> for StreamTaskStatus {
 /// Convention keys for [`TaskSnapshot::metadata`] / [`WorkerSnapshot::task_metadata`].
 pub mod task_meta {
     pub const RECORDS_GENERATED: &str = "records_generated";
-    pub const TASK_INDEX: &str = "task_index";
 }
 
 #[derive(Debug, Clone)]
