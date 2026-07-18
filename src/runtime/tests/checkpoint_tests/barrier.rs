@@ -11,7 +11,8 @@ use crate::runtime::tests::cluster_harness::{
 use crate::runtime::tests::recovery_tests::RecoveryTimeouts;
 
 use super::support::{
-    harness_finish_pipeline, wait_for_checkpoint_completed, wait_until_attempt0_running,
+    harness_finish_pipeline, shutdown_after, wait_for_checkpoint_completed,
+    wait_until_attempt0_running,
 };
 
 /// Wait for an interval checkpoint and verify barrier propagation events.
@@ -21,26 +22,31 @@ pub async fn run_checkpoint_barrier_path(
 ) -> Result<u64> {
     let timeouts = RecoveryTimeouts::for_env(env);
     let cluster = TestCluster::launch(env, launch).await?;
-    let mut cursor = 0;
+    let result = async {
+        let mut cursor = 0;
 
-    cluster.start_execution().await?;
-    wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running).await?;
+        cluster.start_execution().await?;
+        wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running)
+            .await?;
 
-    let checkpoint_id = wait_for_checkpoint_completed(
-        &cluster.master(),
-        &mut cursor,
-        timeouts.attempt_running,
-    )
-    .await?;
+        let checkpoint_id = wait_for_checkpoint_completed(
+            &cluster.master(),
+            &mut cursor,
+            timeouts.attempt_running,
+        )
+        .await?;
 
-    let events = cluster.master().lifecycle_events_since(0).await?;
-    assert_checkpoint_barrier_path(&events, checkpoint_id)?;
+        let events = cluster.master().lifecycle_events_since(0).await?;
+        assert_checkpoint_barrier_path(&events, checkpoint_id)?;
 
-    harness_finish_pipeline(&cluster, &mut cursor, env, 0).await?;
+        harness_finish_pipeline(&cluster, &mut cursor, env, 0).await?;
 
-    let events = cluster.master().lifecycle_events_since(0).await?;
-    RecoveryReport::from_events(&events).print();
-    Ok(checkpoint_id)
+        let events = cluster.master().lifecycle_events_since(0).await?;
+        RecoveryReport::from_events(&events).print();
+        Ok(checkpoint_id)
+    }
+    .await;
+    shutdown_after(&cluster, result).await
 }
 
 /// Assert barrier path for one checkpoint.

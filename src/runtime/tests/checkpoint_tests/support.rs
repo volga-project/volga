@@ -84,3 +84,14 @@ pub(super) async fn harness_finish_pipeline(
     .await?;
     Ok(())
 }
+
+/// Always tear down cluster resources (kube `VolgaPipeline` delete, local workers, etc.).
+pub(super) async fn shutdown_after<T>(cluster: &TestCluster, result: Result<T>) -> Result<T> {
+    match cluster.shutdown().await {
+        Ok(()) => result,
+        Err(shutdown_err) => match result {
+            Ok(_) => Err(shutdown_err),
+            Err(test_err) => Err(test_err),
+        },
+    }
+}

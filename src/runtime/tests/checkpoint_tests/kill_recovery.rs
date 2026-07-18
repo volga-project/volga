@@ -9,7 +9,10 @@ use crate::runtime::tests::cluster_harness::{
 use crate::runtime::tests::recovery_tests::RecoveryTimeouts;
 
 use super::sink_oracle::assert_sink_matches_offline_datagen;
-use super::support::{harness_finish_pipeline, wait_for_checkpoint_completed, wait_until_attempt0_running};
+use super::support::{
+    harness_finish_pipeline, shutdown_after, wait_for_checkpoint_completed,
+    wait_until_attempt0_running,
+};
 
 /// One kill after the first completed checkpoint, then finish + sink check.
 pub async fn run_checkpoint_worker_kill_recovery(
@@ -33,93 +36,98 @@ pub async fn run_checkpoint_sequential_failures(
     }
     let timeouts = RecoveryTimeouts::for_env(env);
     let cluster = TestCluster::launch(env, launch).await?;
-    let worker_ids = cluster.worker_ids();
-    if worker_ids.is_empty() {
-        return Err(anyhow!("expected at least one worker"));
-    }
-    let mut cursor = 0;
-    let mut next_attempt: u64 = 1;
+    let result = async {
+        let worker_ids = cluster.worker_ids();
+        if worker_ids.is_empty() {
+            return Err(anyhow!("expected at least one worker"));
+        }
+        let mut cursor = 0;
+        let mut next_attempt: u64 = 1;
 
-    cluster.start_execution().await?;
-    wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running).await?;
-
-    for failure_idx in 0..failure_count {
-        let checkpoint_id = wait_for_checkpoint_completed(
-            &cluster.master(),
-            &mut cursor,
-            timeouts.attempt_running,
-        )
-        .await?;
-
-        let target = &worker_ids[failure_idx % worker_ids.len()];
-        println!(
-            "[TEST] sequential-failure {}/{} kill worker={target} after checkpoint>={checkpoint_id}",
-            failure_idx + 1,
-            failure_count
-        );
-        cluster
-            .worker(target)
-            .ok_or_else(|| anyhow!("missing worker {target}"))?
-            .kill_with(mode)
+        cluster.start_execution().await?;
+        wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running)
             .await?;
 
-        // Restore id may be > waited id if another CP completed before the kill landed.
-        let started = LifecycleOracle::wait_for(
-            &cluster.master(),
-            &mut cursor,
-            timeouts.recovery_started + timeouts.replacement + timeouts.attempt1_running,
-            |event| {
-                matches!(
-                    event,
-                    LifecycleEvent::AttemptStarted {
-                        restore_checkpoint_id: Some(id),
-                        ..
-                    } if *id >= checkpoint_id
-                )
-            },
-        )
-        .await?;
-        let attempt_id = match started.event {
-            LifecycleEvent::AttemptStarted { attempt_id, .. } => attempt_id,
-            other => {
+        for failure_idx in 0..failure_count {
+            let checkpoint_id = wait_for_checkpoint_completed(
+                &cluster.master(),
+                &mut cursor,
+                timeouts.attempt_running,
+            )
+            .await?;
+
+            let target = &worker_ids[failure_idx % worker_ids.len()];
+            println!(
+                "[TEST] sequential-failure {}/{} kill worker={target} after checkpoint>={checkpoint_id}",
+                failure_idx + 1,
+                failure_count
+            );
+            cluster
+                .worker(target)
+                .ok_or_else(|| anyhow!("missing worker {target}"))?
+                .kill_with(mode)
+                .await?;
+
+            // Restore id may be > waited id if another CP completed before the kill landed.
+            let started = LifecycleOracle::wait_for(
+                &cluster.master(),
+                &mut cursor,
+                timeouts.recovery_started + timeouts.replacement + timeouts.attempt1_running,
+                |event| {
+                    matches!(
+                        event,
+                        LifecycleEvent::AttemptStarted {
+                            restore_checkpoint_id: Some(id),
+                            ..
+                        } if *id >= checkpoint_id
+                    )
+                },
+            )
+            .await?;
+            let attempt_id = match started.event {
+                LifecycleEvent::AttemptStarted { attempt_id, .. } => attempt_id,
+                other => {
+                    return Err(anyhow!(
+                        "expected AttemptStarted after kill, got {other:?}"
+                    ))
+                }
+            };
+            if attempt_id < next_attempt {
                 return Err(anyhow!(
-                    "expected AttemptStarted after kill, got {other:?}"
-                ))
+                    "expected attempt_id >= {next_attempt} after failure {failure_idx}, got {attempt_id}"
+                ));
             }
-        };
-        if attempt_id < next_attempt {
-            return Err(anyhow!(
-                "expected attempt_id >= {next_attempt} after failure {failure_idx}, got {attempt_id}"
-            ));
+            next_attempt = attempt_id + 1;
+
+            LifecycleOracle::wait_for(
+                &cluster.master(),
+                &mut cursor,
+                timeouts.attempt1_running,
+                |event| {
+                    matches!(
+                        event,
+                        LifecycleEvent::AttemptRunning {
+                            attempt_id: id,
+                            ..
+                        } if *id == attempt_id
+                    )
+                },
+            )
+            .await?;
         }
-        next_attempt = attempt_id + 1;
 
-        LifecycleOracle::wait_for(
-            &cluster.master(),
-            &mut cursor,
-            timeouts.attempt1_running,
-            |event| {
-                matches!(
-                    event,
-                    LifecycleEvent::AttemptRunning {
-                        attempt_id: id,
-                        ..
-                    } if *id == attempt_id
-                )
-            },
-        )
-        .await?;
+        harness_finish_pipeline(&cluster, &mut cursor, env, failure_count).await?;
+
+        let snapshot = cluster.storage().snapshot().await?;
+        assert_sink_matches_offline_datagen(&cluster.master(), &snapshot, env).await?;
+
+        let events = cluster.master().lifecycle_events_since(0).await?;
+        let report = RecoveryReport::from_events(&events);
+        report.print();
+        Ok(report)
     }
-
-    harness_finish_pipeline(&cluster, &mut cursor, env, failure_count).await?;
-
-    let snapshot = cluster.storage().snapshot().await?;
-    assert_sink_matches_offline_datagen(&cluster.master(), &snapshot).await?;
-
-    let events = cluster.master().lifecycle_events_since(0).await?;
-    let report = RecoveryReport::from_events(&events);
-    report.print();
-    Ok(report)
+    .await;
+    shutdown_after(&cluster, result).await
 }
 
 pub fn assert_checkpoint_restore(

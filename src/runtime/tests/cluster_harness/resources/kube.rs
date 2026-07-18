@@ -204,7 +204,17 @@ impl KubeClusterResources {
     }
 
     pub fn delete_worker_pod(&self, worker_id: &str) -> Result<()> {
-        kubectl(&["-n", "default", "delete", "pod", worker_id])?;
+        // grace-period=0: stop serving ASAP so in-flight checkpoints cannot complete
+        // during the default termination window (mid-flight kill tests).
+        kubectl(&[
+            "-n",
+            "default",
+            "delete",
+            "pod",
+            worker_id,
+            "--grace-period=0",
+            "--force",
+        ])?;
         Ok(())
     }
 
