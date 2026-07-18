@@ -314,6 +314,10 @@ impl SinkFunctionTrait for ParquetSinkFunction {
         }
         self.put_payloads_bounded(store, payloads).await
     }
+
+    async fn flush(&mut self) -> Result<()> {
+        self.flush_all().await
+    }
 }
 
 #[async_trait]

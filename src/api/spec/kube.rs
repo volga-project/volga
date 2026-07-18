@@ -160,7 +160,7 @@ mod tests {
             })
         );
         match &spec.sink {
-            Some(SinkSpec::InMemoryStorageGrpc { server_addr }) => {
+            Some(SinkSpec::InMemoryStorageGrpc { server_addr, .. }) => {
                 assert_eq!(
                     server_addr,
                     "http://volga-test-storage.default.svc.cluster.local:50071"

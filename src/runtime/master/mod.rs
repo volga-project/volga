@@ -1,11 +1,10 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master::checkpoint::TaskKey;
-use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
+use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 
 pub mod worker_service {
     tonic::include_proto!("worker_service");
@@ -24,7 +23,7 @@ mod worker_client;
 
 use lifecycle::MasterLifecycle;
 use state::MasterState;
-pub use events::{LifecycleEvent, LifecycleEventRecord};
+pub use events::{CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord};
 
 /// Master that orchestrates multiple worker servers.
 pub struct Master {
@@ -84,10 +83,23 @@ impl Master {
         checkpoint_id: u64,
         task: TaskKey,
         blobs: Vec<(String, Vec<u8>)>,
-    ) {
+        execution_attempt_id: u64,
+    ) -> Result<(), String> {
         self.state
-            .report_checkpoint(checkpoint_id, task, blobs)
-            .await;
+            .report_checkpoint(checkpoint_id, task, blobs, execution_attempt_id)
+            .await
+    }
+
+    pub async fn report_checkpoint_propagation(
+        &self,
+        checkpoint_id: u64,
+        task: TaskKey,
+        execution_attempt_id: u64,
+        phase: CheckpointPropagationPhase,
+    ) -> Result<(), String> {
+        self.state
+            .report_checkpoint_propagation(checkpoint_id, task, execution_attempt_id, phase)
+            .await
     }
 
     pub async fn get_task_checkpoint(
@@ -102,8 +114,61 @@ impl Master {
         self.state.latest_complete_checkpoint().await
     }
 
-    pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
-        self.state.worker_states().await
+    /// Fan out cooperative source stop to workers on the current execution attempt.
+    pub async fn stop_sources(&self) -> Result<(), String> {
+        let (execution_attempt_id, workers) = self
+            .state
+            .current_execution_worker_endpoints()
+            .await
+            .ok_or_else(|| "no workers on current execution attempt".to_string())?;
+        let futures = workers.iter().map(|(worker_id, addr)| {
+            let worker_id = worker_id.clone();
+            let addr = addr.clone();
+            async move {
+                let client =
+                    worker_client::WorkerClient::open(&worker_id, addr, execution_attempt_id)
+                        .await
+                        .map_err(|e| format!("{worker_id}: {e}"))?;
+                match client.stop_sources().await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(format!("{worker_id}: stop_sources rejected")),
+                    Err(e) => Err(format!("{worker_id}: {e}")),
+                }
+            }
+        });
+        let mut errors = Vec::new();
+        for result in futures::future::join_all(futures).await {
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            println!(
+                "[MASTER] StopSources ok execution_attempt={} workers={}",
+                execution_attempt_id,
+                workers.len()
+            );
+            Ok(())
+        } else {
+            Err(format!("stop_sources failed: {}", errors.join("; ")))
+        }
+    }
+
+    /// Begin a checkpoint without going through the run-loop.
+    /// Used by tests that drive workers outside `Master::execute`.
+    #[cfg(test)]
+    pub async fn start_checkpoint(&self) -> Result<u64, String> {
+        self.state
+            .begin_checkpoint(self.state.current_attempt_id())
+            .await
+            .map_err(|error| match error {
+                crate::runtime::master::checkpoint::CheckpointStartError::AlreadyInFlight {
+                    checkpoint_id,
+                } => format!("already in flight checkpoint_id={checkpoint_id}"),
+                crate::runtime::master::checkpoint::CheckpointStartError::NoCheckpointableTasks => {
+                    "no checkpointable tasks".to_string()
+                }
+            })
     }
 
     pub async fn get_latest_pipeline_snapshot(&self) -> Option<PipelineSnapshot> {

@@ -296,9 +296,10 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
         // request mode has no direct sink
         spec_builder = spec_builder.with_execution_mode(ExecutionMode::Request);
     } else {
-        spec_builder = spec_builder.with_sink(SinkSpec::InMemoryStorageGrpc {
-            server_addr: format!("http://{}", storage_server_addr),
-        });
+        spec_builder = spec_builder.with_sink(SinkSpec::in_memory_grpc(format!(
+            "http://{}",
+            storage_server_addr
+        )));
         spec_builder = spec_builder.with_execution_mode(ExecutionMode::Streaming);
     }
 

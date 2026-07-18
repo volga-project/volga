@@ -15,7 +15,7 @@ service InMemoryStorageService {
   
   // Insert multiple keyed messages into map storage
   rpc InsertKeyedMany(InsertKeyedManyRequest) returns (InsertKeyedManyResponse);
-  
+
   // Get all messages from vector storage
   rpc GetVector(GetVectorRequest) returns (GetVectorResponse);
   
@@ -96,7 +96,7 @@ message GetMapResponse {
   bool success = 1;
   string error_message = 2;
   map<string, bytes> keyed_messages = 3;
-} 
+}
 
 // Request message for DrainVector
 message DrainVectorRequest {

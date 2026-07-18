@@ -82,7 +82,7 @@ fn test_worker_execution() -> Result<()> {
             schema,
         ),
     );
-    connector_configs.sink = Some(SinkConfig::InMemoryStorageGrpcSinkConfig(format!(
+    connector_configs.sink = Some(SinkConfig::in_memory_grpc(format!(
         "http://{}",
         storage_server_addr
     )));

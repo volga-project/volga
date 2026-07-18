@@ -1,9 +1,20 @@
 use anyhow::Result;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+use std::sync::Arc;
 
-use crate::{common::Message, runtime::{functions::source::{create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig, parquet::ParquetSourceConfig, word_count_source::BatchingMode, RequestSourceConfig, SourceFunction, SourceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
-
+use crate::common::Message;
+use crate::runtime::functions::source::{
+    create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig,
+    parquet::ParquetSourceConfig, word_count_source::BatchingMode, FetchResult,
+    RequestSourceConfig, SourceFunction, SourceFunctionTrait,
+};
+use crate::runtime::operators::operator::{
+    operator_config_requires_checkpoint, MessageStream, OperatorBase, OperatorConfig,
+    OperatorPollResult, OperatorTrait, OperatorType,
+};
+use crate::runtime::runtime_context::RuntimeContext;
+use super::source_handles::{SourceHandle, SourceInterrupt};
 
 #[derive(Debug, Clone)]
 pub struct VectorSourceConfig {
@@ -126,6 +137,7 @@ impl std::fmt::Display for SourceConfig {
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
+    handle: Option<Arc<SourceHandle>>,
 }
 
 impl SourceOperator {
@@ -137,14 +149,27 @@ impl SourceOperator {
         let source_function = create_source_function(source_config);
         Self {
             base: OperatorBase::new_with_function(source_function, config),
+            handle: None,
         }
+    }
+
+    /// Interrupt is only used for checkpointable sources (barrier yield).
+    fn checkpoint_interrupt_arc(&self) -> Option<Arc<SourceInterrupt>> {
+        if !operator_config_requires_checkpoint(self.operator_config()) {
+            return None;
+        }
+        self.handle.as_ref().map(|h| h.interrupt.clone())
     }
 }
 
 #[async_trait]
 impl OperatorTrait for SourceOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        self.base.open(context).await
+        if let Some(handles) = context.source_handles() {
+            self.handle = Some(handles.register(context.vertex_id_arc()));
+        }
+        self.base.open(context).await?;
+        Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
@@ -164,30 +189,63 @@ impl OperatorTrait for SourceOperator {
     }
 
     async fn poll_next(&mut self) -> OperatorPollResult {
-        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        let msg = function.fetch().await;
+        if self.handle.as_ref().is_some_and(|h| h.is_stopped()) {
+            return OperatorPollResult::None;
+        }
 
-        // TODO test
-        // Apply projection if present
-        match msg {
-            Some(Message::Watermark(watermark)) => {
-                return OperatorPollResult::Ready(Message::Watermark(watermark));
+        let interrupt = self.checkpoint_interrupt_arc();
+
+        // Wake arrived between fetches: yield before pulling more data.
+        if interrupt
+            .as_ref()
+            .is_some_and(|interrupt| interrupt.take_canceled())
+        {
+            return OperatorPollResult::Continue;
+        }
+
+        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
+        match function.fetch(interrupt.as_deref()).await {
+            FetchResult::Interrupted => OperatorPollResult::Continue,
+            FetchResult::Data(Message::Watermark(watermark)) => {
+                OperatorPollResult::Ready(Message::Watermark(watermark))
             }
-            Some(message) => OperatorPollResult::Ready(message),
-            None => OperatorPollResult::None,
+            FetchResult::Data(message) => {
+                if let Some(handle) = self.handle.as_ref() {
+                    match &message {
+                        Message::Regular(_) | Message::Keyed(_) => {
+                            handle.stats.add_records(message.num_records());
+                        }
+                        Message::Watermark(_) | Message::CheckpointBarrier(_) => {}
+                    }
+                }
+                OperatorPollResult::Ready(message)
+            }
+            FetchResult::Idle => OperatorPollResult::None,
         }
     }
 
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
         let pos = function.snapshot_position().await?;
+        if pos.is_empty() {
+            return Err(anyhow::anyhow!(
+                "checkpointable source produced empty source_position blob"
+            ));
+        }
         Ok(vec![("source_position".to_string(), pos)])
     }
 
     async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        if let Some((_, bytes)) = blobs.iter().find(|(name, _)| name == "source_position") {
-            function.restore_position(bytes).await?;
+        let Some((_, bytes)) = blobs.iter().find(|(name, _)| name == "source_position") else {
+            return Err(anyhow::anyhow!("missing source_position blob on restore"));
+        };
+        if bytes.is_empty() {
+            return Err(anyhow::anyhow!("empty source_position blob on restore"));
+        }
+        function.restore_position(bytes).await?;
+        if let (Some(handle), Some(n)) = (self.handle.as_ref(), function.emit_count()) {
+            handle.stats.set_records_generated(n);
         }
         Ok(())
     }

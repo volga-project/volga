@@ -5,6 +5,7 @@ use anyhow::Result;
 use super::cluster::ClusterInner;
 use super::{FaultAction, WorkerKillMode};
 use crate::runtime::master::LifecycleEventRecord;
+use crate::runtime::observability::PipelineSnapshot;
 use crate::storage::InMemoryStorageSnapshot;
 
 #[derive(Clone)]
@@ -45,6 +46,20 @@ impl MasterHandle {
             .await
             .lifecycle_events_since(sequence)
             .await
+    }
+
+    pub async fn latest_pipeline_snapshot(&self) -> Result<Option<PipelineSnapshot>> {
+        self.inner
+            .backend
+            .lock()
+            .await
+            .latest_pipeline_snapshot()
+            .await
+    }
+
+    /// Cooperative source stop → drain → `PipelineFinished`.
+    pub async fn stop_sources(&self) -> Result<()> {
+        self.inner.backend.lock().await.stop_sources().await
     }
 }
 

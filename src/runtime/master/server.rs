@@ -1,11 +1,9 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::service::MasterServiceImpl;
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::master::MasterConfig;
 use crate::runtime::master::LifecycleEventRecord;
-use crate::runtime::observability::WorkerSnapshot;
 
 pub mod master_service {
     tonic::include_proto!("master_service");
@@ -37,10 +35,6 @@ impl MasterServer {
 
     pub fn master(&self) -> Arc<super::Master> {
         self.service.master()
-    }
-
-    pub async fn get_worker_states(&self) -> HashMap<String, WorkerSnapshot> {
-        self.service.master().get_worker_states().await
     }
 
     pub async fn lifecycle_events_since(&self, sequence: u64) -> Vec<LifecycleEventRecord> {

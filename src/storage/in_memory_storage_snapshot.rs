@@ -30,11 +30,14 @@ impl InMemoryStorageSnapshot {
     }
 
     pub fn record_batches(&self) -> impl Iterator<Item = &RecordBatch> {
-        self.vector_messages.iter().filter_map(|message| match message {
-            Message::Regular(message) => Some(&message.record_batch),
-            Message::Keyed(message) => Some(&message.base.record_batch),
-            Message::Watermark(_) | Message::CheckpointBarrier(_) => None,
-        })
+        self.vector_messages
+            .iter()
+            .chain(self.keyed_messages.values())
+            .filter_map(|message| match message {
+                Message::Regular(message) => Some(&message.record_batch),
+                Message::Keyed(message) => Some(&message.base.record_batch),
+                Message::Watermark(_) | Message::CheckpointBarrier(_) => None,
+            })
     }
 
     pub fn row_count(&self) -> usize {

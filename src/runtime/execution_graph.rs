@@ -159,6 +159,13 @@ impl ExecutionGraph {
         &self.vertices
     }
 
+    /// All tasks in the graph as `(vertex_id, task_index)`.
+    pub fn all_tasks(&self) -> impl Iterator<Item = (VertexId, i32)> + '_ {
+        self.vertices
+            .values()
+            .map(|v| (v.vertex_id.clone(), v.task_index))
+    }
+
     pub fn get_edges(&self) -> &HashMap<String, ExecutionEdge> {
         &self.edges
     }

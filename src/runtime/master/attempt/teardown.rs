@@ -12,6 +12,11 @@ impl ExecutionAttempt {
         &mut self,
         mut replace: HashSet<String>,
     ) -> anyhow::Result<()> {
+        self.state.clear_workers_execution_attempt().await;
+        let _ = self
+            .state
+            .abort_in_flight_checkpoint(self.id, "recovering".to_string())
+            .await;
         let reset_futures: Vec<_> = self
             .clients
             .drain()
@@ -64,6 +69,7 @@ impl ExecutionAttempt {
     }
 
     pub(in crate::runtime::master) async fn finish(&mut self) {
+        self.state.clear_workers_execution_attempt().await;
         let close_tasks: Vec<_> = self
             .clients
             .iter()

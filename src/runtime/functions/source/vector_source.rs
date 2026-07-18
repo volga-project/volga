@@ -4,7 +4,8 @@ use crate::common::message::Message;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
-use super::source_function::SourceFunctionTrait;
+use super::source_function::{FetchResult, SourceFunctionTrait};
+use crate::runtime::operators::source::SourceInterrupt;
 
 #[derive(Debug)]
 pub struct VectorSourceFunction {
@@ -42,12 +43,12 @@ impl FunctionTrait for VectorSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for VectorSourceFunction {
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(&mut self, _interrupt: Option<&SourceInterrupt>) -> FetchResult {
         if self.next_index >= self.messages.len() {
-            return None;
+            return FetchResult::Idle;
         }
         let msg = self.messages[self.next_index].clone();
         self.next_index += 1;
-        Some(msg)
+        FetchResult::Data(msg)
     }
 } 

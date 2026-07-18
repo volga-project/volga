@@ -104,9 +104,7 @@ pub(crate) async fn run_watermark_window_pipeline(
                 schema_to_json(&schema),
             ),
         )
-        .with_sink(SinkSpec::InMemoryStorageGrpc {
-            server_addr: format!("http://{}", storage_server_addr),
-        })
+        .with_sink(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr)))
         .sql(sql)
         .build();
 

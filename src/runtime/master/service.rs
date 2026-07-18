@@ -5,15 +5,16 @@ use tonic::{Request, Response, Status};
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::master::checkpoint::TaskKey;
 use crate::runtime::master::server::master_service::{
-    master_service_server::MasterService, GetLatestCompleteCheckpointRequest,
-    GetLatestCompleteCheckpointResponse, GetLatestPipelineSnapshotRequest,
-    GetLatestPipelineSnapshotResponse, GetLifecycleEventsRequest,
-    GetLifecycleEventsResponse, GetTaskCheckpointRequest, GetTaskCheckpointResponse,
-    LifecycleEventRecord,
-    RegisterWorkerRequest, RegisterWorkerResponse, ReportCheckpointRequest,
-    ReportCheckpointResponse, StateBlob,
+    master_service_server::MasterService, CheckpointPropagationPhase as ProtoPropagationPhase,
+    GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
+    GetLatestPipelineSnapshotRequest, GetLatestPipelineSnapshotResponse,
+    GetLifecycleEventsRequest, GetLifecycleEventsResponse, GetTaskCheckpointRequest,
+    GetTaskCheckpointResponse, LifecycleEventRecord, RegisterWorkerRequest,
+    RegisterWorkerResponse, ReportCheckpointPropagationRequest,
+    ReportCheckpointPropagationResponse, ReportCheckpointRequest, ReportCheckpointResponse,
+    StateBlob, StopSourcesRequest, StopSourcesResponse,
 };
-use crate::runtime::master::Master;
+use crate::runtime::master::{CheckpointPropagationPhase, Master};
 use crate::runtime::observability::PipelineSnapshot;
 
 /// Server implementation of MasterService
@@ -64,14 +65,60 @@ impl MasterService for MasterServiceImpl {
             .into_iter()
             .map(|b| (b.name, b.bytes))
             .collect::<Vec<_>>();
-        self.master
-            .report_checkpoint(checkpoint_id, task, blobs)
-            .await;
+        match self
+            .master
+            .report_checkpoint(checkpoint_id, task, blobs, req.execution_attempt_id)
+            .await
+        {
+            Ok(()) => Ok(Response::new(ReportCheckpointResponse {
+                success: true,
+                error_message: String::new(),
+            })),
+            Err(error_message) => Ok(Response::new(ReportCheckpointResponse {
+                success: false,
+                error_message,
+            })),
+        }
+    }
 
-        Ok(Response::new(ReportCheckpointResponse {
-            success: true,
-            error_message: String::new(),
-        }))
+    async fn report_checkpoint_propagation(
+        &self,
+        request: Request<ReportCheckpointPropagationRequest>,
+    ) -> Result<Response<ReportCheckpointPropagationResponse>, Status> {
+        let req = request.into_inner();
+        let phase = match ProtoPropagationPhase::try_from(req.phase) {
+            Ok(ProtoPropagationPhase::BarrierInjected) => CheckpointPropagationPhase::BarrierInjected,
+            Ok(ProtoPropagationPhase::Aligned) => CheckpointPropagationPhase::Aligned,
+            Ok(ProtoPropagationPhase::Unspecified) | Err(_) => {
+                return Ok(Response::new(ReportCheckpointPropagationResponse {
+                    success: false,
+                    error_message: format!("invalid checkpoint propagation phase {}", req.phase),
+                }));
+            }
+        };
+        let task = TaskKey {
+            vertex_id: req.vertex_id,
+            task_index: req.task_index,
+        };
+        match self
+            .master
+            .report_checkpoint_propagation(
+                req.checkpoint_id,
+                task,
+                req.execution_attempt_id,
+                phase,
+            )
+            .await
+        {
+            Ok(()) => Ok(Response::new(ReportCheckpointPropagationResponse {
+                success: true,
+                error_message: String::new(),
+            })),
+            Err(error_message) => Ok(Response::new(ReportCheckpointPropagationResponse {
+                success: false,
+                error_message,
+            })),
+        }
     }
 
     async fn get_task_checkpoint(
@@ -170,4 +217,21 @@ impl MasterService for MasterServiceImpl {
             .collect::<Result<Vec<_>, Status>>()?;
         Ok(Response::new(GetLifecycleEventsResponse { events }))
     }
+
+    async fn stop_sources(
+        &self,
+        _request: Request<StopSourcesRequest>,
+    ) -> Result<Response<StopSourcesResponse>, Status> {
+        match self.master.stop_sources().await {
+            Ok(()) => Ok(Response::new(StopSourcesResponse {
+                success: true,
+                error_message: String::new(),
+            })),
+            Err(error_message) => Ok(Response::new(StopSourcesResponse {
+                success: false,
+                error_message,
+            })),
+        }
+    }
+
 }

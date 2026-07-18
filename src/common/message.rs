@@ -238,13 +238,21 @@ impl WatermarkMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointBarrierMessage {
     pub checkpoint_id: u64,
+    /// Fences late barriers from a previous execution attempt after recovery.
+    pub execution_attempt_id: u64,
     pub metadata: MessageMetadata,
 }
 
 impl CheckpointBarrierMessage {
-    pub fn new(upstream_vertex_id: String, checkpoint_id: u64, ingest_timestamp: Option<u64>) -> Self {
+    pub fn new(
+        upstream_vertex_id: String,
+        checkpoint_id: u64,
+        execution_attempt_id: u64,
+        ingest_timestamp: Option<u64>,
+    ) -> Self {
         Self {
             checkpoint_id,
+            execution_attempt_id,
             metadata: MessageMetadata {
                 upstream_vertex_id: Some(upstream_vertex_id),
                 ingest_timestamp,

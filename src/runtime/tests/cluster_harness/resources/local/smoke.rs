@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use super::common::{LocalMaster, LocalStorage, LocalWorkerPool, WorkerServerSlot};
 use crate::api::compile_logical_graph;
-use crate::api::spec::connectors::SinkSpec;
 use crate::orchestrator::local::{LocalTestOrchestrator, LocalWorkerOrchestrator};
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::MasterConfig;
@@ -88,6 +87,32 @@ impl ClusterBackend for LocalCluster {
             .await)
     }
 
+    async fn latest_pipeline_snapshot(
+        &mut self,
+    ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
+        Ok(self
+            .resources
+            .as_ref()
+            .context("local cluster is not launched")?
+            .master
+            .server
+            .master()
+            .get_latest_pipeline_snapshot()
+            .await)
+    }
+
+    async fn stop_sources(&mut self) -> Result<()> {
+        self.resources
+            .as_ref()
+            .context("local cluster is not launched")?
+            .master
+            .server
+            .master()
+            .stop_sources()
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_mut().context("local cluster is not launched")?;
         match fault {
@@ -108,9 +133,7 @@ impl LocalClusterResources {
     pub async fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
         let storage = LocalStorage::start().await?;
         let mut spec = launch.pipeline;
-        spec.sink = Some(SinkSpec::InMemoryStorageGrpc {
-            server_addr: storage.endpoint(),
-        });
+        super::super::install_in_memory_sink(&mut spec, storage.endpoint());
         let logical_graph = compile_logical_graph(&spec, None);
         let local_orchestrator = LocalTestOrchestrator::new(
             launch.worker_count,

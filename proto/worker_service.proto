@@ -23,8 +23,11 @@ service WorkerService {
   // Shut down the worker after final pipeline teardown.
   rpc ShutdownWorker(ShutdownWorkerRequest) returns (ShutdownWorkerResponse);
 
-  // Trigger a checkpoint. Only source tasks should inject barriers.
-  rpc TriggerCheckpoint(TriggerCheckpointRequest) returns (TriggerCheckpointResponse);
+  // Inject a checkpoint barrier at source tasks (data-plane).
+  rpc TriggerCheckpointBarrier(TriggerCheckpointBarrierRequest) returns (TriggerCheckpointBarrierResponse);
+
+  // Cooperative source stop: sources go Idle → drain → PipelineFinished.
+  rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
 
   // Bidirectional health/heartbeat stream between master and worker.
   rpc StreamHeartbeat(stream MasterHeartbeatMessage) returns (stream WorkerHeartbeatMessage);
@@ -102,11 +105,21 @@ message ShutdownWorkerResponse {
   string error_message = 2;
 }
 
-message TriggerCheckpointRequest {
+message TriggerCheckpointBarrierRequest {
   uint64 checkpoint_id = 1;
+  uint64 execution_attempt_id = 2;
 }
 
-message TriggerCheckpointResponse {
+message TriggerCheckpointBarrierResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message StopSourcesRequest {
+  uint64 execution_attempt_id = 1;
+}
+
+message StopSourcesResponse {
   bool success = 1;
   string error_message = 2;
 }

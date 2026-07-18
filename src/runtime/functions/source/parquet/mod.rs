@@ -15,7 +15,8 @@ use regex::Regex;
 use crate::common::message::Message;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::functions::parquet_utils::build_object_store;
-use crate::runtime::functions::source::source_function::SourceFunctionTrait;
+use crate::runtime::functions::source::source_function::{FetchResult, SourceFunctionTrait};
+use crate::runtime::operators::source::SourceInterrupt;
 use crate::runtime::runtime_context::RuntimeContext;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -72,11 +73,11 @@ impl std::fmt::Debug for ParquetSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for ParquetSourceFunction {
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(&mut self, _interrupt: Option<&SourceInterrupt>) -> FetchResult {
         loop {
             if self.current_stream.lock().unwrap().is_none() {
                 let Some(next_file) = self.file_list.pop() else {
-                    return None;
+                    return FetchResult::Idle;
                 };
                 if let Ok(stream) = self.build_stream(&next_file).await {
                     *self.current_stream.lock().unwrap() = Some(stream);
@@ -90,7 +91,9 @@ impl SourceFunctionTrait for ParquetSourceFunction {
                 let next = stream.next().await;
                 *self.current_stream.lock().unwrap() = Some(stream);
                 match next {
-                    Some(Ok(batch)) => return Some(Message::new(None, batch, None, None)),
+                    Some(Ok(batch)) => {
+                        return FetchResult::Data(Message::new(None, batch, None, None));
+                    }
                     Some(Err(_)) => {
                         *self.current_stream.lock().unwrap() = None;
                         continue;

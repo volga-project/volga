@@ -25,7 +25,8 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
-use super::source_function::SourceFunctionTrait;
+use super::source_function::{FetchResult, SourceFunctionTrait};
+use crate::runtime::operators::source::SourceInterrupt;
 use crate::api::SinkSpec;
 
 /// Reserved metadata field names
@@ -415,7 +416,7 @@ impl FunctionTrait for HttpRequestSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for HttpRequestSourceFunction {
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(&mut self, _interrupt: Option<&SourceInterrupt>) -> FetchResult {
         if let Some(shared_rx) = &self.shared_request_rx {
             // Compete with other tasks for messages from the shared queue
             let pending_request = {
@@ -426,13 +427,14 @@ impl SourceFunctionTrait for HttpRequestSourceFunction {
             if let Some(pending_request) = pending_request {
                 match self.create_message_from_request(&pending_request.request_id, &pending_request.payload) {
                     Ok(message) => {
-                        return Some(message);
+                        return FetchResult::Data(message);
                     }
                     Err(e) => {
                         eprintln!("Error creating message from request: {}", e);
                     }
                 }
             }
+            return FetchResult::Idle;
         }
         panic!("No shared_request_rx set");
     }
@@ -536,7 +538,10 @@ mod tests {
         
         println!("Fetching message...");
         // Call fetch() to get the message from the HTTP request
-        let message = source.fetch().await.expect("Should receive a message from HTTP request");
+        let message = source
+            .fetch(None)
+            .await
+            .expect_data("Should receive a message from HTTP request");
         
         println!("Message fetched");
         // Verify the message structure and content

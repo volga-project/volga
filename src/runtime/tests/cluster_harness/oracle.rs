@@ -5,7 +5,9 @@ use anyhow::{anyhow, Result};
 use arrow::array::StringArray;
 
 use super::handles::MasterHandle;
-use crate::runtime::master::{LifecycleEvent, LifecycleEventRecord};
+use crate::runtime::master::{
+    CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord,
+};
 use crate::storage::InMemoryStorageSnapshot;
 
 #[derive(Debug, Clone, Default)]
@@ -260,12 +262,46 @@ impl RecoveryReport {
                 LifecycleEvent::PipelineFailed { detail } => {
                     outcome = format!("failed: {detail}");
                 }
+                LifecycleEvent::CheckpointStarted {
+                    checkpoint_id,
+                    attempt_id,
+                } => {
+                    if let Some(current_attempt) = current {
+                        attempt_entry(&mut by_attempt, current_attempt).events.push(format!(
+                            "checkpoint_started {checkpoint_id} attempt={attempt_id}"
+                        ));
+                    }
+                }
+                LifecycleEvent::CheckpointPropagation {
+                    checkpoint_id,
+                    attempt_id,
+                    vertex_id,
+                    task_index,
+                    phase,
+                } => {
+                    let phase = match phase {
+                        CheckpointPropagationPhase::BarrierInjected => "barrier_injected",
+                        CheckpointPropagationPhase::Aligned => "aligned",
+                    };
+                    attempt_entry(&mut by_attempt, *attempt_id).events.push(format!(
+                        "checkpoint_propagation {checkpoint_id} {phase} vertex={vertex_id} task={task_index}"
+                    ));
+                }
                 LifecycleEvent::CheckpointCompleted { checkpoint_id } => {
                     if let Some(attempt_id) = current {
                         attempt_entry(&mut by_attempt, attempt_id)
                             .events
                             .push(format!("checkpoint_completed {checkpoint_id}"));
                     }
+                }
+                LifecycleEvent::CheckpointFailed {
+                    checkpoint_id,
+                    attempt_id,
+                    detail,
+                } => {
+                    attempt_entry(&mut by_attempt, *attempt_id).events.push(format!(
+                        "checkpoint_failed {checkpoint_id} detail={detail}"
+                    ));
                 }
             }
         }

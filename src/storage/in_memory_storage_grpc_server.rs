@@ -268,4 +268,4 @@ impl Clone for InMemoryStorageServiceImpl {
             map_storage: self.map_storage.clone(),
         }
     }
-} 
+}

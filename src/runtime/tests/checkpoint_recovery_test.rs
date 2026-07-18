@@ -108,9 +108,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
                 schema_json,
             ),
         )
-        .with_sink(SinkSpec::InMemoryStorageGrpc {
-            server_addr: format!("http://{}", storage_server_addr),
-        })
+        .with_sink(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr)))
         .sql(sql)
         .build();
     let mut logical_graph = compile_logical_graph(&spec, None);
@@ -163,8 +161,13 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
     );
     worker.start().await;
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(5)).await;
+    let checkpoint_id = master_server
+        .master()
+        .start_checkpoint()
+        .await
+        .expect("start_checkpoint");
     // Queue checkpoint before run so sources pick it up on first iteration.
-    worker.trigger_checkpoint(1).await;
+    worker.trigger_checkpoint_barrier(checkpoint_id).await;
     worker.signal_tasks_run().await;
 
     // Wait for checkpoint to become complete on master
@@ -177,7 +180,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             ))
             .await?
             .into_inner();
-        if resp.has_checkpoint && resp.checkpoint_id == 1 {
+        if resp.has_checkpoint && resp.checkpoint_id == checkpoint_id {
             break;
         }
         if start.elapsed() > Duration::from_secs(20) {
@@ -192,7 +195,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
         let resp = master_client
             .get_task_checkpoint(tonic::Request::new(
                 crate::runtime::master::server::master_service::GetTaskCheckpointRequest {
-                    checkpoint_id: 1,
+                    checkpoint_id,
                     vertex_id: task.vertex_id.clone(),
                     task_index: task.task_index,
                 },
@@ -259,7 +262,7 @@ async fn test_manual_checkpoint_and_restore() -> Result<()> {
             TransportBackendType::Grpc,
         )
         .with_master_addr(master_addr.clone())
-        .with_restore_checkpoint_id(1),
+        .with_restore_checkpoint_id(checkpoint_id),
     );
     worker2.start().await;
     wait_for_status(&worker2, StreamTaskStatus::Opened, Duration::from_secs(5)).await;

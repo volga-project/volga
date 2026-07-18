@@ -686,7 +686,7 @@ mod tests {
         let mut planner = create_planner();
         
         // Register sink
-        planner.register_sink(SinkConfig::InMemoryStorageGrpcSinkConfig("http://127.0.0.1:8080".to_string()));
+        planner.register_sink(SinkConfig::in_memory_grpc("http://127.0.0.1:8080"));
         
         let sql = "SELECT id, name FROM test_table";
         let graph = planner.sql_to_graph(sql).unwrap();

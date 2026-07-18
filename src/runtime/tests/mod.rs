@@ -1,6 +1,7 @@
 #![cfg(test)]
 
 pub mod checkpoint_recovery_test;
+pub mod checkpoint_tests;
 pub mod cluster_harness;
 pub mod launch_specs;
 pub mod pipeline_exec;

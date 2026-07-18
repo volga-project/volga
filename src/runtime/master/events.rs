@@ -10,6 +10,12 @@ pub struct LifecycleEventRecord {
     pub event: LifecycleEvent,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum CheckpointPropagationPhase {
+    BarrierInjected,
+    Aligned,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LifecycleEvent {
     WorkerRegistered {
@@ -40,8 +46,26 @@ pub enum LifecycleEvent {
     ReplacementRequested {
         worker_ids: Vec<String>,
     },
+    CheckpointStarted {
+        checkpoint_id: u64,
+        attempt_id: u64,
+    },
+    /// Barrier progress (Injected/Aligned). Counts toward checkpoint completion.
+    CheckpointPropagation {
+        checkpoint_id: u64,
+        attempt_id: u64,
+        vertex_id: String,
+        task_index: i32,
+        phase: CheckpointPropagationPhase,
+    },
+    /// Safe restore point: state acks + barrier align on all tasks.
     CheckpointCompleted {
         checkpoint_id: u64,
+    },
+    CheckpointFailed {
+        checkpoint_id: u64,
+        attempt_id: u64,
+        detail: String,
     },
     PipelineFinished,
     PipelineFailed {

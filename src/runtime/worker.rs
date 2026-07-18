@@ -17,6 +17,7 @@ use futures::future::join_all;
 use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
+use crate::runtime::operators::source::SourceHandles;
 use crate::storage::{StorageBudgetConfig, WorkerStorageContext};
 use crate::storage::batch_store::{BatchStore, InMemBatchStore};
 use crate::runtime::operators::window::TimeGranularity;
@@ -103,6 +104,8 @@ pub struct Worker {
     request_source_processor: Option<RequestSourceProcessor>,
     request_source_processor_runtime: Option<Runtime>,
 
+    source_handles: Arc<SourceHandles>,
+
     // TODO separate backend runtime for request mode channels
 }
 
@@ -126,6 +129,7 @@ impl Worker {
             fatal_watcher_handle: None,
             request_source_processor: None,
             request_source_processor_runtime: None,
+            source_handles: Arc::new(SourceHandles::new()),
         }
     }
 
@@ -142,6 +146,7 @@ impl Worker {
         // Fresh incarnation: drop any sticky fatal from a previous execution attempt so this
         // worker is not immediately reported unhealthy after a recovery reset.
         self.health.clear();
+        self.source_handles.clear();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
         println!(
@@ -254,11 +259,15 @@ impl Worker {
         let mut task_statuses: HashMap<VertexId, StreamTaskStatus> = HashMap::new();
         let mut task_metrics: HashMap<VertexId, TaskMetrics> = HashMap::new();
         let mut task_operator_metrics: HashMap<VertexId, TaskOperatorMetrics> = HashMap::new();
+        let mut task_metadata: HashMap<VertexId, HashMap<String, String>> = HashMap::new();
 
         for result in task_results {
             if let Ok((vertex_id, state)) = result {
                 task_statuses.insert(vertex_id.clone(), state.status.clone());
                 task_metrics.insert(vertex_id.clone(), state.metrics.clone());
+                if !state.metadata.is_empty() {
+                    task_metadata.insert(vertex_id.clone(), state.metadata.clone());
+                }
 
                 if let Some(op_state) = operator_states.get_operator_state(vertex_id.as_ref()) {
                     if let Some(m) = op_state.task_operator_metrics() {
@@ -282,6 +291,7 @@ impl Worker {
             state_guard.task_statuses = task_statuses;
             state_guard.set_metrics(worker_metrics);
             state_guard.task_operator_metrics = task_operator_metrics;
+            state_guard.task_metadata = task_metadata;
             // state_guard.worker_metrics.set_tasks_metrics(task_metrics.clone());
             if state_update_sender.is_some() {
                 state_update_sender.unwrap().send(state_guard.clone()).await.unwrap();
@@ -396,6 +406,10 @@ impl Worker {
                     if let Some(restore_checkpoint_id) = config.restore_checkpoint_id {
                         cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
                     }
+                    cfg.insert(
+                        "execution_attempt_id".to_string(),
+                        Value::from(config.execution_attempt_id),
+                    );
                     cfg.insert("pipeline_id".to_string(), Value::String(config.pipeline_id.0.clone()));
                     cfg.insert("worker_id".to_string(), Value::String(config.worker_id.clone()));
                     Some(cfg)
@@ -403,6 +417,7 @@ impl Worker {
                 Some(self.operator_states.clone()),
                 Some(config.graph.clone()),
             );
+            runtime_context.set_source_handles(self.source_handles.clone());
             if let Some(request_source_processor) = &self.request_source_processor {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
                 runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
@@ -747,13 +762,33 @@ impl Worker {
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
     }
 
-    pub async fn trigger_checkpoint(&mut self, checkpoint_id: u64) {
-        println!("[WORKER] Triggering checkpoint {} on source tasks", checkpoint_id);
-        let config = self
-            .config
-            .as_ref()
-            .expect("Worker must be configured before use")
-            .clone();
+    /// Cooperative source stop for harness-driven pipeline finish.
+    /// Returns `false` if the worker is not configured.
+    pub fn stop_sources(&mut self) -> bool {
+        if !self.is_configured() {
+            println!("[WORKER] Rejecting stop_sources: worker not configured");
+            return false;
+        }
+        println!("[WORKER] Stopping sources (cooperative finish)");
+        self.source_handles.stop_all();
+        true
+    }
+
+    /// Inject checkpoint barriers on checkpointable source tasks.
+    /// Returns `false` if the worker is not configured (e.g. reset/closed); callers
+    /// must treat that as rejection so master aborts the in-flight checkpoint.
+    pub async fn trigger_checkpoint_barrier(&mut self, checkpoint_id: u64) -> bool {
+        let Some(config) = self.config.as_ref().cloned() else {
+            println!(
+                "[WORKER] Rejecting checkpoint barrier {}: worker not configured",
+                checkpoint_id
+            );
+            return false;
+        };
+        println!(
+            "[WORKER] Triggering checkpoint barrier {} on source tasks",
+            checkpoint_id
+        );
         for (vertex_id, task_runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let vertex_type = config.graph.get_vertex_type(vertex_id.as_ref());
@@ -768,12 +803,16 @@ impl Worker {
                 }
             }
 
+            self.source_handles.cancel(&vertex_id);
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
             let fut = task_runtime.spawn(async move {
-                let _ = task_ref.ask(StreamTaskMessage::TriggerCheckpoint(checkpoint_id)).await;
+                let _ = task_ref
+                    .ask(StreamTaskMessage::TriggerCheckpointBarrier(checkpoint_id))
+                    .await;
             });
             let _ = fut.await;
         }
+        true
     }
 
     // This should only be used for testing - simulates worker execution

@@ -87,7 +87,7 @@ fn build_source(bootstrap_servers: String, schema: Arc<Schema>, offset: KafkaOff
 async fn read_n(source: &mut KafkaSourceFunction, n: usize) -> Vec<(String, i64)> {
     let mut out = Vec::new();
     while out.len() < n {
-        let msg = source.fetch().await.expect("expected message");
+        let msg = source.fetch(None).await.expect_data("expected message");
         let batch = msg.record_batch();
         let keys = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
         let ts = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
@@ -165,7 +165,7 @@ async fn kafka_source_reads_arrow_ipc() {
     );
 
     source.open(&ctx).await.unwrap();
-    let msg = source.fetch().await.expect("expected message");
+    let msg = source.fetch(None).await.expect_data("expected message");
 
     let batch = msg.record_batch();
     assert_eq!(batch.num_rows(), 1);
@@ -312,9 +312,13 @@ async fn kafka_source_parallel_tasks_consume_all_partitions() {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while seen < total_messages && tokio::time::Instant::now() < deadline {
         for source in [&mut source_a, &mut source_b] {
-            if let Ok(Some(msg)) = tokio::time::timeout(Duration::from_millis(200), source.fetch()).await {
-                let batch = msg.record_batch();
-                seen += batch.num_rows();
+            if let Ok(result) =
+                tokio::time::timeout(Duration::from_millis(200), source.fetch(None)).await
+            {
+                if let Some(msg) = result.into_message() {
+                    let batch = msg.record_batch();
+                    seen += batch.num_rows();
+                }
             }
         }
     }

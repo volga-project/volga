@@ -30,6 +30,7 @@ impl MasterLifecycle {
                     restore_checkpoint_id,
                 })
                 .await;
+            self.state.set_current_attempt_id(execution_attempt_id);
             let mut attempt = ExecutionAttempt::new(
                 execution_attempt_id,
                 restore_checkpoint_id,

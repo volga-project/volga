@@ -18,6 +18,7 @@ pub(crate) use docker::DockerCluster;
 pub(crate) use kube::KubeCluster;
 pub(crate) use local::LocalCluster;
 
+use crate::api::spec::connectors::SinkSpec;
 use crate::api::PipelineSpec;
 use crate::runtime::consts::RuntimeConstsProfile;
 
@@ -89,4 +90,13 @@ impl PipelineLaunchSpec {
         self.runtime_consts_profile = profile;
         self
     }
+}
+
+/// Install/replace the in-memory gRPC sink address, preserving any upsert keys already on the pipeline.
+pub(crate) fn install_in_memory_sink(pipeline: &mut PipelineSpec, server_addr: impl Into<String>) {
+    let server_addr = server_addr.into();
+    pipeline.sink = Some(match pipeline.sink.take() {
+        Some(sink @ SinkSpec::InMemoryStorageGrpc { .. }) => sink.with_server_addr(server_addr),
+        _ => SinkSpec::in_memory_grpc(server_addr),
+    });
 }

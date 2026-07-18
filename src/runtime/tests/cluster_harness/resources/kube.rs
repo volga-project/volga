@@ -7,7 +7,6 @@ use anyhow::{anyhow, Context, Result};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::api::spec::connectors::SinkSpec;
 use crate::api::PipelineSpec;
 use crate::common::test_utils::gen_unique_grpc_port;
 use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
@@ -110,6 +109,28 @@ impl ClusterBackend for KubeCluster {
             .resources()?
             .master_port;
         fetch_lifecycle_events(master_port, sequence).await
+    }
+
+    async fn latest_pipeline_snapshot(
+        &mut self,
+    ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
+        let master_port = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?
+            .resources()?
+            .master_port;
+        master_latest_pipeline_snapshot(master_port).await
+    }
+
+    async fn stop_sources(&mut self) -> Result<()> {
+        let master_port = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?
+            .resources()?
+            .master_port;
+        master_stop_sources(master_port).await
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
@@ -241,9 +262,10 @@ fn write_pipeline_manifest(
     kube_worker_health_poll: bool,
     runtime_consts_profile: crate::runtime::consts::RuntimeConstsProfile,
 ) -> Result<PathBuf> {
-    pipeline.sink = Some(SinkSpec::InMemoryStorageGrpc {
-        server_addr: "http://volga-test-storage.default.svc.cluster.local:50071".to_string(),
-    });
+    super::install_in_memory_sink(
+        &mut pipeline,
+        "http://volga-test-storage.default.svc.cluster.local:50071",
+    );
     let sample_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("kubevolga/config/samples/volga_v1alpha1_pipeline.yaml");
     let mut manifest: Value = serde_yaml::from_str(&fs::read_to_string(sample_path)?)?;
@@ -369,6 +391,38 @@ async fn fetch_lifecycle_events(
             })
         })
         .collect()
+}
+
+async fn master_latest_pipeline_snapshot(
+    master_port: u16,
+) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
+    let mut client =
+        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let response = client
+        .get_latest_pipeline_snapshot(tonic::Request::new(
+            crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.has_snapshot {
+        return Ok(None);
+    }
+    Ok(Some(bincode::deserialize(&response.snapshot_bytes)?))
+}
+
+async fn master_stop_sources(master_port: u16) -> Result<()> {
+    let mut client =
+        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let response = client
+        .stop_sources(tonic::Request::new(
+            crate::runtime::master::server::master_service::StopSourcesRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!("stop_sources failed: {}", response.error_message));
+    }
+    Ok(())
 }
 
 fn kubectl(args: &[&str]) -> Result<String> {

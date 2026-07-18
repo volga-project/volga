@@ -5,13 +5,14 @@ use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use std::any::Any;
 use std::time::{SystemTime, Duration, UNIX_EPOCH};
-use super::source_function::SourceFunctionTrait;
+use super::source_function::{FetchResult, SourceFunctionTrait};
 use arrow::array::ArrayRef;
 use arrow::array::builder::{Float64Builder, Int64Builder, StringBuilder, TimestampMillisecondBuilder};
 use arrow::datatypes::{Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use std::sync::Arc;
 use std::collections::HashMap;
+use crate::runtime::operators::source::{race_interruptible, SourceInterrupt};
 use rand::{SeedableRng, Rng};
 use rand::rngs::StdRng;
 use rand::distributions::Alphanumeric;
@@ -106,22 +107,23 @@ struct DatagenSourcePosition {
 /// Datagen source function with deterministic rate coordination
 #[derive(Debug)]
 pub struct DatagenSourceFunction {
-    config: DatagenSourceConfig,
+    pub(crate) config: DatagenSourceConfig,
     
     // Runtime state
-    task_index: Option<i32>,
-    parallelism: Option<i32>,
+    pub(crate) task_index: Option<i32>,
+    pub(crate) parallelism: Option<i32>,
     vertex_id: Option<String>,
     
     // Rate coordination state
     next_gen_time: Option<SystemTime>,
     gen_interval: Option<Duration>,
+    /// Local generation progress (limits + checkpoint position).
     records_generated: usize,
     task_records_limit: Option<usize>,
     start_time: Option<SystemTime>, // When datagen started (for run_for_s)
     
     // Generation state
-    rng: Option<StdRng>,
+    pub(crate) rng: Option<StdRng>,
     schema: Arc<Schema>,
     
     // Key-based state tracking
@@ -153,6 +155,10 @@ impl DatagenSourceFunction {
             per_key_increments: HashMap::new(),
             per_key_values_indices: HashMap::new(),
         }
+    }
+
+    pub(crate) fn records_generated(&self) -> usize {
+        self.records_generated
     }
 
     fn validate_replayable_config(&self) {
@@ -198,7 +204,7 @@ impl DatagenSourceFunction {
         Some((interval, start_time))
     }
 
-    fn init_keys(&mut self) {
+    pub(crate) fn init_keys(&mut self) {
         let task_index = self.task_index.expect("Task index not set");
         let parallelism = self.parallelism.expect("Parallelism not set");
         
@@ -257,8 +263,14 @@ impl DatagenSourceFunction {
         key_values
     }
 
-    /// Generate a single record batch
-    fn generate_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
+    /// Build a batch and advance the emit counter (offline materialize / unit helpers).
+    pub(crate) fn generate_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
+        let batch = self.build_batch(batch_size)?;
+        self.records_generated += batch.num_rows();
+        Ok(batch)
+    }
+
+    fn build_batch(&mut self, batch_size: usize) -> Result<RecordBatch> {
         let schema = self.schema.clone();
         let mut columns: Vec<ArrayRef> = Vec::new();
         
@@ -310,7 +322,6 @@ impl DatagenSourceFunction {
             columns.push(column);
         }
         
-        self.records_generated += batch_size;
         RecordBatch::try_new(schema.clone(), columns).map_err(Into::into)
     }
 
@@ -487,7 +498,7 @@ impl DatagenSourceFunction {
     fn should_continue(&self) -> bool {
         // Check record limit
         if let Some(limit) = self.task_records_limit {
-            if self.records_generated >= limit {
+            if self.records_generated() >= limit {
                 return false;
             }
         }
@@ -509,42 +520,50 @@ impl DatagenSourceFunction {
 
 #[async_trait]
 impl SourceFunctionTrait for DatagenSourceFunction {
-    async fn fetch(&mut self) -> Option<Message> {
+    async fn fetch(&mut self, interrupt: Option<&SourceInterrupt>) -> FetchResult {
         // If this task has no keys assigned, don't produce anything
         if self.key_values.is_empty() {
-            return None;
+            return FetchResult::Idle;
         }
 
         // Check if we should continue generating
         if !self.should_continue() {
-            return None;
+            return FetchResult::Idle;
         }
 
         // Generate batch - adjust size if we're near the limit
         let batch_size = if let Some(limit) = self.task_records_limit {
-            std::cmp::min(self.config.spec.batch_size, limit - self.records_generated)
+            std::cmp::min(self.config.spec.batch_size, limit - self.records_generated())
         } else {
             self.config.spec.batch_size
         };
 
         if batch_size == 0 {
-            return None;
+            return FetchResult::Idle;
         }
 
-        // Wait for next gen time if rate limiting is enabled
+        // Wait for next gen time if rate limiting is enabled (interruptible by CP trigger).
         if let Some(next_time) = self.next_gen_time {
             if let Ok(sleep_duration) = next_time.duration_since(SystemTime::now()) {
-                tokio::time::sleep(sleep_duration).await;
+                if race_interruptible(interrupt, tokio::time::sleep(sleep_duration))
+                    .await
+                    .is_err()
+                {
+                    return FetchResult::Interrupted;
+                }
             }
-            
+
             // Calculate next event time based on the number of events in this batch
             if let Some(interval) = self.gen_interval {
                 self.next_gen_time = Some(next_time + interval * batch_size as u32);
             }
         }
 
-        match self.generate_batch(batch_size) {
-            Ok(batch) => Some(Message::new(None, batch, None, None)),
+        match self.build_batch(batch_size) {
+            Ok(batch) => {
+                self.records_generated += batch.num_rows();
+                FetchResult::Data(Message::new(None, batch, None, None))
+            }
             Err(e) => {
                 panic!("Error generating batch: {}", e);
             }
@@ -557,7 +576,7 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         }
 
         let pos = DatagenSourcePosition {
-            records_generated: self.records_generated,
+            records_generated: self.records_generated(),
             current_key_index: self.current_key_index,
             task_records_limit: self.task_records_limit,
             key_values: self.key_values.clone(),
@@ -584,6 +603,10 @@ impl SourceFunctionTrait for DatagenSourceFunction {
         self.per_key_increments = pos.per_key_increments;
         self.per_key_values_indices = pos.per_key_values_indices;
         Ok(())
+    }
+
+    fn emit_count(&self) -> Option<u64> {
+        Some(self.records_generated as u64)
     }
 }
 
@@ -628,7 +651,7 @@ impl FunctionTrait for DatagenSourceFunction {
             self.gen_interval = Some(interval);
             self.next_gen_time = Some(start_time);
         }
-        
+
         Ok(())
     }
 
@@ -726,8 +749,8 @@ mod tests {
             let mut batch_count = 0;
             
             loop {
-                match source.fetch().await {
-                    Some(Message::Regular(base_msg)) => {
+                match source.fetch(None).await {
+                    FetchResult::Data(Message::Regular(base_msg)) => {
                         let batch = &base_msg.record_batch;
                         
                         // Extract data from batch
@@ -752,12 +775,12 @@ mod tests {
                         total_records += batch.num_rows();
                         batch_count += 1;
                     },
-                    Some(Message::Keyed(_)) => {
+                    FetchResult::Data(Message::Keyed(_)) => {
                         panic!("Unexpected keyed message");
                     },
-                    Some(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
-                    Some(Message::CheckpointBarrier(_)) => break,
-                    None => break,
+                    FetchResult::Data(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
+                    FetchResult::Data(Message::CheckpointBarrier(_)) => break,
+                    FetchResult::Idle | FetchResult::Interrupted => break,
                 }
                 
                 if batch_count > 50 {
@@ -867,8 +890,8 @@ mod tests {
                 let mut batch_count = 0;
                 
                 loop {
-                    match source.fetch().await {
-                        Some(Message::Regular(base_msg)) => {
+                    match source.fetch(None).await {
+                        FetchResult::Data(Message::Regular(base_msg)) => {
                             let batch = &base_msg.record_batch;
                             let processing_times = batch.column(0).as_any().downcast_ref::<TimestampMillisecondArray>().unwrap();
                             
@@ -878,8 +901,8 @@ mod tests {
                             
                             batch_count += 1;
                         },
-                        Some(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
-                        None => break,
+                        FetchResult::Data(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
+                        FetchResult::Idle | FetchResult::Interrupted => break,
                         _ => {}
                     }
                     
@@ -984,8 +1007,8 @@ mod tests {
                 }
             }
 
-            match source.fetch().await {
-                Some(Message::Regular(base_msg)) => {
+                    match source.fetch(None).await {
+                FetchResult::Data(Message::Regular(base_msg)) => {
                     let batch = &base_msg.record_batch;
                     let ts = batch
                         .column(0)
@@ -1016,10 +1039,14 @@ mod tests {
                         }
                     }
                 }
-                Some(Message::Watermark(_)) => panic!("DatagenSourceFunction should not emit watermarks directly"),
-                Some(Message::CheckpointBarrier(_)) => break,
-                Some(Message::Keyed(_)) => panic!("Unexpected keyed message from datagen"),
-                None => break,
+                FetchResult::Data(Message::Watermark(_)) => {
+                    panic!("DatagenSourceFunction should not emit watermarks directly")
+                }
+                FetchResult::Data(Message::CheckpointBarrier(_)) => break,
+                FetchResult::Data(Message::Keyed(_)) => {
+                    panic!("Unexpected keyed message from datagen")
+                }
+                FetchResult::Idle | FetchResult::Interrupted => break,
             }
         }
 

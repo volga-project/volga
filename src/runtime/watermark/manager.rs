@@ -404,6 +404,7 @@ mod tests {
             Arc::new(AtomicU8::new(StreamTaskStatus::Running as u8)),
             CheckpointAligner::new(&["u0".to_string()], DataReaderControl::empty_for_test()),
             None,
+            0,
         );
 
         let mut seen = Vec::new();
@@ -480,6 +481,7 @@ mod tests {
                 DataReaderControl::empty_for_test(),
             ),
             None,
+            0,
         );
 
         let mut seen = Vec::new();
@@ -543,6 +545,7 @@ mod tests {
                 DataReaderControl::empty_for_test(),
             ),
             None,
+            0,
         );
 
         let mut seen = Vec::new();
@@ -599,6 +602,7 @@ mod tests {
                 DataReaderControl::empty_for_test(),
             ),
             None,
+            0,
         );
 
         let mut seen = Vec::new();
