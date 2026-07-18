@@ -95,7 +95,12 @@ impl OperatorTrait for SinkOperator {
     async fn poll_next(&mut self) -> OperatorPollResult {
         match self.base.next_input().await {
             Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
-            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
+            Some(Message::CheckpointBarrier(barrier)) => {
+                // Barrier alignment must imply durable sink state for restore safety.
+                let function = self.base.get_function_mut::<SinkFunction>().unwrap();
+                function.flush().await.expect("sink flush before checkpoint barrier");
+                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+            }
             Some(message) => {
                 let function = self.base.get_function_mut::<SinkFunction>().unwrap();
                 function.sink(message.clone()).await.unwrap();

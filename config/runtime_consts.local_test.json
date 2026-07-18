@@ -14,6 +14,7 @@
   "master.registry_wait_tick": "50ms",
   "master.checkpoint_interval": "500ms",
   "master.checkpoint_timeout": "5s",
+  "master.checkpoint_retention": 2,
   "kube.worker_health_poll_interval": "250ms",
   "kube.worker_health_unhealthy_grace_ticks": 2,
   "worker.heartbeat_send_interval": "100ms",

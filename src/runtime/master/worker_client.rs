@@ -17,9 +17,8 @@ use crate::common::failure::FailureEvent;
 use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
     worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
-    ShutdownWorkerRequest,
-    ConfigureWorkerRequest, GetWorkerStateRequest, RunWorkerTasksRequest, StartWorkerRequest,
-    TriggerCheckpointBarrierRequest,
+    ShutdownWorkerRequest, StopSourcesRequest, ConfigureWorkerRequest, GetWorkerStateRequest,
+    RunWorkerTasksRequest, StartWorkerRequest, TriggerCheckpointBarrierRequest,
 };
 
 enum Attempt<T> {
@@ -332,6 +331,22 @@ impl WorkerClient {
                             execution_attempt_id,
                         },
                     ))
+                    .await
+            })
+            .await
+            .map_err(anyhow::Error::new)?
+            .into_inner()
+            .success)
+    }
+
+    pub async fn stop_sources(&self) -> anyhow::Result<bool> {
+        let execution_attempt_id = self.execution_attempt_id;
+        Ok(self
+            .rpc("stop_sources", |mut client| async move {
+                client
+                    .stop_sources(tonic::Request::new(StopSourcesRequest {
+                        execution_attempt_id,
+                    }))
                     .await
             })
             .await

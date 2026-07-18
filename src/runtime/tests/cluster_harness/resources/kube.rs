@@ -123,6 +123,16 @@ impl ClusterBackend for KubeCluster {
         master_latest_pipeline_snapshot(master_port).await
     }
 
+    async fn stop_sources(&mut self) -> Result<()> {
+        let master_port = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?
+            .resources()?
+            .master_port;
+        master_stop_sources(master_port).await
+    }
+
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_ref().context("kube cluster is not launched")?;
         match fault {
@@ -398,6 +408,21 @@ async fn master_latest_pipeline_snapshot(
         return Ok(None);
     }
     Ok(Some(bincode::deserialize(&response.snapshot_bytes)?))
+}
+
+async fn master_stop_sources(master_port: u16) -> Result<()> {
+    let mut client =
+        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let response = client
+        .stop_sources(tonic::Request::new(
+            crate::runtime::master::server::master_service::StopSourcesRequest {},
+        ))
+        .await?
+        .into_inner();
+    if !response.success {
+        return Err(anyhow!("stop_sources failed: {}", response.error_message));
+    }
+    Ok(())
 }
 
 fn kubectl(args: &[&str]) -> Result<String> {

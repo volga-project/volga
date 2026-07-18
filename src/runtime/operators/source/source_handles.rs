@@ -87,11 +87,13 @@ pub async fn race_interruptible<T>(
     }
 }
 
-/// Per source-task shared interrupt + stats.
+/// Per source-task shared interrupt + stats + cooperative stop.
 #[derive(Debug)]
 pub struct SourceHandle {
     pub interrupt: Arc<SourceInterrupt>,
     pub stats: Arc<SourceStats>,
+    /// Latched by harness/master `StopSources`; source then returns Idle and finishes.
+    pub stopped: Arc<AtomicBool>,
 }
 
 impl SourceHandle {
@@ -99,7 +101,17 @@ impl SourceHandle {
         Self {
             interrupt: Arc::new(SourceInterrupt::new()),
             stats: Arc::new(SourceStats::new()),
+            stopped: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn stop(&self) {
+        self.stopped.store(true, Ordering::SeqCst);
+        self.interrupt.cancel();
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
     }
 }
 
@@ -134,6 +146,13 @@ impl SourceHandles {
     pub fn cancel(&self, vertex_id: &VertexId) {
         if let Some(handle) = self.inner.lock().unwrap().get(vertex_id) {
             handle.interrupt.cancel();
+        }
+    }
+
+    /// Cooperative stop on every registered source (Idle → drain → Finished).
+    pub fn stop_all(&self) {
+        for handle in self.inner.lock().unwrap().values() {
+            handle.stop();
         }
     }
 

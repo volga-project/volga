@@ -158,6 +158,13 @@ impl SinkFunctionTrait for InMemoryStorageSinkFunction {
         }
         Ok(())
     }
+
+    async fn flush(&mut self) -> Result<()> {
+        let Some(client) = &self.storage_client else {
+            return Ok(());
+        };
+        Self::flush_buffers(client, &self.buffer, &self.keyed_buffer).await
+    }
 }
 
 #[async_trait]

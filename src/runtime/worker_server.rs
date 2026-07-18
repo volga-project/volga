@@ -33,6 +33,7 @@ use worker_service::{
     CloseWorkerTasksRequest, CloseWorkerTasksResponse,
     ResetWorkerRequest, ResetWorkerResponse, ShutdownWorkerRequest, ShutdownWorkerResponse,
     TriggerCheckpointBarrierRequest, TriggerCheckpointBarrierResponse,
+    StopSourcesRequest, StopSourcesResponse,
     MasterHeartbeatMessage, WorkerHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
 };
@@ -256,14 +257,62 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<TriggerCheckpointBarrierRequest>,
     ) -> Result<Response<TriggerCheckpointBarrierResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let checkpoint_id = request.get_ref().checkpoint_id;
+        let req = request.into_inner();
+        // Attempt + configured under one lock so reset/close cannot race past validation.
         let mut worker_guard = self.worker.lock().await;
-        worker_guard.trigger_checkpoint_barrier(checkpoint_id).await;
+        let current_execution_attempt_id = worker_guard.execution_attempt_id();
+        if req.execution_attempt_id != current_execution_attempt_id {
+            return Err(Status::failed_precondition(format!(
+                "stale worker command execution attempt: got {}, current {}",
+                req.execution_attempt_id, current_execution_attempt_id
+            )));
+        }
+        if !worker_guard.is_configured() {
+            return Ok(Response::new(TriggerCheckpointBarrierResponse {
+                success: false,
+                error_message: "worker is not configured for this attempt".to_string(),
+            }));
+        }
+        let triggered = worker_guard
+            .trigger_checkpoint_barrier(req.checkpoint_id)
+            .await;
         Ok(Response::new(TriggerCheckpointBarrierResponse {
-            success: true,
-            error_message: String::new(),
+            success: triggered,
+            error_message: if triggered {
+                String::new()
+            } else {
+                "worker rejected checkpoint barrier trigger".to_string()
+            },
+        }))
+    }
+
+    async fn stop_sources(
+        &self,
+        request: Request<StopSourcesRequest>,
+    ) -> Result<Response<StopSourcesResponse>, Status> {
+        let req = request.into_inner();
+        let mut worker_guard = self.worker.lock().await;
+        let current_execution_attempt_id = worker_guard.execution_attempt_id();
+        if req.execution_attempt_id != current_execution_attempt_id {
+            return Err(Status::failed_precondition(format!(
+                "stale worker command execution attempt: got {}, current {}",
+                req.execution_attempt_id, current_execution_attempt_id
+            )));
+        }
+        if !worker_guard.is_configured() {
+            return Ok(Response::new(StopSourcesResponse {
+                success: false,
+                error_message: "worker is not configured for this attempt".to_string(),
+            }));
+        }
+        let stopped = worker_guard.stop_sources();
+        Ok(Response::new(StopSourcesResponse {
+            success: stopped,
+            error_message: if stopped {
+                String::new()
+            } else {
+                "worker rejected stop_sources".to_string()
+            },
         }))
     }
 

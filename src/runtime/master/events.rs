@@ -50,7 +50,7 @@ pub enum LifecycleEvent {
         checkpoint_id: u64,
         attempt_id: u64,
     },
-    /// Barrier progress for diagnosis; never used for checkpoint completion.
+    /// Barrier progress (Injected/Aligned). Counts toward checkpoint completion.
     CheckpointPropagation {
         checkpoint_id: u64,
         attempt_id: u64,
@@ -58,6 +58,7 @@ pub enum LifecycleEvent {
         task_index: i32,
         phase: CheckpointPropagationPhase,
     },
+    /// Safe restore point: state acks + barrier align on all tasks.
     CheckpointCompleted {
         checkpoint_id: u64,
     },

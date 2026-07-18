@@ -11,6 +11,8 @@ service MasterService {
   rpc GetLatestCompleteCheckpoint(GetLatestCompleteCheckpointRequest) returns (GetLatestCompleteCheckpointResponse);
   rpc GetLatestPipelineSnapshot(GetLatestPipelineSnapshotRequest) returns (GetLatestPipelineSnapshotResponse);
   rpc GetLifecycleEvents(GetLifecycleEventsRequest) returns (GetLifecycleEventsResponse);
+  // Ask running workers to stop sources (harness-driven pipeline finish).
+  rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
 }
 
 message RegisterWorkerRequest {
@@ -102,5 +104,13 @@ message LifecycleEventRecord {
 
 message GetLifecycleEventsResponse {
   repeated LifecycleEventRecord events = 1;
+}
+
+message StopSourcesRequest {
+}
+
+message StopSourcesResponse {
+  bool success = 1;
+  string error_message = 2;
 }
 

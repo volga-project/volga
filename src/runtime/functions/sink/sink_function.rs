@@ -13,6 +13,11 @@ use std::any::Any;
 #[async_trait]
 pub trait SinkFunctionTrait: Send + Sync + fmt::Debug {
     async fn sink(&mut self, message: Message) -> Result<()>;
+
+    /// Make buffered writes durable before a checkpoint barrier is considered aligned.
+    async fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -39,6 +44,14 @@ impl SinkFunctionTrait for SinkFunction {
             SinkFunction::InMemoryStorageGrpc(f) => f.sink(message).await,
             SinkFunction::Request(f) => f.sink(message).await,
             SinkFunction::Parquet(f) => f.sink(message).await,
+        }
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        match self {
+            SinkFunction::InMemoryStorageGrpc(f) => f.flush().await,
+            SinkFunction::Request(f) => f.flush().await,
+            SinkFunction::Parquet(f) => f.flush().await,
         }
     }
 }

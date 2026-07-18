@@ -29,4 +29,8 @@ impl CheckpointBlobs {
             .cloned()
             .unwrap_or_default()
     }
+
+    pub(super) fn remove_checkpoint(&mut self, checkpoint_id: u64) {
+        self.snapshots.retain(|(id, _), _| *id != checkpoint_id);
+    }
 }

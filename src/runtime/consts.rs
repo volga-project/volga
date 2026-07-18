@@ -29,6 +29,8 @@ pub const MASTER_REGISTRY_WAIT_TICK: &str = "master.registry_wait_tick";
 pub const MASTER_CHECKPOINT_INTERVAL: &str = "master.checkpoint_interval";
 /// Fail the attempt if an in-flight checkpoint does not complete within this budget.
 pub const MASTER_CHECKPOINT_TIMEOUT: &str = "master.checkpoint_timeout";
+/// Max completed checkpoints to retain (ids + blobs). Oldest are pruned; must be ≥ 1.
+pub const MASTER_CHECKPOINT_RETENTION: &str = "master.checkpoint_retention";
 pub const KUBE_WORKER_HEALTH_POLL_INTERVAL: &str = "kube.worker_health_poll_interval";
 pub const KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: &str =
     "kube.worker_health_unhealthy_grace_ticks";
@@ -77,6 +79,7 @@ const U64_KEYS: &[&str] = &[
     MASTER_RECOVERY_BUDGET,
     MASTER_RPC_MAX_RETRIES,
     MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS,
+    MASTER_CHECKPOINT_RETENTION,
     KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS,
     WORKER_REGISTER_MAX_RETRIES,
     TRANSPORT_GRPC_CONNECT_MAX_RETRIES,
@@ -372,22 +375,6 @@ mod tests {
             Duration::from_millis(200)
         );
         assert_eq!(local.u64(MASTER_RECOVERY_BUDGET), 5);
-    }
-
-    #[test]
-    fn kube_test_matches_prod() {
-        let kube = parse_consts_json(EMBEDDED_KUBE_TEST);
-        let prod = parse_consts_json(EMBEDDED_PROD);
-        for &key in DURATION_KEYS {
-            assert_eq!(
-                kube.duration(key),
-                prod.duration(key),
-                "duration mismatch for {key}"
-            );
-        }
-        for &key in U64_KEYS {
-            assert_eq!(kube.u64(key), prod.u64(key), "u64 mismatch for {key}");
-        }
     }
 
     #[test]

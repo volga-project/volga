@@ -17,6 +17,6 @@
 - Exactly-once sink commit protocols (Kafka transactions / lake table commits).
 - Metrics for checkpoint in-flight age / ack lag.
 - Use propagation events for timeout localization (which task is stuck).
-- [x] Barrier-path test: Started → BarrierInjected → Aligned → Completed (local + kube ignore).
+- [x] Barrier-path test: Started + BarrierInjected before Completed; Aligned observed (diagnosis-only, order vs Completed free; local + kube ignore).
 - [x] Generic source interrupt (`SourceInterrupt` sleep/race + `FetchResult::Interrupted`); registered for checkpointable sources; datagen + Kafka wired.
 - [x] Shared source emit stats (`SourceStats.records_generated`) owned by registry / incremented by `SourceOperator` for all sources.

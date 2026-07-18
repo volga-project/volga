@@ -762,16 +762,33 @@ impl Worker {
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
     }
 
-    pub async fn trigger_checkpoint_barrier(&mut self, checkpoint_id: u64) {
+    /// Cooperative source stop for harness-driven pipeline finish.
+    /// Returns `false` if the worker is not configured.
+    pub fn stop_sources(&mut self) -> bool {
+        if !self.is_configured() {
+            println!("[WORKER] Rejecting stop_sources: worker not configured");
+            return false;
+        }
+        println!("[WORKER] Stopping sources (cooperative finish)");
+        self.source_handles.stop_all();
+        true
+    }
+
+    /// Inject checkpoint barriers on checkpointable source tasks.
+    /// Returns `false` if the worker is not configured (e.g. reset/closed); callers
+    /// must treat that as rejection so master aborts the in-flight checkpoint.
+    pub async fn trigger_checkpoint_barrier(&mut self, checkpoint_id: u64) -> bool {
+        let Some(config) = self.config.as_ref().cloned() else {
+            println!(
+                "[WORKER] Rejecting checkpoint barrier {}: worker not configured",
+                checkpoint_id
+            );
+            return false;
+        };
         println!(
             "[WORKER] Triggering checkpoint barrier {} on source tasks",
             checkpoint_id
         );
-        let config = self
-            .config
-            .as_ref()
-            .expect("Worker must be configured before use")
-            .clone();
         for (vertex_id, task_runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let vertex_type = config.graph.get_vertex_type(vertex_id.as_ref());
@@ -795,6 +812,7 @@ impl Worker {
             });
             let _ = fut.await;
         }
+        true
     }
 
     // This should only be used for testing - simulates worker execution

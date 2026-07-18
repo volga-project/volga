@@ -56,6 +56,11 @@ impl MasterHandle {
             .latest_pipeline_snapshot()
             .await
     }
+
+    /// Cooperative source stop → drain → `PipelineFinished`.
+    pub async fn stop_sources(&self) -> Result<()> {
+        self.inner.backend.lock().await.stop_sources().await
+    }
 }
 
 #[derive(Clone)]

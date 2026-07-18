@@ -49,6 +49,9 @@ impl ExecutionAttempt {
         self.run_all().await?;
         let worker_ids: Vec<String> = nodes.keys().cloned().collect();
         self.state
+            .set_workers_execution_attempt(self.id, &worker_ids)
+            .await;
+        self.state
             .record_lifecycle_event(LifecycleEvent::AttemptScheduled {
                 attempt_id: self.id,
                 worker_ids: worker_ids.clone(),

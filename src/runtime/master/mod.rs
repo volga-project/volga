@@ -114,6 +114,46 @@ impl Master {
         self.state.latest_complete_checkpoint().await
     }
 
+    /// Fan out cooperative source stop to workers on the current execution attempt.
+    pub async fn stop_sources(&self) -> Result<(), String> {
+        let (execution_attempt_id, workers) = self
+            .state
+            .current_execution_worker_endpoints()
+            .await
+            .ok_or_else(|| "no workers on current execution attempt".to_string())?;
+        let futures = workers.iter().map(|(worker_id, addr)| {
+            let worker_id = worker_id.clone();
+            let addr = addr.clone();
+            async move {
+                let client =
+                    worker_client::WorkerClient::open(&worker_id, addr, execution_attempt_id)
+                        .await
+                        .map_err(|e| format!("{worker_id}: {e}"))?;
+                match client.stop_sources().await {
+                    Ok(true) => Ok(()),
+                    Ok(false) => Err(format!("{worker_id}: stop_sources rejected")),
+                    Err(e) => Err(format!("{worker_id}: {e}")),
+                }
+            }
+        });
+        let mut errors = Vec::new();
+        for result in futures::future::join_all(futures).await {
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            println!(
+                "[MASTER] StopSources ok execution_attempt={} workers={}",
+                execution_attempt_id,
+                workers.len()
+            );
+            Ok(())
+        } else {
+            Err(format!("stop_sources failed: {}", errors.join("; ")))
+        }
+    }
+
     /// Begin a checkpoint without going through the run-loop.
     /// Used by tests that drive workers outside `Master::execute`.
     #[cfg(test)]

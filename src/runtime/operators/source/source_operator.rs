@@ -139,6 +139,7 @@ pub struct SourceOperator {
     base: OperatorBase,
     interrupt: Option<Arc<SourceInterrupt>>,
     stats: Option<Arc<SourceStats>>,
+    stopped: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl SourceOperator {
@@ -152,6 +153,7 @@ impl SourceOperator {
             base: OperatorBase::new_with_function(source_function, config),
             interrupt: None,
             stats: None,
+            stopped: None,
         }
     }
 }
@@ -163,6 +165,7 @@ impl OperatorTrait for SourceOperator {
         if let Some(handles) = context.source_handles() {
             let handle = handles.register(context.vertex_id_arc());
             self.stats = Some(handle.stats.clone());
+            self.stopped = Some(handle.stopped.clone());
             if operator_config_requires_checkpoint(self.operator_config()) {
                 self.interrupt = Some(handle.interrupt.clone());
             }
@@ -188,6 +191,14 @@ impl OperatorTrait for SourceOperator {
     }
 
     async fn poll_next(&mut self) -> OperatorPollResult {
+        if self
+            .stopped
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
+        {
+            return OperatorPollResult::None;
+        }
+
         // Wake arrived between fetches: yield before pulling more data.
         if self
             .interrupt

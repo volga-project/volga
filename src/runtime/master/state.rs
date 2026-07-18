@@ -9,7 +9,9 @@ use tokio::time::{sleep, Duration, Instant};
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode};
-use crate::runtime::consts::{runtime_consts, MASTER_REGISTRY_WAIT_TICK};
+use crate::runtime::consts::{
+    runtime_consts, MASTER_CHECKPOINT_RETENTION, MASTER_REGISTRY_WAIT_TICK,
+};
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
@@ -34,6 +36,8 @@ struct WorkerRecord {
     discovered: Option<WorkerNode>,
     registered: bool,
     replacing: bool,
+    /// Execution attempt this worker is assigned to while running; cleared on recover/finish.
+    execution_attempt_id: Option<u64>,
 }
 
 #[derive(Default)]
@@ -104,6 +108,25 @@ impl WorkerRegistry {
             let record = self.workers.entry(worker_id.clone()).or_default();
             record.registered = false;
             record.replacing = true;
+            record.execution_attempt_id = None;
+        }
+    }
+
+    /// Assign exactly `worker_ids` to `execution_attempt_id` (clears others).
+    fn set_execution_attempt(&mut self, execution_attempt_id: u64, worker_ids: &[String]) {
+        let selected: HashSet<&str> = worker_ids.iter().map(String::as_str).collect();
+        for (worker_id, record) in self.workers.iter_mut() {
+            record.execution_attempt_id = if selected.contains(worker_id.as_str()) {
+                Some(execution_attempt_id)
+            } else {
+                None
+            };
+        }
+    }
+
+    fn clear_execution_attempt(&mut self) {
+        for record in self.workers.values_mut() {
+            record.execution_attempt_id = None;
         }
     }
 }
@@ -149,6 +172,49 @@ impl MasterState {
         }
     }
 
+    /// Assign the scheduled worker set to `execution_attempt_id` (registry SoT).
+    pub(super) async fn set_workers_execution_attempt(
+        &self,
+        execution_attempt_id: u64,
+        worker_ids: &[String],
+    ) {
+        self.workers
+            .lock()
+            .await
+            .set_execution_attempt(execution_attempt_id, worker_ids);
+    }
+
+    pub(super) async fn clear_workers_execution_attempt(&self) {
+        self.workers.lock().await.clear_execution_attempt();
+    }
+
+    /// Workers on the current execution attempt, with control-plane endpoints.
+    pub(super) async fn current_execution_worker_endpoints(
+        &self,
+    ) -> Option<(u64, Vec<(String, String)>)> {
+        let execution_attempt_id = self.current_attempt_id();
+        let workers = self.workers.lock().await;
+        let mut endpoints: Vec<_> = workers
+            .workers
+            .iter()
+            .filter_map(|(worker_id, record)| {
+                if record.execution_attempt_id != Some(execution_attempt_id) {
+                    return None;
+                }
+                let node = record.discovered.as_ref()?;
+                Some((
+                    worker_id.clone(),
+                    format!("{}:{}", node.worker_ip, node.worker_port),
+                ))
+            })
+            .collect();
+        if endpoints.is_empty() {
+            return None;
+        }
+        endpoints.sort_by(|(left, _), (right, _)| left.cmp(right));
+        Some((execution_attempt_id, endpoints))
+    }
+
     pub(super) fn checkpointable_tasks_for_graph(execution_graph: &ExecutionGraph) -> Vec<TaskKey> {
         execution_graph
             .get_vertices()
@@ -162,11 +228,21 @@ impl MasterState {
     }
 
     pub(super) async fn configure(&self, config: MasterConfig) {
-        let expected_tasks = Self::checkpointable_tasks_for_graph(&config.execution_graph);
-        self.checkpoints
-            .lock()
-            .await
-            .configure(expected_tasks.into_iter().collect());
+        let expected_acks = Self::checkpointable_tasks_for_graph(&config.execution_graph);
+        let expected_aligns = config
+            .execution_graph
+            .all_tasks()
+            .map(|(vertex_id, task_index)| TaskKey {
+                vertex_id: vertex_id.as_ref().to_string(),
+                task_index,
+            })
+            .collect();
+        let retention = runtime_consts().u64(MASTER_CHECKPOINT_RETENTION) as usize;
+        self.checkpoints.lock().await.configure(
+            expected_acks.into_iter().collect(),
+            expected_aligns,
+            retention,
+        );
         *self.config.lock().await = Some(config);
     }
 
@@ -239,8 +315,8 @@ impl MasterState {
             .in_flight_timed_out(timeout)
     }
 
-    /// Journal barrier progress. Never advances checkpoint completion.
-    /// Stale attempt / non-in-flight ids are dropped (Ok) so recovery orphans do not fail tasks.
+    /// Journal barrier progress and count it toward completion (with state acks).
+    /// Drops stale attempts and unknown ids; rejects are soft so tasks are not failed.
     pub(super) async fn report_checkpoint_propagation(
         &self,
         checkpoint_id: u64,
@@ -252,9 +328,16 @@ impl MasterState {
         if execution_attempt_id != current {
             return Ok(());
         }
-        if self.checkpoints.lock().await.in_flight_id() != Some(checkpoint_id) {
-            return Ok(());
-        }
+
+        let outcome = {
+            let mut cps = self.checkpoints.lock().await;
+            // Only in-flight CPs accept barrier progress (Completed implies align already done).
+            if cps.in_flight_id() != Some(checkpoint_id) {
+                return Ok(());
+            }
+            cps.note_barrier_progress(checkpoint_id, task.clone())
+        };
+
         self.record_lifecycle_event(LifecycleEvent::CheckpointPropagation {
             checkpoint_id,
             attempt_id: execution_attempt_id,
@@ -263,6 +346,11 @@ impl MasterState {
             phase,
         })
         .await;
+
+        if matches!(outcome, CheckpointAckOutcome::Completed) {
+            self.record_lifecycle_event(LifecycleEvent::CheckpointCompleted { checkpoint_id })
+                .await;
+        }
         Ok(())
     }
 

@@ -26,6 +26,9 @@ service WorkerService {
   // Inject a checkpoint barrier at source tasks (data-plane).
   rpc TriggerCheckpointBarrier(TriggerCheckpointBarrierRequest) returns (TriggerCheckpointBarrierResponse);
 
+  // Cooperative source stop: sources go Idle → drain → PipelineFinished.
+  rpc StopSources(StopSourcesRequest) returns (StopSourcesResponse);
+
   // Bidirectional health/heartbeat stream between master and worker.
   rpc StreamHeartbeat(stream MasterHeartbeatMessage) returns (stream WorkerHeartbeatMessage);
 }
@@ -108,6 +111,15 @@ message TriggerCheckpointBarrierRequest {
 }
 
 message TriggerCheckpointBarrierResponse {
+  bool success = 1;
+  string error_message = 2;
+}
+
+message StopSourcesRequest {
+  uint64 execution_attempt_id = 1;
+}
+
+message StopSourcesResponse {
   bool success = 1;
   string error_message = 2;
 }

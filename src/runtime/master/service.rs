@@ -10,9 +10,9 @@ use crate::runtime::master::server::master_service::{
     GetLatestPipelineSnapshotRequest, GetLatestPipelineSnapshotResponse,
     GetLifecycleEventsRequest, GetLifecycleEventsResponse, GetTaskCheckpointRequest,
     GetTaskCheckpointResponse, LifecycleEventRecord, RegisterWorkerRequest,
-    RegisterWorkerResponse,     ReportCheckpointPropagationRequest,
+    RegisterWorkerResponse, ReportCheckpointPropagationRequest,
     ReportCheckpointPropagationResponse, ReportCheckpointRequest, ReportCheckpointResponse,
-    StateBlob,
+    StateBlob, StopSourcesRequest, StopSourcesResponse,
 };
 use crate::runtime::master::{CheckpointPropagationPhase, Master};
 use crate::runtime::observability::PipelineSnapshot;
@@ -216,6 +216,22 @@ impl MasterService for MasterServiceImpl {
             })
             .collect::<Result<Vec<_>, Status>>()?;
         Ok(Response::new(GetLifecycleEventsResponse { events }))
+    }
+
+    async fn stop_sources(
+        &self,
+        _request: Request<StopSourcesRequest>,
+    ) -> Result<Response<StopSourcesResponse>, Status> {
+        match self.master.stop_sources().await {
+            Ok(()) => Ok(Response::new(StopSourcesResponse {
+                success: true,
+                error_message: String::new(),
+            })),
+            Err(error_message) => Ok(Response::new(StopSourcesResponse {
+                success: false,
+                error_message,
+            })),
+        }
     }
 
 }

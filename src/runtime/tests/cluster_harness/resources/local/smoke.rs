@@ -101,6 +101,18 @@ impl ClusterBackend for LocalCluster {
             .await)
     }
 
+    async fn stop_sources(&mut self) -> Result<()> {
+        self.resources
+            .as_ref()
+            .context("local cluster is not launched")?
+            .master
+            .server
+            .master()
+            .stop_sources()
+            .await
+            .map_err(anyhow::Error::msg)
+    }
+
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
         let resources = self.resources.as_mut().context("local cluster is not launched")?;
         match fault {
