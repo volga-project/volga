@@ -14,7 +14,7 @@ use crate::runtime::operators::operator::{
     OperatorPollResult, OperatorTrait, OperatorType,
 };
 use crate::runtime::runtime_context::RuntimeContext;
-use super::source_handles::{SourceInterrupt, SourceStats};
+use super::source_handles::{SourceHandle, SourceInterrupt};
 
 #[derive(Debug, Clone)]
 pub struct VectorSourceConfig {
@@ -137,9 +137,7 @@ impl std::fmt::Display for SourceConfig {
 #[derive(Debug)]
 pub struct SourceOperator {
     base: OperatorBase,
-    interrupt: Option<Arc<SourceInterrupt>>,
-    stats: Option<Arc<SourceStats>>,
-    stopped: Option<Arc<std::sync::atomic::AtomicBool>>,
+    handle: Option<Arc<SourceHandle>>,
 }
 
 impl SourceOperator {
@@ -151,24 +149,24 @@ impl SourceOperator {
         let source_function = create_source_function(source_config);
         Self {
             base: OperatorBase::new_with_function(source_function, config),
-            interrupt: None,
-            stats: None,
-            stopped: None,
+            handle: None,
         }
+    }
+
+    /// Interrupt is only used for checkpointable sources (barrier yield).
+    fn checkpoint_interrupt_arc(&self) -> Option<Arc<SourceInterrupt>> {
+        if !operator_config_requires_checkpoint(self.operator_config()) {
+            return None;
+        }
+        self.handle.as_ref().map(|h| h.interrupt.clone())
     }
 }
 
 #[async_trait]
 impl OperatorTrait for SourceOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
-        // Register shared handles before function open (stats for all; interrupt if checkpointable).
         if let Some(handles) = context.source_handles() {
-            let handle = handles.register(context.vertex_id_arc());
-            self.stats = Some(handle.stats.clone());
-            self.stopped = Some(handle.stopped.clone());
-            if operator_config_requires_checkpoint(self.operator_config()) {
-                self.interrupt = Some(handle.interrupt.clone());
-            }
+            self.handle = Some(handles.register(context.vertex_id_arc()));
         }
         self.base.open(context).await?;
         Ok(())
@@ -191,35 +189,31 @@ impl OperatorTrait for SourceOperator {
     }
 
     async fn poll_next(&mut self) -> OperatorPollResult {
-        if self
-            .stopped
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::SeqCst))
-        {
+        if self.handle.as_ref().is_some_and(|h| h.is_stopped()) {
             return OperatorPollResult::None;
         }
 
+        let interrupt = self.checkpoint_interrupt_arc();
+
         // Wake arrived between fetches: yield before pulling more data.
-        if self
-            .interrupt
+        if interrupt
             .as_ref()
             .is_some_and(|interrupt| interrupt.take_canceled())
         {
             return OperatorPollResult::Continue;
         }
 
-        let interrupt = self.interrupt.as_deref();
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        match function.fetch(interrupt).await {
+        match function.fetch(interrupt.as_deref()).await {
             FetchResult::Interrupted => OperatorPollResult::Continue,
             FetchResult::Data(Message::Watermark(watermark)) => {
                 OperatorPollResult::Ready(Message::Watermark(watermark))
             }
             FetchResult::Data(message) => {
-                if let Some(stats) = self.stats.as_ref() {
+                if let Some(handle) = self.handle.as_ref() {
                     match &message {
                         Message::Regular(_) | Message::Keyed(_) => {
-                            stats.add_records(message.num_records());
+                            handle.stats.add_records(message.num_records());
                         }
                         Message::Watermark(_) | Message::CheckpointBarrier(_) => {}
                     }
@@ -250,8 +244,8 @@ impl OperatorTrait for SourceOperator {
             return Err(anyhow::anyhow!("empty source_position blob on restore"));
         }
         function.restore_position(bytes).await?;
-        if let (Some(stats), Some(n)) = (self.stats.as_ref(), function.emit_count()) {
-            stats.set_records_generated(n);
+        if let (Some(handle), Some(n)) = (self.handle.as_ref(), function.emit_count()) {
+            handle.stats.set_records_generated(n);
         }
         Ok(())
     }
