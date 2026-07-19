@@ -3,6 +3,7 @@ use std::sync::Arc;
 use arrow_integration_test::schema_from_json;
 use crate::api::{LogicalGraph, Planner, PlanningContext};
 use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
+use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverrides, OperatorTuningSpec};
 use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpec};
 use crate::runtime::functions::source::datagen_source::DatagenSourceConfig;
@@ -79,6 +80,7 @@ fn compile_logical_graph_from_parts(
     parallelism: usize,
     execution_mode: ExecutionMode,
     operator_overrides: &OperatorOverrides,
+    event_time: &EventTimeSpec,
     connector_configs: &ConnectorConfigs,
 ) -> LogicalGraph {
     let df_ctx = datafusion::prelude::SessionContext::new();
@@ -120,10 +122,14 @@ fn compile_logical_graph_from_parts(
                         cfg.set_spec(win.clone());
                     }
                 }
+                // Pipeline event_time is the only compile-time lateness source
+                // (override WindowOperatorSpec.lateness is ignored).
+                cfg.spec.lateness = event_time.window.allowed_lateness_ms;
             }
         }
     }
 
+    graph.set_event_time(event_time.clone());
     graph
 }
 
@@ -148,6 +154,7 @@ pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&C
         spec.parallelism,
         spec.execution_mode,
         &spec.operator_overrides,
+        &spec.event_time,
         &connector_configs_owned,
     )
 }

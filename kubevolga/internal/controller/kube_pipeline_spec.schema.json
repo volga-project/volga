@@ -3,6 +3,18 @@
   "title": "KubePipelineSpec",
   "type": "object",
   "properties": {
+    "event_time": {
+      "$ref": "#/$defs/EventTimeSpec",
+      "default": {
+        "watermark": {
+          "idle_timeout_ms": null,
+          "out_of_orderness_ms": 0
+        },
+        "window": {
+          "allowed_lateness_ms": null
+        }
+      }
+    },
     "execution_mode": {
       "$ref": "#/$defs/ExecutionMode",
       "default": "Streaming"
@@ -88,6 +100,25 @@
   },
   "additionalProperties": false,
   "$defs": {
+    "EventTimeSpec": {
+      "description": "Pipeline-wide event-time defaults (SQL / streaming).\n\nWatermark knobs are shared; allowed lateness is namespaced by operator kind\n(`window` now; `join` later) so semantics stay distinct.",
+      "type": "object",
+      "properties": {
+        "watermark": {
+          "$ref": "#/$defs/WatermarkSpec",
+          "default": {
+            "idle_timeout_ms": null,
+            "out_of_orderness_ms": 0
+          }
+        },
+        "window": {
+          "$ref": "#/$defs/WindowEventTimeSpec",
+          "default": {
+            "allowed_lateness_ms": null
+          }
+        }
+      }
+    },
     "ExecutionMode": {
       "type": "string",
       "enum": [
@@ -177,6 +208,42 @@
           ]
         }
       ]
+    },
+    "WatermarkSpec": {
+      "type": "object",
+      "properties": {
+        "idle_timeout_ms": {
+          "description": "If set, idle upstreams older than this are excluded from min-WM merge.\n`None` keeps the runtime assigner default (`WatermarkAssignConfig::DEFAULT_IDLE_TIMEOUT_MS`).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "default": null,
+          "minimum": 0
+        },
+        "out_of_orderness_ms": {
+          "description": "Max event-time reorder delay for auto-placed watermark assigners (ms).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        }
+      }
+    },
+    "WindowEventTimeSpec": {
+      "type": "object",
+      "properties": {
+        "allowed_lateness_ms": {
+          "description": "Allowed lateness for window operators (ms). `None` = no lateness.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64",
+          "default": null
+        }
+      }
     }
   }
 }

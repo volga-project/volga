@@ -2,7 +2,6 @@ use std::env;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use volga::api::compile_logical_graph;
 use volga::orchestrator::docker::DockerMasterOrchestrator;
 use volga::orchestrator::kube::KubeMasterOrchestrator;
 use volga::orchestrator::orchestrator::MasterOrchestrator;
@@ -50,17 +49,11 @@ async fn main() -> Result<()> {
     orchestrator.bootstrap().await?;
 
     let spec = orchestrator.get_spec().await;
-    let logical_graph = compile_logical_graph(&spec, None);
-    let execution_graph = logical_graph.to_execution_graph();
     let expected_workers = orchestrator.get_num_expected_workers().await;
 
     let mut master_server = MasterServer::new(orchestrator.clone());
     master_server
-        .configure(MasterConfig::with_spec(
-            spec,
-            execution_graph,
-            expected_workers,
-        ))
+        .configure(MasterConfig::from_spec(spec, expected_workers))
         .await;
     master_server.start(&bind_addr).await?;
 

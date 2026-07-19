@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::api::PipelineSpec;
+use crate::api::{compile_logical_graph, PipelineSpec};
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master::checkpoint::TaskKey;
@@ -32,27 +32,17 @@ pub struct Master {
 
 #[derive(Clone)]
 pub struct MasterConfig {
-    pub spec: Option<PipelineSpec>,
+    pub spec: PipelineSpec,
     pub execution_graph: ExecutionGraph,
     pub expected_workers: usize,
 }
 
 impl MasterConfig {
-    pub fn with_spec(
-        spec: PipelineSpec,
-        execution_graph: ExecutionGraph,
-        expected_workers: usize,
-    ) -> Self {
+    /// Compile `spec` to an execution graph and configure the master.
+    pub fn from_spec(spec: PipelineSpec, expected_workers: usize) -> Self {
+        let execution_graph = compile_logical_graph(&spec, None).to_execution_graph();
         Self {
-            spec: Some(spec),
-            execution_graph,
-            expected_workers,
-        }
-    }
-
-    pub fn with_graph(execution_graph: ExecutionGraph, expected_workers: usize) -> Self {
-        Self {
-            spec: None,
+            spec,
             execution_graph,
             expected_workers,
         }

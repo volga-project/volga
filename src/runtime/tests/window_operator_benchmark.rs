@@ -193,10 +193,9 @@ fn update_window_configs_in_graph(
     for node_idx in window_nodes {
         if let Some(node) = graph.get_node_by_index_mut(node_idx) {
             if let OperatorConfig::WindowConfig(ref mut window_config) = node.operator_config {
-                // Update window config parameters
+                // Lateness comes from PipelineSpec.event_time; only mutate bench-only knobs here.
                 window_config.execution_mode = config.execution_mode.clone();
                 window_config.spec.parallelize = config.parallelize;
-                window_config.spec.lateness = config.lateness;
 
                 // Set tiling configs if provided
                 if let Some(ref tiling_configs) = config.tiling_configs {
@@ -283,6 +282,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
         .with_execution_profile(ExecutionProfile::SingleWorker {
             num_threads_per_task: 4,
         })
+        .with_window_allowed_lateness_ms(config.lateness)
         .with_source(
             SourceSpec::new(
                 "datagen_source",

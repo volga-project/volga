@@ -1,4 +1,5 @@
 pub mod connectors;
+pub mod event_time;
 pub mod kube;
 pub mod operators;
 pub mod pipeline;

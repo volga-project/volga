@@ -17,7 +17,6 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::tests::test_utils::{
     create_window_input_schema, wait_for_status, window_rows_from_messages, WindowOutputRow,
 };
-use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 use crate::runtime::worker::{Worker, WorkerConfig};
 use crate::storage::{InMemoryStorageClient, InMemoryStorageServer};
 use crate::transport::transport_backend_actor::TransportBackendType;
@@ -91,12 +90,18 @@ pub(crate) async fn run_watermark_window_pipeline(
         replayable: true,
     };
 
+    if lateness_ms < 0 {
+        panic!("lateness_ms must be >= 0, got {}", lateness_ms);
+    }
+
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_mode(ExecutionMode::Streaming)
         .with_execution_profile(ExecutionProfile::SingleWorker {
             num_threads_per_task: 4,
         })
+        .with_out_of_orderness_ms(out_of_orderness_ms)
+        .with_window_allowed_lateness_ms(Some(lateness_ms))
         .with_source(
             SourceSpec::new(
                 "datagen_source",
@@ -108,28 +113,8 @@ pub(crate) async fn run_watermark_window_pipeline(
         .sql(sql)
         .build();
 
-    let mut logical_graph = compile_logical_graph(&spec, None);
-    // Explicitly configure watermark out-of-orderness for all window operators.
-    logical_graph.set_window_watermark_assign(WatermarkAssignConfig::new(
-        out_of_orderness_ms,
-        Some(TimeHint::WindowOrderByColumn),
-    ));
-
+    let logical_graph = compile_logical_graph(&spec, None);
     let mut exec_graph = logical_graph.to_execution_graph();
-
-    if lateness_ms < 0 {
-        panic!("lateness_ms must be >= 0, got {}", lateness_ms);
-    }
-    // Set lateness directly on the execution graph for this test
-    let vertex_ids_snapshot: Vec<_> = exec_graph.get_vertices().keys().cloned().collect();
-    for vid in vertex_ids_snapshot {
-        if let Some(v) = exec_graph.get_vertex_mut(vid.as_ref()) {
-            if let OperatorConfig::WindowConfig(ref mut cfg) = v.operator_config {
-                cfg.spec.lateness = Some(lateness_ms);
-            }
-        }
-    }
-
     exec_graph.configure_channels(None, None);
     let vertex_ids = exec_graph.get_vertices().keys().cloned().collect();
 

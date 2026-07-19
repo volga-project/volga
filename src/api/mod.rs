@@ -13,6 +13,7 @@ pub use planner::{Planner, PlanningContext};
 // pub use pipeline_context::PipelineContext;
 pub use compiler::compile_logical_graph;
 pub use spec::kube::KubePipelineSpec;
+pub use spec::event_time::{EventTimeSpec, WatermarkSpec, WindowEventTimeSpec};
 pub use spec::pipeline::{ConnectorConfigs, ExecutionMode, ExecutionProfile, PipelineSpec, PipelineSpecBuilder};
 pub use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 pub use spec::operators::{OperatorOverride, OperatorOverrides};
