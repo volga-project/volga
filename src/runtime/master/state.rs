@@ -250,15 +250,10 @@ impl MasterState {
         let config = self.config.lock().await.clone().ok_or_else(|| {
             anyhow::anyhow!("Master is not configured: call configure before execute")
         })?;
-        let spec = config.spec.ok_or_else(|| {
-            anyhow::anyhow!(
-                "Master is configured without spec: provide spec in MasterConfig before execute"
-            )
-        })?;
         let pipeline_id = self.orchestrator.get_pipeline_id().await;
         Ok(PipelineContext {
             pipeline_id,
-            spec,
+            spec: config.spec,
             execution_graph: config.execution_graph,
             expected_workers: config.expected_workers,
         })

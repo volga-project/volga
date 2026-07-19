@@ -9,11 +9,11 @@
 - [x] Prevent overlapping checkpoints (single-in-flight; timeout aborts and recovers).
 - [x] Lifecycle events: `CheckpointStarted` / `CheckpointCompleted` / `CheckpointFailed`.
 - [x] Push barrier-propagation reports (`BarrierInjected` / `Aligned`) — diagnosis only, not completion.
-- [x] Harness e2e: finite datagen + interval CP + keyed upsert sink; oracle via task metadata `records_generated` + offline datagen set equality.
+- [x] Harness e2e: indefinite datagen + interval CP + keyed upsert sink; oracle via task metadata `records_generated` + offline datagen set equality (pass-through).
 
 ## Remaining
 
-- Window operator checkpoint correctness (operator not CP-ready yet).
+- Window operator checkpoint/restore coverage (operator suite: blobs + state; later aggregate / twin-run). Interface is ready; not in harness e2e.
 - Exactly-once sink commit protocols (Kafka transactions / lake table commits).
 - Metrics for checkpoint in-flight age / ack lag.
 - Use propagation events for timeout localization (which task is stuck).

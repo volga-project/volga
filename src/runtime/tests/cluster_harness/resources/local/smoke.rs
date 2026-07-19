@@ -4,7 +4,6 @@ use anyhow::{anyhow, Result};
 use uuid::Uuid;
 
 use super::common::{LocalMaster, LocalStorage, LocalWorkerPool, WorkerServerSlot};
-use crate::api::compile_logical_graph;
 use crate::orchestrator::local::{LocalTestOrchestrator, LocalWorkerOrchestrator};
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::MasterConfig;
@@ -134,7 +133,6 @@ impl LocalClusterResources {
         let storage = LocalStorage::start().await?;
         let mut spec = launch.pipeline;
         super::super::install_in_memory_sink(&mut spec, storage.endpoint());
-        let logical_graph = compile_logical_graph(&spec, None);
         let local_orchestrator = LocalTestOrchestrator::new(
             launch.worker_count,
             Uuid::new_v4().to_string(),
@@ -160,11 +158,7 @@ impl LocalClusterResources {
         let mut master = LocalMaster::new(master_addr, master_orchestrator);
         master
             .server
-            .configure(MasterConfig::with_spec(
-                spec,
-                logical_graph.to_execution_graph(),
-                expected_workers,
-            ))
+            .configure(MasterConfig::from_spec(spec, expected_workers))
             .await;
         master.server.start(&master.addr).await?;
 

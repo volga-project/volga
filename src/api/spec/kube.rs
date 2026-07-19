@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
+use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::OperatorOverrides;
 use crate::api::spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec};
 use crate::api::spec::storage::StorageSpec;
@@ -27,6 +28,8 @@ pub struct KubePipelineSpec {
     pub operator_type_storage: Value,
     #[serde(default = "default_operator_overrides_json")]
     pub operator_overrides: Value,
+    #[serde(default)]
+    pub event_time: EventTimeSpec,
     #[serde(default = "default_sources_json")]
     pub sources: Value,
     #[serde(default)]
@@ -122,6 +125,7 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             worker_runtime,
             operator_type_storage,
             operator_overrides,
+            event_time: spec.event_time,
             sources,
             request_source_sink,
             sink,

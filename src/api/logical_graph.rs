@@ -13,6 +13,7 @@ use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::window_operator::{ExecutionMode, RequestAdvancePolicy};
 use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
 use crate::runtime::partition::PartitionType;
+use crate::api::spec::event_time::EventTimeSpec;
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
 
 #[derive(Debug, Clone)]
@@ -58,6 +59,7 @@ pub struct LogicalGraph {
     operator_type_counters: HashMap<String, u32>,
     root_node_index: Option<NodeIndex>,
     watermarks_enabled: bool,
+    event_time: EventTimeSpec,
 }
 
 impl LogicalGraph {
@@ -67,11 +69,31 @@ impl LogicalGraph {
             operator_type_counters: HashMap::new(),
             root_node_index: None,
             watermarks_enabled: true,
+            event_time: EventTimeSpec::default(),
         }
     }
 
     pub fn set_watermarks_enabled(&mut self, enabled: bool) {
         self.watermarks_enabled = enabled;
+    }
+
+    pub(crate) fn set_event_time(&mut self, event_time: EventTimeSpec) {
+        self.event_time = event_time;
+    }
+
+    pub fn event_time(&self) -> &EventTimeSpec {
+        &self.event_time
+    }
+
+    fn auto_watermark_assign_config(&self) -> WatermarkAssignConfig {
+        let mut cfg = WatermarkAssignConfig::new(
+            self.event_time.watermark.out_of_orderness_ms,
+            Some(TimeHint::WindowOrderByColumn),
+        );
+        if let Some(idle) = self.event_time.watermark.idle_timeout_ms {
+            cfg.idle_timeout_ms = Some(idle);
+        }
+        cfg
     }
     
     pub fn set_root_node(&mut self, node_index: NodeIndex) {
@@ -203,11 +225,12 @@ impl LogicalGraph {
                     .filter(|&idx| matches!(self.graph[idx].operator_config, OperatorConfig::WindowConfig(_)))
                     .collect();
                 if !windows_at_layer.is_empty() {
+                    let assign = self.auto_watermark_assign_config();
                     for w in windows_at_layer {
                         let op_id = self.graph[w].operator_id.clone();
-                        auto_watermark_assign.entry(op_id).or_insert_with(|| {
-                            WatermarkAssignConfig::new(0, Some(TimeHint::WindowOrderByColumn))
-                        });
+                        auto_watermark_assign
+                            .entry(op_id)
+                            .or_insert_with(|| assign.clone());
                     }
                     break;
                 }
@@ -289,23 +312,6 @@ impl LogicalGraph {
 
         execution_graph
     }
-
-    /// Apply a default watermark assignment config to all Window operators in this logical graph.
-    ///
-    /// Note: this is an explicit user/planner configuration that overrides the auto-placement fallback
-    /// in `to_execution_graph()`.
-    ///
-    /// TODO: extend to joins/unions when we add multi-input watermark assignment semantics.
-    pub fn set_window_watermark_assign(&mut self, cfg: WatermarkAssignConfig) {
-        for idx in self.graph.node_indices() {
-            if matches!(self.graph[idx].operator_config, OperatorConfig::WindowConfig(_)) {
-                if let Some(n) = self.get_node_by_index_mut(idx) {
-                    n.watermark_assign = Some(cfg.clone());
-                }
-            }
-        }
-    }
-
 
     pub fn from_linear_operators(operator_list: Vec<OperatorConfig>, parallelism: usize, chained: bool) -> Self {
         // Validate configuration

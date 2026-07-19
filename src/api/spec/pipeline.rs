@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
+use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
 use crate::api::spec::storage::StorageSpec;
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
@@ -42,6 +43,9 @@ pub struct PipelineSpec {
     pub operator_type_storage: HashMap<String, StorageSpec>,
     #[serde(default)]
     pub operator_overrides: OperatorOverrides,
+    /// Pipeline-wide watermark / window lateness defaults (not via operator_overrides).
+    #[serde(default)]
+    pub event_time: EventTimeSpec,
     pub sources: Vec<SourceSpec>,
     pub request_source_sink: Option<RequestSourceSinkSpec>,
     pub sink: Option<SinkSpec>,
@@ -76,6 +80,7 @@ impl PipelineSpecBuilder {
                 worker_runtime: WorkerRuntimeSpec::default(),
                 operator_type_storage: HashMap::new(),
                 operator_overrides: OperatorOverrides::default(),
+                event_time: EventTimeSpec::default(),
                 sources: Vec::new(),
                 request_source_sink: None,
                 sink: None,
@@ -83,6 +88,33 @@ impl PipelineSpecBuilder {
                 task_assignment_strategy: None,
             },
         }
+    }
+
+    pub fn with_event_time(mut self, event_time: EventTimeSpec) -> Self {
+        self.spec.event_time = event_time;
+        self
+    }
+
+    pub fn with_out_of_orderness_ms(mut self, out_of_orderness_ms: u64) -> Self {
+        self.spec.event_time.watermark.out_of_orderness_ms = out_of_orderness_ms;
+        self
+    }
+
+    pub fn with_watermark_idle_timeout_ms(mut self, idle_timeout_ms: Option<u64>) -> Self {
+        self.spec.event_time.watermark.idle_timeout_ms = idle_timeout_ms;
+        self
+    }
+
+    pub fn with_window_allowed_lateness_ms(mut self, allowed_lateness_ms: Option<i64>) -> Self {
+        self.spec.event_time.window.allowed_lateness_ms = allowed_lateness_ms;
+        self
+    }
+
+    /// Sets watermark out-of-orderness and window allowed lateness to the same value.
+    pub fn with_event_time_skew_ms(mut self, skew_ms: u64) -> Self {
+        self.spec.event_time.watermark.out_of_orderness_ms = skew_ms;
+        self.spec.event_time.window.allowed_lateness_ms = Some(skew_ms as i64);
+        self
     }
 
     pub fn with_parallelism(mut self, parallelism: usize) -> Self {
