@@ -21,9 +21,6 @@ pub struct KubePipelineSpec {
     pub parallelism: usize,
     #[serde(default = "default_worker_runtime_json")]
     pub worker_runtime: Value,
-    /// Deprecated / ignored (kept so older YAML still parses under deny_unknown_fields).
-    #[serde(default = "default_operator_type_storage_json")]
-    pub operator_type_storage: Value,
     #[serde(default = "default_operator_overrides_json")]
     pub operator_overrides: Value,
     #[serde(default)]
@@ -51,10 +48,6 @@ fn default_parallelism() -> usize {
 
 fn default_worker_runtime_json() -> Value {
     serde_json::to_value(WorkerRuntimeSpec::default()).expect("serialize default worker runtime")
-}
-
-fn default_operator_type_storage_json() -> Value {
-    Value::Object(serde_json::Map::new())
 }
 
 fn default_operator_overrides_json() -> Value {
@@ -94,7 +87,6 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
         let worker_runtime: WorkerRuntimeSpec =
             serde_json::from_value(normalize_json_strings(spec.worker_runtime))
                 .context("invalid worker_runtime")?;
-        let _ = spec.operator_type_storage; // ignored
         let operator_overrides: OperatorOverrides =
             serde_json::from_value(normalize_json_strings(spec.operator_overrides))
                 .context("invalid operator_overrides")?;

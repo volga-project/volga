@@ -39,9 +39,6 @@
         "per_operator": {}
       }
     },
-    "operator_type_storage": {
-      "default": {}
-    },
     "parallelism": {
       "type": "integer",
       "format": "uint",
