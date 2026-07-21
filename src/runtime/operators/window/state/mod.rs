@@ -1,12 +1,7 @@
 pub mod window_operator_state;
-pub mod sorted_range_view_loader;
-pub mod tiles;
-pub mod window_logic;
+pub mod tile;
 
-#[cfg(test)]
-mod window_operator_state_tests;
-
-
-
-
-
+pub use tile::{
+    plan_coverage, plan_time_range, CoveragePlan, RawGap, Tile, TileConfig, TileScanRun,
+    TimeGranularity, Timestamp,
+};

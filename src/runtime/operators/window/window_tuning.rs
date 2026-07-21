@@ -1,18 +1,17 @@
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::operators::window::state::tiles::TileConfig;
+use crate::runtime::operators::window::state::tile::TileConfig;
 use crate::runtime::operators::window::window_operator::RequestAdvancePolicy;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
 pub struct WindowOperatorSpec {
+    /// State retention after advance (`processed − max_wl − lateness`). Not ingest lag;
+    /// streaming late is `ts ≤ processed_pos` (CDC late-data is separate).
     pub lateness: Option<i64>,
     pub request_advance_policy: RequestAdvancePolicy,
-    pub compaction_interval_ms: u64,
-    pub dump_interval_ms: u64,
-    pub dump_hot_bucket_count: usize,
-    pub in_mem_dump_parallelism: usize,
+    /// Default tiling for all windows (overridable per-window via `tiling_configs`).
     pub tiling: Option<TileConfig>,
-    pub parallelize: bool,
 }
 
 impl Default for WindowOperatorSpec {
@@ -20,13 +19,7 @@ impl Default for WindowOperatorSpec {
         Self {
             lateness: None,
             request_advance_policy: RequestAdvancePolicy::OnWatermark,
-            compaction_interval_ms: 250,
-            dump_interval_ms: 1000,
-            dump_hot_bucket_count: 2,
-            in_mem_dump_parallelism: 4,
             tiling: None,
-            parallelize: false,
         }
     }
 }
-

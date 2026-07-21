@@ -1,7 +1,7 @@
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::test_utils;
-use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
+use crate::runtime::operators::window::create_window_aggregator;
 
 #[tokio::test]
 async fn test_top_n_key_ratio_cate_orders_by_key() {
@@ -24,10 +24,7 @@ WINDOW w AS (
         (4000, 1.0, "c", 3),
     ]);
 
-    let mut acc = match create_window_aggregator(&window_expr) {
-        WindowAggregator::Accumulator(acc) => acc,
-        _ => panic!("expected accumulator"),
-    };
+    let mut acc = create_window_aggregator(&window_expr);
     let args = window_expr.evaluate_args(&batch).expect("eval args");
     acc.update_batch(&args).expect("update");
     let out = acc.evaluate().expect("evaluate");
@@ -55,10 +52,7 @@ WINDOW w AS (
         (4000, 1.0, "c", 3),
     ]);
 
-    let mut acc = match create_window_aggregator(&window_expr) {
-        WindowAggregator::Accumulator(acc) => acc,
-        _ => panic!("expected accumulator"),
-    };
+    let mut acc = create_window_aggregator(&window_expr);
     let args = window_expr.evaluate_args(&batch).expect("eval args");
     acc.update_batch(&args).expect("update");
     let out = acc.evaluate().expect("evaluate");
@@ -85,10 +79,7 @@ WINDOW w AS (
         (3000, 3.0, "a", 2),
     ]);
 
-    let mut acc = match create_window_aggregator(&window_expr) {
-        WindowAggregator::Accumulator(acc) => acc,
-        _ => panic!("expected accumulator"),
-    };
+    let mut acc = create_window_aggregator(&window_expr);
     let args = window_expr.evaluate_args(&batch).expect("eval args");
     acc.update_batch(&args).expect("update");
     let out = acc.evaluate().expect("evaluate");

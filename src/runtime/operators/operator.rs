@@ -18,8 +18,6 @@ use crate::common::message::Message;
 use anyhow::Result;
 use std::fmt;
 use std::pin::Pin;
-use crate::api::StorageSpec;
-use crate::runtime::operators::window::window_storage_spec::default_window_storage_spec;
 use crate::runtime::functions::{
     function_trait::FunctionTrait,
     map::MapFunction,
@@ -91,15 +89,6 @@ pub fn operator_config_requires_checkpoint(operator_config: &OperatorConfig) -> 
         }
         OperatorConfig::ChainedConfig(configs) => configs.iter().any(operator_config_requires_checkpoint),
         _ => false,
-    }
-}
-
-pub fn operator_storage_key_and_default_spec(operator_config: &OperatorConfig) -> Option<(&'static str, StorageSpec)> {
-    match operator_config {
-        OperatorConfig::WindowConfig(_) | OperatorConfig::WindowRequestConfig(_) => {
-            Some(("window", default_window_storage_spec()))
-        }
-        _ => None,
     }
 }
 

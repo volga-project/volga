@@ -122,7 +122,7 @@ fn compile_logical_graph_from_parts(
                         cfg.set_spec(win.clone());
                     }
                 }
-                // Pipeline event_time is the only compile-time lateness source
+                // Pipeline event_time is the only compile-time retention source
                 // (override WindowOperatorSpec.lateness is ignored).
                 cfg.spec.lateness = event_time.window.allowed_lateness_ms;
             }

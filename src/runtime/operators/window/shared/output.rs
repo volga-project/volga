@@ -96,7 +96,7 @@ pub fn stack_concat_results(
 ) -> RecordBatch {
     let num_rows = input_values.len();
 
-    // Filter out rows where any window output is Null (too-late entries).
+    // Filter out rows where any window output is Null.
     let keep_indices = select_keep_indices_for_non_null_rows(&aggregated_values, num_rows);
     if keep_indices.is_empty() {
         return RecordBatch::new_empty(output_schema.clone());

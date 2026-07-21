@@ -119,11 +119,8 @@ impl WorkerService for WorkerServiceImpl {
         if !master_addr.is_empty() {
             worker_config.master_addr = Some(master_addr);
         }
-        worker_config.storage_budgets = spec.worker_runtime.storage.budgets.clone();
-        worker_config.inmem_store_lock_pool_size = spec.worker_runtime.storage.inmem_store_lock_pool_size;
-        worker_config.inmem_store_bucket_granularity = spec.worker_runtime.storage.inmem_store_bucket_granularity;
-        worker_config.inmem_store_max_batch_size = spec.worker_runtime.storage.inmem_store_max_batch_size;
-        worker_config.operator_type_storage_overrides = spec.operator_type_storage_overrides();
+        worker_config.window_state_namespace =
+            spec.worker_runtime.window_state_namespace.clone();
 
         let mut worker_guard = self.worker.lock().await;
         if worker_guard.is_running() {

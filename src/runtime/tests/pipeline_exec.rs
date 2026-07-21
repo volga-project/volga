@@ -34,11 +34,7 @@ pub async fn execute_with_state_updates(
         num_threads_per_task,
         TransportBackendType::Grpc,
     );
-    worker_config.storage_budgets = spec.worker_runtime.storage.budgets.clone();
-    worker_config.inmem_store_lock_pool_size = spec.worker_runtime.storage.inmem_store_lock_pool_size;
-    worker_config.inmem_store_bucket_granularity = spec.worker_runtime.storage.inmem_store_bucket_granularity;
-    worker_config.inmem_store_max_batch_size = spec.worker_runtime.storage.inmem_store_max_batch_size;
-    worker_config.operator_type_storage_overrides = spec.operator_type_storage_overrides();
+    worker_config.window_state_namespace = spec.worker_runtime.window_state_namespace.clone();
     let mut worker = Worker::from_config(worker_config);
 
     if let Some(pipeline_state_sender) = state_updates_sender {

@@ -4,20 +4,37 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
-use tokio_rayon::rayon::{ThreadPool, ThreadPoolBuilder};
 
 use crate::runtime::operators::window::aggregates::get_aggregate_type;
 use crate::runtime::operators::window::shared::config::WindowConfig;
 use crate::runtime::operators::window::shared::output::create_output_schema;
 use crate::runtime::operators::window::window_operator_state::WindowId;
+use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::TileConfig;
+
+/// Pad/fill per-window tiling from `tiling_configs` + `spec.tiling` default.
+pub fn resolve_tiling_configs(
+    n_windows: usize,
+    tiling_configs: &[Option<TileConfig>],
+    spec: &WindowOperatorSpec,
+) -> Vec<Option<TileConfig>> {
+    let mut out = tiling_configs.to_vec();
+    out.resize(n_windows, None);
+    if let Some(default) = &spec.tiling {
+        for t in &mut out {
+            if t.is_none() {
+                *t = Some(default.clone());
+            }
+        }
+    }
+    out
+}
 
 pub fn build_window_operator_parts(
     is_request_operator: bool,
     window_exec: &Arc<BoundedWindowAggExec>,
     tiling_configs: &Vec<Option<TileConfig>>,
-    parallelize: bool,
-) -> (usize, BTreeMap<WindowId, WindowConfig>, SchemaRef, SchemaRef, Option<ThreadPool>) {
+) -> (usize, BTreeMap<WindowId, WindowConfig>, SchemaRef, SchemaRef) {
     let ts_column_index = window_exec.window_expr()[0].order_by()[0]
         .expr
         .as_any()
@@ -48,17 +65,5 @@ pub fn build_window_operator_parts(
     let input_schema = window_exec.input().schema();
     let output_schema = create_output_schema(&input_schema, &window_exec.window_expr());
 
-    let thread_pool = if parallelize {
-        Some(
-            ThreadPoolBuilder::new()
-                .num_threads(std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4))
-                .build()
-                .expect("Failed to create thread pool"),
-        )
-    } else {
-        None
-    };
-
-    (ts_column_index, windows, input_schema, output_schema, thread_pool)
+    (ts_column_index, windows, input_schema, output_schema)
 }
-

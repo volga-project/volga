@@ -5,7 +5,7 @@ use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::test_utils;
 use super::eval_window_expr;
-use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
+use crate::runtime::operators::window::create_window_aggregator;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;
 
@@ -233,10 +233,7 @@ WINDOW w AS (
     let window_expr = test_utils::window_expr_from_sql(sql).await;
     let batch = test_utils::batch(&[(1000, 1.0, "A", 0), (2000, 4.0, "A", 1)]);
     let retract_batch = test_utils::batch(&[(2000, 4.0, "A", 1)]);
-    let mut acc = match create_window_aggregator(&window_expr) {
-        WindowAggregator::Accumulator(acc) => acc,
-        _ => panic!("expected accumulator"),
-    };
+    let mut acc = create_window_aggregator(&window_expr);
     let args = window_expr.evaluate_args(&batch).expect("eval args");
     acc.update_batch(&args).expect("update");
     let out = acc.evaluate().expect("evaluate");
