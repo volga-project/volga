@@ -34,7 +34,6 @@ use tokio::sync::{mpsc, Mutex};
 #[derive(Debug, Clone)]
 pub enum WindowType {
     Range { milliseconds: i64 },
-    Rows { preceding: i64 },
 }
 
 #[derive(Debug, Clone)]
@@ -123,14 +122,6 @@ fn build_sql_query(config: &WindowBenchmarkConfig) -> String {
             format!(
                 "RANGE BETWEEN INTERVAL '{}' MILLISECOND PRECEDING AND CURRENT ROW",
                 milliseconds
-            )
-        }
-        WindowType::Rows { preceding } => {
-            // ROWS unsupported; approximate as RANGE for benchmark scaffolding only.
-            let ms = preceding.saturating_mul(1000);
-            format!(
-                "RANGE BETWEEN INTERVAL '{}' MILLISECOND PRECEDING AND CURRENT ROW",
-                ms
             )
         }
     };
@@ -607,7 +598,7 @@ async fn test_window_benchmark_basic() -> Result<()> {
         rate: None,
         run_for_s: None,
         // window_type: WindowType::Range { milliseconds: 1000 },
-        window_type: WindowType::Rows { preceding: 10000 },
+        window_type: WindowType::Range { milliseconds: 10_000_000 },
         num_windows: num_windows,
         aggregation_type: AggregationType::Plain,
         execution_mode: WindowExecutionMode::Request,

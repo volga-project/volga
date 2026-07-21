@@ -4,7 +4,6 @@ use std::sync::Arc;
 use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use datafusion::common::ScalarValue;
-use datafusion::logical_expr::WindowFrameUnits;
 use serde::{Deserialize, Serialize};
 
 use crate::common::Key;
@@ -184,11 +183,7 @@ impl WindowOperatorState {
 
         let mut max_wl = 0i64;
         for cfg in self.window_configs.values() {
-            let frame = cfg.window_expr.get_window_frame();
-            if frame.units != WindowFrameUnits::Range {
-                continue;
-            }
-            max_wl = max_wl.max(get_window_length_ms(frame));
+            max_wl = max_wl.max(get_window_length_ms(cfg.window_expr.get_window_frame()));
         }
         let cutoff_ts = processed
             .ts

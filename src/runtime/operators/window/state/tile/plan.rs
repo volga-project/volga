@@ -63,6 +63,14 @@ pub fn plan_time_range(config: &TileConfig, start_ts: Timestamp, end_ts: Timesta
     )
 }
 
+/// Geometry only: raw head → coarsest-fitting tiles → raw tail.
+///
+/// Seeds `t` at the first safe min-gran boundary (`first_tile_after_ts` = strictly
+/// after that ts for cursor plans; else at-or-after `start.ts`). Anything before
+/// `t` is a raw gap. Then greedily take the coarsest gran aligned at `t` that
+/// ends ≤ `tile_end_max`, coalesce adjacent same-gran runs, advance `t`. Stop
+/// when nothing fits (leftover shorter than every tile) and cover the rest with
+/// a raw gap to `end`. Missing KV tiles are empty buckets, not planner misses.
 fn plan_interior(
     config: &TileConfig,
     start: Cursor,
@@ -80,7 +88,6 @@ fn plan_interior(
     let mut runs: Vec<TileScanRun> = Vec::new();
     let mut gaps: Vec<RawGap> = Vec::new();
 
-    // Head: data before the first safe/aligned tile start.
     let head_to = Cursor::new(t.min(tile_end_max), 0);
     if start < head_to {
         gaps.push(RawGap {
@@ -95,11 +102,10 @@ fn plan_interior(
                 push_coalesced(&mut runs, gran, t, tile_end);
                 t = tile_end;
             }
-            None => break, // leftover shorter than any fitting tile → raw tail
+            None => break,
         }
     }
 
-    // Tail to end cursor.
     if t < end.ts || (t == end.ts && end.seq_no > 0) {
         let from = cursor_at(start, t);
         if from < end {
