@@ -232,6 +232,8 @@ mod tests {
 
     #[tokio::test]
     async fn slide_leave_tiles_add_raw() {
+        // Leave [prev−wl, effective−wl) via plan_coverage: tile_start > win_start,
+        // so the minute at win_start is a raw head, not a tile.
         let cfg = window_cfg(sum_sql(), Some(tiling_1m())).await;
         let prev = Cursor::new(PREV_TS, 0);
         let effective = Cursor::new(EFF_TS, 0);
@@ -240,9 +242,14 @@ mod tests {
             .raw_runs
             .iter()
             .any(|r| r.from == Cursor::new(PREV_TS, 1) && r.to == effective));
-        assert_eq!(plan.tile_runs[0].start_ts, 3 * 60_000);
+        assert!(
+            plan.raw_runs
+                .iter()
+                .any(|r| r.from == Cursor::new(PREV_TS - WL, 0)),
+            "coverage raw head for tile at win_start"
+        );
+        assert_eq!(plan.tile_runs[0].start_ts, 4 * 60_000);
         assert_eq!(plan.tile_runs[0].end_ts_exclusive, 5 * 60_000);
-        assert!(!plan.raw_runs.iter().any(|r| r.from.ts == PREV_TS - WL));
     }
 
     #[tokio::test]
