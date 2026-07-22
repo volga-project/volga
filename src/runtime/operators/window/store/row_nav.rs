@@ -13,16 +13,17 @@ pub struct RowIdx(pub usize);
 
 #[derive(Debug)]
 pub struct RowNav {
-    rows: Vec<StoredRow>,
-    /// Precomputed args per row (same length as rows), if available.
+    rows: Arc<[StoredRow]>,
+    /// Precomputed args per row (same length as rows).
     args: Vec<Option<Arc<Vec<ArrayRef>>>>,
 }
 
 impl RowNav {
     pub fn from_stored_with_args(
-        rows: Vec<StoredRow>,
+        rows: impl Into<Arc<[StoredRow]>>,
         window_expr: &Arc<dyn WindowExpr>,
     ) -> Self {
+        let rows = rows.into();
         let args: Vec<_> = rows
             .iter()
             .map(|r| {

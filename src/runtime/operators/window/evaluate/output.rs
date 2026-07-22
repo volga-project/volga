@@ -1,19 +1,35 @@
-use std::sync::Arc;
+//! Assemble WO/WRO output batches from input scalars + per-window values.
 
 use arrow::array::{ArrayRef, RecordBatch};
-use arrow::datatypes::{Schema, SchemaBuilder, SchemaRef};
-use datafusion::physical_plan::WindowExpr;
+use arrow::datatypes::SchemaRef;
 use datafusion::scalar::ScalarValue;
 
-// copied from private DataFusion function
-pub fn create_output_schema(input_schema: &Schema, window_exprs: &[Arc<dyn WindowExpr>]) -> Arc<Schema> {
-    let capacity = input_schema.fields().len() + window_exprs.len();
-    let mut builder = SchemaBuilder::with_capacity(capacity);
-    builder.extend(input_schema.fields().iter().cloned());
-    for expr in window_exprs {
-        builder.push(expr.field().expect("Should be able to get field"));
+/// Build an output batch from per-row input scalars and per-window result columns.
+///
+/// `aggregated_values` is `[window_id][row]` (not row-major).
+/// Rows where any window value is Null are dropped (all windows must agree).
+pub fn assemble_window_batch(
+    input_values: Vec<Vec<ScalarValue>>,
+    aggregated_values: Vec<Vec<ScalarValue>>,
+    output_schema: &SchemaRef,
+    input_schema: &SchemaRef,
+) -> RecordBatch {
+    let num_rows = input_values.len();
+
+    let keep_indices = select_keep_indices_for_non_null_rows(&aggregated_values, num_rows);
+    if keep_indices.is_empty() {
+        return RecordBatch::new_empty(output_schema.clone());
     }
-    Arc::new(builder.finish().with_metadata(input_schema.metadata().clone()))
+
+    let filtered_input_values = filter_rows(input_values, &keep_indices);
+    let filtered_aggregated_values = filter_rows_2d(aggregated_values, &keep_indices);
+
+    build_record_batch_from_scalar_columns(
+        filtered_input_values,
+        filtered_aggregated_values,
+        output_schema,
+        input_schema,
+    )
 }
 
 fn select_keep_indices_for_non_null_rows(
@@ -86,30 +102,3 @@ fn build_record_batch_from_scalar_columns(
     RecordBatch::try_new(output_schema.clone(), columns)
         .expect("Should be able to create RecordBatch from window results")
 }
-
-// creates a record batch by vertically stacking input_values and aggregated_values
-pub fn stack_concat_results(
-    input_values: Vec<Vec<ScalarValue>>,      // input columns (per row)
-    aggregated_values: Vec<Vec<ScalarValue>>, // window result columns (per row, per window expr)
-    output_schema: &SchemaRef,
-    input_schema: &SchemaRef,
-) -> RecordBatch {
-    let num_rows = input_values.len();
-
-    // Filter out rows where any window output is Null.
-    let keep_indices = select_keep_indices_for_non_null_rows(&aggregated_values, num_rows);
-    if keep_indices.is_empty() {
-        return RecordBatch::new_empty(output_schema.clone());
-    }
-
-    let filtered_input_values = filter_rows(input_values, &keep_indices);
-    let filtered_aggregated_values = filter_rows_2d(aggregated_values, &keep_indices);
-
-    build_record_batch_from_scalar_columns(
-        filtered_input_values,
-        filtered_aggregated_values,
-        output_schema,
-        input_schema,
-    )
-}
-

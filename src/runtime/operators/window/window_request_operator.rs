@@ -17,9 +17,8 @@ use crate::runtime::operators::operator::{
 use crate::runtime::operators::window::aggregates::VirtualPoint;
 use crate::runtime::operators::window::evaluate::evaluate_range_points;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
-use crate::runtime::operators::window::shared::{
-    build_window_operator_parts, resolve_tiling_configs, stack_concat_results, WindowConfig,
-};
+use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
+use crate::runtime::operators::window::evaluate::assemble_window_batch;
 use crate::runtime::operators::window::store::{StateNamespace, WindowStateStore};
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::operators::window::window_operator_state::WindowId;
@@ -33,6 +32,8 @@ pub struct WindowRequestOperatorConfig {
     pub window_exec: Arc<BoundedWindowAggExec>,
     pub tiling_configs: Vec<Option<TileConfig>>,
     pub spec: WindowOperatorSpec,
+    /// `EXCLUDE CURRENT ROW`: lookup time only (no request-row args). SQL wiring still TODO.
+    pub exclude_current_row: bool,
 }
 
 impl WindowRequestOperatorConfig {
@@ -41,6 +42,7 @@ impl WindowRequestOperatorConfig {
             window_exec: window_operator_config.window_exec,
             tiling_configs: window_operator_config.tiling_configs,
             spec: window_operator_config.spec,
+            exclude_current_row: false,
         }
     }
 }
@@ -70,29 +72,24 @@ impl WindowRequestOperator {
             _ => panic!("Expected WindowRequestConfig, got {:?}", config),
         };
 
-        let tiling_configs = resolve_tiling_configs(
-            window_request_operator_config.window_exec.window_expr().len(),
+        let built = BuiltWindows::for_wro(
+            &window_request_operator_config.window_exec,
             &window_request_operator_config.tiling_configs,
             &window_request_operator_config.spec,
+            window_request_operator_config.exclude_current_row,
         );
-        let (ts_column_index, windows, input_schema, output_schema) =
-            build_window_operator_parts(
-                true,
-                &window_request_operator_config.window_exec,
-                &tiling_configs,
-            );
 
-        for w in windows.values() {
+        for w in built.windows.values() {
             require_range_frame(w.window_expr.get_window_frame());
         }
 
         Self {
             base: OperatorBase::new(config),
-            window_configs: windows,
+            window_configs: built.windows,
             store: None,
-            ts_column_index,
-            output_schema,
-            input_schema,
+            ts_column_index: built.ts_column_index,
+            output_schema: built.output_schema,
+            input_schema: built.input_schema,
         }
     }
 
@@ -112,11 +109,13 @@ impl WindowRequestOperator {
             .expect("Timestamp column");
 
         let kept_rows: Vec<usize> = (0..record_batch.num_rows()).collect();
+        // VirtualPoint is global per key lookup; args from first window expr (assumes
+        // compatible inputs across windows — see VirtualPoint docs).
+        let window_cfg = self.window_configs.values().next().expect("window");
+        let exclude = window_cfg.exclude_current_row.unwrap_or(false);
         let mut points = Vec::with_capacity(kept_rows.len());
         for &row in &kept_rows {
             let ts = ts_array.value(row);
-            let window_cfg = self.window_configs.values().next().expect("window");
-            let exclude = window_cfg.exclude_current_row.unwrap_or(false);
             let args = if exclude {
                 None
             } else {
@@ -130,14 +129,6 @@ impl WindowRequestOperator {
             points.push(VirtualPoint { ts, args });
         }
 
-        // Per-window exclude from first config; evaluate_range_points uses each cfg's flag.
-        let exclude = self
-            .window_configs
-            .values()
-            .next()
-            .and_then(|c| c.exclude_current_row)
-            .unwrap_or(false);
-
         let aggregated = evaluate_range_points(
             store,
             key,
@@ -149,7 +140,7 @@ impl WindowRequestOperator {
         .expect("evaluate");
 
         let input_values = get_input_values_for_rows(record_batch, &self.input_schema, &kept_rows);
-        stack_concat_results(
+        assemble_window_batch(
             input_values,
             aggregated,
             &self.output_schema,

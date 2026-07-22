@@ -1,4 +1,15 @@
-//! WO watermark advance: plan → one parallel load → produce → emit.
+//! WO watermark advance entrypoint.
+//!
+//! ```text
+//! peek emit band (plain+tiles) → plan → load →
+//!   merge emit rows → KeyBatch::for_window →
+//!   Plain        → produce::produce_plain_range
+//!   Retractable  → produce::produce_retractable_range
+//! → emit
+//! ```
+//!
+//! Cold (no `processed_pos`): `win_start = first_ingested.ts − wl` — same rebuild/slide
+//! paths, not a separate cold module.
 
 use std::collections::BTreeMap;
 
@@ -6,33 +17,20 @@ use anyhow::Result;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::scalar::ScalarValue;
-use futures::future::{BoxFuture, FutureExt};
 
 use crate::common::Key;
 use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
-use crate::runtime::operators::window::shared::stack_concat_results;
-use crate::runtime::operators::window::shared::WindowConfig;
-use crate::runtime::operators::window::state::tile::{
-    merge_tile_runs, project_tiles, TimeGranularity, WindowTiles,
-};
+use crate::runtime::operators::window::config::WindowConfig;
+use crate::runtime::operators::window::evaluate::assemble_window_batch;
 use crate::runtime::operators::window::store::event_store::StoredRow;
-use crate::runtime::operators::window::store::row_nav::RowNav;
 use crate::runtime::operators::window::store::WindowStateStore;
 use crate::runtime::operators::window::window_operator_state::WindowId;
 use crate::runtime::operators::window::AggregatorType;
 
-use super::load_plan::{plan_window_load, LoadPlan};
-use super::plain::produce_plain_range;
-use super::retractable::produce_retractable_range;
-
-enum LoadPart {
-    Raw(Vec<StoredRow>),
-    Tile {
-        gran: TimeGranularity,
-        items: Vec<(i64, WindowTiles)>,
-    },
-}
+use super::super::primitives::{cursor_next, load, LoadPlan, WindowView};
+use super::plan::plan_window_load;
+use super::produce::{produce_plain_range, produce_retractable_range};
 
 /// Advance one key to `advance_to` (typically Cursor(wm, u64::MAX)).
 pub async fn advance_key(
@@ -59,89 +57,71 @@ pub async fn advance_key(
         }
     }
 
+    let first_ingested = key_state.first_ingested;
+
+    // Plain+tiles needs emit ends to union gap-only coverages; peek once.
+    let needs_emit_peek = window_configs.values().any(|cfg| {
+        cfg.aggregator_type == AggregatorType::PlainAccumulator && cfg.tiling.is_some()
+    });
+    let emit_from = match prev {
+        Some(p) => cursor_next(p),
+        None => first_ingested
+            .map(|f| Cursor::new(f.ts, 0))
+            .unwrap_or(Cursor::new(i64::MIN, 0)),
+    };
+    let emit_rows = if needs_emit_peek && emit_from.ts != i64::MIN {
+        store.events.scan(key, emit_from, effective).await?
+    } else {
+        vec![]
+    };
+    let emit_ends: Vec<Cursor> = emit_rows.iter().map(|r| r.cursor).collect();
+
     let mut plans = Vec::with_capacity(window_configs.len());
     for (window_id, cfg) in window_configs {
         require_range_frame(cfg.window_expr.get_window_frame());
         let has_acc = key_state.accumulators.contains_key(window_id);
-        plans.push(plan_window_load(cfg, prev, effective, has_acc));
+        plans.push(plan_window_load(
+            cfg,
+            prev,
+            effective,
+            has_acc,
+            first_ingested,
+            &emit_ends,
+        ));
     }
-    let load_plan = LoadPlan::union(plans);
-
-    // One join: every independent KV scan (raw ranges + tile ranges).
-    let mut futs: Vec<BoxFuture<'_, Result<LoadPart>>> = Vec::new();
-    for run in &load_plan.raw_runs {
-        let from = run.from;
-        let to = run.to;
-        futs.push(
-            async move { Ok(LoadPart::Raw(store.events.scan(key, from, to).await?)) }.boxed(),
-        );
-    }
-    for run in merge_tile_runs(load_plan.tile_runs) {
-        let gran = run.granularity;
-        let start_ts = run.start_ts;
-        let end_ts = run.end_ts_exclusive;
-        futs.push(
-            async move {
-                Ok(LoadPart::Tile {
-                    gran,
-                    items: store.tiles.scan(key, gran, start_ts, end_ts).await?,
-                })
-            }
-            .boxed(),
-        );
-    }
-    let parts = futures::future::try_join_all(futs).await?;
-
-    let mut rows = Vec::new();
-    let mut tile_by_key = BTreeMap::new();
-    for part in parts {
-        match part {
-            LoadPart::Raw(chunk) => rows.extend(chunk),
-            LoadPart::Tile { gran, items } => {
-                for (tile_start, window_tiles) in items {
-                    tile_by_key.insert((gran, tile_start), window_tiles);
-                }
-            }
-        }
-    }
-    rows.sort_by_key(|r| r.cursor);
-    rows.dedup_by(|a, b| a.cursor == b.cursor);
+    let batch = load(store, key, LoadPlan::union(plans))
+        .await?
+        .with_merged_rows(emit_rows);
 
     let mut values_by_window: Vec<Vec<ScalarValue>> = Vec::new();
+    // Shared frontier: all windows on a key advance together; emit cursors / new_pos
+    // come from the first window's nav (same emit band for every window).
     let mut emit_cursors: Option<Vec<Cursor>> = None;
     let mut new_pos = prev;
 
     for (window_id, cfg) in window_configs {
         let acc = key_state.accumulators.get(window_id).cloned();
         let wl = get_window_length_ms(cfg.window_expr.get_window_frame());
-        let nav = RowNav::from_stored_with_args(rows.clone(), &cfg.window_expr);
-
-        let loaded_tiles = project_tiles(&tile_by_key, *window_id);
+        let view = batch.for_window(*window_id, &cfg.window_expr);
         let tile_cfg = cfg.tiling.as_ref();
 
         let (values, pos, new_acc) = match cfg.aggregator_type {
-            AggregatorType::PlainAccumulator => produce_plain_range(
-                &cfg.window_expr,
-                &nav,
-                prev,
-                effective,
-                tile_cfg,
-                &loaded_tiles,
-            ),
+            AggregatorType::PlainAccumulator => {
+                produce_plain_range(&cfg.window_expr, &view, prev, effective, tile_cfg)
+            }
             AggregatorType::RetractableAccumulator => produce_retractable_range(
                 &cfg.window_expr,
-                &nav,
+                &view,
                 prev,
                 effective,
                 acc.as_ref(),
                 wl,
                 tile_cfg,
-                &loaded_tiles,
             ),
         };
 
         if emit_cursors.is_none() {
-            emit_cursors = Some(collect_emit_cursors(&nav, prev, effective));
+            emit_cursors = Some(collect_emit_cursors(&view, prev, effective));
         }
         if let Some(p) = pos {
             new_pos = Some(p);
@@ -168,8 +148,8 @@ pub async fn advance_key(
         return Ok((RecordBatch::new_empty(output_schema.clone()), still_pending));
     }
 
-    let emit_input_rows = emit_input_rows_from_stored(&rows, &emit_cursors, input_schema)?;
-    let out = stack_concat_results(emit_input_rows, values_by_window, output_schema, input_schema);
+    let emit_input_rows = emit_input_rows_from_stored(batch.rows(), &emit_cursors, input_schema)?;
+    let out = assemble_window_batch(emit_input_rows, values_by_window, output_schema, input_schema);
     Ok((out, still_pending))
 }
 
@@ -197,20 +177,24 @@ fn emit_input_rows_from_stored(
     Ok(out)
 }
 
-fn collect_emit_cursors(nav: &RowNav, prev: Option<Cursor>, advance_to: Cursor) -> Vec<Cursor> {
-    let Some(mut idx) = nav.first_update_idx(prev) else {
+fn collect_emit_cursors(
+    view: &WindowView,
+    prev: Option<Cursor>,
+    advance_to: Cursor,
+) -> Vec<Cursor> {
+    let Some(mut idx) = view.nav.first_update_idx(prev) else {
         return vec![];
     };
-    let Some(end) = nav.seek_le(advance_to) else {
+    let Some(end) = view.nav.seek_le(advance_to) else {
         return vec![];
     };
     let mut out = Vec::new();
     loop {
-        out.push(nav.cursor(idx));
+        out.push(view.nav.cursor(idx));
         if idx == end {
             break;
         }
-        idx = nav.next(idx).expect("end reachable");
+        idx = view.nav.next(idx).expect("end reachable");
     }
     out
 }

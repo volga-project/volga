@@ -19,11 +19,15 @@ use crate::runtime::operators::window::top::accumulators::value::TOP_NAME;
 
 pub type Timestamp = i64;
 
-/// A single "virtual" point for request-mode window evaluation.
+/// Request-mode lookup point for a key: as-of `ts`, optionally fold in a virtual row.
+///
+/// Global by design (one point answers all windows on the key). Args are produced once
+/// from the request row; windows are assumed to share compatible agg inputs.
+/// TODO: if windows ever need distinct request args, plumb per-window args here.
 #[derive(Debug, Clone)]
 pub struct VirtualPoint {
     pub ts: Timestamp,
-    /// Optional pre-evaluated args for this single row (length=1 arrays).
+    /// Pre-evaluated args for this row when including the virtual value (`!exclude`).
     pub args: Option<Arc<Vec<ArrayRef>>>,
 }
 
@@ -105,6 +109,19 @@ impl Default for AggregateRegistry {
                 let name = format!("{}{}", kind.name(), flavor.suffix());
                 registry.register_aggregate(&name, kind.aggregator_type());
             }
+        }
+        // top_n_key/value_{sum|avg|count|min|max}_cate_where (same kinds as SQL UDAFs)
+        for kind in [
+            AggKind::Sum,
+            AggKind::Avg,
+            AggKind::Count,
+            AggKind::Min,
+            AggKind::Max,
+        ] {
+            let key = format!("top_n_key_{}_cate_where", kind.name());
+            let value = format!("top_n_value_{}_cate_where", kind.name());
+            registry.register_aggregate(&key, kind.aggregator_type());
+            registry.register_aggregate(&value, kind.aggregator_type());
         }
         registry.register_aggregate(TOP_NAME, AggregatorType::PlainAccumulator);
         registry.register_aggregate(TOPN_FREQUENCY_NAME, AggregatorType::RetractableAccumulator);

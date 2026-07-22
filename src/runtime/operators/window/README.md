@@ -1,6 +1,7 @@
 # Window operators (WO / WRO) — SortedKV path
 
 Canonical notes for the RANGE window stack over SortedKV (design, backends, testing, roadmap).  
+**Detailed handoff for a new chat:** [`HANDOFF.md`](HANDOFF.md).  
 `storage/sorted_kv/` holds the trait + InMem only; [`top/README.md`](top/README.md) is aggregate API docs (separate).
 
 **Status:** Core cutover is in-tree (stores, `evaluate/`, tile planner, WO/WRO as separate KV clients). Remaining work is under [Next steps](#next-steps).
@@ -18,12 +19,14 @@ Both share one SortedKV (separate clients, no peer `Arc` / `wait_for_operator_st
 
 ```text
 WO / WRO
-  └─ EventStore / TileStore / MetaStore   (byte keys + serde values today)
+  └─ EventStore / TileStore / MetaStore   (byte keys + serde/IPC values today)
        └─ SortedKV
             ├─ InMemSortedKV          (tests; future shared gRPC backend)
             ├─ RocksDB / SlateDB      (planned durable)
             └─ Scylla                 (planned; single-partition batch)
 ```
+
+**Future (not built):** a typed / batch façade above SortedKV — see [Next steps §1](#1-window-store-façade-above-sortedkv). Keep SortedKV as the streaming byte primitive; do not push RecordBatch into that trait.
 
 **Namespaces:** `raw/` (events), `tile/` (acceleration), `meta/` (processed_pos, retractable acc).
 
@@ -31,7 +34,9 @@ WO / WRO
 
 **Tiles:** multi-window packing in one KV value (`WindowTiles` / `TileState`). Missing tile ≡ empty bucket. Raw events are source of truth; tiles are acceleration.
 
-**Eval:** `LoadPlan` unions raw/tile runs; one parallel load at caller (advance / WRO points). Retractable warm slide loads leave+add bands; plain/cold use full coverage. See `evaluate/load_plan.rs`.
+**Eval:** see `evaluate/mod.rs` matrix. Cold WO uses `first_ingested` (meta) only to close the load lower bound — same rebuild/slide paths (no separate cold module). Plain+tiles loads gap-only via union of per-emit coverages. WRO retractable: meta + slide when `T >= processed_pos`; plain skips meta. WRO exclude ⇒ skip request-row args only (store window still through `T`).
+
+**Batch mode:** WO ingest/advance only. WRO stays request/row-oriented (not a batch path).
 
 ---
 
@@ -85,7 +90,7 @@ Scylla must not split raw vs tile across partitions if WO→WRO torn-free visibi
 | State / ingest / prune | `state/window_operator_state.rs` |
 | Tiles | `state/tile/` (`plan`, `update`, `tile`, `granularity`) |
 | Stores | `store/` (`event_store`, `tile_store`, `meta_store`, `keys`) |
-| Eval | `evaluate/` (`advance`, `points`, `load_plan`, `plain`, `retractable`, `tiles`) |
+| Eval | `evaluate/` (`advance`, `points`, `load`, `rebuild`, `slide`, `coverage`) |
 | Aggs | `aggregates/`, `top/`, `cate/` |
 | KV | `storage/sorted_kv/` |
 
@@ -99,7 +104,7 @@ Deferred suite once tile ingest, plain eval, and retractable tile-slide are stab
 
 ### Correctness oracle
 
-Same input, two configs — Mode A tiling off, Mode B tiling on — bit-identical (or float-eq) outputs. Compare WRO points to WO emits where semantics align.
+Same input, two configs — Mode A tiling off, Mode B tiling on — bit-identical (or float-eq) outputs. WO matrix oracle in `tests/matrix.rs`; WRO point oracle (`matrix_wro_points_match_oracle`) covers before/at/after `processed_pos` and exclude on/off.
 
 ### Aggregate matrix
 
@@ -138,27 +143,37 @@ Unit: `state/tile/tests.rs`, agg retract roundtrip, SortedKV `write` atomicity.
 
 Ordered roughly by dependency / payoff. Skip impl until picked up explicitly.
 
-### 1. Typed window KV (skip serde on in-proc path)
+### 1. Window store façade above SortedKV
 
-Today stores encode/decode values even for InMem. Split:
+Today `EventStore::append_batch_rows` / `scan` pay per-row IPC even for InMem, and the WO path assumes `StoredRow` = 1-row batches. Goal: one abstraction for WO that (a) skips serde on in-proc paths and (b) lets streaming vs batch backends keep their natural layout — without changing `SortedKV`.
 
 ```text
-Window stores → WindowStateKv (typed WindowValue: Raw / Tile / Meta as Arc<…>)
-                    ├─ InMemWindowKv     (same-process tests; no serde)
-                    └─ DurableWindowKv → SortedKV bytes (Rocks / Slate / gRPC)
+WO
+  └─ EventLog / WindowStateKv   (append + scan in RecordBatch / typed values)
+        ├─ InMem / same-process     — Arc batches or typed values; no IPC/serde
+        ├─ StreamingDurable         — 1-row (or small) values over SortedKV
+        │                              (Rocks / Slate / gRPC InMemSortedKV)
+        └─ BatchDurable (later)     — Arrow/Parquet segments; range append/scan
 ```
 
-Keep **`InMemSortedKV`**: needed when simulating **separate WO/WRO workers** (local gRPC or kube) with a **shared SortedKV gRPC service** (same pattern as existing in-mem gRPC). Wire is bytes → Durable adapter → InMemSortedKV (or Rocks later).
+**Design notes (agreed, skip impl for now):**
+
+- **Keep `SortedKV` byte-oriented** (`get` / `scan` / `write`). It is the streaming primitive; batch backends will not map cleanly onto put-per-cursor.
+- **Lift EventStore (and later tiles/meta) to batch APIs:** `append(key, batch)`, `scan(key, from, to) → RecordBatch`s (or typed chunks). Streaming impl still splits to 1-row SortedKV puts; batch impl writes segments.
+- **Typed in-proc path:** `WindowValue` as `Arc<…>` (raw / tile / meta) so same-process tests and co-located WO skip encode/decode. Cross-worker / durable still goes bytes over SortedKV (or gRPC).
+- **Read path must evolve with write:** `RowNav` / eval still assume 1-row `StoredRow`. Multi-row scan results need `(batch, row)` nav (or concat) or advance stays row-taxed even after batch append.
+- **WRO:** not in scope for batch-mode store work; remains point eval.
+
+Keep **`InMemSortedKV`**: needed when simulating **separate WO/WRO workers** (local gRPC or kube) with a **shared SortedKV gRPC service**. Wire is bytes → Durable adapter → InMemSortedKV (or Rocks later).
 
 ### 2. Testing suite
 
-Implement the oracle + fixtures above (`TESTING` section).
+WO matrix + thin WRO point oracle are in `tests/matrix.rs`. Remaining: stress fixtures / layout under `TESTING` above.
 
 ### 3. Eval / tile follow-ups
 
 - Hop emit + tile-add path (add band still raw-only today)
-- Tighten plain raw-under-tiles over-read
-- Plain per-emit full recompute: measure; prefer retractable + tiles over caching (`evaluate/plain.rs` TODO)
+- Plain per-emit full recompute: measure; prefer retractable + tiles over caching (`evaluate/rebuild.rs` TODO)
 
 ### 4. Late data / CDC
 
@@ -176,5 +191,5 @@ Fold/rename leftover WO state; remove stale legacy paths if any remain.
 
 ## Explicitly not doing now
 
-- Implementing `WindowStateKv` / `InMemWindowKv` (tracked in Next steps §1)
+- Implementing the window store façade / `EventLog` / `InMemWindowKv` / multi-row `RowNav` (tracked in Next steps §1)
 - Compiling / running the full deferred test suite until asked

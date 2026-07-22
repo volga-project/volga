@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::Key;
 use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::frame_utils::get_window_length_ms;
-use crate::runtime::operators::window::shared::WindowConfig;
+use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::state::tile::update::{
     apply_batch_to_tiles, plan_update_runs_for_batch,
 };
@@ -96,10 +96,15 @@ impl WindowOperatorState {
         let start_seq = key_state.next_seq();
         let with_seq = append_seq_no_column(&accepted, start_seq);
 
-        if let Some(batch_max) = max_cursor_from_batch(&with_seq, self.ts_column_index) {
+        if let Some((batch_min, batch_max)) = cursor_range_from_batch(&with_seq, self.ts_column_index)
+        {
             key_state.max_seen = Some(match key_state.max_seen {
                 Some(prev) => prev.max(batch_max),
                 None => batch_max,
+            });
+            key_state.first_ingested = Some(match key_state.first_ingested {
+                Some(prev) => prev.min(batch_min),
+                None => batch_min,
             });
         }
 
@@ -215,7 +220,11 @@ fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
     RecordBatch::try_new(schema, columns).expect("append seq")
 }
 
-fn max_cursor_from_batch(batch: &RecordBatch, ts_column_index: usize) -> Option<Cursor> {
+/// Min and max cursors in the batch (`None` if empty).
+fn cursor_range_from_batch(
+    batch: &RecordBatch,
+    ts_column_index: usize,
+) -> Option<(Cursor, Cursor)> {
     if batch.num_rows() == 0 {
         return None;
     }
@@ -230,14 +239,18 @@ fn max_cursor_from_batch(batch: &RecordBatch, ts_column_index: usize) -> Option<
         .as_any()
         .downcast_ref::<UInt64Array>()
         .expect("seq");
-    let mut max = Cursor::new(ts.value(0), seq.value(0));
+    let mut min = Cursor::new(ts.value(0), seq.value(0));
+    let mut max = min;
     for i in 1..batch.num_rows() {
         let c = Cursor::new(ts.value(i), seq.value(i));
+        if c < min {
+            min = c;
+        }
         if c > max {
             max = c;
         }
     }
-    Some(max)
+    Some((min, max))
 }
 
 /// Drop rows with `ts <= processed_pos_ts` (streaming late; no retention slack).

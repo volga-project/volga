@@ -18,9 +18,7 @@ use crate::runtime::operators::operator::{
 use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::evaluate::advance_key;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
-use crate::runtime::operators::window::shared::{
-    build_window_operator_parts, resolve_tiling_configs, WindowConfig,
-};
+use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::store::{StateNamespace, WindowStateStore};
 use crate::runtime::operators::window::window_operator_state::{WindowOperatorState, WindowId};
 use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
@@ -107,33 +105,27 @@ impl WindowOperator {
             panic!("RequestAdvancePolicy::OnIngest is only valid for WindowEmitMode::Request");
         }
 
-        let tiling_configs = resolve_tiling_configs(
-            window_operator_config.window_exec.window_expr().len(),
+        let built = BuiltWindows::for_wo(
+            &window_operator_config.window_exec,
             &window_operator_config.tiling_configs,
             &window_operator_config.spec,
         );
-        let (ts_column_index, windows, input_schema, output_schema) =
-            build_window_operator_parts(
-                false,
-                &window_operator_config.window_exec,
-                &tiling_configs,
-            );
 
-        for w in windows.values() {
+        for w in built.windows.values() {
             require_range_frame(w.window_expr.get_window_frame());
         }
 
         Self {
             base: OperatorBase::new(config),
-            window_configs: Arc::new(windows),
+            window_configs: Arc::new(built.windows),
             state: None,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
             request_advance_policy: window_operator_config.spec.request_advance_policy,
-            output_schema,
-            input_schema,
+            output_schema: built.output_schema,
+            input_schema: built.input_schema,
             current_watermark: None,
-            ts_column_index,
+            ts_column_index: built.ts_column_index,
             lateness: window_operator_config.spec.lateness,
         }
     }

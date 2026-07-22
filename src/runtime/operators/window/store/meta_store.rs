@@ -13,7 +13,12 @@ use crate::storage::{SortedKV, WriteBatch};
 use super::keys::{key_state_key, StateNamespace};
 
 /// Single meta blob per stream key.
-/// `max_seen`: last ingested cursor; next seq = max_seen.seq_no + 1 (or 0).
+///
+/// - `max_seen`: last ingested cursor; next seq = max_seen.seq_no + 1 (or 0).
+/// - `processed_pos`: WO advance frontier (shared across windows on this key).
+/// - `first_ingested`: first accepted ingest cursor — cold coverage lower bound only
+///   (before `processed_pos` exists). Not maintained on prune/retract.
+/// - `accumulators`: per-window retractable state.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct KeyState {
@@ -21,6 +26,9 @@ pub struct KeyState {
     pub processed_pos: Option<Cursor>,
     #[serde_as(as = "BTreeMap<_, Vec<utils::ScalarValueAsBytes>>")]
     pub accumulators: BTreeMap<WindowId, AccumulatorState>,
+    /// Cold-plan origin; see struct docs. Not updated on prune.
+    #[serde(default)]
+    pub first_ingested: Option<Cursor>,
 }
 
 impl KeyState {

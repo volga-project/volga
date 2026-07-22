@@ -23,3 +23,23 @@ impl Default for WindowOperatorSpec {
         }
     }
 }
+
+impl WindowOperatorSpec {
+    /// Pad/fill per-window tiling from overrides + `self.tiling` default.
+    pub fn resolve_tiling(
+        &self,
+        n_windows: usize,
+        tiling_overrides: &[Option<TileConfig>],
+    ) -> Vec<Option<TileConfig>> {
+        let mut out = tiling_overrides.to_vec();
+        out.resize(n_windows, None);
+        if let Some(default) = &self.tiling {
+            for t in &mut out {
+                if t.is_none() {
+                    *t = Some(default.clone());
+                }
+            }
+        }
+        out
+    }
+}

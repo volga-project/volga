@@ -21,7 +21,7 @@ pub struct RawGap {
 
 /// Pure geometry plan: which tile key ranges to scan + raw edges.
 ///
-/// Assumes ingest keeps tiles in sync with raw data, so a missing KV tile means
+/// Callers load closed ranges only. A missing KV key inside a scanned range means
 /// that bucket had no events (skip / identity). No existence map required.
 #[derive(Debug, Clone, Default)]
 pub struct CoveragePlan {
@@ -65,12 +65,8 @@ pub fn plan_time_range(config: &TileConfig, start_ts: Timestamp, end_ts: Timesta
 
 /// Geometry only: raw head → coarsest-fitting tiles → raw tail.
 ///
-/// Seeds `t` at the first safe min-gran boundary (`first_tile_after_ts` = strictly
-/// after that ts for cursor plans; else at-or-after `start.ts`). Anything before
-/// `t` is a raw gap. Then greedily take the coarsest gran aligned at `t` that
-/// ends ≤ `tile_end_max`, coalesce adjacent same-gran runs, advance `t`. Stop
-/// when nothing fits (leftover shorter than every tile) and cover the rest with
-/// a raw gap to `end`. Missing KV tiles are empty buckets, not planner misses.
+/// Callers must pass closed bounds (never `i64::MIN`). Cold open loads raw first,
+/// then plans tiles from `min_ts − wl`.
 fn plan_interior(
     config: &TileConfig,
     start: Cursor,
@@ -312,31 +308,6 @@ mod plan_tests {
     }
 
     #[test]
-    fn merge_coalesces_same_gran() {
-        let m1 = TimeGranularity::Minutes(1);
-        let merged = merge_tile_runs(vec![
-            TileScanRun {
-                granularity: m1,
-                start_ts: 0,
-                end_ts_exclusive: 60_000,
-            },
-            TileScanRun {
-                granularity: m1,
-                start_ts: 60_000,
-                end_ts_exclusive: 120_000,
-            },
-            TileScanRun {
-                granularity: m1,
-                start_ts: 180_000,
-                end_ts_exclusive: 240_000,
-            },
-        ]);
-        assert_eq!(merged.len(), 2);
-        assert_eq!(merged[0].end_ts_exclusive, 120_000);
-        assert_eq!(merged[1].start_ts, 180_000);
-    }
-
-    #[test]
     fn mixes_gran_when_coarse_does_not_fit() {
         let m1 = TimeGranularity::Minutes(1);
         let m5 = TimeGranularity::Minutes(5);
@@ -349,5 +320,48 @@ mod plan_tests {
         assert_eq!(plan.tile_runs[1].granularity, m1);
         assert_eq!(plan.tile_runs[1].start_ts, 5 * 60_000);
         assert_eq!(plan.tile_runs[1].end_ts_exclusive, 7 * 60_000);
+    }
+
+    #[test]
+    fn same_ts_coverage_is_single_raw_gap() {
+        let config = cfg(vec![TimeGranularity::Minutes(1)]);
+        let start = Cursor::new(60_000, 1);
+        let end = Cursor::new(60_000, 5);
+        let plan = plan_coverage(&config, start, end);
+        assert!(plan.tile_runs.is_empty());
+        assert_eq!(plan.raw_gaps, vec![RawGap { from: start, to: end }]);
+    }
+
+    #[test]
+    fn window_shorter_than_min_gran_is_all_raw() {
+        let config = cfg(vec![TimeGranularity::Minutes(5)]);
+        let plan = plan_time_range(&config, 0, 60_000);
+        assert!(plan.tile_runs.is_empty());
+        assert_eq!(plan.raw_gaps.len(), 1);
+        assert_eq!(plan.raw_gaps[0].from.ts, 0);
+        assert_eq!(plan.raw_gaps[0].to.ts, 60_000);
+    }
+
+    #[test]
+    fn plan_update_runs_one_per_gran_per_bucket() {
+        let m1 = TimeGranularity::Minutes(1);
+        let m5 = TimeGranularity::Minutes(5);
+        let config = cfg(vec![m1, m5]);
+
+        assert!(plan_update_runs(&config, std::iter::empty::<i64>()).is_empty());
+
+        let runs = plan_update_runs(&config, [90_000, 90_000, 6 * 60_000]);
+        // Two buckets × two grans; not coalesced like eval coverage.
+        assert_eq!(runs.len(), 4);
+        assert!(runs.iter().any(|r| r.granularity == m1 && r.start_ts == 60_000));
+        assert!(runs.iter().any(|r| r.granularity == m1 && r.start_ts == 6 * 60_000));
+        assert!(runs.iter().any(|r| r.granularity == m5 && r.start_ts == 0));
+        assert!(runs.iter().any(|r| r.granularity == m5 && r.start_ts == 5 * 60_000));
+        for r in &runs {
+            assert_eq!(
+                r.end_ts_exclusive,
+                r.start_ts + r.granularity.to_millis()
+            );
+        }
     }
 }
