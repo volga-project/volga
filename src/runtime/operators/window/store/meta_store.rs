@@ -8,13 +8,15 @@ use crate::common::Key;
 use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::window_operator_state::{AccumulatorState, WindowId};
 use crate::runtime::utils;
-use crate::storage::{SortedKV, WriteBatch};
+use crate::storage::{KvSnapshot, SortedKV, WriteBatch};
 
 use super::keys::{key_state_key, StateNamespace};
 
 /// Single meta blob per stream key.
 ///
-/// - `max_seen`: last ingested cursor; next seq = max_seen.seq_no + 1 (or 0).
+/// - `max_seen`: max ingested [`Cursor`] `(ts, seq)` (event-time frontier).
+/// - `next_seq`: next row `seq_no` to assign (monotonic ingest allocator; **not**
+///   derived from `max_seen.seq_no`, which is ts-first).
 /// - `processed_pos`: WO advance frontier (shared across windows on this key).
 /// - `first_ingested`: first accepted ingest cursor — cold coverage lower bound only
 ///   (before `processed_pos` exists). Not maintained on prune/retract.
@@ -29,14 +31,9 @@ pub struct KeyState {
     /// Cold-plan origin; see struct docs. Not updated on prune.
     #[serde(default)]
     pub first_ingested: Option<Cursor>,
-}
-
-impl KeyState {
-    pub fn next_seq(&self) -> u64 {
-        self.max_seen
-            .map(|c| c.seq_no.saturating_add(1))
-            .unwrap_or(0)
-    }
+    /// Next `__seq_no` to assign on ingest. Independent of `max_seen`.
+    #[serde(default)]
+    pub next_seq: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +50,15 @@ impl MetaStore {
     pub async fn get_key(&self, key: &Key) -> Result<KeyState> {
         let k = key_state_key(&self.ns, key);
         match self.kv.get(&k).await? {
+            Some(bytes) => Ok(bincode::deserialize(&bytes)?),
+            None => Ok(KeyState::default()),
+        }
+    }
+
+    /// Meta get on an open partition snapshot (same epoch as data scans).
+    pub async fn get_key_on(&self, snap: &dyn KvSnapshot, key: &Key) -> Result<KeyState> {
+        let k = key_state_key(&self.ns, key);
+        match snap.get(&k).await? {
             Some(bytes) => Ok(bincode::deserialize(&bytes)?),
             None => Ok(KeyState::default()),
         }

@@ -28,6 +28,8 @@ pub struct WindowOperatorState {
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
     window_ids: Vec<WindowId>,
     lateness: Option<i64>,
+    /// Raw key bucket width (`align_bucket`); used for ingest keys + envelope scans.
+    bucket_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ impl WindowOperatorState {
         ts_column_index: usize,
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
         lateness: Option<i64>,
+        bucket_ms: i64,
     ) -> Self {
         let window_ids: Vec<WindowId> = window_configs.keys().cloned().collect();
         Self {
@@ -49,6 +52,7 @@ impl WindowOperatorState {
             window_configs,
             window_ids,
             lateness,
+            bucket_ms: bucket_ms.max(1),
         }
     }
 
@@ -86,17 +90,20 @@ impl WindowOperatorState {
             .unwrap_or(i64::MIN);
 
         // Streaming late: ts <= processed_pos (no lateness slack). CDC late-data later.
-        // Drop before seq assign so next_seq ≡ max_seen.seq + 1.
+        // Drop before seq assign so `next_seq` stays a dense allocator.
         let (accepted, dropped) =
             drop_late_entries(&batch, self.ts_column_index, processed_pos_ts);
         if accepted.num_rows() == 0 {
             return (dropped, key_state.max_seen);
         }
 
-        let start_seq = key_state.next_seq();
+        let start_seq = key_state.next_seq;
         let with_seq = append_seq_no_column(&accepted, start_seq);
+        // Dedicated allocator (not max_seen.seq — that is ts-first cursor order).
+        key_state.next_seq = start_seq.saturating_add(accepted.num_rows() as u64);
 
-        if let Some((batch_min, batch_max)) = cursor_range_from_batch(&with_seq, self.ts_column_index)
+        if let Some((batch_min, batch_max)) =
+            cursor_range_from_batch(&with_seq, self.ts_column_index)
         {
             key_state.max_seen = Some(match key_state.max_seen {
                 Some(prev) => prev.max(batch_max),
@@ -160,8 +167,14 @@ impl WindowOperatorState {
         let mut wb = WriteBatch::new();
         self.store
             .events
-            .append_batch_rows(&mut wb, key, &with_seq, self.ts_column_index)
-            .expect("append rows");
+            .append_batch(
+                &mut wb,
+                key,
+                &with_seq,
+                self.ts_column_index,
+                self.bucket_ms,
+            )
+            .expect("append event batch");
         self.store
             .tiles
             .append_window_tiles(&mut wb, key, &updated_tiles)
@@ -199,16 +212,19 @@ impl WindowOperatorState {
         }
         let cutoff = Cursor::new(cutoff_ts, u64::MAX);
         let _ = tokio::join!(
-            self.store.events.prune_before(key, cutoff),
+            self.store
+                .events
+                .prune_before(key, cutoff, self.bucket_ms),
             self.store.tiles.prune_before(key, cutoff_ts),
         );
     }
 }
 
 fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
-    if batch.schema().field_with_name(SEQ_NO_COLUMN_NAME).is_ok() {
-        return batch.clone();
-    }
+    assert!(
+        batch.schema().field_with_name(SEQ_NO_COLUMN_NAME).is_err(),
+        "WO ingest assigns __seq_no; input must not already have it",
+    );
     let mut fields = batch.schema().fields().to_vec();
     fields.push(Arc::new(Field::new(SEQ_NO_COLUMN_NAME, DataType::UInt64, false)));
     let schema = Arc::new(Schema::new(fields));
@@ -225,31 +241,14 @@ fn cursor_range_from_batch(
     batch: &RecordBatch,
     ts_column_index: usize,
 ) -> Option<(Cursor, Cursor)> {
-    if batch.num_rows() == 0 {
-        return None;
-    }
-    let ts = batch
-        .column(ts_column_index)
-        .as_any()
-        .downcast_ref::<TimestampMillisecondArray>()
-        .expect("ts");
-    let seq_idx = batch.schema().index_of(SEQ_NO_COLUMN_NAME).ok()?;
-    let seq = batch
-        .column(seq_idx)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("seq");
-    let mut min = Cursor::new(ts.value(0), seq.value(0));
-    let mut max = min;
-    for i in 1..batch.num_rows() {
-        let c = Cursor::new(ts.value(i), seq.value(i));
-        if c < min {
-            min = c;
-        }
-        if c > max {
-            max = c;
-        }
-    }
+    let cursors =
+        crate::runtime::operators::window::store::event_chunk::cursors_from_batch(
+            batch,
+            ts_column_index,
+        )
+        .ok()?;
+    let min = cursors.iter().copied().min()?;
+    let max = cursors.iter().copied().max()?;
     Some((min, max))
 }
 

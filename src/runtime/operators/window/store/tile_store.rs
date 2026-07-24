@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use crate::common::Key;
 use crate::runtime::operators::window::state::tile::{TimeGranularity, WindowTiles};
-use crate::storage::{SortedKV, WriteBatch};
+use crate::storage::{KvSnapshot, SortedKV, WriteBatch};
 
 use super::keys::{
-    tile_key, tile_key_prefix, tile_scan_end, tile_scan_start, StateNamespace,
+    partition_key, tile_key, tile_key_prefix, tile_scan_end, tile_scan_start, StateNamespace,
 };
 
 #[derive(Debug, Clone)]
@@ -26,6 +26,13 @@ impl TileStore {
 
     pub async fn write(&self, wb: WriteBatch) -> Result<()> {
         self.kv.write(wb).await
+    }
+
+    /// Partition-scoped snapshot for multi-scan reads of this business key.
+    pub async fn snapshot(&self, key: &Key) -> Result<std::sync::Arc<dyn KvSnapshot>> {
+        self.kv
+            .snapshot_partition(&partition_key(&self.ns, key))
+            .await
     }
 
     /// One KV get. Missing key → empty [`WindowTiles`].
@@ -61,8 +68,11 @@ impl TileStore {
     }
 
     /// One KV scan of `WindowTiles` at `gran` in `[start_ts, end_ts_exclusive)`.
+    ///
+    /// Pass a [`KvSnapshot`] from `snapshot_partition` for multi-op loads.
     pub async fn scan(
         &self,
+        reader: &dyn KvSnapshot,
         key: &Key,
         gran: TimeGranularity,
         start_ts: i64,
@@ -71,7 +81,7 @@ impl TileStore {
         let start = tile_scan_start(&self.ns, key, gran, start_ts);
         let end = tile_scan_end(&self.ns, key, gran, end_ts_exclusive);
         let mut out = Vec::new();
-        let mut stream = self.kv.scan(&start, &end);
+        let mut stream = reader.scan(&start, &end);
         while let Some(item) = stream.next().await {
             let (k, v) = item?;
             let tile_start = parse_tile_start_from_key(&k)?;

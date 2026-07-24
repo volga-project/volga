@@ -292,7 +292,7 @@ fn oracle_wro_point(evs: &[Ev], point_ts: i64, point_value: f64, exclude: bool) 
 #[tokio::test]
 async fn matrix_wro_points_match_oracle() {
     // After WO advance to last fixture ts: P = 720_000.
-    // Points probe rebuild (T < P), acc-only / slide (T == P), and add-slide (T > P).
+    // Points probe rebuild (T < P), acc-only / jump (T == P), and leave+add jump (T > P).
     let evs = fixture_events();
     let sql = matrix_sql();
     let input_cols = test_input_schema().fields().len();

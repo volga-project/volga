@@ -1,28 +1,51 @@
-//! **Rebuild** — one RANGE window from scratch (shared WO/WRO kernel).
-//!
-//! Used by:
-//! - **WO + plain**: each emit via [`crate::runtime::operators::window::evaluate::wo`]
-//! - **WRO + plain**: each request point
-//! - **WRO + retractable**: past `T`, missing acc, or window fully past `processed_pos`
-//!
-//! Path: threaded [`CoveragePlan`] → coverage rebuild on [`WindowView`] (else fold raw).
-//! Optional request row when including the virtual value.
+//! Rebuild: per-emit produce + shared [`eval_rebuild`] kernel.
 
 use std::sync::Arc;
 
-use datafusion::logical_expr::Accumulator;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::{
     create_window_aggregator, VirtualPoint,
 };
+use crate::runtime::operators::window::frame_utils::get_window_length_ms;
 use crate::runtime::operators::window::state::tile::CoveragePlan;
 use crate::runtime::operators::window::store::row_nav::RowIdx;
+use crate::runtime::operators::window::store::WindowView;
 
-use super::super::primitives::{apply_row, rebuild_from_coverage, WindowView};
+use super::primitives::{
+    apply_request_row, update_acc_from_plan, update_row, EvalUnit,
+};
 
-/// One window answer: tiles+gaps via `coverage` (preferred), else fold raw;
+/// Rebuild each unit (coverage preferred, else raw walk).
+pub(super) fn produce_rebuild(
+    window_expr: &Arc<dyn WindowExpr>,
+    view: &WindowView,
+    units: &[EvalUnit],
+) -> Vec<ScalarValue> {
+    let wl = get_window_length_ms(window_expr.get_window_frame());
+    let mut values = Vec::with_capacity(units.len());
+    for unit in units {
+        let Some(idx) = view.nav.seek_ge(unit.end) else {
+            continue;
+        };
+        let end_c = view.nav.cursor(idx);
+        if end_c != unit.end {
+            continue;
+        }
+        values.push(eval_rebuild(
+            window_expr,
+            view,
+            end_c.ts.saturating_sub(wl),
+            Some(idx),
+            unit.coverage.as_ref(),
+            None,
+        ));
+    }
+    values
+}
+
+/// One window answer: tiles+raw via `coverage` (preferred), else raw rows;
 /// then optional request row.
 pub(crate) fn eval_rebuild(
     window_expr: &Arc<dyn WindowExpr>,
@@ -33,16 +56,16 @@ pub(crate) fn eval_rebuild(
     request_row: Option<&VirtualPoint>,
 ) -> ScalarValue {
     if let Some(plan) = coverage {
-        if let Some(mut acc) = rebuild_from_coverage(window_expr, view, plan, end_idx) {
+        let mut acc = create_window_aggregator(window_expr);
+        if update_acc_from_plan(window_expr, view, acc.as_mut(), plan, end_idx) {
             apply_request_row(acc.as_mut(), request_row);
             return acc.evaluate().expect("evaluate");
         }
     }
-
-    apply_raw_window(window_expr, view, start_ts, end_idx, request_row)
+    update_raw_window(window_expr, view, start_ts, end_idx, request_row)
 }
 
-fn apply_raw_window(
+fn update_raw_window(
     window_expr: &Arc<dyn WindowExpr>,
     view: &WindowView,
     start_ts: i64,
@@ -60,7 +83,7 @@ fn apply_raw_window(
     let mut acc = create_window_aggregator(window_expr);
     let mut i = start_idx;
     loop {
-        apply_row(window_expr, &view.nav, i, acc.as_mut());
+        update_row(window_expr, &view.nav, i, acc.as_mut());
         if i == end_idx {
             break;
         }
@@ -68,15 +91,6 @@ fn apply_raw_window(
     }
     apply_request_row(acc.as_mut(), request_row);
     acc.evaluate().expect("evaluate")
-}
-
-fn apply_request_row(acc: &mut dyn Accumulator, request_row: Option<&VirtualPoint>) {
-    let Some(point) = request_row else {
-        return;
-    };
-    if let Some(args) = &point.args {
-        acc.update_batch(args).expect("update request row");
-    }
 }
 
 fn eval_request_row_only(

@@ -15,7 +15,7 @@ mod tests;
 
 pub use granularity::{TileConfig, TimeGranularity, Timestamp};
 pub use plan::{
-    merge_tile_runs, plan_coverage, plan_time_range, plan_update_runs, CoveragePlan, RawGap,
-    TileScanRun,
+    merge_tile_runs, plan_coverage, plan_time_range, plan_update_runs, CoveragePlan, RawRun,
+    TileRun,
 };
 pub use tile::{project_tiles, Tile, TileState, WindowTiles};

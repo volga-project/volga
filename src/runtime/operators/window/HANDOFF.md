@@ -1,10 +1,35 @@
 # WO / WRO SortedKV — handoff doc (continue from here)
 
 **Purpose:** Full design dump so a new chat can continue without prior transcript.  
-**Branch context:** RANGE-only tiling + evaluate refactor; recent work = cold via `first_ingested`, gap-only plain load, `KeyBatch`/`WindowView`, WO/WRO module split.  
+**Branch context:** RANGE windows; **WO/WRO in `eval/`** (envelope estimate + slide \| rebuild).  
 **Canonical short notes:** also keep [`README.md`](README.md) in sync for roadmap; this file is the detailed handoff.
 
 **Do not** run tests/compile unless the user asks (recent preference).
+
+---
+
+## 0. Evaluate layout (current)
+
+Everything lives under [`eval/`](eval/):
+
+| Path | Role |
+|------|------|
+| `eval/envelope` | Envelope bounds (`estimate_*`, `cold_needed_from`, `window_start_floor`) |
+| `eval/advance` | WO: estimate → `load_envelope` → **slide \| rebuild** → emit |
+| `eval/emit` | WO emit ends + input-row assembly |
+| `eval/wro` | WRO: same via `load_envelope` + `evaluate_points` |
+| `eval/slide`, `rebuild`, `primitives` | Shared kernels (CPU coverage only; no KV LoadPlan) |
+| `store/load` | `PartitionData` / `WindowData` / `WindowView`; `load_envelope` + `load_data` |
+| `store/event_chunk`, `row_nav` | One-row `EventChunk`s; `RowNav` asserts Cursor order |
+
+Branching is only [`can_slide`](eval/mod.rs) (retractable acc), not a "plain operator" family.
+`AggregatorType::PlainAccumulator` remains in the registry only for DF acc construction (min/max until retractable).
+
+### Design targets (still open)
+
+- Retractable min/max (then registry can drop Plain)
+- AccCentric hop; CDC
+- Optional multi-row packing inside a bucket ([#155](https://github.com/volga-project/volga/issues/155))
 
 ---
 
@@ -12,8 +37,8 @@
 
 | Operator | File | Role |
 |----------|------|------|
-| **WO** `WindowOperator` | `window_operator.rs` | Sole writer: ingest + watermark advance (`evaluate::advance_key`) |
-| **WRO** `WindowRequestOperator` | `window_request_operator.rs` | Read-only point eval (`evaluate::evaluate_range_points`) |
+| **WO** `WindowOperator` | `window_operator.rs` | Sole writer: ingest + watermark advance (`eval::advance_key`) |
+| **WRO** `WindowRequestOperator` | `window_request_operator.rs` | Read-only point eval (`eval::evaluate_points`) |
 
 - Shared **SortedKV** (separate store clients; no peer `Arc` / `wait_for_operator_state`).
 - Frames: **RANGE only** (ROWS dropped).
@@ -32,29 +57,32 @@ WO / WRO
 
 | Namespace | Store | Contents |
 |-----------|--------|----------|
-| `raw/` | `EventStore` | Per-cursor event rows (today: 1-row IPC `RecordBatch` per put) |
+| `raw/` | `EventStore` | One row/key: `raw/{ns}/{hash}/{bucket_ts}/{ts}/{seq_no}` |
 | `tile/` | `TileStore` | `(granularity, tile_start)` → `WindowTiles` (multi-window packed) |
 | `meta/` | `MetaStore` | Per stream-key `KeyState` |
+
+`bucket_ms` from `WindowOperatorSpec::resolve_bucket_ms` (tiling min gran, else `60_000`) — used to `align_bucket` for raw keys and envelope scans. Multi-row packing deferred ([#155](https://github.com/volga-project/volga/issues/155)). Breaking key format OK for InMem tests.
 
 ### `KeyState` (`store/meta_store.rs`)
 
 | Field | Meaning |
 |-------|---------|
-| `max_seen` | Last ingested `Cursor`; `next_seq = max_seen.seq + 1` |
+| `max_seen` | Max ingested `Cursor` `(ts, seq)` (event-time frontier; ts-first) |
+| `next_seq` | Next row `seq_no` to assign (monotonic; **not** derived from `max_seen.seq`) |
 | `processed_pos` | WO advance frontier (**shared across all windows** on the key) |
 | `first_ingested` | First accepted ingest cursor — **cold coverage lower bound only**. Set on ingest as min; **not** maintained on prune/retract. `#[serde(default)]` for old blobs |
 | `accumulators` | Per-`WindowId` retractable acc state (plain windows: absent) |
 
 ### Cursor
 
-`Cursor { ts: i64, seq_no: u64 }` — lexicographic order. Seq assigned on ingest after late-drop (`append_seq_no_column`).
+`Cursor { ts: i64, seq_no: u64 }` — lexicographic order. Seq from `KeyState.next_seq` after late-drop (`append_seq_no_column`).
 
 ### Ingest (`state/window_operator_state.rs`)
 
 1. `drop_late_entries`: drop `ts <= processed_pos` (streaming late; **no** lateness slack).
-2. Assign seqs; update `max_seen` / `first_ingested` via `cursor_range_from_batch` (row O(n) min/max — Arrow sort not worth it for composite cursor).
+2. Assign seqs from `next_seq`; update `max_seen` / `first_ingested` / bump `next_seq`.
 3. Plan dirty tiles → parallel get → `apply_batch_to_tiles` in mem.
-4. One atomic `WriteBatch`: raw rows + tiles + meta → `kv.write`.
+4. One atomic `WriteBatch`: one raw put per row under `bucket_ts` + tiles + meta → `kv.write`.
 
 ### Prune
 
@@ -66,100 +94,91 @@ WO / WRO
 
 | Piece | Role |
 |-------|------|
-| `plan_coverage` / `CoveragePlan` | Pure geometry: `tile_runs` + `raw_gaps`. Missing KV tile after a covered scan ⇒ **empty bucket** (not an error) |
+| `plan_coverage` / `CoveragePlan` | Pure geometry: `tile_runs` + `raw_head` / `raw_tail`. Missing KV tile after a covered scan ⇒ **empty bucket** (not an error) |
 | `plan_update_runs` | Ingest: which tile keys a batch dirties (per gran, not coalesced like eval) |
 | `project_tiles` | `TileMap` → `Vec<Tile>` for one `WindowId` |
 | `window_supports_tile_slide` | sum/count/avg (etc.) can tile-retract; min/max cannot |
 
 **Never** plan tiles from `i64::MIN` (geometry walk hangs). Cold needs a **closed** lower bound → `first_ingested.ts − wl`.
 
-Ideal pipeline (partially achieved): **coverage → LoadPlan → load → apply same CoveragePlan**.  
-Apply helpers take `&CoveragePlan` (no re-plan inside). Callers may still plan per emit for multi-emit WO.
+Ideal pipeline: **estimate envelope (no meta) → `store.load_envelope` → slide | rebuild in memory**.  
+Formulas live in [`eval/envelope.rs`](eval/envelope.rs). Eval plans CPU coverage
+(`plan_rebuild_prep`) only — store owns bucket/tile KV scans; slide leave plans in `slide`.
+Overfetch ≈ extra tiles; raw edges &lt; one min-gran.
 
 ---
 
-## 4. Evaluate module map (`evaluate/`)
+## 4. Evaluate module map
 
 ```text
-evaluate/
-  primitives/   plan, load, coverage
-  strategies/   rebuild, slide
-  wo/           advance, plan, produce
-  wro/          points, load
-  output.rs     assemble_window_batch
-config.rs       WindowConfig + BuiltWindows::for_wo/for_wro
+eval/
+  envelope (bounds + window_start_floor / cold_needed_from)
+  advance, emit, slide, rebuild, primitives, wro, output
+store/load.rs         PartitionData / WindowData / WindowView + load_envelope / load_data
+config.rs             WindowConfig + BuiltWindows
 ```
 
 | Path | Responsibility |
 |------|----------------|
-| `primitives/plan` | `LoadPlan`, `plan_gap_only_ends`, `plan_slide`, bounds |
-| `primitives/load` | KV IO → `KeyBatch` / `WindowView` |
-| `primitives/coverage` | apply/retract `CoveragePlan` + `apply_row` / `retract_row` |
-| `strategies/rebuild` | `eval_rebuild` |
-| `strategies/slide` | `eval_slide_as_of` |
-| `wo/advance` | WO entry |
-| `wo/plan` | `plan_window_load` |
-| `wo/produce` | `produce_plain_range` / `produce_retractable_range` |
-| `wro/points` | WRO entry |
-| `wro/load` | `load_rebuild_points` |
-| `output` | `assemble_window_batch` |
-| `config` | `WindowConfig`, `BuiltWindows` |
+| `eval/envelope` | Conservative IO bounds without meta; post-meta floors |
+| `eval/advance` | WO entry: estimate → `load_envelope` → optional `load_data` widen → slide \| rebuild |
+| `eval/emit` | WO emit ends + input-row scalars (`flatten_ordered`) |
+| `eval/slide` | leave+add produce; `slide_same_ts` for WRO |
+| `eval/rebuild` | `eval_rebuild` + produce |
+| `eval/wro` | WRO entry (same envelope load + slide \| rebuild) |
+| `primitives/*` | acc / `plan_rebuild_prep` |
+| `store/load` | One snap: meta + bucket raw + tiles |
 
 ### Execution matrix
 
-| | **Plain** | **Retractable** |
-|--|-----------|-----------------|
-| **WO** | Rebuild each emit in `(prev, effective]` | No acc: seed/rebuild then slide within advance; warm: leave+add slide |
-| **WRO** | Rebuild each point (+ request row if !exclude) | Slide if acc present, `T >= P`, and `T − wl <= P`; else rebuild. `T == P`: acc only (no store IO) |
+| | **!can_slide** (e.g. min/max today) | **can_slide** |
+|--|-------------------------------------|---------------|
+| **WO** | Estimate → load; rebuild each emit | Estimate → load; leave+add (or seed) |
+| **WRO** | Estimate `T−wl` → load; rebuild | Estimate `T−2·wl` → load; slide or rebuild |
 
-Cold WO = no `processed_pos`: same paths; `win_start = first_ingested.ts − wl` (else `i64::MIN` → raw-only, no tiles).
+Cold WO: after meta, if `cold_needed_from` &lt; estimate → one `load_data` widen.
 
-WRO: load meta **only if any window is retractable**. Read-only (never `put_key`).  
-`EXCLUDE CURRENT ROW` ⇒ same store window through `T`; skip request-row args only.
+WRO: meta comes from `load_envelope` (not a prior get). Read-only.  
+`EXCLUDE CURRENT ROW` ⇒ store through `T`; skip request-row args only.
 
 ---
 
-## 5. Load planning details (`wo/plan` / `primitives/plan` / `load`)
+## 5. Load (estimate owns IO bounds)
 
-### `plan_window_load` (WO — `wo/plan.rs`)
+| Case | Estimated envelope (no meta) |
+|------|------------------------------|
+| WO advance | `[wm − max_wl − pad, wm]` (`pad` ≈ lateness) |
+| WRO rebuild-only | `[min(T) − wl, max(T)]` |
+| WRO slide-capable | `[min(T) − 2·wl, max(T)]` |
+| Ingest | N/A (meta + touched tiles → WriteBatch) |
 
-| Case | Plan |
-|------|------|
-| **Plain + tiles** | Gap-only **union** of `plan_coverage` per emit end; caller peeks emit band and `with_merged_rows` |
-| **Plain, no tiles** | Full raw `[win_start, effective]` |
-| **Retractable, no prev / no acc** | **Full raw** `[win_start, effective]` + tiles when closed |
-| **Retractable warm** | `plan_slide`: add `(prev, effective]` raw; leave `[prev−wl, effective−wl)` tiles+gaps |
-| **Open bound** `win_start == i64::MIN` | Raw only, no tiles |
+Post-load, CPU still uses tight leave/add / rebuild units inside the loaded view.
 
-`plan_slide` (shared in `primitives/plan`) returns `(LoadPlan, Option<CoveragePlan>)` — leave coverage threaded into WRO `eval_slide_as_of`.  
-WO multi-emit leave still **re-plans per emit** (see §6.13).
-
-### Data flow after load
+### Data flow
 
 ```text
-LoadPlan → load() → KeyBatch
+load_envelope → PartitionData { key_state, data: WindowData }
   └─ for_window(id, expr) → WindowView { RowNav, Arc<[Tile]> }
 ```
-
-Eval APIs take `&WindowView`.
 
 ---
 
 ## 6. Edge cases / invariants (watch these)
 
 1. **Cold / `first_ingested`:** Only closes lower bound; unused after first advance. Don’t sync with prune.
-2. **Plain gap-only:** Sub-window coverage ≠ parent union geometry → load = **union of per-emit coverages** + merge emit-band rows. Do not gap-only-load one big `[win_start, effective]` and re-plan smaller windows without those gaps.
-3. **Retractable cold full raw:** Unlike plain, keep full raw under tiles for seed+slide leave mid-tile.
+2. **Envelope overfetch:** Store loads full bucket range + tile interior; eval uses coverage for CPU merge/retract only.
+3. **Retractable cold full raw:** Keep full raw under tiles for seed+slide leave mid-tile.
 4. **Missing tile:** Empty bucket, not error.
-5. **`processed_pos` shared:** All windows on a key advance together; emit cursors from first window’s nav.
+5. **`processed_pos` shared:** All windows on a key advance together; emit cursors from loaded chunks.
 6. **Duplicate ts:** Seq order matters; oracle/matrix fixture includes `(60_000, 2.0)` and `(60_000, 2.5)`.
 7. **Streaming late vs retention:** Ingest drops `ts <= processed_pos`; `lateness` only for prune.
 8. **WRO past `T < P` or window fully replaced (`T − wl > P`):** Rebuild, don’t slide.
 9. **Tile slide only if** `window_supports_tile_slide` and leave span ≥ min granularity; else row retract.
-10. **EventStore still 1-row IPC** — known perf ceiling; façade deferred (README §1).
-11. **Vocabulary:** apply/retract only (`apply_row`, `apply_gap`, `apply_plan`, `apply_raw_window`) — no “fold”.
+10. **Concurrency:** WO sole writer per key. Eval uses `eval/envelope` + `load_envelope` so meta+data share one `snapshot_partition` — no window fencing.
+10. **Raw is one row per KV key** under `bucket_ts`; load may return many 1-row `EventChunk`s — `RowNav` sorts by cursor.
+11. **Vocabulary:** update/retract into acc (`update_row`, `update_acc_from_plan`, `update_raw_window`) — no “fold” / “apply”.
 12. **WRO exclude:** store window always through request `T`; exclude only skips virtual request args. Include can double-count if store already has rows at `T`.
-13. **WO multi-emit leave:** re-plans per emit inside `retract_leaving` (different leave band each emit); load already has full leave span — re-plan ⊂ loaded (else row retract).
+13. **WO multi-emit leave:** re-plans per emit inside `retract_leaving`; load already has full leave span — re-plan ⊂ loaded (else row retract).
 
 ---
 
@@ -167,8 +186,6 @@ Eval APIs take `&WindowView`.
 
 - `cursor_range_from_batch`: keep O(n) scan (composite cursor); don’t use `sort_to_indices`.
 - `drop_late_entries`: still builds index vec + `take` — good candidate for `gt` + `filter_record_batch` later.
-- Batch EventLog façade: documented in README; skip impl for now.
-
 ---
 
 ## 8. Current tests (what exists)
@@ -181,8 +198,8 @@ Eval APIs take `&WindowView`.
 | `tests/matrix.rs` `matrix_wro_points_match_oracle` | WRO vs same fixture: tiling off + 1m; points before / at / after `processed_pos`; exclude on/off |
 | `tests/smoke.rs` | Basic WO / late drop / WO↔WRO smoke |
 | `tests/harness.rs` | Shared WO harness + `WoWroHarness` (shared KV) |
-| `state/tile/plan.rs` `plan_tests` | Geometry: coarse tiles, gaps, same-ts, wl ≪ gran, update runs |
-| `evaluate/wo/plan.rs` `tests` | Cold closed/open bounds; plain gap-union emit ends; slide leave tiles / leave raw |
+| `state/tile/plan.rs` `plan_tests` | Geometry: coarse tiles, raw runs, same-ts, wl ≪ gran, update runs |
+| `state/tile/plan` | Geometry contracts |
 | `state/tile/tests.rs` | Tile ingest/update integration |
 
 ### Aggregate unit (not full WO/WRO matrix)
@@ -222,9 +239,9 @@ Eval APIs take `&WindowView`.
 
 From README + recent discussion:
 
-1. **Window store façade** above SortedKV (typed in-proc + batch EventLog) — documented, skip.
+1. Optional multi-row packing inside a bucket ([#155](https://github.com/volga-project/volga/issues/155)).
 2. **WO retractable leave:** per-emit re-plan is intentional (see §6.13); optional precompute of per-emit leave coverages only if profiling shows plan_coverage cost.
-3. Hop emit + tile-add path (add band still raw-only).
+3. Hop emit: plug calendar into emit schedule + [`window_range_for_end`] (aligned bounds); tile-aligned hops → tiles-only load.
 4. Plain per-emit full recompute: measure; prefer retractable+tiles over caching.
 5. CDC / true late data.
 6. Durable backends (Rocks/Slate/Scylla).
@@ -235,14 +252,8 @@ From README + recent discussion:
 ## 11. File cheat sheet
 
 ```text
+eval/                 envelope, advance, slide, rebuild, wro, primitives, output
 config.rs
-evaluate/
-  mod.rs / output.rs
-  primitives/{plan,load,coverage}.rs
-  strategies/{rebuild,slide}.rs
-  wo/{advance,plan,produce}.rs
-  wro/{points,load}.rs
-
 state/…  store/…  tests/…  README.md / HANDOFF.md
 ```
 
@@ -250,7 +261,6 @@ state/…  store/…  tests/…  README.md / HANDOFF.md
 
 ## 12. Suggested first prompt in a new chat
 
-> Continue WO/WRO SortedKV work from `src/runtime/operators/window/HANDOFF.md`.  
-> Don’t run tests unless I ask. Next: pick an item from §10 (impl follow-ups) or §9 stress testing.
+> Continue window work from `HANDOFF.md`. WO advance is `eval/`. Don’t run tests unless asked.
 
 Or pick another item from §10.

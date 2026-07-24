@@ -1,7 +1,6 @@
-//! Apply / retract a [`CoveragePlan`] against a [`WindowView`].
+//! Update / retract an [`Accumulator`] from a [`CoveragePlan`] + [`WindowView`].
 //!
-//! Callers plan once with [`plan_coverage`], load that plan, then pass the same
-//! plan here (no re-plan). Missing KV tile ⇒ empty bucket.
+//! Coverage is CPU-only (store already loaded the envelope). Missing tile ⇒ empty bucket.
 
 use std::sync::Arc;
 
@@ -9,48 +8,53 @@ use datafusion::logical_expr::Accumulator;
 use datafusion::physical_plan::WindowExpr;
 
 use crate::runtime::operators::window::aggregates::{
-    create_window_aggregator, merge_accumulator_state, retract_accumulator_state,
+    merge_accumulator_state, retract_accumulator_state, VirtualPoint,
 };
 use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::state::tile::{CoveragePlan, Tile};
 use crate::runtime::operators::window::store::row_nav::{RowIdx, RowNav};
 
-use super::load::WindowView;
+use crate::runtime::operators::window::store::WindowView;
 
-/// Merge tiles + fold gap rows into a new accumulator.
+/// Merge plan tiles and update raw-run rows into an existing accumulator.
 ///
-/// Returns `None` when the plan has no tile runs (caller should fold raw).
-pub(crate) fn rebuild_from_coverage(
-    window_expr: &Arc<dyn WindowExpr>,
-    view: &WindowView,
-    plan: &CoveragePlan,
-    end_idx: Option<RowIdx>,
-) -> Option<Box<dyn Accumulator>> {
-    if plan.tile_runs.is_empty() {
-        return None;
-    }
-    let mut acc = create_window_aggregator(window_expr);
-    apply_plan(window_expr, view, acc.as_mut(), plan, end_idx);
-    Some(acc)
-}
-
-/// Merge plan tiles and fold plan gaps into an existing accumulator.
-pub(crate) fn seed_from_coverage(
+/// Returns `false` when the plan has no tile runs (caller should use raw rows).
+pub(crate) fn update_acc_from_plan(
     window_expr: &Arc<dyn WindowExpr>,
     view: &WindowView,
     acc: &mut dyn Accumulator,
     plan: &CoveragePlan,
-    end_idx: RowIdx,
+    end_idx: Option<RowIdx>,
 ) -> bool {
     if plan.tile_runs.is_empty() {
         return false;
     }
-    apply_plan(window_expr, view, acc, plan, Some(end_idx));
+    for tile in select_tiles_for_plan(&view.tiles, plan) {
+        if let Some(state) = &tile.state.accumulator_state {
+            merge_accumulator_state(acc, state.as_ref());
+        }
+    }
+    let Some(end_idx) = end_idx else {
+        return true;
+    };
+    let end_c = view.nav.cursor(end_idx);
+    for run in plan.raw_edges() {
+        let to = if run.to.ts > end_c.ts
+            || (run.to.ts == end_c.ts && run.to.seq_no > end_c.seq_no)
+        {
+            Cursor::new(end_c.ts, end_c.seq_no.saturating_add(1))
+        } else {
+            run.to
+        };
+        update_raw_run(window_expr, view, acc, run.from, to, end_idx);
+    }
     true
 }
 
-/// Retract plan tiles + gap rows (half-open leave band from the plan).
-pub(crate) fn retract_from_coverage(
+/// Retract plan tiles + raw-run rows (half-open leave band from the plan).
+///
+/// Returns `false` when the plan has no tile runs (caller should retract raw rows).
+pub(crate) fn retract_acc_from_plan(
     window_expr: &Arc<dyn WindowExpr>,
     view: &WindowView,
     acc: &mut Box<dyn Accumulator>,
@@ -64,30 +68,29 @@ pub(crate) fn retract_from_coverage(
             retract_accumulator_state(window_expr, acc, state.as_ref());
         }
     }
-    for gap in &plan.raw_gaps {
-        retract_gap(window_expr, view, acc.as_mut(), gap.from, gap.to);
+    for run in plan.raw_edges() {
+        retract_raw_run(window_expr, view, acc.as_mut(), run.from, run.to);
     }
     true
 }
 
-/// Apply one nav row into an accumulator.
-pub(crate) fn apply_row(
+/// Update accumulator with one nav row (`Accumulator::update_batch`).
+pub(crate) fn update_row(
     window_expr: &Arc<dyn WindowExpr>,
     nav: &RowNav,
     idx: RowIdx,
     acc: &mut dyn Accumulator,
 ) {
     if let Some(args) = nav.args(idx) {
-        acc.update_batch(args.as_slice()).expect("update");
+        acc.update_batch(&args).expect("update");
     } else {
-        let args = window_expr
-            .evaluate_args(nav.batch(idx))
-            .expect("args");
+        let batch = nav.batch(idx);
+        let args = window_expr.evaluate_args(&batch).expect("args");
         acc.update_batch(&args).expect("update");
     }
 }
 
-/// Retract one nav row from an accumulator.
+/// Retract one nav row from an accumulator (`Accumulator::retract_batch`).
 pub(crate) fn retract_row(
     window_expr: &Arc<dyn WindowExpr>,
     nav: &RowNav,
@@ -95,40 +98,11 @@ pub(crate) fn retract_row(
     acc: &mut dyn Accumulator,
 ) {
     if let Some(args) = nav.args(idx) {
-        acc.retract_batch(args.as_slice()).expect("retract");
-    } else {
-        let args = window_expr
-            .evaluate_args(nav.batch(idx))
-            .expect("args");
         acc.retract_batch(&args).expect("retract");
-    }
-}
-
-fn apply_plan(
-    window_expr: &Arc<dyn WindowExpr>,
-    view: &WindowView,
-    acc: &mut dyn Accumulator,
-    plan: &CoveragePlan,
-    end_idx: Option<RowIdx>,
-) {
-    for tile in select_tiles_for_plan(&view.tiles, plan) {
-        if let Some(state) = &tile.state.accumulator_state {
-            merge_accumulator_state(acc, state.as_ref());
-        }
-    }
-    let Some(end_idx) = end_idx else {
-        return;
-    };
-    let end_c = view.nav.cursor(end_idx);
-    for gap in &plan.raw_gaps {
-        let gap_to = if gap.to.ts > end_c.ts
-            || (gap.to.ts == end_c.ts && gap.to.seq_no > end_c.seq_no)
-        {
-            Cursor::new(end_c.ts, end_c.seq_no.saturating_add(1))
-        } else {
-            gap.to
-        };
-        apply_gap(window_expr, view, acc, gap.from, gap_to, end_idx);
+    } else {
+        let batch = nav.batch(idx);
+        let args = window_expr.evaluate_args(&batch).expect("args");
+        acc.retract_batch(&args).expect("retract");
     }
 }
 
@@ -145,7 +119,7 @@ fn select_tiles_for_plan<'a>(tiles: &'a [Tile], plan: &CoveragePlan) -> Vec<&'a 
         .collect()
 }
 
-fn apply_gap(
+fn update_raw_run(
     window_expr: &Arc<dyn WindowExpr>,
     view: &WindowView,
     acc: &mut dyn Accumulator,
@@ -161,7 +135,7 @@ fn apply_gap(
         if c >= to {
             break;
         }
-        apply_row(window_expr, &view.nav, i, acc);
+        update_row(window_expr, &view.nav, i, acc);
         match view.nav.next(i) {
             Some(n) => i = n,
             None => break,
@@ -169,7 +143,7 @@ fn apply_gap(
     }
 }
 
-fn retract_gap(
+fn retract_raw_run(
     window_expr: &Arc<dyn WindowExpr>,
     view: &WindowView,
     acc: &mut dyn Accumulator,
@@ -189,5 +163,15 @@ fn retract_gap(
             Some(n) => i = n,
             None => break,
         }
+    }
+}
+
+/// Optional virtual request row into an accumulator (WRO include).
+pub(crate) fn apply_request_row(acc: &mut dyn Accumulator, request_row: Option<&VirtualPoint>) {
+    let Some(point) = request_row else {
+        return;
+    };
+    if let Some(args) = &point.args {
+        acc.update_batch(args).expect("update request row");
     }
 }

@@ -10,7 +10,7 @@ pub mod state;
 pub mod store;
 pub mod cursor;
 pub mod frame_utils;
-pub mod evaluate;
+pub mod eval;
 
 #[cfg(test)]
 mod tests;
@@ -21,7 +21,7 @@ pub use config::{BuiltWindows, WindowConfig};
 pub use state::tile::{Tile, TileConfig, TimeGranularity};
 pub use state::window_operator_state;
 pub use cursor::Cursor;
-pub use store::{StateNamespace, WindowStateStore};
+pub use store::{EventChunk, StateNamespace, WindowStateStore};
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";
 

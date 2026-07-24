@@ -76,12 +76,19 @@ async fn load_tiles_for_plan(
     store: &TileStore,
     key: &Key,
     window_id: usize,
-    runs: &[TileScanRun],
+    runs: &[TileRun],
 ) -> Vec<Tile> {
+    let snap = store.snapshot(key).await.unwrap();
     let mut by_key = BTreeMap::new();
     for run in merge_tile_runs(runs.to_vec()) {
         for (tile_start, wt) in store
-            .scan(key, run.granularity, run.start_ts, run.end_ts_exclusive)
+            .scan(
+                snap.as_ref(),
+                key,
+                run.granularity,
+                run.start_ts,
+                run.end_ts_exclusive,
+            )
             .await
             .unwrap()
         {

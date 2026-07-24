@@ -15,10 +15,9 @@ use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
 use crate::runtime::operators::window::aggregates::VirtualPoint;
-use crate::runtime::operators::window::evaluate::evaluate_range_points;
+use crate::runtime::operators::window::eval::{assemble_window_batch, evaluate_points};
 use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
-use crate::runtime::operators::window::evaluate::assemble_window_batch;
 use crate::runtime::operators::window::store::{StateNamespace, WindowStateStore};
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::operators::window::window_operator_state::WindowId;
@@ -54,6 +53,7 @@ pub struct WindowRequestOperator {
     ts_column_index: usize,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
+    bucket_ms: i64,
 }
 
 impl fmt::Debug for WindowRequestOperator {
@@ -83,6 +83,10 @@ impl WindowRequestOperator {
             require_range_frame(w.window_expr.get_window_frame());
         }
 
+        let bucket_ms = window_request_operator_config
+            .spec
+            .resolve_bucket_ms(&built.windows);
+
         Self {
             base: OperatorBase::new(config),
             window_configs: built.windows,
@@ -90,6 +94,7 @@ impl WindowRequestOperator {
             ts_column_index: built.ts_column_index,
             output_schema: built.output_schema,
             input_schema: built.input_schema,
+            bucket_ms,
         }
     }
 
@@ -108,13 +113,13 @@ impl WindowRequestOperator {
             .downcast_ref::<TimestampMillisecondArray>()
             .expect("Timestamp column");
 
-        let kept_rows: Vec<usize> = (0..record_batch.num_rows()).collect();
         // VirtualPoint is global per key lookup; args from first window expr (assumes
         // compatible inputs across windows — see VirtualPoint docs).
         let window_cfg = self.window_configs.values().next().expect("window");
         let exclude = window_cfg.exclude_current_row.unwrap_or(false);
-        let mut points = Vec::with_capacity(kept_rows.len());
-        for &row in &kept_rows {
+        let n = record_batch.num_rows();
+        let mut points = Vec::with_capacity(n);
+        for row in 0..n {
             let ts = ts_array.value(row);
             let args = if exclude {
                 None
@@ -129,17 +134,17 @@ impl WindowRequestOperator {
             points.push(VirtualPoint { ts, args });
         }
 
-        let aggregated = evaluate_range_points(
+        let aggregated = evaluate_points(
             store,
             key,
             &self.window_configs,
             &points,
-            exclude,
+            self.bucket_ms,
         )
         .await
         .expect("evaluate");
 
-        let input_values = get_input_values_for_rows(record_batch, &self.input_schema, &kept_rows);
+        let input_values = get_input_values(record_batch, &self.input_schema);
         assemble_window_batch(
             input_values,
             aggregated,
@@ -149,14 +154,10 @@ impl WindowRequestOperator {
     }
 }
 
-fn get_input_values_for_rows(
-    batch: &RecordBatch,
-    input_schema: &SchemaRef,
-    rows: &[usize],
-) -> Vec<Vec<ScalarValue>> {
-    let mut input_values = Vec::new();
+fn get_input_values(batch: &RecordBatch, input_schema: &SchemaRef) -> Vec<Vec<ScalarValue>> {
+    let mut input_values = Vec::with_capacity(batch.num_rows());
     let input_column_count = input_schema.fields().len();
-    for &row_idx in rows {
+    for row_idx in 0..batch.num_rows() {
         let mut row_input_values = Vec::new();
         for col_idx in 0..input_column_count {
             let array = batch.column(col_idx);

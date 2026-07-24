@@ -1,7 +1,10 @@
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::state::tile::TileConfig;
 use crate::runtime::operators::window::window_operator::RequestAdvancePolicy;
+use crate::runtime::operators::window::window_operator_state::WindowId;
+use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -12,6 +15,10 @@ pub struct WindowOperatorSpec {
     pub request_advance_policy: RequestAdvancePolicy,
     /// Default tiling for all windows (overridable per-window via `tiling_configs`).
     pub tiling: Option<TileConfig>,
+    /// Raw event `bucket_ts` width (ms) for SortedKV key layout / envelope scans.
+    /// `None` → tiling min gran, else `60_000`. Not multi-row packing
+    /// (see https://github.com/volga-project/volga/issues/155).
+    pub raw_bucket_ms: Option<i64>,
 }
 
 impl Default for WindowOperatorSpec {
@@ -20,6 +27,7 @@ impl Default for WindowOperatorSpec {
             lateness: None,
             request_advance_policy: RequestAdvancePolicy::OnWatermark,
             tiling: None,
+            raw_bucket_ms: None,
         }
     }
 }
@@ -41,5 +49,21 @@ impl WindowOperatorSpec {
             }
         }
         out
+    }
+
+    /// Resolve raw bucket width for store IO.
+    pub fn resolve_bucket_ms(
+        &self,
+        window_configs: &BTreeMap<WindowId, WindowConfig>,
+    ) -> i64 {
+        if let Some(ms) = self.raw_bucket_ms {
+            return ms.max(1);
+        }
+        for cfg in window_configs.values() {
+            if let Some(t) = &cfg.tiling {
+                return t.min_granularity().to_millis().max(1);
+            }
+        }
+        60_000
     }
 }

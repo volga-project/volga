@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::stream::{self, BoxStream, StreamExt};
 use parking_lot::RwLock;
 
-use super::{KvOp, SortedKV, WriteBatch};
+use super::{KvOp, KvSnapshot, SortedKV, WriteBatch};
 
 #[derive(Debug, Default)]
 struct Inner {
@@ -50,6 +50,35 @@ fn apply_batch_locked(inner: &mut Inner, batch: WriteBatch) {
     }
 }
 
+/// Map epoch pinned at [`SortedKV::snapshot_partition`] (full DB clone; `partition_key` unused).
+#[derive(Debug)]
+struct InMemSnapshot {
+    map: Arc<BTreeMap<Vec<u8>, Vec<u8>>>,
+}
+
+#[async_trait]
+impl KvSnapshot for InMemSnapshot {
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>> {
+        Ok(self.map.get(key).cloned())
+    }
+
+    fn scan<'a>(
+        &'a self,
+        start: &'a [u8],
+        end: &'a [u8],
+    ) -> BoxStream<'a, Result<(Vec<u8>, Vec<u8>)>> {
+        let items: Vec<(Vec<u8>, Vec<u8>)> = if start >= end {
+            Vec::new()
+        } else {
+            self.map
+                .range(start.to_vec()..end.to_vec())
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        stream::iter(items.into_iter().map(Ok)).boxed()
+    }
+}
+
 #[async_trait]
 impl SortedKV for InMemSortedKV {
     async fn put(&self, key: &[u8], value: &[u8]) -> Result<()> {
@@ -88,6 +117,15 @@ impl SortedKV for InMemSortedKV {
             }
         };
         stream::iter(items.into_iter().map(Ok)).boxed()
+    }
+
+    async fn snapshot_partition(
+        &self,
+        _partition_key: &[u8],
+    ) -> Result<Arc<dyn KvSnapshot>> {
+        // Full-map epoch is correct for InMem; partition_key is for Scylla PK routing.
+        let map = Arc::new(self.inner.read().map.clone());
+        Ok(Arc::new(InMemSnapshot { map }))
     }
 
     async fn write(&self, batch: WriteBatch) -> Result<()> {
@@ -140,5 +178,15 @@ mod tests {
 
         assert_eq!(kv.get(b"a").await.unwrap().as_deref(), Some(b"1".as_ref()));
         assert_eq!(kv.get(b"b").await.unwrap().as_deref(), Some(b"2".as_ref()));
+    }
+
+    #[tokio::test]
+    async fn snapshot_partition_is_stable_across_writes() {
+        let kv = InMemSortedKV::new();
+        kv.put(b"a", b"1").await.unwrap();
+        let snap = kv.snapshot_partition(b"pk").await.unwrap();
+        kv.put(b"a", b"2").await.unwrap();
+        assert_eq!(snap.get(b"a").await.unwrap().as_deref(), Some(b"1".as_ref()));
+        assert_eq!(kv.get(b"a").await.unwrap().as_deref(), Some(b"2".as_ref()));
     }
 }

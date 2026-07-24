@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -49,15 +51,13 @@ impl WriteBatch {
     }
 }
 
-/// Forward-only sorted key-value store.
+/// Point-in-time read view for one [`SortedKV::snapshot_partition`] scope.
 ///
-/// Consistency, caching, and durability semantics are backend concerns.
-/// Use [`SortedKV::write`] for multi-key atomic updates (ingest).
+/// All `get` / `scan` on this handle observe one consistent state. Drop releases
+/// backend pins (Rocks snapshot, Slate snapshot, Scylla row cache, etc.).
 #[async_trait]
-pub trait SortedKV: Send + Sync + std::fmt::Debug {
-    async fn put(&self, key: &[u8], value: &[u8]) -> Result<()>;
+pub trait KvSnapshot: Send + Sync + std::fmt::Debug {
     async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
-    async fn delete(&self, key: &[u8]) -> Result<()>;
 
     /// Forward scan over half-open `[start, end)`.
     fn scan<'a>(
@@ -65,6 +65,44 @@ pub trait SortedKV: Send + Sync + std::fmt::Debug {
         start: &'a [u8],
         end: &'a [u8],
     ) -> BoxStream<'a, Result<(Vec<u8>, Vec<u8>)>>;
+}
+
+/// Forward-only sorted key-value store.
+///
+/// ## Consistency contract
+///
+/// - **Writes:** [`SortedKV::write`] is atomic — concurrent readers see the batch
+///   fully applied or not at all (never a partial batch).
+/// - **Multi-op reads:** use [`SortedKV::snapshot_partition`] then get/scan on the
+///   returned [`KvSnapshot`]. Scope is one opaque `partition_key` (co-location id
+///   for a business key’s rows — not a byte-key prefix of kind-first KV keys).
+///
+/// Caching and durability are also backend concerns.
+#[async_trait]
+pub trait SortedKV: Send + Sync + std::fmt::Debug {
+    /// Latest-state point read (single op). Prefer [`snapshot_partition`] for
+    /// multi-get / multi-scan loads.
+    async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+    /// Latest-state forward scan over half-open `[start, end)`.
+    fn scan<'a>(
+        &'a self,
+        start: &'a [u8],
+        end: &'a [u8],
+    ) -> BoxStream<'a, Result<(Vec<u8>, Vec<u8>)>>;
+
+    /// Pin a consistent read of all keys co-located under `partition_key`.
+    ///
+    /// `partition_key` is an opaque co-location id (e.g. `{ns}/{key_hash}`), not
+    /// a SortedKV scan prefix. Backends: Scylla → one partition SELECT; Rocks/Slate
+    /// → DB snapshot (may ignore id); InMem → map epoch.
+    async fn snapshot_partition(
+        &self,
+        partition_key: &[u8],
+    ) -> Result<Arc<dyn KvSnapshot>>;
+
+    async fn put(&self, key: &[u8], value: &[u8]) -> Result<()>;
+    async fn delete(&self, key: &[u8]) -> Result<()>;
 
     /// Apply all ops atomically (no torn visibility to concurrent readers).
     async fn write(&self, batch: WriteBatch) -> Result<()>;

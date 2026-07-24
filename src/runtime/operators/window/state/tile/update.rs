@@ -9,18 +9,18 @@ use crate::runtime::operators::window::aggregates::merge_accumulator_state;
 use crate::runtime::operators::window::create_window_aggregator;
 use crate::runtime::operators::window::window_operator_state::WindowId;
 
-use super::plan::{plan_update_runs, TileScanRun};
+use super::plan::{plan_update_runs, TileRun};
 use super::{TileConfig, TileState, TimeGranularity, WindowTiles};
 
 /// `(granularity, tile_start)` — SortedKV tile identity.
 pub type TileKey = (TimeGranularity, i64);
 
-/// [`TileScanRun`]s for tiles this batch will update (all configured granularities).
+/// [`TileRun`]s for tiles this batch will update (all configured granularities).
 pub fn plan_update_runs_for_batch(
     config: &TileConfig,
     batch: &RecordBatch,
     ts_column_index: usize,
-) -> Vec<TileScanRun> {
+) -> Vec<TileRun> {
     if batch.num_rows() == 0 {
         return Vec::new();
     }

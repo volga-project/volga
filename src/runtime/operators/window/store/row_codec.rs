@@ -27,6 +27,3 @@ pub fn decode_batch(bytes: &[u8]) -> Result<RecordBatch> {
     Ok(batch)
 }
 
-pub fn encode_row(batch: &RecordBatch, row: usize) -> Result<Vec<u8>> {
-    encode_batch(&batch.slice(row, 1))
-}

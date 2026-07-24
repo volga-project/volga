@@ -4,12 +4,12 @@ Canonical notes for the RANGE window stack over SortedKV (design, backends, test
 **Detailed handoff for a new chat:** [`HANDOFF.md`](HANDOFF.md).  
 `storage/sorted_kv/` holds the trait + InMem only; [`top/README.md`](top/README.md) is aggregate API docs (separate).
 
-**Status:** Core cutover is in-tree (stores, `evaluate/`, tile planner, WO/WRO as separate KV clients). Remaining work is under [Next steps](#next-steps).
+**Status:** All evaluate logic under [`eval/`](eval/) (WO + WRO, slide \| rebuild). Remaining work under [Next steps](#next-steps).
 
 | Operator | Role |
 |----------|------|
 | **WO** (`WindowOperator`) | Ingest + watermark advance (`advance_key`); sole writer |
-| **WRO** (`WindowRequestOperator`) | Read-only point eval (`evaluate_range_points`) |
+| **WRO** (`WindowRequestOperator`) | Read-only point eval (`evaluate_points`) |
 
 Both share one SortedKV (separate clients, no peer `Arc` / `wait_for_operator_state`). Frames: **RANGE only**. ROWS dropped. Scan is **forward-only**. Consistency/caching are backend concerns, not the trait.
 
@@ -26,15 +26,15 @@ WO / WRO
             └─ Scylla                 (planned; single-partition batch)
 ```
 
-**Future (not built):** a typed / batch façade above SortedKV — see [Next steps §1](#1-window-store-façade-above-sortedkv). Keep SortedKV as the streaming byte primitive; do not push RecordBatch into that trait.
+**Namespaces:** `raw/{ns}/{hash}/{bucket_ts}/{ts}/{seq_no}` (one row per key), `tile/` (acceleration), `meta/` (`KeyState` incl. `next_seq` + `max_seen`).
 
-**Namespaces:** `raw/` (events), `tile/` (acceleration), `meta/` (processed_pos, retractable acc).
+**Ingest (atomic):** assign `next_seq` → one put per row under `align_bucket(ts)` → plan dirty tiles → merge → one `WriteBatch` (raw + tiles + meta) → `kv.write`. `bucket_ts` is for envelope scan planning, not multi-row packing ([#155](https://github.com/volga-project/volga/issues/155)).
 
-**Ingest (atomic):** plan dirty tiles → load → merge in memory → one `WriteBatch` (raw + tiles + meta) → `kv.write`. Readers only use `get` / `scan`; never see torn updates.
+**Concurrent reads:** [`load_envelope`](store/load.rs) opens `kv.snapshot_partition(partition_key)` then meta + raw/tile scans on that [`KvSnapshot`](../../../storage/sorted_kv/README.md). Rare WO underfetch uses [`load_data`](store/load.rs). No window-level generation/retry.
 
 **Tiles:** multi-window packing in one KV value (`WindowTiles` / `TileState`). Missing tile ≡ empty bucket. Raw events are source of truth; tiles are acceleration.
 
-**Eval:** see `evaluate/mod.rs` matrix. Cold WO uses `first_ingested` (meta) only to close the load lower bound — same rebuild/slide paths (no separate cold module). Plain+tiles loads gap-only via union of per-emit coverages. WRO retractable: meta + slide when `T >= processed_pos`; plain skips meta. WRO exclude ⇒ skip request-row args only (store window still through `T`).
+**Eval:** estimate envelope without meta ([`eval/envelope.rs`](eval/envelope.rs)) → [`store::load_envelope`](store/load.rs) (meta+data, one snap) → slide \| rebuild in memory. Cold WO: if `cold_needed_from` &lt; estimate, one `load_data` widen. Chunks must be Cursor-ordered (KV scan); `RowNav` / emit assert order + dedup. WRO exclude ⇒ skip request-row args only (store window still through `T`).
 
 **Batch mode:** WO ingest/advance only. WRO stays request/row-oriented (not a batch path).
 
@@ -89,8 +89,8 @@ Scylla must not split raw vs tile across partitions if WO→WRO torn-free visibi
 | Operators | `window_operator.rs`, `window_request_operator.rs`, `window_tuning.rs` |
 | State / ingest / prune | `state/window_operator_state.rs` |
 | Tiles | `state/tile/` (`plan`, `update`, `tile`, `granularity`) |
-| Stores | `store/` (`event_store`, `tile_store`, `meta_store`, `keys`) |
-| Eval | `evaluate/` (`advance`, `points`, `load`, `rebuild`, `slide`, `coverage`) |
+| Stores | `store/` (`load`, `event_chunk`, `row_nav`, `event_store`, `tile_store`, `meta_store`, `keys`) |
+| Eval | `eval/` (`envelope`, `advance`, `emit`, `rebuild`, `slide`, `wro`, `primitives`) |
 | Aggs | `aggregates/`, `top/`, `cate/` |
 | KV | `storage/sorted_kv/` |
 
@@ -110,7 +110,7 @@ Same input, two configs — Mode A tiling off, Mode B tiling on — bit-identica
 
 | Agg | Plain + tiles | Retractable + tile slide |
 |-----|---------------|--------------------------|
-| sum / count / avg | yes | yes (`supports_tile_slide`) |
+| sum / count / avg | yes | yes (`window_supports_tile_slide`) |
 | min / max | yes (merge) | N/A — row retract only |
 | TOP-N / CATE | as supported | no tile slide |
 
@@ -143,28 +143,14 @@ Unit: `state/tile/tests.rs`, agg retract roundtrip, SortedKV `write` atomicity.
 
 Ordered roughly by dependency / payoff. Skip impl until picked up explicitly.
 
-### 1. Window store façade above SortedKV
+### 1. Store / load (done shape)
 
-Today `EventStore::append_batch_rows` / `scan` pay per-row IPC even for InMem, and the WO path assumes `StoredRow` = 1-row batches. Goal: one abstraction for WO that (a) skips serde on in-proc paths and (b) lets streaming vs batch backends keep their natural layout — without changing `SortedKV`.
+- [`EventStore`](store/event_store.rs): one-row keys under `bucket_ts`
+- [`load_envelope`](store/load.rs) / [`load_data`](store/load.rs): partition loads (meta+data / data-only)
+- [`RowNav`](store/row_nav.rs) / emit over [`EventChunk`](store/event_chunk.rs) (assert Cursor order)
+- Optional later: multi-row packing inside a bucket ([#155](https://github.com/volga-project/volga/issues/155))
 
-```text
-WO
-  └─ EventLog / WindowStateKv   (append + scan in RecordBatch / typed values)
-        ├─ InMem / same-process     — Arc batches or typed values; no IPC/serde
-        ├─ StreamingDurable         — 1-row (or small) values over SortedKV
-        │                              (Rocks / Slate / gRPC InMemSortedKV)
-        └─ BatchDurable (later)     — Arrow/Parquet segments; range append/scan
-```
-
-**Design notes (agreed, skip impl for now):**
-
-- **Keep `SortedKV` byte-oriented** (`get` / `scan` / `write`). It is the streaming primitive; batch backends will not map cleanly onto put-per-cursor.
-- **Lift EventStore (and later tiles/meta) to batch APIs:** `append(key, batch)`, `scan(key, from, to) → RecordBatch`s (or typed chunks). Streaming impl still splits to 1-row SortedKV puts; batch impl writes segments.
-- **Typed in-proc path:** `WindowValue` as `Arc<…>` (raw / tile / meta) so same-process tests and co-located WO skip encode/decode. Cross-worker / durable still goes bytes over SortedKV (or gRPC).
-- **Read path must evolve with write:** `RowNav` / eval still assume 1-row `StoredRow`. Multi-row scan results need `(batch, row)` nav (or concat) or advance stays row-taxed even after batch append.
-- **WRO:** not in scope for batch-mode store work; remains point eval.
-
-Keep **`InMemSortedKV`**: needed when simulating **separate WO/WRO workers** (local gRPC or kube) with a **shared SortedKV gRPC service**. Wire is bytes → Durable adapter → InMemSortedKV (or Rocks later).
+WO advance is always [`eval::advance_key`](eval/). Keep **`InMemSortedKV`** for separate WO/WRO workers.
 
 ### 2. Testing suite
 
@@ -173,7 +159,7 @@ WO matrix + thin WRO point oracle are in `tests/matrix.rs`. Remaining: stress fi
 ### 3. Eval / tile follow-ups
 
 - Hop emit + tile-add path (add band still raw-only today)
-- Plain per-emit full recompute: measure; prefer retractable + tiles over caching (`evaluate/rebuild.rs` TODO)
+- ~~Tiled rebuild two-phase emit-band~~ — geometry envelope load (shared WO/WRO)
 
 ### 4. Late data / CDC
 
@@ -191,5 +177,5 @@ Fold/rename leftover WO state; remove stale legacy paths if any remain.
 
 ## Explicitly not doing now
 
-- Implementing the window store façade / `EventLog` / `InMemWindowKv` / multi-row `RowNav` (tracked in Next steps §1)
+- Multi-row raw packing inside buckets (see #155)
 - Compiling / running the full deferred test suite until asked

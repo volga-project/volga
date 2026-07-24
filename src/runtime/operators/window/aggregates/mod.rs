@@ -182,7 +182,7 @@ pub fn merge_accumulator_state(
 
 /// Aggs whose sliding state is component-wise invertible (tile retract via state subtract).
 /// Min/max/top-n/etc. cannot retract a tile without the underlying rows.
-pub fn supports_tile_slide(agg_name: &str) -> bool {
+fn supports_tile_slide(agg_name: &str) -> bool {
     matches!(
         agg_name.to_lowercase().as_str(),
         "sum" | "count" | "avg" | "mean"

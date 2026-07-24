@@ -15,7 +15,6 @@ use crate::runtime::operators::window::{AggregatorType, TileConfig};
 
 #[derive(Debug, Clone)]
 pub struct WindowConfig {
-    pub window_id: WindowId,
     pub window_expr: Arc<dyn WindowExpr>,
     pub tiling: Option<TileConfig>,
     pub aggregator_type: AggregatorType,
@@ -68,7 +67,6 @@ impl BuiltWindows {
             windows.insert(
                 window_id,
                 WindowConfig {
-                    window_id,
                     window_expr: window_expr.clone(),
                     tiling: tiling_configs.get(window_id).and_then(|c| c.clone()),
                     aggregator_type: get_aggregate_type(window_expr),

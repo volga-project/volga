@@ -4,29 +4,38 @@ use crate::runtime::operators::window::cursor::Cursor;
 
 use super::granularity::{TileConfig, TimeGranularity, Timestamp};
 
-/// Coalesced TileStore range scan at one granularity.
+/// Coalesced tile range at one granularity: half-open `[start_ts, end_ts_exclusive)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TileScanRun {
+pub struct TileRun {
     pub granularity: TimeGranularity,
     pub start_ts: Timestamp,
     pub end_ts_exclusive: Timestamp,
 }
 
-/// Cursor-bounded raw EventStore segment (window edges only).
+/// Raw segment: half-open `[from, to)`. Used in CPU coverage plans.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawGap {
+pub struct RawRun {
     pub from: Cursor,
     pub to: Cursor,
 }
 
-/// Pure geometry plan: which tile key ranges to scan + raw edges.
+/// Pure geometry: tile runs + optional raw head/tail.
 ///
-/// Callers load closed ranges only. A missing KV key inside a scanned range means
-/// that bucket had no events (skip / identity). No existence map required.
+/// At most one raw segment before tiles (`raw_head`) and one after (`raw_tail`).
+/// All-raw windows (no tiles) use `raw_head` only. A missing KV key inside a tile
+/// run means that bucket had no events (skip / identity).
 #[derive(Debug, Clone, Default)]
 pub struct CoveragePlan {
-    pub tile_runs: Vec<TileScanRun>,
-    pub raw_gaps: Vec<RawGap>,
+    pub tile_runs: Vec<TileRun>,
+    pub raw_head: Option<RawRun>,
+    pub raw_tail: Option<RawRun>,
+}
+
+impl CoveragePlan {
+    /// Iterate raw edges in order (head then tail).
+    pub fn raw_edges(&self) -> impl Iterator<Item = &RawRun> {
+        self.raw_head.iter().chain(self.raw_tail.iter())
+    }
 }
 
 /// Cursor-aware coverage. Safe tiles satisfy `tile_start > start.ts && tile_end <= end.ts`.
@@ -37,7 +46,8 @@ pub fn plan_coverage(config: &TileConfig, start: Cursor, end: Cursor) -> Coverag
     if end.ts == start.ts {
         return CoveragePlan {
             tile_runs: vec![],
-            raw_gaps: vec![RawGap { from: start, to: end }],
+            raw_head: Some(RawRun { from: start, to: end }),
+            raw_tail: None,
         };
     }
     plan_interior(
@@ -81,44 +91,62 @@ fn plan_interior(
         None => first_aligned_at_or_after(min_gran, start.ts),
     };
 
-    let mut runs: Vec<TileScanRun> = Vec::new();
-    let mut gaps: Vec<RawGap> = Vec::new();
+    let mut tile_runs: Vec<TileRun> = Vec::new();
 
     let head_to = Cursor::new(t.min(tile_end_max), 0);
-    if start < head_to {
-        gaps.push(RawGap {
+    let mut raw_head = if start < head_to {
+        Some(RawRun {
             from: start,
             to: head_to,
-        });
-    }
+        })
+    } else {
+        None
+    };
 
     while t < tile_end_max {
         match pick_coarsest(config, t, tile_end_max) {
             Some((gran, tile_end)) => {
-                push_coalesced(&mut runs, gran, t, tile_end);
+                push_coalesced(&mut tile_runs, gran, t, tile_end);
                 t = tile_end;
             }
             None => break,
         }
     }
 
-    if t < end.ts || (t == end.ts && end.seq_no > 0) {
+    let mut raw_tail = if t < end.ts || (t == end.ts && end.seq_no > 0) {
         let from = cursor_at(start, t);
         if from < end {
-            gaps.push(RawGap { from, to: end });
+            Some(RawRun { from, to: end })
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    if runs.is_empty() && gaps.is_empty() {
-        gaps.push(RawGap {
+    if tile_runs.is_empty() && raw_head.is_none() && raw_tail.is_none() {
+        raw_head = Some(RawRun {
             from: start,
             to: end,
         });
     }
 
+    // Adjacent/overlapping edges (e.g. no tiles fitted) → single raw_head.
+    match (raw_head.take(), raw_tail.take()) {
+        (Some(h), Some(tail)) if h.to >= tail.from => {
+            let to = if tail.to > h.to { tail.to } else { h.to };
+            raw_head = Some(RawRun { from: h.from, to });
+        }
+        (h, t) => {
+            raw_head = h;
+            raw_tail = t;
+        }
+    }
+
     CoveragePlan {
-        tile_runs: runs,
-        raw_gaps: merge_adjacent_gaps(gaps),
+        tile_runs,
+        raw_head,
+        raw_tail,
     }
 }
 
@@ -141,7 +169,7 @@ fn pick_coarsest(
 }
 
 fn push_coalesced(
-    runs: &mut Vec<TileScanRun>,
+    runs: &mut Vec<TileRun>,
     gran: TimeGranularity,
     start_ts: Timestamp,
     end_ts_exclusive: Timestamp,
@@ -152,7 +180,7 @@ fn push_coalesced(
             return;
         }
     }
-    runs.push(TileScanRun {
+    runs.push(TileRun {
         granularity: gran,
         start_ts,
         end_ts_exclusive,
@@ -184,36 +212,13 @@ fn cursor_at(window_start: Cursor, t: Timestamp) -> Cursor {
     }
 }
 
-fn merge_adjacent_gaps(mut gaps: Vec<RawGap>) -> Vec<RawGap> {
-    if gaps.is_empty() {
-        return gaps;
-    }
-    gaps.sort_by_key(|g| (g.from.ts, g.from.seq_no, g.to.ts, g.to.seq_no));
-    let mut out: Vec<RawGap> = Vec::new();
-    for g in gaps {
-        if g.from >= g.to {
-            continue;
-        }
-        if let Some(last) = out.last_mut() {
-            if last.to >= g.from {
-                if g.to > last.to {
-                    last.to = g.to;
-                }
-                continue;
-            }
-        }
-        out.push(g);
-    }
-    out
-}
-
 /// Merge scan runs by granularity, coalescing overlapping / adjacent ranges.
-pub fn merge_tile_runs(mut runs: Vec<TileScanRun>) -> Vec<TileScanRun> {
+pub fn merge_tile_runs(mut runs: Vec<TileRun>) -> Vec<TileRun> {
     if runs.is_empty() {
         return runs;
     }
     runs.sort_by_key(|r| (r.granularity, r.start_ts, r.end_ts_exclusive));
-    let mut out: Vec<TileScanRun> = Vec::with_capacity(runs.len());
+    let mut out: Vec<TileRun> = Vec::with_capacity(runs.len());
     for run in runs {
         if let Some(last) = out.last_mut() {
             if last.granularity == run.granularity && run.start_ts <= last.end_ts_exclusive {
@@ -226,7 +231,7 @@ pub fn merge_tile_runs(mut runs: Vec<TileScanRun>) -> Vec<TileScanRun> {
     out
 }
 
-/// Ingest update plan: one [`TileScanRun`] per `(granularity, tile_start)` touched by `timestamps`.
+/// Ingest update plan: one [`TileRun`] per `(granularity, tile_start)` touched by `timestamps`.
 ///
 /// Unlike [`plan_coverage`] / [`plan_time_range`] (coarsest tiles for eval), this includes
 /// **every** configured granularity so each tile that will be written is loaded.
@@ -234,7 +239,7 @@ pub fn merge_tile_runs(mut runs: Vec<TileScanRun>) -> Vec<TileScanRun> {
 pub fn plan_update_runs(
     config: &TileConfig,
     timestamps: impl IntoIterator<Item = Timestamp>,
-) -> Vec<TileScanRun> {
+) -> Vec<TileRun> {
     use std::collections::BTreeSet;
 
     let mut by_gran: BTreeMap<TimeGranularity, BTreeSet<Timestamp>> = BTreeMap::new();
@@ -248,7 +253,7 @@ pub fn plan_update_runs(
     for (gran, starts) in by_gran {
         let step = gran.to_millis();
         for start in starts {
-            runs.push(TileScanRun {
+            runs.push(TileRun {
                 granularity: gran,
                 start_ts: start,
                 end_ts_exclusive: start.saturating_add(step),
@@ -277,7 +282,8 @@ mod plan_tests {
         assert_eq!(plan.tile_runs[0].granularity, m5);
         assert_eq!(plan.tile_runs[0].start_ts, 0);
         assert_eq!(plan.tile_runs[0].end_ts_exclusive, 10 * 60_000);
-        assert!(plan.raw_gaps.is_empty());
+        assert!(plan.raw_head.is_none());
+        assert!(plan.raw_tail.is_none());
     }
 
     #[test]
@@ -287,9 +293,10 @@ mod plan_tests {
         let plan = plan_time_range(&config, 0, 7 * 60_000);
         assert_eq!(plan.tile_runs.len(), 1);
         assert_eq!(plan.tile_runs[0].end_ts_exclusive, 5 * 60_000);
-        assert_eq!(plan.raw_gaps.len(), 1);
-        assert_eq!(plan.raw_gaps[0].from.ts, 5 * 60_000);
-        assert_eq!(plan.raw_gaps[0].to.ts, 7 * 60_000);
+        assert!(plan.raw_head.is_none());
+        let tail = plan.raw_tail.expect("raw_tail");
+        assert_eq!(tail.from.ts, 5 * 60_000);
+        assert_eq!(tail.to.ts, 7 * 60_000);
     }
 
     #[test]
@@ -300,8 +307,10 @@ mod plan_tests {
         let end = Cursor::new(180_000, 0);
         let plan = plan_coverage(&config, start, end);
 
-        assert_eq!(plan.raw_gaps[0].from, start);
-        assert_eq!(plan.raw_gaps[0].to.ts, 60_000);
+        let head = plan.raw_head.expect("raw_head");
+        assert_eq!(head.from, start);
+        assert_eq!(head.to.ts, 60_000);
+        assert!(plan.raw_tail.is_none());
         assert_eq!(plan.tile_runs.len(), 1);
         assert_eq!(plan.tile_runs[0].start_ts, 60_000);
         assert_eq!(plan.tile_runs[0].end_ts_exclusive, 180_000);
@@ -323,13 +332,17 @@ mod plan_tests {
     }
 
     #[test]
-    fn same_ts_coverage_is_single_raw_gap() {
+    fn same_ts_coverage_is_single_raw_run() {
         let config = cfg(vec![TimeGranularity::Minutes(1)]);
         let start = Cursor::new(60_000, 1);
         let end = Cursor::new(60_000, 5);
         let plan = plan_coverage(&config, start, end);
         assert!(plan.tile_runs.is_empty());
-        assert_eq!(plan.raw_gaps, vec![RawGap { from: start, to: end }]);
+        assert_eq!(
+            plan.raw_head,
+            Some(RawRun { from: start, to: end })
+        );
+        assert!(plan.raw_tail.is_none());
     }
 
     #[test]
@@ -337,9 +350,10 @@ mod plan_tests {
         let config = cfg(vec![TimeGranularity::Minutes(5)]);
         let plan = plan_time_range(&config, 0, 60_000);
         assert!(plan.tile_runs.is_empty());
-        assert_eq!(plan.raw_gaps.len(), 1);
-        assert_eq!(plan.raw_gaps[0].from.ts, 0);
-        assert_eq!(plan.raw_gaps[0].to.ts, 60_000);
+        let head = plan.raw_head.expect("raw_head");
+        assert_eq!(head.from.ts, 0);
+        assert_eq!(head.to.ts, 60_000);
+        assert!(plan.raw_tail.is_none());
     }
 
     #[test]

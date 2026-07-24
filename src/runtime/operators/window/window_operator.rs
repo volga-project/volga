@@ -16,7 +16,7 @@ use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
 use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::evaluate::advance_key;
+use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::store::{StateNamespace, WindowStateStore};
@@ -78,6 +78,7 @@ pub struct WindowOperator {
     current_watermark: Option<u64>,
     ts_column_index: usize,
     lateness: Option<i64>,
+    bucket_ms: i64,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -115,9 +116,13 @@ impl WindowOperator {
             require_range_frame(w.window_expr.get_window_frame());
         }
 
+        let windows = Arc::new(built.windows);
+        let bucket_ms = window_operator_config
+            .spec
+            .resolve_bucket_ms(windows.as_ref());
         Self {
             base: OperatorBase::new(config),
-            window_configs: Arc::new(built.windows),
+            window_configs: windows,
             state: None,
             buffered_keys: HashSet::new(),
             execution_mode: window_operator_config.execution_mode,
@@ -127,6 +132,7 @@ impl WindowOperator {
             current_watermark: None,
             ts_column_index: built.ts_column_index,
             lateness: window_operator_config.spec.lateness,
+            bucket_ms,
         }
     }
 
@@ -144,6 +150,8 @@ impl WindowOperator {
             emit,
             &self.output_schema,
             &self.input_schema,
+            self.bucket_ms,
+            self.lateness,
         )
         .await
         .expect("advance_key");
@@ -202,6 +210,7 @@ impl OperatorTrait for WindowOperator {
                 self.ts_column_index,
                 self.window_configs.clone(),
                 self.lateness,
+                self.bucket_ms,
             )));
         }
 
