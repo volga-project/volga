@@ -1,762 +1,282 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
-use arrow::array::RecordBatch;
+
+use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
-use dashmap::DashMap;
 use datafusion::common::ScalarValue;
 use serde::{Deserialize, Serialize};
-use serde_with::serde_as;
-use tokio::sync::RwLock;
-use tokio::task::JoinHandle;
 
 use crate::common::Key;
-use crate::runtime::operators::window::shared::WindowConfig;
-use crate::runtime::operators::window::aggregates::BucketRange;
-use crate::runtime::operators::window::{BucketIndex, Cursor, SEQ_NO_COLUMN_NAME, TileConfig, Tiles, TimeGranularity};
-use crate::storage::index::bucket_index::BatchRef;
-use crate::runtime::state::OperatorState;
-use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
-use crate::storage::InMemBatchCache;
-use crate::runtime::TaskId;
-use crate::storage::{BatchPins, StorageStatsSnapshot, WorkerStorageContext};
-use crate::storage::batch_store::{
-    BatchStore,
-    Timestamp,
+use crate::runtime::operators::window::cursor::Cursor;
+use crate::runtime::operators::window::frame_utils::get_window_length_ms;
+use crate::runtime::operators::window::config::WindowConfig;
+use crate::runtime::operators::window::state::tile::update::{
+    apply_batch_to_tiles, plan_update_runs_for_batch,
 };
-use crate::runtime::utils;
+use crate::runtime::operators::window::store::WindowStateStore;
+use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
+use crate::storage::WriteBatch;
 
 pub type WindowId = usize;
-
 pub type AccumulatorState = Vec<ScalarValue>;
 
-pub struct WindowsStateGuard {
-    _arc: Arc<RwLock<WindowsState>>,
-    _guard: tokio::sync::OwnedRwLockReadGuard<WindowsState>,
-}
-
-impl WindowsStateGuard {
-    pub fn value(&self) -> &WindowsState {
-        &*self._guard
-    }
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WindowState {
-    pub tiles: Option<Tiles>,
-    #[serde_as(as = "Option<Vec<utils::ScalarValueAsBytes>>")]
-    pub accumulator_state: Option<AccumulatorState>,
-    pub processed_pos: Option<Cursor>,
-}
-
-#[serde_as]
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WindowsState {
-    pub window_states: HashMap<WindowId, WindowState>,
-    pub bucket_index: BucketIndex,
-    pub next_seq_no: u64,
-}
-
+/// SortedKV-backed window runtime state (WO write path).
 #[derive(Debug)]
 pub struct WindowOperatorState {
-    window_states: DashMap<Key, Arc<RwLock<WindowsState>>>,
-
-    storage: Arc<WorkerStorageContext>,
-    task_id: TaskId,
-    batch_reclaimer_started: AtomicBool,
-    background_tasks_started: AtomicBool,
-    batch_reclaimer_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
-    compaction_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
-    dump_handle: std::sync::Mutex<Option<JoinHandle<()>>>,
-
-    bucket_granularity: TimeGranularity,
-
-    // -------- stable operator config (owned by state) --------
+    store: WindowStateStore,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
     window_ids: Vec<WindowId>,
-    tiling_configs: Vec<Option<TileConfig>>,
     lateness: Option<i64>,
-
-    // Backpressure / dump policy knobs.
-    dump_hot_bucket_count: usize,
-    in_mem_low_watermark_per_mille: u32,
-    in_mem_dump_parallelism: usize,
+    /// Raw key bucket width (`align_bucket`); used for ingest keys + envelope scans.
+    bucket_ms: i64,
 }
-
-// Compaction and dumping are intentionally split:
-// - compaction (read-triggered) publishes in-memory runs only (no store writes)
-// - dumping is the only codepath that writes to `BatchStore` and publishes `BatchRef::Stored`
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowOperatorStateCheckpoint {
-    pub keys: Vec<(Vec<u8>, Vec<u8>)>,
+    pub namespace: Vec<u8>,
 }
 
 impl WindowOperatorState {
     pub fn new(
-        storage: Arc<WorkerStorageContext>,
-        task_id: TaskId,
+        store: WindowStateStore,
         ts_column_index: usize,
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
-        tiling_configs: Vec<Option<TileConfig>>,
         lateness: Option<i64>,
-        dump_hot_bucket_count: usize,
-        in_mem_low_watermark_per_mille: u32,
-        in_mem_dump_parallelism: usize,
+        bucket_ms: i64,
     ) -> Self {
-        let bucket_granularity = storage.batch_store.bucket_granularity();
         let window_ids: Vec<WindowId> = window_configs.keys().cloned().collect();
         Self {
-            window_states: DashMap::new(),
-            storage,
-            task_id,
-            batch_reclaimer_started: AtomicBool::new(false),
-            background_tasks_started: AtomicBool::new(false),
-            batch_reclaimer_handle: std::sync::Mutex::new(None),
-            compaction_handle: std::sync::Mutex::new(None),
-            dump_handle: std::sync::Mutex::new(None),
-            bucket_granularity,
+            store,
             ts_column_index,
             window_configs,
             window_ids,
-            tiling_configs,
             lateness,
-            dump_hot_bucket_count,
-            in_mem_low_watermark_per_mille,
-            in_mem_dump_parallelism,
+            bucket_ms: bucket_ms.max(1),
         }
     }
 
-    pub fn storage(&self) -> &Arc<WorkerStorageContext> {
-        &self.storage
+    pub fn store(&self) -> &WindowStateStore {
+        &self.store
     }
 
-    pub fn task_id(&self) -> TaskId {
-        self.task_id.clone()
-    }
-
-    pub fn in_mem_batch_cache(&self) -> &InMemBatchCache {
-        &self.storage.in_mem
-    }
-
-    pub fn storage_stats_snapshot(&self) -> StorageStatsSnapshot {
-        self.storage.in_mem.stats().snapshot()
-    }
-
-    pub fn ts_column_index(&self) -> usize {
-        self.ts_column_index
-    }
-
-    pub fn batch_pins(&self) -> &Arc<BatchPins> {
-        &self.storage.batch_pins
-    }
-
-    pub fn start_batch_reclaimer(&self, interval: Duration, batch_budget_per_tick: usize) {
-        if self
-            .batch_reclaimer_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-        let retired = self.storage.batch_retirement.clone();
-        let store = self.storage.batch_store.clone();
-        let pins = self.storage.batch_pins.clone();
-        let handle = retired.spawn_reclaimer(
-            store,
-            pins,
-            self.task_id.clone(),
-            interval,
-            batch_budget_per_tick,
-        );
-        *self.batch_reclaimer_handle.lock().expect("batch_reclaimer_handle") = Some(handle);
-    }
-
-    pub fn start_background_tasks(
-        &self,
-        compaction_interval: Duration,
-        dump_interval: Duration,
-    ) {
-        // Start the batch reclaimer too (it is cheap and store-agnostic).
-        self.start_batch_reclaimer(dump_interval, 1024);
-
-        if self
-            .background_tasks_started
-            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-
-        let compactor = Arc::new(self.storage.compactor.clone());
-        let window_states = Arc::new(self.window_states.clone());
-        let (compact_handle, dump_handle) = compactor.spawn_background_tasks(
-            window_states,
-            self.task_id.clone(),
-            self.ts_column_index,
-            self.dump_hot_bucket_count,
-            self.in_mem_dump_parallelism,
-            self.in_mem_low_watermark_per_mille,
-            compaction_interval,
-            dump_interval,
-        );
-        *self.compaction_handle.lock().expect("compaction_handle") = Some(compact_handle);
-        *self.dump_handle.lock().expect("dump_handle") = Some(dump_handle);
-    }
-
-    pub async fn stop_background_tasks(&self) {
-        let compact = self.compaction_handle.lock().expect("compaction_handle").take();
-        let dump = self.dump_handle.lock().expect("dump_handle").take();
-        let reclaim = self
-            .batch_reclaimer_handle
-            .lock()
-            .expect("batch_reclaimer_handle")
-            .take();
-
-        if let Some(h) = compact {
-            h.abort();
-            let _ = h.await;
-        }
-        if let Some(h) = dump {
-            h.abort();
-            let _ = h.await;
-        }
-        if let Some(h) = reclaim {
-            h.abort();
-            let _ = h.await;
-        }
-
-        self.background_tasks_started.store(false, Ordering::Release);
-        self.batch_reclaimer_started.store(false, Ordering::Release);
-    }
-
-    pub async fn periodic_dump_to_store(&self) -> anyhow::Result<()> {
-        self.storage
-            .compactor
-            .periodic_dump_to_store(
-                &self.window_states,
-                self.task_id.clone(),
-                self.ts_column_index,
-                self.dump_hot_bucket_count,
-                self.in_mem_dump_parallelism,
-            )
-            .await
-    }
-
-    pub async fn compact_bucket_on_read(
-        &self,
-        key: &Key,
-        bucket_ts: Timestamp,
-    ) {
-        let Some(arc) = self.get_windows_state_arc(key) else {
-            return;
-        };
-        self.storage
-            .compactor
-            .compact_bucket(key, &arc, self.task_id.clone(), bucket_ts, self.ts_column_index)
-            .await;
-
-        if self.storage.in_mem.is_over_limit() {
-            let _ = self
-                .storage
-                .compactor
-                .relieve_in_mem_pressure(
-                    &self.window_states,
-                    self.task_id.clone(),
-                    self.ts_column_index,
-                    self.dump_hot_bucket_count,
-                    self.in_mem_low_watermark_per_mille,
-                    self.in_mem_dump_parallelism,
-                )
-                .await;
-        }
-    }
-
-    pub async fn rehydrate_bucket(
-        &self,
-        key: &Key,
-        bucket_ts: Timestamp,
-    ) {
-        let Some(arc) = self.get_windows_state_arc(key) else {
-            return;
-        };
-        self.storage
-            .compactor
-            .rehydrate_bucket(key, &arc, self.task_id.clone(), bucket_ts)
-            .await;
-
-        if self.storage.in_mem.is_over_limit() {
-            let _ = self
-                .storage
-                .compactor
-                .relieve_in_mem_pressure(
-                    &self.window_states,
-                    self.task_id.clone(),
-                    self.ts_column_index,
-                    self.dump_hot_bucket_count,
-                    self.in_mem_low_watermark_per_mille,
-                    self.in_mem_dump_parallelism,
-                )
-                .await;
-        }
-    }
-
-    /// Flush all in-memory runs into the store for checkpointing.
-    ///
-    /// This makes checkpoints depend only on the store snapshot (plus logical metadata).
-    pub async fn flush_in_mem_runs_to_store(&self) -> anyhow::Result<()> {
-        self.storage
-            .compactor
-            .checkpoint_flush_to_store(
-                &self.window_states,
-                self.task_id.clone(),
-                self.ts_column_index,
-                self.in_mem_dump_parallelism,
-            )
-            .await
-    }
-
-    /// Checkpoint/batch-finalization durability barrier.
-    ///
-    /// For remote-backed stores (e.g. SlateDB), this waits for pending writes to be persisted.
-    /// For purely in-memory stores, it is a no-op.
-    pub async fn await_store_persisted(&self) -> anyhow::Result<()> {
-        self.storage.batch_store.await_persisted().await
+    pub async fn flush(&self) -> anyhow::Result<()> {
+        self.store.flush().await
     }
 
     pub fn to_checkpoint(&self) -> WindowOperatorStateCheckpoint {
-        let mut keys = Vec::new();
-        for entry in self.window_states.iter() {
-            let key = entry.key().clone();
-            let arc = entry.value().clone();
-            let windows_state = arc.try_read().expect("Failed to read windows state for checkpoint");
-
-            let windows_state_bytes =
-                bincode::serialize(&*windows_state).expect("Failed to serialize WindowsState checkpoint");
-
-            keys.push((key.to_bytes(), windows_state_bytes));
-        }
-        WindowOperatorStateCheckpoint { keys }
-    }
-
-    pub fn apply_checkpoint(
-        &self,
-        checkpoint: WindowOperatorStateCheckpoint,
-    ) {
-        self.window_states.clear();
-        self.storage.in_mem.clear();
-        self.storage.compactor.clear_dump_state();
-        for (key_bytes, windows_state_bytes) in checkpoint.keys {
-            let key = Key::from_bytes(&key_bytes);
-            let windows_state: WindowsState =
-                bincode::deserialize(&windows_state_bytes).expect("Failed to deserialize WindowsState checkpoint");
-
-            let arc = Arc::new(RwLock::new(windows_state));
-            self.window_states.insert(key, arc);
+        WindowOperatorStateCheckpoint {
+            namespace: self.store.ns.bytes.clone(),
         }
     }
-    
-    pub async fn get_windows_state(&self, key: &Key) -> Option<WindowsStateGuard> {
-        let arc_rwlock = self.window_states.get(key)?.value().clone();
-        let guard = arc_rwlock.clone().read_owned().await;
-        Some(WindowsStateGuard {
-            _arc: arc_rwlock,
-            _guard: guard,
-        })
-    }
 
-    pub fn get_windows_state_arc(&self, key: &Key) -> Option<Arc<RwLock<WindowsState>>> {
-        self.window_states.get(key).map(|e| e.value().clone())
-    }
-
-    pub async fn insert_batch(
-        &self,
-        key: &Key,
-        watermark_ts: Option<Timestamp>,
-        batch: RecordBatch,
-    ) -> usize {
-        // Get or create windows_state
-        let arc_rwlock = if let Some(entry) = self.window_states.get(key) {
-            entry.value().clone()
-        } else {
-            let windows_state = create_empty_windows_state(
-                &self.window_ids,
-                &self.tiling_configs,
-                self.bucket_granularity,
-            );
-            let arc_rwlock = Arc::new(RwLock::new(windows_state));
-            self.window_states.insert(key.clone(), arc_rwlock.clone());
-            arc_rwlock
-        };
-        
-        // Acquire write lock for mutable access
-        let mut windows_state = arc_rwlock.write().await;
-
+    /// Insert rows; returns `(dropped_count, max_seen after insert)`.
+    pub async fn insert_batch(&self, key: &Key, batch: RecordBatch) -> (usize, Option<Cursor>) {
         if batch.num_rows() == 0 {
-            return 0;
+            let max_seen = self
+                .store
+                .meta
+                .get_key(key)
+                .await
+                .ok()
+                .and_then(|s| s.max_seen);
+            return (0, max_seen);
         }
 
-        // Assign per-row seq_no (tie-breaker for same timestamps).
-        let start_seq = windows_state.next_seq_no;
-        let record_batch_with_seq = append_seq_no_column(&batch, start_seq);
-        windows_state.next_seq_no = windows_state
-            .next_seq_no
-            .saturating_add(record_batch_with_seq.num_rows() as u64);
-
-        // Drop rows at/before the per-key processed cutoff.
-        let ref_window_id = *self
-            .window_ids
-            .first()
-            .expect("window_ids must be non-empty");
-        let processed_pos_ts = windows_state
-            .window_states
-            .get(&ref_window_id)
-            .and_then(|s| s.processed_pos)
+        let mut key_state = self.store.meta.get_key(key).await.expect("key state");
+        let processed_pos_ts = key_state
+            .processed_pos
             .map(|p| p.ts)
             .unwrap_or(i64::MIN);
-        let lateness_ms = self.lateness.unwrap_or(0).max(0);
-        let (record_batch, dropped_rows) = drop_too_late_entries(
-            &record_batch_with_seq,
-            self.ts_column_index,
-            processed_pos_ts,
-            watermark_ts,
-            lateness_ms,
-        );
 
-        if record_batch.num_rows() == 0 {
-            return dropped_rows;
+        // Streaming late: ts <= processed_pos (no lateness slack). CDC late-data later.
+        // Drop before seq assign so `next_seq` stays a dense allocator.
+        let (accepted, dropped) =
+            drop_late_entries(&batch, self.ts_column_index, processed_pos_ts);
+        if accepted.num_rows() == 0 {
+            return (dropped, key_state.max_seen);
         }
 
-        // Hot write path: partition into per-bucket batches (sorted by rowpos) and keep them in-memory (no BatchId).
-        let batches = self
-            .storage
-            .batch_store
-            .partition_records(&record_batch, key, self.ts_column_index);
+        let start_seq = key_state.next_seq;
+        let with_seq = append_seq_no_column(&accepted, start_seq);
+        // Dedicated allocator (not max_seen.seq — that is ts-first cursor order).
+        key_state.next_seq = start_seq.saturating_add(accepted.num_rows() as u64);
 
-        // Calculate pre-aggregated tiles if needed (use already-sorted batches).
-        for (window_id, window_state) in windows_state.window_states.iter_mut() {
-            if let Some(ref mut tiles) = window_state.tiles {
-                let window_expr = &self
-                    .window_configs
-                    .get(&window_id)
-                    .expect("Window config should exist")
-                    .window_expr;
-                for (_bucket_ts, b) in batches.iter() {
-                    tiles.add_sorted_batch(b, window_expr, self.ts_column_index);
-                }
-            }
+        if let Some((batch_min, batch_max)) =
+            cursor_range_from_batch(&with_seq, self.ts_column_index)
+        {
+            key_state.max_seen = Some(match key_state.max_seen {
+                Some(prev) => prev.max(batch_max),
+                None => batch_max,
+            });
+            key_state.first_ingested = Some(match key_state.first_ingested {
+                Some(prev) => prev.min(batch_min),
+                None => batch_min,
+            });
         }
 
-        for (bucket_ts, batch) in batches {
-            if batch.num_rows() == 0 {
+        // Single-writer ingest: plan tile keys → parallel get → update in mem → atomic write.
+        let mut tile_keys = std::collections::BTreeSet::new();
+        let mut tiling_windows = Vec::new();
+        for window_id in &self.window_ids {
+            let Some(cfg) = self
+                .window_configs
+                .get(window_id)
+                .and_then(|c| c.tiling.clone())
+            else {
                 continue;
+            };
+            for run in plan_update_runs_for_batch(&cfg, &with_seq, self.ts_column_index) {
+                tile_keys.insert((run.granularity, run.start_ts));
             }
-            let seq_column_index = get_seq_no_column_index(&batch)
-                .expect("Expected __seq_no column to exist in hot runs");
-            let (min_pos, max_pos) =
-                get_batch_rowpos_range(&batch, self.ts_column_index, seq_column_index);
-            let row_count = batch.num_rows();
-            let bytes_estimate = batch.get_array_memory_size();
-
-            let id = self.storage.in_mem.put(batch);
-            windows_state
-                .bucket_index
-                .insert_batch_ref(bucket_ts, BatchRef::InMem(id), min_pos, max_pos, row_count, bytes_estimate);
+            tiling_windows.push((*window_id, cfg));
+        }
+        let mut updated_tiles = BTreeMap::new();
+        if !tile_keys.is_empty() {
+            let futs: Vec<_> = tile_keys
+                .into_iter()
+                .map(|(gran, tile_start)| {
+                    let store = &self.store;
+                    async move {
+                        let wt = store.tiles.get(key, gran, tile_start).await?;
+                        Ok::<_, anyhow::Error>(((gran, tile_start), wt))
+                    }
+                })
+                .collect();
+            let loaded = futures::future::try_join_all(futs)
+                .await
+                .expect("load tiles");
+            updated_tiles.extend(loaded);
+        }
+        for (window_id, cfg) in &tiling_windows {
+            let window_expr = &self
+                .window_configs
+                .get(window_id)
+                .expect("cfg")
+                .window_expr;
+            apply_batch_to_tiles(
+                &mut updated_tiles,
+                *window_id,
+                cfg,
+                window_expr,
+                &with_seq,
+                self.ts_column_index,
+            );
         }
 
-        let over_limit = self.storage.in_mem.is_over_limit();
-        drop(windows_state); // release per-key lock before doing IO
+        let mut wb = WriteBatch::new();
+        self.store
+            .events
+            .append_batch(
+                &mut wb,
+                key,
+                &with_seq,
+                self.ts_column_index,
+                self.bucket_ms,
+            )
+            .expect("append event batch");
+        self.store
+            .tiles
+            .append_window_tiles(&mut wb, key, &updated_tiles)
+            .expect("append tiles");
+        self.store
+            .meta
+            .append_put_key(&mut wb, key, &key_state)
+            .expect("append meta");
 
-        if over_limit {
-            let _ = self
-                .storage
-                .compactor
-                .relieve_in_mem_pressure(
-                    &self.window_states,
-                    self.task_id.clone(),
-                    self.ts_column_index,
-                    self.dump_hot_bucket_count,
-                    self.in_mem_low_watermark_per_mille,
-                    self.in_mem_dump_parallelism,
-                )
-                .await;
-        }
-
-        // TODO(metrics): report dropped_rows and per-key drops.
-        dropped_rows
+        self.store.kv.write(wb).await.expect("atomic ingest write");
+        (dropped, key_state.max_seen)
     }
 
+    /// Retention GC only: drop raw/tiles older than `processed − max_wl − lateness`.
+    /// Does not affect ingest acceptance (that is `processed_pos` only).
     pub async fn prune_if_needed(&self, key: &Key) {
-        let Some(lateness) = self.lateness else {
+        let Some(retention) = self.lateness else {
             return;
         };
-        use crate::storage::index::get_window_length_ms;
-        use crate::storage::index::get_window_size_rows;
-        use datafusion::logical_expr::WindowFrameUnits;
-        
-        let arc_rwlock = self.window_states.get(key).expect("Windows state should exist").value().clone();
-        let mut windows_state = arc_rwlock.write().await;
-        let mut min_cutoff_timestamp = i64::MAX;
+        let key_state = self.store.meta.get_key(key).await.expect("key state");
+        let Some(processed) = key_state.processed_pos else {
+            return;
+        };
 
-        // For each window state, calculate its specific cutoff and prune tiles
-        let window_ids: Vec<WindowId> = windows_state.window_states.keys().cloned().collect();
-        for window_id in window_ids {
-            let window_config = self
-                .window_configs
-                .get(&window_id)
-                .expect("Window config should exist");
-            let window_frame = window_config.window_expr.get_window_frame();
-            let window_state = windows_state.window_states.get(&window_id).expect("Window state should exist");
-            
-            let window_end_ts = window_state.processed_pos.map(|p| p.ts).unwrap_or(i64::MIN);
-            let window_cutoff = match window_frame.units {
-                WindowFrameUnits::Rows => {
-                    // ROWS windows are count-based (last N rows), so pruning must also be count-based.
-                    // We keep enough buckets to cover the last `window_size` rows ending at roughly
-                    // `processed_pos.ts - lateness`.
-                    let window_size = get_window_size_rows(window_frame);
-                    if window_size == 0 || window_end_ts == i64::MIN {
-                        0
-                    } else if windows_state.bucket_index.is_empty() {
-                        0
-                    } else {
-                        let search_ts = window_end_ts.saturating_sub(lateness);
-                        let end_bucket_ts = windows_state
-                            .bucket_index
-                            .bucket_granularity()
-                            .start(search_ts);
-                        let all_ts = windows_state.bucket_index.bucket_timestamps();
-                        let first_ts = all_ts.first().copied().unwrap_or(0);
-                        let last_ts = all_ts.last().copied().unwrap_or(first_ts);
-                        let within = BucketRange::new(first_ts, end_bucket_ts.min(last_ts));
-                        windows_state
-                            .bucket_index
-                            .plan_rows_tail(search_ts, window_size, within)
-                            .unwrap_or(within)
-                            .start
-                    }
-                }
-                _ => {
-                    // RANGE windows: cutoff = processed_pos.ts - window_length - lateness
-                    let window_length = get_window_length_ms(window_frame);
-                    if window_end_ts == i64::MIN {
-                        0
-                    } else {
-                        window_end_ts
-                            .saturating_sub(window_length)
-                            .saturating_sub(lateness)
-                            .max(0)
-                    }
-                }
-            };
-
-            min_cutoff_timestamp = min_cutoff_timestamp.min(window_cutoff);
-            
-            if window_cutoff > 0 {
-                let window_state = windows_state.window_states.get_mut(&window_id).expect("Window state should exist");
-                if let Some(ref mut tiles) = window_state.tiles {
-                    tiles.prune(window_cutoff);
-                }
-            }
+        let mut max_wl = 0i64;
+        for cfg in self.window_configs.values() {
+            max_wl = max_wl.max(get_window_length_ms(cfg.window_expr.get_window_frame()));
         }
-
-        // Use minimal cutoff to prune batch_index and storage
-        if min_cutoff_timestamp != i64::MAX && min_cutoff_timestamp > 0 {
-            let pruned = windows_state.bucket_index.prune(min_cutoff_timestamp);
-
-            if !pruned.stored.is_empty() {
-                self.storage
-                    .batch_retirement
-                    .retire(self.task_id.clone(), key, &pruned.stored);
-            }
-            if !pruned.inmem.is_empty() {
-                self.storage.in_mem.remove(&pruned.inmem);
-            }
+        let cutoff_ts = processed
+            .ts
+            .saturating_sub(max_wl)
+            .saturating_sub(retention.max(0));
+        if cutoff_ts <= i64::MIN / 2 {
+            return;
         }
-    }
-
-    pub async fn update_window_positions_and_accumulators(
-        &self,
-        key: &Key,
-        processed_pos_by_window: &HashMap<WindowId, Cursor>,
-        accumulator_states: &HashMap<WindowId, Option<AccumulatorState>>,
-    ) {
-        let arc_rwlock = self.window_states.get(key).expect("Windows state should exist").value().clone();
-        let mut windows_state = arc_rwlock.write().await;
-        
-        for (window_id, new_pos) in processed_pos_by_window {
-            let window_state = windows_state.window_states.get_mut(window_id).expect("Window state should exist");
-            window_state.processed_pos = Some(*new_pos);
-            
-            if let Some(accumulator_state) = accumulator_states.get(window_id) {
-                window_state.accumulator_state = accumulator_state.clone();
-            }
-        }
-    }
-
-    pub async fn verify_pruning_for_testing(
-        &self, 
-        partition_key: &Key,
-        expected_min_timestamp: i64
-    ) {
-        let windows_state_ref = self.window_states.get(partition_key).unwrap();
-        let arc_rwlock = windows_state_ref.value();
-        let windows_state = arc_rwlock.read().await;
-        
-        // Check batch_index buckets are correctly pruned
-        let remaining_bucket_timestamps: Vec<_> = windows_state.bucket_index.bucket_timestamps();
-        
-        assert!(remaining_bucket_timestamps.iter().all(|&ts| ts >= expected_min_timestamp),
-                "All bucket timestamps should be >= {}ms, found: {:?}", expected_min_timestamp, remaining_bucket_timestamps);
-    
-        // Check window state and tiles
-        for (_, window_state) in windows_state.window_states.iter() {
-            if let Some(ref tiles) = window_state.tiles {
-                let tile_ranges: Vec<_> = tiles.get_tiles_for_range(0, i64::MAX);
-                for tile in tile_ranges {
-                    assert!(tile.tile_end > expected_min_timestamp, 
-                            "Tile should end after cutoff {}ms, but tile ends at {}ms", 
-                            expected_min_timestamp, tile.tile_end);
-                }
-            }
-        }
-    }
-
-    pub fn get_batch_store(&self) -> &Arc<dyn BatchStore> {
-        &self.storage.batch_store
-    }
-}
-
-impl OperatorState for WindowOperatorState {
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
-
-    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
-        self
-    }
-
-    fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
-        Some(TaskOperatorMetrics::Window {
-            storage: self.storage_stats_snapshot(),
-        })
-    }
-}
-
-pub fn create_empty_windows_state(window_ids: &[WindowId], tiling_configs: &[Option<TileConfig>], bucket_granularity: TimeGranularity) -> WindowsState {
-    WindowsState {
-        window_states: window_ids.iter().map(|&window_id| {
-            (window_id, WindowState {
-                tiles: tiling_configs.get(window_id).and_then(|tile_config| tile_config.as_ref().map(|config| Tiles::new(config.clone()))),
-                accumulator_state: None,
-                processed_pos: None,
-            })
-        }).collect(),
-        bucket_index: BucketIndex::new(bucket_granularity),
-        next_seq_no: 0,
+        let cutoff = Cursor::new(cutoff_ts, u64::MAX);
+        let _ = tokio::join!(
+            self.store
+                .events
+                .prune_before(key, cutoff, self.bucket_ms),
+            self.store.tiles.prune_before(key, cutoff_ts),
+        );
     }
 }
 
 fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
-    use arrow::array::UInt64Array;
-
-    if batch.schema().field_with_name(SEQ_NO_COLUMN_NAME).is_ok() {
-        return batch.clone();
-    }
-
-    let n = batch.num_rows() as u64;
-    let seq = UInt64Array::from_iter_values(start_seq..(start_seq + n));
-
-    let mut fields: Vec<Field> = batch.schema().fields().iter().map(|f| f.as_ref().clone()).collect();
-    fields.push(Field::new(SEQ_NO_COLUMN_NAME, DataType::UInt64, false));
+    assert!(
+        batch.schema().field_with_name(SEQ_NO_COLUMN_NAME).is_err(),
+        "WO ingest assigns __seq_no; input must not already have it",
+    );
+    let mut fields = batch.schema().fields().to_vec();
+    fields.push(Arc::new(Field::new(SEQ_NO_COLUMN_NAME, DataType::UInt64, false)));
     let schema = Arc::new(Schema::new(fields));
-
     let mut columns = batch.columns().to_vec();
-    columns.push(Arc::new(seq));
-
-    RecordBatch::try_new(schema, columns).expect("Should be able to append __seq_no column")
+    let seqs: Vec<u64> = (0..batch.num_rows())
+        .map(|i| start_seq.saturating_add(i as u64))
+        .collect();
+    columns.push(Arc::new(UInt64Array::from(seqs)));
+    RecordBatch::try_new(schema, columns).expect("append seq")
 }
 
-fn get_seq_no_column_index(batch: &RecordBatch) -> Option<usize> {
-    batch.schema()
-        .fields()
-        .iter()
-        .position(|f| f.name() == SEQ_NO_COLUMN_NAME)
-}
-
-fn get_batch_rowpos_range(
+/// Min and max cursors in the batch (`None` if empty).
+fn cursor_range_from_batch(
     batch: &RecordBatch,
     ts_column_index: usize,
-    seq_column_index: usize,
-) -> (Cursor, Cursor) {
-    use arrow::array::{TimestampMillisecondArray, UInt64Array};
+) -> Option<(Cursor, Cursor)> {
+    let cursors =
+        crate::runtime::operators::window::store::event_chunk::cursors_from_batch(
+            batch,
+            ts_column_index,
+        )
+        .ok()?;
+    let min = cursors.iter().copied().min()?;
+    let max = cursors.iter().copied().max()?;
+    Some((min, max))
+}
 
+/// Drop rows with `ts <= processed_pos_ts` (streaming late; no retention slack).
+fn drop_late_entries(
+    batch: &RecordBatch,
+    ts_column_index: usize,
+    processed_pos_ts: i64,
+) -> (RecordBatch, usize) {
     let ts = batch
         .column(ts_column_index)
         .as_any()
         .downcast_ref::<TimestampMillisecondArray>()
-        .expect("Timestamp column should be TimestampMillisecondArray");
-    let seq = batch
-        .column(seq_column_index)
-        .as_any()
-        .downcast_ref::<UInt64Array>()
-        .expect("__seq_no column should be UInt64Array");
-
-    let mut min_pos = Cursor::new(i64::MAX, u64::MAX);
-    let mut max_pos = Cursor::new(i64::MIN, 0);
+        .expect("ts");
+    let mut keep = Vec::new();
     for i in 0..batch.num_rows() {
-        let p = Cursor::new(ts.value(i), seq.value(i));
-        if p < min_pos {
-            min_pos = p;
-        }
-        if p > max_pos {
-            max_pos = p;
+        if ts.value(i) > processed_pos_ts {
+            keep.push(i as u32);
         }
     }
-    (min_pos, max_pos)
-}
-
-/// Drop entries at or before the per-key processed cutoff.
-///
-/// cutoff_ts = max(processed_pos_ts, watermark_ts - lateness_ms).
-/// Drops rows where `ts <= cutoff_ts`.
-pub fn drop_too_late_entries(
-    record_batch: &RecordBatch,
-    ts_column_index: usize,
-    processed_pos_ts: Timestamp,
-    watermark_ts: Option<Timestamp>,
-    lateness_ms: i64,
-) -> (RecordBatch, usize) {
-    use arrow::compute::filter_record_batch;
-    use arrow::compute::kernels::cmp::gt;
-    use arrow::array::{TimestampMillisecondArray, Scalar};
-    
-    let ts_column = record_batch.column(ts_column_index);
-
-    let cutoff_ts = match watermark_ts {
-        Some(wm) => wm.saturating_sub(lateness_ms).max(processed_pos_ts),
-        None => processed_pos_ts,
-    };
-
-    if watermark_ts.is_none() && processed_pos_ts == i64::MIN {
-        return (record_batch.clone(), 0);
+    let dropped = batch.num_rows() - keep.len();
+    if keep.len() == batch.num_rows() {
+        return (batch.clone(), 0);
     }
-
-    let cutoff_array = TimestampMillisecondArray::from_value(cutoff_ts, 1);
-    let cutoff_scalar = Scalar::new(&cutoff_array);
-    
-    let keep_mask = gt(ts_column, &cutoff_scalar)
-        .expect("Should be able to compare with cutoff timestamp");
-    
-    if keep_mask.true_count() == record_batch.num_rows() {
-        return (record_batch.clone(), 0);
+    if keep.is_empty() {
+        return (RecordBatch::new_empty(batch.schema()), dropped);
     }
-
-    let kept = filter_record_batch(record_batch, &keep_mask)
-        .expect("Should be able to filter record batch");
-    let dropped = record_batch.num_rows() - kept.num_rows();
+    let indices = arrow::array::UInt32Array::from(keep);
+    let kept = arrow::compute::take_record_batch(batch, &indices).expect("take");
     (kept, dropped)
 }

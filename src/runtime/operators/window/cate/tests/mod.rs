@@ -3,7 +3,7 @@ use std::sync::Arc;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::test_utils;
-use crate::runtime::operators::window::{create_window_aggregator, WindowAggregator};
+use crate::runtime::operators::window::create_window_aggregator;
 
 mod basic;
 mod matrix;
@@ -18,10 +18,7 @@ pub(super) fn eval_window_expr(
         test_utils::batch(&[(1000, 1.0, "A", 0), (2000, 3.0, "A", 1)]),
         test_utils::batch(&[(3000, 4.0, "B", 2), (4000, 2.0, "B", 3)]),
     ];
-    let mut acc = match create_window_aggregator(window_expr) {
-        WindowAggregator::Accumulator(acc) => acc,
-        _ => panic!("expected accumulator"),
-    };
+    let mut acc = create_window_aggregator(window_expr);
     for batch in batches {
         let args = window_expr.evaluate_args(&batch).expect("eval args");
         acc.update_batch(&args).expect("update");

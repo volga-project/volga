@@ -15,7 +15,7 @@ use crate::{
         metrics::PipelineStateHistory,
         observability::PipelineSnapshot,
         operators::window::{
-            window_operator::ExecutionMode as WindowExecutionMode, TileConfig, TimeGranularity,
+            window_operator::WindowEmitMode as WindowExecutionMode, TileConfig, TimeGranularity,
         },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer},
@@ -34,7 +34,6 @@ use tokio::sync::{mpsc, Mutex};
 #[derive(Debug, Clone)]
 pub enum WindowType {
     Range { milliseconds: i64 },
-    Rows { preceding: i64 },
 }
 
 #[derive(Debug, Clone)]
@@ -61,7 +60,6 @@ pub struct WindowBenchmarkConfig {
 
     // Window operator config params
     pub execution_mode: WindowExecutionMode,
-    pub parallelize: bool,
     pub tiling_configs: Option<Vec<Option<TileConfig>>>,
     pub lateness: Option<i64>,
 
@@ -83,7 +81,6 @@ impl Default for WindowBenchmarkConfig {
             num_windows: 1,
             aggregation_type: AggregationType::Retractable,
             execution_mode: WindowExecutionMode::Regular,
-            parallelize: false,
             tiling_configs: None,
             lateness: None,
             polling_interval_ms: 100,
@@ -126,9 +123,6 @@ fn build_sql_query(config: &WindowBenchmarkConfig) -> String {
                 "RANGE BETWEEN INTERVAL '{}' MILLISECOND PRECEDING AND CURRENT ROW",
                 milliseconds
             )
-        }
-        WindowType::Rows { preceding } => {
-            format!("ROWS BETWEEN {} PRECEDING AND CURRENT ROW", preceding)
         }
     };
 
@@ -195,7 +189,6 @@ fn update_window_configs_in_graph(
             if let OperatorConfig::WindowConfig(ref mut window_config) = node.operator_config {
                 // Lateness comes from PipelineSpec.event_time; only mutate bench-only knobs here.
                 window_config.execution_mode = config.execution_mode.clone();
-                window_config.spec.parallelize = config.parallelize;
 
                 // Set tiling configs if provided
                 if let Some(ref tiling_configs) = config.tiling_configs {
@@ -504,7 +497,6 @@ pub fn print_benchmark_results(config: &WindowBenchmarkConfig, metrics: &Benchma
     println!("  Number of Windows: {}", config.num_windows);
     println!("  Aggregation Type: {:?}", config.aggregation_type);
     println!("  Execution Mode: {:?}", config.execution_mode);
-    println!("  Parallelize: {}", config.parallelize);
     println!("  Tiling Configs: {:?}", config.tiling_configs);
     println!("  Lateness: {:?}", config.lateness);
 
@@ -606,11 +598,10 @@ async fn test_window_benchmark_basic() -> Result<()> {
         rate: None,
         run_for_s: None,
         // window_type: WindowType::Range { milliseconds: 1000 },
-        window_type: WindowType::Rows { preceding: 10000 },
+        window_type: WindowType::Range { milliseconds: 10_000_000 },
         num_windows: num_windows,
         aggregation_type: AggregationType::Plain,
         execution_mode: WindowExecutionMode::Request,
-        parallelize: false,
         tiling_configs: Some(tiling_configs),
         lateness: None,
         polling_interval_ms: 100,
