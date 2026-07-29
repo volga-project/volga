@@ -1,4 +1,4 @@
-//! Shared WO test harness (SortedKV / InMem).
+//! Shared WO/WRO test harness.
 
 use std::sync::Arc;
 
@@ -16,9 +16,11 @@ use crate::common::{Key, WatermarkMessage};
 use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-use crate::runtime::operators::window::store::StateNamespace;
+use crate::runtime::operators::window::store::{
+    InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore,
+};
 use crate::runtime::operators::window::window_operator::{
-    WindowEmitMode, WindowOperator, WindowOperatorConfig,
+    WindowOperator, WindowOperatorConfig, WindowOutputMode,
 };
 use crate::runtime::operators::window::window_request_operator::{
     WindowRequestOperator, WindowRequestOperatorConfig,
@@ -27,7 +29,6 @@ use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorStates;
-use crate::storage::{InMemSortedKV, SortedKV};
 
 pub fn test_input_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -84,7 +85,10 @@ pub async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
     extract_datafusion_window_exec(sql, &mut planner).await
 }
 
-pub fn runtime_context(kv: Arc<dyn SortedKV>) -> RuntimeContext {
+pub fn runtime_context_with_namespace(
+    store: Arc<InMemWindowStore>,
+    namespace: StateNamespace,
+) -> RuntimeContext {
     let mut ctx = RuntimeContext::new(
         "test_vertex".to_string().into(),
         0,
@@ -93,28 +97,54 @@ pub fn runtime_context(kv: Arc<dyn SortedKV>) -> RuntimeContext {
         Some(Arc::new(OperatorStates::new())),
         None,
     );
-    ctx.set_sorted_kv(kv);
-    ctx.set_window_state_namespace(StateNamespace::new(b"window_state"));
+    ctx.set_window_operator_store(store.clone() as Arc<dyn WindowOperatorStore>);
+    ctx.set_window_request_store(store as Arc<dyn WindowRequestStore>);
+    ctx.set_window_state_namespace(namespace);
     ctx
 }
 
 pub struct Harness {
     pub op: WindowOperator,
+    pub store: Arc<InMemWindowStore>,
+    pub namespace: StateNamespace,
 }
 
 impl Harness {
     pub async fn new(cfg: WindowOperatorConfig) -> Self {
-        let kv: Arc<dyn SortedKV> = Arc::new(InMemSortedKV::new());
-        let ctx = runtime_context(kv);
+        let store = Arc::new(InMemWindowStore::new());
+        Self::with_store(cfg, store, StateNamespace::new(b"window_state")).await
+    }
+
+    pub async fn with_store(
+        cfg: WindowOperatorConfig,
+        store: Arc<InMemWindowStore>,
+        namespace: StateNamespace,
+    ) -> Self {
+        Self::with_operator_store(cfg, store.clone(), store, namespace).await
+    }
+
+    pub async fn with_operator_store(
+        cfg: WindowOperatorConfig,
+        store: Arc<InMemWindowStore>,
+        operator_store: Arc<dyn WindowOperatorStore>,
+        namespace: StateNamespace,
+    ) -> Self {
+        let mut ctx = runtime_context_with_namespace(store.clone(), namespace.clone());
+        ctx.set_window_operator_store(operator_store);
         let mut op = WindowOperator::new(OperatorConfig::WindowConfig(cfg));
         op.open(&ctx).await.expect("open");
-        Self { op }
+        Self {
+            op,
+            store,
+            namespace,
+        }
     }
 
     pub async fn ingest(&mut self, b: RecordBatch, partition: &str) {
-        self.op.set_input(Some(Box::pin(futures::stream::iter(vec![
-            keyed_message(b, partition),
-        ]))));
+        self.op
+            .set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
+                b, partition,
+            )]))));
         assert!(matches!(
             self.op.poll_next().await,
             OperatorPollResult::Continue
@@ -139,7 +169,7 @@ impl Harness {
     }
 }
 
-/// Shared SortedKV: WO advances state (request mode), WRO answers point lookups.
+/// Shared store: WO advances state, WRO answers point lookups.
 pub struct WoWroHarness {
     pub wo: WindowOperator,
     pub wro: WindowRequestOperator,
@@ -147,27 +177,62 @@ pub struct WoWroHarness {
 
 impl WoWroHarness {
     pub async fn new(sql: &str, tiling: Option<TileConfig>, exclude_current_row: bool) -> Self {
+        Self::with_store(
+            sql,
+            tiling,
+            exclude_current_row,
+            Arc::new(InMemWindowStore::new()),
+            StateNamespace::new(b"window_state"),
+        )
+        .await
+    }
+
+    pub async fn with_store(
+        sql: &str,
+        tiling: Option<TileConfig>,
+        exclude_current_row: bool,
+        store: Arc<InMemWindowStore>,
+        namespace: StateNamespace,
+    ) -> Self {
+        Self::with_stores(
+            sql,
+            tiling,
+            exclude_current_row,
+            store.clone(),
+            store.clone(),
+            store,
+            namespace,
+        )
+        .await
+    }
+
+    pub async fn with_stores(
+        sql: &str,
+        tiling: Option<TileConfig>,
+        exclude_current_row: bool,
+        store: Arc<InMemWindowStore>,
+        operator_store: Arc<dyn WindowOperatorStore>,
+        request_store: Arc<dyn WindowRequestStore>,
+        namespace: StateNamespace,
+    ) -> Self {
         let exec = window_exec_from_sql(sql).await;
-        let kv: Arc<dyn SortedKV> = Arc::new(InMemSortedKV::new());
-        let ns = StateNamespace::new(b"window_state");
 
         let mut wo_cfg = WindowOperatorConfig::new(exec.clone());
-        wo_cfg.execution_mode = WindowEmitMode::Request;
+        wo_cfg.output_mode = WindowOutputMode::StateOnly;
         if tiling.is_some() {
             wo_cfg.spec = WindowOperatorSpec {
                 tiling: tiling.clone(),
                 ..Default::default()
             };
         }
-        let mut wo_ctx = runtime_context(kv.clone());
-        wo_ctx.set_window_state_namespace(ns.clone());
+        let mut wo_ctx = runtime_context_with_namespace(store.clone(), namespace.clone());
+        wo_ctx.set_window_operator_store(operator_store);
         let mut wo = WindowOperator::new(OperatorConfig::WindowConfig(wo_cfg));
         wo.open(&wo_ctx).await.expect("wo open");
 
-        let mut req_cfg =
-            WindowRequestOperatorConfig::from_window_operator_config(WindowOperatorConfig::new(
-                exec,
-            ));
+        let mut req_cfg = WindowRequestOperatorConfig::from_window_operator_config(
+            WindowOperatorConfig::new(exec),
+        );
         req_cfg.exclude_current_row = exclude_current_row;
         if tiling.is_some() {
             req_cfg.spec = WindowOperatorSpec {
@@ -175,8 +240,8 @@ impl WoWroHarness {
                 ..Default::default()
             };
         }
-        let mut wro_ctx = runtime_context(kv);
-        wro_ctx.set_window_state_namespace(ns);
+        let mut wro_ctx = runtime_context_with_namespace(store, namespace);
+        wro_ctx.set_window_request_store(request_store);
         let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(req_cfg));
         wro.open(&wro_ctx).await.expect("wro open");
 
@@ -184,16 +249,17 @@ impl WoWroHarness {
     }
 
     pub async fn ingest(&mut self, b: RecordBatch, partition: &str) {
-        self.wo.set_input(Some(Box::pin(futures::stream::iter(vec![
-            keyed_message(b, partition),
-        ]))));
+        self.wo
+            .set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
+                b, partition,
+            )]))));
         assert!(matches!(
             self.wo.poll_next().await,
             OperatorPollResult::Continue
         ));
     }
 
-    /// Request-mode advance: no emit batch, then passthrough watermark.
+    /// State-only advance: no emit batch, then passthrough watermark.
     pub async fn advance(&mut self, wm: u64) {
         self.wo.set_input(Some(Box::pin(futures::stream::iter(vec![
             watermark_message(wm),
@@ -211,22 +277,15 @@ impl WoWroHarness {
     }
 
     pub async fn request(&mut self, b: RecordBatch, partition: &str) -> RecordBatch {
-        self.wro.set_input(Some(Box::pin(futures::stream::iter(vec![
-            keyed_message(b, partition),
-        ]))));
+        self.wro
+            .set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
+                b, partition,
+            )]))));
         match self.wro.poll_next().await {
             OperatorPollResult::Ready(Message::Regular(base)) => base.record_batch,
             other => panic!("expected WRO result, got {:?}", other),
         }
     }
-}
-
-pub fn col_f64(batch: &RecordBatch, idx: usize) -> &Float64Array {
-    batch
-        .column(idx)
-        .as_any()
-        .downcast_ref::<Float64Array>()
-        .expect("f64")
 }
 
 /// Run ingest → watermark → emit with optional default tiling.

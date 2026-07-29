@@ -1,4 +1,4 @@
-//! WRO point lookups (slide / rebuild).
+//! Rebuild-only WRO point lookups.
 
 mod points;
 

@@ -7,7 +7,7 @@ use crate::{common::Message, runtime::functions::source::request_source::Pending
 use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::state::OperatorStates;
 use crate::runtime::operators::window::store::StateNamespace;
-use crate::storage::SortedKV;
+use crate::runtime::operators::window::store::{WindowOperatorStore, WindowRequestStore};
 use crate::runtime::VertexId;
 
 #[derive(Clone, Debug)]
@@ -18,8 +18,9 @@ pub struct RuntimeContext {
     job_config: HashMap<String, Value>,
     operator_states: Option<Arc<OperatorStates>>,
     execution_graph: Option<ExecutionGraph>,
-    /// Shared SortedKV backend handle for window ops (clone = same store).
-    sorted_kv: Option<Arc<dyn SortedKV>>,
+    /// Window-state backends shared by WO and WRO.
+    window_operator_store: Option<Arc<dyn WindowOperatorStore>>,
+    window_request_store: Option<Arc<dyn WindowRequestStore>>,
     window_state_namespace: Option<StateNamespace>,
     source_handles: Option<SourceHandles>,
 
@@ -43,7 +44,8 @@ impl RuntimeContext {
             job_config: job_config.unwrap_or_default(),
             operator_states,
             execution_graph,
-            sorted_kv: None,
+            window_operator_store: None,
+            window_request_store: None,
             window_state_namespace: None,
             source_handles: None,
             request_sink_source_request_receiver: None,
@@ -77,12 +79,20 @@ impl RuntimeContext {
             .expect("execution graph should be set")
     }
 
-    pub fn set_sorted_kv(&mut self, kv: Arc<dyn SortedKV>) {
-        self.sorted_kv = Some(kv);
+    pub fn set_window_operator_store(&mut self, store: Arc<dyn WindowOperatorStore>) {
+        self.window_operator_store = Some(store);
     }
 
-    pub fn sorted_kv(&self) -> Option<Arc<dyn SortedKV>> {
-        self.sorted_kv.clone()
+    pub fn window_operator_store(&self) -> Option<Arc<dyn WindowOperatorStore>> {
+        self.window_operator_store.clone()
+    }
+
+    pub fn set_window_request_store(&mut self, store: Arc<dyn WindowRequestStore>) {
+        self.window_request_store = Some(store);
+    }
+
+    pub fn window_request_store(&self) -> Option<Arc<dyn WindowRequestStore>> {
+        self.window_request_store.clone()
     }
 
     pub fn set_window_state_namespace(&mut self, ns: StateNamespace) {

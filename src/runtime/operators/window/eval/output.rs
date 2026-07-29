@@ -59,7 +59,10 @@ fn select_keep_indices_for_non_null_rows(
 }
 
 fn filter_rows<T: Clone>(values: Vec<T>, keep_indices: &[usize]) -> Vec<T> {
-    keep_indices.iter().map(|&idx| values[idx].clone()).collect()
+    keep_indices
+        .iter()
+        .map(|&idx| values[idx].clone())
+        .collect()
 }
 
 fn filter_rows_2d<T: Clone>(values: Vec<Vec<T>>, keep_indices: &[usize]) -> Vec<Vec<T>> {
@@ -78,8 +81,10 @@ fn build_record_batch_from_scalar_columns(
     let mut columns: Vec<ArrayRef> = Vec::new();
 
     for col_idx in 0..input_schema.fields().len() {
-        let column_values: Vec<ScalarValue> =
-            input_values.iter().map(|row| row[col_idx].clone()).collect();
+        let column_values: Vec<ScalarValue> = input_values
+            .iter()
+            .map(|row| row[col_idx].clone())
+            .collect();
         let array = ScalarValue::iter_to_array(column_values.into_iter())
             .expect("Should be able to convert input values to array");
         columns.push(array);

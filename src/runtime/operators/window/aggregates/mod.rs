@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow::array::ArrayRef;
 use datafusion::logical_expr::Accumulator;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;
@@ -18,18 +17,6 @@ use crate::runtime::operators::window::top::accumulators::ratio::{
 use crate::runtime::operators::window::top::accumulators::value::TOP_NAME;
 
 pub type Timestamp = i64;
-
-/// Request-mode lookup point for a key: as-of `ts`, optionally fold in a virtual row.
-///
-/// Global by design (one point answers all windows on the key). Args are produced once
-/// from the request row; windows are assumed to share compatible agg inputs.
-/// TODO: if windows ever need distinct request args, plumb per-window args here.
-#[derive(Debug, Clone)]
-pub struct VirtualPoint {
-    pub ts: Timestamp,
-    /// Pre-evaluated args for this row when including the virtual value (`!exclude`).
-    pub args: Option<Arc<Vec<ArrayRef>>>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregatorType {
@@ -183,10 +170,7 @@ pub fn merge_accumulator_state(
 /// Aggs whose sliding state is component-wise invertible (tile retract via state subtract).
 /// Min/max/top-n/etc. cannot retract a tile without the underlying rows.
 fn supports_tile_slide(agg_name: &str) -> bool {
-    matches!(
-        agg_name.to_lowercase().as_str(),
-        "sum" | "count" | "avg" | "mean"
-    )
+    ["sum", "count", "avg", "mean"].contains(&agg_name.to_lowercase().as_str())
 }
 
 pub fn window_supports_tile_slide(window_expr: &Arc<dyn WindowExpr>) -> bool {
@@ -251,7 +235,9 @@ fn extract_aggregate_expr(
         return sliding_expr.get_aggregate_expr();
     }
 
-    panic!("Window expression is neither PlainAggregateWindowExpr nor SlidingAggregateWindowExpr")
+    std::panic::panic_any(
+        "Window expression is neither PlainAggregateWindowExpr nor SlidingAggregateWindowExpr",
+    )
 }
 
 pub fn get_aggregate_registry() -> &'static AggregateRegistry {

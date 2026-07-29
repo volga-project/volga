@@ -1,4 +1,4 @@
-//! In-memory tile updates for ingest. No KV IO — caller plans/loads, then applies, then writes.
+//! In-memory tile updates for WO ingest.
 
 use arrow::array::{Int64Array, RecordBatch, TimestampMillisecondArray};
 use datafusion::physical_plan::WindowExpr;
@@ -12,7 +12,7 @@ use crate::runtime::operators::window::window_operator_state::WindowId;
 use super::plan::{plan_update_runs, TileRun};
 use super::{TileConfig, TileState, TimeGranularity, WindowTiles};
 
-/// `(granularity, tile_start)` — SortedKV tile identity.
+/// `(granularity, tile_start)` tile identity.
 pub type TileKey = (TimeGranularity, i64);
 
 /// [`TileRun`]s for tiles this batch will update (all configured granularities).
@@ -117,9 +117,6 @@ fn update_state_with_batch(
         .expect("evaluate_args for tile update");
     acc.update_batch(&args).expect("update tile state");
     state.accumulator_state = Some(acc.state().expect("tile state"));
-    state.entry_count = state
-        .entry_count
-        .saturating_add(batch.num_rows() as u64);
 }
 
 fn ts_column_as_i64(batch: &RecordBatch, ts_column_index: usize) -> Int64Array {

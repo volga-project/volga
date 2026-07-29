@@ -8,22 +8,21 @@ use crate::runtime::utils;
 
 use super::granularity::{TimeGranularity, Timestamp};
 
-/// Per-window aggregate state in a shared tile KV value.
+/// Per-window aggregate state in a shared tile.
 #[serde_as]
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct TileState {
     #[serde_as(as = "Option<Vec<utils::ScalarValueAsBytes>>")]
     pub accumulator_state: Option<AccumulatorState>,
-    pub entry_count: u64,
 }
 
-/// SortedKV value for one `(granularity, tile_start)`: all windows' states.
+/// Stored value for one `(granularity, tile_start)`: all windows' states.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WindowTiles {
     pub windows: BTreeMap<WindowId, TileState>,
 }
 
-/// One window's tile view for evaluate (geometry from KV key + that window's state).
+/// One window's tile view for evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tile {
     pub tile_start: Timestamp,

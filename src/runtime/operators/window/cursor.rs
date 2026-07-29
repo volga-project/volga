@@ -11,4 +11,21 @@ impl Cursor {
     pub fn new(ts: i64, seq_no: u64) -> Self {
         Self { ts, seq_no }
     }
+
+    pub fn next(self) -> Self {
+        if self.seq_no == u64::MAX {
+            Self::new(self.ts.saturating_add(1), 0)
+        } else {
+            Self::new(self.ts, self.seq_no + 1)
+        }
+    }
+
+    /// Exclusive upper cursor containing every event at `ts`.
+    pub fn after_timestamp(ts: i64) -> Self {
+        if ts == i64::MAX {
+            Self::new(i64::MAX, u64::MAX)
+        } else {
+            Self::new(ts + 1, 0)
+        }
+    }
 }

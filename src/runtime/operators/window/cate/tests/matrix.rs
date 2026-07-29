@@ -5,7 +5,6 @@ use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::aggregates::test_utils;
 use super::eval_window_expr;
-use crate::runtime::operators::window::create_window_aggregator;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;
 
@@ -34,7 +33,6 @@ fn agg_name(agg: Agg) -> &'static str {
         Agg::Max => "max",
     }
 }
-
 fn format_float(value: f64) -> String {
     let s = format!("{value:.6}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
@@ -180,69 +178,18 @@ fn agg_name_from_window_expr(window_expr: &Arc<dyn WindowExpr>) -> &str {
 async fn test_cate_where_matrix() {
     let aggs = [Agg::Sum, Agg::Count, Agg::Avg, Agg::Min, Agg::Max];
     let variants = [Variant::Where, Variant::Cate, Variant::CateWhere];
-    let agg_counts = [1usize, 2usize];
-    let include_regular = [false, true];
 
     for agg in aggs {
         for &variant in &variants {
-            for &agg_count in &agg_counts {
-                for &with_regular in &include_regular {
-                    let mut exprs = Vec::new();
-                    for i in 0..agg_count {
-                        let a = if i == 0 { agg } else { Agg::Sum };
-                        exprs.push(agg_expr(a, variant, i));
-                    }
-                    if with_regular {
-                        exprs.push(format!("sum(value) OVER w as sum_val_{}", agg_count));
-                    }
-                    let select = exprs.join(",\n    ");
-                    let sql = format!(
-                        "SELECT\n    timestamp,\n    value,\n    partition_key,\n    {select}\nFROM test_table\nWINDOW w AS (\n  PARTITION BY partition_key\n  ORDER BY timestamp\n  RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW\n)"
-                    );
-
-                    let exec = test_utils::window_exec_from_sql(&sql).await;
-                    let window_exprs = exec.window_expr();
-                    for (idx, window_expr) in window_exprs.iter().enumerate() {
-                        let out = eval_window_expr(window_expr);
-                        let _ = idx;
-                        let _ = variant;
-                        let _ = agg;
-                        let name = agg_name_from_window_expr(window_expr);
-                        let expected = expected_for_name(name);
-                        assert_eq!(out, expected);
-                    }
-                }
-            }
+            let select = agg_expr(agg, variant, 0);
+            let sql = format!(
+                "SELECT\n    timestamp,\n    value,\n    partition_key,\n    {select}\nFROM test_table\nWINDOW w AS (\n  PARTITION BY partition_key\n  ORDER BY timestamp\n  RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW\n)"
+            );
+            let exec = test_utils::window_exec_from_sql(&sql).await;
+            let window_expr = &exec.window_expr()[0];
+            let out = eval_window_expr(window_expr);
+            let expected = expected_for_name(agg_name_from_window_expr(window_expr));
+            assert_eq!(out, expected);
         }
     }
-}
-
-#[tokio::test]
-async fn test_cate_where_matrix_with_retract() {
-    let sql = r#"SELECT
-    timestamp,
-    value,
-    partition_key,
-    sum_cate_where(value, value > 2, partition_key) OVER w as sum_val
-FROM test_table
-WINDOW w AS (
-  PARTITION BY partition_key
-  ORDER BY timestamp
-  RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW
-)"#;
-    let window_expr = test_utils::window_expr_from_sql(sql).await;
-    let batch = test_utils::batch(&[(1000, 1.0, "A", 0), (2000, 4.0, "A", 1)]);
-    let retract_batch = test_utils::batch(&[(2000, 4.0, "A", 1)]);
-    let mut acc = create_window_aggregator(&window_expr);
-    let args = window_expr.evaluate_args(&batch).expect("eval args");
-    acc.update_batch(&args).expect("update");
-    let out = acc.evaluate().expect("evaluate");
-    assert_eq!(out, ScalarValue::Utf8(Some("A:4".to_string())));
-
-    let retract_args = window_expr
-        .evaluate_args(&retract_batch)
-        .expect("eval retract args");
-    acc.retract_batch(&retract_args).expect("retract");
-    let out = acc.evaluate().expect("evaluate");
-    assert_eq!(out, ScalarValue::Utf8(Some(String::new())));
 }

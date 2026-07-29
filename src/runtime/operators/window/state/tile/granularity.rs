@@ -54,7 +54,8 @@ impl TileConfig {
             if !granularities[i].is_multiple_of(&granularities[i - 1]) {
                 return Err(format!(
                     "Granularity {:?} must be a multiple of {:?}",
-                    granularities[i], granularities[i - 1]
+                    granularities[i],
+                    granularities[i - 1]
                 ));
             }
         }

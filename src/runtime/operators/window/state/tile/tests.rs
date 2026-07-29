@@ -14,15 +14,15 @@ use crate::runtime::operators::window::state::tile::update::{
     apply_batch_to_tiles, plan_update_runs_for_batch,
 };
 use crate::runtime::operators::window::state::tile::{merge_tile_runs, project_tiles};
-use crate::runtime::operators::window::store::keys::StateNamespace;
-use crate::runtime::operators::window::store::TileStore;
-use crate::storage::{WriteBatch, InMemSortedKV, SortedKV};
-use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
+use crate::runtime::operators::window::store::{
+    InMemWindowStore, KeyState, PartitionKey, StateNamespace, WindowOperatorStore,
+};
+use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
+use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::prelude::SessionContext;
-use std::collections::BTreeMap;
 
 fn merge_tile_states(window_expr: &Arc<dyn WindowExpr>, tiles: &[Tile]) -> ScalarValue {
     if tiles.is_empty() {
@@ -38,8 +38,8 @@ fn merge_tile_states(window_expr: &Arc<dyn WindowExpr>, tiles: &[Tile]) -> Scala
 }
 
 async fn ingest_tiles(
-    store: &TileStore,
-    key: &Key,
+    store: &InMemWindowStore,
+    partition: &PartitionKey,
     window_id: usize,
     config: &TileConfig,
     window_expr: &Arc<dyn WindowExpr>,
@@ -47,18 +47,10 @@ async fn ingest_tiles(
     ts_column_index: usize,
 ) {
     let runs = plan_update_runs_for_batch(config, batch, ts_column_index);
-    let futs: Vec<_> = runs
-        .iter()
-        .map(|r| {
-            let gran = r.granularity;
-            let start = r.start_ts;
-            async move {
-                let wt = store.get(key, gran, start).await.unwrap();
-                ((gran, start), wt)
-            }
-        })
-        .collect();
-    let mut by_key: BTreeMap<_, _> = futures::future::join_all(futs).await.into_iter().collect();
+    let mut by_key = store.load_tiles(partition, &runs).await.unwrap();
+    for run in &runs {
+        by_key.entry((run.granularity, run.start_ts)).or_default();
+    }
     apply_batch_to_tiles(
         &mut by_key,
         window_id,
@@ -67,34 +59,28 @@ async fn ingest_tiles(
         batch,
         ts_column_index,
     );
-    let mut wb = WriteBatch::new();
-    store.append_window_tiles(&mut wb, key, &by_key).unwrap();
-    store.write(wb).await.unwrap();
+    store
+        .commit_events(
+            partition,
+            ts_column_index,
+            batch,
+            &by_key,
+            &KeyState::default(),
+        )
+        .await
+        .unwrap();
 }
 
 async fn load_tiles_for_plan(
-    store: &TileStore,
-    key: &Key,
+    store: &InMemWindowStore,
+    partition: &PartitionKey,
     window_id: usize,
     runs: &[TileRun],
 ) -> Vec<Tile> {
-    let snap = store.snapshot(key).await.unwrap();
-    let mut by_key = BTreeMap::new();
-    for run in merge_tile_runs(runs.to_vec()) {
-        for (tile_start, wt) in store
-            .scan(
-                snap.as_ref(),
-                key,
-                run.granularity,
-                run.start_ts,
-                run.end_ts_exclusive,
-            )
-            .await
-            .unwrap()
-        {
-            by_key.insert((run.granularity, tile_start), wt);
-        }
-    }
+    let by_key = store
+        .load_tiles(partition, &merge_tile_runs(runs.to_vec()))
+        .await
+        .unwrap();
     project_tiles(&by_key, window_id)
 }
 
@@ -134,14 +120,22 @@ async fn extract_window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
 }
 
 fn create_test_batch(timestamps: Vec<i64>, values: Vec<f64>) -> RecordBatch {
-    let schema = create_test_schema();
+    let mut fields = create_test_schema().fields().to_vec();
+    fields.push(Arc::new(Field::new(
+        SEQ_NO_COLUMN_NAME,
+        DataType::UInt64,
+        false,
+    )));
+    let schema = Arc::new(Schema::new(fields));
     let partition_keys = vec!["test"; timestamps.len()];
+    let seq: Vec<u64> = (0..timestamps.len() as u64).collect();
     RecordBatch::try_new(
         schema,
         vec![
             Arc::new(TimestampMillisecondArray::from(timestamps)),
             Arc::new(Float64Array::from(values)),
             Arc::new(StringArray::from(partition_keys)),
+            Arc::new(UInt64Array::from(seq)),
         ],
     )
     .expect("batch")
@@ -163,7 +157,7 @@ fn test_tile_config_validation() {
 }
 
 #[tokio::test]
-async fn test_tile_store_apply_and_plan_load() {
+async fn test_tile_apply_and_plan_load() {
     let sql = "SELECT timestamp, value, partition_key,
         SUM(value) OVER (PARTITION BY partition_key ORDER BY timestamp
             RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW) as sum_val
@@ -175,16 +169,14 @@ async fn test_tile_store_apply_and_plan_load() {
     ])
     .unwrap();
 
-    let store = TileStore::new(
-        Arc::new(InMemSortedKV::new()) as Arc<dyn SortedKV>,
-        StateNamespace::new(b"test"),
-    );
+    let store = InMemWindowStore::new();
     let key = test_key("k1");
+    let partition = PartitionKey::new(&StateNamespace::new(b"test"), &key);
     let base = 1_625_097_600_000i64;
 
     ingest_tiles(
         &store,
-        &key,
+        &partition,
         0,
         &config,
         &window_expr,
@@ -209,7 +201,7 @@ async fn test_tile_store_apply_and_plan_load() {
     assert_eq!(plan.tile_runs[0].granularity, TimeGranularity::Minutes(5));
     assert_eq!(plan.tile_runs[1].granularity, TimeGranularity::Minutes(1));
 
-    let loaded = load_tiles_for_plan(&store, &key, 0, &plan.tile_runs).await;
+    let loaded = load_tiles_for_plan(&store, &partition, 0, &plan.tile_runs).await;
     // Sparse: 5m@5 and 5m@10 and 1m@15 exist; empty tiles in runs are absent.
     assert!(loaded.iter().any(|t| t.tile_start == base + 5 * 60_000));
     assert!(loaded.iter().any(|t| t.tile_start == base + 10 * 60_000));
@@ -222,23 +214,21 @@ async fn test_tile_store_apply_and_plan_load() {
 }
 
 #[tokio::test]
-async fn test_tile_store_merges_same_tile_across_applies() {
+async fn test_tiles_merge_same_tile_across_applies() {
     let sql = "SELECT timestamp, value, partition_key,
         SUM(value) OVER (PARTITION BY partition_key ORDER BY timestamp
             RANGE BETWEEN INTERVAL '1' HOUR PRECEDING AND CURRENT ROW) as sum_val
         FROM test_table";
     let window_expr = extract_window_exec_from_sql(sql).await.window_expr()[0].clone();
     let config = TileConfig::new(vec![TimeGranularity::Minutes(1)]).unwrap();
-    let store = TileStore::new(
-        Arc::new(InMemSortedKV::new()) as Arc<dyn SortedKV>,
-        StateNamespace::new(b"test"),
-    );
+    let store = InMemWindowStore::new();
     let key = test_key("k1");
+    let partition = PartitionKey::new(&StateNamespace::new(b"test"), &key);
     let base = 1_625_097_600_000i64;
 
     ingest_tiles(
         &store,
-        &key,
+        &partition,
         0,
         &config,
         &window_expr,
@@ -248,7 +238,7 @@ async fn test_tile_store_merges_same_tile_across_applies() {
     .await;
     ingest_tiles(
         &store,
-        &key,
+        &partition,
         0,
         &config,
         &window_expr,
@@ -258,12 +248,7 @@ async fn test_tile_store_merges_same_tile_across_applies() {
     .await;
 
     let plan = plan_time_range(&config, base, base + 2 * 60_000);
-    let loaded = load_tiles_for_plan(&store, &key, 0, &plan.tile_runs).await;
-    let one_min = loaded
-        .iter()
-        .find(|t| t.tile_start == base + 60_000)
-        .unwrap();
-    assert_eq!(one_min.state.entry_count, 2);
+    let loaded = load_tiles_for_plan(&store, &partition, 0, &plan.tile_runs).await;
     assert_eq!(
         merge_tile_states(&window_expr, &loaded),
         ScalarValue::Float64(Some(35.0))

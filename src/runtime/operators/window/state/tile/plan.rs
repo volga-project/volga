@@ -22,8 +22,8 @@ pub struct RawRun {
 /// Pure geometry: tile runs + optional raw head/tail.
 ///
 /// At most one raw segment before tiles (`raw_head`) and one after (`raw_tail`).
-/// All-raw windows (no tiles) use `raw_head` only. A missing KV key inside a tile
-/// run means that bucket had no events (skip / identity).
+/// All-raw windows (no tiles) use `raw_head` only. A missing tile inside a run
+/// means that interval had no events.
 #[derive(Debug, Clone, Default)]
 pub struct CoveragePlan {
     pub tile_runs: Vec<TileRun>,
@@ -46,7 +46,10 @@ pub fn plan_coverage(config: &TileConfig, start: Cursor, end: Cursor) -> Coverag
     if end.ts == start.ts {
         return CoveragePlan {
             tile_runs: vec![],
-            raw_head: Some(RawRun { from: start, to: end }),
+            raw_head: Some(RawRun {
+                from: start,
+                to: end,
+            }),
             raw_tail: None,
         };
     }
@@ -60,7 +63,11 @@ pub fn plan_coverage(config: &TileConfig, start: Cursor, end: Cursor) -> Coverag
 }
 
 /// Half-open `[start_ts, end_ts)`. Tiles fully inside: `tile_start >= start_ts && tile_end <= end_ts`.
-pub fn plan_time_range(config: &TileConfig, start_ts: Timestamp, end_ts: Timestamp) -> CoveragePlan {
+pub fn plan_time_range(
+    config: &TileConfig,
+    start_ts: Timestamp,
+    end_ts: Timestamp,
+) -> CoveragePlan {
     if start_ts >= end_ts {
         return CoveragePlan::default();
     }
@@ -111,6 +118,17 @@ fn plan_interior(
             }
             None => break,
         }
+    }
+
+    if tile_runs.is_empty() {
+        return CoveragePlan {
+            tile_runs,
+            raw_head: Some(RawRun {
+                from: start,
+                to: end,
+            }),
+            raw_tail: None,
+        };
     }
 
     let mut raw_tail = if t < end.ts || (t == end.ts && end.seq_no > 0) {
@@ -231,11 +249,33 @@ pub fn merge_tile_runs(mut runs: Vec<TileRun>) -> Vec<TileRun> {
     out
 }
 
+/// Merge overlapping or adjacent half-open raw cursor ranges.
+pub fn merge_raw_runs(mut runs: Vec<RawRun>) -> Vec<RawRun> {
+    if runs.is_empty() {
+        return runs;
+    }
+    runs.sort_by_key(|run| (run.from, run.to));
+    let mut out: Vec<RawRun> = Vec::with_capacity(runs.len());
+    for run in runs {
+        if run.from >= run.to {
+            continue;
+        }
+        if let Some(last) = out.last_mut() {
+            if run.from <= last.to {
+                last.to = last.to.max(run.to);
+                continue;
+            }
+        }
+        out.push(run);
+    }
+    out
+}
+
 /// Ingest update plan: one [`TileRun`] per `(granularity, tile_start)` touched by `timestamps`.
 ///
 /// Unlike [`plan_coverage`] / [`plan_time_range`] (coarsest tiles for eval), this includes
 /// **every** configured granularity so each tile that will be written is loaded.
-/// Caller loads via parallel [`TileStore::get`] (or scans) then applies in memory.
+/// Caller loads these runs through [`WindowOperatorStore`](crate::runtime::operators::window::store::WindowOperatorStore).
 pub fn plan_update_runs(
     config: &TileConfig,
     timestamps: impl IntoIterator<Item = Timestamp>,
@@ -340,7 +380,10 @@ mod plan_tests {
         assert!(plan.tile_runs.is_empty());
         assert_eq!(
             plan.raw_head,
-            Some(RawRun { from: start, to: end })
+            Some(RawRun {
+                from: start,
+                to: end
+            })
         );
         assert!(plan.raw_tail.is_none());
     }
@@ -367,15 +410,18 @@ mod plan_tests {
         let runs = plan_update_runs(&config, [90_000, 90_000, 6 * 60_000]);
         // Two buckets × two grans; not coalesced like eval coverage.
         assert_eq!(runs.len(), 4);
-        assert!(runs.iter().any(|r| r.granularity == m1 && r.start_ts == 60_000));
-        assert!(runs.iter().any(|r| r.granularity == m1 && r.start_ts == 6 * 60_000));
+        assert!(runs
+            .iter()
+            .any(|r| r.granularity == m1 && r.start_ts == 60_000));
+        assert!(runs
+            .iter()
+            .any(|r| r.granularity == m1 && r.start_ts == 6 * 60_000));
         assert!(runs.iter().any(|r| r.granularity == m5 && r.start_ts == 0));
-        assert!(runs.iter().any(|r| r.granularity == m5 && r.start_ts == 5 * 60_000));
+        assert!(runs
+            .iter()
+            .any(|r| r.granularity == m5 && r.start_ts == 5 * 60_000));
         for r in &runs {
-            assert_eq!(
-                r.end_ts_exclusive,
-                r.start_ts + r.granularity.to_millis()
-            );
+            assert_eq!(r.end_ts_exclusive, r.start_ts + r.granularity.to_millis());
         }
     }
 }

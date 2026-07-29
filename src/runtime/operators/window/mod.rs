@@ -15,17 +15,17 @@ pub mod eval;
 #[cfg(test)]
 mod tests;
 
-pub use window_operator::{WindowOperator, WindowEmitMode};
+pub use window_operator::{WindowOperator, WindowOutputMode};
 pub use window_request_operator::WindowRequestOperator;
 pub use config::{BuiltWindows, WindowConfig};
 pub use state::tile::{Tile, TileConfig, TimeGranularity};
 pub use state::window_operator_state;
 pub use cursor::Cursor;
-pub use store::{EventChunk, StateNamespace, WindowStateStore};
+pub use store::{InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore};
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";
 
 pub use aggregates::{
-    AggregatorType, create_window_aggregator, VirtualPoint, merge_accumulator_state,
-    retract_accumulator_state, window_supports_tile_slide,
+    AggregatorType, create_window_aggregator, merge_accumulator_state, retract_accumulator_state,
+    window_supports_tile_slide,
 };

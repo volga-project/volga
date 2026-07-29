@@ -15,7 +15,7 @@ use crate::{
         metrics::PipelineStateHistory,
         observability::PipelineSnapshot,
         operators::window::{
-            window_operator::WindowEmitMode as WindowExecutionMode, TileConfig, TimeGranularity,
+            window_operator::WindowOutputMode, TileConfig, TimeGranularity,
         },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer},
@@ -59,7 +59,7 @@ pub struct WindowBenchmarkConfig {
     pub aggregation_type: AggregationType,
 
     // Window operator config params
-    pub execution_mode: WindowExecutionMode,
+    pub output_mode: WindowOutputMode,
     pub tiling_configs: Option<Vec<Option<TileConfig>>>,
     pub lateness: Option<i64>,
 
@@ -80,7 +80,7 @@ impl Default for WindowBenchmarkConfig {
             window_type: WindowType::Range { milliseconds: 1000 },
             num_windows: 1,
             aggregation_type: AggregationType::Retractable,
-            execution_mode: WindowExecutionMode::Regular,
+            output_mode: WindowOutputMode::Emit,
             tiling_configs: None,
             lateness: None,
             polling_interval_ms: 100,
@@ -188,7 +188,7 @@ fn update_window_configs_in_graph(
         if let Some(node) = graph.get_node_by_index_mut(node_idx) {
             if let OperatorConfig::WindowConfig(ref mut window_config) = node.operator_config {
                 // Lateness comes from PipelineSpec.event_time; only mutate bench-only knobs here.
-                window_config.execution_mode = config.execution_mode.clone();
+                window_config.output_mode = config.output_mode.clone();
 
                 // Set tiling configs if provided
                 if let Some(ref tiling_configs) = config.tiling_configs {
@@ -285,7 +285,7 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
         );
 
     // Set execution mode
-    if config.execution_mode == WindowExecutionMode::Request {
+    if config.output_mode == WindowOutputMode::StateOnly {
         // request mode has no direct sink
         spec_builder = spec_builder.with_execution_mode(ExecutionMode::Request);
     } else {
@@ -496,7 +496,7 @@ pub fn print_benchmark_results(config: &WindowBenchmarkConfig, metrics: &Benchma
     println!("  Window Type: {:?}", config.window_type);
     println!("  Number of Windows: {}", config.num_windows);
     println!("  Aggregation Type: {:?}", config.aggregation_type);
-    println!("  Execution Mode: {:?}", config.execution_mode);
+    println!("  Window Output Mode: {:?}", config.output_mode);
     println!("  Tiling Configs: {:?}", config.tiling_configs);
     println!("  Lateness: {:?}", config.lateness);
 
@@ -601,7 +601,7 @@ async fn test_window_benchmark_basic() -> Result<()> {
         window_type: WindowType::Range { milliseconds: 10_000_000 },
         num_windows: num_windows,
         aggregation_type: AggregationType::Plain,
-        execution_mode: WindowExecutionMode::Request,
+        output_mode: WindowOutputMode::StateOnly,
         tiling_configs: Some(tiling_configs),
         lateness: None,
         polling_interval_ms: 100,

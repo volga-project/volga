@@ -5,8 +5,8 @@
 //! Covers retractable (sum/count/avg) + plain (min/max), multi-window lengths,
 //! unaligned/duplicate-ts edges, and a two-watermark warm-slide scenario.
 //!
-//! WRO: thin point oracle on the same fixture (tiling off + 1m; points before / at /
-//! after `processed_pos`; exclude current row on/off).
+//! WRO: rebuild-only point oracle on the same fixture (tiling off / 1m / 1m+5m),
+//! including pre-advance, partial-frontier, and short all-raw geometry.
 
 use datafusion::scalar::ScalarValue;
 
@@ -27,7 +27,6 @@ struct Ev {
 
 /// Fixture: unaligned starts, 5m boundaries, duplicate ts (seq order matters).
 fn fixture_events() -> Vec<Ev> {
-    // seq assigned in ingest order (single batch → 0..n-1).
     let rows = [
         (30_000, 1.0),
         (60_000, 2.0),
@@ -41,15 +40,18 @@ fn fixture_events() -> Vec<Ev> {
     ];
     rows.iter()
         .enumerate()
-        .map(|(i, &(ts, value))| Ev {
+        .map(|(seq, &(ts, value))| Ev {
             ts,
-            seq: i as u64,
+            seq: seq as u64,
             value,
         })
         .collect()
 }
 
 fn events_batch(evs: &[Ev]) -> arrow::record_batch::RecordBatch {
+    assert!(evs
+        .windows(2)
+        .all(|w| (w[0].ts, w[0].seq) < (w[1].ts, w[1].seq)));
     batch(
         evs.iter().map(|e| e.ts).collect(),
         evs.iter().map(|e| e.value).collect(),
@@ -209,6 +211,48 @@ async fn matrix_two_wm_warm_slide_matches_oracle() {
 }
 
 #[tokio::test]
+async fn matrix_unaligned_dense_warm_slide_matches_oracle() {
+    let rows = [
+        (30_000, 1.0),
+        (90_000, 2.0),
+        (210_000, 3.0),
+        (390_000, 4.0),
+        (435_000, 5.0),
+        (465_000, 6.0),
+        (495_000, 7.0),
+    ];
+    let evs: Vec<_> = rows
+        .iter()
+        .enumerate()
+        .map(|(seq, &(ts, value))| Ev {
+            ts,
+            seq: seq as u64,
+            value,
+        })
+        .collect();
+    let split = 4;
+    let expected: Vec<_> = evs
+        .iter()
+        .enumerate()
+        .map(|(idx, _)| oracle_row(&evs, idx))
+        .collect();
+
+    for (label, tiling) in tiling_variants() {
+        let out = run_wo_scenario(
+            matrix_sql(),
+            tiling,
+            "A",
+            &[
+                (events_batch(&evs[..split]), 420_000),
+                (events_batch(&evs[split..]), 495_000),
+            ],
+        )
+        .await;
+        assert_window_values(&out, 3, &expected, label);
+    }
+}
+
+#[tokio::test]
 async fn matrix_short_window_all_raw_matches_oracle() {
     // wl ≪ min gran → planner all-raw; still must match oracle under tiling.
     let evs = fixture_events();
@@ -255,7 +299,12 @@ fn point_store<'a>(evs: &'a [Ev], point_ts: i64, wl: i64) -> Vec<&'a Ev> {
         .collect()
 }
 
-fn oracle_wro_point(evs: &[Ev], point_ts: i64, point_value: f64, exclude: bool) -> Vec<ScalarValue> {
+fn oracle_wro_point(
+    evs: &[Ev],
+    point_ts: i64,
+    point_value: f64,
+    exclude: bool,
+) -> Vec<ScalarValue> {
     let request = (!exclude).then_some(point_value);
     let agg = |wl: i64, kind: &str| -> ScalarValue {
         let store = point_store(evs, point_ts, wl);
@@ -292,7 +341,7 @@ fn oracle_wro_point(evs: &[Ev], point_ts: i64, point_value: f64, exclude: bool) 
 #[tokio::test]
 async fn matrix_wro_points_match_oracle() {
     // After WO advance to last fixture ts: P = 720_000.
-    // Points probe rebuild (T < P), acc-only / jump (T == P), and leave+add jump (T > P).
+    // Rebuild-only points are independent of WO's frontier.
     let evs = fixture_events();
     let sql = matrix_sql();
     let input_cols = test_input_schema().fields().len();
@@ -300,26 +349,14 @@ async fn matrix_wro_points_match_oracle() {
     let events = events_batch(&evs);
 
     // (ts, value): mid gap, at P (same value as last event), after P.
-    let points = [
-        (350_000i64, 50.0),
-        (720_000i64, 8.0),
-        (800_000i64, 9.0),
-    ];
+    let points = [(350_000i64, 50.0), (720_000i64, 8.0), (800_000i64, 9.0)];
     let request_batch = batch(
         points.iter().map(|(t, _)| *t).collect(),
         points.iter().map(|(_, v)| *v).collect(),
         vec!["A"; points.len()],
     );
 
-    let tiling_variants = [
-        ("no_tiling", None),
-        (
-            "1m",
-            Some(TileConfig::new(vec![TimeGranularity::Minutes(1)]).unwrap()),
-        ),
-    ];
-
-    for (tiling_label, tiling) in tiling_variants {
+    for (tiling_label, tiling) in tiling_variants() {
         for exclude in [false, true] {
             let label = format!("{tiling_label}_exclude_{exclude}");
             let expected: Vec<Vec<ScalarValue>> = points
@@ -334,4 +371,89 @@ async fn matrix_wro_points_match_oracle() {
             assert_window_values(&out, input_cols, &expected, &label);
         }
     }
+}
+
+#[tokio::test]
+async fn matrix_wro_reads_before_and_across_partial_frontier() {
+    let evs = fixture_events();
+    let tiling = TileConfig::new(vec![
+        TimeGranularity::Minutes(1),
+        TimeGranularity::Minutes(5),
+    ])
+    .unwrap();
+    let mut h = WoWroHarness::new(matrix_sql(), Some(tiling), true).await;
+    h.ingest(events_batch(&evs), "A").await;
+
+    let pre_point = 350_000;
+    let pre = h
+        .request(batch(vec![pre_point], vec![0.0], vec!["A"]), "A")
+        .await;
+    assert_window_values(
+        &pre,
+        3,
+        &[oracle_wro_point(&evs, pre_point, 0.0, true)],
+        "pre-advance point",
+    );
+
+    h.advance(420_000).await;
+    let points = [350_000, 600_000];
+    let out = h
+        .request(
+            batch(
+                points.to_vec(),
+                vec![0.0; points.len()],
+                vec!["A"; points.len()],
+            ),
+            "A",
+        )
+        .await;
+    let expected: Vec<_> = points
+        .iter()
+        .map(|&ts| oracle_wro_point(&evs, ts, 0.0, true))
+        .collect();
+    assert_window_values(&out, 3, &expected, "partial-frontier points");
+}
+
+#[tokio::test]
+async fn matrix_wro_short_window_uses_all_raw_geometry() {
+    let sql = r#"SELECT timestamp, value, partition_key,
+  SUM(value) OVER w as sum_30s,
+  MIN(value) OVER w as min_30s
+FROM test_table
+WINDOW w AS (
+  PARTITION BY partition_key
+  ORDER BY timestamp
+  RANGE BETWEEN INTERVAL '30000' MILLISECOND PRECEDING AND CURRENT ROW
+)"#;
+    let evs = fixture_events();
+    let tiling = TileConfig::new(vec![TimeGranularity::Minutes(5)]).unwrap();
+    let mut h = WoWroHarness::new(sql, Some(tiling), true).await;
+    h.ingest(events_batch(&evs), "A").await;
+
+    let points = [60_000, 330_000, 720_000];
+    let out = h
+        .request(
+            batch(
+                points.to_vec(),
+                vec![0.0; points.len()],
+                vec!["A"; points.len()],
+            ),
+            "A",
+        )
+        .await;
+    let expected: Vec<Vec<ScalarValue>> = points
+        .iter()
+        .map(|&point| {
+            let vals: Vec<_> = evs
+                .iter()
+                .filter(|e| e.ts >= point - 30_000 && e.ts <= point)
+                .map(|e| e.value)
+                .collect();
+            vec![
+                ScalarValue::Float64(Some(vals.iter().sum())),
+                ScalarValue::Float64(Some(vals.iter().copied().fold(f64::INFINITY, f64::min))),
+            ]
+        })
+        .collect();
+    assert_window_values(&out, 3, &expected, "WRO all-raw geometry");
 }

@@ -18,8 +18,9 @@ use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use serde_json::Value;
 use crate::runtime::operators::source::SourceHandles;
-use crate::storage::{InMemSortedKV, SortedKV};
-use crate::runtime::operators::window::store::StateNamespace;
+use crate::runtime::operators::window::store::{
+    InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore,
+};
 
 use tokio::sync::mpsc;
 
@@ -343,8 +344,7 @@ impl Worker {
             .expect("Worker must be configured before use")
             .clone();
 
-        // Shared SortedKV for all window operators on this worker (each op gets a clone/handle).
-        let window_sorted_kv: Arc<dyn SortedKV> = Arc::new(InMemSortedKV::new());
+        let window_store = Arc::new(InMemWindowStore::new());
         let window_state_namespace =
             StateNamespace::new(config.window_state_namespace.as_bytes());
 
@@ -401,7 +401,12 @@ impl Worker {
                 crate::runtime::operators::operator::OperatorConfig::WindowConfig(_)
                     | crate::runtime::operators::operator::OperatorConfig::WindowRequestConfig(_)
             ) {
-                runtime_context.set_sorted_kv(window_sorted_kv.clone());
+                runtime_context.set_window_operator_store(
+                    window_store.clone() as Arc<dyn WindowOperatorStore>
+                );
+                runtime_context.set_window_request_store(
+                    window_store.clone() as Arc<dyn WindowRequestStore>
+                );
                 runtime_context.set_window_state_namespace(window_state_namespace.clone());
             }
 

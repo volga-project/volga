@@ -8,7 +8,7 @@ use crate::transport::transport_spec::TransportSpec;
 pub struct WorkerRuntimeSpec {
     #[serde(default)]
     pub transport: TransportSpec,
-    /// SortedKV key namespace shared by WO and WRO clients.
+    /// Window-state namespace shared by WO and WRO.
     #[serde(default = "default_window_state_namespace")]
     pub window_state_namespace: String,
     /// Snapshot history retention window, in milliseconds.

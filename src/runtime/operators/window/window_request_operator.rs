@@ -14,17 +14,17 @@ use crate::common::Key;
 use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
-use crate::runtime::operators::window::aggregates::VirtualPoint;
 use crate::runtime::operators::window::eval::{assemble_window_batch, evaluate_points};
 use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
-use crate::runtime::operators::window::store::{StateNamespace, WindowStateStore};
+use crate::runtime::operators::window::store::{
+    PartitionKey, StateNamespace, WindowRequestStore,
+};
 use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
 use crate::runtime::operators::window::window_operator_state::WindowId;
 use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::storage::{InMemSortedKV, SortedKV};
 
 #[derive(Debug, Clone)]
 pub struct WindowRequestOperatorConfig {
@@ -49,11 +49,11 @@ impl WindowRequestOperatorConfig {
 pub struct WindowRequestOperator {
     base: OperatorBase,
     window_configs: BTreeMap<WindowId, WindowConfig>,
-    store: Option<WindowStateStore>,
+    store: Option<Arc<dyn WindowRequestStore>>,
+    namespace: Option<StateNamespace>,
     ts_column_index: usize,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
-    bucket_ms: i64,
 }
 
 impl fmt::Debug for WindowRequestOperator {
@@ -83,26 +83,22 @@ impl WindowRequestOperator {
             require_range_frame(w.window_expr.get_window_frame());
         }
 
-        let bucket_ms = window_request_operator_config
-            .spec
-            .resolve_bucket_ms(&built.windows);
-
         Self {
             base: OperatorBase::new(config),
             window_configs: built.windows,
             store: None,
+            namespace: None,
             ts_column_index: built.ts_column_index,
             output_schema: built.output_schema,
             input_schema: built.input_schema,
-            bucket_ms,
         }
     }
 
     async fn process_key(&self, key: &Key, record_batch: &RecordBatch) -> RecordBatch {
         let store = self.store.as_ref().expect("store");
+        let partition = PartitionKey::new(self.namespace.as_ref().expect("namespace"), key);
 
-        // No lateness filter: retention is WO prune only. Answer any request point
-        // still covered by retained state (empty/partial if already GC'd).
+        // No lateness filter. Answer from whatever state the backend still retains.
         if record_batch.num_rows() == 0 {
             return RecordBatch::new_empty(self.output_schema.clone());
         }
@@ -113,33 +109,19 @@ impl WindowRequestOperator {
             .downcast_ref::<TimestampMillisecondArray>()
             .expect("Timestamp column");
 
-        // VirtualPoint is global per key lookup; args from first window expr (assumes
-        // compatible inputs across windows — see VirtualPoint docs).
-        let window_cfg = self.window_configs.values().next().expect("window");
-        let exclude = window_cfg.exclude_current_row.unwrap_or(false);
         let n = record_batch.num_rows();
-        let mut points = Vec::with_capacity(n);
+        let mut point_timestamps = Vec::with_capacity(n);
         for row in 0..n {
-            let ts = ts_array.value(row);
-            let args = if exclude {
-                None
-            } else {
-                let one = record_batch.slice(row, 1);
-                let evaluated = window_cfg
-                    .window_expr
-                    .evaluate_args(&one)
-                    .expect("evaluate_args");
-                Some(Arc::new(evaluated))
-            };
-            points.push(VirtualPoint { ts, args });
+            point_timestamps.push(ts_array.value(row));
         }
 
         let aggregated = evaluate_points(
-            store,
-            key,
+            store.as_ref(),
+            &partition,
             &self.window_configs,
-            &points,
-            self.bucket_ms,
+            &point_timestamps,
+            record_batch,
+            self.ts_column_index,
         )
         .await
         .expect("evaluate");
@@ -174,14 +156,14 @@ fn get_input_values(batch: &RecordBatch, input_schema: &SchemaRef) -> Vec<Vec<Sc
 impl OperatorTrait for WindowRequestOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await?;
-        let kv: Arc<dyn SortedKV> = context
-            .sorted_kv()
-            .unwrap_or_else(|| Arc::new(InMemSortedKV::new()) as Arc<dyn SortedKV>);
+        let store: Arc<dyn WindowRequestStore> = context
+            .window_request_store()
+            .expect("WindowRequestStore must be configured");
         let ns = context
             .window_state_namespace()
-            .unwrap_or_else(|| StateNamespace::new(b"window_state"));
-        // Own client handle (clone shares backend) — no peer WO local state.
-        self.store = Some(WindowStateStore::new(kv, ns));
+            .expect("window state namespace must be configured");
+        self.store = Some(store);
+        self.namespace = Some(ns);
         Ok(())
     }
 

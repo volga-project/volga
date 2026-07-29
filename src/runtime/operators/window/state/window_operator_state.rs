@@ -7,92 +7,93 @@ use datafusion::common::ScalarValue;
 use serde::{Deserialize, Serialize};
 
 use crate::common::Key;
-use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::frame_utils::get_window_length_ms;
 use crate::runtime::operators::window::config::WindowConfig;
+use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::state::tile::update::{
     apply_batch_to_tiles, plan_update_runs_for_batch,
 };
-use crate::runtime::operators::window::store::WindowStateStore;
+use crate::runtime::operators::window::store::row_nav::cursors_from_batch;
+use crate::runtime::operators::window::store::{
+    PartitionKey, StateNamespace, WindowCheckpointMeta, WindowOperatorStore, WindowRestoreMeta,
+};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
-use crate::storage::WriteBatch;
 
 pub type WindowId = usize;
 pub type AccumulatorState = Vec<ScalarValue>;
 
-/// SortedKV-backed window runtime state (WO write path).
+/// Runtime state owned by the WO.
 #[derive(Debug)]
 pub struct WindowOperatorState {
-    store: WindowStateStore,
+    store: Arc<dyn WindowOperatorStore>,
+    namespace: StateNamespace,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
-    window_ids: Vec<WindowId>,
-    lateness: Option<i64>,
-    /// Raw key bucket width (`align_bucket`); used for ingest keys + envelope scans.
-    bucket_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowOperatorStateCheckpoint {
     pub namespace: Vec<u8>,
+    pub store_meta: WindowCheckpointMeta,
 }
 
 impl WindowOperatorState {
     pub fn new(
-        store: WindowStateStore,
+        store: Arc<dyn WindowOperatorStore>,
+        namespace: StateNamespace,
         ts_column_index: usize,
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
-        lateness: Option<i64>,
-        bucket_ms: i64,
     ) -> Self {
-        let window_ids: Vec<WindowId> = window_configs.keys().cloned().collect();
         Self {
             store,
+            namespace,
             ts_column_index,
             window_configs,
-            window_ids,
-            lateness,
-            bucket_ms: bucket_ms.max(1),
         }
     }
 
-    pub fn store(&self) -> &WindowStateStore {
-        &self.store
+    pub fn store(&self) -> &dyn WindowOperatorStore {
+        self.store.as_ref()
     }
 
-    pub async fn flush(&self) -> anyhow::Result<()> {
-        self.store.flush().await
+    pub fn partition(&self, key: &Key) -> PartitionKey {
+        PartitionKey::new(&self.namespace, key)
     }
 
-    pub fn to_checkpoint(&self) -> WindowOperatorStateCheckpoint {
-        WindowOperatorStateCheckpoint {
-            namespace: self.store.ns.bytes.clone(),
-        }
+    pub async fn checkpoint(&self) -> anyhow::Result<WindowOperatorStateCheckpoint> {
+        Ok(WindowOperatorStateCheckpoint {
+            namespace: self.namespace.bytes.clone(),
+            store_meta: self.store.checkpoint(&self.namespace).await?,
+        })
+    }
+
+    pub async fn restore(&self, checkpoint: WindowOperatorStateCheckpoint) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            checkpoint.namespace == self.namespace.bytes,
+            "window checkpoint namespace does not match runtime namespace",
+        );
+        self.store
+            .restore(
+                &self.namespace,
+                &WindowRestoreMeta::from(checkpoint.store_meta),
+            )
+            .await
     }
 
     /// Insert rows; returns `(dropped_count, max_seen after insert)`.
     pub async fn insert_batch(&self, key: &Key, batch: RecordBatch) -> (usize, Option<Cursor>) {
         if batch.num_rows() == 0 {
-            let max_seen = self
-                .store
-                .meta
-                .get_key(key)
-                .await
-                .ok()
-                .and_then(|s| s.max_seen);
-            return (0, max_seen);
+            return (0, None);
         }
+        let partition = self.partition(key);
 
-        let mut key_state = self.store.meta.get_key(key).await.expect("key state");
-        let processed_pos_ts = key_state
-            .processed_pos
-            .map(|p| p.ts)
-            .unwrap_or(i64::MIN);
-
-        // Streaming late: ts <= processed_pos (no lateness slack). CDC late-data later.
+        let mut key_state = self.store.load_meta(&partition).await.expect("key state");
         // Drop before seq assign so `next_seq` stays a dense allocator.
-        let (accepted, dropped) =
-            drop_late_entries(&batch, self.ts_column_index, processed_pos_ts);
+        let (accepted, dropped) = drop_late_entries(
+            &batch,
+            self.ts_column_index,
+            key_state.processed_pos,
+            key_state.next_seq,
+        );
         if accepted.num_rows() == 0 {
             return (dropped, key_state.max_seen);
         }
@@ -100,7 +101,9 @@ impl WindowOperatorState {
         let start_seq = key_state.next_seq;
         let with_seq = append_seq_no_column(&accepted, start_seq);
         // Dedicated allocator (not max_seen.seq — that is ts-first cursor order).
-        key_state.next_seq = start_seq.saturating_add(accepted.num_rows() as u64);
+        key_state.next_seq = start_seq
+            .checked_add(accepted.num_rows() as u64)
+            .expect("per-key sequence exhausted");
 
         if let Some((batch_min, batch_max)) =
             cursor_range_from_batch(&with_seq, self.ts_column_index)
@@ -115,45 +118,31 @@ impl WindowOperatorState {
             });
         }
 
-        // Single-writer ingest: plan tile keys → parallel get → update in mem → atomic write.
-        let mut tile_keys = std::collections::BTreeSet::new();
+        // Load and update every tile touched by this batch.
+        let mut tile_runs = Vec::new();
         let mut tiling_windows = Vec::new();
-        for window_id in &self.window_ids {
-            let Some(cfg) = self
-                .window_configs
-                .get(window_id)
-                .and_then(|c| c.tiling.clone())
-            else {
+        for (window_id, window) in self.window_configs.iter() {
+            let Some(cfg) = window.tiling.clone() else {
                 continue;
             };
             for run in plan_update_runs_for_batch(&cfg, &with_seq, self.ts_column_index) {
-                tile_keys.insert((run.granularity, run.start_ts));
+                tile_runs.push(run);
             }
-            tiling_windows.push((*window_id, cfg));
+            tiling_windows.push((*window_id, cfg, Arc::clone(&window.window_expr)));
         }
-        let mut updated_tiles = BTreeMap::new();
-        if !tile_keys.is_empty() {
-            let futs: Vec<_> = tile_keys
-                .into_iter()
-                .map(|(gran, tile_start)| {
-                    let store = &self.store;
-                    async move {
-                        let wt = store.tiles.get(key, gran, tile_start).await?;
-                        Ok::<_, anyhow::Error>(((gran, tile_start), wt))
-                    }
-                })
-                .collect();
-            let loaded = futures::future::try_join_all(futs)
-                .await
-                .expect("load tiles");
-            updated_tiles.extend(loaded);
+        tile_runs.sort_by_key(|run| (run.granularity, run.start_ts, run.end_ts_exclusive));
+        tile_runs.dedup();
+        let mut updated_tiles = self
+            .store
+            .load_tiles(&partition, &tile_runs)
+            .await
+            .expect("load tiles");
+        for run in &tile_runs {
+            updated_tiles
+                .entry((run.granularity, run.start_ts))
+                .or_default();
         }
-        for (window_id, cfg) in &tiling_windows {
-            let window_expr = &self
-                .window_configs
-                .get(window_id)
-                .expect("cfg")
-                .window_expr;
+        for (window_id, cfg, window_expr) in &tiling_windows {
             apply_batch_to_tiles(
                 &mut updated_tiles,
                 *window_id,
@@ -164,59 +153,17 @@ impl WindowOperatorState {
             );
         }
 
-        let mut wb = WriteBatch::new();
         self.store
-            .events
-            .append_batch(
-                &mut wb,
-                key,
-                &with_seq,
+            .commit_events(
+                &partition,
                 self.ts_column_index,
-                self.bucket_ms,
+                &with_seq,
+                &updated_tiles,
+                &key_state,
             )
-            .expect("append event batch");
-        self.store
-            .tiles
-            .append_window_tiles(&mut wb, key, &updated_tiles)
-            .expect("append tiles");
-        self.store
-            .meta
-            .append_put_key(&mut wb, key, &key_state)
-            .expect("append meta");
-
-        self.store.kv.write(wb).await.expect("atomic ingest write");
+            .await
+            .expect("atomic ingest write");
         (dropped, key_state.max_seen)
-    }
-
-    /// Retention GC only: drop raw/tiles older than `processed − max_wl − lateness`.
-    /// Does not affect ingest acceptance (that is `processed_pos` only).
-    pub async fn prune_if_needed(&self, key: &Key) {
-        let Some(retention) = self.lateness else {
-            return;
-        };
-        let key_state = self.store.meta.get_key(key).await.expect("key state");
-        let Some(processed) = key_state.processed_pos else {
-            return;
-        };
-
-        let mut max_wl = 0i64;
-        for cfg in self.window_configs.values() {
-            max_wl = max_wl.max(get_window_length_ms(cfg.window_expr.get_window_frame()));
-        }
-        let cutoff_ts = processed
-            .ts
-            .saturating_sub(max_wl)
-            .saturating_sub(retention.max(0));
-        if cutoff_ts <= i64::MIN / 2 {
-            return;
-        }
-        let cutoff = Cursor::new(cutoff_ts, u64::MAX);
-        let _ = tokio::join!(
-            self.store
-                .events
-                .prune_before(key, cutoff, self.bucket_ms),
-            self.store.tiles.prune_before(key, cutoff_ts),
-        );
     }
 }
 
@@ -226,11 +173,19 @@ fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
         "WO ingest assigns __seq_no; input must not already have it",
     );
     let mut fields = batch.schema().fields().to_vec();
-    fields.push(Arc::new(Field::new(SEQ_NO_COLUMN_NAME, DataType::UInt64, false)));
+    fields.push(Arc::new(Field::new(
+        SEQ_NO_COLUMN_NAME,
+        DataType::UInt64,
+        false,
+    )));
     let schema = Arc::new(Schema::new(fields));
     let mut columns = batch.columns().to_vec();
     let seqs: Vec<u64> = (0..batch.num_rows())
-        .map(|i| start_seq.saturating_add(i as u64))
+        .map(|i| {
+            start_seq
+                .checked_add(i as u64)
+                .expect("per-key sequence exhausted")
+        })
         .collect();
     columns.push(Arc::new(UInt64Array::from(seqs)));
     RecordBatch::try_new(schema, columns).expect("append seq")
@@ -241,22 +196,18 @@ fn cursor_range_from_batch(
     batch: &RecordBatch,
     ts_column_index: usize,
 ) -> Option<(Cursor, Cursor)> {
-    let cursors =
-        crate::runtime::operators::window::store::event_chunk::cursors_from_batch(
-            batch,
-            ts_column_index,
-        )
-        .ok()?;
+    let cursors = cursors_from_batch(batch, ts_column_index).ok()?;
     let min = cursors.iter().copied().min()?;
     let max = cursors.iter().copied().max()?;
     Some((min, max))
 }
 
-/// Drop rows with `ts <= processed_pos_ts` (streaming late; no retention slack).
+/// Drop rows at or behind the processed cursor.
 fn drop_late_entries(
     batch: &RecordBatch,
     ts_column_index: usize,
-    processed_pos_ts: i64,
+    processed_pos: Option<Cursor>,
+    next_seq: u64,
 ) -> (RecordBatch, usize) {
     let ts = batch
         .column(ts_column_index)
@@ -265,7 +216,11 @@ fn drop_late_entries(
         .expect("ts");
     let mut keep = Vec::new();
     for i in 0..batch.num_rows() {
-        if ts.value(i) > processed_pos_ts {
+        let seq_no = next_seq
+            .checked_add(keep.len() as u64)
+            .expect("per-key sequence exhausted");
+        let cursor = Cursor::new(ts.value(i), seq_no);
+        if processed_pos.map_or(true, |processed| cursor > processed) {
             keep.push(i as u32);
         }
     }

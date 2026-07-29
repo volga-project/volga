@@ -1,53 +1,13 @@
-//! Smoke: basic WO / WRO behavior (not tiling equivalence).
+//! Smoke: basic WO/WRO behavior and representative custom aggregates.
 
-use std::sync::Arc;
+use datafusion::scalar::ScalarValue;
 
-use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
-use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
-use crate::runtime::operators::window::store::StateNamespace;
 use crate::runtime::operators::window::tests::harness::{
-    batch, col_f64, keyed_message, runtime_context, watermark_message, window_exec_from_sql,
-    Harness,
+    assert_window_values, batch, run_wo, window_exec_from_sql, Harness, WoWroHarness,
 };
-use crate::runtime::operators::window::window_operator::{
-    WindowEmitMode, WindowOperator, WindowOperatorConfig,
-};
-use crate::runtime::operators::window::window_request_operator::{
-    WindowRequestOperator, WindowRequestOperatorConfig,
-};
-use crate::storage::{InMemSortedKV, SortedKV};
-
-#[tokio::test]
-async fn range_sum_basic() {
-    let sql = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
-FROM test_table
-WINDOW w AS (
-  PARTITION BY partition_key
-  ORDER BY timestamp
-  RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW
-)"#;
-    let exec = window_exec_from_sql(sql).await;
-    let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
-
-    h.ingest(
-        batch(
-            vec![1000, 2000, 3000],
-            vec![10.0, 20.0, 30.0],
-            vec!["A", "A", "A"],
-        ),
-        "A",
-    )
-    .await;
-    let out = h.watermark_and_output(3000).await;
-    let _ = h.drain_passthrough_watermark().await;
-
-    assert_eq!(out.num_rows(), 3);
-    let sum_col = out.num_columns() - 1;
-    assert!((col_f64(&out, sum_col).value(0) - 10.0).abs() < 1e-9);
-    assert!((col_f64(&out, sum_col).value(1) - 30.0).abs() < 1e-9);
-    assert!((col_f64(&out, sum_col).value(2) - 60.0).abs() < 1e-9);
-}
+use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
+use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 
 #[tokio::test]
 async fn drop_post_frontier_late_events() {
@@ -66,7 +26,8 @@ WINDOW w AS (
     let _ = h.watermark_and_output(2000).await;
     let _ = h.drain_passthrough_watermark().await;
 
-    h.ingest(batch(vec![1500], vec![99.0], vec!["A"]), "A").await;
+    h.ingest(batch(vec![1500], vec![99.0], vec!["A"]), "A")
+        .await;
     let out = h.watermark_and_output(3000).await;
     let _ = h.drain_passthrough_watermark().await;
     assert_eq!(out.num_rows(), 0);
@@ -92,56 +53,62 @@ WINDOW w AS (
 }
 
 #[tokio::test]
-async fn two_clients_wo_wro_share_backend() {
-    let sql = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
+async fn top_and_categorical_aggregates_flow_through_wo_and_wro() {
+    let cases = [
+        (
+            r#"SELECT timestamp, value, partition_key, top(value, 2) OVER w as top_val
 FROM test_table
 WINDOW w AS (
   PARTITION BY partition_key
   ORDER BY timestamp
-  RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW
-)"#;
-    let exec = window_exec_from_sql(sql).await;
-    let kv = Arc::new(InMemSortedKV::new());
-    let ns = StateNamespace::new(b"window_state");
+  RANGE BETWEEN INTERVAL '10' MINUTE PRECEDING AND CURRENT ROW
+)"#,
+            vec![
+                vec![ScalarValue::Utf8(Some("1".to_string()))],
+                vec![ScalarValue::Utf8(Some("2,1".to_string()))],
+                vec![ScalarValue::Utf8(Some("3,2".to_string()))],
+            ],
+            ScalarValue::Utf8(Some("3,2".to_string())),
+            batch(
+                vec![0, 300_000, 600_000],
+                vec![1.0, 2.0, 3.0],
+                vec!["K", "K", "K"],
+            ),
+        ),
+        (
+            r#"SELECT timestamp, value, partition_key,
+  sum_cate(value, partition_key) OVER w as sums
+FROM test_table
+WINDOW w AS (
+  PARTITION BY partition_key
+  ORDER BY timestamp
+  RANGE BETWEEN INTERVAL '10' MINUTE PRECEDING AND CURRENT ROW
+)"#,
+            vec![
+                vec![ScalarValue::Utf8(Some("A:1".to_string()))],
+                vec![ScalarValue::Utf8(Some("A:1,B:2".to_string()))],
+                vec![ScalarValue::Utf8(Some("A:4,B:2".to_string()))],
+            ],
+            ScalarValue::Utf8(Some("A:4,B:2".to_string())),
+            batch(
+                vec![0, 300_000, 600_000],
+                vec![1.0, 2.0, 3.0],
+                vec!["A", "B", "A"],
+            ),
+        ),
+    ];
 
-    let mut wo_ctx = runtime_context(kv.clone() as Arc<dyn SortedKV>);
-    wo_ctx.set_window_state_namespace(ns.clone());
-    let mut wo_cfg = WindowOperatorConfig::new(exec.clone());
-    wo_cfg.execution_mode = WindowEmitMode::Request;
-    let mut wo = WindowOperator::new(OperatorConfig::WindowConfig(wo_cfg));
-    wo.open(&wo_ctx).await.expect("wo open");
+    for (sql, wo_expected, wro_expected, events) in cases {
+        let tiling = TileConfig::new(vec![TimeGranularity::Minutes(1)]).unwrap();
+        let wo = run_wo(sql, Some(tiling.clone()), events.clone(), "K", 600_000).await;
+        assert_window_values(&wo, 3, &wo_expected, "aggregate WO");
 
-    let mut wro_ctx = runtime_context(kv as Arc<dyn SortedKV>);
-    wro_ctx.set_window_state_namespace(ns);
-    let req_cfg = WindowRequestOperatorConfig::from_window_operator_config(
-        WindowOperatorConfig::new(exec),
-    );
-    let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(req_cfg));
-    wro.open(&wro_ctx).await.expect("wro open");
-
-    wo.set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
-        batch(vec![1000, 2000], vec![10.0, 20.0], vec!["A", "A"]),
-        "A",
-    )]))));
-    assert!(matches!(wo.poll_next().await, OperatorPollResult::Continue));
-
-    wo.set_input(Some(Box::pin(futures::stream::iter(vec![watermark_message(
-        2000,
-    )]))));
-    assert!(matches!(wo.poll_next().await, OperatorPollResult::Continue));
-    assert!(matches!(
-        wo.poll_next().await,
-        OperatorPollResult::Ready(Message::Watermark(_))
-    ));
-
-    wro.set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
-        batch(vec![2000], vec![0.0], vec!["A"]),
-        "A",
-    )]))));
-    match wro.poll_next().await {
-        OperatorPollResult::Ready(Message::Regular(base)) => {
-            assert_eq!(base.record_batch.num_rows(), 1);
-        }
-        other => panic!("expected WRO result, got {:?}", other),
+        let mut h = WoWroHarness::new(sql, Some(tiling), true).await;
+        h.ingest(events, "K").await;
+        h.advance(600_000).await;
+        let out = h
+            .request(batch(vec![600_000], vec![0.0], vec!["K"]), "K")
+            .await;
+        assert_window_values(&out, 3, &[vec![wro_expected]], "aggregate WRO");
     }
 }

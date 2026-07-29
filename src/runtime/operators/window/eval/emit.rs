@@ -1,20 +1,22 @@
 //! WO emit helpers: which ends fire and their input-row scalars.
 
 use anyhow::Result;
+use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::store::event_chunk::{flatten_ordered, EventChunk};
+use crate::runtime::operators::window::store::row_nav::flatten_ordered;
 
-/// Emit ends in `(prev, advance_to]` from loaded chunks (must be Cursor-ordered).
+/// Emit ends in `(prev, advance_to]` from loaded batches.
 pub(super) fn emit_ends(
-    chunks: &[EventChunk],
+    batches: &[RecordBatch],
+    ts_column_index: usize,
     prev: Option<Cursor>,
     advance_to: Cursor,
 ) -> Vec<Cursor> {
     let prev = prev.unwrap_or(Cursor::new(i64::MIN, 0));
-    flatten_ordered(chunks)
+    flatten_ordered(batches, ts_column_index)
         .into_iter()
         .map(|(c, _, _)| c)
         .filter(|c| *c > prev && *c <= advance_to)
@@ -23,11 +25,12 @@ pub(super) fn emit_ends(
 
 /// Map emit ends → input row scalars. Missing cursor → nulls.
 pub(super) fn emit_input_rows(
-    chunks: &[EventChunk],
+    batches: &[RecordBatch],
+    ts_column_index: usize,
     emit_cursors: &[Cursor],
     input_schema: &SchemaRef,
 ) -> Result<Vec<Vec<ScalarValue>>> {
-    let entries = flatten_ordered(chunks);
+    let entries = flatten_ordered(batches, ts_column_index);
     let mut out = Vec::with_capacity(emit_cursors.len());
     let mut i = 0usize;
     for c in emit_cursors {
@@ -41,7 +44,7 @@ pub(super) fn emit_input_rows(
         let mut vals = Vec::new();
         for col_idx in 0..input_schema.fields().len() {
             vals.push(ScalarValue::try_from_array(
-                chunks[ci as usize].batch.column(col_idx),
+                batches[ci as usize].column(col_idx),
                 ri as usize,
             )?);
         }

@@ -1,36 +1,33 @@
-//! In-memory cursor-ordered navigation over [`EventChunk`]s.
-//!
-//! Callers must pass chunks already in [`Cursor`] order (SortedKV scan over
-//! `raw/…/{bucket_ts}/{ts}/{seq}`). We assert that and only dedup.
+//! In-memory cursor-ordered navigation over raw Arrow batches.
 
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, RecordBatch};
+use anyhow::{anyhow, Result};
+use arrow::array::{ArrayRef, RecordBatch, TimestampMillisecondArray, UInt64Array};
 use datafusion::physical_plan::WindowExpr;
 
 use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::store::event_chunk::{flatten_ordered, EventChunk};
+use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RowIdx(pub usize);
 
 #[derive(Debug)]
 pub struct RowNav {
-    chunks: Arc<[EventChunk]>,
-    /// Flat index: global row → (chunk, row-in-chunk).
+    /// Flat index: global row → (batch, row-in-batch).
     locs: Vec<(u32, u32)>,
     cursors: Vec<Cursor>,
-    /// `evaluate_args` once per chunk (full-length arrays).
-    chunk_args: Vec<Option<Vec<ArrayRef>>>,
+    /// `evaluate_args` once per batch.
+    batch_args: Vec<Vec<ArrayRef>>,
 }
 
 impl RowNav {
-    pub fn from_chunks(
-        chunks: impl Into<Arc<[EventChunk]>>,
+    pub fn from_batches(
+        batches: &[RecordBatch],
+        ts_column_index: usize,
         window_expr: &Arc<dyn WindowExpr>,
     ) -> Self {
-        let chunks = chunks.into();
-        let entries = flatten_ordered(&chunks);
+        let entries = flatten_ordered(batches, ts_column_index);
         let mut locs = Vec::with_capacity(entries.len());
         let mut cursors = Vec::with_capacity(entries.len());
         for (c, ci, ri) in entries {
@@ -38,26 +35,21 @@ impl RowNav {
             cursors.push(c);
         }
 
-        let chunk_args: Vec<_> = chunks
+        let batch_args: Vec<_> = batches
             .iter()
-            .map(|ch| {
-                if ch.is_empty() {
-                    None
+            .map(|batch| {
+                if batch.num_rows() == 0 {
+                    Vec::new()
                 } else {
-                    Some(
-                        window_expr
-                            .evaluate_args(ch.batch.as_ref())
-                            .expect("evaluate_args"),
-                    )
+                    window_expr.evaluate_args(batch).expect("evaluate_args")
                 }
             })
             .collect();
 
         Self {
-            chunks,
             locs,
             cursors,
-            chunk_args,
+            batch_args,
         }
     }
 
@@ -65,19 +57,13 @@ impl RowNav {
         self.cursors[idx.0]
     }
 
-    /// 1-row Arrow slice for this global row (zero-copy buffers).
-    pub fn batch(&self, idx: RowIdx) -> RecordBatch {
+    /// Per-row args sliced from the batch-level `evaluate_args`.
+    pub fn args(&self, idx: RowIdx) -> Vec<ArrayRef> {
         let (ci, ri) = self.locs[idx.0];
-        self.chunks[ci as usize]
-            .batch
-            .slice(ri as usize, 1)
-    }
-
-    /// Per-row args: 1-row slices from the chunk-level `evaluate_args`.
-    pub fn args(&self, idx: RowIdx) -> Option<Vec<ArrayRef>> {
-        let (ci, ri) = self.locs[idx.0];
-        let cols = self.chunk_args[ci as usize].as_ref()?;
-        Some(cols.iter().map(|a| a.slice(ri as usize, 1)).collect())
+        self.batch_args[ci as usize]
+            .iter()
+            .map(|array| array.slice(ri as usize, 1))
+            .collect()
     }
 
     pub fn next(&self, idx: RowIdx) -> Option<RowIdx> {
@@ -87,15 +73,6 @@ impl RowNav {
         } else {
             None
         }
-    }
-
-    /// First row with cursor > prev (or first row if prev is None).
-    pub fn first_update_idx(&self, prev: Option<Cursor>) -> Option<RowIdx> {
-        let prev = prev.unwrap_or(Cursor::new(i64::MIN, 0));
-        self.cursors
-            .iter()
-            .position(|c| *c > prev)
-            .map(RowIdx)
     }
 
     /// Last row with cursor <= target.
@@ -108,10 +85,7 @@ impl RowNav {
 
     /// First index with cursor >= target.
     pub fn seek_ge(&self, target: Cursor) -> Option<RowIdx> {
-        self.cursors
-            .iter()
-            .position(|c| *c >= target)
-            .map(RowIdx)
+        self.cursors.iter().position(|c| *c >= target).map(RowIdx)
     }
 
     /// First index with ts >= start_ts (for RANGE window start).
@@ -121,4 +95,45 @@ impl RowNav {
             .position(|c| c.ts >= start_ts)
             .map(RowIdx)
     }
+}
+
+/// Flatten batches into cursor-ordered `(cursor, batch_idx, row_idx)` entries.
+pub(crate) fn flatten_ordered(
+    batches: &[RecordBatch],
+    ts_column_index: usize,
+) -> Vec<(Cursor, u32, u32)> {
+    let mut entries = Vec::new();
+    for (batch_idx, batch) in batches.iter().enumerate() {
+        let cursors =
+            cursors_from_batch(batch, ts_column_index).expect("stored batch cursor columns");
+        entries.extend(
+            cursors
+                .into_iter()
+                .enumerate()
+                .map(|(row_idx, cursor)| (cursor, batch_idx as u32, row_idx as u32)),
+        );
+    }
+    entries.sort_by_key(|(cursor, _, _)| *cursor);
+    entries.dedup_by_key(|(cursor, _, _)| *cursor);
+    entries
+}
+
+pub(crate) fn cursors_from_batch(
+    batch: &RecordBatch,
+    ts_column_index: usize,
+) -> Result<Vec<Cursor>> {
+    let ts = batch
+        .column(ts_column_index)
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .ok_or_else(|| anyhow!("event-time column must use millisecond precision"))?;
+    let seq_idx = batch.schema().index_of(SEQ_NO_COLUMN_NAME)?;
+    let seq = batch
+        .column(seq_idx)
+        .as_any()
+        .downcast_ref::<UInt64Array>()
+        .ok_or_else(|| anyhow!("invalid {SEQ_NO_COLUMN_NAME} column"))?;
+    Ok((0..batch.num_rows())
+        .map(|row| Cursor::new(ts.value(row), seq.value(row)))
+        .collect())
 }
