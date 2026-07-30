@@ -1,9 +1,9 @@
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
+use crate::runtime::operators::window::spec::WindowSpec;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum OperatorTuningSpec {
-    Window(WindowOperatorSpec),
+    Window(WindowSpec),
 }
 

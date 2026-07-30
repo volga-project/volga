@@ -1,0 +1,123 @@
+//! Update / retract an [`Accumulator`] from a [`CoveragePlan`] + [`WindowView`].
+//!
+//! Coverage is CPU-only; the store already loaded its exact runs. Missing tile means empty.
+
+use std::sync::Arc;
+
+use datafusion::logical_expr::Accumulator;
+use datafusion::physical_plan::WindowExpr;
+
+use crate::runtime::operators::window::aggs::{merge_accumulator_state, retract_accumulator_state};
+use crate::runtime::operators::window::model::{Cursor, Tile};
+use crate::runtime::operators::window::store::data::{RowIdx, RowNav};
+
+use crate::runtime::operators::window::store::WindowView;
+
+use super::coverage_plan::CoveragePlan;
+
+/// Merge plan tiles and update raw-run rows into an existing accumulator.
+pub(crate) fn update_acc_from_plan(
+    view: &WindowView,
+    acc: &mut dyn Accumulator,
+    plan: &CoveragePlan,
+    end_idx: Option<RowIdx>,
+) {
+    for tile in select_tiles_for_plan(&view.tiles, plan) {
+        if let Some(state) = &tile.state.accumulator_state {
+            merge_accumulator_state(acc, state.as_ref());
+        }
+    }
+    let Some(end_idx) = end_idx else {
+        return;
+    };
+    let end_c = view.nav.cursor(end_idx);
+    for run in plan.raw_edges() {
+        let to = if run.to.ts > end_c.ts || (run.to.ts == end_c.ts && run.to.seq_no > end_c.seq_no)
+        {
+            Cursor::new(end_c.ts, end_c.seq_no.saturating_add(1))
+        } else {
+            run.to
+        };
+        update_raw_run(view, acc, run.from, to, end_idx);
+    }
+}
+
+/// Retract plan tiles + raw-run rows (half-open leave band from the plan).
+pub(crate) fn retract_acc_from_plan(
+    window_expr: &Arc<dyn WindowExpr>,
+    view: &WindowView,
+    acc: &mut Box<dyn Accumulator>,
+    plan: &CoveragePlan,
+) {
+    for tile in select_tiles_for_plan(&view.tiles, plan) {
+        if let Some(state) = &tile.state.accumulator_state {
+            retract_accumulator_state(window_expr, acc, state.as_ref());
+        }
+    }
+    for run in plan.raw_edges() {
+        retract_raw_run(view, acc.as_mut(), run.from, run.to);
+    }
+}
+
+/// Update accumulator with one nav row (`Accumulator::update_batch`).
+pub(crate) fn update_row(nav: &RowNav, idx: RowIdx, acc: &mut dyn Accumulator) {
+    acc.update_batch(&nav.args(idx)).expect("update");
+}
+
+/// Retract one nav row from an accumulator (`Accumulator::retract_batch`).
+fn retract_row(nav: &RowNav, idx: RowIdx, acc: &mut dyn Accumulator) {
+    acc.retract_batch(&nav.args(idx)).expect("retract");
+}
+
+fn select_tiles_for_plan<'a>(tiles: &'a [Tile], plan: &CoveragePlan) -> Vec<&'a Tile> {
+    tiles
+        .iter()
+        .filter(|t| {
+            plan.tile_runs.iter().any(|r| {
+                r.granularity == t.granularity
+                    && t.tile_start >= r.start_ts
+                    && t.tile_end <= r.end_ts_exclusive
+            })
+        })
+        .collect()
+}
+
+fn update_raw_run(
+    view: &WindowView,
+    acc: &mut dyn Accumulator,
+    from: Cursor,
+    to: Cursor,
+    end_idx: RowIdx,
+) {
+    let Some(mut i) = view.nav.seek_ge(from) else {
+        return;
+    };
+    while i <= end_idx {
+        let c = view.nav.cursor(i);
+        if c >= to {
+            break;
+        }
+        update_row(&view.nav, i, acc);
+        match view.nav.next(i) {
+            Some(n) => i = n,
+            None => break,
+        }
+    }
+}
+
+fn retract_raw_run(view: &WindowView, acc: &mut dyn Accumulator, from: Cursor, to: Cursor) {
+    let Some(mut i) = view.nav.seek_ge(from) else {
+        return;
+    };
+    loop {
+        let c = view.nav.cursor(i);
+        if c >= to {
+            break;
+        }
+        retract_row(&view.nav, i, acc);
+        match view.nav.next(i) {
+            Some(n) => i = n,
+            None => break,
+        }
+    }
+}

@@ -283,8 +283,8 @@ impl LogicalPlanExamples {
             SELECT 
                 user_id,
                 amount,
-                SUM(amount) OVER (PARTITION BY user_id ORDER BY timestamp ROWS BETWEEN 4 PRECEDING AND CURRENT ROW) as sum_1m,
-                AVG(amount) OVER (PARTITION BY user_id ORDER BY timestamp ROWS BETWEEN 19 PRECEDING AND CURRENT ROW) as avg_5m
+                SUM(amount) OVER (PARTITION BY user_id ORDER BY timestamp RANGE BETWEEN INTERVAL '4000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_1m,
+                AVG(amount) OVER (PARTITION BY user_id ORDER BY timestamp RANGE BETWEEN INTERVAL '19000' MILLISECOND PRECEDING AND CURRENT ROW) as avg_5m
             FROM orders
             WHERE amount > 50
         ";
@@ -418,7 +418,7 @@ impl LogicalPlanExamples {
                 SUM(SUM(amount)) OVER (
                     PARTITION BY user_id 
                     ORDER BY timestamp 
-                    ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '3000' MILLISECOND PRECEDING AND CURRENT ROW
                 ) as rolling_4h_spent
             FROM orders 
             WHERE amount > 25
@@ -499,22 +499,22 @@ impl LogicalPlanExamples {
                 SUM(amount) OVER (
                     PARTITION BY user_id 
                     ORDER BY timestamp 
-                    ROWS BETWEEN 3 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '3000' MILLISECOND PRECEDING AND CURRENT ROW
                 ) as rolling_4h_sum,
                 AVG(amount) OVER (
                     PARTITION BY user_id 
                     ORDER BY timestamp 
-                    ROWS BETWEEN 5 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '5000' MILLISECOND PRECEDING AND CURRENT ROW
                 ) as rolling_6h_avg,
                 COUNT(*) OVER (
                     PARTITION BY user_id 
                     ORDER BY timestamp 
-                    ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW
                 ) as rolling_3h_count,
                 MAX(amount) OVER (
                     PARTITION BY user_id 
                     ORDER BY timestamp 
-                    ROWS BETWEEN 10 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW
                 ) as rolling_11h_max
             FROM orders 
             WHERE amount > 25
@@ -544,12 +544,12 @@ impl LogicalPlanExamples {
                 SUM(amount) OVER (
                     PARTITION BY user_id 
                     ORDER BY timestamp 
-                    ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '2000' MILLISECOND PRECEDING AND CURRENT ROW
                 ) as rolling_3h_sum,
                 AVG(amount) OVER (
                     PARTITION BY user_id 
                     ORDER BY timestamp 
-                    ROWS BETWEEN 4 PRECEDING AND CURRENT ROW
+                    RANGE BETWEEN INTERVAL '4000' MILLISECOND PRECEDING AND CURRENT ROW
                 ) as rolling_5h_avg
             FROM orders 
             WHERE amount > 50

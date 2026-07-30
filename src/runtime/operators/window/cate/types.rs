@@ -5,7 +5,7 @@ use datafusion::logical_expr::AggregateUDF;
 use datafusion::scalar::ScalarValue;
 use serde::{Deserialize, Serialize};
 
-pub(crate) use crate::runtime::operators::window::aggregates::AggKind;
+pub(crate) use crate::runtime::operators::window::aggs::AggKind;
 use crate::runtime::operators::window::top::heap::TopKKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

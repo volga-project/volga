@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use anyhow::Context;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -9,7 +7,6 @@ use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::OperatorOverrides;
 use crate::api::spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec};
-use crate::api::spec::storage::StorageSpec;
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 
@@ -24,8 +21,6 @@ pub struct KubePipelineSpec {
     pub parallelism: usize,
     #[serde(default = "default_worker_runtime_json")]
     pub worker_runtime: Value,
-    #[serde(default = "default_operator_type_storage_json")]
-    pub operator_type_storage: Value,
     #[serde(default = "default_operator_overrides_json")]
     pub operator_overrides: Value,
     #[serde(default)]
@@ -53,10 +48,6 @@ fn default_parallelism() -> usize {
 
 fn default_worker_runtime_json() -> Value {
     serde_json::to_value(WorkerRuntimeSpec::default()).expect("serialize default worker runtime")
-}
-
-fn default_operator_type_storage_json() -> Value {
-    Value::Object(serde_json::Map::new())
 }
 
 fn default_operator_overrides_json() -> Value {
@@ -96,9 +87,6 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
         let worker_runtime: WorkerRuntimeSpec =
             serde_json::from_value(normalize_json_strings(spec.worker_runtime))
                 .context("invalid worker_runtime")?;
-        let operator_type_storage: HashMap<String, StorageSpec> =
-            serde_json::from_value(normalize_json_strings(spec.operator_type_storage))
-                .context("invalid operator_type_storage")?;
         let operator_overrides: OperatorOverrides =
             serde_json::from_value(normalize_json_strings(spec.operator_overrides))
                 .context("invalid operator_overrides")?;
@@ -123,7 +111,6 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             execution_mode: spec.execution_mode,
             parallelism: spec.parallelism,
             worker_runtime,
-            operator_type_storage,
             operator_overrides,
             event_time: spec.event_time,
             sources,

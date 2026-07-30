@@ -12,6 +12,7 @@ use crate::runtime::functions::source::parquet::ParquetSourceConfig;
 use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
+use crate::runtime::operators::window::spec::WindowAdvancePolicy;
 
 fn resolve_source_schema(src: &SourceSpec) -> arrow::datatypes::Schema {
     schema_from_json(&src.schema_json)
@@ -114,6 +115,8 @@ fn compile_logical_graph_from_parts(
 
         if let Some(node) = graph.get_node_by_index_mut(idx) {
             if let OperatorConfig::WindowConfig(ref mut cfg) = node.operator_config {
+                let preserve_on_ingest =
+                    matches!(cfg.spec.advance_policy, WindowAdvancePolicy::OnIngest);
                 if let Some(OperatorTuningSpec::Window(win)) = &operator_overrides.defaults.tuning {
                     cfg.set_spec(win.clone());
                 }
@@ -122,9 +125,12 @@ fn compile_logical_graph_from_parts(
                         cfg.set_spec(win.clone());
                     }
                 }
-                // Pipeline event_time is the only compile-time lateness source
+                // Pipeline event_time is the only compile-time retention source
                 // (override WindowOperatorSpec.lateness is ignored).
                 cfg.spec.lateness = event_time.window.allowed_lateness_ms;
+                if preserve_on_ingest {
+                    cfg.spec.advance_policy = WindowAdvancePolicy::OnIngest;
+                }
             }
         }
     }

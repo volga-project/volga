@@ -8,13 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
-use crate::api::spec::storage::StorageSpec;
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::operators::window::TimeGranularity;
-use crate::storage::StorageBudgetConfig;
 use crate::transport::transport_spec::OperatorTransportSpec;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -37,10 +34,6 @@ pub struct PipelineSpec {
     pub parallelism: usize,
     #[serde(default)]
     pub worker_runtime: WorkerRuntimeSpec,
-    /// Per-operator-type storage overrides (shared across all instances of that operator type in a worker).
-    /// Key is a stable operator-type string (e.g. "window").
-    #[serde(default)]
-    pub operator_type_storage: HashMap<String, StorageSpec>,
     #[serde(default)]
     pub operator_overrides: OperatorOverrides,
     /// Pipeline-wide watermark / window lateness defaults (not via operator_overrides).
@@ -78,7 +71,6 @@ impl PipelineSpecBuilder {
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
                 worker_runtime: WorkerRuntimeSpec::default(),
-                operator_type_storage: HashMap::new(),
                 operator_overrides: OperatorOverrides::default(),
                 event_time: EventTimeSpec::default(),
                 sources: Vec::new(),
@@ -110,7 +102,7 @@ impl PipelineSpecBuilder {
         self
     }
 
-    /// Sets watermark out-of-orderness and window allowed lateness to the same value.
+    /// Sets watermark out-of-orderness and window retention (`allowed_lateness_ms`) to the same value.
     pub fn with_event_time_skew_ms(mut self, skew_ms: u64) -> Self {
         self.spec.event_time.watermark.out_of_orderness_ms = skew_ms;
         self.spec.event_time.window.allowed_lateness_ms = Some(skew_ms as i64);
@@ -153,47 +145,14 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_storage_budgets(mut self, budgets: StorageBudgetConfig) -> Self {
-        self.spec.worker_runtime.storage.budgets = budgets;
-        self
-    }
-
     pub fn with_snapshot_history_retention_window_ms(mut self, ms: u64) -> Self {
         self.spec.worker_runtime.history_retention_window_ms = Some(ms.max(1));
         self
     }
 
-    pub fn with_inmem_store_lock_pool_size(mut self, size: usize) -> Self {
-        self.spec.worker_runtime.storage.inmem_store_lock_pool_size = size;
+    pub fn with_window_state_namespace(mut self, ns: impl Into<String>) -> Self {
+        self.spec.worker_runtime.window_state_namespace = ns.into();
         self
-    }
-
-    pub fn with_inmem_store_bucket_granularity(mut self, g: TimeGranularity) -> Self {
-        self.spec
-            .worker_runtime
-            .storage
-            .inmem_store_bucket_granularity = g;
-        self
-    }
-
-    pub fn with_inmem_store_max_batch_size(mut self, size: usize) -> Self {
-        self.spec.worker_runtime.storage.inmem_store_max_batch_size = size;
-        self
-    }
-
-    pub fn with_operator_type_storage_spec(
-        mut self,
-        operator_type: &str,
-        spec: StorageSpec,
-    ) -> Self {
-        self.spec
-            .operator_type_storage
-            .insert(operator_type.to_string(), spec);
-        self
-    }
-
-    pub fn with_window_storage_spec(self, spec: StorageSpec) -> Self {
-        self.with_operator_type_storage_spec("window", spec)
     }
 
     pub fn with_operator_overrides_defaults(mut self, defaults: OperatorOverride) -> Self {
@@ -270,9 +229,5 @@ impl PipelineSpec {
             }
         }
         out
-    }
-
-    pub fn operator_type_storage_overrides(&self) -> HashMap<String, StorageSpec> {
-        self.operator_type_storage.clone()
     }
 }

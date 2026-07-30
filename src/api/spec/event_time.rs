@@ -3,8 +3,8 @@ use serde::{Deserialize, Serialize};
 
 /// Pipeline-wide event-time defaults (SQL / streaming).
 ///
-/// Watermark knobs are shared; allowed lateness is namespaced by operator kind
-/// (`window` now; `join` later) so semantics stay distinct.
+/// Watermark knobs are shared; window `allowed_lateness_ms` is retention-only
+/// (prune after advance). Streaming late ingest is `ts ≤ processed_pos`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EventTimeSpec {
     #[serde(default)]
@@ -35,7 +35,8 @@ impl Default for WatermarkSpec {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowEventTimeSpec {
-    /// Allowed lateness for window operators (ms). `None` = no lateness.
+    /// Window state retention after advance (ms). `None` = no prune.
+    /// Does not delay watermarks or accept post-frontier ingest; CDC late-data is separate.
     #[serde(default)]
     pub allowed_lateness_ms: Option<i64>,
 }

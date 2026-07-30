@@ -1,29 +1,31 @@
-pub mod window_operator;
-pub mod window_request_operator;
-pub mod window_tuning;
-pub mod window_storage_spec;
+pub mod operator;
+pub mod request;
+pub mod spec;
 
-pub mod aggregates;
+pub mod aggs;
 pub mod cate;
-pub mod top;
-pub mod shared;
+pub mod config;
+pub mod eval;
+pub mod frame_utils;
+pub mod model;
 pub mod state;
+pub mod store;
+pub mod tile;
+pub mod top;
 
 #[cfg(test)]
-mod window_operator_tests;
-#[cfg(test)]
-mod perf_tests;
+mod tests;
 
-pub use window_operator::WindowOperator;
-pub use window_request_operator::WindowRequestOperator;
-pub use shared::WindowConfig;
-pub use state::tiles::{Tiles, TileConfig, TimeGranularity};
-pub use state::window_operator_state;
+pub use config::{BuiltWindows, WindowConfig};
+pub use model::{Cursor, Tile, TimeGranularity};
+pub use operator::{WindowOperator, WindowOutputMode};
+pub use request::WindowRequestOperator;
+pub use store::{InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore};
+pub use tile::TileConfig;
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";
 
-pub use crate::storage::index::{BucketIndex, Cursor, RowPtr};
-
-pub use aggregates::{AggregatorType, Evaluator, AggregateRegistry, WindowAggregator, create_window_aggregator, get_aggregate_registry, Aggregation};
-pub use aggregates::plain::PlainAggregation;
-pub use aggregates::retractable::RetractableAggregation;
+pub use aggs::{
+    create_window_accumulator, merge_accumulator_state, retract_accumulator_state,
+    window_supports_tile_slide, AccumulatorType,
+};

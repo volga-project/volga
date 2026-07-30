@@ -115,7 +115,7 @@ SELECT
   -- top aggregations
   top(o.product_id, 3) OVER w_long AS top_products_30d,
   topn_frequency(o.product_id, 3) OVER w_long AS top_product_freq_30d,
-  top1_ratio(o.product_id) OVER w_rows AS top_product_dominance_last_100,
+  top1_ratio(o.product_id) OVER w_long AS top_product_dominance_30d,
 
   -- categorical aggregation
   sum_cate(o.amount, o.product_type) OVER w_long AS spent_per_category,
@@ -133,11 +133,6 @@ WINDOW
     PARTITION BY u.user_id 
     ORDER BY o.event_time 
     RANGE BETWEEN INTERVAL '30 day' PRECEDING AND CURRENT ROW 
-  ),
-  w_rows AS (
-    PARTITION BY u.user_id 
-    ORDER BY o.event_time 
-    ROWS BETWEEN 100 PRECEDING AND CURRENT ROW
   )
 
 FROM users u

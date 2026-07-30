@@ -10,16 +10,14 @@ use crate::runtime::operators::map::map_operator::MapOperator;
 use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
-use crate::runtime::operators::window::window_operator::{WindowOperatorConfig, WindowOperator};
-use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
+use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOperator};
+use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
 use crate::runtime::operators::window::WindowRequestOperator;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::common::message::Message;
 use anyhow::Result;
 use std::fmt;
 use std::pin::Pin;
-use crate::api::StorageSpec;
-use crate::runtime::operators::window::window_storage_spec::default_window_storage_spec;
 use crate::runtime::functions::{
     function_trait::FunctionTrait,
     map::MapFunction,
@@ -91,15 +89,6 @@ pub fn operator_config_requires_checkpoint(operator_config: &OperatorConfig) -> 
         }
         OperatorConfig::ChainedConfig(configs) => configs.iter().any(operator_config_requires_checkpoint),
         _ => false,
-    }
-}
-
-pub fn operator_storage_key_and_default_spec(operator_config: &OperatorConfig) -> Option<(&'static str, StorageSpec)> {
-    match operator_config {
-        OperatorConfig::WindowConfig(_) | OperatorConfig::WindowRequestConfig(_) => {
-            Some(("window", default_window_storage_spec()))
-        }
-        _ => None,
     }
 }
 

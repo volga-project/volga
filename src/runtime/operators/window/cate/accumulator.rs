@@ -5,22 +5,18 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
 use arrow::compute::kernels::boolean::and_kleene;
 use arrow::compute::{filter, is_not_null, take};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::DataType;
 use datafusion::common::{exec_err, Result};
-use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator, AggregateUDF};
-use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::PhysicalExpr;
 use datafusion::scalar::ScalarValue;
 
 use super::types::{CateKey, CateUdfSpec, EncodedStateBytes};
-use crate::runtime::operators::window::aggregates::{AggKind, AggregatorType};
+use super::utils::{acc_state_to_bytes, df_error, merge_state_bytes, scalar_to_string};
+use crate::runtime::operators::window::aggs::{
+    build_base_accumulator, ensure_value_type, infer_value_type, AccumulatorType, AggKind,
+};
 use crate::runtime::operators::window::top::utils::{
     group_indices_by_scalar_with_hash, hash_scalar_value,
-};
-use super::utils::{
-    acc_state_to_bytes, coerce_value_type, df_error, infer_value_type, merge_state_bytes,
-    scalar_to_string,
 };
 use crate::runtime::utils::{scalar_value_from_bytes, scalar_value_to_bytes};
 
@@ -49,40 +45,16 @@ impl CateAccumulator {
     }
 
     fn ensure_value_type(&mut self, value_array: &ArrayRef) -> Result<DataType> {
-        if let Some(t) = &self.value_type {
-            return Ok(t.clone());
-        }
-        let coerced = coerce_value_type(self.kind, self.base_udaf.as_ref(), value_array.data_type())?;
-        self.value_type = Some(coerced.clone());
-        Ok(coerced)
+        ensure_value_type(
+            &mut self.value_type,
+            self.kind,
+            self.base_udaf.as_ref(),
+            value_array,
+        )
     }
 
     fn build_accumulator(&self, value_type: &DataType) -> Result<Box<dyn Accumulator>> {
-        let coerced = if matches!(self.kind, AggKind::Count) {
-            vec![value_type.clone()]
-        } else {
-            self.base_udaf.coerce_types(&[value_type.clone()])?
-        };
-        let return_type = self.base_udaf.return_type(&coerced)?;
-        let input_field = Field::new("value", coerced[0].clone(), true);
-        let schema = Schema::new(vec![input_field.clone()]);
-        let exprs: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(Column::new("value", 0))];
-        let return_field = Arc::new(Field::new("out", return_type, true));
-        let acc_args = AccumulatorArgs {
-            return_field,
-            schema: &schema,
-            ignore_nulls: false,
-            order_bys: &[],
-            is_reversed: false,
-            name: self.base_udaf.name(),
-            is_distinct: false,
-            exprs: &exprs,
-        };
-        if matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator) {
-            self.base_udaf.create_sliding_accumulator(acc_args)
-        } else {
-            self.base_udaf.accumulator(acc_args)
-        }
+        build_base_accumulator(self.kind, self.base_udaf.as_ref(), value_type)
     }
 
     fn build_mask(
@@ -104,18 +76,13 @@ impl CateAccumulator {
     fn key_from_value(value: ScalarValue) -> Result<CateKey> {
         let hash = hash_scalar_value(&value)
             .map_err(|e| df_error(format!("hash value to array failed: {e}")))?;
-        Ok(CateKey {
-            hash,
-            value,
-        })
+        Ok(CateKey { hash, value })
     }
 }
 
 impl Accumulator for CateAccumulator {
     fn update_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        let value_array = values
-            .get(0)
-            .ok_or_else(|| df_error("missing value arg"))?;
+        let value_array = values.get(0).ok_or_else(|| df_error("missing value arg"))?;
         let value_type = self.ensure_value_type(value_array)?;
         let cond_array = if self.has_condition {
             Some(
@@ -131,7 +98,11 @@ impl Accumulator for CateAccumulator {
         };
         let cate_array = if self.has_category {
             let idx = if self.has_condition { 2 } else { 1 };
-            Some(values.get(idx).ok_or_else(|| df_error("missing category arg"))?)
+            Some(
+                values
+                    .get(idx)
+                    .ok_or_else(|| df_error("missing category arg"))?,
+            )
         } else {
             None
         };
@@ -186,13 +157,14 @@ impl Accumulator for CateAccumulator {
     }
 
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        if !matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator) {
+        if !matches!(
+            self.kind.accumulator_type(),
+            AccumulatorType::RetractableAccumulator
+        ) {
             return exec_err!("retract not supported for {}", self.base_udaf.name());
         }
 
-        let value_array = values
-            .get(0)
-            .ok_or_else(|| df_error("missing value arg"))?;
+        let value_array = values.get(0).ok_or_else(|| df_error("missing value arg"))?;
         let value_type = self.ensure_value_type(value_array)?;
         let cond_array = if self.has_condition {
             Some(
@@ -208,7 +180,11 @@ impl Accumulator for CateAccumulator {
         };
         let cate_array = if self.has_category {
             let idx = if self.has_condition { 2 } else { 1 };
-            Some(values.get(idx).ok_or_else(|| df_error("missing category arg"))?)
+            Some(
+                values
+                    .get(idx)
+                    .ok_or_else(|| df_error("missing category arg"))?,
+            )
         } else {
             None
         };
@@ -272,7 +248,10 @@ impl Accumulator for CateAccumulator {
 
     fn evaluate(&mut self) -> Result<ScalarValue> {
         if !self.has_category {
-            let acc = self.single.as_mut().ok_or_else(|| df_error("missing accumulator"))?;
+            let acc = self
+                .single
+                .as_mut()
+                .ok_or_else(|| df_error("missing accumulator"))?;
             return acc.evaluate();
         }
 
@@ -301,10 +280,7 @@ impl Accumulator for CateAccumulator {
             } else {
                 None
             };
-            EncodedStateBytes {
-                single,
-                cate: None,
-            }
+            EncodedStateBytes { single, cate: None }
         } else {
             let mut cate: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(self.cate.len());
             for (k, acc) in self.cate.iter_mut() {
@@ -370,6 +346,9 @@ impl Accumulator for CateAccumulator {
     }
 
     fn supports_retract_batch(&self) -> bool {
-        matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator)
+        matches!(
+            self.kind.accumulator_type(),
+            AccumulatorType::RetractableAccumulator
+        )
     }
 }

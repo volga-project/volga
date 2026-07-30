@@ -1,0 +1,201 @@
+use std::collections::BTreeMap;
+use std::fmt;
+use std::sync::Arc;
+
+use anyhow::Result;
+use arrow::array::{RecordBatch, TimestampMillisecondArray};
+use arrow::datatypes::SchemaRef;
+use async_trait::async_trait;
+use datafusion::physical_plan::windows::BoundedWindowAggExec;
+use datafusion::scalar::ScalarValue;
+
+use crate::common::message::Message;
+use crate::common::Key;
+use crate::runtime::operators::operator::{
+    MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
+};
+use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
+use crate::runtime::operators::window::eval::{assemble_window_batch, evaluate_points};
+use crate::runtime::operators::window::frame_utils::require_range_frame;
+use crate::runtime::operators::window::model::WindowId;
+use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::operators::window::spec::WindowSpec;
+use crate::runtime::operators::window::store::{PartitionKey, StateNamespace, WindowRequestStore};
+use crate::runtime::operators::window::TileConfig;
+use crate::runtime::runtime_context::RuntimeContext;
+
+#[derive(Debug, Clone)]
+pub struct WindowRequestOperatorConfig {
+    pub window_exec: Arc<BoundedWindowAggExec>,
+    pub tiling_configs: Vec<Option<TileConfig>>,
+    pub spec: WindowSpec,
+    /// `EXCLUDE CURRENT ROW`: lookup time only (no request-row args). SQL wiring still TODO.
+    pub exclude_current_row: bool,
+}
+
+impl WindowRequestOperatorConfig {
+    pub fn from_window_operator_config(window_operator_config: WindowOperatorConfig) -> Self {
+        Self {
+            window_exec: window_operator_config.window_exec,
+            tiling_configs: window_operator_config.tiling_configs,
+            spec: window_operator_config.spec,
+            exclude_current_row: false,
+        }
+    }
+}
+
+pub struct WindowRequestOperator {
+    base: OperatorBase,
+    window_configs: BTreeMap<WindowId, WindowConfig>,
+    store: Option<Arc<dyn WindowRequestStore>>,
+    namespace: Option<StateNamespace>,
+    ts_column_index: usize,
+    output_schema: SchemaRef,
+    input_schema: SchemaRef,
+}
+
+impl fmt::Debug for WindowRequestOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WindowRequestOperator")
+            .field("base", &self.base)
+            .field("windows", &self.window_configs)
+            .finish()
+    }
+}
+
+impl WindowRequestOperator {
+    pub fn new(config: OperatorConfig) -> Self {
+        let window_request_operator_config = match config.clone() {
+            OperatorConfig::WindowRequestConfig(config) => config,
+            _ => panic!("Expected WindowRequestConfig, got {:?}", config),
+        };
+
+        let built = BuiltWindows::for_wro(
+            &window_request_operator_config.window_exec,
+            &window_request_operator_config.tiling_configs,
+            &window_request_operator_config.spec,
+            window_request_operator_config.exclude_current_row,
+        );
+
+        for w in built.windows.values() {
+            require_range_frame(w.window_expr.get_window_frame());
+        }
+
+        Self {
+            base: OperatorBase::new(config),
+            window_configs: built.windows,
+            store: None,
+            namespace: None,
+            ts_column_index: built.ts_column_index,
+            output_schema: built.output_schema,
+            input_schema: built.input_schema,
+        }
+    }
+
+    async fn process_key(&self, key: &Key, record_batch: &RecordBatch) -> RecordBatch {
+        let store = self.store.as_ref().expect("store");
+        let partition = PartitionKey::new(self.namespace.as_ref().expect("namespace"), key);
+
+        // No lateness filter. Answer from whatever state the backend still retains.
+        if record_batch.num_rows() == 0 {
+            return RecordBatch::new_empty(self.output_schema.clone());
+        }
+
+        let ts_array = record_batch
+            .column(self.ts_column_index)
+            .as_any()
+            .downcast_ref::<TimestampMillisecondArray>()
+            .expect("Timestamp column");
+
+        let n = record_batch.num_rows();
+        let mut point_timestamps = Vec::with_capacity(n);
+        for row in 0..n {
+            point_timestamps.push(ts_array.value(row));
+        }
+
+        let aggregated = evaluate_points(
+            store.as_ref(),
+            &partition,
+            &self.window_configs,
+            &point_timestamps,
+            record_batch,
+            self.ts_column_index,
+        )
+        .await
+        .expect("evaluate");
+
+        let input_values = get_input_values(record_batch, &self.input_schema);
+        assemble_window_batch(
+            input_values,
+            aggregated,
+            &self.output_schema,
+            &self.input_schema,
+        )
+    }
+}
+
+fn get_input_values(batch: &RecordBatch, input_schema: &SchemaRef) -> Vec<Vec<ScalarValue>> {
+    let mut input_values = Vec::with_capacity(batch.num_rows());
+    let input_column_count = input_schema.fields().len();
+    for row_idx in 0..batch.num_rows() {
+        let mut row_input_values = Vec::new();
+        for col_idx in 0..input_column_count {
+            let array = batch.column(col_idx);
+            let scalar_value = ScalarValue::try_from_array(array, row_idx).expect("extract scalar");
+            row_input_values.push(scalar_value);
+        }
+        input_values.push(row_input_values);
+    }
+    input_values
+}
+
+#[async_trait]
+impl OperatorTrait for WindowRequestOperator {
+    async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
+        self.base.open(context).await?;
+        let store: Arc<dyn WindowRequestStore> = context
+            .window_request_store()
+            .expect("WindowRequestStore must be configured");
+        let ns = context
+            .window_state_namespace()
+            .expect("window state namespace must be configured");
+        self.store = Some(store);
+        self.namespace = Some(ns);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<()> {
+        self.base.close().await
+    }
+
+    fn set_input(&mut self, input: Option<MessageStream>) {
+        self.base.set_input(input);
+    }
+
+    fn operator_type(&self) -> OperatorType {
+        self.base.operator_type()
+    }
+
+    fn operator_config(&self) -> &OperatorConfig {
+        self.base.operator_config()
+    }
+
+    async fn poll_next(&mut self) -> OperatorPollResult {
+        if let Some(msg) = self.base.pop_pending_output() {
+            return OperatorPollResult::Ready(msg);
+        }
+
+        match self.base.next_input().await {
+            Some(message) => match message {
+                Message::Keyed(keyed) => {
+                    let key = keyed.key();
+                    let out = self.process_key(key, &keyed.base.record_batch).await;
+                    OperatorPollResult::Ready(Message::new(None, out, None, None))
+                }
+                Message::Watermark(w) => OperatorPollResult::Ready(Message::Watermark(w)),
+                other => panic!("WindowRequestOperator unexpected message: {:?}", other),
+            },
+            None => OperatorPollResult::None,
+        }
+    }
+}

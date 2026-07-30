@@ -10,8 +10,9 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::operators::window::window_operator::{ExecutionMode, RequestAdvancePolicy};
-use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
+use crate::runtime::operators::window::operator::WindowOutputMode;
+use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
+use crate::runtime::operators::window::spec::WindowAdvancePolicy;
 use crate::runtime::partition::PartitionType;
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
@@ -392,11 +393,11 @@ impl LogicalGraph {
             top_window
         };
 
-        // Set execution mode of top window operator to request
+        // The WO maintains state for WRO without emitting rows into the DAG.
         if let Some(node) = self.graph.node_weight_mut(top_window_node) {
             if let OperatorConfig::WindowConfig(ref mut config) = node.operator_config {
-                config.execution_mode = ExecutionMode::Request;
-                config.spec.request_advance_policy = RequestAdvancePolicy::OnIngest;
+                config.output_mode = WindowOutputMode::StateOnly;
+                config.spec.advance_policy = WindowAdvancePolicy::OnIngest;
             }
         }
         

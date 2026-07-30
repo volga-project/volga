@@ -4,22 +4,19 @@ use std::sync::Arc;
 use arrow::array::{Array, ArrayRef, BooleanArray, UInt32Array};
 use arrow::compute::kernels::boolean::and_kleene;
 use arrow::compute::{filter, is_not_null, take};
-use arrow::datatypes::{DataType, Field, Schema};
+use arrow::datatypes::DataType;
 use datafusion::common::{exec_err, Result};
-use datafusion::logical_expr::function::AccumulatorArgs;
 use datafusion::logical_expr::{Accumulator, AggregateUDF};
-use datafusion::physical_expr::expressions::Column;
-use datafusion::physical_expr::PhysicalExpr;
 use datafusion::scalar::ScalarValue;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::operators::window::aggregates::{AggKind, AggregatorType};
+use crate::runtime::operators::window::aggs::{
+    build_base_accumulator, ensure_value_type, infer_value_type, AccumulatorType, AggKind,
+};
+use crate::runtime::operators::window::top::accumulators::common::{df_error, parse_n_once};
 use crate::runtime::operators::window::top::format::{join_csv, scalar_to_string};
 use crate::runtime::operators::window::top::heap::{TopKMap, TopKOrder};
 use crate::runtime::operators::window::top::utils::group_indices_by_scalar;
-use crate::runtime::operators::window::top::accumulators::common::{
-    df_error, infer_value_type, parse_n_once,
-};
 use crate::runtime::utils::{scalar_value_from_bytes, scalar_value_to_bytes};
 
 #[derive(Debug)]
@@ -46,48 +43,16 @@ impl GroupedAggTopKAccumulator {
     }
 
     fn ensure_value_type(&mut self, value_array: &ArrayRef) -> Result<DataType> {
-        if let Some(t) = &self.value_type {
-            return Ok(t.clone());
-        }
-        let coerced = if matches!(self.kind, AggKind::Count) {
-            value_array.data_type().clone()
-        } else {
-            let coerced = self.base_udaf.coerce_types(&[value_array.data_type().clone()])?;
-            coerced
-                .get(0)
-                .cloned()
-                .ok_or_else(|| df_error("failed to coerce value type"))?
-        };
-        self.value_type = Some(coerced.clone());
-        Ok(coerced)
+        ensure_value_type(
+            &mut self.value_type,
+            self.kind,
+            self.base_udaf.as_ref(),
+            value_array,
+        )
     }
 
     fn build_accumulator(&self, value_type: &DataType) -> Result<Box<dyn Accumulator>> {
-        let coerced = if matches!(self.kind, AggKind::Count) {
-            vec![value_type.clone()]
-        } else {
-            self.base_udaf.coerce_types(&[value_type.clone()])?
-        };
-        let return_type = self.base_udaf.return_type(&coerced)?;
-        let input_field = Field::new("value", coerced[0].clone(), true);
-        let schema = Schema::new(vec![input_field.clone()]);
-        let exprs: Vec<Arc<dyn PhysicalExpr>> = vec![Arc::new(Column::new("value", 0))];
-        let return_field = Arc::new(Field::new("out", return_type, true));
-        let acc_args = AccumulatorArgs {
-            return_field,
-            schema: &schema,
-            ignore_nulls: false,
-            order_bys: &[],
-            is_reversed: false,
-            name: self.base_udaf.name(),
-            is_distinct: false,
-            exprs: &exprs,
-        };
-        if matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator) {
-            self.base_udaf.create_sliding_accumulator(acc_args)
-        } else {
-            self.base_udaf.accumulator(acc_args)
-        }
+        build_base_accumulator(self.kind, self.base_udaf.as_ref(), value_type)
     }
 
     fn parse_n(&mut self, n_array: &ArrayRef) -> Result<usize> {
@@ -139,14 +104,18 @@ impl Accumulator for GroupedAggTopKAccumulator {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| df_error("condition must be boolean"))?;
-        let cate_array = values.get(2).ok_or_else(|| df_error("missing category arg"))?;
+        let cate_array = values
+            .get(2)
+            .ok_or_else(|| df_error("missing category arg"))?;
         let n_array = values.get(3).ok_or_else(|| df_error("missing n arg"))?;
         self.parse_n(n_array)?;
 
         let value_type = self.ensure_value_type(value_array)?;
         let mask = Self::build_mask(cond_array, cate_array)?;
-        let filtered_values = filter(value_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
-        let filtered_cate = filter(cate_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
+        let filtered_values =
+            filter(value_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
+        let filtered_cate =
+            filter(cate_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
         if filtered_cate.len() == 0 {
             return Ok(());
         }
@@ -158,7 +127,10 @@ impl Accumulator for GroupedAggTopKAccumulator {
     }
 
     fn retract_batch(&mut self, values: &[ArrayRef]) -> Result<()> {
-        if !matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator) {
+        if !matches!(
+            self.kind.accumulator_type(),
+            AccumulatorType::RetractableAccumulator
+        ) {
             return exec_err!("retract not supported for {}", self.base_udaf.name());
         }
         let value_array = values.get(0).ok_or_else(|| df_error("missing value arg"))?;
@@ -168,14 +140,18 @@ impl Accumulator for GroupedAggTopKAccumulator {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| df_error("condition must be boolean"))?;
-        let cate_array = values.get(2).ok_or_else(|| df_error("missing category arg"))?;
+        let cate_array = values
+            .get(2)
+            .ok_or_else(|| df_error("missing category arg"))?;
         let n_array = values.get(3).ok_or_else(|| df_error("missing n arg"))?;
         self.parse_n(n_array)?;
 
         let value_type = self.ensure_value_type(value_array)?;
         let mask = Self::build_mask(cond_array, cate_array)?;
-        let filtered_values = filter(value_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
-        let filtered_cate = filter(cate_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
+        let filtered_values =
+            filter(value_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
+        let filtered_cate =
+            filter(cate_array.as_ref(), &mask).map_err(|e| df_error(e.to_string()))?;
         if filtered_cate.len() == 0 {
             return Ok(());
         }
@@ -207,22 +183,28 @@ impl Accumulator for GroupedAggTopKAccumulator {
     fn state(&mut self) -> Result<Vec<ScalarValue>> {
         let mut entries: Vec<(Vec<u8>, Vec<Vec<u8>>)> = Vec::with_capacity(self.per_key.len());
         for (key, acc) in self.per_key.iter_mut() {
-            let key_bytes =
-                scalar_value_to_bytes(key).map_err(|e| df_error(format!("state key encode failed: {e}")))?;
+            let key_bytes = scalar_value_to_bytes(key)
+                .map_err(|e| df_error(format!("state key encode failed: {e}")))?;
             let state = acc
                 .state()?
                 .into_iter()
-                .map(|s| scalar_value_to_bytes(&s).map_err(|e| df_error(format!("state encode failed: {e}"))))
+                .map(|s| {
+                    scalar_value_to_bytes(&s)
+                        .map_err(|e| df_error(format!("state encode failed: {e}")))
+                })
                 .collect::<Result<Vec<_>>>()?;
             entries.push((key_bytes, state));
         }
         let encoded = EncodedAggTopKState { entries };
-        let bytes = bincode::serialize(&encoded).map_err(|e| df_error(format!("state encode failed: {e}")))?;
+        let bytes = bincode::serialize(&encoded)
+            .map_err(|e| df_error(format!("state encode failed: {e}")))?;
         Ok(vec![ScalarValue::Binary(Some(bytes))])
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        let array = states.get(0).ok_or_else(|| df_error("missing state array"))?;
+        let array = states
+            .get(0)
+            .ok_or_else(|| df_error("missing state array"))?;
         let bin = array
             .as_any()
             .downcast_ref::<arrow::array::BinaryArray>()
@@ -231,8 +213,8 @@ impl Accumulator for GroupedAggTopKAccumulator {
             if bin.is_null(row) {
                 continue;
             }
-            let decoded: EncodedAggTopKState =
-                bincode::deserialize(bin.value(row)).map_err(|e| df_error(format!("state decode failed: {e}")))?;
+            let decoded: EncodedAggTopKState = bincode::deserialize(bin.value(row))
+                .map_err(|e| df_error(format!("state decode failed: {e}")))?;
             for (key_bytes, state_bytes) in decoded.entries {
                 let key = scalar_value_from_bytes(&key_bytes)
                     .map_err(|e| df_error(format!("state key decode failed: {e}")))?;
@@ -269,7 +251,10 @@ impl Accumulator for GroupedAggTopKAccumulator {
     }
 
     fn supports_retract_batch(&self) -> bool {
-        matches!(self.kind.aggregator_type(), AggregatorType::RetractableAccumulator)
+        matches!(
+            self.kind.accumulator_type(),
+            AccumulatorType::RetractableAccumulator
+        )
     }
 }
 
@@ -281,9 +266,9 @@ struct EncodedAggTopKState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use arrow::array::{ArrayRef, BooleanArray, Float64Array, Int64Array, StringArray};
     use datafusion::functions_aggregate::sum::sum_udaf;
+    use std::sync::Arc;
 
     fn value_array(values: &[f64]) -> ArrayRef {
         Arc::new(Float64Array::from(values.to_vec()))
@@ -303,7 +288,8 @@ mod tests {
 
     #[test]
     fn test_grouped_topk_update_retract() {
-        let mut acc = GroupedAggTopKAccumulator::new(AggKind::Sum, sum_udaf(), TopKOrder::MetricDesc);
+        let mut acc =
+            GroupedAggTopKAccumulator::new(AggKind::Sum, sum_udaf(), TopKOrder::MetricDesc);
         let values = value_array(&[1.0, 2.0, 3.0, 4.0]);
         let conds = bool_array(&[true, true, true, true]);
         let cates = string_array(&["a", "b", "a", "c"]);
@@ -329,7 +315,8 @@ mod tests {
 
     #[test]
     fn test_grouped_topk_merge() {
-        let mut left = GroupedAggTopKAccumulator::new(AggKind::Sum, sum_udaf(), TopKOrder::MetricDesc);
+        let mut left =
+            GroupedAggTopKAccumulator::new(AggKind::Sum, sum_udaf(), TopKOrder::MetricDesc);
         let left_values = value_array(&[1.0]);
         let left_conds = bool_array(&[true]);
         let left_cates = string_array(&["a"]);
