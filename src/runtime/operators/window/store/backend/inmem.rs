@@ -1,86 +1,22 @@
+//! In-memory window store implementation and behavior tests.
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 
-use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::state::tile::{RawRun, TileRun};
+use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 
-use super::key_state::KeyState;
-use super::keys::{PartitionKey, StateNamespace};
-use super::row_nav::cursors_from_batch;
-use super::window_data::{TileMap, WindowData};
-
-pub type AttemptToken = Vec<u8>;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct StateVersion {
-    pub attempt: AttemptToken,
-    pub epoch: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowCheckpointMeta {
-    pub version: StateVersion,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowRestoreMeta {
-    pub base_version: StateVersion,
-}
-
-impl From<WindowCheckpointMeta> for WindowRestoreMeta {
-    fn from(meta: WindowCheckpointMeta) -> Self {
-        Self {
-            base_version: meta.version,
-        }
-    }
-}
-
-/// Store operations used by the sole Window Operator for a partition.
-#[async_trait]
-pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
-    async fn load_meta(&self, partition: &PartitionKey) -> Result<KeyState>;
-    async fn load_raw(
-        &self,
-        partition: &PartitionKey,
-        runs: &[RawRun],
-    ) -> Result<Vec<RecordBatch>>;
-    async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap>;
-    async fn commit_events(
-        &self,
-        partition: &PartitionKey,
-        ts_column_index: usize,
-        events: &RecordBatch,
-        tiles: &TileMap,
-        meta: &KeyState,
-    ) -> Result<()>;
-    async fn store_meta(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()>;
-    async fn flush(&self) -> Result<()> {
-        Ok(())
-    }
-    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowCheckpointMeta>;
-    async fn restore(
-        &self,
-        namespace: &StateNamespace,
-        meta: &WindowRestoreMeta,
-    ) -> Result<()>;
-}
-
-/// Coherent point-lookup reads used by the Window Request Operator.
-#[async_trait]
-pub trait WindowRequestStore: Send + Sync + std::fmt::Debug {
-    async fn load_window_data(
-        &self,
-        partition: &PartitionKey,
-        raw_runs: &[RawRun],
-        tile_runs: &[TileRun],
-    ) -> Result<WindowData>;
-}
+use super::{
+    StateVersion, WindowCheckpointMeta, WindowOperatorStore, WindowRequestStore, WindowRestoreMeta,
+};
+use crate::runtime::operators::window::store::data::cursors_from_batch;
+use crate::runtime::operators::window::store::{
+    KeyState, PartitionKey, StateNamespace, TileMap, WindowData,
+};
 
 #[derive(Debug, Clone, Default)]
 struct PartitionState {
@@ -198,9 +134,7 @@ impl WindowOperatorStore for InMemWindowStore {
             .read()
             .await
             .iter()
-            .filter(|(partition, _)| {
-                partition.namespace.as_slice() == namespace.bytes.as_slice()
-            })
+            .filter(|(partition, _)| partition.namespace.as_slice() == namespace.bytes.as_slice())
             .map(|(partition, state)| (partition.clone(), state.clone()))
             .collect();
         let mut checkpoints = self.checkpoints.lock().await;
@@ -217,11 +151,7 @@ impl WindowOperatorStore for InMemWindowStore {
         })
     }
 
-    async fn restore(
-        &self,
-        namespace: &StateNamespace,
-        meta: &WindowRestoreMeta,
-    ) -> Result<()> {
+    async fn restore(&self, namespace: &StateNamespace, meta: &WindowRestoreMeta) -> Result<()> {
         let version = &meta.base_version;
         anyhow::ensure!(
             version.attempt.as_slice() == b"in-memory",
@@ -239,9 +169,8 @@ impl WindowOperatorStore for InMemWindowStore {
             "in-memory checkpoint namespace does not match runtime namespace",
         );
         let mut partitions = self.partitions.write().await;
-        partitions.retain(|partition, _| {
-            partition.namespace.as_slice() != namespace.bytes.as_slice()
-        });
+        partitions
+            .retain(|partition, _| partition.namespace.as_slice() != namespace.bytes.as_slice());
         partitions.extend(checkpoint.partitions);
         Ok(())
     }
@@ -270,11 +199,9 @@ impl WindowRequestStore for InMemWindowStore {
 mod tests {
     use super::*;
 
-    use crate::runtime::operators::window::aggregates::test_utils;
-    use crate::runtime::operators::window::state::tile::{
-        TimeGranularity, TileRun, WindowTiles,
-    };
-    use crate::runtime::operators::window::store::row_nav::RowIdx;
+    use crate::runtime::operators::window::aggs::test_utils;
+    use crate::runtime::operators::window::model::{TileRun, TimeGranularity, WindowTiles};
+    use crate::runtime::operators::window::store::data::RowIdx;
 
     fn partition() -> PartitionKey {
         PartitionKey {
@@ -344,7 +271,11 @@ mod tests {
             &store.load_meta(&partition).await.unwrap(),
             &KeyState::default(),
         );
-        assert!(store.load_raw(&partition, &raw_runs).await.unwrap().is_empty());
+        assert!(store
+            .load_raw(&partition, &raw_runs)
+            .await
+            .unwrap()
+            .is_empty());
         assert!(store
             .load_tiles(&partition, &tile_runs)
             .await
@@ -390,10 +321,7 @@ mod tests {
         let loaded = store
             .load_raw(
                 &partition,
-                &[
-                    raw_run((10, 1), (30, 3)),
-                    raw_run((20, 1), (40, 4)),
-                ],
+                &[raw_run((10, 1), (30, 3)), raw_run((20, 1), (40, 4))],
             )
             .await
             .unwrap();

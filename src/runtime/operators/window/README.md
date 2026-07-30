@@ -1,52 +1,228 @@
 # Window operators
 
-The window stack implements RANGE windows through two roles:
+This module implements keyed event-time `RANGE` windows in two roles:
 
-- `WindowOperator` owns ingest and watermark advancement for each key.
-- `WindowRequestOperator` performs read-only point lookups.
+- `WindowOperator` (WO) ingests rows, owns mutable state, advances event-time
+  frontiers, and optionally emits streaming results.
+- `WindowRequestOperator` (WRO) performs read-only point lookups against
+  coherently published window data.
 
-Both use the domain store described in [`STORE_DESIGN.md`](STORE_DESIGN.md).
+Both roles use the same logical raw rows and optional aggregate tiles through
+separate store contracts. Raw rows are authoritative. Tiles only reduce raw I/O
+and accumulator CPU work.
 
-## Data flow
+## Core model
 
-```text
-WO ingest
-  meta → dirty tiles → commit events + tiles + meta
+State is isolated by `PartitionKey { namespace, business_key }`. The namespace
+identifies one logical operator state space; the business key is the keyed
+stream value.
 
-WO advance
-  meta → exact raw/tile runs → slide or rebuild → store meta
-
-WRO request
-  exact rebuild plans → merge runs → coherent snapshot read → rebuild
-```
-
-Envelope estimation and generic byte-key storage are not part of the design.
-`RawRun` and `TileRun` are logical; physical bucketing belongs to durable
-backends.
-
-## Layout
+Every accepted row receives a per-key sequence number and is identified by:
 
 ```text
-eval/       advance, slide, rebuild, WRO points, output
-state/      WO state and tile planning/update
-store/      contracts, in-memory backend, WindowData, RowNav
-aggregates/ DataFusion accumulator integration
-top/, cate/ custom aggregates
+Cursor { ts, seq_no }
 ```
 
-## Invariants
+Cursor order is event-time first and sequence number second. It provides stable
+ordering and distinguishes rows with equal timestamps. Raw and tile reads use
+half-open logical ranges:
 
-- One fenced WO owns a partition.
-- `Cursor { ts, seq_no }` is the raw event identity and ordering.
-- Streaming ingest drops rows at or behind `processed_pos`.
-- Raw rows are the source of truth; tiles are acceleration.
-- Missing tiles represent empty intervals.
-- WRO is rebuild-only and never reads WO accumulator state.
-- Store-returned raw batches are globally cursor ordered and deduplicated.
-- Retention is published in meta and cleaned asynchronously by the backend.
+- `RawRun [from, to)` uses cursors.
+- `TileRun [start_ts, end_ts_exclusive)` addresses one tile granularity.
 
-## Backends
+`KeyState` is the WO metadata for one partition:
 
-`InMemWindowStore` is the reference implementation and uses one lock for a
-coherent WRO read. The planned Scylla backend uses physical time buckets,
-per-key MVCC publication, and Foyer caching; see [`STORE_DESIGN.md`](STORE_DESIGN.md).
+- `max_seen`: greatest ingested cursor.
+- `processed_pos`: frontier already reflected in streaming results and saved
+  sliding accumulators.
+- `accumulators`: saved state for retractable windows.
+- `first_ingested`: cold-start lower bound.
+- `next_seq`: dense per-key sequence allocator.
+- `retention_floor`: data before this cursor is outside the configured
+  supported horizon.
+
+## Configuration
+
+`BuiltWindows` converts a DataFusion `BoundedWindowAggExec` into shared schemas
+and one `WindowConfig` per expression. Each config records the expression,
+accumulator capability, optional tiling, and WRO current-row behavior.
+
+`WindowSpec` controls:
+
+- `advance_policy`: advance on watermarks, or on every ingest for state-only
+  request-serving topologies.
+- `lateness`: retention padding behind the largest window.
+- `tiling`: default tile granularities, with optional per-window overrides.
+
+The implementation currently requires timestamp-millisecond `ORDER BY` columns
+and `RANGE` frames.
+
+## WO ingest
+
+`WindowOperatorState::insert_batch` performs one partition update:
+
+1. Load `KeyState`.
+2. Drop rows whose generated cursor is at or behind `processed_pos`.
+3. Assign the internal `__seq_no` column to accepted rows.
+4. Update `max_seen`, `first_ingested`, and `next_seq`.
+5. Plan and load every tile bucket touched by the accepted rows.
+6. Update each configured window's accumulator state in those tiles.
+7. Atomically commit raw rows, updated tiles, and metadata through
+   `WindowOperatorStore::commit_events`.
+
+The input batch must not contain `__seq_no`; WO owns that column. Late rows are
+dropped relative to the processed cursor, not merely relative to `max_seen`.
+
+## WO advance and streaming evaluation
+
+`eval::advance_key` advances one partition to a requested cursor, bounded by
+`max_seen`:
+
+1. Load metadata and skip work if the requested frontier is already processed.
+2. Load newly eligible raw rows and derive the exact emit cursors.
+3. Build one `EvalPlan` per emitted result and window expression.
+4. Flatten all plan coverage, merge overlapping raw/tile runs, and load the
+   historical data once.
+5. Evaluate each window by sliding or rebuilding.
+6. Save the new accumulator state and `processed_pos`.
+7. Publish `retention_floor` when lateness is configured.
+8. Assemble output rows when `WindowOutputMode::Emit` is enabled.
+
+Retractable accumulators reuse their saved state. For each result they retract
+the planned leave band, add the new end row, and evaluate. Tile-state
+retraction is used only for aggregates whose state is component-wise
+invertible; other leave bands use raw rows.
+
+Plain accumulators rebuild each result from its exact `CoveragePlan`. A rebuild
+merges complete tile states and evaluates raw edge rows. Raw-only windows are
+represented by a coverage plan with no tile runs, not by a separate fallback
+path.
+
+## WRO point evaluation
+
+WRO is deliberately rebuild-only and does not read WO's saved sliding
+accumulator:
+
+1. Convert each requested timestamp `T` to `Cursor(T, u64::MAX)`.
+2. Build rebuild plans for every requested point and window.
+3. Merge all raw and tile runs across those plans.
+4. Call `WindowRequestStore::load_window_data` once for a coherent view.
+5. Rebuild every result from the loaded rows and tiles.
+
+By default, the request row's evaluated arguments are added after stored
+coverage. `EXCLUDE CURRENT ROW` suppresses those request arguments; stored rows
+through `T` remain part of the window.
+
+## Tiling
+
+`TileConfig` defines sorted, nested granularities. Each tile key is
+`(granularity, tile_start)`, and its value contains accumulator states for all
+configured windows.
+
+Coverage planning chooses complete interior tiles and raw boundary segments.
+It never uses a tile that extends outside the requested range. Missing tiles
+mean that the corresponding interval contained no rows. Evaluation remains
+correct when tiling is disabled because plans then cover the whole range with
+raw rows.
+
+WO ingest updates all configured granularities so later plans can choose the
+best available coverage. Adjacent and overlapping load runs are merged before
+store access.
+
+## Store contracts
+
+`WindowOperatorStore` is the sole-writer interface:
+
+- load partition metadata and exact raw/tile runs;
+- atomically commit ingest data and metadata;
+- publish metadata after advancement;
+- flush, checkpoint, and restore a namespace.
+
+`WindowRequestStore` exposes one operation that returns raw rows and tiles from
+the same coherent snapshot. A backend must not combine raw rows from one
+published state with tiles from another.
+
+The contracts expose logical ranges only. Durable backends own physical
+partitioning, publication, fencing, caching, and cleanup. They must preserve:
+
+- one active WO writer per partition;
+- atomic visibility of an ingest commit;
+- coherent WRO reads;
+- restorable checkpoint versions;
+- ordered, collision-safe row identity.
+
+`InMemWindowStore` is the reference backend. It keeps partition state in memory,
+uses one read lock as the WRO snapshot boundary, and copies namespace state into
+in-memory checkpoints. It is process-local and is not a durable or
+cross-worker backend.
+
+## Checkpoint and restore
+
+`WindowOperatorState::checkpoint` asks the store to flush and checkpoint the
+namespace, then serializes:
+
+- the namespace bytes;
+- `WindowCheckpointMeta`, containing the backend `StateVersion`.
+
+Restore first verifies the namespace and then passes the checkpoint version
+back to the store. The backend is responsible for restoring raw rows, tiles,
+and `KeyState` consistently. The checkpoint blob name
+`"window_operator_state"` is persisted by `WindowOperator` and must remain
+stable for compatibility.
+
+## Materialized evaluation data
+
+`WindowData` owns raw batches and a shared `TileMap`. `for_window` projects the
+relevant tile state and constructs a `RowNav`.
+
+`RowNav`:
+
+- globally sorts and deduplicates loaded rows by cursor;
+- maps flat row indices back to Arrow batch rows;
+- evaluates aggregate arguments once per batch;
+- supports cursor seeks used by coverage evaluation.
+
+This keeps store DTOs independent of a particular aggregate expression while
+giving evaluators one ordered view.
+
+## Module map
+
+```text
+operator.rs       WO runtime operator and advance policy
+request.rs        WRO runtime operator
+state.rs          WO ingest state plus checkpoint/restore bridge
+spec.rs           shared window runtime settings
+config.rs         DataFusion expression-to-window configuration
+model.rs          cursors, keys, metadata, runs, and tile models
+tile.rs           tile configuration, planning, projection, and updates
+eval/
+  advance.rs      WO multi-phase load planning and advancement
+  eval_plan.rs    per-result slide/rebuild plans
+  coverage_plan.rs exact raw/tile geometry and run merging
+  accumulate.rs   apply coverage to DataFusion accumulators
+  slide.rs        retract/add evaluation
+  rebuild.rs      tile/raw rebuild evaluation
+  wro.rs          point-request planning and evaluation
+  emit.rs         streaming emit cursor/input selection
+  output.rs       result batch assembly
+store/
+  backend/mod.rs  WO/WRO contracts and checkpoint DTOs
+  backend/inmem.rs reference in-memory implementation
+  data.rs         WindowData, WindowView, and RowNav
+aggs/             aggregate registry and accumulator-state operations
+top/, cate/       custom aggregate implementations
+tests/            WO/WRO semantics, tiling, planning, and matrix coverage
+```
+
+## Invariants to preserve
+
+- WO is the only mutator for a partition.
+- Cursor identity and ordering include both timestamp and sequence number.
+- Rows at or behind `processed_pos` are not accepted by streaming ingest.
+- Raw rows remain sufficient to produce a correct result.
+- Tiles cover only complete aligned intervals selected by the plan.
+- Sliding accumulator state corresponds exactly to `processed_pos`.
+- WRO evaluates one coherent published snapshot and never depends on WO's
+  private sliding accumulator.
+- Retention publication is metadata; physical deletion is backend work.
+- Physical backend details do not leak into operator-facing run or key models.

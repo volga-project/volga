@@ -18,14 +18,14 @@ use datafusion::logical_expr::{
 use datafusion::prelude::SessionContext;
 
 use super::accumulator::CateAccumulator;
+use super::types::{AggFlavor, CateUdfSpec};
+use super::utils::df_error;
+use crate::runtime::operators::window::aggs::{coerce_value_type, AggKind};
 use crate::runtime::operators::window::top::accumulators::grouped_agg::GroupedAggTopKAccumulator;
 use crate::runtime::operators::window::top::accumulators::ratio::{
     RatioTopKAccumulator, TOP_N_KEY_RATIO_CATE_NAME, TOP_N_VALUE_RATIO_CATE_NAME,
 };
 use crate::runtime::operators::window::top::heap::TopKOrder;
-use super::types::{AggFlavor, CateUdfSpec};
-use crate::runtime::operators::window::aggregates::AggKind;
-use super::utils::{coerce_value_type, df_error};
 
 #[derive(Debug, Clone)]
 struct CateUdf {
@@ -42,11 +42,7 @@ impl CateUdf {
     }
 
     fn state_fields_impl(&self, args: StateFieldsArgs) -> Result<Vec<Arc<Field>>> {
-        let field = Field::new(
-            format!("{}_state", args.name),
-            DataType::Binary,
-            true,
-        );
+        let field = Field::new(format!("{}_state", args.name), DataType::Binary, true);
         Ok(vec![Arc::new(field)])
     }
 }
@@ -160,7 +156,10 @@ fn cate_udaf(spec: CateUdfSpec) -> AggregateUDF {
 
 #[derive(Debug, Clone)]
 enum CateTopMode {
-    Agg { kind: AggKind, base_udaf: Arc<AggregateUDF> },
+    Agg {
+        kind: AggKind,
+        base_udaf: Arc<AggregateUDF>,
+    },
     Ratio,
 }
 
@@ -237,9 +236,11 @@ impl AggregateUDFImpl for CateTopUdf {
 
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
         match &self.mode {
-            CateTopMode::Agg { kind, base_udaf } => Ok(Box::new(
-                GroupedAggTopKAccumulator::new(*kind, base_udaf.clone(), self.order),
-            )),
+            CateTopMode::Agg { kind, base_udaf } => Ok(Box::new(GroupedAggTopKAccumulator::new(
+                *kind,
+                base_udaf.clone(),
+                self.order,
+            ))),
             CateTopMode::Ratio => Ok(Box::new(RatioTopKAccumulator::new(self.order))),
         }
     }
@@ -394,13 +395,19 @@ pub fn register_cate_udafs(ctx: &SessionContext) {
         ctx.register_udaf(cate_top_udaf(
             &key_name,
             TopKOrder::KeyDesc,
-            CateTopMode::Agg { kind, base_udaf: base.clone() },
+            CateTopMode::Agg {
+                kind,
+                base_udaf: base.clone(),
+            },
         ));
         let value_name = format!("top_n_value_{}_cate_where", kind.name());
         ctx.register_udaf(cate_top_udaf(
             &value_name,
             TopKOrder::MetricDesc,
-            CateTopMode::Agg { kind, base_udaf: base },
+            CateTopMode::Agg {
+                kind,
+                base_udaf: base,
+            },
         ));
     }
 

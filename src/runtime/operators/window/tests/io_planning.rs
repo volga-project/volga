@@ -5,7 +5,9 @@ use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::state::tile::{RawRun, TileRun};
+use crate::runtime::operators::window::model::{RawRun, TileRun};
+use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, WindowCheckpointMeta,
     WindowData, WindowOperatorStore, WindowRequestStore, WindowRestoreMeta,
@@ -13,8 +15,6 @@ use crate::runtime::operators::window::store::{
 use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, window_exec_from_sql, Harness, WoWroHarness,
 };
-use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 
 #[derive(Debug)]
@@ -109,9 +109,9 @@ impl WindowRequestStore for RecordingWindowStore {
 async fn recording_harness(sql: &str) -> (Harness, Arc<RecordingWindowStore>) {
     let exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(exec);
-    cfg.spec = WindowOperatorSpec {
+    cfg.spec = WindowSpec {
         tiling: Some(TileConfig::new(vec![TimeGranularity::Minutes(1)]).unwrap()),
-        ..WindowOperatorSpec::default()
+        ..WindowSpec::default()
     };
     let inner = Arc::new(InMemWindowStore::new());
     let recording = Arc::new(RecordingWindowStore::new(inner.clone()));

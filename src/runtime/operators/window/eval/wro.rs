@@ -9,14 +9,13 @@ use arrow::array::{ArrayRef, RecordBatch};
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::config::WindowConfig;
-use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
-use crate::runtime::operators::window::state::tile::{merge_raw_runs, merge_tile_runs};
+use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::store::{PartitionKey, WindowData, WindowRequestStore};
-use crate::runtime::operators::window::window_operator_state::WindowId;
 
-use super::super::primitives::{append_rebuild_runs, plan_rebuilds, EvalPlan};
-use super::super::rebuild::eval_rebuild;
+use super::coverage_plan::{merge_raw_runs, merge_tile_runs};
+use super::eval_plan::{append_coverage_runs, plan_rebuilds, EvalPlan};
+use super::rebuild::eval_rebuild;
 
 pub async fn evaluate_points(
     store: &dyn WindowRequestStore,
@@ -41,7 +40,7 @@ pub async fn evaluate_points(
             .map(|&ts| Cursor::new(ts, u64::MAX))
             .collect();
         let window_plans = plan_rebuilds(&ends, wl, cfg.tiling.as_ref(), None);
-        append_rebuild_runs(&window_plans, wl, &mut raw_runs, &mut tile_runs);
+        append_coverage_runs(&window_plans, &mut raw_runs, &mut tile_runs);
         plans.insert(*window_id, window_plans);
     }
     let raw_runs = merge_raw_runs(raw_runs);
@@ -74,8 +73,7 @@ fn rebuild_points(
     data: &WindowData,
 ) -> Vec<ScalarValue> {
     let view = data.for_window(window_id, ts_column_index, &cfg.window_expr);
-    let wl = get_window_length_ms(cfg.window_expr.get_window_frame());
-    let include_request_row = !cfg.exclude_current_row.unwrap_or(false);
+    let include_request_row = !cfg.exclude_current_row;
     let request_args = include_request_row.then(|| {
         cfg.window_expr
             .evaluate_args(request_batch)
@@ -91,9 +89,8 @@ fn rebuild_points(
             eval_rebuild(
                 &cfg.window_expr,
                 &view,
-                unit.end.ts.saturating_sub(wl),
                 view.nav.seek_le(unit.end),
-                unit.coverage.as_ref(),
+                unit.coverage.as_ref().expect("rebuild coverage"),
                 row_args.as_deref(),
             )
         })

@@ -1,7 +1,7 @@
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::aggregates::test_utils;
-use crate::runtime::operators::window::create_window_aggregator;
+use crate::runtime::operators::window::aggs::test_utils;
+use crate::runtime::operators::window::create_window_accumulator;
 
 #[tokio::test]
 async fn test_sum_cate_where_retracts() {
@@ -24,7 +24,7 @@ WINDOW w AS (
     ]);
     let retract_batch = test_utils::batch(&[(1000, 5.0, "a", 0)]);
 
-    let mut acc = create_window_aggregator(&window_expr);
+    let mut acc = create_window_accumulator(&window_expr);
     let args = window_expr.evaluate_args(&batch).expect("eval args");
     acc.update_batch(&args).expect("update");
     let out = acc.evaluate().expect("evaluate");

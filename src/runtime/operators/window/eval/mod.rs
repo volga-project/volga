@@ -5,10 +5,12 @@
 //! WRO: exact point plans → coherent snapshot read → rebuild
 //! ```
 
+mod accumulate;
 mod advance;
+pub(crate) mod coverage_plan;
 mod emit;
+mod eval_plan;
 mod output;
-mod primitives;
 mod rebuild;
 mod slide;
 mod wro;

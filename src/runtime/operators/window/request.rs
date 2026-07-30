@@ -14,15 +14,13 @@ use crate::common::Key;
 use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
+use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::{assemble_window_batch, evaluate_points};
 use crate::runtime::operators::window::frame_utils::require_range_frame;
-use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
-use crate::runtime::operators::window::store::{
-    PartitionKey, StateNamespace, WindowRequestStore,
-};
-use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
-use crate::runtime::operators::window::window_operator_state::WindowId;
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
+use crate::runtime::operators::window::model::WindowId;
+use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::operators::window::spec::WindowSpec;
+use crate::runtime::operators::window::store::{PartitionKey, StateNamespace, WindowRequestStore};
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 
@@ -30,7 +28,7 @@ use crate::runtime::runtime_context::RuntimeContext;
 pub struct WindowRequestOperatorConfig {
     pub window_exec: Arc<BoundedWindowAggExec>,
     pub tiling_configs: Vec<Option<TileConfig>>,
-    pub spec: WindowOperatorSpec,
+    pub spec: WindowSpec,
     /// `EXCLUDE CURRENT ROW`: lookup time only (no request-row args). SQL wiring still TODO.
     pub exclude_current_row: bool,
 }
@@ -143,8 +141,7 @@ fn get_input_values(batch: &RecordBatch, input_schema: &SchemaRef) -> Vec<Vec<Sc
         let mut row_input_values = Vec::new();
         for col_idx in 0..input_column_count {
             let array = batch.column(col_idx);
-            let scalar_value = ScalarValue::try_from_array(array, row_idx)
-                .expect("extract scalar");
+            let scalar_value = ScalarValue::try_from_array(array, row_idx).expect("extract scalar");
             row_input_values.push(scalar_value);
         }
         input_values.push(row_input_values);
@@ -192,9 +189,7 @@ impl OperatorTrait for WindowRequestOperator {
             Some(message) => match message {
                 Message::Keyed(keyed) => {
                     let key = keyed.key();
-                    let out = self
-                        .process_key(key, &keyed.base.record_batch)
-                        .await;
+                    let out = self.process_key(key, &keyed.base.record_batch).await;
                     OperatorPollResult::Ready(Message::new(None, out, None, None))
                 }
                 Message::Watermark(w) => OperatorPollResult::Ready(Message::Watermark(w)),

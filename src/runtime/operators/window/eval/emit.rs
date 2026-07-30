@@ -5,8 +5,8 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::store::row_nav::flatten_ordered;
+use crate::runtime::operators::window::model::Cursor;
+use crate::runtime::operators::window::store::data::flatten_ordered;
 
 /// Emit ends in `(prev, advance_to]` from loaded batches.
 pub(super) fn emit_ends(

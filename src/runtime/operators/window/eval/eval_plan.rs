@@ -1,9 +1,10 @@
 //! Per-result coverage planning and load-run collection.
 
-use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::state::tile::{
-    plan_coverage, plan_time_range, CoveragePlan, RawRun, TileConfig, TileRun,
-};
+use crate::runtime::operators::window::model::Cursor;
+use crate::runtime::operators::window::model::{RawRun, TileRun};
+use crate::runtime::operators::window::tile::TileConfig;
+
+use super::coverage_plan::{plan_coverage, plan_time_range, CoveragePlan};
 
 /// One window result and the exact coverage used to load and evaluate it.
 #[derive(Debug, Clone)]
@@ -23,15 +24,18 @@ pub(crate) fn plan_rebuilds(
         .map(|&end| {
             let start = end.ts.saturating_sub(wl);
             let start = start_floor.map_or(start, |floor| start.max(floor));
+            let from = Cursor::new(start, 0);
+            let to = Cursor::after_timestamp(end.ts);
             EvalPlan {
                 end,
-                coverage: tile_cfg.map(|config| {
-                    plan_coverage(
-                        config,
-                        Cursor::new(start, 0),
-                        Cursor::after_timestamp(end.ts),
-                    )
-                }),
+                coverage: Some(tile_cfg.map_or_else(
+                    || CoveragePlan {
+                        tile_runs: Vec::new(),
+                        raw_head: Some(RawRun { from, to }),
+                        raw_tail: None,
+                    },
+                    |config| plan_coverage(config, from, to),
+                )),
             }
         })
         .collect()
@@ -82,22 +86,4 @@ pub(crate) fn append_coverage_runs(
         raw_runs.extend(coverage.raw_edges().cloned());
         tile_runs.extend(coverage.tile_runs.iter().cloned());
     }
-}
-
-pub(crate) fn append_rebuild_runs(
-    plans: &[EvalPlan],
-    wl: i64,
-    raw_runs: &mut Vec<RawRun>,
-    tile_runs: &mut Vec<TileRun>,
-) {
-    append_coverage_runs(plans, raw_runs, tile_runs);
-    raw_runs.extend(
-        plans
-            .iter()
-            .filter(|plan| plan.coverage.is_none())
-            .map(|plan| RawRun {
-                from: Cursor::new(plan.end.ts.saturating_sub(wl), 0),
-                to: Cursor::after_timestamp(plan.end.ts),
-            }),
-    );
 }

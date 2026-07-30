@@ -1,31 +1,31 @@
-pub mod window_operator;
-pub mod window_request_operator;
-pub mod window_tuning;
+pub mod operator;
+pub mod request;
+pub mod spec;
 
-pub mod aggregates;
+pub mod aggs;
 pub mod cate;
 pub mod config;
-pub mod top;
+pub mod eval;
+pub mod frame_utils;
+pub mod model;
 pub mod state;
 pub mod store;
-pub mod cursor;
-pub mod frame_utils;
-pub mod eval;
+pub mod tile;
+pub mod top;
 
 #[cfg(test)]
 mod tests;
 
-pub use window_operator::{WindowOperator, WindowOutputMode};
-pub use window_request_operator::WindowRequestOperator;
 pub use config::{BuiltWindows, WindowConfig};
-pub use state::tile::{Tile, TileConfig, TimeGranularity};
-pub use state::window_operator_state;
-pub use cursor::Cursor;
+pub use model::{Cursor, Tile, TimeGranularity};
+pub use operator::{WindowOperator, WindowOutputMode};
+pub use request::WindowRequestOperator;
 pub use store::{InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore};
+pub use tile::TileConfig;
 
 pub const SEQ_NO_COLUMN_NAME: &str = "__seq_no";
 
-pub use aggregates::{
-    AggregatorType, create_window_aggregator, merge_accumulator_state, retract_accumulator_state,
-    window_supports_tile_slide,
+pub use aggs::{
+    create_window_accumulator, merge_accumulator_state, retract_accumulator_state,
+    window_supports_tile_slide, AccumulatorType,
 };

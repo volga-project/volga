@@ -6,21 +6,20 @@ use arrow::array::ArrayRef;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::aggregates::create_window_aggregator;
-use crate::runtime::operators::window::frame_utils::get_window_length_ms;
-use crate::runtime::operators::window::state::tile::CoveragePlan;
-use crate::runtime::operators::window::store::row_nav::RowIdx;
+use crate::runtime::operators::window::aggs::{apply_request_args, create_window_accumulator};
+use crate::runtime::operators::window::store::data::RowIdx;
 use crate::runtime::operators::window::store::WindowView;
 
-use super::primitives::{apply_request_args, update_acc_from_plan, update_row, EvalPlan};
+use super::accumulate::update_acc_from_plan;
+use super::coverage_plan::CoveragePlan;
+use super::eval_plan::EvalPlan;
 
-/// Rebuild each unit (coverage preferred, else raw walk).
+/// Rebuild each result from its planned tile and raw coverage.
 pub(super) fn produce_rebuild(
     window_expr: &Arc<dyn WindowExpr>,
     view: &WindowView,
     plans: &[EvalPlan],
 ) -> Vec<ScalarValue> {
-    let wl = get_window_length_ms(window_expr.get_window_frame());
     let mut values = Vec::with_capacity(plans.len());
     for plan in plans {
         let idx = view
@@ -31,71 +30,24 @@ pub(super) fn produce_rebuild(
         values.push(eval_rebuild(
             window_expr,
             view,
-            plan.end.ts.saturating_sub(wl),
             Some(idx),
-            plan.coverage.as_ref(),
+            plan.coverage.as_ref().expect("rebuild coverage"),
             None,
         ));
     }
     values
 }
 
-/// One window answer: tiles+raw via `coverage` (preferred), else raw rows;
-/// then optional request row.
+/// One window answer from planned tiles/raw rows, then an optional request row.
 pub(crate) fn eval_rebuild(
     window_expr: &Arc<dyn WindowExpr>,
     view: &WindowView,
-    start_ts: i64,
     end_idx: Option<RowIdx>,
-    coverage: Option<&CoveragePlan>,
+    coverage: &CoveragePlan,
     request_args: Option<&[ArrayRef]>,
 ) -> ScalarValue {
-    if let Some(plan) = coverage {
-        let mut acc = create_window_aggregator(window_expr);
-        if update_acc_from_plan(view, acc.as_mut(), plan, end_idx) {
-            apply_request_args(acc.as_mut(), request_args);
-            return acc.evaluate().expect("evaluate");
-        }
-    }
-    update_raw_window(window_expr, view, start_ts, end_idx, request_args)
-}
-
-fn update_raw_window(
-    window_expr: &Arc<dyn WindowExpr>,
-    view: &WindowView,
-    start_ts: i64,
-    end_idx: Option<RowIdx>,
-    request_args: Option<&[ArrayRef]>,
-) -> ScalarValue {
-    let Some(end_idx) = end_idx else {
-        return eval_request_row_only(window_expr, request_args);
-    };
-    let start_idx = view.nav.seek_ts_ge(start_ts).unwrap_or(RowIdx(0));
-    if start_idx > end_idx {
-        return eval_request_row_only(window_expr, request_args);
-    }
-
-    let mut acc = create_window_aggregator(window_expr);
-    let mut i = start_idx;
-    loop {
-        update_row(&view.nav, i, acc.as_mut());
-        if i == end_idx {
-            break;
-        }
-        i = view.nav.next(i).expect("next");
-    }
+    let mut acc = create_window_accumulator(window_expr);
+    update_acc_from_plan(view, acc.as_mut(), coverage, end_idx);
     apply_request_args(acc.as_mut(), request_args);
     acc.evaluate().expect("evaluate")
-}
-
-fn eval_request_row_only(
-    window_expr: &Arc<dyn WindowExpr>,
-    request_args: Option<&[ArrayRef]>,
-) -> ScalarValue {
-    let Some(args) = request_args else {
-        return ScalarValue::Null;
-    };
-    let mut acc = create_window_aggregator(window_expr);
-    acc.update_batch(args).expect("update request row");
-    acc.evaluate().expect("eval")
 }

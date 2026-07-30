@@ -15,7 +15,7 @@ use crate::{
         metrics::PipelineStateHistory,
         observability::PipelineSnapshot,
         operators::window::{
-            window_operator::WindowOutputMode, TileConfig, TimeGranularity,
+            operator::WindowOutputMode, TileConfig, TimeGranularity,
         },
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer},

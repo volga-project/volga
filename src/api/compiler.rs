@@ -12,7 +12,7 @@ use crate::runtime::functions::source::parquet::ParquetSourceConfig;
 use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::operators::window::window_operator::WindowAdvancePolicy;
+use crate::runtime::operators::window::spec::WindowAdvancePolicy;
 
 fn resolve_source_schema(src: &SourceSpec) -> arrow::datatypes::Schema {
     schema_from_json(&src.schema_json)

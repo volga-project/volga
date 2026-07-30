@@ -1,11 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::operators::window::state::tile::TileConfig;
-use crate::runtime::operators::window::window_operator::WindowAdvancePolicy;
+use crate::runtime::operators::window::tile::TileConfig;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum WindowAdvancePolicy {
+    /// Advance only on watermarks.
+    OnWatermark,
+    /// Advance on every keyed message for state-only request serving.
+    OnIngest,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
-pub struct WindowOperatorSpec {
+pub struct WindowSpec {
     /// State retention after advance (`processed − max_wl − lateness`).
     /// Streaming late data is at or behind `processed_pos`.
     pub lateness: Option<i64>,
@@ -14,7 +21,7 @@ pub struct WindowOperatorSpec {
     pub tiling: Option<TileConfig>,
 }
 
-impl Default for WindowOperatorSpec {
+impl Default for WindowSpec {
     fn default() -> Self {
         Self {
             lateness: None,
@@ -24,7 +31,7 @@ impl Default for WindowOperatorSpec {
     }
 }
 
-impl WindowOperatorSpec {
+impl WindowSpec {
     /// Pad/fill per-window tiling from overrides + `self.tiling` default.
     pub fn resolve_tiling(
         &self,

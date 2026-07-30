@@ -1,5 +1,3 @@
-use super::*;
-
 use datafusion::common::ScalarValue;
 use datafusion::physical_plan::WindowExpr;
 use std::sync::Arc;
@@ -8,14 +6,15 @@ use crate::api::planner::{Planner, PlanningContext};
 use crate::common::Key;
 use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
-use crate::runtime::operators::window::aggregates::merge_accumulator_state;
-use crate::runtime::operators::window::create_window_aggregator;
-use crate::runtime::operators::window::state::tile::update::{
-    apply_batch_to_tiles, plan_update_runs_for_batch,
-};
-use crate::runtime::operators::window::state::tile::{merge_tile_runs, project_tiles};
+use crate::runtime::operators::window::aggs::merge_accumulator_state;
+use crate::runtime::operators::window::create_window_accumulator;
+use crate::runtime::operators::window::eval::coverage_plan::{merge_tile_runs, plan_time_range};
+use crate::runtime::operators::window::model::{Tile, TileRun, TimeGranularity};
 use crate::runtime::operators::window::store::{
     InMemWindowStore, KeyState, PartitionKey, StateNamespace, WindowOperatorStore,
+};
+use crate::runtime::operators::window::tile::{
+    apply_batch_to_tiles, plan_update_runs_for_batch, project_tiles, TileConfig,
 };
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray, UInt64Array};
@@ -28,7 +27,7 @@ fn merge_tile_states(window_expr: &Arc<dyn WindowExpr>, tiles: &[Tile]) -> Scala
     if tiles.is_empty() {
         return ScalarValue::Null;
     }
-    let mut acc = create_window_aggregator(window_expr);
+    let mut acc = create_window_accumulator(window_expr);
     for tile in tiles {
         if let Some(state) = &tile.state.accumulator_state {
             merge_accumulator_state(acc.as_mut(), state.as_ref());
@@ -139,21 +138,6 @@ fn create_test_batch(timestamps: Vec<i64>, values: Vec<f64>) -> RecordBatch {
         ],
     )
     .expect("batch")
-}
-
-#[test]
-fn test_tile_config_validation() {
-    assert!(TileConfig::new(vec![
-        TimeGranularity::Minutes(1),
-        TimeGranularity::Minutes(5),
-        TimeGranularity::Hours(1),
-    ])
-    .is_ok());
-    assert!(TileConfig::new(vec![
-        TimeGranularity::Minutes(5),
-        TimeGranularity::Minutes(7),
-    ])
-    .is_err());
 }
 
 #[tokio::test]

@@ -8,18 +8,18 @@ use datafusion::physical_plan::expressions::Column;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use datafusion::physical_plan::WindowExpr;
 
-use crate::runtime::operators::window::aggregates::get_aggregate_type;
-use crate::runtime::operators::window::window_operator_state::WindowId;
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
-use crate::runtime::operators::window::{AggregatorType, TileConfig};
+use crate::runtime::operators::window::aggs::get_accumulator_type;
+use crate::runtime::operators::window::model::WindowId;
+use crate::runtime::operators::window::spec::WindowSpec;
+use crate::runtime::operators::window::{AccumulatorType, TileConfig};
 
 #[derive(Debug, Clone)]
 pub struct WindowConfig {
     pub window_expr: Arc<dyn WindowExpr>,
     pub tiling: Option<TileConfig>,
-    pub aggregator_type: AggregatorType,
-    /// WRO only: skip request args; store window still through `T`. `None` for WO.
-    pub exclude_current_row: Option<bool>,
+    pub accumulator_type: AccumulatorType,
+    /// WRO only: skip request args; stored rows through `T` remain included.
+    pub exclude_current_row: bool,
 }
 
 /// Schemas + per-window configs built from a `BoundedWindowAggExec`.
@@ -34,26 +34,26 @@ impl BuiltWindows {
     pub fn for_wo(
         window_exec: &Arc<BoundedWindowAggExec>,
         tiling_overrides: &[Option<TileConfig>],
-        spec: &WindowOperatorSpec,
+        spec: &WindowSpec,
     ) -> Self {
         let tiling = spec.resolve_tiling(window_exec.window_expr().len(), tiling_overrides);
-        Self::build(window_exec, &tiling, None)
+        Self::build(window_exec, &tiling, false)
     }
 
     pub fn for_wro(
         window_exec: &Arc<BoundedWindowAggExec>,
         tiling_overrides: &[Option<TileConfig>],
-        spec: &WindowOperatorSpec,
+        spec: &WindowSpec,
         exclude_current_row: bool,
     ) -> Self {
         let tiling = spec.resolve_tiling(window_exec.window_expr().len(), tiling_overrides);
-        Self::build(window_exec, &tiling, Some(exclude_current_row))
+        Self::build(window_exec, &tiling, exclude_current_row)
     }
 
     fn build(
         window_exec: &Arc<BoundedWindowAggExec>,
         tiling_configs: &[Option<TileConfig>],
-        exclude_current_row: Option<bool>,
+        exclude_current_row: bool,
     ) -> Self {
         let ts_column_index = window_exec.window_expr()[0].order_by()[0]
             .expr
@@ -69,7 +69,7 @@ impl BuiltWindows {
                 WindowConfig {
                     window_expr: window_expr.clone(),
                     tiling: tiling_configs.get(window_id).and_then(|c| c.clone()),
-                    aggregator_type: get_aggregate_type(window_expr),
+                    accumulator_type: get_accumulator_type(window_expr),
                     exclude_current_row,
                 },
             );
@@ -97,5 +97,9 @@ fn create_output_schema(
     for expr in window_exprs {
         builder.push(expr.field().expect("Should be able to get field"));
     }
-    Arc::new(builder.finish().with_metadata(input_schema.metadata().clone()))
+    Arc::new(
+        builder
+            .finish()
+            .with_metadata(input_schema.metadata().clone()),
+    )
 }

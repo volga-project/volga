@@ -7,34 +7,28 @@ use std::sync::Arc;
 use datafusion::logical_expr::Accumulator;
 use datafusion::physical_plan::WindowExpr;
 
-use crate::runtime::operators::window::aggregates::{
-    merge_accumulator_state, retract_accumulator_state,
-};
-use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::state::tile::{CoveragePlan, Tile};
-use crate::runtime::operators::window::store::row_nav::{RowIdx, RowNav};
+use crate::runtime::operators::window::aggs::{merge_accumulator_state, retract_accumulator_state};
+use crate::runtime::operators::window::model::{Cursor, Tile};
+use crate::runtime::operators::window::store::data::{RowIdx, RowNav};
 
 use crate::runtime::operators::window::store::WindowView;
 
+use super::coverage_plan::CoveragePlan;
+
 /// Merge plan tiles and update raw-run rows into an existing accumulator.
-///
-/// Returns `false` when the plan has no tile runs (caller should use raw rows).
 pub(crate) fn update_acc_from_plan(
     view: &WindowView,
     acc: &mut dyn Accumulator,
     plan: &CoveragePlan,
     end_idx: Option<RowIdx>,
-) -> bool {
-    if plan.tile_runs.is_empty() {
-        return false;
-    }
+) {
     for tile in select_tiles_for_plan(&view.tiles, plan) {
         if let Some(state) = &tile.state.accumulator_state {
             merge_accumulator_state(acc, state.as_ref());
         }
     }
     let Some(end_idx) = end_idx else {
-        return true;
+        return;
     };
     let end_c = view.nav.cursor(end_idx);
     for run in plan.raw_edges() {
@@ -46,7 +40,6 @@ pub(crate) fn update_acc_from_plan(
         };
         update_raw_run(view, acc, run.from, to, end_idx);
     }
-    true
 }
 
 /// Retract plan tiles + raw-run rows (half-open leave band from the plan).
@@ -127,15 +120,4 @@ fn retract_raw_run(view: &WindowView, acc: &mut dyn Accumulator, from: Cursor, t
             None => break,
         }
     }
-}
-
-/// Optional request-row arguments into an accumulator.
-pub(crate) fn apply_request_args(
-    acc: &mut dyn Accumulator,
-    request_args: Option<&[arrow::array::ArrayRef]>,
-) {
-    let Some(args) = request_args else {
-        return;
-    };
-    acc.update_batch(args).expect("update request row");
 }

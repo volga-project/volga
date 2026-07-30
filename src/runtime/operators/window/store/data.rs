@@ -1,4 +1,4 @@
-//! In-memory cursor-ordered navigation over raw Arrow batches.
+//! Materialized raw/tile data and cursor-ordered row navigation.
 
 use std::sync::Arc;
 
@@ -6,7 +6,8 @@ use anyhow::{anyhow, Result};
 use arrow::array::{ArrayRef, RecordBatch, TimestampMillisecondArray, UInt64Array};
 use datafusion::physical_plan::WindowExpr;
 
-use crate::runtime::operators::window::cursor::Cursor;
+use crate::runtime::operators::window::model::{Cursor, Tile, TileMap, WindowId};
+use crate::runtime::operators::window::tile::project_tiles;
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -136,4 +137,42 @@ pub(crate) fn cursors_from_batch(
     Ok((0..batch.num_rows())
         .map(|row| Cursor::new(ts.value(row), seq.value(row)))
         .collect())
+}
+
+/// Raw batches and tiles loaded for one partition.
+#[derive(Debug)]
+pub struct WindowData {
+    raw_batches: Vec<RecordBatch>,
+    tile_map: TileMap,
+}
+
+impl WindowData {
+    pub fn new(raw_batches: Vec<RecordBatch>, tile_map: TileMap) -> Self {
+        Self {
+            raw_batches,
+            tile_map,
+        }
+    }
+
+    pub fn raw_batches(&self) -> &[RecordBatch] {
+        &self.raw_batches
+    }
+
+    pub fn for_window(
+        &self,
+        window_id: WindowId,
+        ts_column_index: usize,
+        window_expr: &Arc<dyn WindowExpr>,
+    ) -> WindowView {
+        WindowView {
+            nav: RowNav::from_batches(&self.raw_batches, ts_column_index, window_expr),
+            tiles: project_tiles(&self.tile_map, window_id),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WindowView {
+    pub nav: RowNav,
+    pub tiles: Vec<Tile>,
 }

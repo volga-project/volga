@@ -1,11 +1,7 @@
 use arrow::array::ArrayRef;
-use arrow::datatypes::DataType;
 use datafusion::common::{exec_err, Result};
 use datafusion::error::DataFusionError;
 use datafusion::scalar::ScalarValue;
-
-use crate::runtime::operators::window::aggregates::AggKind;
-use crate::runtime::utils::scalar_value_from_bytes;
 
 pub(crate) fn df_error(msg: impl Into<String>) -> DataFusionError {
     DataFusionError::Execution(msg.into())
@@ -52,24 +48,6 @@ pub(crate) fn parse_n_optional(
     let parsed = scalar_to_usize(&value)?;
     *n = Some(parsed);
     Ok(Some(parsed))
-}
-
-pub(crate) fn infer_value_type(kind: AggKind, state: &[Vec<u8>]) -> Result<DataType> {
-    if state.is_empty() {
-        return exec_err!("empty state");
-    }
-    let mut scalars: Vec<ScalarValue> = Vec::with_capacity(state.len());
-    for bytes in state {
-        scalars.push(scalar_value_from_bytes(bytes).map_err(|e| df_error(e.to_string()))?);
-    }
-    let scalar = match kind {
-        AggKind::Avg => scalars.get(1).or_else(|| scalars.get(0)),
-        AggKind::Sum | AggKind::Min | AggKind::Max => scalars.get(0),
-        AggKind::Count => Some(&ScalarValue::Int64(Some(0))),
-        _ => return exec_err!("unsupported agg kind for top state"),
-    }
-    .ok_or_else(|| df_error("missing state value"))?;
-    Ok(scalar.data_type())
 }
 
 pub(crate) fn ratio_scalar(matched: i64, total: i64) -> ScalarValue {

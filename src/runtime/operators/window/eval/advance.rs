@@ -8,16 +8,15 @@ use arrow::datatypes::SchemaRef;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::config::WindowConfig;
-use crate::runtime::operators::window::cursor::Cursor;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
-use crate::runtime::operators::window::state::tile::{merge_raw_runs, merge_tile_runs, RawRun};
+use crate::runtime::operators::window::model::{Cursor, RawRun, WindowId};
 use crate::runtime::operators::window::store::{PartitionKey, WindowData, WindowOperatorStore};
-use crate::runtime::operators::window::window_operator_state::WindowId;
-use crate::runtime::operators::window::{window_supports_tile_slide, AggregatorType};
+use crate::runtime::operators::window::{window_supports_tile_slide, AccumulatorType};
 
+use super::coverage_plan::{merge_raw_runs, merge_tile_runs};
 use super::emit::{emit_ends, emit_input_rows};
+use super::eval_plan::{append_coverage_runs, plan_rebuilds, plan_slides};
 use super::output::assemble_window_batch;
-use super::primitives::{append_coverage_runs, append_rebuild_runs, plan_rebuilds, plan_slides};
 use super::rebuild::produce_rebuild;
 use super::slide::produce_slide;
 
@@ -74,7 +73,7 @@ pub async fn advance_key(
     let mut tile_runs = Vec::new();
     for (window_id, cfg) in window_configs {
         let wl = get_window_length_ms(cfg.window_expr.get_window_frame());
-        let plans_for_window = if cfg.aggregator_type == AggregatorType::RetractableAccumulator {
+        let plans_for_window = if cfg.accumulator_type == AccumulatorType::RetractableAccumulator {
             let tile_cfg = cfg
                 .tiling
                 .as_ref()
@@ -85,7 +84,7 @@ pub async fn advance_key(
         } else {
             let floor = window_start_floor(prev, first_ingested, wl);
             let plans = plan_rebuilds(&ends, wl, cfg.tiling.as_ref(), floor);
-            append_rebuild_runs(&plans, wl, &mut historical_raw_runs, &mut tile_runs);
+            append_coverage_runs(&plans, &mut historical_raw_runs, &mut tile_runs);
             plans
         };
         plans.insert(*window_id, plans_for_window);
@@ -105,7 +104,7 @@ pub async fn advance_key(
         let acc = key_state.accumulators.get(window_id).cloned();
         let view = batch.for_window(*window_id, ts_column_index, &cfg.window_expr);
         let plans = plans.get(window_id).expect("window plan");
-        let (values, new_acc) = if cfg.aggregator_type == AggregatorType::RetractableAccumulator {
+        let (values, new_acc) = if cfg.accumulator_type == AccumulatorType::RetractableAccumulator {
             produce_slide(&cfg.window_expr, &view, prev, acc.as_ref(), plans)
         } else {
             (produce_rebuild(&cfg.window_expr, &view, plans), None)

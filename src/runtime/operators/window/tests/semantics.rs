@@ -3,7 +3,13 @@ use std::sync::Arc;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
-use crate::runtime::operators::window::cursor::Cursor;
+use crate::runtime::operators::window::model::Cursor;
+use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
+use crate::runtime::operators::window::request::{
+    WindowRequestOperator, WindowRequestOperatorConfig,
+};
+use crate::runtime::operators::window::spec::WindowAdvancePolicy;
+use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowOperatorStore,
 };
@@ -11,13 +17,6 @@ use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, key, keyed_message, runtime_context_with_namespace,
     window_exec_from_sql, Harness, WoWroHarness,
 };
-use crate::runtime::operators::window::window_operator::{
-    WindowAdvancePolicy, WindowOperatorConfig, WindowOutputMode,
-};
-use crate::runtime::operators::window::window_request_operator::{
-    WindowRequestOperator, WindowRequestOperatorConfig,
-};
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 
 const SQL: &str = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
 FROM test_table
@@ -128,7 +127,7 @@ async fn watermark_without_ingest_is_empty_and_passes_through() {
 async fn lateness_config_sets_retention_floor_in_meta() {
     let exec = window_exec_from_sql(SQL).await;
     let mut cfg = WindowOperatorConfig::new(exec);
-    cfg.spec = WindowOperatorSpec {
+    cfg.spec = WindowSpec {
         lateness: Some(2000),
         ..Default::default()
     };

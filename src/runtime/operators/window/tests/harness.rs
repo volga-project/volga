@@ -16,16 +16,16 @@ use crate::common::{Key, WatermarkMessage};
 use crate::runtime::functions::key_by::key_by_function::extract_datafusion_window_exec;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
+use crate::runtime::operators::window::operator::{
+    WindowOperator, WindowOperatorConfig, WindowOutputMode,
+};
+use crate::runtime::operators::window::request::{
+    WindowRequestOperator, WindowRequestOperatorConfig,
+};
+use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore,
 };
-use crate::runtime::operators::window::window_operator::{
-    WindowOperator, WindowOperatorConfig, WindowOutputMode,
-};
-use crate::runtime::operators::window::window_request_operator::{
-    WindowRequestOperator, WindowRequestOperatorConfig,
-};
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorStates;
@@ -220,7 +220,7 @@ impl WoWroHarness {
         let mut wo_cfg = WindowOperatorConfig::new(exec.clone());
         wo_cfg.output_mode = WindowOutputMode::StateOnly;
         if tiling.is_some() {
-            wo_cfg.spec = WindowOperatorSpec {
+            wo_cfg.spec = WindowSpec {
                 tiling: tiling.clone(),
                 ..Default::default()
             };
@@ -235,7 +235,7 @@ impl WoWroHarness {
         );
         req_cfg.exclude_current_row = exclude_current_row;
         if tiling.is_some() {
-            req_cfg.spec = WindowOperatorSpec {
+            req_cfg.spec = WindowSpec {
                 tiling,
                 ..Default::default()
             };
@@ -309,9 +309,9 @@ pub async fn run_wo_scenario(
     let exec = window_exec_from_sql(sql).await;
     let mut cfg = WindowOperatorConfig::new(exec);
     if tiling.is_some() {
-        cfg.spec = WindowOperatorSpec {
+        cfg.spec = WindowSpec {
             tiling,
-            ..WindowOperatorSpec::default()
+            ..WindowSpec::default()
         };
     }
     let mut h = Harness::new(cfg).await;

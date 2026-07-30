@@ -10,10 +10,9 @@ use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::execution_graph::{ExecutionGraph, ExecutionVertex, ExecutionEdge};
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::operators::window::window_operator::{
-    WindowAdvancePolicy, WindowOutputMode,
-};
-use crate::runtime::operators::window::window_request_operator::WindowRequestOperatorConfig;
+use crate::runtime::operators::window::operator::WindowOutputMode;
+use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
+use crate::runtime::operators::window::spec::WindowAdvancePolicy;
 use crate::runtime::partition::PartitionType;
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};

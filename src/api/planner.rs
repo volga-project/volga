@@ -38,7 +38,7 @@ use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::aggregate::aggregate_operator::AggregateConfig;
-use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
+use crate::runtime::operators::window::operator::WindowOperatorConfig;
 
 // pub static REQUEST_SOURCE_NAME: &str = "request_source";
 

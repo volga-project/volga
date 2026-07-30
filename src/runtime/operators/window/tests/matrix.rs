@@ -10,12 +10,12 @@
 
 use datafusion::scalar::ScalarValue;
 
+use crate::runtime::operators::window::operator::WindowOperatorConfig;
+use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, run_wo, run_wo_scenario, test_input_schema, window_exec_from_sql,
     Harness, WoWroHarness,
 };
-use crate::runtime::operators::window::window_operator::WindowOperatorConfig;
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
 use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 
 #[derive(Clone, Copy, Debug)]
@@ -163,7 +163,7 @@ async fn matrix_single_wm_matches_oracle() {
     for (label, tiling) in tiling_variants() {
         let mut cfg = WindowOperatorConfig::new(exec.clone());
         if tiling.is_some() {
-            cfg.spec = WindowOperatorSpec {
+            cfg.spec = WindowSpec {
                 tiling,
                 ..Default::default()
             };

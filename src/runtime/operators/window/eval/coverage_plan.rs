@@ -1,23 +1,7 @@
-use std::collections::BTreeMap;
-
-use crate::runtime::operators::window::cursor::Cursor;
-
-use super::granularity::{TileConfig, TimeGranularity, Timestamp};
-
-/// Coalesced tile range at one granularity: half-open `[start_ts, end_ts_exclusive)`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TileRun {
-    pub granularity: TimeGranularity,
-    pub start_ts: Timestamp,
-    pub end_ts_exclusive: Timestamp,
-}
-
-/// Raw segment: half-open `[from, to)`. Used in CPU coverage plans.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RawRun {
-    pub from: Cursor,
-    pub to: Cursor,
-}
+use crate::runtime::operators::window::model::{
+    Cursor, RawRun, TileRun, TimeGranularity, Timestamp,
+};
+use crate::runtime::operators::window::tile::TileConfig;
 
 /// Pure geometry: tile runs + optional raw head/tail.
 ///
@@ -142,14 +126,7 @@ fn plan_interior(
         None
     };
 
-    if tile_runs.is_empty() && raw_head.is_none() && raw_tail.is_none() {
-        raw_head = Some(RawRun {
-            from: start,
-            to: end,
-        });
-    }
-
-    // Adjacent/overlapping edges (e.g. no tiles fitted) → single raw_head.
+    // Adjacent or overlapping edges become one raw head.
     match (raw_head.take(), raw_tail.take()) {
         (Some(h), Some(tail)) if h.to >= tail.from => {
             let to = if tail.to > h.to { tail.to } else { h.to };
@@ -271,38 +248,6 @@ pub fn merge_raw_runs(mut runs: Vec<RawRun>) -> Vec<RawRun> {
     out
 }
 
-/// Ingest update plan: one [`TileRun`] per `(granularity, tile_start)` touched by `timestamps`.
-///
-/// Unlike [`plan_coverage`] / [`plan_time_range`] (coarsest tiles for eval), this includes
-/// **every** configured granularity so each tile that will be written is loaded.
-/// Caller loads these runs through [`WindowOperatorStore`](crate::runtime::operators::window::store::WindowOperatorStore).
-pub fn plan_update_runs(
-    config: &TileConfig,
-    timestamps: impl IntoIterator<Item = Timestamp>,
-) -> Vec<TileRun> {
-    use std::collections::BTreeSet;
-
-    let mut by_gran: BTreeMap<TimeGranularity, BTreeSet<Timestamp>> = BTreeMap::new();
-    for ts in timestamps {
-        for &gran in &config.granularities {
-            by_gran.entry(gran).or_default().insert(gran.start(ts));
-        }
-    }
-
-    let mut runs = Vec::new();
-    for (gran, starts) in by_gran {
-        let step = gran.to_millis();
-        for start in starts {
-            runs.push(TileRun {
-                granularity: gran,
-                start_ts: start,
-                end_ts_exclusive: start.saturating_add(step),
-            });
-        }
-    }
-    runs
-}
-
 #[cfg(test)]
 mod plan_tests {
     use super::*;
@@ -397,31 +342,5 @@ mod plan_tests {
         assert_eq!(head.from.ts, 0);
         assert_eq!(head.to.ts, 60_000);
         assert!(plan.raw_tail.is_none());
-    }
-
-    #[test]
-    fn plan_update_runs_one_per_gran_per_bucket() {
-        let m1 = TimeGranularity::Minutes(1);
-        let m5 = TimeGranularity::Minutes(5);
-        let config = cfg(vec![m1, m5]);
-
-        assert!(plan_update_runs(&config, std::iter::empty::<i64>()).is_empty());
-
-        let runs = plan_update_runs(&config, [90_000, 90_000, 6 * 60_000]);
-        // Two buckets × two grans; not coalesced like eval coverage.
-        assert_eq!(runs.len(), 4);
-        assert!(runs
-            .iter()
-            .any(|r| r.granularity == m1 && r.start_ts == 60_000));
-        assert!(runs
-            .iter()
-            .any(|r| r.granularity == m1 && r.start_ts == 6 * 60_000));
-        assert!(runs.iter().any(|r| r.granularity == m5 && r.start_ts == 0));
-        assert!(runs
-            .iter()
-            .any(|r| r.granularity == m5 && r.start_ts == 5 * 60_000));
-        for r in &runs {
-            assert_eq!(r.end_ts_exclusive, r.start_ts + r.granularity.to_millis());
-        }
     }
 }

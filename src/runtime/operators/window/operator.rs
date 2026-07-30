@@ -8,37 +8,29 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use futures::future;
 
-use datafusion::physical_plan::windows::BoundedWindowAggExec;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
-use crate::runtime::operators::window::cursor::Cursor;
+use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
-use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
-use crate::runtime::operators::window::store::WindowOperatorStore;
-use crate::runtime::operators::window::window_operator_state::{
-    WindowId, WindowOperatorState, WindowOperatorStateCheckpoint,
+use crate::runtime::operators::window::model::{Cursor, WindowId};
+use crate::runtime::operators::window::spec::{WindowAdvancePolicy, WindowSpec};
+use crate::runtime::operators::window::state::{
+    WindowOperatorState, WindowOperatorStateCheckpoint,
 };
-use crate::runtime::operators::window::window_tuning::WindowOperatorSpec;
+use crate::runtime::operators::window::store::WindowOperatorStore;
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
+use datafusion::physical_plan::windows::BoundedWindowAggExec;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowOutputMode {
     Emit,
     StateOnly,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
-pub enum WindowAdvancePolicy {
-    /// Advance windows only when watermark is received (default, supports complex DAGs).
-    OnWatermark,
-    /// Advance windows on every keyed message (for simple ingest+request topologies; max freshness).
-    OnIngest,
 }
 
 #[derive(Debug, Clone)]
@@ -48,7 +40,7 @@ pub struct WindowOperatorConfig {
     /// Per-window tiling overrides (index-aligned with window exprs).
     /// Gaps filled from `spec.tiling` at operator construction.
     pub tiling_configs: Vec<Option<TileConfig>>,
-    pub spec: WindowOperatorSpec,
+    pub spec: WindowSpec,
 }
 
 impl WindowOperatorConfig {
@@ -57,11 +49,11 @@ impl WindowOperatorConfig {
             window_exec,
             output_mode: WindowOutputMode::Emit,
             tiling_configs: Vec::new(),
-            spec: WindowOperatorSpec::default(),
+            spec: WindowSpec::default(),
         }
     }
 
-    pub fn set_spec(&mut self, spec: WindowOperatorSpec) -> &mut Self {
+    pub fn set_spec(&mut self, spec: WindowSpec) -> &mut Self {
         self.spec = spec;
         self
     }
@@ -131,7 +123,9 @@ impl WindowOperator {
     }
 
     fn state_ref(&self) -> &Arc<WindowOperatorState> {
-        self.state.as_ref().expect("WindowOperator must be opened first")
+        self.state
+            .as_ref()
+            .expect("WindowOperator must be opened first")
     }
 
     async fn process_key(&self, key: &Key, advance_to: Cursor) -> (RecordBatch, bool) {
@@ -180,8 +174,7 @@ impl WindowOperator {
             }
         }
 
-        let out = arrow::compute::concat_batches(&self.output_schema, &batches)
-            .expect("concat");
+        let out = arrow::compute::concat_batches(&self.output_schema, &batches).expect("concat");
         (out, pending_keys)
     }
 }
@@ -241,10 +234,7 @@ impl OperatorTrait for WindowOperator {
                         .await;
                     if dropped < input_rows {
                         if self.output_mode == WindowOutputMode::StateOnly
-                            && matches!(
-                                self.advance_policy,
-                                WindowAdvancePolicy::OnIngest
-                            )
+                            && matches!(self.advance_policy, WindowAdvancePolicy::OnIngest)
                         {
                             let max = max_seen.expect("accepted ingest must update max_seen");
                             let _ = self.process_key(key, max).await;
@@ -263,15 +253,16 @@ impl OperatorTrait for WindowOperator {
                     let advance_to = Cursor::new(wm_ts, u64::MAX);
 
                     let keys: Vec<Key> = self.buffered_keys.iter().cloned().collect();
-                    let (result, pending_keys) =
-                        self.process_buffered(keys, advance_to).await;
+                    let (result, pending_keys) = self.process_buffered(keys, advance_to).await;
                     if watermark.watermark_value == MAX_WATERMARK_VALUE {
                         self.buffered_keys.clear();
                     } else {
                         self.buffered_keys = pending_keys;
                     }
 
-                    self.base.pending_messages.push(Message::Watermark(watermark));
+                    self.base
+                        .pending_messages
+                        .push(Message::Watermark(watermark));
 
                     if self.output_mode == WindowOutputMode::StateOnly {
                         OperatorPollResult::Continue

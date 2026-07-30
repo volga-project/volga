@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::aggregates::test_utils;
+use crate::runtime::operators::window::aggs::test_utils;
 use super::eval_window_expr;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;

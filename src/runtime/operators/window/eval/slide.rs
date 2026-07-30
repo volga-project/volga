@@ -9,14 +9,12 @@ use std::sync::Arc;
 use datafusion::physical_plan::WindowExpr;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::aggregates::{
-    create_window_aggregator, merge_accumulator_state,
-};
-use crate::runtime::operators::window::cursor::Cursor;
+use crate::runtime::operators::window::aggs::{create_window_accumulator, merge_accumulator_state};
+use crate::runtime::operators::window::model::{AccumulatorState, Cursor};
 use crate::runtime::operators::window::store::WindowView;
-use crate::runtime::operators::window::window_operator_state::AccumulatorState;
 
-use super::primitives::{retract_acc_from_plan, update_row, EvalPlan};
+use super::accumulate::{retract_acc_from_plan, update_row};
+use super::eval_plan::EvalPlan;
 
 /// WO: retract each preplanned leave band, add its end row, and evaluate.
 pub(super) fn produce_slide(
@@ -26,7 +24,7 @@ pub(super) fn produce_slide(
     accumulator_state: Option<&AccumulatorState>,
     plans: &[EvalPlan],
 ) -> (Vec<ScalarValue>, Option<AccumulatorState>) {
-    let mut acc = create_window_aggregator(window_expr);
+    let mut acc = create_window_accumulator(window_expr);
     if let (Some(state), Some(_)) = (accumulator_state, prev) {
         merge_accumulator_state(acc.as_mut(), state);
     }

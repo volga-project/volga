@@ -3,23 +3,17 @@ use std::sync::Arc;
 
 use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
-use datafusion::common::ScalarValue;
 use serde::{Deserialize, Serialize};
 
 use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
-use crate::runtime::operators::window::cursor::Cursor;
-use crate::runtime::operators::window::state::tile::update::{
-    apply_batch_to_tiles, plan_update_runs_for_batch,
-};
-use crate::runtime::operators::window::store::row_nav::cursors_from_batch;
+use crate::runtime::operators::window::model::{Cursor, WindowId};
+use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     PartitionKey, StateNamespace, WindowCheckpointMeta, WindowOperatorStore, WindowRestoreMeta,
 };
+use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
-
-pub type WindowId = usize;
-pub type AccumulatorState = Vec<ScalarValue>;
 
 /// Runtime state owned by the WO.
 #[derive(Debug)]
