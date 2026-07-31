@@ -34,7 +34,6 @@ pub async fn execute_with_state_updates(
         num_threads_per_task,
         TransportBackendType::Grpc,
     );
-    worker_config.window_state_namespace = spec.worker_runtime.window_state_namespace.clone();
     let mut worker = Worker::from_config(worker_config);
 
     if let Some(pipeline_state_sender) = state_updates_sender {

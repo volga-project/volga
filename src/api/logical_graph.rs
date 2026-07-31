@@ -447,7 +447,10 @@ impl LogicalGraph {
         );
         let keyby_idx_new = self.add_node(keyby_node_new);
         
-        let window_request_config = WindowRequestOperatorConfig::from_window_operator_config(window_config);
+        let mut window_request_config =
+            WindowRequestOperatorConfig::from_window_operator_config(window_config);
+        window_request_config.state_owner_operator_id =
+            Some(self.graph[top_window_node].operator_id.clone());
         let window_request_node = LogicalNode::new(
             OperatorConfig::WindowRequestConfig(window_request_config),
             parallelism,

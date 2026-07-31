@@ -8,24 +8,16 @@ use crate::transport::transport_spec::TransportSpec;
 pub struct WorkerRuntimeSpec {
     #[serde(default)]
     pub transport: TransportSpec,
-    /// Window-state namespace shared by WO and WRO.
-    #[serde(default = "default_window_state_namespace")]
-    pub window_state_namespace: String,
     /// Snapshot history retention window, in milliseconds.
     /// When omitted, defaults to 10 minutes.
     #[serde(default)]
     pub history_retention_window_ms: Option<u64>,
 }
 
-fn default_window_state_namespace() -> String {
-    "window_state".to_string()
-}
-
 impl Default for WorkerRuntimeSpec {
     fn default() -> Self {
         Self {
             transport: TransportSpec::default(),
-            window_state_namespace: default_window_state_namespace(),
             history_retention_window_ms: None,
         }
     }

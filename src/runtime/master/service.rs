@@ -3,16 +3,17 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::orchestrator::orchestrator::MasterOrchestrator;
+use crate::runtime::checkpoint::SerializedCheckpoint;
 use crate::runtime::master::checkpoint::TaskKey;
 use crate::runtime::master::server::master_service::{
     master_service_server::MasterService, CheckpointPropagationPhase as ProtoPropagationPhase,
     GetLatestCompleteCheckpointRequest, GetLatestCompleteCheckpointResponse,
     GetLatestPipelineSnapshotRequest, GetLatestPipelineSnapshotResponse,
-    GetLifecycleEventsRequest, GetLifecycleEventsResponse, GetTaskCheckpointRequest,
-    GetTaskCheckpointResponse, LifecycleEventRecord, RegisterWorkerRequest,
+    GetLifecycleEventsRequest, GetLifecycleEventsResponse, LifecycleEventRecord,
+    RegisterWorkerRequest,
     RegisterWorkerResponse, ReportCheckpointPropagationRequest,
     ReportCheckpointPropagationResponse, ReportCheckpointRequest, ReportCheckpointResponse,
-    StateBlob, StopSourcesRequest, StopSourcesResponse,
+    StopSourcesRequest, StopSourcesResponse,
 };
 use crate::runtime::master::{CheckpointPropagationPhase, Master};
 use crate::runtime::observability::PipelineSnapshot;
@@ -60,14 +61,10 @@ impl MasterService for MasterServiceImpl {
             task_index: req.task_index,
         };
 
-        let blobs = req
-            .blobs
-            .into_iter()
-            .map(|b| (b.name, b.bytes))
-            .collect::<Vec<_>>();
+        let checkpoint = SerializedCheckpoint::new(req.checkpoint_data);
         match self
             .master
-            .report_checkpoint(checkpoint_id, task, blobs, req.execution_attempt_id)
+            .report_checkpoint(checkpoint_id, task, checkpoint, req.execution_attempt_id)
             .await
         {
             Ok(()) => Ok(Response::new(ReportCheckpointResponse {
@@ -119,32 +116,6 @@ impl MasterService for MasterServiceImpl {
                 error_message,
             })),
         }
-    }
-
-    async fn get_task_checkpoint(
-        &self,
-        request: Request<GetTaskCheckpointRequest>,
-    ) -> Result<Response<GetTaskCheckpointResponse>, Status> {
-        let req = request.into_inner();
-        let checkpoint_id = req.checkpoint_id;
-        let task = TaskKey {
-            vertex_id: req.vertex_id,
-            task_index: req.task_index,
-        };
-
-        let blobs = self
-            .master
-            .get_task_checkpoint(checkpoint_id, task)
-            .await
-            .into_iter()
-            .map(|(name, bytes)| StateBlob { name, bytes })
-            .collect::<Vec<_>>();
-
-        Ok(Response::new(GetTaskCheckpointResponse {
-            success: true,
-            error_message: String::new(),
-            blobs,
-        }))
     }
 
     async fn get_latest_complete_checkpoint(

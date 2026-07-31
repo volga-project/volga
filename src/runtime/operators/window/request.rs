@@ -20,7 +20,9 @@ use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::model::WindowId;
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
-use crate::runtime::operators::window::store::{PartitionKey, StateNamespace, WindowRequestStore};
+use crate::runtime::operators::window::store::{
+    create_window_request_store, PartitionKey, StateNamespace, WindowRequestStore,
+};
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 
@@ -31,6 +33,7 @@ pub struct WindowRequestOperatorConfig {
     pub spec: WindowSpec,
     /// `EXCLUDE CURRENT ROW`: lookup time only (no request-row args). SQL wiring still TODO.
     pub exclude_current_row: bool,
+    pub state_owner_operator_id: Option<String>,
 }
 
 impl WindowRequestOperatorConfig {
@@ -40,6 +43,7 @@ impl WindowRequestOperatorConfig {
             tiling_configs: window_operator_config.tiling_configs,
             spec: window_operator_config.spec,
             exclude_current_row: false,
+            state_owner_operator_id: None,
         }
     }
 }
@@ -49,6 +53,7 @@ pub struct WindowRequestOperator {
     window_configs: BTreeMap<WindowId, WindowConfig>,
     store: Option<Arc<dyn WindowRequestStore>>,
     namespace: Option<StateNamespace>,
+    state_owner_operator_id: Option<String>,
     ts_column_index: usize,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
@@ -86,10 +91,25 @@ impl WindowRequestOperator {
             window_configs: built.windows,
             store: None,
             namespace: None,
+            state_owner_operator_id: window_request_operator_config.state_owner_operator_id,
             ts_column_index: built.ts_column_index,
             output_schema: built.output_schema,
             input_schema: built.input_schema,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_store_and_namespace(
+        &mut self,
+        store: Arc<dyn WindowRequestStore>,
+        namespace: StateNamespace,
+    ) {
+        assert!(
+            self.store.is_none() && self.namespace.is_none(),
+            "window request state is already configured"
+        );
+        self.store = Some(store);
+        self.namespace = Some(namespace);
     }
 
     async fn process_key(&self, key: &Key, record_batch: &RecordBatch) -> RecordBatch {
@@ -153,14 +173,26 @@ fn get_input_values(batch: &RecordBatch, input_schema: &SchemaRef) -> Vec<Vec<Sc
 impl OperatorTrait for WindowRequestOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await?;
-        let store: Arc<dyn WindowRequestStore> = context
-            .window_request_store()
-            .expect("WindowRequestStore must be configured");
-        let ns = context
-            .window_state_namespace()
-            .expect("window state namespace must be configured");
-        self.store = Some(store);
-        self.namespace = Some(ns);
+        if self.store.is_none() {
+            let backend = context
+                .state_backend()
+                .expect("state backend must be configured for WindowRequestOperator");
+            self.store = Some(create_window_request_store(backend));
+        }
+        if self.namespace.is_none() {
+            let owner_operator_id = self
+                .state_owner_operator_id
+                .as_deref()
+                .or_else(|| context.operator_id())
+                .expect("operator id must be configured for WindowRequestOperator");
+            self.namespace = Some(StateNamespace::for_operator_task(
+                context
+                    .pipeline_id()
+                    .expect("pipeline id must be configured for WindowRequestOperator"),
+                owner_operator_id,
+                context.task_index(),
+            ));
+        }
         Ok(())
     }
 

@@ -36,6 +36,14 @@ service WorkerService {
 message ConfigureWorkerRequest {
   bytes init_payload_bytes = 1;
   uint64 execution_attempt_id = 2;
+  repeated TaskRestoreData task_restore_data = 3;
+  bool restoring = 4;
+}
+
+message TaskRestoreData {
+  string vertex_id = 1;
+  int32 task_index = 2;
+  bytes restore_data = 3;
 }
 
 message ConfigureWorkerResponse {

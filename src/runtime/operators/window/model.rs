@@ -4,6 +4,7 @@ use datafusion::common::ScalarValue;
 use serde::{Deserialize, Serialize};
 use serde_with::serde_as;
 
+use crate::common::types::PipelineId;
 use crate::common::Key;
 use crate::runtime::utils;
 
@@ -54,10 +55,20 @@ impl StateNamespace {
             bytes: s.as_ref().to_vec(),
         }
     }
+
+    pub fn for_operator_task(pipeline_id: &PipelineId, operator_id: &str, task_index: i32) -> Self {
+        let mut bytes = Vec::new();
+        for component in [pipeline_id.0.as_bytes(), operator_id.as_bytes()] {
+            bytes.extend_from_slice(&(component.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(component);
+        }
+        bytes.extend_from_slice(&task_index.to_be_bytes());
+        Self { bytes }
+    }
 }
 
 /// Collision-safe logical identity. Backends choose their own physical keys.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PartitionKey {
     pub namespace: Vec<u8>,
     pub business_key: Vec<u8>,

@@ -88,6 +88,7 @@ fn test_stream_task_actor() -> Result<()> {
             RuntimeContext::new(task_vertex_id.clone(), 0, 1, None, None, None),
             graph.clone(),
             std::sync::Arc::new(WorkerHealth::new()),
+            None,
         );
 
         // Create transport backend actor

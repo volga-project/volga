@@ -85,22 +85,15 @@ pub async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
     extract_datafusion_window_exec(sql, &mut planner).await
 }
 
-pub fn runtime_context_with_namespace(
-    store: Arc<InMemWindowStore>,
-    namespace: StateNamespace,
-) -> RuntimeContext {
-    let mut ctx = RuntimeContext::new(
+pub fn runtime_context() -> RuntimeContext {
+    RuntimeContext::new(
         "test_vertex".to_string().into(),
         0,
         1,
         None,
         Some(Arc::new(OperatorStates::new())),
         None,
-    );
-    ctx.set_window_operator_store(store.clone() as Arc<dyn WindowOperatorStore>);
-    ctx.set_window_request_store(store as Arc<dyn WindowRequestStore>);
-    ctx.set_window_state_namespace(namespace);
-    ctx
+    )
 }
 
 pub struct Harness {
@@ -129,9 +122,9 @@ impl Harness {
         operator_store: Arc<dyn WindowOperatorStore>,
         namespace: StateNamespace,
     ) -> Self {
-        let mut ctx = runtime_context_with_namespace(store.clone(), namespace.clone());
-        ctx.set_window_operator_store(operator_store);
+        let ctx = runtime_context();
         let mut op = WindowOperator::new(OperatorConfig::WindowConfig(cfg));
+        op.set_store_and_namespace(operator_store, namespace.clone());
         op.open(&ctx).await.expect("open");
         Self {
             op,
@@ -199,7 +192,6 @@ impl WoWroHarness {
             tiling,
             exclude_current_row,
             store.clone(),
-            store.clone(),
             store,
             namespace,
         )
@@ -210,7 +202,6 @@ impl WoWroHarness {
         sql: &str,
         tiling: Option<TileConfig>,
         exclude_current_row: bool,
-        store: Arc<InMemWindowStore>,
         operator_store: Arc<dyn WindowOperatorStore>,
         request_store: Arc<dyn WindowRequestStore>,
         namespace: StateNamespace,
@@ -225,9 +216,9 @@ impl WoWroHarness {
                 ..Default::default()
             };
         }
-        let mut wo_ctx = runtime_context_with_namespace(store.clone(), namespace.clone());
-        wo_ctx.set_window_operator_store(operator_store);
+        let wo_ctx = runtime_context();
         let mut wo = WindowOperator::new(OperatorConfig::WindowConfig(wo_cfg));
+        wo.set_store_and_namespace(operator_store, namespace.clone());
         wo.open(&wo_ctx).await.expect("wo open");
 
         let mut req_cfg = WindowRequestOperatorConfig::from_window_operator_config(
@@ -240,9 +231,9 @@ impl WoWroHarness {
                 ..Default::default()
             };
         }
-        let mut wro_ctx = runtime_context_with_namespace(store, namespace);
-        wro_ctx.set_window_request_store(request_store);
+        let wro_ctx = runtime_context();
         let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(req_cfg));
+        wro.set_store_and_namespace(request_store, namespace);
         wro.open(&wro_ctx).await.expect("wro open");
 
         Self { wo, wro }

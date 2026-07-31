@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 
+use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::join::join_function::JoinFunction;
 use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
 use crate::runtime::operators::chained::chained_operator::ChainedOperator;
@@ -67,11 +68,11 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
         panic!("set_input not implemented for this operator")
     }
 
-    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
-        Ok(vec![])
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        Ok(SerializedCheckpoint::new(Vec::new()))
     }
 
-    async fn restore(&mut self, _blobs: &[(String, Vec<u8>)]) -> Result<()> {
+    async fn restore(&mut self, _restore: SerializedRestore) -> Result<()> {
         Ok(())
     }
 }
@@ -229,7 +230,7 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<SerializedCheckpoint> {
         match self {
             Operator::Map(op) => op.checkpoint(checkpoint_id).await,
             Operator::Join(op) => op.checkpoint(checkpoint_id).await,
@@ -244,18 +245,18 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+    async fn restore(&mut self, restore: SerializedRestore) -> Result<()> {
         match self {
-            Operator::Map(op) => op.restore(blobs).await,
-            Operator::Join(op) => op.restore(blobs).await,
-            Operator::Sink(op) => op.restore(blobs).await,
-            Operator::Source(op) => op.restore(blobs).await,
-            Operator::KeyBy(op) => op.restore(blobs).await,
-            Operator::Reduce(op) => op.restore(blobs).await,
-            Operator::Aggregate(op) => op.restore(blobs).await,
-            Operator::Window(op) => op.restore(blobs).await,
-            Operator::WindowRequest(op) => op.restore(blobs).await,
-            Operator::Chained(op) => op.restore(blobs).await,
+            Operator::Map(op) => op.restore(restore).await,
+            Operator::Join(op) => op.restore(restore).await,
+            Operator::Sink(op) => op.restore(restore).await,
+            Operator::Source(op) => op.restore(restore).await,
+            Operator::KeyBy(op) => op.restore(restore).await,
+            Operator::Reduce(op) => op.restore(restore).await,
+            Operator::Aggregate(op) => op.restore(restore).await,
+            Operator::Window(op) => op.restore(restore).await,
+            Operator::WindowRequest(op) => op.restore(restore).await,
+            Operator::Chained(op) => op.restore(restore).await,
         }
     }
 }

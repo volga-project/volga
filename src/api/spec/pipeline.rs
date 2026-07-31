@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
+use crate::api::spec::state::StateSpec;
+use crate::api::spec::state::{CheckpointStoreConfig, OperatorStateBackendConfig};
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
@@ -34,6 +36,8 @@ pub struct PipelineSpec {
     pub parallelism: usize,
     #[serde(default)]
     pub worker_runtime: WorkerRuntimeSpec,
+    #[serde(default)]
+    pub state: StateSpec,
     #[serde(default)]
     pub operator_overrides: OperatorOverrides,
     /// Pipeline-wide watermark / window lateness defaults (not via operator_overrides).
@@ -71,6 +75,7 @@ impl PipelineSpecBuilder {
                 execution_mode: ExecutionMode::Streaming,
                 parallelism: 1,
                 worker_runtime: WorkerRuntimeSpec::default(),
+                state: StateSpec::default(),
                 operator_overrides: OperatorOverrides::default(),
                 event_time: EventTimeSpec::default(),
                 sources: Vec::new(),
@@ -150,8 +155,16 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_window_state_namespace(mut self, ns: impl Into<String>) -> Self {
-        self.spec.worker_runtime.window_state_namespace = ns.into();
+    pub fn with_checkpoint_store(mut self, checkpoint_store: CheckpointStoreConfig) -> Self {
+        self.spec.state.checkpoint_store = checkpoint_store;
+        self
+    }
+
+    pub fn with_operator_state_backend(
+        mut self,
+        operator_backend: OperatorStateBackendConfig,
+    ) -> Self {
+        self.spec.state.operator_backend = operator_backend;
         self
     }
 
@@ -212,15 +225,29 @@ impl PipelineSpecBuilder {
     }
 
     pub fn build(self) -> PipelineSpec {
-        // assert that the execution profile is set
-        if self.spec.execution_profile.is_none() {
-            panic!("Execution profile must be set");
-        }
+        self.spec
+            .validate()
+            .unwrap_or_else(|error| panic!("invalid pipeline spec: {error}"));
         self.spec
     }
 }
 
 impl PipelineSpec {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.execution_profile.is_none() {
+            return Err("execution profile must be set".to_string());
+        }
+        if self.execution_mode == ExecutionMode::Request
+            && self.state.operator_backend == OperatorStateBackendConfig::InMemory
+        {
+            return Err(
+                "request mode requires a shared operator state backend; in_memory is streaming-only"
+                    .to_string(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn transport_overrides_queue_records(&self) -> HashMap<String, u32> {
         let mut out = HashMap::new();
         for (op_id, ov) in &self.operator_overrides.per_operator {

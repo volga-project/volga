@@ -4,7 +4,7 @@
 
 - [x] Master-driven, monotonic, single-in-flight checkpoint trigger (interval from `runtime_consts`; `0s` disables).
 - [x] Validate checkpoint acknowledgements against the exact expected task set.
-- [x] Fail restoration when a checkpointable task has no checkpoint blobs.
+- [x] Fail worker configuration when a checkpointable task has no restore data.
 - [x] Fence checkpoint triggers and reports with `execution_attempt_id`.
 - [x] Prevent overlapping checkpoints (single-in-flight; timeout aborts and recovers).
 - [x] Lifecycle events: `CheckpointStarted` / `CheckpointCompleted` / `CheckpointFailed`.
@@ -13,7 +13,7 @@
 
 ## Remaining
 
-- Window operator checkpoint/restore coverage (operator suite: blobs + state; later aggregate / twin-run). Interface is ready; not in harness e2e.
+- Window operator checkpoint/restore coverage (operator suite: data + state; later aggregate / twin-run). Interface is ready; not in harness e2e.
 - Exactly-once sink commit protocols (Kafka transactions / lake table commits).
 - Metrics for checkpoint in-flight age / ack lag.
 - Use propagation events for timeout localization (which task is stuck).

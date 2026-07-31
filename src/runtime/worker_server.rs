@@ -2,6 +2,7 @@ use tonic::{Request, Response, Status};
 use tonic::transport::Endpoint;
 use std::sync::Arc;
 use std::pin::Pin;
+use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
@@ -10,6 +11,7 @@ use tokio_stream::Stream;
 
 use crate::orchestrator::orchestrator::WorkerOrchestrator;
 use crate::common::types::PipelineId;
+use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::consts::{
     runtime_consts, WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT, WORKER_HEARTBEAT_SEND_INTERVAL,
     WORKER_REGISTER_CONNECT_TIMEOUT, WORKER_REGISTER_MAX_RETRIES, WORKER_REGISTER_RETRY_DELAY,
@@ -17,6 +19,7 @@ use crate::runtime::consts::{
 };
 use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
+use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::worker_config_utils::{build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type, WorkerInitPayload};
 use crate::runtime::worker::{Worker, WorkerConfig};
 
@@ -84,6 +87,8 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<ConfigureWorkerRequest>,
     ) -> Result<Response<ConfigureWorkerResponse>, Status> {
         let req = request.into_inner();
+        let execution_attempt_id = req.execution_attempt_id;
+        let restoring = req.restoring;
         let payload_len = req.init_payload_bytes.len();
         let payload: WorkerInitPayload = serde_json::from_slice(&req.init_payload_bytes)
             .map_err(|e| {
@@ -93,6 +98,7 @@ impl WorkerService for WorkerServiceImpl {
                 ))
             })?;
         let spec = payload.pipeline_spec.clone();
+        spec.validate().map_err(Status::invalid_argument)?;
         let execution_graph = build_execution_graph(&spec, &payload.task_worker_mapping);
         let execution_graph_signature = execution_graph.signature();
 
@@ -101,6 +107,65 @@ impl WorkerService for WorkerServiceImpl {
             .iter()
             .map(|v| Arc::<str>::from(v.as_str()))
             .collect::<Vec<_>>();
+        let mut task_restore_data = HashMap::new();
+        for task_restore in req.task_restore_data {
+            let task = TaskKey {
+                vertex_id: task_restore.vertex_id,
+                task_index: task_restore.task_index,
+            };
+            let restore = SerializedRestore::new(task_restore.restore_data);
+            if task_restore_data.insert(task.clone(), restore).is_some() {
+                return Err(Status::invalid_argument(format!(
+                    "duplicate restore data for {} index={}",
+                    task.vertex_id, task.task_index
+                )));
+            }
+        }
+        for task in task_restore_data.keys() {
+            let Some(vertex) = execution_graph.get_vertex(&task.vertex_id) else {
+                return Err(Status::invalid_argument(format!(
+                    "restore data references unknown task {}",
+                    task.vertex_id
+                )));
+            };
+            if !vertex_ids
+                .iter()
+                .any(|id| id.as_ref() == task.vertex_id.as_str())
+                || vertex.task_index != task.task_index
+            {
+                return Err(Status::invalid_argument(format!(
+                    "restore data is not assigned to this worker for {} index={}",
+                    task.vertex_id, task.task_index
+                )));
+            }
+            if !operator_config_requires_checkpoint(&vertex.operator_config) {
+                return Err(Status::invalid_argument(format!(
+                    "restore data provided for non-checkpointable task {} index={}",
+                    task.vertex_id, task.task_index
+                )));
+            }
+        }
+        for vertex_id in &vertex_ids {
+            let vertex = execution_graph
+                .get_vertex(vertex_id.as_ref())
+                .expect("configured vertex must exist");
+            let key = TaskKey {
+                vertex_id: vertex_id.as_ref().to_string(),
+                task_index: vertex.task_index,
+            };
+            let requires_restore = operator_config_requires_checkpoint(&vertex.operator_config);
+            if restoring && requires_restore && !task_restore_data.contains_key(&key) {
+                return Err(Status::invalid_argument(format!(
+                    "missing restore data for {} index={}",
+                    key.vertex_id, key.task_index
+                )));
+            }
+        }
+        if !restoring && !task_restore_data.is_empty() {
+            return Err(Status::invalid_argument(
+                "restore data provided for a fresh execution attempt",
+            ));
+        }
 
         let transport_backend_type = resolve_transport_backend_type(&execution_graph, &payload.vertex_ids);
         let num_threads_per_task = resolve_num_threads_per_task(&spec);
@@ -113,14 +178,13 @@ impl WorkerService for WorkerServiceImpl {
             num_threads_per_task.max(1),
             transport_backend_type,
         );
-        worker_config.execution_attempt_id = req.execution_attempt_id;
-        worker_config.restore_checkpoint_id = payload.restore_checkpoint_id;
+        worker_config.execution_attempt_id = execution_attempt_id;
+        worker_config.task_restore_data = task_restore_data;
         let master_addr = self.orchestrator.get_master_service_addr().await;
         if !master_addr.is_empty() {
             worker_config.master_addr = Some(master_addr);
         }
-        worker_config.window_state_namespace =
-            spec.worker_runtime.window_state_namespace.clone();
+        worker_config.operator_state_backend = spec.state.operator_backend.clone();
 
         let mut worker_guard = self.worker.lock().await;
         if worker_guard.is_running() {

@@ -7,6 +7,7 @@ use tonic::Code;
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
+use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::worker_config_utils::WorkerInitPayload;
 use crate::runtime::consts::{
@@ -18,7 +19,7 @@ use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
     worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
     ShutdownWorkerRequest, StopSourcesRequest, ConfigureWorkerRequest, GetWorkerStateRequest,
-    RunWorkerTasksRequest, StartWorkerRequest, TriggerCheckpointBarrierRequest,
+    RunWorkerTasksRequest, StartWorkerRequest, TaskRestoreData, TriggerCheckpointBarrierRequest,
 };
 
 enum Attempt<T> {
@@ -169,7 +170,8 @@ impl WorkerClient {
         spec: PipelineSpec,
         vertex_ids: Vec<String>,
         task_worker_mapping: TaskWorkerMapping,
-        restore_checkpoint_id: Option<u64>,
+        task_restore_data: Vec<(TaskKey, SerializedRestore)>,
+        restoring: bool,
     ) -> Result<String, WorkerCallError> {
         let payload = WorkerInitPayload {
             worker_id: worker_id.clone(),
@@ -177,19 +179,29 @@ impl WorkerClient {
             pipeline_spec: spec,
             vertex_ids,
             task_worker_mapping,
-            restore_checkpoint_id,
         };
         let init_payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| WorkerCallError::Rejected(e.to_string()))?;
+        let task_restore_data = task_restore_data
+            .into_iter()
+            .map(|(task, restore)| TaskRestoreData {
+                vertex_id: task.vertex_id,
+                task_index: task.task_index,
+                restore_data: restore.into_bytes(),
+            })
+            .collect::<Vec<_>>();
 
         let execution_attempt_id = self.execution_attempt_id;
         let response = self
             .rpc("configure", |mut client| {
             let init_payload_bytes = init_payload_bytes.clone();
+            let task_restore_data = task_restore_data.clone();
             async move {
                 client.configure_worker(tonic::Request::new(ConfigureWorkerRequest {
                         init_payload_bytes,
                         execution_attempt_id,
+                        task_restore_data,
+                        restoring,
                     })).await
             }
             })

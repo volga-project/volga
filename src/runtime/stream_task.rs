@@ -1,6 +1,7 @@
 use crate::{
     common::MAX_WATERMARK_VALUE,
     runtime::{
+        checkpoint::{SerializedCheckpoint, SerializedRestore},
         collector::Collector,
         execution_graph::ExecutionGraph,
         health::{WorkerFatalReason, WorkerHealth},
@@ -132,7 +133,7 @@ pub struct StreamTask {
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>, // upstream_vertex_id -> watermark_value
     current_watermark: Arc<AtomicU64>,
     master_addr: Option<String>,
-    restore_checkpoint_id: Option<u64>,
+    restore_data: Option<SerializedRestore>,
     execution_attempt_id: u64,
     worker_health: Arc<WorkerHealth>,
 }
@@ -145,6 +146,7 @@ impl StreamTask {
         runtime_context: RuntimeContext,
         execution_graph: ExecutionGraph,
         worker_health: Arc<WorkerHealth>,
+        restore_data: Option<SerializedRestore>,
     ) -> Self {
         init_metrics();
         let master_addr = runtime_context
@@ -152,10 +154,6 @@ impl StreamTask {
             .get("master_addr")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let restore_checkpoint_id = runtime_context
-            .job_config()
-            .get("restore_checkpoint_id")
-            .and_then(|v| v.as_u64());
         let execution_attempt_id = runtime_context
             .job_config()
             .get("execution_attempt_id")
@@ -196,72 +194,9 @@ impl StreamTask {
             upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
             current_watermark: Arc::new(AtomicU64::new(0)),
             master_addr,
-            restore_checkpoint_id,
+            restore_data,
             execution_attempt_id,
             worker_health,
-        }
-    }
-
-    async fn restore_from_master_if_configured(
-        operator: &mut dyn OperatorTrait,
-        master_client: &mut Option<MasterServiceClient<tonic::transport::Channel>>,
-        restore_checkpoint_id: Option<u64>,
-        vertex_id: &str,
-        task_index: i32,
-    ) -> Result<()> {
-        let Some(restore_checkpoint_id) = restore_checkpoint_id else {
-            return Ok(());
-        };
-        let Some(client) = master_client.as_mut() else {
-            return Ok(());
-        };
-
-        println!(
-            "[CHECKPOINT] {} task_index={} restoring from checkpoint_id={}",
-            vertex_id, task_index, restore_checkpoint_id
-        );
-
-        let req = crate::runtime::master::server::master_service::GetTaskCheckpointRequest {
-            checkpoint_id: restore_checkpoint_id,
-            vertex_id: vertex_id.to_string(),
-            task_index,
-        };
-        let resp = client
-            .get_task_checkpoint(tonic::Request::new(req))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get task checkpoint: {}", e))?
-            .into_inner();
-
-        if resp.success && !resp.blobs.is_empty() {
-            println!(
-                "[CHECKPOINT] {} restore found {} blobs",
-                vertex_id,
-                resp.blobs.len()
-            );
-            let blobs = resp
-                .blobs
-                .into_iter()
-                .map(|b| (b.name, b.bytes))
-                .collect::<Vec<_>>();
-            operator.restore(&blobs).await?;
-            println!("[CHECKPOINT] {} restore applied", vertex_id);
-            Ok(())
-        } else if crate::runtime::operators::operator::operator_config_requires_checkpoint(
-            operator.operator_config(),
-        ) {
-            Err(anyhow::anyhow!(
-                "checkpointable task {} index={} missing blobs for restore checkpoint_id={} success={}",
-                vertex_id,
-                task_index,
-                restore_checkpoint_id,
-                resp.success
-            ))
-        } else {
-            println!(
-                "[CHECKPOINT] {} restore had no blobs (success={})",
-                vertex_id, resp.success
-            );
-            Ok(())
         }
     }
 
@@ -535,7 +470,7 @@ impl StreamTask {
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
         let master_addr = self.master_addr.clone();
-        let restore_checkpoint_id = self.restore_checkpoint_id;
+        let restore_data = self.restore_data.take();
         let execution_attempt_id = self.execution_attempt_id;
         let worker_health = self.worker_health.clone();
         let run_loop_health = worker_health.clone();
@@ -606,7 +541,7 @@ impl StreamTask {
                 collector.start().await;
             }
 
-            // Optional master client (used for restore + checkpoint reporting)
+            // Optional master client used for checkpoint reporting.
             let mut master_client: Option<MasterServiceClient<tonic::transport::Channel>> = if let Some(master_addr) = master_addr {
                 let endpoint = format!("http://{}", master_addr);
                 Some(
@@ -624,14 +559,10 @@ impl StreamTask {
             // Optional restore hook (after open, before run).
             // Important: some operators (e.g. sources) initialize internal state in open();
             // restoring before open would be overwritten by that initialization.
-            Self::restore_from_master_if_configured(
-                &mut operator,
-                &mut master_client,
-                restore_checkpoint_id,
-                &vertex_id,
-                runtime_context.task_index(),
-            )
-            .await?;
+            if let Some(restore) = restore_data {
+                operator.restore(restore).await?;
+                println!("[CHECKPOINT] {} restore applied", vertex_id);
+            }
 
             // if task is not finished/closed early, mark as opened
             if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
@@ -772,12 +703,9 @@ impl StreamTask {
                                     "[CHECKPOINT] {} checkpointing checkpoint_id={}",
                                     vertex_id, checkpoint_id
                                 );
-                                let blobs = operator.checkpoint(checkpoint_id).await?;
-                                println!(
-                                    "[CHECKPOINT] {} checkpointed {} blobs, reporting...",
-                                    vertex_id,
-                                    blobs.len()
-                                );
+                                let checkpoint: SerializedCheckpoint =
+                                    operator.checkpoint(checkpoint_id).await?;
+                                let checkpoint_data = checkpoint.into_bytes();
 
                                 let report_resp = master_client
                                     .as_mut()
@@ -787,10 +715,7 @@ impl StreamTask {
                                             checkpoint_id,
                                             vertex_id: vertex_id.as_ref().to_string(),
                                             task_index: runtime_context.task_index(),
-                                            blobs: blobs
-                                                .into_iter()
-                                                .map(|(name, bytes)| crate::runtime::master::server::master_service::StateBlob { name, bytes })
-                                                .collect(),
+                                            checkpoint_data,
                                             execution_attempt_id,
                                         },
                                     ))
