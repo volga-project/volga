@@ -41,6 +41,7 @@ pub struct StateVersion {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WindowBackendSnapshot {
+    /// Development/test-only inline snapshot.
     InMemory { snapshot: Vec<u8> },
     Versioned { version: StateVersion },
 }

@@ -154,7 +154,9 @@ partitioning, publication, fencing, caching, and cleanup. They must preserve:
 `InMemWindowStore` is the reference backend. It keeps partition state in memory,
 uses one read lock as the WRO snapshot boundary, and embeds complete namespace
 snapshots, including durable triggers, in checkpoint data. Its live state
-remains process-local and is not a cross-worker backend.
+remains process-local and is not a cross-worker backend. It is intended only
+for development and tests: inline checkpoint snapshots are limited to 3 MiB to
+stay below the gRPC control-plane message limit.
 
 ## Checkpoint and restore
 
