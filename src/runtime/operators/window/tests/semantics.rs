@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use datafusion::scalar::ScalarValue;
 
+use crate::runtime::checkpoint::SerializedRestore;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::window::model::Cursor;
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
@@ -229,6 +230,34 @@ async fn keys_and_namespaces_are_isolated() {
     assert_eq!(
         request_sum(&mut right.wro, "A", 1000).await,
         ScalarValue::Float64(Some(10.0))
+    );
+}
+
+#[tokio::test]
+async fn operator_checkpoint_restores_into_fresh_store() {
+    let exec = window_exec_from_sql(SQL).await;
+    let mut original = Harness::new(WindowOperatorConfig::new(exec.clone())).await;
+    original
+        .ingest(
+            batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]),
+            "A",
+        )
+        .await;
+    let _ = original.watermark_and_output(2000).await;
+    let _ = original.drain_passthrough_watermark().await;
+
+    let checkpoint = original.op.checkpoint(1).await.expect("checkpoint");
+    let mut restored = Harness::new(WindowOperatorConfig::new(exec)).await;
+    restored
+        .op
+        .restore(SerializedRestore::new(checkpoint.into_bytes()))
+        .await
+        .expect("restore");
+
+    let mut wro = open_wro(restored.store.clone(), restored.namespace.clone()).await;
+    assert_eq!(
+        request_sum(&mut wro, "A", 2000).await,
+        ScalarValue::Float64(Some(3.0))
     );
 }
 

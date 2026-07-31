@@ -85,3 +85,86 @@ impl RestorePlanner {
         SerializedRestore::new(checkpoint.into_bytes())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use arrow::datatypes::Schema;
+
+    use super::*;
+    use crate::runtime::execution_graph::ExecutionVertex;
+    use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSpec};
+    use crate::runtime::operators::source::source_operator::SourceConfig;
+
+    fn replayable_source() -> OperatorConfig {
+        let spec = DatagenSpec {
+            rate: None,
+            limit: None,
+            run_for_s: None,
+            batch_size: 1,
+            fields: HashMap::new(),
+            replayable: true,
+        };
+        OperatorConfig::SourceConfig(SourceConfig::DatagenSourceConfig(
+            DatagenSourceConfig::new(Arc::new(Schema::empty()), spec),
+        ))
+    }
+
+    fn graph(task: &TaskKey) -> ExecutionGraph {
+        let mut graph = ExecutionGraph::new();
+        graph.add_vertex(ExecutionVertex::new(
+            task.vertex_id.clone(),
+            "source".to_string(),
+            replayable_source(),
+            1,
+            task.task_index,
+        ));
+        graph
+    }
+
+    #[test]
+    fn same_assignment_preserves_operator_checkpoint_bytes() {
+        let task = TaskKey {
+            vertex_id: "source-0".to_string(),
+            task_index: 0,
+        };
+        let bytes = vec![1, 2, 3];
+        let checkpoint = CompletedCheckpoint {
+            checkpoint_id: 7,
+            tasks: HashMap::from([(
+                task.clone(),
+                SerializedCheckpoint::new(bytes.clone()),
+            )]),
+        };
+
+        let mut plan = RestorePlanner::plan(checkpoint, &graph(&task)).unwrap();
+
+        assert_eq!(plan.tasks.remove(&task).unwrap().into_bytes(), bytes);
+        assert!(plan.tasks.is_empty());
+    }
+
+    #[test]
+    fn rejects_checkpoint_for_different_task_assignment() {
+        let target = TaskKey {
+            vertex_id: "source-0".to_string(),
+            task_index: 0,
+        };
+        let checkpoint_task = TaskKey {
+            vertex_id: "source-1".to_string(),
+            task_index: 0,
+        };
+        let checkpoint = CompletedCheckpoint {
+            checkpoint_id: 8,
+            tasks: HashMap::from([(
+                checkpoint_task,
+                SerializedCheckpoint::new(vec![1]),
+            )]),
+        };
+
+        let error = RestorePlanner::plan(checkpoint, &graph(&target)).unwrap_err();
+
+        assert!(error.to_string().contains("has no state for task source-0"));
+    }
+}
