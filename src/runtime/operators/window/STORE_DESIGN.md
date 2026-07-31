@@ -110,11 +110,11 @@ pub trait WindowOperatorStore: Send + Sync + Debug {
     async fn checkpoint(
         &self,
         namespace: &StateNamespace,
-    ) -> Result<WindowCheckpointMeta>;
+    ) -> Result<WindowBackendSnapshot>;
     async fn restore(
         &self,
         namespace: &StateNamespace,
-        meta: &WindowRestoreMeta,
+        snapshot: &WindowBackendSnapshot,
     ) -> Result<()>;
 }
 #[async_trait]
@@ -139,8 +139,8 @@ pub trait WindowRequestStore: Send + Sync + Debug {
   `ts_column_index` plus `__seq_no` identifies each raw cursor. Retries are
   idempotent.
 - `store_meta` publishes only progress and retention state.
-- `checkpoint` resolves pending writes, flushes them, and returns the backend
-  version at the aligned barrier. It does not serialize window payloads.
+- `checkpoint` resolves pending writes, flushes them, and returns a
+  backend-specific snapshot. Scylla returns only the aligned backend version.
 - `restore` starts store access from the supplied checkpoint base. For Scylla,
   the current fenced attempt inherits reads from that immutable version.
 - The namespace argument scopes checkpoint and restore when one store instance
@@ -153,7 +153,8 @@ pub trait WindowRequestStore: Send + Sync + Debug {
 - Methods must not broaden ranges or return partial results.
 
 `InMemWindowStore` is the reference backend. One lock provides the WRO snapshot
-boundary; asynchronous physical retention is not emulated.
+boundary, and its checkpoint embeds the serialized namespace state.
+Asynchronous physical retention is not emulated.
 
 ## Runtime flows
 
@@ -211,12 +212,9 @@ pub struct StateVersion {
     pub epoch: u64,
 }
 
-pub struct WindowCheckpointMeta {
-    pub version: StateVersion,
-}
-
-pub struct WindowRestoreMeta {
-    pub base_version: StateVersion,
+pub enum WindowBackendSnapshot {
+    InMemory { snapshot: Vec<u8> }, // in mem uses whole snapshot
+    Versioned { version: StateVersion }, // this is for scylla
 }
 ```
 
@@ -227,9 +225,9 @@ It is both the writer fence and the recovery branch ID.
 Epoch is one task-wide counter within an attempt. Every publication, regardless
 of key, gets the next epoch. A new attempt may restart at zero because
 `(attempt, epoch)` remains unique. Scylla stores the two fields separately.
-The process-local in-memory backend keeps cloned snapshots indexed by a local
-version; those versions are valid only while that store instance survives.
-Namespace remains in the operator's checkpoint envelope.
+Scylla uses `WindowBackendSnapshot::Versioned`; the in-memory backend uses
+`InMemory` with a serialized namespace snapshot. Namespace remains in the
+operator's checkpoint envelope.
 
 ### Tables
 
@@ -389,8 +387,8 @@ At an aligned barrier:
 1. Drain all buffered keys to a defined checkpoint frontier.
 2. Resolve all in-flight publication outcomes and flush the backend.
 3. Capture `(current attempt, current task epoch)`.
-4. Return `WindowCheckpointMeta`; master persists it with task/checkpoint
-   identity.
+4. Return `WindowBackendSnapshot::Versioned`; the operator persists it in its
+   checkpoint envelope.
 5. Continue processing at later epochs.
 
 The checkpoint contains no keys or state payloads. For any key, checkpoint
@@ -398,13 +396,15 @@ state is its newest version from the checkpoint attempt with epoch at or below
 the cutoff. Creating a checkpoint does not insert a recovery-base row; that row
 is created only when a new attempt restores this checkpoint.
 
-The operator stores namespace plus `WindowCheckpointMeta` and passes the
-corresponding `WindowRestoreMeta` back to the store on restore. It still does
-not drain `buffered_keys`; checkpoint integration must implement that frontier.
+The operator stores namespace plus `WindowBackendSnapshot` in
+`WindowStateSnapshot`. For unchanged task assignment, restore passes that same
+versioned snapshot back to the store. It still does not drain `buffered_keys`;
+checkpoint integration must implement that frontier.
 
 ### Recovery
 
-1. Master starts the replacement with `WindowRestoreMeta`.
+1. The replacement receives the restored version in
+   `WindowBackendSnapshot::Versioned`.
 2. Create a new attempt, insert
    `window_recovery_bases(new attempt -> restored checkpoint version)`, and
    start epoch at zero. The row must exist before the attempt publishes data.
@@ -491,6 +491,8 @@ only the materialization and merge rules would change.
 
 ### Rescaling
 
-When we introduce key groups, rescaling is simiply re-mapping key-group <->task in-between checkpoints. `WindowRestoreMeta` becomes a key-group-to-base-version
-mapping and window_recovery_bases gain key-group granularity. The core head, raw,
-tile, `KeyState`, WO, and WRO contracts remain unchanged.
+When we introduce key groups, rescaling is simiply re-mapping key-group <->task
+in-between checkpoints. The versioned backend snapshot becomes a
+key-group-to-base-version mapping and `window_recovery_bases` gain key-group
+granularity. The core head, raw, tile, `KeyState`, WO, and WRO contracts remain
+unchanged.
