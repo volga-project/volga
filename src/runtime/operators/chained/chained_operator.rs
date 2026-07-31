@@ -1,3 +1,4 @@
+use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{operators::operator::{create_operator, MessageStream, Operator, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -86,6 +87,14 @@ impl OperatorTrait for ChainedOperator {
             let first_op = &mut self.operators[0];
             first_op.set_input(input);
         }
+    }
+
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        panic!("checkpoint is not implemented for ChainedOperator")
+    }
+
+    async fn restore(&mut self, _restore: SerializedRestore) -> Result<()> {
+        panic!("restore is not implemented for ChainedOperator")
     }
 
     // TODO implement

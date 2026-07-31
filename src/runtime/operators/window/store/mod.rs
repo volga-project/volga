@@ -5,7 +5,7 @@ pub use crate::runtime::operators::window::model::{
     KeyState, PartitionKey, StateNamespace, TileMap,
 };
 pub use backend::{
-    AttemptToken, InMemWindowStore, StateVersion, WindowCheckpointMeta, WindowOperatorStore,
-    WindowRequestStore, WindowRestoreMeta,
+    open_window_operator_store, open_window_request_store, AttemptToken, InMemWindowStore,
+    StateVersion, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore,
 };
 pub use data::{WindowData, WindowView};

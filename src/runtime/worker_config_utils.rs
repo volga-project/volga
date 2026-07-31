@@ -11,9 +11,6 @@ pub struct WorkerInitPayload {
     pub pipeline_spec: PipelineSpec,
     pub vertex_ids: Vec<String>,
     pub task_worker_mapping: TaskWorkerMapping,
-    /// If set, restore operator state from this completed checkpoint on (re)configure.
-    #[serde(default)]
-    pub restore_checkpoint_id: Option<u64>,
 }
 
 pub fn build_execution_graph(

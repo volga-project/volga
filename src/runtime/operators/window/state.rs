@@ -10,7 +10,7 @@ use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
-    PartitionKey, StateNamespace, WindowCheckpointMeta, WindowOperatorStore, WindowRestoreMeta,
+    PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
@@ -25,9 +25,9 @@ pub struct WindowOperatorState {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowOperatorStateCheckpoint {
+pub struct WindowStateSnapshot {
     pub namespace: Vec<u8>,
-    pub store_meta: WindowCheckpointMeta,
+    pub backend: WindowBackendSnapshot,
 }
 
 impl WindowOperatorState {
@@ -53,24 +53,19 @@ impl WindowOperatorState {
         PartitionKey::new(&self.namespace, key)
     }
 
-    pub async fn checkpoint(&self) -> anyhow::Result<WindowOperatorStateCheckpoint> {
-        Ok(WindowOperatorStateCheckpoint {
+    pub async fn checkpoint(&self) -> anyhow::Result<WindowStateSnapshot> {
+        Ok(WindowStateSnapshot {
             namespace: self.namespace.bytes.clone(),
-            store_meta: self.store.checkpoint(&self.namespace).await?,
+            backend: self.store.checkpoint(&self.namespace).await?,
         })
     }
 
-    pub async fn restore(&self, checkpoint: WindowOperatorStateCheckpoint) -> anyhow::Result<()> {
+    pub async fn restore(&self, restore: WindowStateSnapshot) -> anyhow::Result<()> {
         anyhow::ensure!(
-            checkpoint.namespace == self.namespace.bytes,
+            restore.namespace == self.namespace.bytes,
             "window checkpoint namespace does not match runtime namespace",
         );
-        self.store
-            .restore(
-                &self.namespace,
-                &WindowRestoreMeta::from(checkpoint.store_meta),
-            )
-            .await
+        self.store.restore(&self.namespace, &restore.backend).await
     }
 
     /// Insert rows; returns `(dropped_count, max_seen after insert)`.

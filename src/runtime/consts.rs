@@ -29,7 +29,7 @@ pub const MASTER_REGISTRY_WAIT_TICK: &str = "master.registry_wait_tick";
 pub const MASTER_CHECKPOINT_INTERVAL: &str = "master.checkpoint_interval";
 /// Fail the attempt if an in-flight checkpoint does not complete within this budget.
 pub const MASTER_CHECKPOINT_TIMEOUT: &str = "master.checkpoint_timeout";
-/// Max completed checkpoints to retain (ids + blobs). Oldest are pruned; must be ≥ 1.
+/// Max completed checkpoints to retain. Oldest are pruned; must be ≥ 1.
 pub const MASTER_CHECKPOINT_RETENTION: &str = "master.checkpoint_retention";
 pub const KUBE_WORKER_HEALTH_POLL_INTERVAL: &str = "kube.worker_health_poll_interval";
 pub const KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: &str =

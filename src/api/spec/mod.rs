@@ -3,5 +3,6 @@ pub mod event_time;
 pub mod kube;
 pub mod operators;
 pub mod pipeline;
+pub mod state;
 pub mod worker_runtime;
 

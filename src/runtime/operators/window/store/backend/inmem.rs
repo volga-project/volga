@@ -1,18 +1,20 @@
 //! In-memory window store implementation and behavior tests.
 
 use std::collections::{BTreeMap, HashMap};
+use std::io::Cursor as IoCursor;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use arrow::array::RecordBatch;
+use arrow::ipc::reader::FileReader;
+use arrow::ipc::writer::FileWriter;
 use async_trait::async_trait;
-use tokio::sync::{Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
 
-use super::{
-    StateVersion, WindowCheckpointMeta, WindowOperatorStore, WindowRequestStore, WindowRestoreMeta,
-};
+use super::{WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     KeyState, PartitionKey, StateNamespace, TileMap, WindowData,
@@ -25,17 +27,23 @@ struct PartitionState {
     tiles: TileMap,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 struct InMemCheckpoint {
     namespace: Vec<u8>,
-    partitions: HashMap<PartitionKey, PartitionState>,
+    partitions: HashMap<PartitionKey, PartitionCheckpoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PartitionCheckpoint {
+    meta: KeyState,
+    raw: BTreeMap<Cursor, Vec<u8>>,
+    tiles: TileMap,
 }
 
 /// Reference backend. One read lock is the WRO snapshot boundary.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
     partitions: Arc<RwLock<HashMap<PartitionKey, PartitionState>>>,
-    checkpoints: Arc<Mutex<Vec<InMemCheckpoint>>>,
 }
 
 impl InMemWindowStore {
@@ -66,6 +74,23 @@ impl InMemWindowStore {
             );
         }
         out
+    }
+
+    fn encode_batch(batch: &RecordBatch) -> Result<Vec<u8>> {
+        let mut bytes = Vec::new();
+        {
+            let mut writer = FileWriter::try_new(&mut bytes, batch.schema().as_ref())?;
+            writer.write(batch)?;
+            writer.finish()?;
+        }
+        Ok(bytes)
+    }
+
+    fn decode_batch(bytes: &[u8]) -> Result<RecordBatch> {
+        FileReader::try_new(IoCursor::new(bytes), None)?
+            .next()
+            .transpose()?
+            .ok_or_else(|| anyhow!("in-memory checkpoint contains an empty Arrow payload"))
     }
 }
 
@@ -127,51 +152,75 @@ impl WindowOperatorStore for InMemWindowStore {
         Ok(())
     }
 
-    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowCheckpointMeta> {
+    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
         self.flush().await?;
-        let snapshot = self
-            .partitions
-            .read()
-            .await
+        let partitions = self.partitions.read().await;
+        let snapshot = partitions
             .iter()
             .filter(|(partition, _)| partition.namespace.as_slice() == namespace.bytes.as_slice())
-            .map(|(partition, state)| (partition.clone(), state.clone()))
-            .collect();
-        let mut checkpoints = self.checkpoints.lock().await;
-        let epoch = checkpoints.len() as u64;
-        checkpoints.push(InMemCheckpoint {
+            .map(|(partition, state)| {
+                let raw = state
+                    .raw
+                    .iter()
+                    .map(|(cursor, batch)| Ok((*cursor, Self::encode_batch(batch)?)))
+                    .collect::<Result<_>>()?;
+                Ok((
+                    partition.clone(),
+                    PartitionCheckpoint {
+                        meta: state.meta.clone(),
+                        raw,
+                        tiles: state.tiles.clone(),
+                    },
+                ))
+            })
+            .collect::<Result<_>>()?;
+        let checkpoint = InMemCheckpoint {
             namespace: namespace.bytes.clone(),
             partitions: snapshot,
-        });
-        Ok(WindowCheckpointMeta {
-            version: StateVersion {
-                attempt: b"in-memory".to_vec(),
-                epoch,
-            },
+        };
+        Ok(WindowBackendSnapshot::InMemory {
+            snapshot: bincode::serialize(&checkpoint)?,
         })
     }
 
-    async fn restore(&self, namespace: &StateNamespace, meta: &WindowRestoreMeta) -> Result<()> {
-        let version = &meta.base_version;
-        anyhow::ensure!(
-            version.attempt.as_slice() == b"in-memory",
-            "checkpoint belongs to a different window store backend",
-        );
-        let checkpoint = self
-            .checkpoints
-            .lock()
-            .await
-            .get(version.epoch as usize)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("in-memory window checkpoint is unavailable"))?;
+    async fn restore(
+        &self,
+        namespace: &StateNamespace,
+        restore: &WindowBackendSnapshot,
+    ) -> Result<()> {
+        let WindowBackendSnapshot::InMemory { snapshot } = restore else {
+            return Err(anyhow!(
+                "in-memory window store requires in-memory restore data"
+            ));
+        };
+        let checkpoint: InMemCheckpoint = bincode::deserialize(snapshot)?;
         anyhow::ensure!(
             checkpoint.namespace.as_slice() == namespace.bytes.as_slice(),
             "in-memory checkpoint namespace does not match runtime namespace",
         );
+        let restored = checkpoint
+            .partitions
+            .into_iter()
+            .map(|(partition, state)| {
+                let raw = state
+                    .raw
+                    .into_iter()
+                    .map(|(cursor, bytes)| Ok((cursor, Self::decode_batch(&bytes)?)))
+                    .collect::<Result<_>>()?;
+                Ok((
+                    partition,
+                    PartitionState {
+                        meta: state.meta,
+                        raw,
+                        tiles: state.tiles,
+                    },
+                ))
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
         let mut partitions = self.partitions.write().await;
         partitions
             .retain(|partition, _| partition.namespace.as_slice() != namespace.bytes.as_slice());
-        partitions.extend(checkpoint.partitions);
+        partitions.extend(restored);
         Ok(())
     }
 }
@@ -201,7 +250,7 @@ mod tests {
 
     use crate::runtime::operators::window::aggs::test_utils;
     use crate::runtime::operators::window::model::{TileRun, TimeGranularity, WindowTiles};
-    use crate::runtime::operators::window::store::data::RowIdx;
+    use crate::runtime::operators::window::store::{data::RowIdx, StateVersion};
 
     fn partition() -> PartitionKey {
         PartitionKey {
@@ -543,5 +592,135 @@ mod tests {
                 (TimeGranularity::Seconds(1), 2_000),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_restores_complete_namespace_into_fresh_store() {
+        let source = InMemWindowStore::new();
+        let partition = partition();
+        let namespace = StateNamespace::new(&partition.namespace);
+        let mut meta = KeyState {
+            max_seen: Some(Cursor::new(2_000, 2)),
+            processed_pos: Some(Cursor::new(1_000, 1)),
+            first_ingested: Some(Cursor::new(1_000, 1)),
+            next_seq: 3,
+            retention_floor: Some(Cursor::new(500, 0)),
+            ..Default::default()
+        };
+        meta.accumulators
+            .insert(7, vec![datafusion::scalar::ScalarValue::Float64(Some(3.0))]);
+        source
+            .commit_events(
+                &partition,
+                0,
+                &batch(&[(1_000, 1), (2_000, 2)]),
+                &tiles(&[(TimeGranularity::Seconds(1), 1_000, 7)]),
+                &meta,
+            )
+            .await
+            .unwrap();
+
+        let checkpoint = source.checkpoint(&namespace).await.unwrap();
+        let restored = InMemWindowStore::new();
+        restored.restore(&namespace, &checkpoint).await.unwrap();
+
+        assert_meta(&restored.load_meta(&partition).await.unwrap(), &meta);
+        assert_eq!(
+            raw_cursors(
+                &restored
+                    .load_raw(&partition, &[raw_run((0, 0), (3_000, 0))])
+                    .await
+                    .unwrap()
+            ),
+            vec![Cursor::new(1_000, 1), Cursor::new(2_000, 2)]
+        );
+        assert_eq!(
+            tile_keys(
+                &restored
+                    .load_tiles(
+                        &partition,
+                        &[TileRun {
+                            granularity: TimeGranularity::Seconds(1),
+                            start_ts: 0,
+                            end_ts_exclusive: 2_000,
+                        }]
+                    )
+                    .await
+                    .unwrap()
+            ),
+            vec![(TimeGranularity::Seconds(1), 1_000)]
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_replaces_only_the_checkpoint_namespace() {
+        let source = InMemWindowStore::new();
+        let checkpoint_partition = partition();
+        let checkpoint_namespace = StateNamespace::new(&checkpoint_partition.namespace);
+        source
+            .store_meta(
+                &checkpoint_partition,
+                &KeyState {
+                    next_seq: 11,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let checkpoint = source.checkpoint(&checkpoint_namespace).await.unwrap();
+
+        let restored = InMemWindowStore::new();
+        let other_partition = PartitionKey {
+            namespace: b"other-namespace".to_vec(),
+            business_key: b"other-key".to_vec(),
+        };
+        restored
+            .store_meta(
+                &other_partition,
+                &KeyState {
+                    next_seq: 22,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        restored
+            .restore(&checkpoint_namespace, &checkpoint)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            restored
+                .load_meta(&checkpoint_partition)
+                .await
+                .unwrap()
+                .next_seq,
+            11
+        );
+        assert_eq!(
+            restored.load_meta(&other_partition).await.unwrap().next_seq,
+            22
+        );
+    }
+
+    #[tokio::test]
+    async fn in_memory_restore_rejects_version_checkpoint() {
+        let store = InMemWindowStore::new();
+        let error = store
+            .restore(
+                &StateNamespace::new("test-namespace"),
+                &WindowBackendSnapshot::Versioned {
+                    version: StateVersion {
+                        attempt: b"attempt".to_vec(),
+                        epoch: 1,
+                    },
+                },
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("requires in-memory restore data"));
     }
 }

@@ -8,7 +8,9 @@ use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
 
 use crate::api::PipelineSpec;
+use crate::common::types::PipelineId;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerNode};
+use crate::runtime::checkpoint::{RestorePlan, SerializedCheckpoint};
 use crate::runtime::consts::{
     runtime_consts, MASTER_CHECKPOINT_RETENTION, MASTER_REGISTRY_WAIT_TICK,
 };
@@ -17,7 +19,8 @@ use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 use super::checkpoint::{
-    CheckpointAckOutcome, CheckpointStartError, Checkpoints, TaskKey,
+    create_checkpoint_store, CheckpointAckOutcome, CheckpointStartError, Checkpoints,
+    RestorePlanner, TaskKey,
 };
 use super::events::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord, LifecycleJournal,
@@ -228,6 +231,8 @@ impl MasterState {
     }
 
     pub(super) async fn configure(&self, config: MasterConfig) {
+        let pipeline_id = PipelineId(self.orchestrator.get_pipeline_id().await);
+        let checkpoint_store = create_checkpoint_store(&config.spec.state.checkpoint_store);
         let expected_acks = Self::checkpointable_tasks_for_graph(&config.execution_graph);
         let expected_aligns = config
             .execution_graph
@@ -239,9 +244,11 @@ impl MasterState {
             .collect();
         let retention = runtime_consts().u64(MASTER_CHECKPOINT_RETENTION) as usize;
         self.checkpoints.lock().await.configure(
+            pipeline_id,
             expected_acks.into_iter().collect(),
             expected_aligns,
             retention,
+            checkpoint_store,
         );
         *self.config.lock().await = Some(config);
     }
@@ -290,8 +297,14 @@ impl MasterState {
         &self,
         attempt_id: u64,
         detail: String,
-    ) -> Option<u64> {
-        let checkpoint_id = self.checkpoints.lock().await.abort_in_flight();
+    ) -> Result<Option<u64>, String> {
+        let checkpoint_id = self
+            .checkpoints
+            .lock()
+            .await
+            .abort_in_flight()
+            .await
+            .map_err(|error| format!("failed to remove aborted checkpoint: {error}"))?;
         if let Some(checkpoint_id) = checkpoint_id {
             self.record_lifecycle_event(LifecycleEvent::CheckpointFailed {
                 checkpoint_id,
@@ -300,7 +313,7 @@ impl MasterState {
             })
             .await;
         }
-        checkpoint_id
+        Ok(checkpoint_id)
     }
 
     pub(super) async fn in_flight_checkpoint_timed_out(&self, timeout: Duration) -> Option<u64> {
@@ -331,6 +344,8 @@ impl MasterState {
                 return Ok(());
             }
             cps.note_barrier_progress(checkpoint_id, task.clone())
+                .await
+                .map_err(|error| format!("failed to update checkpoint store: {error}"))?
         };
 
         self.record_lifecycle_event(LifecycleEvent::CheckpointPropagation {
@@ -353,7 +368,7 @@ impl MasterState {
         &self,
         checkpoint_id: u64,
         task: TaskKey,
-        blobs: Vec<(String, Vec<u8>)>,
+        checkpoint: SerializedCheckpoint,
         execution_attempt_id: u64,
     ) -> Result<(), String> {
         let current = self.current_attempt_id();
@@ -362,24 +377,37 @@ impl MasterState {
                 "stale checkpoint report attempt={execution_attempt_id} current={current}"
             ));
         }
-        if blobs.is_empty() {
+        {
+            let config = self.config.lock().await;
+            let config = config
+                .as_ref()
+                .ok_or_else(|| "master is not configured".to_string())?;
+            let vertex = config
+                .execution_graph
+                .get_vertex(&task.vertex_id)
+                .ok_or_else(|| format!("unknown checkpoint task {}", task.vertex_id))?;
+            if vertex.task_index != task.task_index
+                || !operator_config_requires_checkpoint(&vertex.operator_config)
+            {
+                return Err(format!(
+                    "checkpoint data does not match task {} index={}",
+                    task.vertex_id, task.task_index
+                ));
+            }
+        }
+        if checkpoint.is_empty() {
             return Err(format!(
-                "empty checkpoint blob list for {}:{}",
+                "empty checkpoint data for {} index={}",
                 task.vertex_id, task.task_index
             ));
         }
-        if let Some((name, _)) = blobs.iter().find(|(_, bytes)| bytes.is_empty()) {
-            return Err(format!(
-                "empty checkpoint blob '{name}' for {}:{}",
-                task.vertex_id, task.task_index
-            ));
-        }
-
         let outcome = self
             .checkpoints
             .lock()
             .await
-            .report(checkpoint_id, task, blobs);
+            .report(checkpoint_id, task, checkpoint)
+            .await
+            .map_err(|error| format!("failed to update checkpoint store: {error}"))?;
 
         match outcome {
             CheckpointAckOutcome::Completed => {
@@ -394,12 +422,23 @@ impl MasterState {
         }
     }
 
-    pub(super) async fn task_checkpoint(
-        &self,
-        checkpoint_id: u64,
-        task: TaskKey,
-    ) -> Vec<(String, Vec<u8>)> {
-        self.checkpoints.lock().await.get(checkpoint_id, &task)
+    pub(super) async fn plan_restore(&self, checkpoint_id: u64) -> Result<RestorePlan, String> {
+        let completed = self
+            .checkpoints
+            .lock()
+            .await
+            .load(checkpoint_id)
+            .await
+            .map_err(|error| format!("failed to load checkpoint: {error}"))?;
+        let target_graph = {
+            let config = self.config.lock().await;
+            let config = config
+                .as_ref()
+                .ok_or_else(|| "master is not configured".to_string())?;
+            config.execution_graph.clone()
+        };
+        RestorePlanner::plan(completed, &target_graph)
+            .map_err(|error| format!("failed to plan restore: {error}"))
     }
 
     pub(super) async fn latest_complete_checkpoint(&self) -> Option<u64> {

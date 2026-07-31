@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::api::{compile_logical_graph, PipelineSpec};
 use crate::orchestrator::orchestrator::MasterOrchestrator;
+use crate::runtime::checkpoint::SerializedCheckpoint;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master::checkpoint::TaskKey;
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
@@ -40,6 +41,8 @@ pub struct MasterConfig {
 impl MasterConfig {
     /// Compile `spec` to an execution graph and configure the master.
     pub fn from_spec(spec: PipelineSpec, expected_workers: usize) -> Self {
+        spec.validate()
+            .unwrap_or_else(|error| panic!("invalid pipeline spec: {error}"));
         let execution_graph = compile_logical_graph(&spec, None).to_execution_graph();
         Self {
             spec,
@@ -72,11 +75,11 @@ impl Master {
         &self,
         checkpoint_id: u64,
         task: TaskKey,
-        blobs: Vec<(String, Vec<u8>)>,
+        checkpoint: SerializedCheckpoint,
         execution_attempt_id: u64,
     ) -> Result<(), String> {
         self.state
-            .report_checkpoint(checkpoint_id, task, blobs, execution_attempt_id)
+            .report_checkpoint(checkpoint_id, task, checkpoint, execution_attempt_id)
             .await
     }
 
@@ -90,14 +93,6 @@ impl Master {
         self.state
             .report_checkpoint_propagation(checkpoint_id, task, execution_attempt_id, phase)
             .await
-    }
-
-    pub async fn get_task_checkpoint(
-        &self,
-        checkpoint_id: u64,
-        task: TaskKey,
-    ) -> Vec<(String, Vec<u8>)> {
-        self.state.task_checkpoint(checkpoint_id, task).await
     }
 
     pub async fn get_latest_complete_checkpoint(&self) -> Option<u64> {

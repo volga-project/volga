@@ -1,6 +1,7 @@
 use crate::{common::types::PipelineId, runtime::{
     execution_graph::ExecutionGraph, functions::source::request_source::{RequestSourceProcessor, extract_request_source_config}, metrics::emit_poll_derived_gauges, observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot}, runtime_context::RuntimeContext, state::OperatorStates, stream_task::StreamTask, stream_task_actor::{StreamTaskActor, StreamTaskMessage}
 }};
+use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::VertexId;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::metrics::{MetricsLabels, TaskMetrics, WorkerAggregateMetrics};
@@ -14,13 +15,11 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 // (serde/Result imports removed; this module does not serialize Worker directly)
-use crate::runtime::operators::operator::OperatorType;
+use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
+use crate::runtime::operators::operator::OperatorType;
 use serde_json::Value;
 use crate::runtime::operators::source::SourceHandles;
-use crate::runtime::operators::window::store::{
-    InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore,
-};
 
 use tokio::sync::mpsc;
 
@@ -34,8 +33,9 @@ pub struct WorkerConfig {
     pub num_threads_per_task: usize,
     pub transport_backend_type: TransportBackendType,
     pub master_addr: Option<String>,
-    pub restore_checkpoint_id: Option<u64>,
-    pub window_state_namespace: String,
+    pub task_restore_data: HashMap<TaskKey, SerializedRestore>,
+    pub operator_state_backend: OperatorStateBackendConfig,
+    pub request_store: Option<RequestStoreConfig>,
 }
 
 impl WorkerConfig {
@@ -56,18 +56,14 @@ impl WorkerConfig {
             num_threads_per_task,
             transport_backend_type,
             master_addr: None,
-            restore_checkpoint_id: None,
-            window_state_namespace: "window_state".to_string(),
+            task_restore_data: HashMap::new(),
+            operator_state_backend: OperatorStateBackendConfig::default(),
+            request_store: None,
         }
     }
 
     pub fn with_master_addr(mut self, master_addr: String) -> Self {
         self.master_addr = Some(master_addr);
-        self
-    }
-
-    pub fn with_restore_checkpoint_id(mut self, checkpoint_id: u64) -> Self {
-        self.restore_checkpoint_id = Some(checkpoint_id);
         self
     }
 }
@@ -344,10 +340,6 @@ impl Worker {
             .expect("Worker must be configured before use")
             .clone();
 
-        let window_store = Arc::new(InMemWindowStore::new());
-        let window_state_namespace =
-            StateNamespace::new(config.window_state_namespace.as_bytes());
-
         let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
             TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health.clone())),
         };
@@ -377,9 +369,6 @@ impl Worker {
                     if let Some(master_addr) = &config.master_addr {
                         cfg.insert("master_addr".to_string(), Value::String(master_addr.clone()));
                     }
-                    if let Some(restore_checkpoint_id) = config.restore_checkpoint_id {
-                        cfg.insert("restore_checkpoint_id".to_string(), Value::from(restore_checkpoint_id));
-                    }
                     cfg.insert(
                         "execution_attempt_id".to_string(),
                         Value::from(config.execution_attempt_id),
@@ -390,26 +379,18 @@ impl Worker {
                 },
                 Some(self.operator_states.clone()),
                 Some(config.graph.clone()),
+            )
+            .with_state_config(
+                config.operator_state_backend.clone(),
+                config.request_store.clone(),
+                config.pipeline_id.clone(),
+                vertex.operator_id.clone(),
             );
             runtime_context.set_source_handles(self.source_handles.clone());
             if let Some(request_source_processor) = &self.request_source_processor {
                 runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
                 runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
             }
-            if matches!(
-                &vertex.operator_config,
-                crate::runtime::operators::operator::OperatorConfig::WindowConfig(_)
-                    | crate::runtime::operators::operator::OperatorConfig::WindowRequestConfig(_)
-            ) {
-                runtime_context.set_window_operator_store(
-                    window_store.clone() as Arc<dyn WindowOperatorStore>
-                );
-                runtime_context.set_window_request_store(
-                    window_store.clone() as Arc<dyn WindowRequestStore>
-                );
-                runtime_context.set_window_state_namespace(window_state_namespace.clone());
-            }
-
             // Create the task and its actor in the task's runtime
             let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();
             transport_cfg.set_metrics_labels(MetricsLabels {
@@ -423,6 +404,13 @@ impl Worker {
                 runtime_context,
                 config.graph.clone(),
                 self.health.clone(),
+                config
+                    .task_restore_data
+                    .get(&TaskKey {
+                        vertex_id: vertex_id.as_ref().to_string(),
+                        task_index: vertex.task_index,
+                    })
+                    .cloned(),
             );
             let task_actor = StreamTaskActor::new(task);
             let task_ref = task_runtime.spawn(async{

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use datafusion::scalar::ScalarValue;
 
+use crate::runtime::checkpoint::SerializedRestore;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
 use crate::runtime::operators::window::model::Cursor;
 use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOutputMode};
@@ -14,8 +15,8 @@ use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowOperatorStore,
 };
 use crate::runtime::operators::window::tests::harness::{
-    assert_window_values, batch, key, keyed_message, runtime_context_with_namespace,
-    window_exec_from_sql, Harness, WoWroHarness,
+    assert_window_values, batch, key, keyed_message, runtime_context, window_exec_from_sql,
+    Harness, WoWroHarness,
 };
 
 const SQL: &str = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
@@ -34,8 +35,9 @@ async fn open_wro(
     let mut cfg =
         WindowRequestOperatorConfig::from_window_operator_config(WindowOperatorConfig::new(exec));
     cfg.exclude_current_row = true;
-    let ctx = runtime_context_with_namespace(store, namespace);
+    let ctx = runtime_context();
     let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(cfg));
+    wro.set_state_with_store_and_ns(store, namespace);
     wro.open(&ctx).await.expect("wro open");
     wro
 }
@@ -228,6 +230,34 @@ async fn keys_and_namespaces_are_isolated() {
     assert_eq!(
         request_sum(&mut right.wro, "A", 1000).await,
         ScalarValue::Float64(Some(10.0))
+    );
+}
+
+#[tokio::test]
+async fn operator_checkpoint_restores_into_fresh_store() {
+    let exec = window_exec_from_sql(SQL).await;
+    let mut original = Harness::new(WindowOperatorConfig::new(exec.clone())).await;
+    original
+        .ingest(
+            batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]),
+            "A",
+        )
+        .await;
+    let _ = original.watermark_and_output(2000).await;
+    let _ = original.drain_passthrough_watermark().await;
+
+    let checkpoint = original.op.checkpoint(1).await.expect("checkpoint");
+    let mut restored = Harness::new(WindowOperatorConfig::new(exec)).await;
+    restored
+        .op
+        .restore(SerializedRestore::new(checkpoint.into_bytes()))
+        .await
+        .expect("restore");
+
+    let mut wro = open_wro(restored.store.clone(), restored.namespace.clone()).await;
+    assert_eq!(
+        request_sum(&mut wro, "A", 2000).await,
+        ScalarValue::Float64(Some(3.0))
     );
 }
 
