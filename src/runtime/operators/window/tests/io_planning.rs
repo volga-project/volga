@@ -5,12 +5,12 @@ use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::model::{RawRun, TileRun};
+use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, WindowBackendSnapshot,
-    WindowData, WindowOperatorStore, WindowRequestStore,
+    DueContinuation, DuePage, InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap,
+    WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRequestStore,
 };
 use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, window_exec_from_sql, Harness, WoWroHarness,
@@ -69,14 +69,34 @@ impl WindowOperatorStore for RecordingWindowStore {
         events: &RecordBatch,
         tiles: &TileMap,
         meta: &KeyState,
+        triggers: &[WindowTrigger],
     ) -> Result<()> {
         self.inner
-            .commit_events(partition, ts_column_index, events, tiles, meta)
+            .commit_events(
+                partition,
+                ts_column_index,
+                events,
+                tiles,
+                meta,
+                triggers,
+            )
             .await
     }
 
-    async fn store_meta(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
-        self.inner.store_meta(partition, meta).await
+    async fn load_due_page(
+        &self,
+        namespace: &StateNamespace,
+        after: Option<Cursor>,
+        through: Cursor,
+        continuation: Option<DueContinuation>,
+    ) -> Result<DuePage> {
+        self.inner
+            .load_due_page(namespace, after, through, continuation)
+            .await
+    }
+
+    async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
+        self.inner.commit_advance(partition, meta).await
     }
 
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
@@ -172,13 +192,13 @@ FROM test_table"#;
     );
 
     let raw_reads = recording.raw_reads.lock().unwrap();
-    assert_eq!(raw_reads.len(), 2, "emit discovery + historical edges");
+    assert_eq!(raw_reads.len(), 1, "one merged emit and historical read");
     assert!(
-        raw_reads[1]
+        raw_reads[0]
             .iter()
             .all(|run| !(run.from.ts <= 300_000 && run.to.ts > 300_000)),
         "interior raw rows must not be loaded: {:?}",
-        raw_reads[1]
+        raw_reads[0]
     );
     let tile_reads = recording.tile_reads.lock().unwrap();
     assert!(
@@ -221,13 +241,13 @@ FROM test_table"#;
     );
 
     let raw_reads = recording.raw_reads.lock().unwrap();
-    assert_eq!(raw_reads.len(), 2, "emit discovery + leave-band edges");
+    assert_eq!(raw_reads.len(), 1, "one merged emit and leave-band read");
     assert!(
-        raw_reads[1]
+        raw_reads[0]
             .iter()
             .all(|run| !(run.from.ts <= 120_000 && run.to.ts > 120_000)),
         "leave-band interior raw rows must not be loaded: {:?}",
-        raw_reads[1]
+        raw_reads[0]
     );
     let tile_reads = recording.tile_reads.lock().unwrap();
     assert!(

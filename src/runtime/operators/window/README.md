@@ -32,14 +32,12 @@ half-open logical ranges:
 
 `KeyState` is the WO metadata for one partition:
 
-- `max_seen`: greatest ingested cursor.
-- `processed_pos`: frontier already reflected in streaming results and saved
-  sliding accumulators.
-- `accumulators`: saved state for retractable windows.
-- `first_ingested`: cold-start lower bound.
 - `next_seq`: dense per-key sequence allocator.
-- `retention_floor`: data before this cursor is outside the configured
-  supported horizon.
+- optional evaluation state containing the last fired trigger and saved
+  retractable accumulators. State-only WO does not maintain evaluation state.
+
+The operator separately tracks the last fully processed watermark. It is the
+late-data boundary and is included in the operator checkpoint.
 
 ## Configuration
 
@@ -63,31 +61,32 @@ and `RANGE` frames.
 `WindowOperatorState::insert_batch` performs one partition update:
 
 1. Load `KeyState`.
-2. Drop rows whose generated cursor is at or behind `processed_pos`.
+2. Drop rows whose timestamp is at or behind the task watermark.
 3. Assign the internal `__seq_no` column to accepted rows.
-4. Update `max_seen`, `first_ingested`, and `next_seq`.
+4. Update `next_seq`.
 5. Plan and load every tile bucket touched by the accepted rows.
 6. Update each configured window's accumulator state in those tiles.
-7. Atomically commit raw rows, updated tiles, and metadata through
-   `WindowOperatorStore::commit_events`.
+7. Atomically commit raw rows, updated tiles, metadata, and durable row
+   triggers through `WindowOperatorStore::commit_events`.
 
 The input batch must not contain `__seq_no`; WO owns that column. Late rows are
-dropped relative to the processed cursor, not merely relative to `max_seen`.
+dropped relative to the task watermark, including rows for previously unseen
+keys.
 
 ## WO advance and streaming evaluation
 
-`eval::advance_key` advances one partition to a requested cursor, bounded by
-`max_seen`:
+Emitting WO pages durable triggers through the requested watermark:
 
-1. Load metadata and skip work if the requested frontier is already processed.
-2. Load newly eligible raw rows and derive the exact emit cursors.
+1. Load a backend-sized page of due triggers grouped by partition.
+2. Use trigger cursors as exact emit points.
 3. Build one `EvalPlan` per emitted result and window expression.
-4. Flatten all plan coverage, merge overlapping raw/tile runs, and load the
-   historical data once.
+4. Merge emit-row and historical coverage, then load raw rows and tiles once.
 5. Evaluate each window by sliding or rebuilding.
-6. Save the new accumulator state and `processed_pos`.
-7. Publish `retention_floor` when lateness is configured.
-8. Assemble output rows when `WindowOutputMode::Emit` is enabled.
+6. Save evaluation state through the final trigger.
+7. Advance and forward the watermark after every due page succeeds.
+
+State-only WO publishes raw rows and tiles on ingest but creates no row
+triggers or evaluation state.
 
 Retractable accumulators reuse their saved state. For each result they retract
 the planned leave band, add the new end row, and evaluate. Tile-state
@@ -135,8 +134,8 @@ store access.
 `WindowOperatorStore` is the sole-writer interface:
 
 - load partition metadata and exact raw/tile runs;
-- atomically commit ingest data and metadata;
-- publish metadata after advancement;
+- atomically commit ingest data, metadata, and triggers;
+- page due triggers and publish evaluation state after advancement;
 - flush, checkpoint, and restore a namespace.
 
 `WindowRequestStore` exposes one operation that returns raw rows and tiles from
@@ -154,8 +153,8 @@ partitioning, publication, fencing, caching, and cleanup. They must preserve:
 
 `InMemWindowStore` is the reference backend. It keeps partition state in memory,
 uses one read lock as the WRO snapshot boundary, and embeds complete namespace
-snapshots in checkpoint data. Its live state remains process-local and is not
-a cross-worker backend.
+snapshots, including durable triggers, in checkpoint data. Its live state
+remains process-local and is not a cross-worker backend.
 
 ## Checkpoint and restore
 
@@ -163,6 +162,7 @@ a cross-worker backend.
 namespace, then returns `WindowStateSnapshot` containing:
 
 - the namespace bytes;
+- the last fully processed watermark;
 - backend-specific `WindowBackendSnapshot`.
 
 The operator serializes the snapshot as `SerializedCheckpoint`. The master
@@ -191,7 +191,7 @@ giving evaluators one ordered view.
 ## Module map
 
 ```text
-operator.rs       WO runtime operator and advance policy
+operator.rs       WO runtime operator and watermark processing
 request.rs        WRO runtime operator
 state.rs          WO ingest state plus checkpoint/restore bridge
 spec.rs           shared window runtime settings
@@ -199,7 +199,7 @@ config.rs         DataFusion expression-to-window configuration
 model.rs          cursors, keys, metadata, runs, and tile models
 tile.rs           tile configuration, planning, projection, and updates
 eval/
-  advance.rs      WO multi-phase load planning and advancement
+  advance.rs      trigger-driven WO planning and advancement
   eval_plan.rs    per-result slide/rebuild plans
   coverage_plan.rs exact raw/tile geometry and run merging
   accumulate.rs   apply coverage to DataFusion accumulators
@@ -221,10 +221,10 @@ tests/            WO/WRO semantics, tiling, planning, and matrix coverage
 
 - WO is the only mutator for a partition.
 - Cursor identity and ordering include both timestamp and sequence number.
-- Rows at or behind `processed_pos` are not accepted by streaming ingest.
+- Rows at or behind the task watermark are not accepted by streaming ingest.
 - Raw rows remain sufficient to produce a correct result.
 - Tiles cover only complete aligned intervals selected by the plan.
-- Sliding accumulator state corresponds exactly to `processed_pos`.
+- Sliding accumulator state corresponds exactly to its saved trigger cursor.
 - WRO evaluates one coherent published snapshot and never depends on WO's
   private sliding accumulator.
 - Retention publication is metadata; physical deletion is backend work.

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
-use crate::runtime::operators::window::model::{Cursor, WindowId};
+use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
@@ -27,6 +27,7 @@ pub struct WindowOperatorState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WindowStateSnapshot {
     pub namespace: Vec<u8>,
+    pub watermark_frontier: Option<i64>,
     pub backend: WindowBackendSnapshot,
 }
 
@@ -49,63 +50,61 @@ impl WindowOperatorState {
         self.store.as_ref()
     }
 
+    pub fn namespace(&self) -> &StateNamespace {
+        &self.namespace
+    }
+
     pub fn partition(&self, key: &Key) -> PartitionKey {
         PartitionKey::new(&self.namespace, key)
     }
 
-    pub async fn checkpoint(&self) -> anyhow::Result<WindowStateSnapshot> {
+    pub async fn checkpoint(
+        &self,
+        watermark_frontier: Option<i64>,
+    ) -> anyhow::Result<WindowStateSnapshot> {
         Ok(WindowStateSnapshot {
             namespace: self.namespace.bytes.clone(),
+            watermark_frontier,
             backend: self.store.checkpoint(&self.namespace).await?,
         })
     }
 
-    pub async fn restore(&self, restore: WindowStateSnapshot) -> anyhow::Result<()> {
+    pub async fn restore(&self, restore: WindowStateSnapshot) -> anyhow::Result<Option<i64>> {
         anyhow::ensure!(
             restore.namespace == self.namespace.bytes,
             "window checkpoint namespace does not match runtime namespace",
         );
-        self.store.restore(&self.namespace, &restore.backend).await
+        self.store.restore(&self.namespace, &restore.backend).await?;
+        Ok(restore.watermark_frontier)
     }
 
-    /// Insert rows; returns `(dropped_count, max_seen after insert)`.
-    pub async fn insert_batch(&self, key: &Key, batch: RecordBatch) -> (usize, Option<Cursor>) {
+    pub async fn insert_batch(
+        &self,
+        key: &Key,
+        batch: RecordBatch,
+        watermark_frontier: Option<i64>,
+        schedule_row_triggers: bool,
+    ) -> usize {
         if batch.num_rows() == 0 {
-            return (0, None);
+            return 0;
         }
         let partition = self.partition(key);
 
         let mut key_state = self.store.load_meta(&partition).await.expect("key state");
-        // Drop before seq assign so `next_seq` stays a dense allocator.
         let (accepted, dropped) = drop_late_entries(
             &batch,
             self.ts_column_index,
-            key_state.processed_pos,
-            key_state.next_seq,
+            watermark_frontier,
         );
         if accepted.num_rows() == 0 {
-            return (dropped, key_state.max_seen);
+            return dropped;
         }
 
         let start_seq = key_state.next_seq;
         let with_seq = append_seq_no_column(&accepted, start_seq);
-        // Dedicated allocator (not max_seen.seq — that is ts-first cursor order).
         key_state.next_seq = start_seq
             .checked_add(accepted.num_rows() as u64)
             .expect("per-key sequence exhausted");
-
-        if let Some((batch_min, batch_max)) =
-            cursor_range_from_batch(&with_seq, self.ts_column_index)
-        {
-            key_state.max_seen = Some(match key_state.max_seen {
-                Some(prev) => prev.max(batch_max),
-                None => batch_max,
-            });
-            key_state.first_ingested = Some(match key_state.first_ingested {
-                Some(prev) => prev.min(batch_min),
-                None => batch_min,
-            });
-        }
 
         // Load and update every tile touched by this batch.
         let mut tile_runs = Vec::new();
@@ -142,6 +141,20 @@ impl WindowOperatorState {
             );
         }
 
+        let triggers = if schedule_row_triggers {
+            cursors_from_batch(&with_seq, self.ts_column_index)
+                .expect("stored batch cursor columns")
+                .into_iter()
+                .map(|fire_at| WindowTrigger {
+                    fire_at,
+                    partition: partition.clone(),
+                    kind: WindowTriggerKind::RowEmit,
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
         self.store
             .commit_events(
                 &partition,
@@ -149,10 +162,11 @@ impl WindowOperatorState {
                 &with_seq,
                 &updated_tiles,
                 &key_state,
+                &triggers,
             )
             .await
             .expect("atomic ingest write");
-        (dropped, key_state.max_seen)
+        dropped
     }
 }
 
@@ -180,23 +194,11 @@ fn append_seq_no_column(batch: &RecordBatch, start_seq: u64) -> RecordBatch {
     RecordBatch::try_new(schema, columns).expect("append seq")
 }
 
-/// Min and max cursors in the batch (`None` if empty).
-fn cursor_range_from_batch(
-    batch: &RecordBatch,
-    ts_column_index: usize,
-) -> Option<(Cursor, Cursor)> {
-    let cursors = cursors_from_batch(batch, ts_column_index).ok()?;
-    let min = cursors.iter().copied().min()?;
-    let max = cursors.iter().copied().max()?;
-    Some((min, max))
-}
-
-/// Drop rows at or behind the processed cursor.
+/// Drop rows at or behind the task watermark.
 fn drop_late_entries(
     batch: &RecordBatch,
     ts_column_index: usize,
-    processed_pos: Option<Cursor>,
-    next_seq: u64,
+    watermark_frontier: Option<i64>,
 ) -> (RecordBatch, usize) {
     let ts = batch
         .column(ts_column_index)
@@ -205,11 +207,7 @@ fn drop_late_entries(
         .expect("ts");
     let mut keep = Vec::new();
     for i in 0..batch.num_rows() {
-        let seq_no = next_seq
-            .checked_add(keep.len() as u64)
-            .expect("per-key sequence exhausted");
-        let cursor = Cursor::new(ts.value(i), seq_no);
-        if processed_pos.map_or(true, |processed| cursor > processed) {
+        if watermark_frontier.map_or(true, |watermark| ts.value(i) > watermark) {
             keep.push(i as u32);
         }
     }

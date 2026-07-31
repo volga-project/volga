@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -9,14 +9,13 @@ use async_trait::async_trait;
 use futures::future;
 
 use crate::common::message::Message;
-use crate::common::Key;
 use crate::common::MAX_WATERMARK_VALUE;
 use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
-use crate::runtime::operators::window::eval::advance_key;
+use crate::runtime::operators::window::eval::advance_due_work;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
@@ -65,12 +64,11 @@ pub struct WindowOperator {
     base: OperatorBase,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
     state: Option<Arc<WindowOperatorState>>,
-    buffered_keys: HashSet<Key>,
     output_mode: WindowOutputMode,
+    watermark_frontier: Option<i64>,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     ts_column_index: usize,
-    lateness: Option<i64>,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -105,12 +103,11 @@ impl WindowOperator {
             base: OperatorBase::new(config),
             window_configs: windows,
             state: None,
-            buffered_keys: HashSet::new(),
             output_mode: window_operator_config.output_mode,
+            watermark_frontier: None,
             output_schema: built.output_schema,
             input_schema: built.input_schema,
             ts_column_index: built.ts_column_index,
-            lateness: window_operator_config.spec.lateness,
         }
     }
 
@@ -135,54 +132,46 @@ impl WindowOperator {
             .expect("WindowOperator must be opened first")
     }
 
-    async fn process_key(&self, key: &Key, advance_to: Cursor) -> (RecordBatch, bool) {
-        let emit = self.output_mode == WindowOutputMode::Emit;
-        let partition = self.state_ref().partition(key);
-        let (batch, pending) = advance_key(
-            self.state_ref().store(),
-            &partition,
-            self.window_configs.as_ref(),
-            advance_to,
-            emit,
-            self.ts_column_index,
-            &self.output_schema,
-            &self.input_schema,
-            self.lateness,
-        )
-        .await
-        .expect("advance_key");
-        (batch, pending)
-    }
-
-    async fn process_buffered(
-        &self,
-        keys: Vec<Key>,
-        advance_to: Cursor,
-    ) -> (RecordBatch, HashSet<Key>) {
-        if keys.is_empty() {
-            return (
-                RecordBatch::new_empty(self.output_schema.clone()),
-                HashSet::new(),
+    async fn process_due(&self, through: Cursor) -> RecordBatch {
+        let Some(state) = self.state.as_ref() else {
+            return RecordBatch::new_empty(self.output_schema.clone());
+        };
+        let after = self
+            .watermark_frontier
+            .map(|timestamp| Cursor::new(timestamp, u64::MAX));
+        let mut continuation = None;
+        let mut batches = Vec::new();
+        loop {
+            let page = state
+                .store()
+                .load_due_page(state.namespace(), after, through, continuation)
+                .await
+                .expect("load due window triggers");
+            let futures = page.work.into_iter().map(|work| {
+                advance_due_work(
+                    state.store(),
+                    work,
+                    self.window_configs.as_ref(),
+                    true,
+                    self.ts_column_index,
+                    &self.output_schema,
+                    &self.input_schema,
+                )
+            });
+            batches.extend(
+                future::try_join_all(futures)
+                    .await
+                    .expect("advance due window triggers"),
             );
+            let Some(next) = page.continuation else {
+                break;
+            };
+            continuation = Some(next);
         }
-
-        let futures: Vec<_> = keys
-            .iter()
-            .map(|k| async move { (k.clone(), self.process_key(k, advance_to).await) })
-            .collect();
-        let results = future::join_all(futures).await;
-
-        let mut batches = Vec::with_capacity(results.len());
-        let mut pending_keys = HashSet::new();
-        for (k, (batch, pending)) in results {
-            batches.push(batch);
-            if pending {
-                pending_keys.insert(k);
-            }
+        if batches.is_empty() {
+            return RecordBatch::new_empty(self.output_schema.clone());
         }
-
-        let out = arrow::compute::concat_batches(&self.output_schema, &batches).expect("concat");
-        (out, pending_keys)
+        arrow::compute::concat_batches(&self.output_schema, &batches).expect("concat")
     }
 }
 
@@ -233,15 +222,18 @@ impl OperatorTrait for WindowOperator {
     }
 
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
-        // TODO: Drain buffered keys to a defined checkpoint frontier before flushing.
-        let snapshot = self.state_ref().checkpoint().await?;
+        let snapshot = self
+            .state_ref()
+            .checkpoint(self.watermark_frontier)
+            .await?;
         Ok(SerializedCheckpoint::new(bincode::serialize(&snapshot)?))
     }
 
     async fn restore(&mut self, restore: SerializedRestore) -> Result<()> {
         let bytes = restore.into_bytes();
         let snapshot: WindowStateSnapshot = bincode::deserialize(&bytes)?;
-        self.state_ref().restore(snapshot).await
+        self.watermark_frontier = self.state_ref().restore(snapshot).await?;
+        Ok(())
     }
 
     async fn poll_next(&mut self) -> OperatorPollResult {
@@ -254,14 +246,16 @@ impl OperatorTrait for WindowOperator {
                 Message::Keyed(keyed_message) => {
                     let key = keyed_message.key();
                     let input_rows = keyed_message.base.record_batch.num_rows();
-                    let (dropped, max_seen) = self
+                    let dropped = self
                         .state_ref()
-                        .insert_batch(key, keyed_message.base.record_batch.clone())
+                        .insert_batch(
+                            key,
+                            keyed_message.base.record_batch.clone(),
+                            self.watermark_frontier,
+                            self.output_mode == WindowOutputMode::Emit,
+                        )
                         .await;
-                    if dropped < input_rows {
-                        debug_assert!(max_seen.is_some());
-                        self.buffered_keys.insert(key.clone());
-                    }
+                    debug_assert!(dropped <= input_rows);
                     OperatorPollResult::Continue
                 }
                 Message::Watermark(watermark) => {
@@ -272,12 +266,18 @@ impl OperatorTrait for WindowOperator {
                     };
                     let advance_to = Cursor::new(wm_ts, u64::MAX);
 
-                    let keys: Vec<Key> = self.buffered_keys.iter().cloned().collect();
-                    let (result, pending_keys) = self.process_buffered(keys, advance_to).await;
-                    if watermark.watermark_value == MAX_WATERMARK_VALUE {
-                        self.buffered_keys.clear();
+                    let advances_frontier = self
+                        .watermark_frontier
+                        .map_or(true, |frontier| wm_ts > frontier);
+                    let result = if advances_frontier
+                        && self.output_mode == WindowOutputMode::Emit
+                    {
+                        self.process_due(advance_to).await
                     } else {
-                        self.buffered_keys = pending_keys;
+                        RecordBatch::new_empty(self.output_schema.clone())
+                    };
+                    if advances_frontier {
+                        self.watermark_frontier = Some(wm_ts);
                     }
 
                     self.base

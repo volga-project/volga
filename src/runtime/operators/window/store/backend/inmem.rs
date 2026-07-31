@@ -1,6 +1,6 @@
 //! In-memory window store implementation and behavior tests.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor as IoCursor;
 use std::sync::Arc;
 
@@ -12,9 +12,12 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun};
+use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
 
-use super::{WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore};
+use super::{
+    DueContinuation, DuePage, DueWindowWork, WindowBackendSnapshot, WindowOperatorStore,
+    WindowRequestStore,
+};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     KeyState, PartitionKey, StateNamespace, TileMap, WindowData,
@@ -31,6 +34,7 @@ struct PartitionState {
 struct InMemCheckpoint {
     namespace: Vec<u8>,
     partitions: HashMap<PartitionKey, PartitionCheckpoint>,
+    triggers: Vec<WindowTrigger>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -40,10 +44,16 @@ struct PartitionCheckpoint {
     tiles: TileMap,
 }
 
+#[derive(Debug, Default)]
+struct InMemState {
+    partitions: HashMap<PartitionKey, PartitionState>,
+    triggers: BTreeSet<WindowTrigger>,
+}
+
 /// Reference backend. One read lock is the WRO snapshot boundary.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
-    partitions: Arc<RwLock<HashMap<PartitionKey, PartitionState>>>,
+    state: Arc<RwLock<InMemState>>,
 }
 
 impl InMemWindowStore {
@@ -97,8 +107,9 @@ impl InMemWindowStore {
 #[async_trait]
 impl WindowOperatorStore for InMemWindowStore {
     async fn load_meta(&self, partition: &PartitionKey) -> Result<KeyState> {
-        let partitions = self.partitions.read().await;
-        Ok(partitions
+        let state = self.state.read().await;
+        Ok(state
+            .partitions
             .get(partition)
             .map(|state| state.meta.clone())
             .unwrap_or_default())
@@ -109,16 +120,18 @@ impl WindowOperatorStore for InMemWindowStore {
         partition: &PartitionKey,
         runs: &[RawRun],
     ) -> Result<Vec<RecordBatch>> {
-        let partitions = self.partitions.read().await;
-        Ok(partitions
+        let state = self.state.read().await;
+        Ok(state
+            .partitions
             .get(partition)
             .map(|state| Self::select_raw(state, runs))
             .unwrap_or_default())
     }
 
     async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap> {
-        let partitions = self.partitions.read().await;
-        Ok(partitions
+        let state = self.state.read().await;
+        Ok(state
+            .partitions
             .get(partition)
             .map(|state| Self::select_tiles(state, runs))
             .unwrap_or_default())
@@ -131,10 +144,15 @@ impl WindowOperatorStore for InMemWindowStore {
         events: &RecordBatch,
         tiles: &TileMap,
         meta: &KeyState,
+        triggers: &[WindowTrigger],
     ) -> Result<()> {
         let cursors = cursors_from_batch(events, ts_column_index)?;
-        let mut partitions = self.partitions.write().await;
-        let state = partitions.entry(partition.clone()).or_default();
+        anyhow::ensure!(
+            triggers.iter().all(|trigger| &trigger.partition == partition),
+            "window trigger partition does not match committed partition"
+        );
+        let mut store = self.state.write().await;
+        let state = store.partitions.entry(partition.clone()).or_default();
         for (row, cursor) in cursors.into_iter().enumerate() {
             state.raw.insert(cursor, events.slice(row, 1));
         }
@@ -142,20 +160,85 @@ impl WindowOperatorStore for InMemWindowStore {
             state.tiles.insert(*key, value.clone());
         }
         state.meta = meta.clone();
+        store.triggers.extend(triggers.iter().cloned());
         Ok(())
     }
 
-    async fn store_meta(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
-        let mut partitions = self.partitions.write().await;
-        let state = partitions.entry(partition.clone()).or_default();
+    async fn load_due_page(
+        &self,
+        namespace: &StateNamespace,
+        after: Option<Cursor>,
+        through: Cursor,
+        continuation: Option<DueContinuation>,
+    ) -> Result<DuePage> {
+        const PAGE_SIZE: usize = 256;
+
+        let resume_after = continuation
+            .map(|continuation| bincode::deserialize::<WindowTrigger>(&continuation.0))
+            .transpose()?;
+        let store = self.state.read().await;
+        let mut selected = store
+            .triggers
+            .iter()
+            .filter(|trigger| trigger.partition.namespace == namespace.bytes)
+            .filter(|trigger| after.map_or(true, |after| trigger.fire_at > after))
+            .filter(|trigger| trigger.fire_at <= through)
+            .filter(|trigger| {
+                resume_after
+                    .as_ref()
+                    .map_or(true, |resume_after| *trigger > resume_after)
+            })
+            .take(PAGE_SIZE + 1)
+            .cloned()
+            .collect::<Vec<_>>();
+        let has_more = selected.len() > PAGE_SIZE;
+        if has_more {
+            selected.pop();
+        }
+        let next = has_more
+            .then(|| selected.last())
+            .flatten()
+            .map(|trigger| bincode::serialize(trigger))
+            .transpose()?
+            .map(DueContinuation);
+
+        let mut grouped = BTreeMap::<PartitionKey, Vec<WindowTrigger>>::new();
+        for trigger in selected {
+            grouped
+                .entry(trigger.partition.clone())
+                .or_default()
+                .push(trigger);
+        }
+        let work = grouped
+            .into_iter()
+            .map(|(partition, triggers)| DueWindowWork {
+                key_state: store
+                    .partitions
+                    .get(&partition)
+                    .map(|state| state.meta.clone())
+                    .unwrap_or_default(),
+                partition,
+                triggers,
+            })
+            .collect();
+        Ok(DuePage {
+            work,
+            continuation: next,
+        })
+    }
+
+    async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
+        let mut store = self.state.write().await;
+        let state = store.partitions.entry(partition.clone()).or_default();
         state.meta = meta.clone();
         Ok(())
     }
 
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
         self.flush().await?;
-        let partitions = self.partitions.read().await;
-        let snapshot = partitions
+        let store = self.state.read().await;
+        let snapshot = store
+            .partitions
             .iter()
             .filter(|(partition, _)| partition.namespace.as_slice() == namespace.bytes.as_slice())
             .map(|(partition, state)| {
@@ -177,6 +260,12 @@ impl WindowOperatorStore for InMemWindowStore {
         let checkpoint = InMemCheckpoint {
             namespace: namespace.bytes.clone(),
             partitions: snapshot,
+            triggers: store
+                .triggers
+                .iter()
+                .filter(|trigger| trigger.partition.namespace == namespace.bytes)
+                .cloned()
+                .collect(),
         };
         Ok(WindowBackendSnapshot::InMemory {
             snapshot: bincode::serialize(&checkpoint)?,
@@ -217,10 +306,15 @@ impl WindowOperatorStore for InMemWindowStore {
                 ))
             })
             .collect::<Result<HashMap<_, _>>>()?;
-        let mut partitions = self.partitions.write().await;
-        partitions
+        let mut store = self.state.write().await;
+        store
+            .partitions
             .retain(|partition, _| partition.namespace.as_slice() != namespace.bytes.as_slice());
-        partitions.extend(restored);
+        store.partitions.extend(restored);
+        store
+            .triggers
+            .retain(|trigger| trigger.partition.namespace.as_slice() != namespace.bytes.as_slice());
+        store.triggers.extend(checkpoint.triggers);
         Ok(())
     }
 }
@@ -233,8 +327,8 @@ impl WindowRequestStore for InMemWindowStore {
         raw_runs: &[RawRun],
         tile_runs: &[TileRun],
     ) -> Result<WindowData> {
-        let partitions = self.partitions.read().await;
-        let Some(state) = partitions.get(partition) else {
+        let store = self.state.read().await;
+        let Some(state) = store.partitions.get(partition) else {
             return Ok(WindowData::new(Vec::new(), TileMap::new()));
         };
         Ok(WindowData::new(
@@ -249,7 +343,9 @@ mod tests {
     use super::*;
 
     use crate::runtime::operators::window::aggs::test_utils;
-    use crate::runtime::operators::window::model::{TileRun, TimeGranularity, WindowTiles};
+    use crate::runtime::operators::window::model::{
+        KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
+    };
     use crate::runtime::operators::window::store::{data::RowIdx, StateVersion};
 
     fn partition() -> PartitionKey {
@@ -297,12 +393,7 @@ mod tests {
     }
 
     fn assert_meta(actual: &KeyState, expected: &KeyState) {
-        assert_eq!(actual.max_seen, expected.max_seen);
-        assert_eq!(actual.processed_pos, expected.processed_pos);
-        assert_eq!(actual.accumulators, expected.accumulators);
-        assert_eq!(actual.first_ingested, expected.first_ingested);
-        assert_eq!(actual.next_seq, expected.next_seq);
-        assert_eq!(actual.retention_floor, expected.retention_floor);
+        assert_eq!(actual, expected);
     }
 
     #[tokio::test]
@@ -338,7 +429,7 @@ mod tests {
             .is_empty());
 
         store
-            .store_meta(
+            .commit_advance(
                 &partition,
                 &KeyState {
                     next_seq: 1,
@@ -363,6 +454,7 @@ mod tests {
                 &events,
                 &TileMap::new(),
                 &KeyState::default(),
+                &[],
             )
             .await
             .unwrap();
@@ -404,6 +496,7 @@ mod tests {
                 &batch(&[]),
                 &stored_tiles,
                 &KeyState::default(),
+                &[],
             )
             .await
             .unwrap();
@@ -430,7 +523,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn store_meta_leaves_raw_and_tiles_unchanged() {
+    async fn commit_advance_leaves_raw_and_tiles_unchanged() {
         let store = InMemWindowStore::new();
         let partition = partition();
         let stored_tiles = tiles(&[(TimeGranularity::Seconds(1), 1_000, 7)]);
@@ -441,19 +534,22 @@ mod tests {
                 &batch(&[(1_000, 4)]),
                 &stored_tiles,
                 &KeyState::default(),
+                &[],
             )
             .await
             .unwrap();
         let updated_meta = KeyState {
-            max_seen: Some(Cursor::new(2_000, 5)),
-            processed_pos: Some(Cursor::new(1_000, 4)),
-            first_ingested: Some(Cursor::new(1_000, 4)),
             next_seq: 6,
-            retention_floor: Some(Cursor::new(500, 0)),
-            ..Default::default()
+            evaluation: Some(KeyEvaluationState {
+                through: Cursor::new(1_000, 4),
+                accumulators: BTreeMap::new(),
+            }),
         };
 
-        store.store_meta(&partition, &updated_meta).await.unwrap();
+        store
+            .commit_advance(&partition, &updated_meta)
+            .await
+            .unwrap();
 
         assert_meta(&store.load_meta(&partition).await.unwrap(), &updated_meta);
         assert_eq!(
@@ -488,7 +584,6 @@ mod tests {
         let store = InMemWindowStore::new();
         let partition = partition();
         let meta = KeyState {
-            max_seen: Some(Cursor::new(2_000, 2)),
             next_seq: 3,
             ..Default::default()
         };
@@ -501,6 +596,7 @@ mod tests {
                 &batch(&[(2_000, 2), (1_000, 1)]),
                 &stored_tiles,
                 &meta,
+                &[],
             )
             .await
             .unwrap();
@@ -548,6 +644,7 @@ mod tests {
                     (TimeGranularity::Seconds(1), 3_000, 7),
                 ]),
                 &KeyState::default(),
+                &[],
             )
             .await
             .unwrap();
@@ -595,20 +692,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn due_triggers_are_range_filtered_and_backend_paged() {
+        let store = InMemWindowStore::new();
+        let partition = partition();
+        let namespace = StateNamespace::new(&partition.namespace);
+        let triggers = (0..300)
+            .map(|seq_no| WindowTrigger {
+                fire_at: Cursor::new(seq_no as i64, seq_no),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            })
+            .collect::<Vec<_>>();
+        store
+            .commit_events(
+                &partition,
+                0,
+                &batch(&[]),
+                &TileMap::new(),
+                &KeyState::default(),
+                &triggers,
+            )
+            .await
+            .unwrap();
+
+        let first = store
+            .load_due_page(
+                &namespace,
+                Some(Cursor::new(9, u64::MAX)),
+                Cursor::new(299, u64::MAX),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(first.work[0].triggers.len(), 256);
+        let second = store
+            .load_due_page(
+                &namespace,
+                Some(Cursor::new(9, u64::MAX)),
+                Cursor::new(299, u64::MAX),
+                first.continuation,
+            )
+            .await
+            .unwrap();
+        assert_eq!(second.work[0].triggers.len(), 34);
+        assert!(second.continuation.is_none());
+    }
+
+    #[tokio::test]
     async fn checkpoint_restores_complete_namespace_into_fresh_store() {
         let source = InMemWindowStore::new();
         let partition = partition();
         let namespace = StateNamespace::new(&partition.namespace);
-        let mut meta = KeyState {
-            max_seen: Some(Cursor::new(2_000, 2)),
-            processed_pos: Some(Cursor::new(1_000, 1)),
-            first_ingested: Some(Cursor::new(1_000, 1)),
+        let mut accumulators = BTreeMap::new();
+        accumulators.insert(
+            7,
+            vec![datafusion::scalar::ScalarValue::Float64(Some(3.0))],
+        );
+        let meta = KeyState {
             next_seq: 3,
-            retention_floor: Some(Cursor::new(500, 0)),
-            ..Default::default()
+            evaluation: Some(KeyEvaluationState {
+                through: Cursor::new(1_000, 1),
+                accumulators,
+            }),
         };
-        meta.accumulators
-            .insert(7, vec![datafusion::scalar::ScalarValue::Float64(Some(3.0))]);
+        let triggers = [
+            WindowTrigger {
+                fire_at: Cursor::new(1_000, 1),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            },
+            WindowTrigger {
+                fire_at: Cursor::new(2_000, 2),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            },
+        ];
         source
             .commit_events(
                 &partition,
@@ -616,6 +774,7 @@ mod tests {
                 &batch(&[(1_000, 1), (2_000, 2)]),
                 &tiles(&[(TimeGranularity::Seconds(1), 1_000, 7)]),
                 &meta,
+                &triggers,
             )
             .await
             .unwrap();
@@ -625,6 +784,17 @@ mod tests {
         restored.restore(&namespace, &checkpoint).await.unwrap();
 
         assert_meta(&restored.load_meta(&partition).await.unwrap(), &meta);
+        let due = restored
+            .load_due_page(
+                &namespace,
+                Some(Cursor::new(1_000, u64::MAX)),
+                Cursor::new(2_000, u64::MAX),
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(due.work.len(), 1);
+        assert_eq!(due.work[0].triggers, vec![triggers[1].clone()]);
         assert_eq!(
             raw_cursors(
                 &restored
@@ -658,7 +828,7 @@ mod tests {
         let checkpoint_partition = partition();
         let checkpoint_namespace = StateNamespace::new(&checkpoint_partition.namespace);
         source
-            .store_meta(
+            .commit_advance(
                 &checkpoint_partition,
                 &KeyState {
                     next_seq: 11,
@@ -675,7 +845,7 @@ mod tests {
             business_key: b"other-key".to_vec(),
         };
         restored
-            .store_meta(
+            .commit_advance(
                 &other_partition,
                 &KeyState {
                     next_seq: 22,

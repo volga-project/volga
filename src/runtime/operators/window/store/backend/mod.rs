@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::runtime::operators::window::model::{
-    KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun,
+    Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
 
 use super::WindowData;
@@ -44,6 +44,22 @@ pub enum WindowBackendSnapshot {
     Versioned { version: StateVersion },
 }
 
+#[derive(Debug, Clone)]
+pub struct DueWindowWork {
+    pub partition: PartitionKey,
+    pub key_state: KeyState,
+    pub triggers: Vec<WindowTrigger>,
+}
+
+#[derive(Debug, Clone)]
+pub struct DueContinuation(pub Vec<u8>);
+
+#[derive(Debug, Clone)]
+pub struct DuePage {
+    pub work: Vec<DueWindowWork>,
+    pub continuation: Option<DueContinuation>,
+}
+
 /// Store operations used by the sole Window Operator for a partition.
 #[async_trait]
 pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
@@ -58,8 +74,16 @@ pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
         events: &RecordBatch,
         tiles: &TileMap,
         meta: &KeyState,
+        triggers: &[WindowTrigger],
     ) -> Result<()>;
-    async fn store_meta(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()>;
+    async fn load_due_page(
+        &self,
+        namespace: &StateNamespace,
+        after: Option<Cursor>,
+        through: Cursor,
+        continuation: Option<DueContinuation>,
+    ) -> Result<DuePage>;
+    async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()>;
     async fn flush(&self) -> Result<()> {
         Ok(())
     }

@@ -9,7 +9,6 @@ use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOu
 use crate::runtime::operators::window::request::{
     WindowRequestOperator, WindowRequestOperatorConfig,
 };
-use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowOperatorStore,
 };
@@ -56,7 +55,7 @@ async fn request_sum(wro: &mut WindowRequestOperator, partition: &str, ts: i64) 
 }
 
 #[tokio::test]
-async fn duplicate_timestamps_across_batches_follow_sequence_frontier() {
+async fn duplicate_timestamps_are_ordered_before_the_watermark() {
     let exec = window_exec_from_sql(SQL).await;
     let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
 
@@ -80,12 +79,7 @@ async fn duplicate_timestamps_across_batches_follow_sequence_frontier() {
         .await;
     let second = h.watermark_and_output(1000).await;
     let _ = h.drain_passthrough_watermark().await;
-    assert_window_values(
-        &second,
-        3,
-        &[vec![ScalarValue::Float64(Some(10.0))]],
-        "sequence-sensitive drop",
-    );
+    assert_eq!(second.num_rows(), 0);
 }
 
 #[tokio::test]
@@ -125,22 +119,17 @@ async fn watermark_without_ingest_is_empty_and_passes_through() {
 }
 
 #[tokio::test]
-async fn lateness_config_sets_retention_floor_in_meta() {
+async fn watermark_rejects_late_rows_for_unseen_key() {
     let exec = window_exec_from_sql(SQL).await;
-    let mut cfg = WindowOperatorConfig::new(exec);
-    cfg.spec = WindowSpec {
-        lateness: Some(2000),
-        ..Default::default()
-    };
-    let mut h = Harness::new(cfg).await;
-    h.ingest(batch(vec![10_000], vec![1.0], vec!["A"]), "A")
-        .await;
+    let mut h = Harness::new(WindowOperatorConfig::new(exec)).await;
     let _ = h.watermark_and_output(10_000).await;
     let _ = h.drain_passthrough_watermark().await;
+    h.ingest(batch(vec![9_000], vec![1.0], vec!["B"]), "B")
+        .await;
 
-    let partition = PartitionKey::new(&h.namespace, &key("A"));
+    let partition = PartitionKey::new(&h.namespace, &key("B"));
     let meta = h.store.load_meta(&partition).await.expect("meta");
-    assert_eq!(meta.retention_floor, Some(Cursor::new(3000, 0)));
+    assert_eq!(meta.next_seq, 0);
 }
 
 #[tokio::test]
@@ -154,7 +143,18 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
 
     let partition = PartitionKey::new(&h.namespace, &key("A"));
     let meta = h.store.load_meta(&partition).await.expect("meta");
-    assert_eq!(meta.processed_pos, None);
+    assert!(meta.evaluation.is_none());
+    let due = h
+        .store
+        .load_due_page(
+            &h.namespace,
+            None,
+            Cursor::new(2000, u64::MAX),
+            None,
+        )
+        .await
+        .expect("due page");
+    assert!(due.work.is_empty());
 
     let mut wro = open_wro(h.store.clone(), h.namespace.clone()).await;
     assert_eq!(
@@ -170,7 +170,7 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
         OperatorPollResult::Continue
     ));
     let meta = h.store.load_meta(&partition).await.expect("meta");
-    assert_eq!(meta.processed_pos, Some(Cursor::new(2000, 1)));
+    assert!(meta.evaluation.is_none());
 }
 
 #[tokio::test]
@@ -266,6 +266,38 @@ async fn operator_checkpoint_restores_into_fresh_store() {
     assert_eq!(
         request_sum(&mut wro, "A", 2000).await,
         ScalarValue::Float64(Some(3.0))
+    );
+}
+
+#[tokio::test]
+async fn pending_triggers_survive_checkpoint_restore() {
+    let exec = window_exec_from_sql(SQL).await;
+    let mut original = Harness::new(WindowOperatorConfig::new(exec.clone())).await;
+    original
+        .ingest(
+            batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]),
+            "A",
+        )
+        .await;
+
+    let checkpoint = original.op.checkpoint(1).await.expect("checkpoint");
+    let mut restored = Harness::new(WindowOperatorConfig::new(exec)).await;
+    restored
+        .op
+        .restore(SerializedRestore::new(checkpoint.into_bytes()))
+        .await
+        .expect("restore");
+
+    let output = restored.watermark_and_output(2000).await;
+    let _ = restored.drain_passthrough_watermark().await;
+    assert_window_values(
+        &output,
+        3,
+        &[
+            vec![ScalarValue::Float64(Some(1.0))],
+            vec![ScalarValue::Float64(Some(3.0))],
+        ],
+        "restored pending triggers",
     );
 }
 
