@@ -90,7 +90,11 @@ impl WindowOperatorState {
         }
         let partition = self.partition(key);
 
-        let mut key_state = self.store.load_meta(&partition).await.expect("key state");
+        let mut key_state = self
+            .store
+            .load_key_state(&partition)
+            .await
+            .expect("key state");
         let (accepted, dropped) = drop_late_entries(
             &batch,
             self.ts_column_index,

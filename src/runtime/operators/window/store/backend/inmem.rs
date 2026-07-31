@@ -105,7 +105,7 @@ impl InMemWindowStore {
 
 #[async_trait]
 impl WindowOperatorStore for InMemWindowStore {
-    async fn load_meta(&self, partition: &PartitionKey) -> Result<KeyState> {
+    async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState> {
         let state = self.state.read().await;
         Ok(state
             .partitions
@@ -223,7 +223,7 @@ impl WindowOperatorStore for InMemWindowStore {
         ))
     }
 
-    async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
+    async fn store_key_state(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
         let mut store = self.state.write().await;
         let state = store.partitions.entry(partition.clone()).or_default();
         state.meta = meta.clone();
@@ -404,7 +404,7 @@ mod tests {
         }];
 
         assert_meta(
-            &store.load_meta(&partition).await.unwrap(),
+            &store.load_key_state(&partition).await.unwrap(),
             &KeyState::default(),
         );
         assert!(store
@@ -425,7 +425,7 @@ mod tests {
             .is_empty());
 
         store
-            .commit_advance(
+            .store_key_state(
                 &partition,
                 &KeyState {
                     next_seq: 1,
@@ -519,7 +519,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn commit_advance_leaves_raw_and_tiles_unchanged() {
+    async fn store_key_state_leaves_raw_and_tiles_unchanged() {
         let store = InMemWindowStore::new();
         let partition = partition();
         let stored_tiles = tiles(&[(TimeGranularity::Seconds(1), 1_000, 7)]);
@@ -543,11 +543,14 @@ mod tests {
         };
 
         store
-            .commit_advance(&partition, &updated_meta)
+            .store_key_state(&partition, &updated_meta)
             .await
             .unwrap();
 
-        assert_meta(&store.load_meta(&partition).await.unwrap(), &updated_meta);
+        assert_meta(
+            &store.load_key_state(&partition).await.unwrap(),
+            &updated_meta,
+        );
         assert_eq!(
             raw_cursors(
                 &store
@@ -597,7 +600,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_meta(&store.load_meta(&partition).await.unwrap(), &meta);
+        assert_meta(&store.load_key_state(&partition).await.unwrap(), &meta);
         assert_eq!(
             raw_cursors(
                 &store
@@ -768,7 +771,7 @@ mod tests {
         let restored = InMemWindowStore::new();
         restored.restore(&namespace, &checkpoint).await.unwrap();
 
-        assert_meta(&restored.load_meta(&partition).await.unwrap(), &meta);
+        assert_meta(&restored.load_key_state(&partition).await.unwrap(), &meta);
         let mut due = restored.stream_due(
             &namespace,
             Some(Cursor::new(1_000, u64::MAX)),
@@ -810,7 +813,7 @@ mod tests {
         let checkpoint_partition = partition();
         let checkpoint_namespace = StateNamespace::new(&checkpoint_partition.namespace);
         source
-            .commit_advance(
+            .store_key_state(
                 &checkpoint_partition,
                 &KeyState {
                     next_seq: 11,
@@ -827,7 +830,7 @@ mod tests {
             business_key: b"other-key".to_vec(),
         };
         restored
-            .commit_advance(
+            .store_key_state(
                 &other_partition,
                 &KeyState {
                     next_seq: 22,
@@ -843,14 +846,18 @@ mod tests {
 
         assert_eq!(
             restored
-                .load_meta(&checkpoint_partition)
+                .load_key_state(&checkpoint_partition)
                 .await
                 .unwrap()
                 .next_seq,
             11
         );
         assert_eq!(
-            restored.load_meta(&other_partition).await.unwrap().next_seq,
+            restored
+                .load_key_state(&other_partition)
+                .await
+                .unwrap()
+                .next_seq,
             22
         );
     }

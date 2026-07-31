@@ -44,8 +44,8 @@ impl RecordingWindowStore {
 
 #[async_trait]
 impl WindowOperatorStore for RecordingWindowStore {
-    async fn load_meta(&self, partition: &PartitionKey) -> Result<KeyState> {
-        self.inner.load_meta(partition).await
+    async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState> {
+        self.inner.load_key_state(partition).await
     }
 
     async fn load_raw(
@@ -92,8 +92,8 @@ impl WindowOperatorStore for RecordingWindowStore {
         self.inner.stream_due(namespace, after, through)
     }
 
-    async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
-        self.inner.commit_advance(partition, meta).await
+    async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()> {
+        self.inner.store_key_state(partition, state).await
     }
 
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {

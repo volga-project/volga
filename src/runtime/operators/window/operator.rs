@@ -133,9 +133,7 @@ impl WindowOperator {
     }
 
     async fn process_due(&self, through: Cursor) -> RecordBatch {
-        let Some(state) = self.state.as_ref() else {
-            return RecordBatch::new_empty(self.output_schema.clone());
-        };
+        let state = self.state_ref();
         let after = self
             .watermark_frontier
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
@@ -153,13 +151,13 @@ impl WindowOperator {
                     state.store(),
                     work,
                     self.window_configs.as_ref(),
-                    true,
                     self.ts_column_index,
                     &self.output_schema,
                     &self.input_schema,
                 )
             });
             batches.extend(
+                // TODO add concurrency limit
                 future::try_join_all(futures)
                     .await
                     .expect("advance due window triggers"),

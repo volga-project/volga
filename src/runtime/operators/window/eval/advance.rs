@@ -1,4 +1,4 @@
-//! Watermark advance: meta → exact raw/tile ranges → slide | rebuild → emit.
+//! Watermark advance: due triggers → exact raw/tile ranges → slide | rebuild → emit.
 
 use std::collections::BTreeMap;
 
@@ -8,7 +8,7 @@ use arrow::datatypes::SchemaRef;
 use datafusion::scalar::ScalarValue;
 
 use crate::runtime::operators::window::config::WindowConfig;
-use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
+use crate::runtime::operators::window::frame_utils::get_window_length_ms;
 use crate::runtime::operators::window::model::{
     Cursor, KeyEvaluationState, RawRun, WindowId, WindowTriggerKind,
 };
@@ -27,15 +27,10 @@ pub async fn advance_key(
     store: &dyn WindowOperatorStore,
     work: DueWindowWork,
     window_configs: &BTreeMap<WindowId, WindowConfig>,
-    emit: bool,
     ts_column_index: usize,
     output_schema: &SchemaRef,
     input_schema: &SchemaRef,
 ) -> Result<RecordBatch> {
-    for cfg in window_configs.values() {
-        require_range_frame(cfg.window_expr.get_window_frame());
-    }
-
     let DueWindowWork {
         partition,
         mut key_state,
@@ -45,12 +40,19 @@ pub async fn advance_key(
         .evaluation
         .as_ref()
         .map(|evaluation| evaluation.through);
-    let mut ends = triggers
-        .into_iter()
-        .filter(|trigger| matches!(trigger.kind, WindowTriggerKind::RowEmit))
-        .map(|trigger| trigger.fire_at)
-        .filter(|cursor| prev.map_or(true, |prev| *cursor > prev))
-        .collect::<Vec<_>>();
+    let mut ends = Vec::with_capacity(triggers.len());
+    for trigger in triggers {
+        match trigger.kind {
+            WindowTriggerKind::RowEmit => {
+                if prev.map_or(true, |prev| trigger.fire_at > prev) {
+                    ends.push(trigger.fire_at);
+                }
+            }
+            WindowTriggerKind::WindowEnd { window_id } => {
+                anyhow::bail!("window-end trigger is not supported for window {window_id}");
+            }
+        }
+    }
     ends.sort_unstable();
     ends.dedup();
     let Some(first) = ends.first().copied() else {
@@ -118,13 +120,9 @@ pub async fn advance_key(
         through: last,
         accumulators,
     });
-    store.commit_advance(&partition, &key_state).await?;
+    store.store_key_state(&partition, &key_state).await?;
 
-    if !emit {
-        return Ok(RecordBatch::new_empty(output_schema.clone()));
-    }
-
-    if ends.is_empty() || values_by_window.iter().all(|v| v.is_empty()) {
+    if values_by_window.iter().all(|v| v.is_empty()) {
         return Ok(RecordBatch::new_empty(output_schema.clone()));
     }
 

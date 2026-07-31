@@ -57,7 +57,7 @@ pub type DueWorkStream<'a> = BoxStream<'a, Result<Vec<DueWindowWork>>>;
 /// Store operations used by the sole Window Operator for a partition.
 #[async_trait]
 pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
-    async fn load_meta(&self, partition: &PartitionKey) -> Result<KeyState>;
+    async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState>;
     async fn load_raw(&self, partition: &PartitionKey, runs: &[RawRun])
         -> Result<Vec<RecordBatch>>;
     async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap>;
@@ -76,7 +76,7 @@ pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
         after: Option<Cursor>,
         through: Cursor,
     ) -> DueWorkStream<'a>;
-    async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()>;
+    async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()>;
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot>;
     async fn restore(

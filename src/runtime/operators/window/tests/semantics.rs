@@ -129,7 +129,7 @@ async fn watermark_rejects_late_rows_for_unseen_key() {
         .await;
 
     let partition = PartitionKey::new(&h.namespace, &key("B"));
-    let meta = h.store.load_meta(&partition).await.expect("meta");
+    let meta = h.store.load_key_state(&partition).await.expect("state");
     assert_eq!(meta.next_seq, 0);
 }
 
@@ -143,7 +143,7 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
         .await;
 
     let partition = PartitionKey::new(&h.namespace, &key("A"));
-    let meta = h.store.load_meta(&partition).await.expect("meta");
+    let meta = h.store.load_key_state(&partition).await.expect("state");
     assert!(meta.evaluation.is_none());
     let mut due = h
         .store
@@ -163,7 +163,7 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
         h.op.poll_next().await,
         OperatorPollResult::Continue
     ));
-    let meta = h.store.load_meta(&partition).await.expect("meta");
+    let meta = h.store.load_key_state(&partition).await.expect("state");
     assert!(meta.evaluation.is_none());
 }
 
