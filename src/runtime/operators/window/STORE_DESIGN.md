@@ -4,6 +4,10 @@
 `WindowRequestStore` serves coherent WRO point lookups. Physical layout, MVCC,
 serialization, and caching stay inside the backend.
 
+For detailed window-operator semantics, evaluation flow, and module structure,
+see the [window operator README](README.md). This document focuses on store
+contracts and the proposed Scylla backend.
+
 The current data contract is append-only. CDC and late-event correction will
 require explicit mutation semantics rather than implicit delete markers - this is future work
 
