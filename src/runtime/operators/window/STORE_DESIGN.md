@@ -41,13 +41,27 @@ pub enum TimeGranularity {
 }
 pub type WindowId = usize;
 pub type AccumulatorState = Vec<ScalarValue>;
-pub struct KeyState {
-    pub max_seen: Option<Cursor>,
-    pub processed_pos: Option<Cursor>,
+pub struct KeyEvaluationState {
+    pub through: Cursor,
     pub accumulators: BTreeMap<WindowId, AccumulatorState>,
-    pub first_ingested: Option<Cursor>,
+}
+pub struct KeyState {
     pub next_seq: u64,
-    pub retention_floor: Option<Cursor>,
+    pub evaluation: Option<KeyEvaluationState>,
+}
+pub enum WindowTriggerKind {
+    RowEmit,
+    WindowEnd { window_id: WindowId },
+}
+pub struct WindowTrigger {
+    pub fire_at: Cursor,
+    pub partition: PartitionKey,
+    pub kind: WindowTriggerKind,
+}
+pub struct DueWindowWork {
+    pub partition: PartitionKey,
+    pub key_state: KeyState,
+    pub triggers: Vec<WindowTrigger>,
 }
 pub struct TileState {
     pub accumulator_state: Option<AccumulatorState>,
@@ -61,6 +75,11 @@ pub struct WindowData {
     raw_batches: Vec<RecordBatch>,
     tile_map: TileMap,
 }
+pub struct WindowStateSnapshot {
+    pub namespace: Vec<u8>,
+    pub watermark_frontier: Option<i64>,
+    pub backend: WindowBackendSnapshot,
+}
 ```
 
 - `PartitionKey` must remain collision-safe; hashes alone are insufficient.
@@ -69,10 +88,14 @@ pub struct WindowData {
 - `Cursor` is raw event identity and total order within a partition.
 - `RawRun` and `TileRun` are half-open. Calls contain merged logical runs, and
   backends must return exactly their union.
-- `max_seen` is the greatest ingested cursor; `processed_pos` is the evaluated
-  frontier; `first_ingested` is the cold-start bound; `next_seq` allocates
-  per-key sequence IDs.
-- `retention_floor` is the first cursor still required by logical retention.
+- `next_seq` allocates per-key sequence IDs. Optional `evaluation` keeps the
+  last fired trigger together with retractable accumulator state. State-only WO
+  does not keep evaluation state.
+- `watermark_frontier` is the task-level late-data boundary. Logical retention
+  is derived from it, the largest window, and configured lateness.
+- `WindowTrigger` is durable event-time work. Current RANGE windows create one
+  `RowEmit` trigger per accepted row; `WindowEnd` is reserved for scheduled
+  windows.
 - Tiles for all windows share `(granularity, tile_start)`, so persisted tile and
   accumulator state retain `WindowId`.
 - `WindowData` is one materialized WRO snapshot. Evaluation filters its rows by
@@ -83,7 +106,7 @@ pub struct WindowData {
 ```rust
 #[async_trait]
 pub trait WindowOperatorStore: Send + Sync + Debug {
-    async fn load_meta(&self, partition: &PartitionKey) -> Result<KeyState>;
+    async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState>;
     async fn load_raw(
         &self,
         partition: &PartitionKey,
@@ -100,13 +123,21 @@ pub trait WindowOperatorStore: Send + Sync + Debug {
         ts_column_index: usize,
         events: &RecordBatch,
         tiles: &TileMap,
-        meta: &KeyState,
+        state: &KeyState,
+        triggers: &[WindowTrigger],
     ) -> Result<()>;
-    async fn store_meta(&self, partition: &PartitionKey, meta: &KeyState)
-        -> Result<()>;
-    async fn flush(&self) -> Result<()> {
-        Ok(())
-    }
+    fn stream_due<'a>(
+        &'a self,
+        namespace: &'a StateNamespace,
+        after: Option<Cursor>,
+        through: Cursor,
+    ) -> BoxStream<'a, Result<Vec<DueWindowWork>>>;
+    async fn store_key_state(
+        &self,
+        partition: &PartitionKey,
+        state: &KeyState,
+    ) -> Result<()>;
+    /// Complete pending writes before capturing the returned snapshot.
     async fn checkpoint(
         &self,
         namespace: &StateNamespace,
@@ -135,12 +166,14 @@ pub trait WindowRequestStore: Send + Sync + Debug {
   ordered by `Cursor`. Their Arrow schema includes `__seq_no: UInt64`.
 - Tiles are unique by `(granularity, tile_start)` and restricted to requested
   runs. Missing tiles mean empty intervals.
-- `commit_events` atomically publishes raw rows, replacement tiles, and meta.
-  `ts_column_index` plus `__seq_no` identifies each raw cursor. Retries are
-  idempotent.
-- `store_meta` publishes only progress and retention state.
-- `checkpoint` resolves pending writes, flushes them, and returns a
-  backend-specific snapshot. Scylla returns only the aligned backend version.
+- `commit_events` atomically publishes raw rows, replacement tiles, key state,
+  and triggers. `ts_column_index` plus `__seq_no` identifies each raw cursor.
+  Retries are idempotent.
+- `stream_due` owns backend pagination for one stable watermark range and
+  returns bounded trigger groups with their corresponding key state.
+- `store_key_state` publishes only sequence/evaluation state.
+- `checkpoint` completes pending writes and returns a backend-specific
+  snapshot. Scylla returns only the aligned backend version.
 - `restore` starts store access from the supplied checkpoint base. For Scylla,
   the current fenced attempt inherits reads from that immutable version.
 - The namespace argument scopes checkpoint and restore when one store instance
@@ -153,29 +186,34 @@ pub trait WindowRequestStore: Send + Sync + Debug {
 - Methods must not broaden ranges or return partial results.
 
 `InMemWindowStore` is the reference backend. One lock provides the WRO snapshot
-boundary, and its checkpoint embeds the serialized namespace state.
+boundary, and its checkpoint embeds serialized partition state and triggers.
 Asynchronous physical retention is not emulated.
 
 ## Runtime flows
 
 WO ingest:
 
-1. Load meta, drop rows at or behind `processed_pos`, and assign sequence IDs.
+1. Load key state, drop rows at or behind the task watermark, and assign
+   sequence IDs.
 2. Load and update affected tiles.
-3. Atomically `commit_events(..., events, tiles, meta)`.
+3. For emitting WO, create one `RowEmit` trigger per accepted row.
+4. Atomically `commit_events(..., events, tiles, state, triggers)`. State-only
+   WO publishes raw rows and tiles without row triggers.
 
 WO advance:
 
-1. Load meta and derive the unprocessed cursor range.
-2. Load that raw range to discover the exact emit cursors.
+1. Stream backend-sized trigger pages for
+   `(watermark_frontier, incoming_watermark]`.
+2. Group each page by key and use every trigger cursor as an exact emit point.
 3. Build per-cursor plans. Sliding aggregates plan leave bands; rebuild
    aggregates plan raw edges plus interior tiles.
-4. Merge the plans, then load historical raw edges and tiles concurrently.
+4. Merge emit-row and historical coverage, then load raw rows and tiles
+   concurrently.
    Small ranges remain all-raw. Large slide leave bands may also use tiles.
 5. Evaluate using those same plans. New rows are always raw; rebuild interiors
    do not overfetch raw rows.
-6. Publish updated progress, accumulators, and `retention_floor` with
-   `store_meta`.
+6. Publish updated `KeyEvaluationState` with `store_key_state`.
+7. Advance and forward the task watermark only after all due work succeeds.
 
 Tile-based slide retraction is limited to aggregates whose states can be
 subtracted safely (`SUM`, `COUNT`, and `AVG`). Other sliding aggregates retract
@@ -226,8 +264,8 @@ Epoch is one task-wide counter within an attempt. Every publication, regardless
 of key, gets the next epoch. A new attempt may restart at zero because
 `(attempt, epoch)` remains unique. Scylla stores the two fields separately.
 Scylla uses `WindowBackendSnapshot::Versioned`; the in-memory backend uses
-`InMemory` with a serialized namespace snapshot. Namespace remains in the
-operator's checkpoint envelope.
+`InMemory` with a serialized namespace snapshot. Namespace and the last fully
+processed watermark remain in the operator's `WindowStateSnapshot` envelope.
 
 ### Tables
 
@@ -300,6 +338,35 @@ CREATE TABLE window_key_states (
         epoch
     )
 ) WITH CLUSTERING ORDER BY (epoch DESC);
+
+CREATE TABLE window_triggers (
+    namespace blob,
+    attempt blob,
+    bucket_start bigint,
+    trigger_shard int,
+    fire_ts bigint,
+    fire_seq bigint,
+    business_key blob,
+    trigger_kind tinyint,
+    window_id bigint,
+    epoch bigint,
+    PRIMARY KEY (
+        (namespace, attempt, bucket_start, trigger_shard),
+        fire_ts,
+        fire_seq,
+        business_key,
+        trigger_kind,
+        window_id,
+        epoch
+    )
+) WITH CLUSTERING ORDER BY (
+    fire_ts ASC,
+    fire_seq ASC,
+    business_key ASC,
+    trigger_kind ASC,
+    window_id ASC,
+    epoch DESC
+);
 ```
 
 - `window_head`: per-key ownership fence plus writer and WRO-visible version
@@ -314,6 +381,15 @@ CREATE TABLE window_key_states (
   granularity.
 - `window_key_states`: versioned `KeyState` history used by current WO reads and
   checkpoint recovery.
+- `window_triggers`: immutable due work ordered by event time. Time buckets and
+  `trigger_shard` bound each Scylla partition:
+  `stable_hash(business_key) % trigger_shard_count`. Without it, every trigger
+  in one namespace, attempt, and time bucket would share one hot, potentially
+  oversized partition. `stream_due` queries all shards for each relevant time
+  bucket and merges their results by trigger cursor. The shard is only a
+  physical storage concern, not a window, task, or rescaling key group; its
+  count must remain stable for the namespace. Row triggers use a sentinel
+  `window_id`; scheduled windows retain their actual `WindowId`.
 
 Raw payloads are Arrow-IPC one-row `RecordBatch` values including `__seq_no`..
 
@@ -334,13 +410,13 @@ or replace the expected previous owner. Only one competing WO can succeed.
 Fencing happens when a zombie tries to update a head now owned by the new WO:
 the conditional update fails, so the zombie's data is not published.
 
-### Publication
+### WO write
 
 For one key:
 
 1. Load writer `KeyState`.
 2. Allocate task epoch `E`.
-3. Write changed raw rows, tiles, and `KeyState` under `(attempt, E)`.
+3. Write changed raw rows, tiles, `KeyState`, and triggers under `(attempt, E)`.
 4. LWT-update the head, requiring the current owner and previous writer version.
 5. During normal operation, set both writer and serving versions to
    `(attempt, E)`. During recovery, advance only writer until catch-up.
@@ -350,9 +426,11 @@ The head update is the visibility boundary. Data written before a failed head
 update is orphaned. A new epoch starts only after the previous publication
 outcome is known. On success, advance the epoch; on failure, safely retry the
 same publication or abort the attempt. An ownership CAS failure stops the WO as
-fenced.
+fenced. Trigger rows from an unpublished attempt/epoch are orphaned with its
+other data and are not returned by `stream_due`.
 
-`store_meta` follows the same protocol but writes no raw or tile versions.
+`store_key_state` follows the same protocol but writes no raw, tile, or trigger
+versions.
 
 ### WO reads
 
@@ -364,6 +442,12 @@ then fall back to the base version for data not replaced by recovery writes.
 Logical runs are mapped to time buckets, loaded, merged, and filtered back to
 the exact requested ranges. Raw rows are deduplicated by `Cursor`; current
 tiles replace matching base tiles.
+
+`stream_due` maps its stable watermark range to trigger buckets and shards,
+overlays the recovery attempt over its checkpoint base, and filters trigger
+versions through each key's writer head. It batch-loads writer `KeyState`,
+groups triggers into `DueWindowWork`, and owns page sizing and continuation
+state for the lifetime of the stream.
 
 ### WRO reads
 
@@ -384,44 +468,46 @@ complete serving snapshot.
 
 At an aligned barrier:
 
-1. Drain all buffered keys to a defined checkpoint frontier.
-2. Resolve all in-flight publication outcomes and flush the backend.
-3. Capture `(current attempt, current task epoch)`.
-4. Return `WindowBackendSnapshot::Versioned`; the operator persists it in its
+1. Resolve all in-flight publication outcomes and complete pending writes.
+2. Capture `(current attempt, current task epoch)`.
+3. Return `WindowBackendSnapshot::Versioned`; the operator persists it in its
    checkpoint envelope.
-5. Continue processing at later epochs.
+4. Continue processing at later epochs.
 
 The checkpoint contains no keys or state payloads. For any key, checkpoint
 state is its newest version from the checkpoint attempt with epoch at or below
 the cutoff. Creating a checkpoint does not insert a recovery-base row; that row
 is created only when a new attempt restores this checkpoint.
 
-The operator stores namespace plus `WindowBackendSnapshot` in
-`WindowStateSnapshot`. For unchanged task assignment, restore passes that same
-versioned snapshot back to the store. It still does not drain `buffered_keys`;
-checkpoint integration must implement that frontier.
+The operator stores namespace, its last fully processed watermark, and
+`WindowBackendSnapshot` in `WindowStateSnapshot`. Durable triggers already
+represent work above that watermark, so checkpointing neither drains nor
+serializes an operator-local pending-key set. For unchanged task assignment,
+restore passes the same versioned snapshot back to the store.
 
 ### Recovery
 
-1. The replacement receives the restored version in
+1. The replacement worker has the restored version in
    `WindowBackendSnapshot::Versioned`.
-2. Create a new attempt, insert
-   `window_recovery_bases(new attempt -> restored checkpoint version)`, and
-   start epoch at zero. The row must exist before the attempt publishes data.
+2. During operator restore, the worker's Scylla store creates the new attempt,
+   inserts `window_recovery_bases(new attempt -> restored checkpoint version)`,
+   and starts its epoch at zero. The row must exist before the attempt
+   publishes data. The master only plans and sends the restore snapshot.
 3. Source restores its checkpoint offset and replays post-checkpoint input.
 4. On first access to a key, retain its old serving version, claim ownership,
    and restore writer `KeyState` from the checkpoint base.
-5. Replay into the new attempt and advance only writer state.
+5. Resume watermark work by streaming checkpoint-visible triggers above the
+   restored watermark while replay advances only writer state.
 6. Once append-only replay catches the old serving state, atomically switch
    serving to writer.
 7. Continue normal publication with writer and serving together.
 
 During recovery, writer and serving versions differ. Replay advances writer
 while WRO keeps using the old serving snapshot. While they differ, compare the
-writer `KeyState` with the retained serving state. Once `next_seq`, `max_seen`,
-and `processed_pos` reach the serving frontier, atomically promote writer to
-serving. Keys not touched after recovery may continue serving their old
-snapshot.
+writer `KeyState` with the retained serving state. Once `next_seq` and
+`evaluation.through` reach the serving state, atomically promote writer to
+serving. Keys without evaluation state compare only `next_seq`. Keys not
+touched after recovery may continue serving their old snapshot.
 
 ### WO cache
 
@@ -432,13 +518,16 @@ meta:
     PartitionKey -> (writer version, KeyState)
 data:
     (PartitionKey, family, bucket) -> materialized writer-view data
+triggers:
+    (namespace, attempt, bucket, shard) -> immutable due entries
 ```
 
 `family` is raw data or tiles at a specific granularity.
 
 The cache is cleared before each execution attempt. On a miss, run the normal
 WO bucket read and cache its materialized result. Successful writes replace or
-invalidate affected buckets.
+invalidate affected data buckets. Immutable trigger buckets may be cached and
+paged without becoming a separate source of truth.
 
 `writer_version` remains in the meta value because the next CAS needs it, but
 it is not part of the cache key.
@@ -451,7 +540,10 @@ scans are assembled from bucket point reads. WRO bypasses cache.
 Retain versions reachable from writer heads, serving heads, recovery bases, and
 retained completed checkpoints. We should have a separet maintenance task (per worker?) that independently performs:
 
-- logical retention below `retention_floor`;
+- trigger cleanup at or below watermarks no longer reachable from retained
+  checkpoints;
+- logical raw/tile retention below the floor derived from watermark, maximum
+  window length, and lateness;
 - MVCC cleanup of unreachable versions;
 - orphan cleanup for failed or zombie writes;
 
@@ -475,8 +567,8 @@ state growth visible to normal flow control.
 
 ### CDC and late events
 
-The current flow is append-only. An event is accepted while its cursor is
-ahead of `processed_pos`; an event at or behind that frontier is dropped.
+The current flow is append-only. An event is accepted while its timestamp is
+ahead of the task watermark; an event at or behind that frontier is dropped.
 `lateness` only extends retention and does not provide a late-update grace
 period or revise already emitted results.
 
