@@ -39,7 +39,7 @@ pub async fn evaluate_points(
             .iter()
             .map(|&ts| Cursor::new(ts, u64::MAX))
             .collect();
-        let window_plans = plan_rebuilds(&ends, wl, cfg.tiling.as_ref(), None);
+        let window_plans = plan_rebuilds(&ends, wl, cfg.tiling.as_ref());
         append_coverage_runs(&window_plans, &mut raw_runs, &mut tile_runs);
         plans.insert(*window_id, window_plans);
     }

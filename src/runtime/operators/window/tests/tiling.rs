@@ -65,6 +65,7 @@ async fn ingest_tiles(
             batch,
             &by_key,
             &KeyState::default(),
+            &[],
         )
         .await
         .unwrap();

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 /// Pipeline-wide event-time defaults (SQL / streaming).
 ///
 /// Watermark knobs are shared; window `allowed_lateness_ms` is retention-only
-/// (prune after advance). Streaming late ingest is `ts ≤ processed_pos`.
+/// (prune after advance). Streaming late ingest is `ts ≤ task watermark`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct EventTimeSpec {
     #[serde(default)]

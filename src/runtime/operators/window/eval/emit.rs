@@ -8,21 +8,6 @@ use datafusion::scalar::ScalarValue;
 use crate::runtime::operators::window::model::Cursor;
 use crate::runtime::operators::window::store::data::flatten_ordered;
 
-/// Emit ends in `(prev, advance_to]` from loaded batches.
-pub(super) fn emit_ends(
-    batches: &[RecordBatch],
-    ts_column_index: usize,
-    prev: Option<Cursor>,
-    advance_to: Cursor,
-) -> Vec<Cursor> {
-    let prev = prev.unwrap_or(Cursor::new(i64::MIN, 0));
-    flatten_ordered(batches, ts_column_index)
-        .into_iter()
-        .map(|(c, _, _)| c)
-        .filter(|c| *c > prev && *c <= advance_to)
-        .collect()
-}
-
 /// Map emit ends → input row scalars. Missing cursor → nulls.
 pub(super) fn emit_input_rows(
     batches: &[RecordBatch],

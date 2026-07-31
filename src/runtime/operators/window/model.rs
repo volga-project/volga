@@ -68,7 +68,7 @@ impl StateNamespace {
 }
 
 /// Collision-safe logical identity. Backends choose their own physical keys.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PartitionKey {
     pub namespace: Vec<u8>,
     pub business_key: Vec<u8>,
@@ -83,25 +83,36 @@ impl PartitionKey {
     }
 }
 
-/// State published by the WO for one partition.
 #[serde_as]
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct KeyState {
-    /// Greatest ingested cursor.
-    pub max_seen: Option<Cursor>,
-    /// Frontier reflected by WO accumulators and emitted output.
-    pub processed_pos: Option<Cursor>,
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyEvaluationState {
+    /// Last trigger reflected by the accumulators.
+    pub through: Cursor,
     #[serde_as(as = "BTreeMap<_, Vec<utils::ScalarValueAsBytes>>")]
     pub accumulators: BTreeMap<WindowId, AccumulatorState>,
-    /// Cold-start lower bound; not changed by retention.
-    #[serde(default)]
-    pub first_ingested: Option<Cursor>,
+}
+
+/// State published by the WO for one partition.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct KeyState {
     /// Per-key sequence allocator, independent of cursor ordering.
-    #[serde(default)]
     pub next_seq: u64,
-    /// Data before this cursor is outside the supported retention horizon.
-    #[serde(default)]
-    pub retention_floor: Option<Cursor>,
+    /// Watermark-driven evaluation state; absent for state-only operators.
+    pub evaluation: Option<KeyEvaluationState>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum WindowTriggerKind {
+    RowEmit,
+    WindowEnd { window_id: WindowId },
+}
+
+/// Durable event-time work ordered by firing cursor.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct WindowTrigger {
+    pub fire_at: Cursor,
+    pub partition: PartitionKey,
+    pub kind: WindowTriggerKind,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

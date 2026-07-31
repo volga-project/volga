@@ -13,17 +13,14 @@ pub(crate) struct EvalPlan {
     pub coverage: Option<CoveragePlan>,
 }
 
-/// `start_floor`: lower bound on window start (WO cold/`first_ingested`); `None` = `end − wl`.
 pub(crate) fn plan_rebuilds(
     ends: &[Cursor],
     wl: i64,
     tile_cfg: Option<&TileConfig>,
-    start_floor: Option<i64>,
 ) -> Vec<EvalPlan> {
     ends.iter()
         .map(|&end| {
             let start = end.ts.saturating_sub(wl);
-            let start = start_floor.map_or(start, |floor| start.max(floor));
             let from = Cursor::new(start, 0);
             let to = Cursor::after_timestamp(end.ts);
             EvalPlan {

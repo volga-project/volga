@@ -98,7 +98,7 @@
       ]
     },
     "EventTimeSpec": {
-      "description": "Pipeline-wide event-time defaults (SQL / streaming).\n\nWatermark knobs are shared; window `allowed_lateness_ms` is retention-only\n(prune after advance). Streaming late ingest is `ts ≤ processed_pos`.",
+      "description": "Pipeline-wide event-time defaults (SQL / streaming).\n\nWatermark knobs are shared; window `allowed_lateness_ms` is retention-only\n(prune after advance). Streaming late ingest is `ts ≤ task watermark`.",
       "type": "object",
       "properties": {
         "watermark": {

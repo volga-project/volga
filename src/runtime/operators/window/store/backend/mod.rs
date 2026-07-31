@@ -3,11 +3,12 @@ use std::sync::Arc;
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::runtime::operators::window::model::{
-    KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun,
+    Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
 
 use super::WindowData;
@@ -44,10 +45,19 @@ pub enum WindowBackendSnapshot {
     Versioned { version: StateVersion },
 }
 
+#[derive(Debug, Clone)]
+pub struct DueWindowWork {
+    pub partition: PartitionKey,
+    pub key_state: KeyState,
+    pub triggers: Vec<WindowTrigger>,
+}
+
+pub type DueWorkStream<'a> = BoxStream<'a, Result<Vec<DueWindowWork>>>;
+
 /// Store operations used by the sole Window Operator for a partition.
 #[async_trait]
 pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
-    async fn load_meta(&self, partition: &PartitionKey) -> Result<KeyState>;
+    async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState>;
     async fn load_raw(&self, partition: &PartitionKey, runs: &[RawRun])
         -> Result<Vec<RecordBatch>>;
     async fn load_tiles(&self, partition: &PartitionKey, runs: &[TileRun]) -> Result<TileMap>;
@@ -58,11 +68,16 @@ pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
         events: &RecordBatch,
         tiles: &TileMap,
         meta: &KeyState,
+        triggers: &[WindowTrigger],
     ) -> Result<()>;
-    async fn store_meta(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()>;
-    async fn flush(&self) -> Result<()> {
-        Ok(())
-    }
+    fn stream_due<'a>(
+        &'a self,
+        namespace: &'a StateNamespace,
+        after: Option<Cursor>,
+        through: Cursor,
+    ) -> DueWorkStream<'a>;
+    async fn store_key_state(&self, partition: &PartitionKey, state: &KeyState) -> Result<()>;
+    /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot>;
     async fn restore(
         &self,
