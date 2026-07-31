@@ -1,17 +1,21 @@
+use crate::common::message::{Message, WatermarkMessage};
+use crate::transport::transport_client::DataReaderControl;
+use crate::transport::transport_client::TransportClient;
 use crate::{
     common::MAX_WATERMARK_VALUE,
     runtime::{
+        checkpoint::{SerializedCheckpoint, SerializedRestore},
         collector::Collector,
         execution_graph::ExecutionGraph,
         health::{WorkerFatalReason, WorkerHealth},
         metrics::{
-            get_stream_task_metrics, init_metrics, MetricsLabels,
-            LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
-            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY,
+            get_stream_task_metrics, init_metrics, MetricsLabels, LABEL_PIPELINE_ID,
+            LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BYTES_RECV,
+            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY,
             METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
             METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
         },
-        observability::snapshot_types::{TaskSnapshot, StreamTaskStatus},
+        observability::snapshot_types::{StreamTaskStatus, TaskSnapshot},
         operators::operator::{
             create_operator, MessageStream, OperatorConfig, OperatorPollResult, OperatorTrait,
             OperatorType,
@@ -21,21 +25,25 @@ use crate::{
     transport::transport_client::TransportClientConfig,
 };
 use anyhow::Result;
-use futures::{FutureExt, StreamExt};
 use async_stream::stream;
+use futures::{FutureExt, StreamExt};
 use metrics::{counter, histogram};
-use tokio::{task::JoinHandle, sync::Mutex, sync::watch, sync::mpsc};
-use crate::transport::transport_client::DataReaderControl;
 use std::collections::HashSet;
-use crate::transport::transport_client::TransportClient;
-use crate::common::message::{Message, WatermarkMessage};
-use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicU64, AtomicU8, Ordering},
+        Arc,
+    },
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{sync::mpsc, sync::watch, sync::Mutex, task::JoinHandle};
 // serde imports removed; this module does not define serializable DTOs directly.
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
-use std::sync::atomic::AtomicBool;
-use crate::runtime::VertexId;
 use crate::runtime::watermark::WatermarkAssignConfig;
 use crate::runtime::watermark::WatermarkManager;
+use crate::runtime::VertexId;
+use std::sync::atomic::AtomicBool;
 
 pub static MESSAGE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -132,7 +140,7 @@ pub struct StreamTask {
     upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>, // upstream_vertex_id -> watermark_value
     current_watermark: Arc<AtomicU64>,
     master_addr: Option<String>,
-    restore_checkpoint_id: Option<u64>,
+    restore_data: Option<SerializedRestore>,
     execution_attempt_id: u64,
     worker_health: Arc<WorkerHealth>,
 }
@@ -145,6 +153,7 @@ impl StreamTask {
         runtime_context: RuntimeContext,
         execution_graph: ExecutionGraph,
         worker_health: Arc<WorkerHealth>,
+        restore_data: Option<SerializedRestore>,
     ) -> Self {
         init_metrics();
         let master_addr = runtime_context
@@ -152,10 +161,6 @@ impl StreamTask {
             .get("master_addr")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let restore_checkpoint_id = runtime_context
-            .job_config()
-            .get("restore_checkpoint_id")
-            .and_then(|v| v.as_u64());
         let execution_attempt_id = runtime_context
             .job_config()
             .get("execution_attempt_id")
@@ -196,72 +201,9 @@ impl StreamTask {
             upstream_watermarks: Arc::new(Mutex::new(HashMap::new())),
             current_watermark: Arc::new(AtomicU64::new(0)),
             master_addr,
-            restore_checkpoint_id,
+            restore_data,
             execution_attempt_id,
             worker_health,
-        }
-    }
-
-    async fn restore_from_master_if_configured(
-        operator: &mut dyn OperatorTrait,
-        master_client: &mut Option<MasterServiceClient<tonic::transport::Channel>>,
-        restore_checkpoint_id: Option<u64>,
-        vertex_id: &str,
-        task_index: i32,
-    ) -> Result<()> {
-        let Some(restore_checkpoint_id) = restore_checkpoint_id else {
-            return Ok(());
-        };
-        let Some(client) = master_client.as_mut() else {
-            return Ok(());
-        };
-
-        println!(
-            "[CHECKPOINT] {} task_index={} restoring from checkpoint_id={}",
-            vertex_id, task_index, restore_checkpoint_id
-        );
-
-        let req = crate::runtime::master::server::master_service::GetTaskCheckpointRequest {
-            checkpoint_id: restore_checkpoint_id,
-            vertex_id: vertex_id.to_string(),
-            task_index,
-        };
-        let resp = client
-            .get_task_checkpoint(tonic::Request::new(req))
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get task checkpoint: {}", e))?
-            .into_inner();
-
-        if resp.success && !resp.blobs.is_empty() {
-            println!(
-                "[CHECKPOINT] {} restore found {} blobs",
-                vertex_id,
-                resp.blobs.len()
-            );
-            let blobs = resp
-                .blobs
-                .into_iter()
-                .map(|b| (b.name, b.bytes))
-                .collect::<Vec<_>>();
-            operator.restore(&blobs).await?;
-            println!("[CHECKPOINT] {} restore applied", vertex_id);
-            Ok(())
-        } else if crate::runtime::operators::operator::operator_config_requires_checkpoint(
-            operator.operator_config(),
-        ) {
-            Err(anyhow::anyhow!(
-                "checkpointable task {} index={} missing blobs for restore checkpoint_id={} success={}",
-                vertex_id,
-                task_index,
-                restore_checkpoint_id,
-                resp.success
-            ))
-        } else {
-            println!(
-                "[CHECKPOINT] {} restore had no blobs (success={})",
-                vertex_id, resp.success
-            );
-            Ok(())
         }
     }
 
@@ -304,8 +246,11 @@ impl StreamTask {
         recv_or_send: bool,
         labels: Option<&MetricsLabels>,
     ) {
-        let is_control_message = matches!(message, Message::Watermark(_) | Message::CheckpointBarrier(_));
-        
+        let is_control_message = matches!(
+            message,
+            Message::Watermark(_) | Message::CheckpointBarrier(_)
+        );
+
         if !is_control_message {
             if recv_or_send {
                 if let Some(labels) = labels {
@@ -314,25 +259,30 @@ impl StreamTask {
                         LABEL_VERTEX_ID => vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(1);
+                    )
+                    .increment(1);
                     counter!(
                         METRIC_STREAM_TASK_RECORDS_RECV,
                         LABEL_VERTEX_ID => vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.num_records() as u64);
+                    )
+                    .increment(message.num_records() as u64);
                     counter!(
                         METRIC_STREAM_TASK_BYTES_RECV,
                         LABEL_VERTEX_ID => vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.get_memory_size() as u64);
+                    )
+                    .increment(message.get_memory_size() as u64);
                 } else {
                     counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
-                    counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
-                    counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
+                    counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                        .increment(message.num_records() as u64);
+                    counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                        .increment(message.get_memory_size() as u64);
                 }
-                
+
                 if let Some(ingest_timestamp) = message.ingest_timestamp() {
                     let current_time = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -352,7 +302,6 @@ impl StreamTask {
                             .record(latency as f64);
                     }
                 }
-
             } else {
                 if let Some(labels) = labels {
                     counter!(
@@ -360,23 +309,28 @@ impl StreamTask {
                         LABEL_VERTEX_ID => vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(1);
+                    )
+                    .increment(1);
                     counter!(
                         METRIC_STREAM_TASK_RECORDS_SENT,
                         LABEL_VERTEX_ID => vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.num_records() as u64);
+                    )
+                    .increment(message.num_records() as u64);
                     counter!(
                         METRIC_STREAM_TASK_BYTES_SENT,
                         LABEL_VERTEX_ID => vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.get_memory_size() as u64);
+                    )
+                    .increment(message.get_memory_size() as u64);
                 } else {
                     counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
-                    counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
-                    counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
+                    counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                        .increment(message.num_records() as u64);
+                    counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                        .increment(message.get_memory_size() as u64);
                 }
             }
         }
@@ -475,7 +429,7 @@ impl StreamTask {
         mut collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,
         vertex_id: VertexId,
-        status: Arc<AtomicU8>
+        status: Arc<AtomicU8>,
     ) {
         if collectors_per_target_operator.is_empty() {
             // Edge operator - no downstream collectors
@@ -491,24 +445,28 @@ impl StreamTask {
 
         // TODO should retires be inside transport?
         let mut retries_before_close = 3; // per - messages
-    
+
         // send message to all destinations until no backpressure
-        while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
-            status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
-            
+        while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8
+            || status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8
+        {
             if status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
                 if retries_before_close == 0 {
-                    panic!("StreamTask {:?} gave up on writing message {:?}", vertex_id, message);
+                    panic!(
+                        "StreamTask {:?} gave up on writing message {:?}",
+                        vertex_id, message
+                    );
                 }
                 retries_before_close -= 1;
             }
 
             let write_results = Collector::write_message_to_operators(
-                &mut collectors_per_target_operator, 
-                &message, 
-                channels_to_send_per_operator.clone()
-            ).await;
-            
+                &mut collectors_per_target_operator,
+                &message,
+                channels_to_send_per_operator.clone(),
+            )
+            .await;
+
             channels_to_send_per_operator.clear();
             for (target_operator_id, write_res) in write_results {
                 let mut resend_channels = vec![];
@@ -519,7 +477,8 @@ impl StreamTask {
                     }
                 }
                 if !resend_channels.is_empty() {
-                    channels_to_send_per_operator.insert(target_operator_id.clone(), resend_channels);
+                    channels_to_send_per_operator
+                        .insert(target_operator_id.clone(), resend_channels);
                 }
             }
             if channels_to_send_per_operator.len() == 0 {
@@ -535,14 +494,14 @@ impl StreamTask {
         let operator_config = self.operator_config.clone();
         let execution_graph = self.execution_graph.clone();
         let master_addr = self.master_addr.clone();
-        let restore_checkpoint_id = self.restore_checkpoint_id;
+        let restore_data = self.restore_data.take();
         let execution_attempt_id = self.execution_attempt_id;
         let worker_health = self.worker_health.clone();
         let run_loop_health = worker_health.clone();
-        
+
         let upstream_watermarks = self.upstream_watermarks.clone();
         let current_watermark = self.current_watermark.clone();
-        
+
         let upstream_vertices: Vec<String> = execution_graph
             .get_edges_for_vertex(vertex_id.as_ref())
             .map(|(input_edges, _)| {
@@ -554,7 +513,7 @@ impl StreamTask {
             .unwrap_or_default();
 
         let transport_client_config = self.transport_client_config.take().unwrap();
-        
+
         let (run_sender, run_receiver) = watch::channel(false);
         self.run_signal_sender = Some(run_sender);
 
@@ -563,19 +522,16 @@ impl StreamTask {
 
         let (checkpoint_sender, mut checkpoint_receiver) = mpsc::unbounded_channel::<u64>();
         self.checkpoint_trigger_sender = Some(checkpoint_sender);
-        
+
         // Main stream task lifecycle loop
         let metrics_labels = self.metrics_labels.clone();
         let task_vertex_id = vertex_id.clone();
         let run_loop = async move {
             let mut operator = create_operator(operator_config);
-            
-            let mut transport_client = TransportClient::new(
-                vertex_id.clone(),
-                transport_client_config,
-                run_loop_health,
-            );
-            
+
+            let mut transport_client =
+                TransportClient::new(vertex_id.clone(), transport_client_config, run_loop_health);
+
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
             let (_, output_edges) = execution_graph.get_edges_for_vertex(&vertex_id).unwrap();
@@ -586,18 +542,17 @@ impl StreamTask {
                 let partition_type = edge.partition_type.clone();
                 let target_operator_id = edge.target_operator_id.clone();
 
-                let writer = transport_client.writer.as_ref()
+                let writer = transport_client
+                    .writer
+                    .as_ref()
                     .unwrap_or_else(|| panic!("Writer not initialized"));
-            
+
                 let partition = partition_type.create();
-                
-                let collector = collectors_per_target_operator.entry(target_operator_id).or_insert_with(|| {
-                    Collector::new(
-                        writer.clone(),
-                        partition,
-                    )
-                });
-                
+
+                let collector = collectors_per_target_operator
+                    .entry(target_operator_id)
+                    .or_insert_with(|| Collector::new(writer.clone(), partition));
+
                 collector.add_output_channel(channel);
             }
 
@@ -606,51 +561,66 @@ impl StreamTask {
                 collector.start().await;
             }
 
-            // Optional master client (used for restore + checkpoint reporting)
-            let mut master_client: Option<MasterServiceClient<tonic::transport::Channel>> = if let Some(master_addr) = master_addr {
-                let endpoint = format!("http://{}", master_addr);
-                Some(
-                    MasterServiceClient::connect(endpoint)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to connect to master service: {}", e))?,
-                )
-            } else {
-                None
-            };
+            // Optional master client used for checkpoint reporting.
+            let mut master_client: Option<MasterServiceClient<tonic::transport::Channel>> =
+                if let Some(master_addr) = master_addr {
+                    let endpoint = format!("http://{}", master_addr);
+                    Some(MasterServiceClient::connect(endpoint).await.map_err(|e| {
+                        anyhow::anyhow!("Failed to connect to master service: {}", e)
+                    })?)
+                } else {
+                    None
+                };
 
             operator.open(&runtime_context).await?;
-            println!("{:?} Operator {:?} opened with {} output edges", timestamp(), vertex_id, num_output_edges);
+            println!(
+                "{:?} Operator {:?} opened with {} output edges",
+                timestamp(),
+                vertex_id,
+                num_output_edges
+            );
 
             // Optional restore hook (after open, before run).
             // Important: some operators (e.g. sources) initialize internal state in open();
             // restoring before open would be overwritten by that initialization.
-            Self::restore_from_master_if_configured(
-                &mut operator,
-                &mut master_client,
-                restore_checkpoint_id,
-                &vertex_id,
-                runtime_context.task_index(),
-            )
-            .await?;
+            if let Some(restore) = restore_data {
+                operator.restore(restore).await?;
+                println!("[CHECKPOINT] {} restore applied", vertex_id);
+            }
 
             // if task is not finished/closed early, mark as opened
-            if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
+            if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8
+                && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8
+            {
                 status.store(StreamTaskStatus::Opened as u8, Ordering::SeqCst);
             }
-            
+
             // Wait for signal to start processing
-            println!("{:?} Task {:?} waiting for run signal", timestamp(), vertex_id);
+            println!(
+                "{:?} Task {:?} waiting for run signal",
+                timestamp(),
+                vertex_id
+            );
             Self::wait_for_signal(run_receiver, status.clone(), true).await;
-            println!("{:?} Task {:?} received run signal, starting processing", timestamp(), vertex_id);
-            
+            println!(
+                "{:?} Task {:?} received run signal, starting processing",
+                timestamp(),
+                vertex_id
+            );
+
             // if task is not finished/closed early, mark as runnning
-            if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8 && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8 {
+            if status.load(Ordering::SeqCst) != StreamTaskStatus::Finished as u8
+                && status.load(Ordering::SeqCst) != StreamTaskStatus::Closed as u8
+            {
                 status.store(StreamTaskStatus::Running as u8, Ordering::SeqCst);
             }
 
             let operator_type = operator.operator_type();
-            let is_source = operator_type == OperatorType::Source || operator_type == OperatorType::ChainedSourceSink;
-            let mut data_reader_control: Option<crate::transport::transport_client::DataReaderControl> = None;
+            let is_source = operator_type == OperatorType::Source
+                || operator_type == OperatorType::ChainedSourceSink;
+            let mut data_reader_control: Option<
+                crate::transport::transport_client::DataReaderControl,
+            > = None;
             let vertex_meta = execution_graph
                 .get_vertex(&vertex_id)
                 .expect("vertex should exist in execution graph");
@@ -682,10 +652,12 @@ impl StreamTask {
             } else {
                 None
             };
-            
+
             if !is_source {
                 // Pre-process input stream for non-source operators
-                let reader = transport_client.reader.take()
+                let reader = transport_client
+                    .reader
+                    .take()
                     .expect("Reader should be initialized for non-SOURCE operator");
                 let (input_stream, reader_control) = reader.message_stream_with_control();
                 data_reader_control = Some(reader_control.clone());
@@ -712,7 +684,10 @@ impl StreamTask {
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 // For sources: if checkpoint is triggered, synthesize a CheckpointBarrier message and treat it exactly
                 // like a poll_next() output (same code path, no duplication).
-                let produced = if is_source && crate::runtime::operators::operator::operator_config_requires_checkpoint(operator.operator_config()) {
+                let produced = if is_source
+                    && crate::runtime::operators::operator::operator_config_requires_checkpoint(
+                        operator.operator_config(),
+                    ) {
                     match checkpoint_receiver.try_recv() {
                         Ok(checkpoint_id) => {
                             println!(
@@ -743,10 +718,12 @@ impl StreamTask {
 
                 match poll_res {
                     OperatorPollResult::Ready(mut message) => {
-                        let injected_wm = if is_source && matches!(message, Message::Regular(_) | Message::Keyed(_)) {
-                            source_watermark_manager
-                                .as_mut()
-                                .and_then(|manager| manager.on_data_message(vertex_id.as_ref(), &message))
+                        let injected_wm = if is_source
+                            && matches!(message, Message::Regular(_) | Message::Keyed(_))
+                        {
+                            source_watermark_manager.as_mut().and_then(|manager| {
+                                manager.on_data_message(vertex_id.as_ref(), &message)
+                            })
                         } else {
                             None
                         };
@@ -772,12 +749,9 @@ impl StreamTask {
                                     "[CHECKPOINT] {} checkpointing checkpoint_id={}",
                                     vertex_id, checkpoint_id
                                 );
-                                let blobs = operator.checkpoint(checkpoint_id).await?;
-                                println!(
-                                    "[CHECKPOINT] {} checkpointed {} blobs, reporting...",
-                                    vertex_id,
-                                    blobs.len()
-                                );
+                                let checkpoint: SerializedCheckpoint =
+                                    operator.checkpoint(checkpoint_id).await?;
+                                let checkpoint_data = checkpoint.into_bytes();
 
                                 let report_resp = master_client
                                     .as_mut()
@@ -787,10 +761,7 @@ impl StreamTask {
                                             checkpoint_id,
                                             vertex_id: vertex_id.as_ref().to_string(),
                                             task_index: runtime_context.task_index(),
-                                            blobs: blobs
-                                                .into_iter()
-                                                .map(|(name, bytes)| crate::runtime::master::server::master_service::StateBlob { name, bytes })
-                                                .collect(),
+                                            checkpoint_data,
                                             execution_attempt_id,
                                         },
                                     ))
@@ -819,15 +790,19 @@ impl StreamTask {
                         //     println!("StreamTask {:?} produced message {:?}", vertex_id, message);
                         // }
                         if is_source {
-                            message.set_ingest_timestamp(SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64);
+                            message.set_ingest_timestamp(
+                                SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64,
+                            );
                         }
                         if let Message::Watermark(ref mut watermark) = message {
                             if is_source {
                                 if let Some(manager) = source_watermark_manager.as_mut() {
-                                    if let Some(new_watermark) = manager.merge_watermark(watermark.clone()).await {
+                                    if let Some(new_watermark) =
+                                        manager.merge_watermark(watermark.clone()).await
+                                    {
                                         watermark.watermark_value = new_watermark;
                                     }
                                 }
@@ -836,24 +811,33 @@ impl StreamTask {
                             if watermark.watermark_value == MAX_WATERMARK_VALUE {
                                 status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                             }
-                            println!("StreamTask {:?} produced watermark {:?}", vertex_id, watermark.watermark_value);
+                            println!(
+                                "StreamTask {:?} produced watermark {:?}",
+                                vertex_id, watermark.watermark_value
+                            );
                         }
-                        
+
                         if MESSAGE_TRACE_ENABLED.load(Ordering::Relaxed) {
                             message.append_trace(&vertex_id);
                         }
 
                         // Set upstream vertex id for all messages before sending downstream
                         message.set_upstream_vertex_id(vertex_id.as_ref().to_string());
-                        Self::record_metrics(vertex_id.clone(), &message, false, metrics_labels.as_ref());
+                        Self::record_metrics(
+                            vertex_id.clone(),
+                            &message,
+                            false,
+                            metrics_labels.as_ref(),
+                        );
 
                         // Send to collectors
                         Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,
                             vertex_id.clone(),
-                            status.clone()
-                        ).await;
+                            status.clone(),
+                        )
+                        .await;
 
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);
@@ -880,7 +864,12 @@ impl StreamTask {
                                 MAX_WATERMARK_VALUE,
                                 None,
                             ));
-                            Self::record_metrics(vertex_id.clone(), &wm, false, metrics_labels.as_ref());
+                            Self::record_metrics(
+                                vertex_id.clone(),
+                                &wm,
+                                false,
+                                metrics_labels.as_ref(),
+                            );
                             Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 wm,
@@ -900,21 +889,29 @@ impl StreamTask {
                     OperatorPollResult::Continue => { /* no output */ }
                 }
             }
-            
+
             // Flush and close collectors
             for (_, collector) in collectors_per_target_operator.iter_mut() {
                 collector.flush_and_close().await.unwrap();
             }
-            
-            println!("{:?} Task {:?} waiting for close signal", timestamp(), vertex_id);
+
+            println!(
+                "{:?} Task {:?} waiting for close signal",
+                timestamp(),
+                vertex_id
+            );
             Self::wait_for_signal(close_receiver, status.clone(), false).await;
-            println!("{:?} Task {:?} received close signal, performing close", timestamp(), vertex_id);
+            println!(
+                "{:?} Task {:?} received close signal, performing close",
+                timestamp(),
+                vertex_id
+            );
 
             operator.close().await?;
 
             status.store(StreamTaskStatus::Closed as u8, Ordering::SeqCst);
             println!("{:?} StreamTask {:?} closed", timestamp(), vertex_id);
-            
+
             Ok(())
         };
         let run_loop_handle = tokio::spawn(run_loop.map(move |result| {
@@ -926,7 +923,7 @@ impl StreamTask {
             }
             result
         }));
-        
+
         self.run_loop_handle = Some(run_loop_handle);
     }
 
@@ -955,25 +952,42 @@ impl StreamTask {
     }
 
     pub fn signal_trigger_checkpoint(&mut self, checkpoint_id: u64) {
-        let sender = self.checkpoint_trigger_sender.as_ref().expect("checkpoint trigger sender not set");
+        let sender = self
+            .checkpoint_trigger_sender
+            .as_ref()
+            .expect("checkpoint trigger sender not set");
         let _ = sender.send(checkpoint_id);
     }
 
-    async fn wait_for_signal(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>, skip_on_finished: bool) {
+    async fn wait_for_signal(
+        mut receiver: watch::Receiver<bool>,
+        status: Arc<AtomicU8>,
+        skip_on_finished: bool,
+    ) {
         let timeout = Duration::from_millis(50000);
         let start_time = SystemTime::now();
-        
+
         loop {
             if skip_on_finished {
                 let current_status = status.load(Ordering::SeqCst);
-                if current_status == StreamTaskStatus::Finished as u8 || current_status == StreamTaskStatus::Closed as u8 {
-                    println!("{:?} Task status is {:?}, stopping wait for signal", timestamp(), StreamTaskStatus::from(current_status));
+                if current_status == StreamTaskStatus::Finished as u8
+                    || current_status == StreamTaskStatus::Closed as u8
+                {
+                    println!(
+                        "{:?} Task status is {:?}, stopping wait for signal",
+                        timestamp(),
+                        StreamTaskStatus::from(current_status)
+                    );
                     return;
                 }
             }
 
             if start_time.elapsed().unwrap_or_default() > timeout {
-                panic!("Timeout waiting for signal after {:?}, current status is {:?}", timeout, StreamTaskStatus::from(status.load(Ordering::SeqCst)));
+                panic!(
+                    "Timeout waiting for signal after {:?}, current status is {:?}",
+                    timeout,
+                    StreamTaskStatus::from(status.load(Ordering::SeqCst))
+                );
             }
 
             match tokio::time::timeout(Duration::from_millis(50), receiver.changed()).await {

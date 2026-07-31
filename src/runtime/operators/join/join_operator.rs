@@ -1,8 +1,17 @@
 use std::fmt;
 
-use crate::{common::Message, runtime::{operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
-use async_trait::async_trait;
+use crate::{
+    common::Message,
+    runtime::{
+        operators::operator::{
+            MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
+            OperatorType,
+        },
+        runtime_context::RuntimeContext,
+    },
+};
 use anyhow::Result;
+use async_trait::async_trait;
 
 pub struct JoinOperator {
     base: OperatorBase,
@@ -26,7 +35,7 @@ impl JoinOperator {
             OperatorConfig::JoinConfig(join_function) => join_function,
             _ => panic!("Expected JoinConfig, got {:?}", config),
         };
-        Self { 
+        Self {
             base: OperatorBase::new_with_function(join_function, config),
             left_buffer: Vec::new(),
             right_buffer: Vec::new(),
@@ -54,8 +63,12 @@ impl OperatorTrait for JoinOperator {
 
     async fn poll_next(&mut self) -> OperatorPollResult {
         match self.base.next_input().await {
-            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
-            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
+            Some(Message::Watermark(watermark)) => {
+                OperatorPollResult::Ready(Message::Watermark(watermark))
+            }
+            Some(Message::CheckpointBarrier(barrier)) => {
+                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+            }
             Some(message) => {
                 // TODO proper lookup for upstream_vertex_id position (left or right)
                 if let Some(upstream_id) = message.upstream_vertex_id() {

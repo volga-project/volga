@@ -1,8 +1,11 @@
+use std::sync::Arc;
+
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::api::spec::state::OperatorStateBackendConfig;
 use crate::runtime::operators::window::model::{
     KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun,
 };
@@ -13,6 +16,22 @@ mod inmem;
 
 pub use inmem::InMemWindowStore;
 
+pub fn create_window_operator_store(
+    backend: &OperatorStateBackendConfig,
+) -> Arc<dyn WindowOperatorStore> {
+    match backend {
+        OperatorStateBackendConfig::InMemory => Arc::new(InMemWindowStore::new()),
+    }
+}
+
+pub fn create_window_request_store(
+    backend: &OperatorStateBackendConfig,
+) -> Arc<dyn WindowRequestStore> {
+    match backend {
+        OperatorStateBackendConfig::InMemory => Arc::new(InMemWindowStore::new()),
+    }
+}
+
 pub type AttemptToken = Vec<u8>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,21 +41,9 @@ pub struct StateVersion {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowCheckpointMeta {
-    pub version: StateVersion,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct WindowRestoreMeta {
-    pub base_version: StateVersion,
-}
-
-impl From<WindowCheckpointMeta> for WindowRestoreMeta {
-    fn from(meta: WindowCheckpointMeta) -> Self {
-        Self {
-            base_version: meta.version,
-        }
-    }
+pub enum WindowBackendSnapshot {
+    InMemory { snapshot: Vec<u8> },
+    Versioned { version: StateVersion },
 }
 
 /// Store operations used by the sole Window Operator for a partition.
@@ -58,8 +65,12 @@ pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
     async fn flush(&self) -> Result<()> {
         Ok(())
     }
-    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowCheckpointMeta>;
-    async fn restore(&self, namespace: &StateNamespace, meta: &WindowRestoreMeta) -> Result<()>;
+    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot>;
+    async fn restore(
+        &self,
+        namespace: &StateNamespace,
+        snapshot: &WindowBackendSnapshot,
+    ) -> Result<()>;
 }
 
 /// Coherent point-lookup reads used by the Window Request Operator.

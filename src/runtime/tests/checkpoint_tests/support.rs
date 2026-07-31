@@ -4,7 +4,9 @@ use anyhow::{anyhow, Result};
 use std::time::Duration;
 
 use crate::runtime::master::LifecycleEvent;
-use crate::runtime::tests::cluster_harness::{LifecycleOracle, MasterHandle, RuntimeEnv, TestCluster};
+use crate::runtime::tests::cluster_harness::{
+    LifecycleOracle, MasterHandle, RuntimeEnv, TestCluster,
+};
 
 pub(super) async fn wait_until_attempt0_running(
     master: &MasterHandle,
@@ -12,10 +14,7 @@ pub(super) async fn wait_until_attempt0_running(
     timeout: Duration,
 ) -> Result<()> {
     LifecycleOracle::wait_for(master, cursor, timeout, |event| {
-        matches!(
-            event,
-            LifecycleEvent::AttemptRunning { attempt_id: 0, .. }
-        )
+        matches!(event, LifecycleEvent::AttemptRunning { attempt_id: 0, .. })
     })
     .await?;
     Ok(())

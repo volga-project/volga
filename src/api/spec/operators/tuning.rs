@@ -6,4 +6,3 @@ use crate::runtime::operators::window::spec::WindowSpec;
 pub enum OperatorTuningSpec {
     Window(WindowSpec),
 }
-

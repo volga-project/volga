@@ -150,7 +150,10 @@ pub fn assert_checkpoint_restore(
         ));
     }
     let attempt1 = report.attempt(1)?;
-    if !attempt1.trigger.contains(&format!("restore=Some({expected_checkpoint_id})")) {
+    if !attempt1
+        .trigger
+        .contains(&format!("restore=Some({expected_checkpoint_id})"))
+    {
         return Err(anyhow!(
             "attempt 1 trigger missing restore=Some({expected_checkpoint_id}): {}",
             attempt1.trigger

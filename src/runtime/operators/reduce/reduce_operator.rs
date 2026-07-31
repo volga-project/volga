@@ -1,10 +1,26 @@
-use std::{collections::HashMap, sync::{Arc, Mutex}, fmt};
+use std::{
+    collections::HashMap,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::{common::{Key, Message}, runtime::{functions::reduce::{Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait, ReduceFunction, ReduceFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
-
+use crate::{
+    common::{Key, Message},
+    runtime::{
+        functions::reduce::{
+            Accumulator, AggregationResultExtractor, AggregationResultExtractorTrait,
+            ReduceFunction, ReduceFunctionTrait,
+        },
+        operators::operator::{
+            MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
+            OperatorType,
+        },
+        runtime_context::RuntimeContext,
+    },
+};
 
 pub struct ReduceOperator {
     base: OperatorBase,
@@ -25,13 +41,16 @@ impl fmt::Debug for ReduceOperator {
 impl ReduceOperator {
     pub fn new(config: OperatorConfig) -> Self {
         let (reduce_function, extractor) = match config.clone() {
-            OperatorConfig::ReduceConfig(reduce_function, extractor) => (reduce_function, extractor),
+            OperatorConfig::ReduceConfig(reduce_function, extractor) => {
+                (reduce_function, extractor)
+            }
             _ => panic!("Expected ReduceConfig, got {:?}", config),
         };
         Self {
             base: OperatorBase::new_with_function(reduce_function, config),
             accumulators: HashMap::new(),
-            result_extractor: extractor.unwrap_or_else(AggregationResultExtractor::all_aggregations),
+            result_extractor: extractor
+                .unwrap_or_else(AggregationResultExtractor::all_aggregations),
         }
     }
 }
@@ -56,8 +75,12 @@ impl OperatorTrait for ReduceOperator {
 
     async fn poll_next(&mut self) -> OperatorPollResult {
         match self.base.next_input().await {
-            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
-            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
+            Some(Message::Watermark(watermark)) => {
+                OperatorPollResult::Ready(Message::Watermark(watermark))
+            }
+            Some(Message::CheckpointBarrier(barrier)) => {
+                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+            }
             Some(message) => {
                 let upstream_vertex_id = message.upstream_vertex_id();
                 let ingest_ts = message.ingest_timestamp();
@@ -65,27 +88,29 @@ impl OperatorTrait for ReduceOperator {
                 match message {
                     Message::Keyed(keyed_message) => {
                         let key = keyed_message.key().clone();
-                        
+
                         // Check if we need to create a new accumulator or update an existing one
                         let acc_exists = self.accumulators.contains_key(&key);
-                        
+
                         let function = self.base.get_function_mut::<ReduceFunction>().unwrap();
 
                         if !acc_exists {
                             // Create a new accumulator
-                            self.accumulators.insert(key.clone(), Arc::new(Mutex::new(function.create_accumulator())));
+                            self.accumulators.insert(
+                                key.clone(),
+                                Arc::new(Mutex::new(function.create_accumulator())),
+                            );
                         }
-                        
+
                         // Now that we've updated the accumulator, get the result
-                        let acc = self.accumulators.get_mut(&key)
-                            .unwrap();
-                        
+                        let acc = self.accumulators.get_mut(&key).unwrap();
+
                         let keyed_message = keyed_message.clone();
                         let function = function.clone();
                         let result_extractor = self.result_extractor.clone();
                         let acc = acc.clone();
-          
-                        // make sure we use fifo to maintain order 
+
+                        // make sure we use fifo to maintain order
                         // let result = self.base.thread_pool.spawn_fifo_async(move || {
                         //     let mut acc = acc.lock().unwrap();
                         //     function.update_accumulator(&mut acc, &keyed_message);
@@ -97,9 +122,14 @@ impl OperatorTrait for ReduceOperator {
                         let mut acc = acc.lock().unwrap();
                         function.update_accumulator(&mut acc, &keyed_message);
                         let agg_result = function.get_result(&acc);
-                        let result_message = result_extractor.extract_result(&key, &agg_result, upstream_vertex_id, ingest_ts);
+                        let result_message = result_extractor.extract_result(
+                            &key,
+                            &agg_result,
+                            upstream_vertex_id,
+                            ingest_ts,
+                        );
                         OperatorPollResult::Ready(result_message)
-                    },
+                    }
                     _ => {
                         panic!("ReduceOperator requires KeyedMessage input")
                     }

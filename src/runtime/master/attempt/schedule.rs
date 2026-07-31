@@ -2,8 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use crate::orchestrator::orchestrator::WorkerNode;
 use crate::orchestrator::task_assignment::{build_mapping, worker_to_tasks, TaskWorkerMapping};
+use crate::runtime::checkpoint::RestorePlan;
+use crate::runtime::consts::{
+    runtime_consts, MASTER_DISCOVERY_TIMEOUT, MASTER_REPLACEMENT_TIMEOUT,
+};
 use crate::runtime::observability::StreamTaskStatus;
-use crate::runtime::consts::{runtime_consts, MASTER_DISCOVERY_TIMEOUT, MASTER_REPLACEMENT_TIMEOUT};
 
 use super::super::events::LifecycleEvent;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
@@ -41,8 +44,17 @@ impl ExecutionAttempt {
         );
         let mapping = build_mapping(&self.pipeline.spec, &self.pipeline.execution_graph, &nodes)
             .map_err(|error| ScheduleError::Terminal(error.to_string()))?;
+        let restore_plan = match self.restore_checkpoint_id {
+            Some(checkpoint_id) => Some(
+                self.state
+                    .plan_restore(checkpoint_id)
+                    .await
+                    .map_err(ScheduleError::Terminal)?,
+            ),
+            None => None,
+        };
         self.connect_all(&nodes).await?;
-        self.configure_all(&mapping).await?;
+        self.configure_all(&mapping, restore_plan).await?;
         self.start_all().await?;
         self.wait_opened().await?;
         self.start_heartbeats();
@@ -69,24 +81,42 @@ impl ExecutionAttempt {
     async fn configure_all(
         &self,
         mapping: &TaskWorkerMapping,
+        restore_plan: Option<RestorePlan>,
     ) -> Result<(), ScheduleError> {
         let worker_tasks = worker_to_tasks(mapping);
+        let restoring = restore_plan.is_some();
+        let mut restore_by_worker = HashMap::new();
+        if let Some(plan) = restore_plan {
+            for (task, restore) in plan.tasks {
+                let worker_id = &mapping
+                    .get(&task.vertex_id)
+                    .expect("restore task must be assigned")
+                    .worker_id;
+                restore_by_worker
+                    .entry(worker_id.clone())
+                    .or_insert_with(Vec::new)
+                    .push((task, restore));
+            }
+        }
         let futures = self.clients.iter().map(|(worker_id, client)| {
             let worker_id = worker_id.clone();
             let pipeline_id = self.pipeline.pipeline_id.clone();
             let spec = self.pipeline.spec.clone();
             let vertex_ids = worker_tasks.get(&worker_id).cloned().unwrap_or_default();
+            let task_restore_data = restore_by_worker.remove(&worker_id).unwrap_or_default();
             let mapping = mapping.clone();
             async move {
-                let result = client.configure(
-                    worker_id.clone(),
-                    pipeline_id,
-                    spec,
-                    vertex_ids,
-                    mapping,
-                    self.restore_checkpoint_id,
-                )
-                .await;
+                let result = client
+                    .configure(
+                        worker_id.clone(),
+                        pipeline_id,
+                        spec,
+                        vertex_ids,
+                        mapping,
+                        task_restore_data,
+                        restoring,
+                    )
+                    .await;
                 (worker_id, result)
             }
         });
@@ -135,12 +165,8 @@ impl ExecutionAttempt {
             let worker_id = worker_id.clone();
             let worker_addr = format!("{}:{}", node.worker_ip, node.worker_port);
             async move {
-                let result = WorkerClient::open(
-                    &worker_id,
-                    worker_addr,
-                    execution_attempt_id,
-                )
-                .await;
+                let result =
+                    WorkerClient::open(&worker_id, worker_addr, execution_attempt_id).await;
                 (worker_id, result)
             }
         });

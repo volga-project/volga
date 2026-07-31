@@ -1,14 +1,14 @@
+use serde_json::Value;
 use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
-use serde_json::Value;
 
+use crate::api::spec::state::OperatorStateBackendConfig;
+use crate::common::types::PipelineId;
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
 use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::state::OperatorStates;
-use crate::runtime::operators::window::store::StateNamespace;
-use crate::runtime::operators::window::store::{WindowOperatorStore, WindowRequestStore};
 use crate::runtime::VertexId;
+use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
 
 #[derive(Clone, Debug)]
 pub struct RuntimeContext {
@@ -18,10 +18,9 @@ pub struct RuntimeContext {
     job_config: HashMap<String, Value>,
     operator_states: Option<Arc<OperatorStates>>,
     execution_graph: Option<ExecutionGraph>,
-    /// Window-state backends shared by WO and WRO.
-    window_operator_store: Option<Arc<dyn WindowOperatorStore>>,
-    window_request_store: Option<Arc<dyn WindowRequestStore>>,
-    window_state_namespace: Option<StateNamespace>,
+    state_backend: Option<OperatorStateBackendConfig>,
+    pipeline_id: Option<PipelineId>,
+    operator_id: Option<String>,
     source_handles: Option<SourceHandles>,
 
     request_sink_source_request_receiver: Option<Arc<Mutex<mpsc::Receiver<PendingRequest>>>>,
@@ -44,9 +43,9 @@ impl RuntimeContext {
             job_config: job_config.unwrap_or_default(),
             operator_states,
             execution_graph,
-            window_operator_store: None,
-            window_request_store: None,
-            window_state_namespace: None,
+            state_backend: None,
+            pipeline_id: None,
+            operator_id: None,
             source_handles: None,
             request_sink_source_request_receiver: None,
             request_sink_source_response_sender: None,
@@ -79,28 +78,28 @@ impl RuntimeContext {
             .expect("execution graph should be set")
     }
 
-    pub fn set_window_operator_store(&mut self, store: Arc<dyn WindowOperatorStore>) {
-        self.window_operator_store = Some(store);
+    pub fn with_state_backend(
+        mut self,
+        state_backend: OperatorStateBackendConfig,
+        pipeline_id: PipelineId,
+        operator_id: String,
+    ) -> Self {
+        self.state_backend = Some(state_backend);
+        self.pipeline_id = Some(pipeline_id);
+        self.operator_id = Some(operator_id);
+        self
     }
 
-    pub fn window_operator_store(&self) -> Option<Arc<dyn WindowOperatorStore>> {
-        self.window_operator_store.clone()
+    pub fn state_backend(&self) -> Option<&OperatorStateBackendConfig> {
+        self.state_backend.as_ref()
     }
 
-    pub fn set_window_request_store(&mut self, store: Arc<dyn WindowRequestStore>) {
-        self.window_request_store = Some(store);
+    pub fn pipeline_id(&self) -> Option<&PipelineId> {
+        self.pipeline_id.as_ref()
     }
 
-    pub fn window_request_store(&self) -> Option<Arc<dyn WindowRequestStore>> {
-        self.window_request_store.clone()
-    }
-
-    pub fn set_window_state_namespace(&mut self, ns: StateNamespace) {
-        self.window_state_namespace = Some(ns);
-    }
-
-    pub fn window_state_namespace(&self) -> Option<StateNamespace> {
-        self.window_state_namespace.clone()
+    pub fn operator_id(&self) -> Option<&str> {
+        self.operator_id.as_deref()
     }
 
     pub fn set_source_handles(&mut self, handles: Arc<SourceHandles>) {

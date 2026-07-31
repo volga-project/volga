@@ -64,8 +64,9 @@ fn test_stream_task_actor() -> Result<()> {
             .collect::<Vec<crate::runtime::VertexId>>();
         vertex_ids.sort();
 
-        let mut backend: Box<dyn TransportBackendTrait> =
-            Box::new(TransportBackend::new(std::sync::Arc::new(WorkerHealth::new())));
+        let mut backend: Box<dyn TransportBackendTrait> = Box::new(TransportBackend::new(
+            std::sync::Arc::new(WorkerHealth::new()),
+        ));
         let mut configs = backend.init_channels(&graph, vertex_ids.clone());
 
         let input_vertex_id = vertex_ids[0].clone();
@@ -88,6 +89,7 @@ fn test_stream_task_actor() -> Result<()> {
             RuntimeContext::new(task_vertex_id.clone(), 0, 1, None, None, None),
             graph.clone(),
             std::sync::Arc::new(WorkerHealth::new()),
+            None,
         );
 
         // Create transport backend actor

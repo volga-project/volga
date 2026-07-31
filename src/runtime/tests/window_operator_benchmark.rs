@@ -14,9 +14,7 @@ use crate::{
         },
         metrics::PipelineStateHistory,
         observability::PipelineSnapshot,
-        operators::window::{
-            operator::WindowOutputMode, TileConfig, TimeGranularity,
-        },
+        operators::window::{operator::WindowOutputMode, TileConfig, TimeGranularity},
     },
     storage::{InMemoryStorageClient, InMemoryStorageServer},
 };
@@ -276,13 +274,11 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
             num_threads_per_task: 4,
         })
         .with_window_allowed_lateness_ms(config.lateness)
-        .with_source(
-            SourceSpec::new(
-                "datagen_source",
-                SourceSpecKind::Datagen(datagen_config.spec.clone()),
-                schema_to_json(schema.as_ref()),
-            )
-        );
+        .with_source(SourceSpec::new(
+            "datagen_source",
+            SourceSpecKind::Datagen(datagen_config.spec.clone()),
+            schema_to_json(schema.as_ref()),
+        ));
 
     // Set execution mode
     if config.output_mode == WindowOutputMode::StateOnly {
@@ -410,12 +406,8 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
 
     // Spawn execution task
     let execution_task = tokio::spawn(async move {
-        pipeline_exec::execute_with_state_updates(
-            spec,
-            logical_graph,
-            Some(state_updates_sender),
-        )
-        .await
+        pipeline_exec::execute_with_state_updates(spec, logical_graph, Some(state_updates_sender))
+            .await
     });
 
     // Race between execution completion and timeout
@@ -598,7 +590,9 @@ async fn test_window_benchmark_basic() -> Result<()> {
         rate: None,
         run_for_s: None,
         // window_type: WindowType::Range { milliseconds: 1000 },
-        window_type: WindowType::Range { milliseconds: 10_000_000 },
+        window_type: WindowType::Range {
+            milliseconds: 10_000_000,
+        },
         num_windows: num_windows,
         aggregation_type: AggregationType::Plain,
         output_mode: WindowOutputMode::StateOnly,

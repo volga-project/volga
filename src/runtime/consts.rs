@@ -29,14 +29,13 @@ pub const MASTER_REGISTRY_WAIT_TICK: &str = "master.registry_wait_tick";
 pub const MASTER_CHECKPOINT_INTERVAL: &str = "master.checkpoint_interval";
 /// Fail the attempt if an in-flight checkpoint does not complete within this budget.
 pub const MASTER_CHECKPOINT_TIMEOUT: &str = "master.checkpoint_timeout";
-/// Max completed checkpoints to retain (ids + blobs). Oldest are pruned; must be ≥ 1.
+/// Max completed checkpoints to retain. Oldest are pruned; must be ≥ 1.
 pub const MASTER_CHECKPOINT_RETENTION: &str = "master.checkpoint_retention";
 pub const KUBE_WORKER_HEALTH_POLL_INTERVAL: &str = "kube.worker_health_poll_interval";
 pub const KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS: &str =
     "kube.worker_health_unhealthy_grace_ticks";
 pub const WORKER_HEARTBEAT_SEND_INTERVAL: &str = "worker.heartbeat_send_interval";
-pub const WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT: &str =
-    "worker.heartbeat_master_silence_timeout";
+pub const WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT: &str = "worker.heartbeat_master_silence_timeout";
 pub const WORKER_REGISTER_MAX_RETRIES: &str = "worker.register_max_retries";
 pub const WORKER_REGISTER_RETRY_DELAY: &str = "worker.register_retry_delay";
 pub const WORKER_REGISTER_CONNECT_TIMEOUT: &str = "worker.register_connect_timeout";
@@ -215,14 +214,17 @@ fn resolve_consts_path(profile: RuntimeConstsProfile) -> Option<PathBuf> {
 }
 
 fn parse_consts_json(raw: &str) -> RuntimeConsts {
-    let map: HashMap<String, serde_json::Value> = serde_json::from_str(raw)
-        .unwrap_or_else(|e| panic!("invalid runtime consts JSON: {e}"));
+    let map: HashMap<String, serde_json::Value> =
+        serde_json::from_str(raw).unwrap_or_else(|e| panic!("invalid runtime consts JSON: {e}"));
     let mut values = HashMap::new();
     for &key in DURATION_KEYS {
         let value = map
             .get(key)
             .unwrap_or_else(|| panic!("runtime consts missing duration key {key}"));
-        values.insert(key.to_string(), RuntimeValue::Duration(json_duration(key, value)));
+        values.insert(
+            key.to_string(),
+            RuntimeValue::Duration(json_duration(key, value)),
+        );
     }
     for &key in U64_KEYS {
         let value = map
@@ -235,12 +237,13 @@ fn parse_consts_json(raw: &str) -> RuntimeConsts {
 
 fn json_duration(key: &str, value: &serde_json::Value) -> Duration {
     match value {
-        serde_json::Value::String(s) => parse_duration(s)
-            .unwrap_or_else(|e| panic!("runtime consts {key}: {e}")),
+        serde_json::Value::String(s) => {
+            parse_duration(s).unwrap_or_else(|e| panic!("runtime consts {key}: {e}"))
+        }
         serde_json::Value::Number(n) => {
-            let ms = n
-                .as_u64()
-                .unwrap_or_else(|| panic!("runtime consts {key}: expected non-negative integer ms"));
+            let ms = n.as_u64().unwrap_or_else(|| {
+                panic!("runtime consts {key}: expected non-negative integer ms")
+            });
             Duration::from_millis(ms)
         }
         _ => panic!("runtime consts {key}: expected duration string or integer ms"),
@@ -276,9 +279,7 @@ fn parse_duration(s: &str) -> Result<Duration, String> {
             .map_err(|_| format!("invalid duration '{s}'"))?;
         return Ok(Duration::from_secs(n));
     }
-    Err(format!(
-        "invalid duration '{s}' (use Ns, Nms, or Nus)"
-    ))
+    Err(format!("invalid duration '{s}' (use Ns, Nms, or Nus)"))
 }
 
 static RUNTIME_CONSTS: OnceLock<RuntimeConsts> = OnceLock::new();
@@ -308,10 +309,7 @@ fn select_runtime_consts() -> RuntimeConsts {
             RuntimeConstsProfile::Prod
         }
     });
-    println!(
-        "[MASTER] using {} runtime consts",
-        profile.as_str()
-    );
+    println!("[MASTER] using {} runtime consts", profile.as_str());
     RuntimeConsts::for_profile(profile)
 }
 
@@ -355,7 +353,10 @@ mod tests {
     #[test]
     fn parses_embedded_profiles() {
         let prod = parse_consts_json(EMBEDDED_PROD);
-        assert_eq!(prod.duration(MASTER_DISCOVERY_TIMEOUT), Duration::from_secs(30));
+        assert_eq!(
+            prod.duration(MASTER_DISCOVERY_TIMEOUT),
+            Duration::from_secs(30)
+        );
         assert_eq!(prod.u64(MASTER_RECOVERY_BUDGET), 20);
         assert_eq!(
             prod.duration(MASTER_FAILURE_AGGREGATION_WINDOW),
@@ -370,7 +371,10 @@ mod tests {
         assert_eq!(kube.u64(KUBE_WORKER_HEALTH_UNHEALTHY_GRACE_TICKS), 2);
 
         let local = parse_consts_json(EMBEDDED_LOCAL_TEST);
-        assert_eq!(local.duration(MASTER_DISCOVERY_TIMEOUT), Duration::from_secs(2));
+        assert_eq!(
+            local.duration(MASTER_DISCOVERY_TIMEOUT),
+            Duration::from_secs(2)
+        );
         assert_eq!(
             local.duration(MASTER_WORKER_CONNECT_TIMEOUT),
             Duration::from_millis(200)

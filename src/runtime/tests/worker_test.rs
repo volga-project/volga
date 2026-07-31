@@ -12,11 +12,11 @@ use crate::{
         },
         WatermarkMessage, MAX_WATERMARK_VALUE,
     },
-    runtime::tests::pipeline_exec,
     runtime::operators::{
         sink::sink_operator::SinkConfig,
         source::source_operator::{SourceConfig, VectorSourceConfig},
     },
+    runtime::tests::pipeline_exec,
     storage::{InMemoryStorageClient, InMemoryStorageServer},
 };
 use anyhow::Result;
@@ -92,9 +92,7 @@ fn test_worker_execution() -> Result<()> {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
 
-        pipeline_exec::execute(spec, logical_graph)
-            .await
-            .unwrap();
+        pipeline_exec::execute(spec, logical_graph).await.unwrap();
 
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr))
             .await

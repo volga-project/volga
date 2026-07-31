@@ -220,7 +220,8 @@ fn describe_unhealthy_pod(pod: &Value) -> String {
             return format!("phase={phase} reason={reason}");
         }
     }
-    if let Some(statuses) = json_get_path(pod, &["status", "containerStatuses"]).and_then(|v| v.as_array())
+    if let Some(statuses) =
+        json_get_path(pod, &["status", "containerStatuses"]).and_then(|v| v.as_array())
     {
         for status in statuses {
             if let Some(terminated) = json_get_path(status, &["state", "terminated"]) {
@@ -241,7 +242,10 @@ fn describe_unhealthy_pod(pod: &Value) -> String {
                     .unwrap_or("Waiting");
                 if matches!(
                     reason,
-                    "CrashLoopBackOff" | "ImagePullBackOff" | "ErrImagePull" | "CreateContainerError"
+                    "CrashLoopBackOff"
+                        | "ImagePullBackOff"
+                        | "ErrImagePull"
+                        | "CreateContainerError"
                 ) {
                     return format!("container waiting reason={reason}");
                 }
@@ -425,7 +429,11 @@ impl KubeMasterOrchestrator {
             Ok(crd) => {
                 let annotation = json_get_path(
                     &crd,
-                    &["metadata", "annotations", KUBE_WORKER_HEALTH_POLL_ANNOTATION],
+                    &[
+                        "metadata",
+                        "annotations",
+                        KUBE_WORKER_HEALTH_POLL_ANNOTATION,
+                    ],
                 )
                 .and_then(|v| v.as_str());
                 match annotation.and_then(parse_boolish) {

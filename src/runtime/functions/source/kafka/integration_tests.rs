@@ -5,8 +5,8 @@ use std::time::Duration;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::ipc::writer::StreamWriter;
-use rdkafka::consumer::BaseConsumer;
 use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
+use rdkafka::consumer::BaseConsumer;
 use rdkafka::producer::{FutureProducer, FutureRecord};
 use rdkafka::ClientConfig;
 use testcontainers::clients;
@@ -68,7 +68,11 @@ fn make_payload(schema: &Schema, key: &str, ts: i64) -> Vec<u8> {
     payload
 }
 
-fn build_source(bootstrap_servers: String, schema: Arc<Schema>, offset: KafkaOffsetSpec) -> KafkaSourceFunction {
+fn build_source(
+    bootstrap_servers: String,
+    schema: Arc<Schema>,
+    offset: KafkaOffsetSpec,
+) -> KafkaSourceFunction {
     let spec = KafkaSourceSpec {
         bootstrap_servers,
         topic: "kafka_source_test".to_string(),
@@ -89,8 +93,16 @@ async fn read_n(source: &mut KafkaSourceFunction, n: usize) -> Vec<(String, i64)
     while out.len() < n {
         let msg = source.fetch(None).await.expect_data("expected message");
         let batch = msg.record_batch();
-        let keys = batch.column(0).as_any().downcast_ref::<StringArray>().unwrap();
-        let ts = batch.column(1).as_any().downcast_ref::<Int64Array>().unwrap();
+        let keys = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let ts = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
         for i in 0..batch.num_rows() {
             out.push((keys.value(i).to_string(), ts.value(i)));
         }
@@ -155,14 +167,7 @@ async fn kafka_source_reads_arrow_ipc() {
 
     let mut source = build_source(bootstrap_servers, schema, KafkaOffsetSpec::Earliest);
 
-    let ctx = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        0,
-        1,
-        None,
-        None,
-        None,
-    );
+    let ctx = RuntimeContext::new("kafka_source".to_string().into(), 0, 1, None, None, None);
 
     source.open(&ctx).await.unwrap();
     let msg = source.fetch(None).await.expect_data("expected message");
@@ -199,15 +204,12 @@ async fn kafka_source_checkpoint_restore_replays_from_saved_offsets() {
             .unwrap();
     }
 
-    let mut source = build_source(bootstrap_servers.clone(), schema.clone(), KafkaOffsetSpec::Earliest);
-    let ctx = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        0,
-        1,
-        None,
-        None,
-        None,
+    let mut source = build_source(
+        bootstrap_servers.clone(),
+        schema.clone(),
+        KafkaOffsetSpec::Earliest,
     );
+    let ctx = RuntimeContext::new("kafka_source".to_string().into(), 0, 1, None, None, None);
     source.open(&ctx).await.unwrap();
     let _ = read_n(&mut source, 3).await;
     let snapshot = source.snapshot_position().await.unwrap();
@@ -286,22 +288,8 @@ async fn kafka_source_parallel_tasks_consume_all_partitions() {
         max_batch_bytes: Some(1024 * 1024),
     };
 
-    let ctx_a = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        0,
-        2,
-        None,
-        None,
-        None,
-    );
-    let ctx_b = RuntimeContext::new(
-        "kafka_source".to_string().into(),
-        1,
-        2,
-        None,
-        None,
-        None,
-    );
+    let ctx_a = RuntimeContext::new("kafka_source".to_string().into(), 0, 2, None, None, None);
+    let ctx_b = RuntimeContext::new("kafka_source".to_string().into(), 1, 2, None, None, None);
 
     let mut source_a = KafkaSourceFunction::new(KafkaSourceConfig::new(schema.clone(), spec_a));
     let mut source_b = KafkaSourceFunction::new(KafkaSourceConfig::new(schema.clone(), spec_b));

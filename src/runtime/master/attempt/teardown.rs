@@ -97,7 +97,11 @@ impl ExecutionAttempt {
             .clients
             .drain()
             .map(|(worker_id, client)| async move {
-                log_close("shutdown_worker", &worker_id, client.shutdown_worker().await);
+                log_close(
+                    "shutdown_worker",
+                    &worker_id,
+                    client.shutdown_worker().await,
+                );
             })
             .collect();
         futures::future::join_all(shutdown_workers).await;

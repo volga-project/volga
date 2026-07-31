@@ -4,4 +4,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::compile_protos("proto/in_memory_storage_service.proto")?;
     tonic_build::compile_protos("proto/master_service.proto")?;
     Ok(())
-} 
+}

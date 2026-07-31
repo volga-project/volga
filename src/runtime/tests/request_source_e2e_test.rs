@@ -373,9 +373,7 @@ async fn test_request_source_sink_e2e() {
     // Start pipeline execution in background
     // TODO implement stop
     let _pipeline_handle = tokio::spawn(async move {
-        pipeline_exec::execute(spec, logical_graph)
-            .await
-            .unwrap();
+        pipeline_exec::execute(spec, logical_graph).await.unwrap();
     });
 
     // Wait for server to start

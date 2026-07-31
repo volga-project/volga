@@ -2,9 +2,7 @@
 
 use anyhow::{anyhow, Result};
 
-use crate::runtime::master::{
-    CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord,
-};
+use crate::runtime::master::{CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord};
 use crate::runtime::tests::cluster_harness::{
     PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster,
 };
@@ -29,12 +27,9 @@ pub async fn run_checkpoint_barrier_path(
         wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running)
             .await?;
 
-        let checkpoint_id = wait_for_checkpoint_completed(
-            &cluster.master(),
-            &mut cursor,
-            timeouts.attempt_running,
-        )
-        .await?;
+        let checkpoint_id =
+            wait_for_checkpoint_completed(&cluster.master(), &mut cursor, timeouts.attempt_running)
+                .await?;
 
         let events = cluster.master().lifecycle_events_since(0).await?;
         assert_checkpoint_barrier_path(&events, checkpoint_id)?;
@@ -97,9 +92,7 @@ pub fn assert_checkpoint_barrier_path(
                     }
                 }
             }
-            LifecycleEvent::CheckpointCompleted {
-                checkpoint_id: id,
-            } if *id == checkpoint_id => {
+            LifecycleEvent::CheckpointCompleted { checkpoint_id: id } if *id == checkpoint_id => {
                 completed = true;
             }
             _ => {}

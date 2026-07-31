@@ -11,9 +11,6 @@ pub struct WorkerInitPayload {
     pub pipeline_spec: PipelineSpec,
     pub vertex_ids: Vec<String>,
     pub task_worker_mapping: TaskWorkerMapping,
-    /// If set, restore operator state from this completed checkpoint on (re)configure.
-    #[serde(default)]
-    pub restore_checkpoint_id: Option<u64>,
 }
 
 pub fn build_execution_graph(
@@ -27,8 +24,12 @@ pub fn build_execution_graph(
 
 pub fn resolve_num_threads_per_task(spec: &PipelineSpec) -> usize {
     match spec.execution_profile.clone() {
-        Some(crate::api::ExecutionProfile::MasterWorker { num_threads_per_task }) => num_threads_per_task,
-        Some(crate::api::ExecutionProfile::SingleWorker { num_threads_per_task }) => num_threads_per_task,
+        Some(crate::api::ExecutionProfile::MasterWorker {
+            num_threads_per_task,
+        }) => num_threads_per_task,
+        Some(crate::api::ExecutionProfile::SingleWorker {
+            num_threads_per_task,
+        }) => num_threads_per_task,
         None => 4,
     }
 }

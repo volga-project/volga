@@ -3,7 +3,9 @@ use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use std::sync::Arc;
 
+use super::source_handles::{SourceHandle, SourceInterrupt};
 use crate::common::Message;
+use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::source::{
     create_source_function, datagen_source::DatagenSourceConfig, kafka::KafkaSourceConfig,
     parquet::ParquetSourceConfig, word_count_source::BatchingMode, FetchResult,
@@ -14,7 +16,6 @@ use crate::runtime::operators::operator::{
     OperatorPollResult, OperatorTrait, OperatorType,
 };
 use crate::runtime::runtime_context::RuntimeContext;
-use super::source_handles::{SourceHandle, SourceInterrupt};
 
 #[derive(Debug, Clone)]
 pub struct VectorSourceConfig {
@@ -112,9 +113,11 @@ impl SourceConfig {
     pub fn set_projection(&mut self, projection: Vec<usize>, schema: SchemaRef) {
         match self {
             SourceConfig::VectorSourceConfig(config) => config.set_projection(projection, schema),
-            SourceConfig::WordCountSourceConfig(config) => config.set_projection(projection, schema),
+            SourceConfig::WordCountSourceConfig(config) => {
+                config.set_projection(projection, schema)
+            }
             SourceConfig::DatagenSourceConfig(config) => config.set_projection(projection, schema),
-            SourceConfig::HttpRequestSourceConfig(_) => {}, // Request source doesn't support projection
+            SourceConfig::HttpRequestSourceConfig(_) => {} // Request source doesn't support projection
             SourceConfig::KafkaSourceConfig(config) => config.set_projection(projection, schema),
             SourceConfig::ParquetSourceConfig(config) => config.set_projection(projection, schema),
         }
@@ -188,6 +191,27 @@ impl OperatorTrait for SourceOperator {
         self.base.set_input(input);
     }
 
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
+        let position = function.snapshot_position().await?;
+        anyhow::ensure!(
+            !position.is_empty(),
+            "checkpointable source produced empty position"
+        );
+        Ok(SerializedCheckpoint::new(position))
+    }
+
+    async fn restore(&mut self, restore: SerializedRestore) -> Result<()> {
+        let position = restore.into_bytes();
+        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
+        anyhow::ensure!(!position.is_empty(), "empty source position on restore");
+        function.restore_position(&position).await?;
+        if let (Some(handle), Some(n)) = (self.handle.as_ref(), function.emit_count()) {
+            handle.stats.set_records_generated(n);
+        }
+        Ok(())
+    }
+
     async fn poll_next(&mut self) -> OperatorPollResult {
         if self.handle.as_ref().is_some_and(|h| h.is_stopped()) {
             return OperatorPollResult::None;
@@ -222,31 +246,5 @@ impl OperatorTrait for SourceOperator {
             }
             FetchResult::Idle => OperatorPollResult::None,
         }
-    }
-
-    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
-        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        let pos = function.snapshot_position().await?;
-        if pos.is_empty() {
-            return Err(anyhow::anyhow!(
-                "checkpointable source produced empty source_position blob"
-            ));
-        }
-        Ok(vec![("source_position".to_string(), pos)])
-    }
-
-    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
-        let function = self.base.get_function_mut::<SourceFunction>().unwrap();
-        let Some((_, bytes)) = blobs.iter().find(|(name, _)| name == "source_position") else {
-            return Err(anyhow::anyhow!("missing source_position blob on restore"));
-        };
-        if bytes.is_empty() {
-            return Err(anyhow::anyhow!("empty source_position blob on restore"));
-        }
-        function.restore_position(bytes).await?;
-        if let (Some(handle), Some(n)) = (self.handle.as_ref(), function.emit_count()) {
-            handle.stats.set_records_generated(n);
-        }
-        Ok(())
     }
 }

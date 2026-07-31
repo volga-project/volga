@@ -1,6 +1,10 @@
 use crate::common::message::Message;
-use crate::common::test_utils::{create_test_string_batch, gen_unique_grpc_port, IdentityMapFunction};
-use crate::runtime::execution_graph::{gen_edge_id, ExecutionEdge, ExecutionGraph, ExecutionVertex};
+use crate::common::test_utils::{
+    create_test_string_batch, gen_unique_grpc_port, IdentityMapFunction,
+};
+use crate::runtime::execution_graph::{
+    gen_edge_id, ExecutionEdge, ExecutionGraph, ExecutionVertex,
+};
 use crate::runtime::functions::map::MapFunction;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::partition::PartitionType;
@@ -9,7 +13,9 @@ use crate::transport::channel::Channel;
 use crate::transport::test_utils::{
     TestDataReaderActor, TestDataReaderMessage, TestDataWriterActor, TestDataWriterMessage,
 };
-use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
+use crate::transport::transport_backend_actor::{
+    TransportBackendActor, TransportBackendActorMessage,
+};
 use crate::transport::TransportBackendTrait;
 use arrow::array::StringArray;
 use kameo::spawn;
@@ -218,7 +224,10 @@ where
         for message_idx in 0..config.messages_per_writer {
             let message = Message::new(
                 Some(format!("writer_{}_stream", writer_idx)),
-                create_test_string_batch(vec![format!("writer_{}_batch_{}", writer_idx, message_idx)]),
+                create_test_string_batch(vec![format!(
+                    "writer_{}_batch_{}",
+                    writer_idx, message_idx
+                )]),
                 Some(100),
                 None,
             );

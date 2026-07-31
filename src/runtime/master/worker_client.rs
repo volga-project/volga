@@ -7,19 +7,20 @@ use tonic::Code;
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
-use crate::runtime::observability::snapshot_types::WorkerSnapshot;
-use crate::runtime::worker_config_utils::WorkerInitPayload;
+use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::consts::{
     runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY, MASTER_WORKER_CONNECT_TIMEOUT,
 };
+use crate::runtime::observability::snapshot_types::WorkerSnapshot;
+use crate::runtime::worker_config_utils::WorkerInitPayload;
 
-use crate::common::failure::FailureEvent;
 use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
-    worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
-    ShutdownWorkerRequest, StopSourcesRequest, ConfigureWorkerRequest, GetWorkerStateRequest,
-    RunWorkerTasksRequest, StartWorkerRequest, TriggerCheckpointBarrierRequest,
+    worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ConfigureWorkerRequest,
+    GetWorkerStateRequest, ResetWorkerRequest, RunWorkerTasksRequest, ShutdownWorkerRequest,
+    StartWorkerRequest, StopSourcesRequest, TaskRestoreData, TriggerCheckpointBarrierRequest,
 };
+use crate::common::failure::FailureEvent;
 
 enum Attempt<T> {
     Done(T),
@@ -67,11 +68,7 @@ fn status_attempt<T>(status: tonic::Status) -> Attempt<T> {
     }
 }
 
-async fn with_retry<T, F, Fut>(
-    op_name: &str,
-    target: &str,
-    mut op: F,
-) -> Result<T, WorkerCallError>
+async fn with_retry<T, F, Fut>(op_name: &str, target: &str, mut op: F) -> Result<T, WorkerCallError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Attempt<T>>,
@@ -98,7 +95,10 @@ where
     }
     Err(WorkerCallError::Unreachable(format!(
         "{} failed on {} after {} attempts: {:?}",
-        op_name, target, runtime_consts().u64(MASTER_RPC_MAX_RETRIES), last_error
+        op_name,
+        target,
+        runtime_consts().u64(MASTER_RPC_MAX_RETRIES),
+        last_error
     )))
 }
 
@@ -148,11 +148,7 @@ impl WorkerClient {
         })
     }
 
-    pub fn start_heartbeat(
-        &mut self,
-        worker_id: String,
-        failure_tx: mpsc::Sender<FailureEvent>,
-    ) {
+    pub fn start_heartbeat(&mut self, worker_id: String, failure_tx: mpsc::Sender<FailureEvent>) {
         self._heartbeat_monitor = Some(WorkerHeartbeatMonitor::spawn(
             worker_id,
             self.worker_ip.clone(),
@@ -169,7 +165,8 @@ impl WorkerClient {
         spec: PipelineSpec,
         vertex_ids: Vec<String>,
         task_worker_mapping: TaskWorkerMapping,
-        restore_checkpoint_id: Option<u64>,
+        task_restore_data: Vec<(TaskKey, SerializedRestore)>,
+        restoring: bool,
     ) -> Result<String, WorkerCallError> {
         let payload = WorkerInitPayload {
             worker_id: worker_id.clone(),
@@ -177,21 +174,33 @@ impl WorkerClient {
             pipeline_spec: spec,
             vertex_ids,
             task_worker_mapping,
-            restore_checkpoint_id,
         };
         let init_payload_bytes =
             serde_json::to_vec(&payload).map_err(|e| WorkerCallError::Rejected(e.to_string()))?;
+        let task_restore_data = task_restore_data
+            .into_iter()
+            .map(|(task, restore)| TaskRestoreData {
+                vertex_id: task.vertex_id,
+                task_index: task.task_index,
+                restore_data: restore.into_bytes(),
+            })
+            .collect::<Vec<_>>();
 
         let execution_attempt_id = self.execution_attempt_id;
         let response = self
             .rpc("configure", |mut client| {
-            let init_payload_bytes = init_payload_bytes.clone();
-            async move {
-                client.configure_worker(tonic::Request::new(ConfigureWorkerRequest {
-                        init_payload_bytes,
-                        execution_attempt_id,
-                    })).await
-            }
+                let init_payload_bytes = init_payload_bytes.clone();
+                let task_restore_data = task_restore_data.clone();
+                async move {
+                    client
+                        .configure_worker(tonic::Request::new(ConfigureWorkerRequest {
+                            init_payload_bytes,
+                            execution_attempt_id,
+                            task_restore_data,
+                            restoring,
+                        }))
+                        .await
+                }
             })
             .await?
             .into_inner();
@@ -354,7 +363,6 @@ impl WorkerClient {
             .into_inner()
             .success)
     }
-
 }
 
 fn response_result(

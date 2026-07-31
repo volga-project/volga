@@ -7,6 +7,7 @@ use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::OperatorOverrides;
 use crate::api::spec::pipeline::{ExecutionMode, ExecutionProfile, PipelineSpec};
+use crate::api::spec::state::StateSpec;
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 
@@ -21,6 +22,8 @@ pub struct KubePipelineSpec {
     pub parallelism: usize,
     #[serde(default = "default_worker_runtime_json")]
     pub worker_runtime: Value,
+    #[serde(default)]
+    pub state: StateSpec,
     #[serde(default = "default_operator_overrides_json")]
     pub operator_overrides: Value,
     #[serde(default)]
@@ -90,8 +93,8 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
         let operator_overrides: OperatorOverrides =
             serde_json::from_value(normalize_json_strings(spec.operator_overrides))
                 .context("invalid operator_overrides")?;
-        let sources: Vec<SourceSpec> =
-            serde_json::from_value(normalize_json_strings(spec.sources)).context("invalid sources")?;
+        let sources: Vec<SourceSpec> = serde_json::from_value(normalize_json_strings(spec.sources))
+            .context("invalid sources")?;
         let request_source_sink: Option<RequestSourceSinkSpec> = match spec.request_source_sink {
             Some(v) => Some(
                 serde_json::from_value(normalize_json_strings(v))
@@ -100,17 +103,18 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             None => None,
         };
         let sink: Option<SinkSpec> = match spec.sink {
-            Some(v) => Some(
-                serde_json::from_value(normalize_json_strings(v)).context("invalid sink")?,
-            ),
+            Some(v) => {
+                Some(serde_json::from_value(normalize_json_strings(v)).context("invalid sink")?)
+            }
             None => None,
         };
 
-        Ok(PipelineSpec {
+        let pipeline = PipelineSpec {
             execution_profile: spec.execution_profile,
             execution_mode: spec.execution_mode,
             parallelism: spec.parallelism,
             worker_runtime,
+            state: spec.state,
             operator_overrides,
             event_time: spec.event_time,
             sources,
@@ -118,7 +122,9 @@ impl TryFrom<KubePipelineSpec> for PipelineSpec {
             sink,
             sql: spec.sql,
             task_assignment_strategy: spec.task_assignment_strategy,
-        })
+        };
+        pipeline.validate().map_err(anyhow::Error::msg)?;
+        Ok(pipeline)
     }
 }
 

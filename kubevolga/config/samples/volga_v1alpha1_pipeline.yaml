@@ -31,6 +31,9 @@ spec:
     execution_profile:
       MasterWorker:
         num_threads_per_task: 4
+    state:
+      checkpoint_store: in_memory
+      operator_backend: in_memory
     task_assignment_strategy:
       Pipelined:
         slots_per_node: 2

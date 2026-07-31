@@ -40,11 +40,11 @@ pub struct WatermarkAssignerState {
 impl WatermarkAssignerState {
     pub fn new(cfg: WatermarkAssignConfig, operator_config: Option<&OperatorConfig>) -> Self {
         let ts_column = match cfg.time_hint {
-            Some(TimeHint::WindowOrderByColumn) => TsColumnSpec::Index(
-                Self::derive_window_ts_column_index(
+            Some(TimeHint::WindowOrderByColumn) => {
+                TsColumnSpec::Index(Self::derive_window_ts_column_index(
                     operator_config.expect("WindowOrderByColumn requires operator_config"),
-                ),
-            ),
+                ))
+            }
             Some(TimeHint::ColumnName { name }) => TsColumnSpec::ColumnName(name),
             None => {
                 // Auto-resolve only for Window vertices.
@@ -65,8 +65,7 @@ impl WatermarkAssignerState {
         let OperatorConfig::WindowConfig(window_cfg) = operator_config else {
             panic!("WatermarkAssign auto-resolve requires Window vertex or explicit time hint");
         };
-        window_cfg.window_exec.window_expr()[0]
-            .order_by()[0]
+        window_cfg.window_exec.window_expr()[0].order_by()[0]
             .expr
             .as_any()
             .downcast_ref::<Column>()
@@ -77,16 +76,13 @@ impl WatermarkAssignerState {
     fn resolve_ts_column_index(&self, batch: &RecordBatch) -> usize {
         match &self.ts_column {
             TsColumnSpec::Index(idx) => *idx,
-            TsColumnSpec::ColumnName(name) => batch
-                .schema()
-                .index_of(name)
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "WatermarkAssign failed: missing column '{}' in schema {:?}",
-                        name,
-                        batch.schema()
-                    )
-                }),
+            TsColumnSpec::ColumnName(name) => batch.schema().index_of(name).unwrap_or_else(|_| {
+                panic!(
+                    "WatermarkAssign failed: missing column '{}' in schema {:?}",
+                    name,
+                    batch.schema()
+                )
+            }),
         }
     }
 
@@ -185,8 +181,11 @@ impl WatermarkManager {
         upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
         current_watermark: Arc<AtomicU64>,
     ) -> Self {
-        let idle_timeout_ms = watermark_assign.as_ref().and_then(|cfg| cfg.idle_timeout_ms);
-        let assigner = watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, operator_config));
+        let idle_timeout_ms = watermark_assign
+            .as_ref()
+            .and_then(|cfg| cfg.idle_timeout_ms);
+        let assigner =
+            watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, operator_config));
         let last_seen_processing_time = upstream_vertices
             .iter()
             .map(|u| (u.clone(), Instant::now()))
@@ -205,7 +204,11 @@ impl WatermarkManager {
         self.assigner.is_some()
     }
 
-    pub fn on_data_message(&mut self, upstream_vertex_id: &str, message: &Message) -> Option<WatermarkMessage> {
+    pub fn on_data_message(
+        &mut self,
+        upstream_vertex_id: &str,
+        message: &Message,
+    ) -> Option<WatermarkMessage> {
         self.last_seen_processing_time
             .insert(upstream_vertex_id.to_string(), Instant::now());
         self.assigner
@@ -270,7 +273,12 @@ pub async fn advance_watermark_min(
         .metadata
         .upstream_vertex_id
         .clone()
-        .unwrap_or_else(|| panic!("Watermark must have upstream_vertex_id set: {:?}", watermark));
+        .unwrap_or_else(|| {
+            panic!(
+                "Watermark must have upstream_vertex_id set: {:?}",
+                watermark
+            )
+        });
 
     let mut upstream_wms = upstream_watermarks.lock().await;
     if let Some(&prev) = upstream_wms.get(&upstream_id) {
@@ -315,8 +323,8 @@ mod tests {
     use futures::stream;
     use futures::StreamExt;
 
-        use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-        use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
+    use crate::runtime::observability::snapshot_types::StreamTaskStatus;
+    use crate::runtime::stream_task::{CheckpointAligner, StreamTask};
     use crate::transport::transport_client::DataReaderControl;
     use std::sync::atomic::AtomicU8;
     use std::time::Duration;
@@ -614,4 +622,3 @@ mod tests {
         assert_eq!(seen.len(), 1);
     }
 }
-

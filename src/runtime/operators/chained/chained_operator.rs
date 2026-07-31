@@ -1,4 +1,16 @@
-use crate::{api::logical_graph::determine_partition_type, common::Message, runtime::{operators::operator::{create_operator, MessageStream, Operator, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, partition::PartitionType, runtime_context::RuntimeContext}};
+use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
+use crate::{
+    api::logical_graph::determine_partition_type,
+    common::Message,
+    runtime::{
+        operators::operator::{
+            create_operator, MessageStream, Operator, OperatorBase, OperatorConfig,
+            OperatorPollResult, OperatorTrait, OperatorType,
+        },
+        partition::PartitionType,
+        runtime_context::RuntimeContext,
+    },
+};
 use anyhow::Result;
 use async_trait::async_trait;
 use futures::future::try_join_all;
@@ -37,9 +49,9 @@ impl ChainedOperator {
                 operators.push(operator);
             }
         }
-        
-        Self { 
-            base: OperatorBase::new(config), 
+
+        Self {
+            base: OperatorBase::new(config),
             _chain_senders: chain_senders,
             operators,
         }
@@ -48,15 +60,15 @@ impl ChainedOperator {
 
 #[async_trait]
 impl OperatorTrait for ChainedOperator {
-
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         // TODO open base?
 
-        let open_futures: Vec<_> = self.operators
+        let open_futures: Vec<_> = self
+            .operators
             .iter_mut()
             .map(|operator| operator.open(context))
             .collect();
-        
+
         try_join_all(open_futures).await?;
         Ok(())
     }
@@ -70,13 +82,13 @@ impl OperatorTrait for ChainedOperator {
     }
 
     async fn close(&mut self) -> Result<()> {
-
         // TODO close base?
-        let close_futures: Vec<_> = self.operators
+        let close_futures: Vec<_> = self
+            .operators
             .iter_mut()
             .map(|operator| operator.close())
             .collect();
-        
+
         try_join_all(close_futures).await?;
         Ok(())
     }
@@ -86,6 +98,14 @@ impl OperatorTrait for ChainedOperator {
             let first_op = &mut self.operators[0];
             first_op.set_input(input);
         }
+    }
+
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        panic!("checkpoint is not implemented for ChainedOperator")
+    }
+
+    async fn restore(&mut self, _restore: SerializedRestore) -> Result<()> {
+        panic!("restore is not implemented for ChainedOperator")
     }
 
     // TODO implement
@@ -99,16 +119,16 @@ impl OperatorTrait for ChainedOperator {
 pub fn group_operators_for_chaining(operators: &[OperatorConfig]) -> Vec<OperatorConfig> {
     let mut grouped_operators = Vec::new();
     let mut current_chain = Vec::new();
-    
+
     for op_config in operators {
         current_chain.push(op_config.clone());
-        
+
         // If this is the last operator or the next operator requires hash partitioning,
         // end the current chain
         if current_chain.len() > 1 {
             let last_op = &current_chain[current_chain.len() - 2];
             let current_op = &current_chain[current_chain.len() - 1];
-            
+
             if determine_partition_type(&last_op, &current_op) == PartitionType::Hash {
                 // Remove the last operator from current chain and start a new one
                 let last_op = current_chain.pop().unwrap();
@@ -117,12 +137,12 @@ pub fn group_operators_for_chaining(operators: &[OperatorConfig]) -> Vec<Operato
             }
         }
     }
-    
+
     // Add the last chain
     if !current_chain.is_empty() {
         grouped_operators.push(create_operator_from_chain(&current_chain));
     }
-    
+
     grouped_operators
 }
 
@@ -133,10 +153,9 @@ pub fn create_operator_from_chain(chain: &[OperatorConfig]) -> OperatorConfig {
         chain[0].clone()
     } else {
         // Multiple operators - create chained config
-        let chained_config = OperatorConfig::ChainedConfig(
-            chain.iter().map(|config| config.clone()).collect()
-        );
-        
+        let chained_config =
+            OperatorConfig::ChainedConfig(chain.iter().map(|config| config.clone()).collect());
+
         chained_config
     }
 }

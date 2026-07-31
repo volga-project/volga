@@ -2,17 +2,17 @@ use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 
+use super::worker_client::connect_worker_client;
 use crate::runtime::consts::{
     runtime_consts, MASTER_HEARTBEAT_MAX_STREAM_ATTEMPTS, MASTER_HEARTBEAT_RECONNECT_DELAY,
     MASTER_HEARTBEAT_SEND_INTERVAL,
 };
-use super::worker_client::connect_worker_client;
 
-use crate::common::failure::{FailureEvent, FailureKind};
 use super::worker_service::{
     worker_service_client::WorkerServiceClient, MasterHeartbeatMessage,
     WorkerFatalReason as WorkerFatalReasonProto,
 };
+use crate::common::failure::{FailureEvent, FailureKind};
 
 enum StreamOutcome {
     /// Worker reported unhealthy via heartbeat payload — do not reconnect.

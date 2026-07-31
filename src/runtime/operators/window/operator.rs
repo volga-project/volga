@@ -11,6 +11,7 @@ use futures::future;
 use crate::common::message::Message;
 use crate::common::Key;
 use crate::common::MAX_WATERMARK_VALUE;
+use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
@@ -19,10 +20,10 @@ use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::{WindowAdvancePolicy, WindowSpec};
-use crate::runtime::operators::window::state::{
-    WindowOperatorState, WindowOperatorStateCheckpoint,
+use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
+use crate::runtime::operators::window::store::{
+    create_window_operator_store, StateNamespace, WindowOperatorStore,
 };
-use crate::runtime::operators::window::store::WindowOperatorStore;
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
@@ -122,6 +123,21 @@ impl WindowOperator {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_store_and_namespace(
+        &mut self,
+        store: Arc<dyn WindowOperatorStore>,
+        namespace: StateNamespace,
+    ) {
+        assert!(self.state.is_none(), "window state is already configured");
+        self.state = Some(Arc::new(WindowOperatorState::new(
+            store,
+            namespace,
+            self.ts_column_index,
+            self.window_configs.clone(),
+        )));
+    }
+
     fn state_ref(&self) -> &Arc<WindowOperatorState> {
         self.state
             .as_ref()
@@ -185,12 +201,19 @@ impl OperatorTrait for WindowOperator {
         self.base.open(context).await?;
 
         if self.state.is_none() {
-            let store: Arc<dyn WindowOperatorStore> = context
-                .window_operator_store()
-                .expect("WindowOperatorStore must be configured");
-            let ns = context
-                .window_state_namespace()
-                .expect("window state namespace must be configured");
+            let backend = context
+                .state_backend()
+                .expect("state backend must be configured for WindowOperator");
+            let store = create_window_operator_store(backend);
+            let ns = StateNamespace::for_operator_task(
+                context
+                    .pipeline_id()
+                    .expect("pipeline id must be configured for WindowOperator"),
+                context
+                    .operator_id()
+                    .expect("operator id must be configured for WindowOperator"),
+                context.task_index(),
+            );
             self.state = Some(Arc::new(WindowOperatorState::new(
                 store,
                 ns,
@@ -216,6 +239,18 @@ impl OperatorTrait for WindowOperator {
 
     fn operator_config(&self) -> &OperatorConfig {
         self.base.operator_config()
+    }
+
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        // TODO: Drain buffered keys to a defined checkpoint frontier before flushing.
+        let snapshot = self.state_ref().checkpoint().await?;
+        Ok(SerializedCheckpoint::new(bincode::serialize(&snapshot)?))
+    }
+
+    async fn restore(&mut self, restore: SerializedRestore) -> Result<()> {
+        let bytes = restore.into_bytes();
+        let snapshot: WindowStateSnapshot = bincode::deserialize(&bytes)?;
+        self.state_ref().restore(snapshot).await
     }
 
     async fn poll_next(&mut self) -> OperatorPollResult {
@@ -277,27 +312,5 @@ impl OperatorTrait for WindowOperator {
             },
             None => OperatorPollResult::None,
         }
-    }
-
-    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
-        // TODO: Drain buffered keys to a defined checkpoint frontier before flushing.
-        let state_cp = self.state_ref().checkpoint().await?;
-        Ok(vec![(
-            "window_operator_state".to_string(),
-            bincode::serialize(&state_cp)?,
-        )])
-    }
-
-    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
-        let Some((_, bytes)) = blobs
-            .iter()
-            .find(|(name, _)| name == "window_operator_state")
-        else {
-            return Err(anyhow::anyhow!(
-                "missing window_operator_state blob on restore"
-            ));
-        };
-        let checkpoint: WindowOperatorStateCheckpoint = bincode::deserialize(bytes)?;
-        self.state_ref().restore(checkpoint).await
     }
 }

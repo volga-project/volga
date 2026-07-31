@@ -3,9 +3,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant};
 
-use super::{
-    CheckpointAckOutcome, CheckpointAckReject, CheckpointStartError, TaskKey,
-};
+use super::{CheckpointAckOutcome, CheckpointAckReject, CheckpointStartError, TaskKey};
 
 #[derive(Debug)]
 struct InFlightCheckpoint {
@@ -178,7 +176,10 @@ mod tests {
         t: TaskKey,
     ) -> u64 {
         let id = protocol.start(acks, aligns).unwrap();
-        assert_eq!(protocol.ack(id, t.clone(), acks, aligns), CheckpointAckOutcome::Pending);
+        assert_eq!(
+            protocol.ack(id, t.clone(), acks, aligns),
+            CheckpointAckOutcome::Pending
+        );
         assert_eq!(
             protocol.align(id, t, acks, aligns),
             CheckpointAckOutcome::Completed
@@ -241,9 +242,7 @@ mod tests {
         let id = protocol.start(&acks, &aligns).unwrap();
         assert_eq!(
             protocol.start(&acks, &aligns),
-            Err(CheckpointStartError::AlreadyInFlight {
-                checkpoint_id: id
-            })
+            Err(CheckpointStartError::AlreadyInFlight { checkpoint_id: id })
         );
         protocol.abort_in_flight();
         assert!(protocol.start(&acks, &aligns).is_ok());

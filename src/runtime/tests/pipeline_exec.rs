@@ -22,7 +22,9 @@ pub async fn execute_with_state_updates(
     let worker_id = "single_worker".to_string();
 
     let num_threads_per_task = match spec.execution_profile.clone().unwrap() {
-        ExecutionProfile::SingleWorker { num_threads_per_task } => num_threads_per_task,
+        ExecutionProfile::SingleWorker {
+            num_threads_per_task,
+        } => num_threads_per_task,
         _ => panic!("Execution profile must be SingleWorker"),
     };
 
@@ -34,7 +36,6 @@ pub async fn execute_with_state_updates(
         num_threads_per_task,
         TransportBackendType::Grpc,
     );
-    worker_config.window_state_namespace = spec.worker_runtime.window_state_namespace.clone();
     let mut worker = Worker::from_config(worker_config);
 
     if let Some(pipeline_state_sender) = state_updates_sender {
@@ -45,7 +46,9 @@ pub async fn execute_with_state_updates(
             while let Some(worker_state) = worker_state_receiver.recv().await {
                 let mut worker_states = StdHashMap::new();
                 worker_states.insert(worker_id_clone.clone(), worker_state);
-                let _ = pipeline_sender.send(PipelineSnapshot::new(worker_states)).await;
+                let _ = pipeline_sender
+                    .send(PipelineSnapshot::new(worker_states))
+                    .await;
             }
         });
         worker

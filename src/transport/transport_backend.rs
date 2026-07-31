@@ -1,8 +1,3 @@
-use std::collections::HashMap;
-use std::sync::atomic::AtomicBool;
-use std::time::Duration;
-use tokio::sync::mpsc;
-use tokio::time;
 use crate::common::message::Message;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::health::{WorkerFatalReason, WorkerHealth};
@@ -10,14 +5,19 @@ use crate::runtime::VertexId;
 use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, BatchSender};
 use crate::transport::channel::Channel;
 use crate::transport::grpc::grpc_streaming_service::{
-    MessageStreamClient, MessageStreamServiceImpl,
-    message_stream::message_stream_service_server::MessageStreamServiceServer,
+    message_stream::message_stream_service_server::MessageStreamServiceServer, MessageStreamClient,
+    MessageStreamServiceImpl,
 };
 use crate::transport::TransportBackendTrait;
 use async_trait::async_trait;
-use tonic::transport::Server;
+use std::collections::HashMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use tokio::time;
+use tonic::transport::Server;
 
 use super::transport_client::TransportClientConfig;
 
@@ -131,12 +131,7 @@ impl TransportBackend {
         let mut channel_to_node: HashMap<ChannelId, NodeId> = HashMap::new();
 
         for channel in out_channels {
-            let (
-                channel_id,
-                target_node_id,
-                target_node_ip,
-                target_port,
-            ) = match channel {
+            let (channel_id, target_node_id, target_node_ip, target_port) = match channel {
                 Channel::Remote {
                     channel_id,
                     target_node_id,
@@ -174,10 +169,7 @@ impl TransportBackend {
         (node_list, channel_to_node)
     }
 
-    async fn start_reading_side(
-        &mut self,
-        remote_reader_senders: HashMap<ChannelId, BatchSender>,
-    ) {
+    async fn start_reading_side(&mut self, remote_reader_senders: HashMap<ChannelId, BatchSender>) {
         // Start reading side only when this worker has remote input channels.
         let Some(port) = self.port else {
             return;
@@ -218,8 +210,11 @@ impl TransportBackend {
                         // THIS WILL CAUSE BACKPRESSURE FOR ALL CHANNELS IF ONE CHANNEL IS BLOCKED
                         let sender = remote_reader_senders.get(&channel_id).unwrap();
                         while running.load(std::sync::atomic::Ordering::Relaxed) {
-                            match time::timeout(Duration::from_millis(100), sender.send(message.clone()))
-                                .await
+                            match time::timeout(
+                                Duration::from_millis(100),
+                                sender.send(message.clone()),
+                            )
+                            .await
                             {
                                 Ok(Ok(())) => break,
                                 Ok(Err(e)) => {
@@ -260,8 +255,10 @@ impl TransportBackend {
             return;
         }
 
-        let channel_to_node: HashMap<ChannelId, NodeId> =
-            self.channel_to_node.take().expect("Remote channel mapping should be found");
+        let channel_to_node: HashMap<ChannelId, NodeId> = self
+            .channel_to_node
+            .take()
+            .expect("Remote channel mapping should be found");
         let nodes = self.nodes.take().expect("Remote nodes should be found");
         let worker_health = self.worker_health.clone();
         let mut client_txs: HashMap<NodeId, mpsc::Sender<(Message, ChannelId)>> = HashMap::new();
@@ -422,12 +419,10 @@ impl TransportBackend {
             let queue_size = channel.get_queue_size_records();
             match channel {
                 Channel::Local { .. } => {
-                    let (tx, _rx) = local_channels
-                        .entry(channel_id.clone())
-                        .or_insert_with(|| {
-                            let (tx, rx) = batch_bounded_channel(queue_size);
-                            (tx, Some(rx))
-                        });
+                    let (tx, _rx) = local_channels.entry(channel_id.clone()).or_insert_with(|| {
+                        let (tx, rx) = batch_bounded_channel(queue_size);
+                        (tx, Some(rx))
+                    });
                     writer_senders.insert(channel_id, tx.clone());
                 }
                 Channel::Remote { .. } => {
@@ -443,9 +438,8 @@ impl TransportBackend {
             let queue_size = channel.get_queue_size_records();
             match channel {
                 Channel::Local { .. } => {
-                    let (_tx, rx_opt) = local_channels
-                        .entry(channel_id.clone())
-                        .or_insert_with(|| {
+                    let (_tx, rx_opt) =
+                        local_channels.entry(channel_id.clone()).or_insert_with(|| {
                             let (tx, rx) = batch_bounded_channel(queue_size);
                             (tx, Some(rx))
                         });
@@ -514,7 +508,8 @@ impl TransportBackend {
 #[async_trait]
 impl TransportBackendTrait for TransportBackend {
     async fn start(&mut self) {
-        self.running.store(true, std::sync::atomic::Ordering::Release);
+        self.running
+            .store(true, std::sync::atomic::Ordering::Release);
 
         // Local-only topology: channel wiring is already done in init_channels.
         // No gRPC server/client tasks are needed.
@@ -530,7 +525,8 @@ impl TransportBackendTrait for TransportBackend {
     }
 
     async fn close(&mut self) {
-        self.running.store(false, std::sync::atomic::Ordering::Release);
+        self.running
+            .store(false, std::sync::atomic::Ordering::Release);
 
         // Send shutdown signal to server
         if let Some(shutdown_tx) = self.shutdown_tx.take() {
@@ -578,12 +574,8 @@ impl TransportBackendTrait for TransportBackend {
         self.port = port;
         self.channel_to_node = channel_to_node;
         self.nodes = nodes;
-        let (
-            reader_receivers,
-            writer_senders,
-            remote_reader_senders,
-            remote_writer_receivers,
-        ) = Self::build_channel_maps(&input_channels, &output_channels);
+        let (reader_receivers, writer_senders, remote_reader_senders, remote_writer_receivers) =
+            Self::build_channel_maps(&input_channels, &output_channels);
         let transport_client_configs = Self::build_transport_client_configs(
             execution_graph,
             &vertex_ids,
@@ -597,4 +589,4 @@ impl TransportBackendTrait for TransportBackend {
 
         transport_client_configs
     }
-} 
+}

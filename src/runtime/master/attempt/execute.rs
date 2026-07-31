@@ -9,12 +9,12 @@ use crate::runtime::consts::{
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
 
-use crate::common::failure::{workers_to_replace, FailureEvent, FailureKind};
 use super::super::checkpoint::CheckpointStartError;
-use super::super::state::MasterState;
 use super::super::events::LifecycleEvent;
+use super::super::state::MasterState;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
 use super::{AttemptOutcome, ExecutionAttempt};
+use crate::common::failure::{workers_to_replace, FailureEvent, FailureKind};
 
 const STATUS_POLL: Duration = Duration::from_millis(100);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -29,13 +29,7 @@ impl ExecutionAttempt {
         &self,
         status: StreamTaskStatus,
     ) -> Result<(), HashSet<String>> {
-        wait_for_status(
-            &self.clients,
-            &self.state,
-            status,
-            Some(STATUS_TIMEOUT),
-        )
-        .await
+        wait_for_status(&self.clients, &self.state, status, Some(STATUS_TIMEOUT)).await
     }
 
     pub(in crate::runtime::master) async fn run(&mut self) -> anyhow::Result<AttemptOutcome> {
@@ -119,18 +113,18 @@ impl ExecutionAttempt {
 
     /// Start a checkpoint on master and trigger barriers on all workers.
     async fn begin_checkpoint(&self) -> Result<u64, String> {
-        let checkpoint_id = self
-            .state
-            .begin_checkpoint(self.id)
-            .await
-            .map_err(|error| match error {
-                CheckpointStartError::AlreadyInFlight { checkpoint_id } => {
-                    format!("already in flight checkpoint_id={checkpoint_id}")
-                }
-                CheckpointStartError::NoCheckpointableTasks => {
-                    "no checkpointable tasks".to_string()
-                }
-            })?;
+        let checkpoint_id =
+            self.state
+                .begin_checkpoint(self.id)
+                .await
+                .map_err(|error| match error {
+                    CheckpointStartError::AlreadyInFlight { checkpoint_id } => {
+                        format!("already in flight checkpoint_id={checkpoint_id}")
+                    }
+                    CheckpointStartError::NoCheckpointableTasks => {
+                        "no checkpointable tasks".to_string()
+                    }
+                })?;
         println!(
             "[MASTER] Triggering checkpoint {} attempt={}",
             checkpoint_id, self.id
@@ -157,10 +151,7 @@ impl ExecutionAttempt {
     }
 
     /// Record the first failure, wait the aggregation window for cascade fatals, then decide.
-    async fn await_failure_window_and_recover(
-        &mut self,
-        first: FailureEvent,
-    ) -> AttemptOutcome {
+    async fn await_failure_window_and_recover(&mut self, first: FailureEvent) -> AttemptOutcome {
         let mut events = Vec::new();
         self.record_failure(&first).await;
         events.push(first);

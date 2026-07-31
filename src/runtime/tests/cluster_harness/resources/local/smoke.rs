@@ -6,13 +6,13 @@ use uuid::Uuid;
 use super::common::{LocalMaster, LocalStorage, LocalWorkerPool, WorkerServerSlot};
 use crate::orchestrator::local::{LocalTestOrchestrator, LocalWorkerOrchestrator};
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
-use crate::runtime::master::MasterConfig;
 use crate::runtime::master::LifecycleEventRecord;
-use crate::storage::InMemoryStorageSnapshot;
+use crate::runtime::master::MasterConfig;
 use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
 use crate::runtime::tests::cluster_harness::{FaultAction, PipelineLaunchSpec, WorkerKillMode};
-use async_trait::async_trait;
+use crate::storage::InMemoryStorageSnapshot;
 use anyhow::Context;
+use async_trait::async_trait;
 
 pub struct LocalClusterResources {
     storage: LocalStorage,
@@ -72,10 +72,7 @@ impl ClusterBackend for LocalCluster {
             .await
     }
 
-    async fn lifecycle_events_since(
-        &mut self,
-        sequence: u64,
-    ) -> Result<Vec<LifecycleEventRecord>> {
+    async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
         Ok(self
             .resources
             .as_ref()
@@ -113,7 +110,10 @@ impl ClusterBackend for LocalCluster {
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        let resources = self.resources.as_mut().context("local cluster is not launched")?;
+        let resources = self
+            .resources
+            .as_mut()
+            .context("local cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode } => {
                 resources.kill_worker(&worker_id, mode).await
@@ -133,28 +133,30 @@ impl LocalClusterResources {
         let storage = LocalStorage::start().await?;
         let mut spec = launch.pipeline;
         super::super::install_in_memory_sink(&mut spec, storage.endpoint());
-        let local_orchestrator = LocalTestOrchestrator::new(
-            launch.worker_count,
-            Uuid::new_v4().to_string(),
-        )
-        .with_spec(spec.clone());
+        let local_orchestrator =
+            LocalTestOrchestrator::new(launch.worker_count, Uuid::new_v4().to_string())
+                .with_spec(spec.clone());
         let worker_nodes = local_orchestrator.get_worker_nodes().await;
         let expected_workers = local_orchestrator.get_num_expected_workers().await;
-        let master_addr = format!("127.0.0.1:{}", crate::common::test_utils::gen_unique_grpc_port());
+        let master_addr = format!(
+            "127.0.0.1:{}",
+            crate::common::test_utils::gen_unique_grpc_port()
+        );
         let worker_orchestrator: Arc<dyn WorkerOrchestrator> =
             Arc::new(LocalWorkerOrchestrator::new(master_addr.clone()));
         let workers = worker_nodes
             .values()
-            .map(|node| WorkerServerSlot::new(
-                node.worker_id.clone(),
-                format!("{}:{}", node.worker_ip, node.worker_port),
-            ))
+            .map(|node| {
+                WorkerServerSlot::new(
+                    node.worker_id.clone(),
+                    format!("{}:{}", node.worker_ip, node.worker_port),
+                )
+            })
             .collect::<Vec<_>>();
         let worker_ids = workers.iter().map(|worker| worker.id.clone()).collect();
         let workers = Arc::new(LocalWorkerPool::new(workers, worker_orchestrator));
-        let master_orchestrator: Arc<dyn MasterOrchestrator> = Arc::new(
-            local_orchestrator.with_replacement(workers.clone()),
-        );
+        let master_orchestrator: Arc<dyn MasterOrchestrator> =
+            Arc::new(local_orchestrator.with_replacement(workers.clone()));
         let mut master = LocalMaster::new(master_addr, master_orchestrator);
         master
             .server

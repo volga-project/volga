@@ -20,7 +20,12 @@ pub struct WorkerNode {
 }
 
 impl WorkerNode {
-    pub fn new(worker_id: String, worker_ip: String, worker_port: u16, transport_port: u16) -> Self {
+    pub fn new(
+        worker_id: String,
+        worker_ip: String,
+        worker_port: u16,
+        transport_port: u16,
+    ) -> Self {
         Self {
             worker_id,
             worker_ip,
@@ -63,11 +68,7 @@ pub trait MasterOrchestrator: Send + Sync {
         Ok(())
     }
 
-    async fn record_lifecycle_event(
-        &self,
-        _sequence: u64,
-        _event_json: &str,
-    ) -> Result<()> {
+    async fn record_lifecycle_event(&self, _sequence: u64, _event_json: &str) -> Result<()> {
         Ok(())
     }
 

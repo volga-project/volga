@@ -7,7 +7,9 @@ pub struct OperatorTransportSpec {
 
 impl Default for OperatorTransportSpec {
     fn default() -> Self {
-        Self { queue_records: None }
+        Self {
+            queue_records: None,
+        }
     }
 }
 
@@ -27,4 +29,3 @@ impl Default for TransportSpec {
         }
     }
 }
-

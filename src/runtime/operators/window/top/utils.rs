@@ -6,9 +6,7 @@ use datafusion::common::hash_utils::create_hashes;
 use datafusion::common::Result;
 use datafusion::scalar::ScalarValue;
 
-pub(crate) fn group_indices_by_scalar(
-    values: &ArrayRef,
-) -> Result<Vec<(ScalarValue, Vec<u32>)>> {
+pub(crate) fn group_indices_by_scalar(values: &ArrayRef) -> Result<Vec<(ScalarValue, Vec<u32>)>> {
     let grouped = group_indices_by_scalar_with_hash(values)?;
     Ok(grouped
         .into_iter()

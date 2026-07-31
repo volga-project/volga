@@ -120,7 +120,9 @@ impl Accumulator for TopValueAccumulator {
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        let array = states.get(0).ok_or_else(|| df_error("missing state array"))?;
+        let array = states
+            .get(0)
+            .ok_or_else(|| df_error("missing state array"))?;
         let bin = array
             .as_any()
             .downcast_ref::<arrow::array::BinaryArray>()
@@ -172,8 +174,8 @@ fn metric_as_i64(value: &ScalarValue) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use arrow::array::{ArrayRef, Int64Array, StringArray};
+    use std::sync::Arc;
 
     fn string_array(values: &[&str]) -> ArrayRef {
         Arc::new(StringArray::from(values.to_vec()))

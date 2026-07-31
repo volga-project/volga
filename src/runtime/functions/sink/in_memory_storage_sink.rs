@@ -1,18 +1,18 @@
-use async_trait::async_trait;
+use crate::common::message::Message;
+use crate::runtime::functions::function_trait::FunctionTrait;
+use crate::runtime::functions::sink::SinkFunctionTrait;
+use crate::runtime::runtime_context::RuntimeContext;
+use crate::storage::in_memory_storage_grpc_client::InMemoryStorageClient;
 use anyhow::Result;
 use arrow::array::{Array, Int64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::DataType;
-use crate::common::message::Message;
-use crate::runtime::functions::sink::SinkFunctionTrait;
-use crate::storage::in_memory_storage_grpc_client::InMemoryStorageClient;
-use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::functions::function_trait::FunctionTrait;
+use async_trait::async_trait;
 use std::any::Any;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
-use tokio::time::{Duration, interval};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::time::{interval, Duration};
 
 const BUFFER_FLUSH_INTERVAL_MS: u64 = 100;
 
@@ -185,9 +185,12 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
             let mut ticker = interval(Duration::from_millis(BUFFER_FLUSH_INTERVAL_MS));
             while running.load(Ordering::SeqCst) {
                 ticker.tick().await;
-                if let Err(e) =
-                    InMemoryStorageSinkFunction::flush_buffers(&shared_client, &buffer, &keyed_buffer)
-                        .await
+                if let Err(e) = InMemoryStorageSinkFunction::flush_buffers(
+                    &shared_client,
+                    &buffer,
+                    &keyed_buffer,
+                )
+                .await
                 {
                     eprintln!("[IN_MEMORY_SINK] flush error: {e}");
                 }
@@ -220,13 +223,13 @@ impl FunctionTrait for InMemoryStorageSinkFunction {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::{StringArray, TimestampMillisecondArray};
-    use arrow::datatypes::{Field, Schema, TimeUnit};
-    use arrow::record_batch::RecordBatch;
     use crate::common::message::{BaseMessage, KeyedMessage};
     use crate::common::test_utils::{create_test_string_batch, gen_unique_grpc_port};
     use crate::common::Key;
     use crate::storage::in_memory_storage_grpc_server::InMemoryStorageServer;
+    use arrow::array::{StringArray, TimestampMillisecondArray};
+    use arrow::datatypes::{Field, Schema, TimeUnit};
+    use arrow::record_batch::RecordBatch;
 
     #[tokio::test]
     async fn test_in_memory_storage_grpc_sink_function() -> Result<()> {

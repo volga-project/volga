@@ -3,13 +3,13 @@ use std::sync::Arc;
 
 use crate::api::PipelineSpec;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
+use crate::runtime::operators::operator::OperatorType;
 use crate::runtime::operators::operator::{get_operator_type_from_config, OperatorConfig};
 use crate::runtime::partition::PartitionType;
+use crate::runtime::watermark::WatermarkAssignConfig;
+use crate::runtime::VertexId;
 use crate::transport::channel::Channel;
 use crate::transport::transport_spec::TransportSpec;
-use crate::runtime::operators::operator::OperatorType;
-use crate::runtime::VertexId;
-use crate::runtime::watermark::WatermarkAssignConfig;
 
 #[derive(Debug, Clone)]
 pub struct ExecutionEdge {
@@ -20,7 +20,7 @@ pub struct ExecutionEdge {
     pub partition_type: PartitionType,
     pub channel: Option<Channel>,
 }
- 
+
 impl ExecutionEdge {
     pub fn new(
         source_vertex_id: String,
@@ -40,7 +40,10 @@ impl ExecutionEdge {
     }
 
     pub fn get_channel(&self) -> Channel {
-        self.channel.as_ref().expect("channel should be present").clone()
+        self.channel
+            .as_ref()
+            .expect("channel should be present")
+            .clone()
     }
 }
 
@@ -170,24 +173,30 @@ impl ExecutionGraph {
         &self.edges
     }
 
-    pub fn get_edges_for_vertex(&self, vertex_id: &str) -> Option<(Vec<&ExecutionEdge>, Vec<&ExecutionEdge>)> {
+    pub fn get_edges_for_vertex(
+        &self,
+        vertex_id: &str,
+    ) -> Option<(Vec<&ExecutionEdge>, Vec<&ExecutionEdge>)> {
         let vertex = self.vertices.get(vertex_id)?;
-        
-        let input_edges: Vec<&ExecutionEdge> = vertex.input_edges
+
+        let input_edges: Vec<&ExecutionEdge> = vertex
+            .input_edges
             .iter()
             .map(|edge_id| self.edges.get(edge_id).expect("Edge should exist"))
             .collect();
-            
-        let output_edges: Vec<&ExecutionEdge> = vertex.output_edges
+
+        let output_edges: Vec<&ExecutionEdge> = vertex
+            .output_edges
             .iter()
             .map(|edge_id| self.edges.get(edge_id).expect("Edge should exist"))
             .collect();
-            
+
         Some((input_edges, output_edges))
     }
 
     pub fn get_source_vertices(&self) -> Vec<ExecutionVertex> {
-        self.vertices.values()
+        self.vertices
+            .values()
             .filter(|v| matches!(v.operator_config, OperatorConfig::SourceConfig(_)))
             .cloned()
             .collect()
@@ -199,12 +208,11 @@ impl ExecutionGraph {
     }
 
     pub fn get_sink_vertices(&self) -> Vec<String> {
-        self.vertices.iter()
-            .filter_map(|(id, vertex)| {
-                match &vertex.operator_config {
-                    OperatorConfig::SinkConfig(_) => Some(id.as_ref().to_string()),
-                    _ => None,
-                }
+        self.vertices
+            .iter()
+            .filter_map(|(id, vertex)| match &vertex.operator_config {
+                OperatorConfig::SinkConfig(_) => Some(id.as_ref().to_string()),
+                _ => None,
             })
             .collect()
     }
@@ -242,7 +250,7 @@ impl ExecutionGraph {
 
     // TODO we should add topology verification for request mode (window+window_request and reques source+sink tasks on same nodes)
 
-    // TODO we should separate execution graph and channel configurations - 
+    // TODO we should separate execution graph and channel configurations -
     // execution graph should be static and compiled by planner,
     // channel mapping depends on cluster configuration and is defined at runtime
     pub fn configure_channels(
@@ -288,16 +296,16 @@ impl ExecutionGraph {
                 let target_node = mapping
                     .get(edge.target_vertex_id.as_ref())
                     .expect(&format!("Node with id {} expected", edge.target_vertex_id));
-                
+
                 if source_node.worker_id != target_node.worker_id {
                     // Vertices are on different nodes, create remote channel
                     Channel::new_remote_with_queue(
                         edge.source_vertex_id.as_ref().to_string(),
                         edge.target_vertex_id.as_ref().to_string(),
-                        source_node.worker_ip.clone(), 
-                        source_node.worker_id.clone(), 
-                        target_node.worker_ip.clone(), 
-                        target_node.worker_id.clone(), 
+                        source_node.worker_ip.clone(),
+                        source_node.worker_id.clone(),
+                        target_node.worker_ip.clone(),
+                        target_node.worker_id.clone(),
                         target_node.transport_port as i32,
                         queue_size_records,
                     )

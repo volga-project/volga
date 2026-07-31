@@ -6,10 +6,8 @@ use std::collections::{HashMap, HashSet};
 pub const HEARTBEAT_FENCE_ERR_MSG: &str = "worker not bound to attempt";
 
 /// Present in `StatePollFailure` detail when get_worker_state fencing rejects an unbound peer.
-pub const STATE_POLL_FENCE_ERR_MSGS: &[&str] = &[
-    "not configured for this attempt",
-    "stale worker command",
-];
+pub const STATE_POLL_FENCE_ERR_MSGS: &[&str] =
+    &["not configured for this attempt", "stale worker command"];
 
 #[derive(Clone, Debug)]
 pub enum FailureKind {

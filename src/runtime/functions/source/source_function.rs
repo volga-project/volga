@@ -1,18 +1,18 @@
-use async_trait::async_trait;
-use anyhow::Result;
-use std::fmt;
-use crate::common::message::Message;
-use crate::runtime::functions::source::HttpRequestSourceFunction;
-use crate::runtime::operators::source::source_operator::SourceConfig;
-use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::functions::function_trait::FunctionTrait;
-use crate::runtime::operators::source::SourceInterrupt;
-use std::any::Any;
-use super::vector_source::VectorSourceFunction;
-use super::word_count_source::WordCountSourceFunction;
 use super::datagen_source::DatagenSourceFunction;
 use super::kafka::KafkaSourceFunction;
 use super::parquet::ParquetSourceFunction;
+use super::vector_source::VectorSourceFunction;
+use super::word_count_source::WordCountSourceFunction;
+use crate::common::message::Message;
+use crate::runtime::functions::function_trait::FunctionTrait;
+use crate::runtime::functions::source::HttpRequestSourceFunction;
+use crate::runtime::operators::source::source_operator::SourceConfig;
+use crate::runtime::operators::source::SourceInterrupt;
+use crate::runtime::runtime_context::RuntimeContext;
+use anyhow::Result;
+use async_trait::async_trait;
+use std::any::Any;
+use std::fmt;
 
 /// Outcome of a source `fetch` poll.
 #[derive(Debug)]
@@ -144,7 +144,7 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Parquet(f) => f.open(context).await,
         }
     }
-    
+
     async fn close(&mut self) -> Result<()> {
         match self {
             SourceFunction::Vector(f) => f.close().await,
@@ -155,11 +155,11 @@ impl FunctionTrait for SourceFunction {
             SourceFunction::Parquet(f) => f.close().await,
         }
     }
-    
+
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -183,9 +183,9 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
         SourceConfig::DatagenSourceConfig(datagen_config) => {
             SourceFunction::Datagen(DatagenSourceFunction::new(datagen_config))
         }
-        SourceConfig::HttpRequestSourceConfig(config) => {
-            SourceFunction::HttpRequest(HttpRequestSourceFunction::new(config.schema.expect("Schema not set").clone()))
-        }
+        SourceConfig::HttpRequestSourceConfig(config) => SourceFunction::HttpRequest(
+            HttpRequestSourceFunction::new(config.schema.expect("Schema not set").clone()),
+        ),
         SourceConfig::KafkaSourceConfig(config) => {
             SourceFunction::Kafka(KafkaSourceFunction::new(config))
         }
@@ -193,4 +193,4 @@ pub fn create_source_function(config: SourceConfig) -> SourceFunction {
             SourceFunction::Parquet(ParquetSourceFunction::new(config))
         }
     }
-} 
+}

@@ -16,11 +16,8 @@ pub(crate) enum AggFlavor {
 }
 
 impl AggFlavor {
-    pub(crate) const ALL: [AggFlavor; 3] = [
-        AggFlavor::Where,
-        AggFlavor::Cate,
-        AggFlavor::CateWhere,
-    ];
+    pub(crate) const ALL: [AggFlavor; 3] =
+        [AggFlavor::Where, AggFlavor::Cate, AggFlavor::CateWhere];
 
     pub(crate) fn suffix(&self) -> &'static str {
         match self {
@@ -93,17 +90,13 @@ impl Hash for CateKey {
 
 impl TopKKey for CateKey {
     fn cmp_key(&self, other: &Self) -> std::cmp::Ordering {
-        self.value
-            .partial_cmp(&other.value)
-            .unwrap_or_else(|| {
-                crate::runtime::operators::window::top::format::scalar_to_string(&self.value)
-                    .unwrap_or_default()
-                    .cmp(
-                        &crate::runtime::operators::window::top::format::scalar_to_string(
-                            &other.value,
-                        )
+        self.value.partial_cmp(&other.value).unwrap_or_else(|| {
+            crate::runtime::operators::window::top::format::scalar_to_string(&self.value)
+                .unwrap_or_default()
+                .cmp(
+                    &crate::runtime::operators::window::top::format::scalar_to_string(&other.value)
                         .unwrap_or_default(),
-                    )
-            })
+                )
+        })
     }
 }

@@ -9,7 +9,6 @@ use crate::{
     },
     common::types::PipelineId,
     runtime::{
-        
         functions::source::datagen_source::{
             DatagenSourceConfig, DatagenSourceFunction, DatagenSpec, FieldGenerator,
         },
@@ -259,13 +258,11 @@ async fn test_request_execution_mode() {
         .with_execution_profile(ExecutionProfile::SingleWorker {
             num_threads_per_task: 4,
         })
-        .with_source(
-            SourceSpec::new(
-                "events",
-                SourceSpecKind::Datagen(datagen_config.spec.clone()),
-                schema_to_json(schema.as_ref()),
-            ),
-        )
+        .with_source(SourceSpec::new(
+            "events",
+            SourceSpecKind::Datagen(datagen_config.spec.clone()),
+            schema_to_json(schema.as_ref()),
+        ))
         .with_request_source_sink(request_source_sink_spec)
         .sql(sql)
         .build();

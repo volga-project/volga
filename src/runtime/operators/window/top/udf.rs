@@ -14,8 +14,8 @@ use datafusion::prelude::SessionContext;
 use super::accumulators::frequency::{
     FrequencyMode, FrequencyTopKAccumulator, TOP1_RATIO_NAME, TOPN_FREQUENCY_NAME,
 };
-use super::accumulators::value::TOP_NAME;
 use super::accumulators::value::TopValueAccumulator;
+use super::accumulators::value::TOP_NAME;
 
 #[derive(Debug, Clone, Copy)]
 enum TopUdfKind {
@@ -87,9 +87,9 @@ impl AggregateUDFImpl for TopUdf {
     fn accumulator(&self, _args: AccumulatorArgs) -> Result<Box<dyn Accumulator>> {
         match self.kind {
             TopUdfKind::TopValue => Ok(Box::new(TopValueAccumulator::new())),
-            TopUdfKind::TopNFrequency => Ok(Box::new(FrequencyTopKAccumulator::new(
-                FrequencyMode::TopN,
-            ))),
+            TopUdfKind::TopNFrequency => {
+                Ok(Box::new(FrequencyTopKAccumulator::new(FrequencyMode::TopN)))
+            }
             TopUdfKind::Top1Ratio => Ok(Box::new(FrequencyTopKAccumulator::new(
                 FrequencyMode::Top1Ratio,
             ))),

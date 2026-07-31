@@ -1,9 +1,19 @@
-use std::{fmt};
+use std::fmt;
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 
-use crate::{common::Message, runtime::{functions::key_by::{KeyByFunction, KeyByFunctionTrait}, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{
+    common::Message,
+    runtime::{
+        functions::key_by::{KeyByFunction, KeyByFunctionTrait},
+        operators::operator::{
+            MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
+            OperatorType,
+        },
+        runtime_context::RuntimeContext,
+    },
+};
 
 pub struct KeyByOperator {
     base: OperatorBase,
@@ -23,7 +33,7 @@ impl KeyByOperator {
             OperatorConfig::KeyByConfig(key_by_function) => key_by_function,
             _ => panic!("Expected KeyByConfig, got {:?}", config),
         };
-        Self { 
+        Self {
             base: OperatorBase::new_with_function(key_by_function, config),
         }
     }
@@ -49,18 +59,21 @@ impl OperatorTrait for KeyByOperator {
         }
 
         match self.base.next_input().await {
-            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
-            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
+            Some(Message::Watermark(watermark)) => {
+                OperatorPollResult::Ready(Message::Watermark(watermark))
+            }
+            Some(Message::CheckpointBarrier(barrier)) => {
+                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+            }
             Some(message) => {
                 let function = self.base.get_function_mut::<KeyByFunction>().unwrap();
                 let function = function.clone();
-                
+
                 let keyed_messages = function.key_by(message);
                 // Convert to Messages
-                let mut messages: Vec<Message> = keyed_messages.into_iter()
-                    .map(Message::Keyed)
-                    .collect();
-                
+                let mut messages: Vec<Message> =
+                    keyed_messages.into_iter().map(Message::Keyed).collect();
+
                 if messages.is_empty() {
                     panic!("KeyBy operator produced no messages");
                 }

@@ -43,20 +43,11 @@ async fn parquet_source_applies_projection_mask() {
     };
     let mut config = ParquetSourceConfig::new(schema.clone(), spec);
     let projection = vec![0];
-    let projected_schema = Arc::new(Schema::new(vec![
-        Field::new("k", DataType::Utf8, false),
-    ]));
+    let projected_schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Utf8, false)]));
     config.set_projection(projection, projected_schema.clone());
 
     let mut source = ParquetSourceFunction::new(config);
-    let ctx = RuntimeContext::new(
-        "parquet_source".to_string().into(),
-        0,
-        1,
-        None,
-        None,
-        None,
-    );
+    let ctx = RuntimeContext::new("parquet_source".to_string().into(), 0, 1, None, None, None);
     source.open(&ctx).await.unwrap();
 
     let msg = source.fetch(None).await.expect_data("expected batch");

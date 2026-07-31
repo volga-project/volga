@@ -37,7 +37,9 @@ async fn sink_enforces_max_buffer_bytes() {
             ],
         )
         .unwrap();
-        sink.sink(Message::new(None, batch, None, None)).await.unwrap();
+        sink.sink(Message::new(None, batch, None, None))
+            .await
+            .unwrap();
     }
 
     sink.close().await.unwrap();
@@ -73,10 +75,7 @@ fn partition_batches_respects_partition_fields() {
     .unwrap();
 
     let partitions = sink.partition_batches(batch).unwrap();
-    let mut partition_paths: Vec<String> = partitions
-        .into_iter()
-        .map(|(_, path)| path)
-        .collect();
+    let mut partition_paths: Vec<String> = partitions.into_iter().map(|(_, path)| path).collect();
     partition_paths.sort();
     assert_eq!(partition_paths, vec!["k=A".to_string(), "k=B".to_string()]);
 }

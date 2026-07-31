@@ -1,18 +1,19 @@
 use std::env;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use volga::orchestrator::docker::DockerMasterOrchestrator;
 use volga::orchestrator::kube::KubeMasterOrchestrator;
 use volga::orchestrator::orchestrator::MasterOrchestrator;
-use volga::runtime::master::MasterConfig;
 use volga::runtime::master::server::MasterServer;
+use volga::runtime::master::MasterConfig;
 
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},

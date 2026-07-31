@@ -78,7 +78,11 @@ impl PipelineSnapshotHistory {
         let seq = self.next_seq;
         self.next_seq = self.next_seq.saturating_add(1);
 
-        self.entries.push_back(PipelineSnapshotEntry { ts_ms, seq, snapshot });
+        self.entries.push_back(PipelineSnapshotEntry {
+            ts_ms,
+            seq,
+            snapshot,
+        });
         seq
     }
 
@@ -114,4 +118,3 @@ fn system_time_to_ms(ts: SystemTime) -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-

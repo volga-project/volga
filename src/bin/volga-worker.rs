@@ -1,7 +1,7 @@
 use std::env;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{bail, Result};
 use volga::orchestrator::docker::DockerWorkerOrchestrator;
 use volga::orchestrator::kube::KubeWorkerOrchestrator;
 use volga::orchestrator::orchestrator::WorkerOrchestrator;
@@ -11,8 +11,9 @@ use volga::runtime::worker_server::WorkerServer;
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{SignalKind, signal};
-        let mut sigterm = signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+        use tokio::signal::unix::{signal, SignalKind};
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
         tokio::select! {
             _ = tokio::signal::ctrl_c() => {},
             _ = sigterm.recv() => {},
@@ -48,8 +49,7 @@ async fn build_worker_bootstrap() -> Result<(String, Arc<dyn WorkerOrchestrator>
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let bind_addr =
-        env::var("VOLGA_WORKER_BIND_ADDR").expect("VOLGA_WORKER_BIND_ADDR is not set");
+    let bind_addr = env::var("VOLGA_WORKER_BIND_ADDR").expect("VOLGA_WORKER_BIND_ADDR is not set");
     let hold_on_finish = env::var("VOLGA_WORKER_HOLD_ON_FINISH")
         .ok()
         .map(|v| v.eq_ignore_ascii_case("true") || v == "1" || v.eq_ignore_ascii_case("yes"))

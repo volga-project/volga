@@ -1,11 +1,11 @@
-use async_trait::async_trait;
-use anyhow::Result;
-use crate::common::message::Message;
-use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::functions::function_trait::FunctionTrait;
-use std::any::Any;
 use super::source_function::{FetchResult, SourceFunctionTrait};
+use crate::common::message::Message;
+use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::operators::source::SourceInterrupt;
+use crate::runtime::runtime_context::RuntimeContext;
+use anyhow::Result;
+use async_trait::async_trait;
+use std::any::Any;
 
 #[derive(Debug)]
 pub struct VectorSourceFunction {
@@ -27,7 +27,7 @@ impl FunctionTrait for VectorSourceFunction {
     async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
         Ok(())
     }
-    
+
     async fn close(&mut self) -> Result<()> {
         Ok(())
     }
@@ -35,7 +35,7 @@ impl FunctionTrait for VectorSourceFunction {
     fn as_any(&self) -> &dyn Any {
         self
     }
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
@@ -51,4 +51,4 @@ impl SourceFunctionTrait for VectorSourceFunction {
         self.next_index += 1;
         FetchResult::Data(msg)
     }
-} 
+}

@@ -1,10 +1,10 @@
-pub mod map;
+pub mod aggregate;
+pub mod chained;
 pub mod join;
+pub mod key_by;
+pub mod map;
+pub mod operator;
+pub mod reduce;
 pub mod sink;
 pub mod source;
-pub mod key_by;
-pub mod reduce;
-pub mod operator;
-pub mod chained;
-pub mod aggregate;
 pub mod window;

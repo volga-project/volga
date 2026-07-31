@@ -52,7 +52,10 @@ pub(super) fn checkpoint_datagen_parts(parallelism: usize) -> (Arc<Schema>, Data
     fields.insert(
         "value".to_string(),
         FieldGenerator::Values {
-            values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))],
+            values: vec![
+                ScalarValue::Float64(Some(1.0)),
+                ScalarValue::Float64(Some(2.0)),
+            ],
         },
     );
     (

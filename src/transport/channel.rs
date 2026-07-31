@@ -33,17 +33,30 @@ pub enum Channel {
         target_node_id: String,
         target_transport_port: i32,
         queue_size_records: u32,
-    }
+    },
 }
 
 impl Channel {
     pub fn new_local(source_vertex_id: String, target_vertex_id: String) -> Self {
-        Self::new_local_with_queue(source_vertex_id, target_vertex_id, crate::transport::transport_spec::TransportSpec::DEFAULT_QUEUE_RECORDS)
+        Self::new_local_with_queue(
+            source_vertex_id,
+            target_vertex_id,
+            crate::transport::transport_spec::TransportSpec::DEFAULT_QUEUE_RECORDS,
+        )
     }
 
-    pub fn new_local_with_queue(source_vertex_id: String, target_vertex_id: String, queue_size_records: u32) -> Self {
+    pub fn new_local_with_queue(
+        source_vertex_id: String,
+        target_vertex_id: String,
+        queue_size_records: u32,
+    ) -> Self {
         let channel_id = gen_channel_id(source_vertex_id.clone(), target_vertex_id.clone());
-        Channel::Local { channel_id, source_vertex_id, target_vertex_id, queue_size_records }
+        Channel::Local {
+            channel_id,
+            source_vertex_id,
+            target_vertex_id,
+            queue_size_records,
+        }
     }
 
     pub fn new_remote(
@@ -95,41 +108,41 @@ impl Channel {
 impl Channel {
     pub fn get_channel_id(&self) -> String {
         match &self {
-            Channel::Local { channel_id, ..} => {
-                channel_id.clone()
-            },
-            Channel::Remote { channel_id, ..} => {
-                channel_id.clone()  
-            }
+            Channel::Local { channel_id, .. } => channel_id.clone(),
+            Channel::Remote { channel_id, .. } => channel_id.clone(),
         }
     }
 
     pub fn get_source_vertex_id(&self) -> String {
         match &self {
-            Channel::Local { source_vertex_id, ..} => {
-                source_vertex_id.clone()
-            },
-            Channel::Remote { source_vertex_id, ..} => {
-                source_vertex_id.clone()
-            }
+            Channel::Local {
+                source_vertex_id, ..
+            } => source_vertex_id.clone(),
+            Channel::Remote {
+                source_vertex_id, ..
+            } => source_vertex_id.clone(),
         }
     }
 
     pub fn get_target_vertex_id(&self) -> String {
         match &self {
-            Channel::Local { target_vertex_id, ..} => {
-                target_vertex_id.clone()
-            },
-            Channel::Remote { target_vertex_id, ..} => {
-                target_vertex_id.clone()
-            }
+            Channel::Local {
+                target_vertex_id, ..
+            } => target_vertex_id.clone(),
+            Channel::Remote {
+                target_vertex_id, ..
+            } => target_vertex_id.clone(),
         }
     }
 
     pub fn get_queue_size_records(&self) -> u32 {
         match &self {
-            Channel::Local { queue_size_records, .. } => *queue_size_records,
-            Channel::Remote { queue_size_records, .. } => *queue_size_records,
+            Channel::Local {
+                queue_size_records, ..
+            } => *queue_size_records,
+            Channel::Remote {
+                queue_size_records, ..
+            } => *queue_size_records,
         }
     }
 }
@@ -140,17 +153,15 @@ pub fn to_local_and_remote(channels: &Vec<Channel>) -> (Vec<Channel>, Vec<Channe
 
     for channel in channels {
         match channel {
-            Channel::Local{..} => {
+            Channel::Local { .. } => {
                 local.push(channel.clone());
             }
-            Channel::Remote {..} => {
-                remote.push(channel.clone())
-            }
+            Channel::Remote { .. } => remote.push(channel.clone()),
         }
     }
 
     (local, remote)
-} 
+}
 
 fn gen_channel_id(source_vertex_id: String, target_vertex_id: String) -> String {
     format!("{}_to_{}", source_vertex_id, target_vertex_id)

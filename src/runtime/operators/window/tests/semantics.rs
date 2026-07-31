@@ -14,8 +14,8 @@ use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowOperatorStore,
 };
 use crate::runtime::operators::window::tests::harness::{
-    assert_window_values, batch, key, keyed_message, runtime_context_with_namespace,
-    window_exec_from_sql, Harness, WoWroHarness,
+    assert_window_values, batch, key, keyed_message, runtime_context, window_exec_from_sql,
+    Harness, WoWroHarness,
 };
 
 const SQL: &str = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
@@ -34,8 +34,9 @@ async fn open_wro(
     let mut cfg =
         WindowRequestOperatorConfig::from_window_operator_config(WindowOperatorConfig::new(exec));
     cfg.exclude_current_row = true;
-    let ctx = runtime_context_with_namespace(store, namespace);
+    let ctx = runtime_context();
     let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(cfg));
+    wro.set_store_and_namespace(store, namespace);
     wro.open(&ctx).await.expect("wro open");
     wro
 }

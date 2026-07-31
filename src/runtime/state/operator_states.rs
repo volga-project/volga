@@ -1,10 +1,10 @@
+use dashmap::DashMap;
 use std::any::Any;
 use std::sync::Arc;
-use dashmap::DashMap;
 use tokio::sync::Notify;
 
-use crate::runtime::VertexId;
 use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
+use crate::runtime::VertexId;
 
 pub trait OperatorState: Send + Sync + std::fmt::Debug {
     fn as_any(&self) -> &dyn Any;
@@ -38,7 +38,9 @@ impl OperatorStates {
     }
 
     pub fn get_operator_state(&self, vertex_id: &str) -> Option<Arc<dyn OperatorState>> {
-        self.states.get(vertex_id).map(|entry| entry.value().clone())
+        self.states
+            .get(vertex_id)
+            .map(|entry| entry.value().clone())
     }
 
     pub async fn wait_for_operator_state(&self, vertex_id: &str) -> Arc<dyn OperatorState> {
@@ -59,7 +61,11 @@ impl OperatorStates {
         }
     }
 
-    pub fn get_or_insert_operator_state<F>(&self, vertex_id: &str, factory: F) -> Arc<dyn OperatorState>
+    pub fn get_or_insert_operator_state<F>(
+        &self,
+        vertex_id: &str,
+        factory: F,
+    ) -> Arc<dyn OperatorState>
     where
         F: FnOnce() -> Arc<dyn OperatorState>,
     {
@@ -82,4 +88,3 @@ impl Default for OperatorStates {
         Self::new()
     }
 }
-

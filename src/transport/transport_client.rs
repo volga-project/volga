@@ -1,14 +1,32 @@
+use crate::runtime::VertexId;
+use crate::transport::batcher::BatcherConfig;
+use crate::{
+    common::message::Message,
+    runtime::{
+        health::{WorkerFatalReason, WorkerHealth},
+        metrics::{
+            MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID,
+            LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
+            METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE,
+        },
+        operators::operator::MessageStream,
+    },
+    transport::{
+        batch_channel::{BatchReceiver, BatchSender},
+        channel::Channel,
+    },
+};
 use anyhow::Result;
+use futures::stream;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
-use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
-use futures::stream;
-use crate::transport::batcher::BatcherConfig;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use crate::runtime::VertexId;
+use tokio::{sync::mpsc::error::SendError, time};
 
 // pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send>>;
 
@@ -34,14 +52,20 @@ impl TransportClientConfig {
         if self.reader_receivers.is_none() {
             self.reader_receivers = Some(HashMap::new());
         }
-        self.reader_receivers.as_mut().unwrap().insert(channel_id, receiver);
+        self.reader_receivers
+            .as_mut()
+            .unwrap()
+            .insert(channel_id, receiver);
     }
 
     pub fn add_writer_sender(&mut self, channel_id: String, sender: BatchSender) {
         if self.writer_senders.is_none() {
             self.writer_senders = Some(HashMap::new());
         }
-        self.writer_senders.as_mut().unwrap().insert(channel_id, sender);
+        self.writer_senders
+            .as_mut()
+            .unwrap()
+            .insert(channel_id, sender);
     }
 
     pub fn set_metrics_labels(&mut self, labels: MetricsLabels) {
@@ -106,7 +130,9 @@ impl DataReaderControl {
 
     #[cfg(test)]
     pub fn empty_for_test() -> Self {
-        Self { gates: HashMap::new() }
+        Self {
+            gates: HashMap::new(),
+        }
     }
 }
 
@@ -120,7 +146,8 @@ impl DataReader {
 
     pub fn message_stream(self) -> MessageStream {
         // Convert each BatchReceiver into a boxed Stream using unfold
-        let receiver_streams: Vec<MessageStream> = self.receivers
+        let receiver_streams: Vec<MessageStream> = self
+            .receivers
             .into_iter()
             .map(|(_channel_id, receiver)| {
                 // Convert BatchReceiver to Stream using unfold and box it for Unpin
@@ -132,7 +159,7 @@ impl DataReader {
                 })) as MessageStream
             })
             .collect();
-        
+
         Box::pin(stream::select_all(receiver_streams))
     }
 
@@ -141,37 +168,40 @@ impl DataReader {
 
         // Convert each BatchReceiver into a gated stream and then select_all.
         // No background tasks: gating happens inside the stream.
-        let receiver_streams: Vec<MessageStream> = self.receivers
+        let receiver_streams: Vec<MessageStream> = self
+            .receivers
             .into_iter()
             .map(|(channel_id, receiver)| {
                 // channel id is "{source}_to_{target}"
-                let upstream_vertex_id = channel_id
-                    .split("_to_")
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let upstream_vertex_id = channel_id.split("_to_").next().unwrap_or("").to_string();
 
                 let gate = gates
                     .entry(upstream_vertex_id)
                     .or_insert_with(|| Arc::new(UpstreamGate::new()))
                     .clone();
 
-                Box::pin(stream::unfold((receiver, gate), |(mut rx, gate)| async move {
-                    loop {
-                        while !gate.enabled.load(Ordering::Acquire) {
-                            gate.notify.notified().await;
-                        }
+                Box::pin(stream::unfold(
+                    (receiver, gate),
+                    |(mut rx, gate)| async move {
+                        loop {
+                            while !gate.enabled.load(Ordering::Acquire) {
+                                gate.notify.notified().await;
+                            }
 
-                        match rx.recv().await {
-                            Some(message) => return Some((message, (rx, gate))),
-                            None => return None, // Channel closed
+                            match rx.recv().await {
+                                Some(message) => return Some((message, (rx, gate))),
+                                None => return None, // Channel closed
+                            }
                         }
-                    }
-                })) as MessageStream
+                    },
+                )) as MessageStream
             })
             .collect();
 
-        (Box::pin(stream::select_all(receiver_streams)), DataReaderControl { gates })
+        (
+            Box::pin(stream::select_all(receiver_streams)),
+            DataReaderControl { gates },
+        )
     }
 }
 
@@ -196,7 +226,7 @@ impl DataWriter {
     ) -> Self {
         let batching_config = BatcherConfig::default();
         // let batcher = Batcher::new(batching_config.clone(), senders.clone());
-        
+
         Self {
             vertex_id,
             senders,
@@ -223,7 +253,8 @@ impl DataWriter {
         //     Ok(()) => (true, 0), // Success, no latency for batching
         //     Err(_) => (false, 0)
         // }
-        self.write_message_with_params(channel, message, self.default_timeout, self.default_retries).await
+        self.write_message_with_params(channel, message, self.default_timeout, self.default_retries)
+            .await
     }
 
     async fn write_message_with_params(
@@ -231,7 +262,7 @@ impl DataWriter {
         channel: &Channel,
         message: &Message,
         timeout_duration: Duration,
-        retries: usize
+        retries: usize,
     ) -> (bool, u32) {
         let mut attempts = 0;
         let start_time = std::time::Instant::now();
@@ -253,32 +284,35 @@ impl DataWriter {
                         LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).set(queue_size);
+                    )
+                    .set(queue_size);
                     gauge!(
                         METRIC_STREAM_TASK_TX_QUEUE_REM,
                         LABEL_VERTEX_ID => self.vertex_id.clone(),
                         LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).set(queue_remaining);
-                    let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
+                    )
+                    .set(queue_remaining);
+                    let backpressure =
+                        1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
                     gauge!(
                         METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
                         LABEL_VERTEX_ID => self.vertex_id.clone(),
                         LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).set(backpressure);
+                    )
+                    .set(backpressure);
                 } else {
                     gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_size);
                     gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_remaining);
-                    let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
+                    let backpressure =
+                        1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
                     gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(backpressure);
                 }
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
-                    Ok(Ok(())) => {
-                        return (true, start_time.elapsed().as_millis() as u32)
-                    }
+                    Ok(Ok(())) => return (true, start_time.elapsed().as_millis() as u32),
                     Ok(Err(_)) => {
                         self.worker_health.report_fatal(
                             WorkerFatalReason::TransportDisconnect,
@@ -296,15 +330,20 @@ impl DataWriter {
                     }
                 }
             } else {
-                panic!("DataWriter {:?} channel {} not found", self.vertex_id, channel_id);
+                panic!(
+                    "DataWriter {:?} channel {} not found",
+                    self.vertex_id, channel_id
+                );
             }
         }
-    
+
         (false, start_time.elapsed().as_millis() as u32)
     }
 
     pub fn get_queue_size_and_capacity(&self, channel_id: &str) -> Option<(u32, u32)> {
-        self.senders.get(channel_id).map(|sender| (sender.size(), sender.capacity()))
+        self.senders
+            .get(channel_id)
+            .map(|sender| (sender.size(), sender.capacity()))
     }
 }
 
@@ -316,11 +355,20 @@ pub struct TransportClient {
 }
 
 impl TransportClient {
-    pub fn new(vertex_id: VertexId, config: TransportClientConfig, worker_health: Arc<WorkerHealth>) -> Self {
+    pub fn new(
+        vertex_id: VertexId,
+        config: TransportClientConfig,
+        worker_health: Arc<WorkerHealth>,
+    ) -> Self {
         let mut reader: Option<DataReader> = None;
         let mut writer: Option<DataWriter> = None;
 
-        let TransportClientConfig { reader_receivers, writer_senders, metrics_labels, .. } = config;
+        let TransportClientConfig {
+            reader_receivers,
+            writer_senders,
+            metrics_labels,
+            ..
+        } = config;
 
         if let Some(receivers) = reader_receivers {
             reader = Some(DataReader::new(vertex_id.clone(), receivers));

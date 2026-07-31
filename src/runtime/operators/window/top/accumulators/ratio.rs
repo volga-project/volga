@@ -8,12 +8,12 @@ use datafusion::logical_expr::Accumulator;
 use datafusion::scalar::ScalarValue;
 use serde::{Deserialize, Serialize};
 
-use crate::runtime::operators::window::top::format::{join_csv, scalar_to_string};
-use crate::runtime::operators::window::top::heap::{TopKMap, TopKOrder};
-use crate::runtime::operators::window::top::utils::group_counts_by_value;
 use crate::runtime::operators::window::top::accumulators::common::{
     df_error, parse_n_once, ratio_scalar,
 };
+use crate::runtime::operators::window::top::format::{join_csv, scalar_to_string};
+use crate::runtime::operators::window::top::heap::{TopKMap, TopKOrder};
+use crate::runtime::operators::window::top::utils::group_counts_by_value;
 use crate::runtime::utils::{scalar_value_from_bytes, scalar_value_to_bytes};
 
 pub(crate) const TOP_N_KEY_RATIO_CATE_NAME: &str = "top_n_key_ratio_cate";
@@ -60,12 +60,15 @@ impl Accumulator for RatioTopKAccumulator {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| df_error("condition must be boolean"))?;
-        let cate_array = values.get(2).ok_or_else(|| df_error("missing category arg"))?;
+        let cate_array = values
+            .get(2)
+            .ok_or_else(|| df_error("missing category arg"))?;
         let n_array = values.get(3).ok_or_else(|| df_error("missing n arg"))?;
         self.parse_n(n_array)?;
 
         let total_mask = Self::build_total_mask(value_array, cate_array)?;
-        let total_cate = filter(cate_array.as_ref(), &total_mask).map_err(|e| df_error(e.to_string()))?;
+        let total_cate =
+            filter(cate_array.as_ref(), &total_mask).map_err(|e| df_error(e.to_string()))?;
         let mut touched: HashSet<ScalarValue> = HashSet::new();
         for (key, count) in Self::group_counts(&total_cate)? {
             let entry = self.counts.entry(key.clone()).or_default();
@@ -73,8 +76,10 @@ impl Accumulator for RatioTopKAccumulator {
             touched.insert(key);
         }
 
-        let match_mask = and_kleene(cond_array, &total_mask).map_err(|e| df_error(e.to_string()))?;
-        let match_cate = filter(cate_array.as_ref(), &match_mask).map_err(|e| df_error(e.to_string()))?;
+        let match_mask =
+            and_kleene(cond_array, &total_mask).map_err(|e| df_error(e.to_string()))?;
+        let match_cate =
+            filter(cate_array.as_ref(), &match_mask).map_err(|e| df_error(e.to_string()))?;
         for (key, count) in Self::group_counts(&match_cate)? {
             let entry = self.counts.entry(key.clone()).or_default();
             entry.matched += count as i64;
@@ -101,12 +106,15 @@ impl Accumulator for RatioTopKAccumulator {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .ok_or_else(|| df_error("condition must be boolean"))?;
-        let cate_array = values.get(2).ok_or_else(|| df_error("missing category arg"))?;
+        let cate_array = values
+            .get(2)
+            .ok_or_else(|| df_error("missing category arg"))?;
         let n_array = values.get(3).ok_or_else(|| df_error("missing n arg"))?;
         self.parse_n(n_array)?;
 
         let total_mask = Self::build_total_mask(value_array, cate_array)?;
-        let total_cate = filter(cate_array.as_ref(), &total_mask).map_err(|e| df_error(e.to_string()))?;
+        let total_cate =
+            filter(cate_array.as_ref(), &total_mask).map_err(|e| df_error(e.to_string()))?;
         let mut touched: HashSet<ScalarValue> = HashSet::new();
         for (key, count) in Self::group_counts(&total_cate)? {
             let entry = self.counts.entry(key.clone()).or_default();
@@ -114,8 +122,10 @@ impl Accumulator for RatioTopKAccumulator {
             touched.insert(key);
         }
 
-        let match_mask = and_kleene(cond_array, &total_mask).map_err(|e| df_error(e.to_string()))?;
-        let match_cate = filter(cate_array.as_ref(), &match_mask).map_err(|e| df_error(e.to_string()))?;
+        let match_mask =
+            and_kleene(cond_array, &total_mask).map_err(|e| df_error(e.to_string()))?;
+        let match_cate =
+            filter(cate_array.as_ref(), &match_mask).map_err(|e| df_error(e.to_string()))?;
         for (key, count) in Self::group_counts(&match_cate)? {
             let entry = self.counts.entry(key.clone()).or_default();
             entry.matched -= count as i64;
@@ -167,7 +177,9 @@ impl Accumulator for RatioTopKAccumulator {
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        let array = states.get(0).ok_or_else(|| df_error("missing state array"))?;
+        let array = states
+            .get(0)
+            .ok_or_else(|| df_error("missing state array"))?;
         let bin = array
             .as_any()
             .downcast_ref::<arrow::array::BinaryArray>()
@@ -218,8 +230,8 @@ struct EncodedRatioState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use arrow::array::{ArrayRef, BooleanArray, Int64Array, StringArray};
+    use std::sync::Arc;
 
     fn bool_array(values: &[bool]) -> ArrayRef {
         Arc::new(BooleanArray::from(values.to_vec()))
@@ -266,14 +278,17 @@ mod tests {
         let left_conds = bool_array(&[true]);
         let left_cates = string_array(&["a"]);
         let left_n = int_array(&[2]);
-        left.update_batch(&[left_values, left_conds, left_cates, left_n]).unwrap();
+        left.update_batch(&[left_values, left_conds, left_cates, left_n])
+            .unwrap();
 
         let mut right = RatioTopKAccumulator::new(TopKOrder::MetricDesc);
         let right_values = string_array(&["y", "z"]);
         let right_conds = bool_array(&[false, true]);
         let right_cates = string_array(&["a", "b"]);
         let right_n = int_array(&[2, 2]);
-        right.update_batch(&[right_values, right_conds, right_cates, right_n]).unwrap();
+        right
+            .update_batch(&[right_values, right_conds, right_cates, right_n])
+            .unwrap();
 
         let state = right.state().unwrap();
         let state_arrays = state

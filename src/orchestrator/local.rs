@@ -1,12 +1,12 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use anyhow::Result;
+use async_trait::async_trait;
 
 use crate::api::PipelineSpec;
 
-use super::orchestrator::{MasterOrchestrator, WorkerNode, WorkerOrchestrator, mock_worker_nodes};
+use super::orchestrator::{mock_worker_nodes, MasterOrchestrator, WorkerNode, WorkerOrchestrator};
 
 #[async_trait]
 pub trait LocalWorkerReplacement: Send + Sync {
@@ -63,7 +63,9 @@ impl LocalTestOrchestrator {
 
 impl LocalWorkerOrchestrator {
     pub fn new(master_service_addr: String) -> Self {
-        Self { master_service_addr }
+        Self {
+            master_service_addr,
+        }
     }
 }
 
@@ -78,8 +80,7 @@ impl MasterOrchestrator for LocalTestOrchestrator {
     }
 
     async fn get_spec(&self) -> PipelineSpec {
-        self
-            .spec
+        self.spec
             .clone()
             .expect("LocalTestOrchestrator spec is not configured")
     }

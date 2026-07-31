@@ -1,6 +1,16 @@
-use std::{fmt};
+use std::fmt;
 
-use crate::{common::Message, runtime::{functions::map::MapFunction, operators::operator::{MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType}, runtime_context::RuntimeContext}};
+use crate::{
+    common::Message,
+    runtime::{
+        functions::map::MapFunction,
+        operators::operator::{
+            MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait,
+            OperatorType,
+        },
+        runtime_context::RuntimeContext,
+    },
+};
 use anyhow::Result;
 use async_trait::async_trait;
 
@@ -24,7 +34,7 @@ impl MapOperator {
             OperatorConfig::MapConfig(map_function) => map_function,
             _ => panic!("Expected MapConfig, got {:?}", config),
         };
-        Self { 
+        Self {
             base: OperatorBase::new_with_function(map_function, config),
             // input_stream: None,
         }
@@ -47,8 +57,12 @@ impl OperatorTrait for MapOperator {
 
     async fn poll_next(&mut self) -> OperatorPollResult {
         match self.base.next_input().await {
-            Some(Message::Watermark(watermark)) => OperatorPollResult::Ready(Message::Watermark(watermark)),
-            Some(Message::CheckpointBarrier(barrier)) => OperatorPollResult::Ready(Message::CheckpointBarrier(barrier)),
+            Some(Message::Watermark(watermark)) => {
+                OperatorPollResult::Ready(Message::Watermark(watermark))
+            }
+            Some(Message::CheckpointBarrier(barrier)) => {
+                OperatorPollResult::Ready(Message::CheckpointBarrier(barrier))
+            }
             Some(message) => {
                 let function = self.base.get_function_mut::<MapFunction>().unwrap();
                 let function = function.clone();

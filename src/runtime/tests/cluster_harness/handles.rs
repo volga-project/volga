@@ -36,10 +36,7 @@ impl MasterHandle {
             .await
     }
 
-    pub async fn lifecycle_events_since(
-        &self,
-        sequence: u64,
-    ) -> Result<Vec<LifecycleEventRecord>> {
+    pub async fn lifecycle_events_since(&self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
         self.inner
             .backend
             .lock()
@@ -104,7 +101,6 @@ impl WorkerHandle {
             })
             .await
     }
-
 }
 
 #[derive(Clone)]

@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::types::PipelineId;
+use crate::runtime::metrics::TaskMetrics;
 use crate::runtime::metrics::WorkerAggregateMetrics;
 use crate::runtime::VertexId;
-use crate::runtime::metrics::TaskMetrics;
-use anyhow::Result;
 use crate::storage::StorageStatsSnapshot;
+use anyhow::Result;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamTaskStatus {
@@ -74,7 +74,9 @@ impl WorkerSnapshot {
     }
 
     pub fn all_tasks_have_status(&self, status: StreamTaskStatus) -> bool {
-        self.task_statuses.values().all(|_status| *_status == status)
+        self.task_statuses
+            .values()
+            .all(|_status| *_status == status)
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
@@ -100,4 +102,3 @@ impl PipelineSnapshot {
         Self { worker_states }
     }
 }
-

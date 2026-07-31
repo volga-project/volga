@@ -194,19 +194,20 @@ pub async fn run_window_request_benchmark(
             num_threads_per_task: 4,
         })
         .with_execution_mode(ExecutionMode::Request)
-        .with_source(
-            SourceSpec::new(
-                "events",
-                SourceSpecKind::Datagen(query_datagen_config.spec.clone()),
-                schema_to_json(schema.as_ref()),
-            )
-        )
+        .with_source(SourceSpec::new(
+            "events",
+            SourceSpecKind::Datagen(query_datagen_config.spec.clone()),
+            schema_to_json(schema.as_ref()),
+        ))
         .with_request_source_sink(RequestSourceSinkSpec {
             bind_address: request_bind_address,
             max_pending_requests: 10_000,
             request_timeout_ms: 30_000,
             schema_json: Some(schema_to_json(request_datagen_config.schema.as_ref())),
-            sink: Some(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr))),
+            sink: Some(SinkSpec::in_memory_grpc(format!(
+                "http://{}",
+                storage_server_addr
+            ))),
         })
         .build();
     let logical_graph = compile_logical_graph(&spec, None);
@@ -268,12 +269,8 @@ pub async fn run_window_request_benchmark(
         }
     });
 
-        pipeline_exec::execute_with_state_updates(
-        spec,
-        logical_graph,
-        Some(state_updates_sender),
-    )
-    .await?;
+    pipeline_exec::execute_with_state_updates(spec, logical_graph, Some(state_updates_sender))
+        .await?;
 
     running.store(false, Ordering::Relaxed);
 

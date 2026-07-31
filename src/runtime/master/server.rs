@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use super::service::MasterServiceImpl;
 use crate::orchestrator::orchestrator::MasterOrchestrator;
-use crate::runtime::master::MasterConfig;
 use crate::runtime::master::LifecycleEventRecord;
+use crate::runtime::master::MasterConfig;
 
 pub mod master_service {
     tonic::include_proto!("master_service");

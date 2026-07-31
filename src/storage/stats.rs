@@ -34,7 +34,9 @@ impl StorageStats {
     /// A process-global instance for now (future: move into WorkerStorageContext).
     pub fn global() -> Arc<Self> {
         static STATS: OnceLock<Arc<StorageStats>> = OnceLock::new();
-        STATS.get_or_init(|| Arc::new(StorageStats::default())).clone()
+        STATS
+            .get_or_init(|| Arc::new(StorageStats::default()))
+            .clone()
     }
 
     pub fn snapshot(&self) -> StorageStatsSnapshot {
@@ -51,7 +53,9 @@ impl StorageStats {
             dump_seconds: nanos_to_seconds_f64(self.dump_seconds_nanos.load(Ordering::Relaxed)),
             compact_calls: self.compact_calls.load(Ordering::Relaxed),
             compact_published: self.compact_published.load(Ordering::Relaxed),
-            compact_seconds: nanos_to_seconds_f64(self.compact_seconds_nanos.load(Ordering::Relaxed)),
+            compact_seconds: nanos_to_seconds_f64(
+                self.compact_seconds_nanos.load(Ordering::Relaxed),
+            ),
         }
     }
 
@@ -135,7 +139,3 @@ pub struct StorageStatsSnapshot {
 fn nanos_to_seconds_f64(nanos: u64) -> f64 {
     (nanos as f64) / 1_000_000_000.0
 }
-
-
-
-

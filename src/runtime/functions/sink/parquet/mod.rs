@@ -2,12 +2,12 @@ use std::collections::HashMap;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, anyhow};
-use async_trait::async_trait;
+use anyhow::{anyhow, Result};
 use arrow::array::Array;
 use arrow::compute::{partition as partition_array, take};
-use arrow::record_batch::RecordBatch;
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
+use async_trait::async_trait;
 use bytes::Bytes;
 use datafusion::common::ScalarValue;
 use futures::stream::{self, StreamExt};
@@ -48,9 +48,7 @@ pub struct ParquetSinkConfig {
 
 impl ParquetSinkSpec {
     pub fn to_config(&self) -> ParquetSinkConfig {
-        ParquetSinkConfig {
-            spec: self.clone(),
-        }
+        ParquetSinkConfig { spec: self.clone() }
     }
 }
 
@@ -120,16 +118,19 @@ impl ParquetSinkFunction {
         batch: RecordBatch,
     ) -> Result<Vec<(ObjectPath, Bytes)>> {
         let writer_properties = self.writer_properties();
-        let writer_state = self.writers.entry(partition_path.to_string()).or_insert_with(|| {
-            let cursor = Cursor::new(Vec::new());
-            let writer = ArrowWriter::try_new(
-                cursor,
-                batch.schema(),
-                Some(writer_properties),
-            )
-            .unwrap();
-            ParquetWriterState { writer: Mutex::new(writer), part: 0, schema: batch.schema() }
-        });
+        let writer_state = self
+            .writers
+            .entry(partition_path.to_string())
+            .or_insert_with(|| {
+                let cursor = Cursor::new(Vec::new());
+                let writer =
+                    ArrowWriter::try_new(cursor, batch.schema(), Some(writer_properties)).unwrap();
+                ParquetWriterState {
+                    writer: Mutex::new(writer),
+                    part: 0,
+                    schema: batch.schema(),
+                }
+            });
 
         let mut should_flush = false;
         let mut payloads = Vec::new();
@@ -186,7 +187,10 @@ impl ParquetSinkFunction {
                 payloads.push(payload);
             }
         }
-        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| anyhow!("sink not initialized"))?;
         self.put_payloads_bounded(store, payloads).await
     }
 
@@ -256,7 +260,8 @@ impl ParquetSinkFunction {
         let Some(fields) = &self.config.spec.partition_fields else {
             return Ok(vec![(batch, "".to_string())]);
         };
-        let mut builder = arrow::array::StringBuilder::with_capacity(batch.num_rows(), batch.num_rows() * 32);
+        let mut builder =
+            arrow::array::StringBuilder::with_capacity(batch.num_rows(), batch.num_rows() * 32);
         for row in 0..batch.num_rows() {
             let mut parts = Vec::with_capacity(fields.len());
             for field in fields {
@@ -307,7 +312,10 @@ impl ParquetSinkFunction {
 impl SinkFunctionTrait for ParquetSinkFunction {
     async fn sink(&mut self, message: Message) -> Result<()> {
         let batch = message.record_batch().clone();
-        let store = self.store.clone().ok_or_else(|| anyhow!("sink not initialized"))?;
+        let store = self
+            .store
+            .clone()
+            .ok_or_else(|| anyhow!("sink not initialized"))?;
         let mut payloads = Vec::new();
         for (partition_batch, partition_path) in self.partition_batches(batch)? {
             payloads.extend(self.write_batch_to_partition(&partition_path, partition_batch)?);
@@ -353,9 +361,7 @@ impl FunctionTrait for ParquetSinkFunction {
 
 impl ParquetSinkConfig {
     pub fn new(spec: ParquetSinkSpec) -> Self {
-        Self {
-            spec,
-        }
+        Self { spec }
     }
 }
 

@@ -13,9 +13,7 @@ use crate::runtime::master::LifecycleEvent;
 use crate::runtime::tests::cluster_harness::{
     MasterHandle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster, WorkerKillMode,
 };
-use crate::runtime::tests::launch_specs::{
-    default_pipelined_smoke_launch_spec, smoke_launch_spec,
-};
+use crate::runtime::tests::launch_specs::{default_pipelined_smoke_launch_spec, smoke_launch_spec};
 
 #[derive(Clone, Copy)]
 pub struct RecoveryTimeouts {
@@ -118,13 +116,8 @@ pub async fn run_workers_kill_recovery(
         result?;
     }
 
-    if let Err(error) = wait_until_targets_recovered(
-        &cluster.master(),
-        &mut cursor,
-        &timeouts,
-        &target_set,
-    )
-    .await
+    if let Err(error) =
+        wait_until_targets_recovered(&cluster.master(), &mut cursor, &timeouts, &target_set).await
     {
         // Timeouts skip assert_* (which prints the report); dump timeline here.
         dump_recovery_timeline(&cluster.master()).await;

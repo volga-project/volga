@@ -9,15 +9,15 @@ use uuid::Uuid;
 
 use crate::api::PipelineSpec;
 use crate::common::test_utils::gen_unique_grpc_port;
-use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
-use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
-use crate::runtime::tests::cluster_harness::FaultAction;
-use crate::storage::InMemoryStorageSnapshot;
-use crate::runtime::master::LifecycleEvent;
-use crate::runtime::master::LifecycleEventRecord;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master::server::master_service::GetLifecycleEventsRequest;
+use crate::runtime::master::LifecycleEvent;
+use crate::runtime::master::LifecycleEventRecord;
+use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
+use crate::runtime::tests::cluster_harness::FaultAction;
+use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
 use crate::storage::InMemoryStorageClient;
+use crate::storage::InMemoryStorageSnapshot;
 use async_trait::async_trait;
 
 struct KubeResources {
@@ -98,10 +98,7 @@ impl ClusterBackend for KubeCluster {
             .await
     }
 
-    async fn lifecycle_events_since(
-        &mut self,
-        sequence: u64,
-    ) -> Result<Vec<LifecycleEventRecord>> {
+    async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
         let master_port = self
             .resources
             .as_ref()
@@ -134,7 +131,10 @@ impl ClusterBackend for KubeCluster {
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        let resources = self.resources.as_ref().context("kube cluster is not launched")?;
+        let resources = self
+            .resources
+            .as_ref()
+            .context("kube cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode: _ }
             | FaultAction::RestartWorker { worker_id } => resources.delete_worker_pod(&worker_id),
@@ -387,8 +387,8 @@ async fn fetch_lifecycle_events(
         .events
         .into_iter()
         .map(|record| {
-            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
-                .with_context(|| {
+            let event: LifecycleEvent =
+                bincode::deserialize(&record.event_bytes).with_context(|| {
                     format!(
                         "failed to decode lifecycle event sequence={} bytes={}",
                         record.sequence,

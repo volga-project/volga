@@ -5,7 +5,9 @@ use arrow::array::{Array, Float64Array, StringArray, TimestampMillisecondArray};
 use arrow::record_batch::RecordBatch;
 use std::collections::HashSet;
 
-use crate::runtime::functions::source::datagen_source::{DatagenSourceConfig, DatagenSourceFunction};
+use crate::runtime::functions::source::datagen_source::{
+    DatagenSourceConfig, DatagenSourceFunction,
+};
 use crate::runtime::observability::{task_meta, PipelineSnapshot};
 use crate::runtime::tests::cluster_harness::{MasterHandle, RuntimeEnv};
 use crate::storage::InMemoryStorageSnapshot;

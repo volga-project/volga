@@ -18,6 +18,9 @@ pub trait ClusterBackend: Send {
     async fn stop_sources(&mut self) -> Result<()>;
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        bail!("fault action {:?} is not supported by this environment", fault)
+        bail!(
+            "fault action {:?} is not supported by this environment",
+            fault
+        )
     }
 }

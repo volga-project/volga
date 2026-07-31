@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use arrow::record_batch::RecordBatch;
 use arrow::datatypes::SchemaRef;
+use arrow::record_batch::RecordBatch;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use object_store::path::Path as ObjectPath;
-use object_store::{ObjectStore, ObjectMeta};
-use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
+use object_store::{ObjectMeta, ObjectStore};
 use parquet::arrow::async_reader::ParquetObjectReader;
+use parquet::arrow::{ParquetRecordBatchStreamBuilder, ProjectionMask};
 use regex::Regex;
 
 use crate::common::message::Message;
@@ -59,7 +59,15 @@ impl ParquetSourceConfig {
 pub struct ParquetSourceFunction {
     config: ParquetSourceConfig,
     file_list: Vec<ObjectMeta>,
-    current_stream: Mutex<Option<Box<dyn Stream<Item = Result<RecordBatch, parquet::errors::ParquetError>> + Unpin + Send>>>,
+    current_stream: Mutex<
+        Option<
+            Box<
+                dyn Stream<Item = Result<RecordBatch, parquet::errors::ParquetError>>
+                    + Unpin
+                    + Send,
+            >,
+        >,
+    >,
 }
 
 impl std::fmt::Debug for ParquetSourceFunction {
@@ -155,14 +163,19 @@ impl ParquetSourceFunction {
         }
     }
 
-    async fn build_stream(&self, meta: &ObjectMeta) -> Result<Box<dyn Stream<Item = Result<RecordBatch, parquet::errors::ParquetError>> + Unpin + Send>> {
+    async fn build_stream(
+        &self,
+        meta: &ObjectMeta,
+    ) -> Result<
+        Box<dyn Stream<Item = Result<RecordBatch, parquet::errors::ParquetError>> + Unpin + Send>,
+    > {
         let (store, _) = build_object_store(
             &self.config.spec.path,
             &self.config.spec.storage_options,
             true,
         )?;
-        let reader = ParquetObjectReader::new(store, meta.location.clone())
-            .with_file_size(meta.size);
+        let reader =
+            ParquetObjectReader::new(store, meta.location.clone()).with_file_size(meta.size);
         let mut builder = ParquetRecordBatchStreamBuilder::new(reader).await?;
         if let Some(batch_size) = self.config.spec.batch_size {
             builder = builder.with_batch_size(batch_size);
@@ -204,6 +217,6 @@ fn hash_path(path: &ObjectPath) -> usize {
 }
 
 #[cfg(test)]
-mod unit_tests;
-#[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod unit_tests;

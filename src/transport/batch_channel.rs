@@ -1,9 +1,14 @@
-use std::sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc,
+};
 
-use tokio::sync::{mpsc::{error::SendError, unbounded_channel, UnboundedReceiver, UnboundedSender}, Notify};
+use tokio::sync::{
+    mpsc::{error::SendError, unbounded_channel, UnboundedReceiver, UnboundedSender},
+    Notify,
+};
 
 use crate::common::Message;
-
 
 // Arroyo-style bounded batch channel
 // uses batch-size as a bound

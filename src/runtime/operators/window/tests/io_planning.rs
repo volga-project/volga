@@ -9,8 +9,8 @@ use crate::runtime::operators::window::model::{RawRun, TileRun};
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, WindowCheckpointMeta,
-    WindowData, WindowOperatorStore, WindowRequestStore, WindowRestoreMeta,
+    InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap, WindowBackendSnapshot,
+    WindowData, WindowOperatorStore, WindowRequestStore,
 };
 use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, window_exec_from_sql, Harness, WoWroHarness,
@@ -79,12 +79,16 @@ impl WindowOperatorStore for RecordingWindowStore {
         self.inner.store_meta(partition, meta).await
     }
 
-    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowCheckpointMeta> {
+    async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
         self.inner.checkpoint(namespace).await
     }
 
-    async fn restore(&self, namespace: &StateNamespace, meta: &WindowRestoreMeta) -> Result<()> {
-        self.inner.restore(namespace, meta).await
+    async fn restore(
+        &self,
+        namespace: &StateNamespace,
+        restore: &WindowBackendSnapshot,
+    ) -> Result<()> {
+        self.inner.restore(namespace, restore).await
     }
 }
 
@@ -247,7 +251,6 @@ FROM test_table"#;
         sql,
         Some(tiling),
         true,
-        inner,
         recording.clone(),
         recording.clone(),
         StateNamespace::new(b"wro_io_planning"),

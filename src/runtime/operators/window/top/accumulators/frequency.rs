@@ -7,12 +7,10 @@ use datafusion::logical_expr::Accumulator;
 use datafusion::scalar::ScalarValue;
 use serde::{Deserialize, Serialize};
 
+use crate::runtime::operators::window::top::accumulators::common::{df_error, parse_n_optional};
 use crate::runtime::operators::window::top::format::{join_csv, scalar_to_string};
 use crate::runtime::operators::window::top::heap::{TopKMap, TopKOrder};
 use crate::runtime::operators::window::top::utils::group_counts_by_value;
-use crate::runtime::operators::window::top::accumulators::common::{
-    df_error, parse_n_optional,
-};
 use crate::runtime::utils::{scalar_value_from_bytes, scalar_value_to_bytes};
 
 pub(crate) const TOPN_FREQUENCY_NAME: &str = "topn_frequency";
@@ -134,7 +132,9 @@ impl Accumulator for FrequencyTopKAccumulator {
     }
 
     fn merge_batch(&mut self, states: &[ArrayRef]) -> Result<()> {
-        let array = states.get(0).ok_or_else(|| df_error("missing state array"))?;
+        let array = states
+            .get(0)
+            .ok_or_else(|| df_error("missing state array"))?;
         let bin = array
             .as_any()
             .downcast_ref::<arrow::array::BinaryArray>()
@@ -183,8 +183,8 @@ fn scalar_to_i64(value: &ScalarValue) -> Result<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
     use arrow::array::{ArrayRef, Int64Array, StringArray};
+    use std::sync::Arc;
 
     fn string_array(values: &[&str]) -> ArrayRef {
         Arc::new(StringArray::from(values.to_vec()))

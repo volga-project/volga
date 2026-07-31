@@ -15,8 +15,8 @@ use tokio::time::timeout;
 use crate::common::message::Message;
 use crate::runtime::functions::function_trait::FunctionTrait;
 use crate::runtime::functions::source::source_function::{FetchResult, SourceFunctionTrait};
-use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::operators::source::{race_interruptible, SourceInterrupt};
+use crate::runtime::runtime_context::RuntimeContext;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct KafkaSourceSpec {
@@ -164,7 +164,8 @@ impl KafkaSourceFunction {
 
     fn assign_partitions(&mut self, ctx: &RuntimeContext) -> Result<()> {
         let consumer = self.consumer.as_ref().expect("consumer not initialized");
-        let metadata = consumer.fetch_metadata(Some(&self.config.spec.topic), Duration::from_secs(30))?;
+        let metadata =
+            consumer.fetch_metadata(Some(&self.config.spec.topic), Duration::from_secs(30))?;
         let partitions = metadata.topics()[0].partitions();
 
         let mut map = HashMap::new();
@@ -177,7 +178,10 @@ impl KafkaSourceFunction {
             if !assigned.contains(&p.id()) {
                 continue;
             }
-            map.insert((self.config.spec.topic.clone(), p.id()), self.offset_from_spec());
+            map.insert(
+                (self.config.spec.topic.clone(), p.id()),
+                self.offset_from_spec(),
+            );
         }
         self.assigned_partitions = assigned;
 
@@ -216,8 +220,18 @@ impl KafkaSourceFunction {
 #[async_trait::async_trait]
 impl SourceFunctionTrait for KafkaSourceFunction {
     async fn fetch(&mut self, interrupt: Option<&SourceInterrupt>) -> FetchResult {
-        let max_records = self.config.spec.max_batch_records.unwrap_or(usize::MAX).max(1);
-        let max_bytes = self.config.spec.max_batch_bytes.unwrap_or(usize::MAX).max(1);
+        let max_records = self
+            .config
+            .spec
+            .max_batch_records
+            .unwrap_or(usize::MAX)
+            .max(1);
+        let max_bytes = self
+            .config
+            .spec
+            .max_batch_bytes
+            .unwrap_or(usize::MAX)
+            .max(1);
         let poll_timeout = Duration::from_millis(self.config.spec.poll_timeout_ms.max(1));
 
         loop {
@@ -241,15 +255,13 @@ impl SourceFunctionTrait for KafkaSourceFunction {
                     break;
                 }
 
-                let recv = match race_interruptible(
-                    interrupt,
-                    timeout(poll_timeout, consumer.recv()),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(_) => return FetchResult::Interrupted,
-                };
+                let recv =
+                    match race_interruptible(interrupt, timeout(poll_timeout, consumer.recv()))
+                        .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => return FetchResult::Interrupted,
+                    };
                 let msg = match recv {
                     Ok(Ok(m)) => m,
                     Ok(Err(_)) => continue,

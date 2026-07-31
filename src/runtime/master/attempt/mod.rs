@@ -3,9 +3,9 @@ use std::sync::Arc;
 
 use tokio::sync::mpsc;
 
-use crate::common::failure::FailureEvent;
 use super::state::{MasterState, PipelineContext};
 use super::worker_client::WorkerClient;
+use crate::common::failure::FailureEvent;
 
 mod execute;
 mod schedule;

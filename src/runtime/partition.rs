@@ -1,4 +1,6 @@
-use crate::{common::message::Message, runtime::functions::source::request_source::SOURCE_TASK_INDEX_FIELD};
+use crate::{
+    common::message::Message, runtime::functions::source::request_source::SOURCE_TASK_INDEX_FIELD,
+};
 use std::fmt;
 
 pub trait PartitionTrait: Send + Sync + fmt::Debug {
@@ -141,8 +143,11 @@ impl RequestRoutePartition {
 
 impl PartitionTrait for RequestRoutePartition {
     fn partition(&mut self, message: &Message, num_partitions: usize) -> Vec<usize> {
-        let extras = message.get_extras().expect("RequestRoutePartition message should have extras");
-        let task_index = extras.get(SOURCE_TASK_INDEX_FIELD)
+        let extras = message
+            .get_extras()
+            .expect("RequestRoutePartition message should have extras");
+        let task_index = extras
+            .get(SOURCE_TASK_INDEX_FIELD)
             .expect("RequestRoutePartition message should have task_index extra")
             .parse::<i32>()
             .expect("task_index should be parsed as i32") as usize;
@@ -151,6 +156,6 @@ impl PartitionTrait for RequestRoutePartition {
             panic!("task_index should be within 0..num_partitions")
         }
 
-        return vec![task_index]
+        return vec![task_index];
     }
 }

@@ -17,8 +17,10 @@ pub fn scalar_value_to_bytes(value: &ScalarValue) -> Result<Vec<u8>> {
 }
 
 pub fn scalar_value_from_bytes(bytes: &[u8]) -> Result<ScalarValue> {
-    let proto = datafusion_proto_common::protobuf_common::ScalarValue::decode(Bytes::copy_from_slice(bytes))
-        .map_err(|e| anyhow!("failed to decode ScalarValue protobuf: {e}"))?;
+    let proto = datafusion_proto_common::protobuf_common::ScalarValue::decode(
+        Bytes::copy_from_slice(bytes),
+    )
+    .map_err(|e| anyhow!("failed to decode ScalarValue protobuf: {e}"))?;
 
     let value: ScalarValue = (&proto)
         .try_into()

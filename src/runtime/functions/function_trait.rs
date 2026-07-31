@@ -1,20 +1,20 @@
-use async_trait::async_trait;
-use anyhow::Result;
 use crate::runtime::runtime_context::RuntimeContext;
-use std::fmt;
+use anyhow::Result;
+use async_trait::async_trait;
 use std::any::Any;
+use std::fmt;
 
 #[async_trait]
 pub trait FunctionTrait: Send + Sync + fmt::Debug + Any {
     async fn open(&mut self, _context: &RuntimeContext) -> Result<()> {
         Ok(())
     }
-    
+
     async fn close(&mut self) -> Result<()> {
         Ok(())
     }
-    
+
     fn as_any(&self) -> &dyn Any;
-    
+
     fn as_any_mut(&mut self) -> &mut dyn Any;
-} 
+}

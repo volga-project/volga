@@ -11,10 +11,7 @@ pub struct InMemoryStorageSnapshot {
 }
 
 impl InMemoryStorageSnapshot {
-    pub fn new(
-        vector_messages: Vec<Message>,
-        keyed_messages: HashMap<String, Message>,
-    ) -> Self {
+    pub fn new(vector_messages: Vec<Message>, keyed_messages: HashMap<String, Message>) -> Self {
         Self {
             vector_messages,
             keyed_messages,

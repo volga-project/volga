@@ -37,4 +37,3 @@ pub struct CheckpointMetadata {
     pub committed_at: DateTime<Utc>,
     pub manifest_uri: String,
 }
-

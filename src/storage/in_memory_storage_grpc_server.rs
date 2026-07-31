@@ -1,23 +1,19 @@
-use tonic::{Request, Response, Status};
+use crate::common::message::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use crate::common::message::Message;
+use tonic::{Request, Response, Status};
 
 pub mod in_memory_storage_service {
     tonic::include_proto!("in_memory_storage_service");
 }
 
 use in_memory_storage_service::{
-    in_memory_storage_service_server::InMemoryStorageService,
-    AppendRequest, AppendResponse,
-    AppendManyRequest, AppendManyResponse,
-    InsertRequest, InsertResponse,
-    InsertKeyedManyRequest, InsertKeyedManyResponse,
-    GetVectorRequest, GetVectorResponse,
-    GetMapRequest, GetMapResponse,
-    DrainVectorRequest, DrainVectorResponse,
-    DrainMapRequest, DrainMapResponse,
+    in_memory_storage_service_server::InMemoryStorageService, AppendManyRequest,
+    AppendManyResponse, AppendRequest, AppendResponse, DrainMapRequest, DrainMapResponse,
+    DrainVectorRequest, DrainVectorResponse, GetMapRequest, GetMapResponse, GetVectorRequest,
+    GetVectorResponse, InsertKeyedManyRequest, InsertKeyedManyResponse, InsertRequest,
+    InsertResponse,
 };
 
 /// Server implementation of the InMemoryStorageService
@@ -43,12 +39,12 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
     ) -> Result<Response<AppendResponse>, Status> {
         let req = request.into_inner();
         let message_bytes = req.message_bytes;
-        
+
         let message = Message::from_bytes(&message_bytes);
-        
+
         let mut storage_guard = self.vector_storage.lock().await;
         storage_guard.push(message);
-        
+
         Ok(Response::new(AppendResponse {
             success: true,
             error_message: String::new(),
@@ -61,16 +57,16 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
     ) -> Result<Response<AppendManyResponse>, Status> {
         let req = request.into_inner();
         let messages_bytes_list = req.messages_bytes;
-        
+
         let mut messages = Vec::new();
         for message_bytes in messages_bytes_list {
             let message = Message::from_bytes(&message_bytes);
             messages.push(message);
         }
-        
+
         let mut storage_guard = self.vector_storage.lock().await;
         storage_guard.extend(messages);
-        
+
         Ok(Response::new(AppendManyResponse {
             success: true,
             error_message: String::new(),
@@ -84,12 +80,12 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
         let req = request.into_inner();
         let key = req.key;
         let message_bytes = req.message_bytes;
-        
+
         let message = Message::from_bytes(&message_bytes);
-        
+
         let mut storage_guard = self.map_storage.lock().await;
         storage_guard.insert(key, message);
-        
+
         Ok(Response::new(InsertResponse {
             success: true,
             error_message: String::new(),
@@ -102,16 +98,16 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
     ) -> Result<Response<InsertKeyedManyResponse>, Status> {
         let req = request.into_inner();
         let keyed_messages_bytes = req.keyed_messages;
-        
+
         let mut keyed_messages = HashMap::new();
         for (key, message_bytes) in keyed_messages_bytes {
             let message = Message::from_bytes(&message_bytes);
             keyed_messages.insert(key, message);
         }
-        
+
         let mut storage_guard = self.map_storage.lock().await;
         storage_guard.extend(keyed_messages);
-        
+
         Ok(Response::new(InsertKeyedManyResponse {
             success: true,
             error_message: String::new(),
@@ -124,12 +120,12 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
     ) -> Result<Response<GetVectorResponse>, Status> {
         let storage_guard = self.vector_storage.lock().await;
         let mut messages_bytes = Vec::new();
-        
+
         for message in storage_guard.iter() {
             let bytes = message.to_bytes();
             messages_bytes.push(bytes);
         }
-        
+
         Ok(Response::new(GetVectorResponse {
             success: true,
             error_message: String::new(),
@@ -143,12 +139,12 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
     ) -> Result<Response<GetMapResponse>, Status> {
         let storage_guard = self.map_storage.lock().await;
         let mut keyed_messages = HashMap::new();
-        
+
         for (key, message) in storage_guard.iter() {
             let message_bytes = message.to_bytes();
             keyed_messages.insert(key.clone(), message_bytes);
         }
-        
+
         Ok(Response::new(GetMapResponse {
             success: true,
             error_message: String::new(),
@@ -218,11 +214,14 @@ impl InMemoryStorageServer {
             self.service.clone()
         );
 
-        println!("[IN_MEMORY_STORAGE_SERVER] Starting InMemoryStorageService server on {}", addr);
-        
+        println!(
+            "[IN_MEMORY_STORAGE_SERVER] Starting InMemoryStorageService server on {}",
+            addr
+        );
+
         // Create shutdown channel
         let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
-        
+
         let server_handle = tokio::spawn(async move {
             match tonic::transport::Server::builder()
                 .max_frame_size(Some(12 * 1024 * 1024)) // 12MB
@@ -231,7 +230,8 @@ impl InMemoryStorageServer {
                     shutdown_receiver.await.ok();
                     println!("[IN_MEMORY_STORAGE_SERVER] Received shutdown signal");
                 })
-                .await {
+                .await
+            {
                 Ok(_) => println!("[IN_MEMORY_STORAGE_SERVER] Server shutdown gracefully"),
                 Err(e) => eprintln!("[IN_MEMORY_STORAGE_SERVER] Server error: {}", e),
             }
@@ -249,13 +249,18 @@ impl InMemoryStorageServer {
             println!("[IN_MEMORY_STORAGE_SERVER] Sending graceful shutdown signal...");
             let _ = shutdown_sender.send(());
         }
-        
+
         // Then wait for the server to finish
         if let Some(handle) = self.server_handle.take() {
             match handle.await {
                 Ok(_) => println!("[IN_MEMORY_STORAGE_SERVER] Server stopped gracefully"),
-                Err(e) if e.is_cancelled() => println!("[IN_MEMORY_STORAGE_SERVER] Server stopped (cancelled)"),
-                Err(e) => eprintln!("[IN_MEMORY_STORAGE_SERVER] Server stopped with error: {}", e),
+                Err(e) if e.is_cancelled() => {
+                    println!("[IN_MEMORY_STORAGE_SERVER] Server stopped (cancelled)")
+                }
+                Err(e) => eprintln!(
+                    "[IN_MEMORY_STORAGE_SERVER] Server stopped with error: {}",
+                    e
+                ),
             }
         }
     }

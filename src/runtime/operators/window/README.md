@@ -148,27 +148,29 @@ partitioning, publication, fencing, caching, and cleanup. They must preserve:
 - one active WO writer per partition;
 - atomic visibility of an ingest commit;
 - coherent WRO reads;
-- restorable checkpoint versions;
+- restorable checkpoint artifacts;
 - ordered, collision-safe row identity.
 
 `InMemWindowStore` is the reference backend. It keeps partition state in memory,
-uses one read lock as the WRO snapshot boundary, and copies namespace state into
-in-memory checkpoints. It is process-local and is not a durable or
-cross-worker backend.
+uses one read lock as the WRO snapshot boundary, and embeds complete namespace
+snapshots in checkpoint data. Its live state remains process-local and is not
+a cross-worker backend.
 
 ## Checkpoint and restore
 
 `WindowOperatorState::checkpoint` asks the store to flush and checkpoint the
-namespace, then serializes:
+namespace, then returns `WindowStateSnapshot` containing:
 
 - the namespace bytes;
-- `WindowCheckpointMeta`, containing the backend `StateVersion`.
+- backend-specific `WindowBackendSnapshot`.
 
-Restore first verifies the namespace and then passes the checkpoint version
-back to the store. The backend is responsible for restoring raw rows, tiles,
-and `KeyState` consistently. The checkpoint blob name
-`"window_operator_state"` is persisted by `WindowOperator` and must remain
-stable for compatibility.
+The operator serializes the snapshot as `SerializedCheckpoint`. The master
+stores completed checkpoints without interpreting operator payloads. On
+recovery, `RestorePlanner` creates `SerializedRestore` entries for the target
+assignment and sends them with worker configuration. The operator deserializes
+its own snapshot before restoring raw rows, tiles, and `KeyState`. The current
+planner supports unchanged task identities; key-group redistribution remains
+future work.
 
 ## Materialized evaluation data
 
@@ -206,7 +208,7 @@ eval/
   emit.rs         streaming emit cursor/input selection
   output.rs       result batch assembly
 store/
-  backend/mod.rs  WO/WRO contracts and checkpoint DTOs
+  backend/mod.rs  WO/WRO contracts and snapshot model
   backend/inmem.rs reference in-memory implementation
   data.rs         WindowData, WindowView, and RowNav
 aggs/             aggregate registry and accumulator-state operations

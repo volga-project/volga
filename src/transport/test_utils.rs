@@ -1,13 +1,13 @@
-use anyhow::{Ok, Result};
-use futures::StreamExt;
-use kameo::Actor;
-use kameo::message::Context;
 use crate::common::message::Message;
-use crate::runtime::VertexId;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::operators::operator::MessageStream;
+use crate::runtime::VertexId;
 use crate::transport::channel::Channel;
 use crate::transport::transport_client::{DataReader, DataWriter};
+use anyhow::{Ok, Result};
+use futures::StreamExt;
+use kameo::message::Context;
+use kameo::Actor;
 
 use super::transport_client::TransportClientConfig;
 
@@ -34,23 +34,22 @@ impl TestDataReaderActor {
 impl kameo::message::Message<TestDataReaderMessage> for TestDataReaderActor {
     type Reply = Result<Option<Message>>;
 
-    async fn handle(&mut self, msg: TestDataReaderMessage, _ctx: &mut Context<TestDataReaderActor, Result<Option<Message>>>) -> Self::Reply {
+    async fn handle(
+        &mut self,
+        msg: TestDataReaderMessage,
+        _ctx: &mut Context<TestDataReaderActor, Result<Option<Message>>>,
+    ) -> Self::Reply {
         match msg {
-            TestDataReaderMessage::ReadMessage => {
-                Ok(self.reader_message_stream.next().await)
-            }
+            TestDataReaderMessage::ReadMessage => Ok(self.reader_message_stream.next().await),
         }
     }
 }
 
 #[derive(Debug)]
 pub enum TestDataWriterMessage {
-    WriteMessage {
-        channel: Channel,
-        message: Message,
-    },
+    WriteMessage { channel: Channel, message: Message },
     Start,
-    FlushAndClose
+    FlushAndClose,
 }
 
 #[derive(Actor)]
@@ -74,7 +73,11 @@ impl TestDataWriterActor {
 impl kameo::message::Message<TestDataWriterMessage> for TestDataWriterActor {
     type Reply = Result<()>;
 
-    async fn handle(&mut self, msg: TestDataWriterMessage, _ctx: &mut Context<TestDataWriterActor, Result<()>>) -> Self::Reply {
+    async fn handle(
+        &mut self,
+        msg: TestDataWriterMessage,
+        _ctx: &mut Context<TestDataWriterActor, Result<()>>,
+    ) -> Self::Reply {
         match msg {
             TestDataWriterMessage::WriteMessage { channel, message } => {
                 let (success, _) = self.writer.write_message(&channel, &message).await;
@@ -83,11 +86,11 @@ impl kameo::message::Message<TestDataWriterMessage> for TestDataWriterActor {
                 } else {
                     Err(anyhow::anyhow!("Failed to write message"))
                 }
-            },
+            }
             TestDataWriterMessage::Start => {
                 self.writer.start().await;
                 Ok(())
-            },
+            }
             TestDataWriterMessage::FlushAndClose => {
                 self.writer.flush_and_close().await.unwrap();
                 Ok(())

@@ -52,7 +52,9 @@ pub enum FaultAction {
         worker_id: String,
         mode: WorkerKillMode,
     },
-    RestartWorker { worker_id: String },
+    RestartWorker {
+        worker_id: String,
+    },
     KillMaster,
     RestartMaster,
 }

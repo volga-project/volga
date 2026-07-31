@@ -1,12 +1,28 @@
 use crate::{
-    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{MAX_WATERMARK_VALUE, WatermarkMessage, message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}}, runtime::{operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}, tests::pipeline_exec}, storage::{InMemoryStorageClient, InMemoryStorageServer}
+    api::{
+        compile_logical_graph, spec::pipeline::ExecutionProfile, ConnectorConfigs,
+        PipelineSpecBuilder,
+    },
+    common::{
+        message::Message,
+        test_utils::{gen_unique_grpc_port, verify_message_records_match},
+        WatermarkMessage, MAX_WATERMARK_VALUE,
+    },
+    runtime::{
+        operators::{
+            sink::sink_operator::SinkConfig,
+            source::source_operator::{SourceConfig, VectorSourceConfig},
+        },
+        tests::pipeline_exec,
+    },
+    storage::{InMemoryStorageClient, InMemoryStorageServer},
 };
 use anyhow::Result;
 
 use arrow::{
-    datatypes::{Schema, Field, DataType},
-    array::{StringArray, Int32Array, Int64Array, Float64Array, BooleanArray},
-    record_batch::RecordBatch
+    array::{BooleanArray, Float64Array, Int32Array, Int64Array, StringArray},
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
 };
 use std::sync::Arc;
 
@@ -21,195 +37,151 @@ struct SqlTestCase {
 }
 
 /// Helper function to create a record batch with mixed data types
-fn create_mixed_batch(
-    ids: Vec<i32>,
-    names: Vec<&str>,
-    values: Vec<f64>
-) -> RecordBatch {
+fn create_mixed_batch(ids: Vec<i32>, names: Vec<&str>, values: Vec<f64>) -> RecordBatch {
     let id_array = Int32Array::from(ids);
     let name_array = StringArray::from(names);
     let value_array = Float64Array::from(values);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("value", DataType::Float64, false),
     ]));
-    
+
     RecordBatch::try_new(
         schema,
         vec![
             Arc::new(id_array),
             Arc::new(name_array),
             Arc::new(value_array),
-        ]
-    ).unwrap()
+        ],
+    )
+    .unwrap()
 }
 
 /// Helper function to create a record batch with just names and values
-fn create_name_value_batch(
-    names: Vec<&str>,
-    values: Vec<f64>
-) -> RecordBatch {
+fn create_name_value_batch(names: Vec<&str>, values: Vec<f64>) -> RecordBatch {
     let name_array = StringArray::from(names);
     let value_array = Float64Array::from(values);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("name", DataType::Utf8, false),
         Field::new("value", DataType::Float64, false),
     ]));
-    
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(name_array),
-            Arc::new(value_array),
-        ]
-    ).unwrap()
+
+    RecordBatch::try_new(schema, vec![Arc::new(name_array), Arc::new(value_array)]).unwrap()
 }
 
 /// Helper function to create a record batch with aggregated results
-fn create_agg_batch(
-    names: Vec<&str>,
-    counts: Vec<i64>
-) -> RecordBatch {
+fn create_agg_batch(names: Vec<&str>, counts: Vec<i64>) -> RecordBatch {
     let name_array = StringArray::from(names);
     let count_array = Int64Array::from(counts);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("name", DataType::Utf8, false),
         Field::new("count", DataType::Int64, false),
     ]));
-    
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(name_array),
-            Arc::new(count_array),
-        ]
-    ).unwrap()
+
+    RecordBatch::try_new(schema, vec![Arc::new(name_array), Arc::new(count_array)]).unwrap()
 }
 
 /// Helper function to create a record batch with sum aggregation
-fn create_sum_batch(
-    names: Vec<&str>,
-    sums: Vec<f64>
-) -> RecordBatch {
+fn create_sum_batch(names: Vec<&str>, sums: Vec<f64>) -> RecordBatch {
     let name_array = StringArray::from(names);
     let sum_array = Float64Array::from(sums);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("name", DataType::Utf8, false),
-        Field::new("sum", DataType::Float64, true),  // SUM is nullable in DataFusion
+        Field::new("sum", DataType::Float64, true), // SUM is nullable in DataFusion
     ]));
-    
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(name_array),
-            Arc::new(sum_array),
-        ]
-    ).unwrap()
+
+    RecordBatch::try_new(schema, vec![Arc::new(name_array), Arc::new(sum_array)]).unwrap()
 }
 
 /// Helper function to create a record batch with average aggregation
-fn create_avg_batch(
-    names: Vec<&str>,
-    avgs: Vec<f64>
-) -> RecordBatch {
+fn create_avg_batch(names: Vec<&str>, avgs: Vec<f64>) -> RecordBatch {
     let name_array = StringArray::from(names);
     let avg_array = Float64Array::from(avgs);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("name", DataType::Utf8, false),
-        Field::new("avg", DataType::Float64, true),  // AVG is nullable in DataFusion
+        Field::new("avg", DataType::Float64, true), // AVG is nullable in DataFusion
     ]));
-    
-    RecordBatch::try_new(
-        schema,
-        vec![
-            Arc::new(name_array),
-            Arc::new(avg_array),
-        ]
-    ).unwrap()
+
+    RecordBatch::try_new(schema, vec![Arc::new(name_array), Arc::new(avg_array)]).unwrap()
 }
 
 /// Helper function to create a record batch with min/max aggregation
-fn create_min_max_batch(
-    names: Vec<&str>,
-    mins: Vec<f64>,
-    maxs: Vec<f64>
-) -> RecordBatch {
+fn create_min_max_batch(names: Vec<&str>, mins: Vec<f64>, maxs: Vec<f64>) -> RecordBatch {
     let name_array = StringArray::from(names);
     let min_array = Float64Array::from(mins);
     let max_array = Float64Array::from(maxs);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("name", DataType::Utf8, false),
-        Field::new("min", DataType::Float64, true),  // MIN is nullable in DataFusion
-        Field::new("max", DataType::Float64, true),  // MAX is nullable in DataFusion
+        Field::new("min", DataType::Float64, true), // MIN is nullable in DataFusion
+        Field::new("max", DataType::Float64, true), // MAX is nullable in DataFusion
     ]));
-    
+
     RecordBatch::try_new(
         schema,
         vec![
             Arc::new(name_array),
             Arc::new(min_array),
             Arc::new(max_array),
-        ]
-    ).unwrap()
+        ],
+    )
+    .unwrap()
 }
 
 /// Helper function to create a record batch with boolean values
-fn create_bool_batch(
-    ids: Vec<i32>,
-    names: Vec<&str>,
-    is_active: Vec<bool>
-) -> RecordBatch {
+fn create_bool_batch(ids: Vec<i32>, names: Vec<&str>, is_active: Vec<bool>) -> RecordBatch {
     let id_array = Int32Array::from(ids);
     let name_array = StringArray::from(names);
     let bool_array = BooleanArray::from(is_active);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("is_active", DataType::Boolean, false),
     ]));
-    
+
     RecordBatch::try_new(
         schema,
         vec![
             Arc::new(id_array),
             Arc::new(name_array),
             Arc::new(bool_array),
-        ]
-    ).unwrap()
+        ],
+    )
+    .unwrap()
 }
 
 /// Helper function to create a record batch with computed values
 fn create_computed_batch(
     ids: Vec<i32>,
     names: Vec<&str>,
-    computed_values: Vec<f64>
+    computed_values: Vec<f64>,
 ) -> RecordBatch {
     let id_array = Int32Array::from(ids);
     let name_array = StringArray::from(names);
     let computed_array = Float64Array::from(computed_values);
-    
+
     let schema = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),
         Field::new("name", DataType::Utf8, false),
         Field::new("computed_value", DataType::Float64, false),
     ]));
-    
+
     RecordBatch::try_new(
         schema,
         vec![
             Arc::new(id_array),
             Arc::new(name_array),
             Arc::new(computed_array),
-        ]
-    ).unwrap()
+        ],
+    )
+    .unwrap()
 }
 
 fn get_test_cases() -> Vec<SqlTestCase> {
@@ -224,12 +196,12 @@ fn get_test_cases() -> Vec<SqlTestCase> {
         create_mixed_batch(
             vec![1, 2, 3],
             vec!["alice", "bob", "charlie"],
-            vec![10.0, 20.0, 30.0]
+            vec![10.0, 20.0, 30.0],
         ),
         create_mixed_batch(
             vec![4, 5, 6],
             vec!["alice", "bob", "alice"],
-            vec![15.0, 25.0, 35.0]
+            vec![15.0, 25.0, 35.0],
         ),
     ];
 
@@ -477,11 +449,12 @@ fn get_test_cases() -> Vec<SqlTestCase> {
 /// Run a single SQL test case
 async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
     // Convert input batches to messages
-    let mut test_messages: Vec<Message> = test_case.input_batches
+    let mut test_messages: Vec<Message> = test_case
+        .input_batches
         .iter()
         .map(|batch| Message::new(None, batch.clone(), None, None))
         .collect();
-    
+
     test_messages.push(Message::Watermark(WatermarkMessage::new(
         "source".to_string(),
         MAX_WATERMARK_VALUE,
@@ -489,12 +462,14 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
     )));
 
     let storage_server_addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
-    
+
     // Create spec
     let spec = PipelineSpecBuilder::new()
         .with_parallelism(1)
         .sql(test_case.sql)
-        .with_execution_profile(ExecutionProfile::SingleWorker { num_threads_per_task: 4 })
+        .with_execution_profile(ExecutionProfile::SingleWorker {
+            num_threads_per_task: 4,
+        })
         .build();
     let mut connector_configs = ConnectorConfigs::default();
     connector_configs.sources.insert(
@@ -504,30 +479,45 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
             test_case.schema.clone(),
         ),
     );
-    connector_configs.sink = Some(SinkConfig::in_memory_grpc(format!("http://{}", storage_server_addr)));
+    connector_configs.sink = Some(SinkConfig::in_memory_grpc(format!(
+        "http://{}",
+        storage_server_addr
+    )));
     let logical_graph = compile_logical_graph(&spec, Some(&connector_configs));
 
     // Start storage server and execute
     let mut storage_server = InMemoryStorageServer::new();
     storage_server.start(&storage_server_addr).await.unwrap();
-    
+
     pipeline_exec::execute(spec, logical_graph).await.unwrap();
-    
-    let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await.unwrap();
+
+    let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr))
+        .await
+        .unwrap();
     let actual_messages = client.get_vector().await.unwrap();
     storage_server.stop().await;
 
     // Convert expected batch to message for comparison
-    let expected_messages = vec![Message::new(None, test_case.expected_batch.clone(), None, None)];
+    let expected_messages = vec![Message::new(
+        None,
+        test_case.expected_batch.clone(),
+        None,
+        None,
+    )];
 
     // Verify results - use unordered comparison for group by operations
-    let preserve_order = !matches!(test_case.name, 
-        "group_by_count" | "group_by_sum" | "group_by_avg" | "group_by_min_max" | 
-        "group_by_having"
+    let preserve_order = !matches!(
+        test_case.name,
+        "group_by_count" | "group_by_sum" | "group_by_avg" | "group_by_min_max" | "group_by_having"
     );
-    
-    verify_message_records_match(&expected_messages, &actual_messages, test_case.name, preserve_order);
-    
+
+    verify_message_records_match(
+        &expected_messages,
+        &actual_messages,
+        test_case.name,
+        preserve_order,
+    );
+
     println!("✓ SQL test '{}' passed", test_case.name);
     Ok(())
 }
@@ -535,14 +525,14 @@ async fn run_sql_test_case(test_case: &SqlTestCase) -> Result<()> {
 #[tokio::test]
 async fn test_sql_queries() -> Result<()> {
     let test_cases = get_test_cases();
-    
+
     println!("Running {} SQL test cases...", test_cases.len());
-    
+
     for test_case in &test_cases {
         println!("Running test: {} - SQL: {}", test_case.name, test_case.sql);
         run_sql_test_case(test_case).await?;
     }
-    
+
     println!("All SQL tests passed! ✓");
     Ok(())
 }
@@ -554,56 +544,80 @@ mod tests {
     #[tokio::test]
     async fn test_select_all() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "select_all").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "select_all")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_select_columns() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "select_columns").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "select_columns")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_where_string() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "where_string").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "where_string")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_where_numeric() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "where_numeric").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "where_numeric")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_group_by_count() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "group_by_count").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "group_by_count")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_group_by_sum() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "group_by_sum").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "group_by_sum")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_group_by_avg() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "group_by_avg").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "group_by_avg")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_group_by_min_max() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "group_by_min_max").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "group_by_min_max")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
@@ -631,42 +645,60 @@ mod tests {
     #[tokio::test]
     async fn test_where_between() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "where_between").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "where_between")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_where_like() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "where_like").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "where_like")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_select_computed() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "select_computed").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "select_computed")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_select_case_when() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "select_case_when").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "select_case_when")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_group_by_having() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "group_by_having").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "group_by_having")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 
     #[tokio::test]
     async fn test_where_complex() -> Result<()> {
         let test_cases = get_test_cases();
-        let test_case = test_cases.iter().find(|tc| tc.name == "where_complex").unwrap();
+        let test_case = test_cases
+            .iter()
+            .find(|tc| tc.name == "where_complex")
+            .unwrap();
         run_sql_test_case(test_case).await
     }
 

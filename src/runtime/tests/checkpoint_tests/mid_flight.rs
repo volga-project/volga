@@ -259,10 +259,7 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
 }
 
 /// Mid-flight kill with no completed CP: attempt 1 restores None; in-flight was failed.
-pub fn assert_mid_flight_restore_none(
-    report: &RecoveryReport,
-    in_flight_id: u64,
-) -> Result<()> {
+pub fn assert_mid_flight_restore_none(report: &RecoveryReport, in_flight_id: u64) -> Result<()> {
     let attempt1 = report.attempt(1)?;
     if !attempt1.trigger.contains("restore=None") {
         return Err(anyhow!(

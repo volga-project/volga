@@ -23,4 +23,3 @@ pub enum TimeHint {
     ColumnName { name: String },
     // TODO: auto-resolve for non-window operators (timestamp-like column heuristics).
 }
-

@@ -3,9 +3,9 @@ use std::collections::HashMap;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::VertexId;
 use crate::transport::transport_client::TransportClientConfig;
-use kameo::Actor;
-use kameo::message::{Context, Message};
 use anyhow::Result;
+use kameo::message::{Context, Message};
+use kameo::Actor;
 use tonic::async_trait;
 
 #[async_trait]
@@ -22,7 +22,7 @@ pub trait TransportBackendTrait: Send + Sync {
 #[derive(Debug)]
 pub enum TransportBackendActorMessage {
     Start,
-    Close
+    Close,
 }
 
 #[derive(Debug, Clone)]
@@ -37,16 +37,18 @@ pub struct TransportBackendActor {
 
 impl TransportBackendActor {
     pub fn new(backend: Box<dyn TransportBackendTrait + Send + 'static>) -> Self {
-        Self {
-            backend,
-        }
+        Self { backend }
     }
 }
 
 impl Message<TransportBackendActorMessage> for TransportBackendActor {
     type Reply = Result<()>;
 
-    async fn handle(&mut self, msg: TransportBackendActorMessage, _ctx: &mut Context<TransportBackendActor, Result<()>>) -> Self::Reply {
+    async fn handle(
+        &mut self,
+        msg: TransportBackendActorMessage,
+        _ctx: &mut Context<TransportBackendActor, Result<()>>,
+    ) -> Self::Reply {
         match msg {
             TransportBackendActorMessage::Start => {
                 self.backend.start().await;
@@ -57,4 +59,4 @@ impl Message<TransportBackendActorMessage> for TransportBackendActor {
         }
         Ok(())
     }
-} 
+}

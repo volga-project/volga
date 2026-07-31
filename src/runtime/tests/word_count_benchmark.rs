@@ -187,7 +187,10 @@ pub async fn run_word_count_benchmark(
         .with_execution_profile(ExecutionProfile::SingleWorker {
             num_threads_per_task: 4,
         })
-        .with_sink(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr)))
+        .with_sink(SinkSpec::in_memory_grpc(format!(
+            "http://{}",
+            storage_server_addr
+        )))
         .build();
     let mut connector_configs = ConnectorConfigs::default();
     connector_configs.sources.insert(
@@ -279,13 +282,9 @@ pub async fn run_word_count_benchmark(
         }
     });
 
-    pipeline_exec::execute_with_state_updates(
-        spec,
-        logical_graph,
-        Some(state_updates_sender),
-    )
-    .await
-    .unwrap();
+    pipeline_exec::execute_with_state_updates(spec, logical_graph, Some(state_updates_sender))
+        .await
+        .unwrap();
     running.store(false, Ordering::Relaxed);
 
     // Wait for metrics task to complete

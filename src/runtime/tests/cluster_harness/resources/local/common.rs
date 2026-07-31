@@ -85,10 +85,7 @@ impl WorkerServerSlot {
         }
     }
 
-    pub(super) async fn start(
-        &mut self,
-        orchestrator: Arc<dyn WorkerOrchestrator>,
-    ) -> Result<()> {
+    pub(super) async fn start(&mut self, orchestrator: Arc<dyn WorkerOrchestrator>) -> Result<()> {
         if self.process.is_some() {
             return Ok(());
         }

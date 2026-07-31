@@ -1,8 +1,18 @@
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 
+use crate::common::message::Message;
+use crate::runtime::checkpoint::{SerializedCheckpoint, SerializedRestore};
 use crate::runtime::functions::join::join_function::JoinFunction;
-use crate::runtime::operators::aggregate::aggregate_operator::{AggregateConfig, AggregateOperator};
+use crate::runtime::functions::{
+    function_trait::FunctionTrait,
+    key_by::KeyByFunction,
+    map::MapFunction,
+    reduce::{AggregationResultExtractor, ReduceFunction},
+};
+use crate::runtime::operators::aggregate::aggregate_operator::{
+    AggregateConfig, AggregateOperator,
+};
 use crate::runtime::operators::chained::chained_operator::ChainedOperator;
 use crate::runtime::operators::join::join_operator::JoinOperator;
 use crate::runtime::operators::key_by::key_by_operator::KeyByOperator;
@@ -10,35 +20,30 @@ use crate::runtime::operators::map::map_operator::MapOperator;
 use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
-use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOperator};
+use crate::runtime::operators::window::operator::{WindowOperator, WindowOperatorConfig};
 use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
 use crate::runtime::operators::window::WindowRequestOperator;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::common::message::Message;
 use anyhow::Result;
 use std::fmt;
 use std::pin::Pin;
-use crate::runtime::functions::{
-    function_trait::FunctionTrait,
-    map::MapFunction,
-    key_by::{KeyByFunction},
-    reduce::{ReduceFunction, AggregationResultExtractor},
-};
 
 pub type MessageStream = Pin<Box<dyn Stream<Item = Message> + Send + Sync>>;
 
 #[derive(Debug, Clone)]
 pub enum OperatorPollResult {
     Ready(Message),
-    Continue,    
-    None
+    Continue,
+    None,
 }
 
 impl OperatorPollResult {
     pub fn get_result_message(self) -> Message {
         match self {
             OperatorPollResult::Ready(msg) => msg,
-            OperatorPollResult::Continue => panic!("OperatorPollResult is Continue, expected Ready"),
+            OperatorPollResult::Continue => {
+                panic!("OperatorPollResult is Continue, expected Ready")
+            }
             OperatorPollResult::None => panic!("OperatorPollResult is None, expected Ready"),
         }
     }
@@ -67,11 +72,11 @@ pub trait OperatorTrait: Send + Sync + fmt::Debug {
         panic!("set_input not implemented for this operator")
     }
 
-    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
-        Ok(vec![])
+    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+        Ok(SerializedCheckpoint::new(Vec::new()))
     }
 
-    async fn restore(&mut self, _blobs: &[(String, Vec<u8>)]) -> Result<()> {
+    async fn restore(&mut self, _restore: SerializedRestore) -> Result<()> {
         Ok(())
     }
 }
@@ -87,7 +92,9 @@ pub fn operator_config_requires_checkpoint(operator_config: &OperatorConfig) -> 
                 _ => false,
             }
         }
-        OperatorConfig::ChainedConfig(configs) => configs.iter().any(operator_config_requires_checkpoint),
+        OperatorConfig::ChainedConfig(configs) => {
+            configs.iter().any(operator_config_requires_checkpoint)
+        }
         _ => false,
     }
 }
@@ -150,7 +157,7 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.open(context).await,
             Operator::Window(op) => op.open(context).await,
             Operator::WindowRequest(op) => op.open(context).await,
-            Operator::Chained(op) => op.open(context).await
+            Operator::Chained(op) => op.open(context).await,
         }
     }
 
@@ -165,7 +172,7 @@ impl OperatorTrait for Operator {
             Operator::Aggregate(op) => op.close().await,
             Operator::Window(op) => op.close().await,
             Operator::WindowRequest(op) => op.close().await,
-            Operator::Chained(op) => op.close().await
+            Operator::Chained(op) => op.close().await,
         }
     }
 
@@ -198,7 +205,7 @@ impl OperatorTrait for Operator {
             Operator::Chained(op) => op.operator_config(),
         }
     }
-    
+
     fn set_input(&mut self, input: Option<MessageStream>) {
         match self {
             Operator::Map(op) => op.set_input(input),
@@ -213,7 +220,7 @@ impl OperatorTrait for Operator {
             Operator::Chained(op) => op.set_input(input),
         }
     }
-    
+
     async fn poll_next(&mut self) -> OperatorPollResult {
         match self {
             Operator::Map(op) => op.poll_next().await,
@@ -229,7 +236,7 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<Vec<(String, Vec<u8>)>> {
+    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<SerializedCheckpoint> {
         match self {
             Operator::Map(op) => op.checkpoint(checkpoint_id).await,
             Operator::Join(op) => op.checkpoint(checkpoint_id).await,
@@ -244,22 +251,21 @@ impl OperatorTrait for Operator {
         }
     }
 
-    async fn restore(&mut self, blobs: &[(String, Vec<u8>)]) -> Result<()> {
+    async fn restore(&mut self, restore: SerializedRestore) -> Result<()> {
         match self {
-            Operator::Map(op) => op.restore(blobs).await,
-            Operator::Join(op) => op.restore(blobs).await,
-            Operator::Sink(op) => op.restore(blobs).await,
-            Operator::Source(op) => op.restore(blobs).await,
-            Operator::KeyBy(op) => op.restore(blobs).await,
-            Operator::Reduce(op) => op.restore(blobs).await,
-            Operator::Aggregate(op) => op.restore(blobs).await,
-            Operator::Window(op) => op.restore(blobs).await,
-            Operator::WindowRequest(op) => op.restore(blobs).await,
-            Operator::Chained(op) => op.restore(blobs).await,
+            Operator::Map(op) => op.restore(restore).await,
+            Operator::Join(op) => op.restore(restore).await,
+            Operator::Sink(op) => op.restore(restore).await,
+            Operator::Source(op) => op.restore(restore).await,
+            Operator::KeyBy(op) => op.restore(restore).await,
+            Operator::Reduce(op) => op.restore(restore).await,
+            Operator::Aggregate(op) => op.restore(restore).await,
+            Operator::Window(op) => op.restore(restore).await,
+            Operator::WindowRequest(op) => op.restore(restore).await,
+            Operator::Chained(op) => op.restore(restore).await,
         }
     }
 }
-
 
 pub struct OperatorBase {
     pub runtime_context: Option<RuntimeContext>,
@@ -291,8 +297,11 @@ impl OperatorBase {
             pending_messages: Vec::new(),
         }
     }
-    
-    pub fn new_with_function<F: FunctionTrait + 'static>(function: F, operator_config: OperatorConfig) -> Self {
+
+    pub fn new_with_function<F: FunctionTrait + 'static>(
+        function: F,
+        operator_config: OperatorConfig,
+    ) -> Self {
         Self {
             runtime_context: None,
             function: Some(Box::new(function)),
@@ -301,14 +310,16 @@ impl OperatorBase {
             pending_messages: Vec::new(),
         }
     }
-    
+
     pub fn get_function<T: 'static>(&self) -> Option<&T> {
-        self.function.as_ref()
+        self.function
+            .as_ref()
             .and_then(|f| f.as_any().downcast_ref::<T>())
     }
-    
+
     pub fn get_function_mut<T: 'static>(&mut self) -> Option<&mut T> {
-        self.function.as_mut()
+        self.function
+            .as_mut()
             .and_then(|f| f.as_any_mut().downcast_mut::<T>())
     }
 
@@ -333,7 +344,7 @@ impl OperatorTrait for OperatorBase {
         if let Some(function) = &mut self.function {
             function.open(context).await?;
         }
-        
+
         Ok(())
     }
 
@@ -341,43 +352,48 @@ impl OperatorTrait for OperatorBase {
         if let Some(function) = &mut self.function {
             function.close().await?;
         }
-        
+
         Ok(())
     }
 
     fn operator_type(&self) -> OperatorType {
         get_operator_type_from_config(&self.operator_config)
-    }   
+    }
 
     fn operator_config(&self) -> &OperatorConfig {
         &self.operator_config
     }
-    
+
     fn set_input(&mut self, input: Option<MessageStream>) {
         self.input = input;
     }
-    
+
     async fn poll_next(&mut self) -> OperatorPollResult {
         // OperatorBase is not a real stream operator, conform to OperatorTrait
         panic!("poll_next not implemented for OperatorBase");
     }
 }
 
-
-pub fn create_operator(
-    operator_config: OperatorConfig
-) -> Operator {
+pub fn create_operator(operator_config: OperatorConfig) -> Operator {
     let operator = match operator_config {
         OperatorConfig::MapConfig(_) => Operator::Map(MapOperator::new(operator_config)),
         OperatorConfig::JoinConfig(_) => Operator::Join(JoinOperator::new(operator_config)),
         OperatorConfig::SinkConfig(_) => Operator::Sink(SinkOperator::new(operator_config)),
         OperatorConfig::SourceConfig(_) => Operator::Source(SourceOperator::new(operator_config)),
         OperatorConfig::KeyByConfig(_) => Operator::KeyBy(KeyByOperator::new(operator_config)),
-        OperatorConfig::ReduceConfig(_, _) => Operator::Reduce(ReduceOperator::new(operator_config)),
-        OperatorConfig::AggregateConfig(_) => Operator::Aggregate(AggregateOperator::new(operator_config)),
+        OperatorConfig::ReduceConfig(_, _) => {
+            Operator::Reduce(ReduceOperator::new(operator_config))
+        }
+        OperatorConfig::AggregateConfig(_) => {
+            Operator::Aggregate(AggregateOperator::new(operator_config))
+        }
         OperatorConfig::WindowConfig(_) => Operator::Window(WindowOperator::new(operator_config)),
-        OperatorConfig::WindowRequestConfig(_) => Operator::WindowRequest(WindowRequestOperator::new(operator_config)),
-        OperatorConfig::ChainedConfig(_) => Operator::Chained(ChainedOperator::new(operator_config)),
+        OperatorConfig::WindowRequestConfig(_) => {
+            Operator::WindowRequest(WindowRequestOperator::new(operator_config))
+        }
+        OperatorConfig::ChainedConfig(_) => {
+            Operator::Chained(ChainedOperator::new(operator_config))
+        }
     };
     operator
 }
@@ -386,17 +402,17 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
     match operator_config {
         OperatorConfig::SourceConfig(_) => OperatorType::Source,
         OperatorConfig::SinkConfig(_) => OperatorType::Sink,
-        OperatorConfig::ChainedConfig(configs   ) => {
+        OperatorConfig::ChainedConfig(configs) => {
             let mut has_source = false;
             let mut has_sink = false;
             for config in configs {
                 match config {
                     OperatorConfig::SourceConfig(_) => {
                         has_source = true;
-                    },
+                    }
                     OperatorConfig::SinkConfig(_) => {
                         has_sink = true;
-                    },
+                    }
                     _ => {}
                 }
             }
@@ -410,15 +426,13 @@ pub fn get_operator_type_from_config(operator_config: &OperatorConfig) -> Operat
             } else {
                 OperatorType::Processor
             }
-        },
-        OperatorConfig::MapConfig(_) | 
-        OperatorConfig::JoinConfig(_) | 
-        OperatorConfig::KeyByConfig(_) | 
-        OperatorConfig::ReduceConfig(_, _) |
-        OperatorConfig::AggregateConfig(_) |
-        OperatorConfig::WindowConfig(_) |
-        OperatorConfig::WindowRequestConfig(_) => {
-            OperatorType::Processor
         }
+        OperatorConfig::MapConfig(_)
+        | OperatorConfig::JoinConfig(_)
+        | OperatorConfig::KeyByConfig(_)
+        | OperatorConfig::ReduceConfig(_, _)
+        | OperatorConfig::AggregateConfig(_)
+        | OperatorConfig::WindowConfig(_)
+        | OperatorConfig::WindowRequestConfig(_) => OperatorType::Processor,
     }
 }

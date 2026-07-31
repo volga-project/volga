@@ -48,7 +48,10 @@ fn test_word_count() -> Result<()> {
         .with_execution_profile(ExecutionProfile::SingleWorker {
             num_threads_per_task: 4,
         })
-        .with_sink(SinkSpec::in_memory_grpc(format!("http://{}", storage_server_addr)))
+        .with_sink(SinkSpec::in_memory_grpc(format!(
+            "http://{}",
+            storage_server_addr
+        )))
         .build();
     let mut connector_configs = ConnectorConfigs::default();
     connector_configs.sources.insert(
@@ -74,9 +77,7 @@ fn test_word_count() -> Result<()> {
         let mut storage_server = InMemoryStorageServer::new();
         storage_server.start(&storage_server_addr).await.unwrap();
 
-        let pipeline_state = pipeline_exec::execute(spec, logical_graph)
-            .await
-            .unwrap();
+        let pipeline_state = pipeline_exec::execute(spec, logical_graph).await.unwrap();
 
         let mut client = InMemoryStorageClient::new(format!("http://{}", storage_server_addr))
             .await

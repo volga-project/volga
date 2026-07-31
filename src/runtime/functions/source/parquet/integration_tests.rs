@@ -1,19 +1,21 @@
 use super::*;
-use crate::runtime::functions::sink::parquet::{ParquetSinkConfig, ParquetSinkFunction, ParquetSinkSpec};
+use crate::runtime::functions::sink::parquet::{
+    ParquetSinkConfig, ParquetSinkFunction, ParquetSinkSpec,
+};
 use crate::runtime::functions::sink::SinkFunctionTrait;
 use crate::runtime::runtime_context::RuntimeContext;
 use arrow::array::{Int64Array, StringArray};
 use arrow::datatypes::{DataType, Field, Schema};
+use object_store::memory::InMemory;
+use object_store::path::Path as ObjectPath;
+use object_store::throttle::{ThrottleConfig, ThrottledStore};
 use parquet::arrow::ArrowWriter;
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::path::Path;
 use std::sync::Arc;
-use object_store::path::Path as ObjectPath;
-use object_store::memory::InMemory;
-use object_store::throttle::{ThrottleConfig, ThrottledStore};
-use testcontainers::{clients::Cli, GenericImage, RunnableImage};
 use testcontainers::core::WaitFor;
+use testcontainers::{clients::Cli, GenericImage, RunnableImage};
 use uuid::Uuid;
 
 fn write_parquet_file(path: &Path, schema: SchemaRef, batch: RecordBatch) {
@@ -82,7 +84,9 @@ async fn parquet_roundtrip_via_sink_and_source(
         input_batches.push(batch);
     }
     for batch in &input_batches {
-        sink.sink(Message::new(None, batch.clone(), None, None)).await.unwrap();
+        sink.sink(Message::new(None, batch.clone(), None, None))
+            .await
+            .unwrap();
     }
     sink.close().await.unwrap();
 
@@ -217,7 +221,11 @@ async fn parquet_projection_pushdown_roundtrip() {
     fs::create_dir_all(&input_dir).unwrap();
 
     let schema = test_schema();
-    write_parquet_file(&input_dir.join("input.parquet"), schema.clone(), make_batch(schema.clone(), "A", 1));
+    write_parquet_file(
+        &input_dir.join("input.parquet"),
+        schema.clone(),
+        make_batch(schema.clone(), "A", 1),
+    );
 
     let spec = ParquetSourceSpec {
         path: format!("file://{}", input_dir.to_string_lossy()),
@@ -227,9 +235,7 @@ async fn parquet_projection_pushdown_roundtrip() {
     };
     let mut config = ParquetSourceConfig::new(schema.clone(), spec);
     let projection = vec![0];
-    let projected_schema = Arc::new(Schema::new(vec![
-        Field::new("k", DataType::Utf8, false),
-    ]));
+    let projected_schema = Arc::new(Schema::new(vec![Field::new("k", DataType::Utf8, false)]));
     config.set_projection(projection, projected_schema.clone());
 
     let mut source = ParquetSourceFunction::new(config);
@@ -272,7 +278,9 @@ async fn parquet_partitioned_sink_writes_directories() {
     let mut sink = ParquetSinkFunction::new(sink_config);
     let sink_ctx = RuntimeContext::new("sink".to_string().into(), 0, 1, None, None, None);
     sink.open(&sink_ctx).await.unwrap();
-    sink.sink(Message::new(None, batch, None, None)).await.unwrap();
+    sink.sink(Message::new(None, batch, None, None))
+        .await
+        .unwrap();
     sink.close().await.unwrap();
 
     let (store, prefix) = crate::runtime::functions::parquet_utils::build_object_store(
@@ -314,7 +322,8 @@ async fn parquet_sink_bounded_concurrency_backpressure() {
         partition_fields: Some(vec!["k".to_string()]),
     };
     let sink_config = ParquetSinkConfig::new(sink_spec);
-    let mut sink = ParquetSinkFunction::new_with_store(sink_config, store.clone(), ObjectPath::from(""));
+    let mut sink =
+        ParquetSinkFunction::new_with_store(sink_config, store.clone(), ObjectPath::from(""));
     let sink_ctx = RuntimeContext::new("sink".to_string().into(), 0, 1, None, None, None);
     sink.open(&sink_ctx).await.unwrap();
 
@@ -329,7 +338,9 @@ async fn parquet_sink_bounded_concurrency_backpressure() {
             ],
         )
         .unwrap();
-        sink.sink(Message::new(None, batch, None, None)).await.unwrap();
+        sink.sink(Message::new(None, batch, None, None))
+            .await
+            .unwrap();
     }
     sink.close().await.unwrap();
     let mut total_bytes = 0_u64;

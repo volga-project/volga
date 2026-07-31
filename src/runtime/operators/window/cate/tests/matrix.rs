@@ -3,8 +3,8 @@ use std::sync::Arc;
 
 use datafusion::scalar::ScalarValue;
 
-use crate::runtime::operators::window::aggs::test_utils;
 use super::eval_window_expr;
+use crate::runtime::operators::window::aggs::test_utils;
 use datafusion::physical_expr::window::{PlainAggregateWindowExpr, SlidingAggregateWindowExpr};
 use datafusion::physical_plan::WindowExpr;
 
@@ -162,7 +162,10 @@ fn expected_for_name(name: &str) -> ScalarValue {
 }
 
 fn agg_name_from_window_expr(window_expr: &Arc<dyn WindowExpr>) -> &str {
-    if let Some(plain_expr) = window_expr.as_any().downcast_ref::<PlainAggregateWindowExpr>() {
+    if let Some(plain_expr) = window_expr
+        .as_any()
+        .downcast_ref::<PlainAggregateWindowExpr>()
+    {
         return plain_expr.get_aggregate_expr().fun().name();
     }
     if let Some(sliding_expr) = window_expr

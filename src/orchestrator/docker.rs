@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 
 use crate::api::PipelineSpec;
@@ -55,8 +55,9 @@ impl DockerMasterOrchestrator {
         let pipeline_id = env::var("VOLGA_PIPELINE_ID")
             .unwrap_or_else(|_| panic!("VOLGA_PIPELINE_ID is required for docker orchestrator"));
         let worker_count = parse_env_usize("VOLGA_WORKER_COUNT").max(1);
-        let worker_host_prefix = env::var("VOLGA_WORKER_HOST_PREFIX")
-            .unwrap_or_else(|_| panic!("VOLGA_WORKER_HOST_PREFIX is required for docker orchestrator"));
+        let worker_host_prefix = env::var("VOLGA_WORKER_HOST_PREFIX").unwrap_or_else(|_| {
+            panic!("VOLGA_WORKER_HOST_PREFIX is required for docker orchestrator")
+        });
         let worker_port = parse_env_u16("VOLGA_WORKER_PORT");
         let transport_port = parse_env_u16("VOLGA_WORKER_TRANSPORT_PORT");
         let mut worker_nodes = HashMap::new();
@@ -65,12 +66,7 @@ impl DockerMasterOrchestrator {
             let worker_id = format!("{}{}", worker_host_prefix, ordinal);
             worker_nodes.insert(
                 worker_id.clone(),
-                WorkerNode::new(
-                    worker_id.clone(),
-                    worker_id,
-                    worker_port,
-                    transport_port,
-                ),
+                WorkerNode::new(worker_id.clone(), worker_id, worker_port, transport_port),
             );
         }
         let spec = parse_pipeline_spec_from_env()?;
@@ -84,10 +80,12 @@ impl DockerMasterOrchestrator {
 
 impl DockerWorkerOrchestrator {
     pub fn from_env() -> Result<Self> {
-        let master_service_addr = env::var("VOLGA_MASTER_SERVICE_ADDR")
-            .unwrap_or_else(|_| panic!("VOLGA_MASTER_SERVICE_ADDR is required for docker orchestrator"));
-        let worker_host_prefix = env::var("VOLGA_WORKER_HOST_PREFIX")
-            .unwrap_or_else(|_| panic!("VOLGA_WORKER_HOST_PREFIX is required for docker orchestrator"));
+        let master_service_addr = env::var("VOLGA_MASTER_SERVICE_ADDR").unwrap_or_else(|_| {
+            panic!("VOLGA_MASTER_SERVICE_ADDR is required for docker orchestrator")
+        });
+        let worker_host_prefix = env::var("VOLGA_WORKER_HOST_PREFIX").unwrap_or_else(|_| {
+            panic!("VOLGA_WORKER_HOST_PREFIX is required for docker orchestrator")
+        });
         Ok(Self {
             master_service_addr,
             worker_host_prefix,
@@ -123,9 +121,12 @@ impl WorkerOrchestrator for DockerWorkerOrchestrator {
     async fn resolve_worker_id(&self) -> Result<String> {
         let worker_index = env::var("VOLGA_WORKER_INDEX")
             .context("VOLGA_WORKER_INDEX is required for docker worker orchestrator")?;
-        let index = worker_index
-            .parse::<usize>()
-            .with_context(|| format!("failed to parse VOLGA_WORKER_INDEX='{}' as usize", worker_index))?;
+        let index = worker_index.parse::<usize>().with_context(|| {
+            format!(
+                "failed to parse VOLGA_WORKER_INDEX='{}' as usize",
+                worker_index
+            )
+        })?;
         Ok(format!("{}{}", self.worker_host_prefix, index))
     }
 }

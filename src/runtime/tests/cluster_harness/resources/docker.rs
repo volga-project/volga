@@ -14,10 +14,10 @@ use crate::runtime::master::LifecycleEvent;
 use crate::runtime::master::LifecycleEventRecord;
 use crate::runtime::observability::{PipelineSnapshot, StreamTaskStatus};
 use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
-use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
 use crate::runtime::tests::cluster_harness::FaultAction;
-use crate::storage::InMemoryStorageSnapshot;
+use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
 use crate::storage::InMemoryStorageClient;
+use crate::storage::InMemoryStorageSnapshot;
 use async_trait::async_trait;
 
 struct DockerResources {
@@ -158,10 +158,7 @@ impl ClusterBackend for DockerCluster {
             .await
     }
 
-    async fn lifecycle_events_since(
-        &mut self,
-        sequence: u64,
-    ) -> Result<Vec<LifecycleEventRecord>> {
+    async fn lifecycle_events_since(&mut self, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
         let resources = self
             .resources
             .as_ref()
@@ -193,7 +190,10 @@ impl ClusterBackend for DockerCluster {
     }
 
     async fn apply_fault(&mut self, fault: FaultAction) -> Result<()> {
-        let resources = self.resources.as_ref().context("docker cluster is not launched")?;
+        let resources = self
+            .resources
+            .as_ref()
+            .context("docker cluster is not launched")?;
         match fault {
             FaultAction::KillWorker { worker_id, mode: _ } => resources.kill(&worker_id),
             FaultAction::RestartWorker { worker_id } => resources.restart(&worker_id),
@@ -302,10 +302,7 @@ async fn connect_master(port: u16) -> Result<MasterServiceClient<tonic::transpor
     }
 }
 
-async fn fetch_lifecycle_events(
-    port: u16,
-    sequence: u64,
-) -> Result<Vec<LifecycleEventRecord>> {
+async fn fetch_lifecycle_events(port: u16, sequence: u64) -> Result<Vec<LifecycleEventRecord>> {
     let mut client = connect_master(port).await?;
     client
         .get_lifecycle_events(tonic::Request::new(GetLifecycleEventsRequest {
@@ -316,8 +313,8 @@ async fn fetch_lifecycle_events(
         .events
         .into_iter()
         .map(|record| {
-            let event: LifecycleEvent = bincode::deserialize(&record.event_bytes)
-                .with_context(|| {
+            let event: LifecycleEvent =
+                bincode::deserialize(&record.event_bytes).with_context(|| {
                     format!(
                         "failed to decode lifecycle event sequence={} bytes={}",
                         record.sequence,

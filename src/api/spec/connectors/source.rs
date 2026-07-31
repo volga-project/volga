@@ -26,4 +26,3 @@ pub enum SourceSpecKind {
     Kafka(KafkaSourceSpec),
     Parquet(ParquetSourceSpec),
 }
-

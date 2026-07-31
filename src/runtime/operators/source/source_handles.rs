@@ -66,8 +66,7 @@ impl SourceStats {
 
     pub fn add_records(&self, n: usize) {
         if n > 0 {
-            self.records_generated
-                .fetch_add(n as u64, Ordering::SeqCst);
+            self.records_generated.fetch_add(n as u64, Ordering::SeqCst);
         }
     }
 

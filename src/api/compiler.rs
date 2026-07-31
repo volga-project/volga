@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
-use arrow_integration_test::schema_from_json;
-use crate::api::{LogicalGraph, Planner, PlanningContext};
 use crate::api::spec::connectors::{SourceSpec, SourceSpecKind};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverrides, OperatorTuningSpec};
 use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionMode, PipelineSpec};
+use crate::api::{LogicalGraph, Planner, PlanningContext};
 use crate::runtime::functions::source::datagen_source::DatagenSourceConfig;
 use crate::runtime::functions::source::kafka::KafkaSourceConfig;
 use crate::runtime::functions::source::parquet::ParquetSourceConfig;
@@ -13,6 +12,7 @@ use crate::runtime::functions::source::request_source::RequestSourceConfig;
 use crate::runtime::operators::operator::OperatorConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::spec::WindowAdvancePolicy;
+use arrow_integration_test::schema_from_json;
 
 fn resolve_source_schema(src: &SourceSpec) -> arrow::datatypes::Schema {
     schema_from_json(&src.schema_json)
@@ -24,15 +24,15 @@ fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
     for src in &spec.sources {
         let schema = Arc::new(resolve_source_schema(src));
         let source_config = match &src.source {
-            SourceSpecKind::Datagen(cfg) => {
-                SourceConfig::DatagenSourceConfig(DatagenSourceConfig::new(schema.clone(), cfg.clone()))
-            }
+            SourceSpecKind::Datagen(cfg) => SourceConfig::DatagenSourceConfig(
+                DatagenSourceConfig::new(schema.clone(), cfg.clone()),
+            ),
             SourceSpecKind::Kafka(cfg) => {
                 SourceConfig::KafkaSourceConfig(KafkaSourceConfig::new(schema.clone(), cfg.clone()))
             }
-            SourceSpecKind::Parquet(cfg) => {
-                SourceConfig::ParquetSourceConfig(ParquetSourceConfig::new(schema.clone(), cfg.clone()))
-            }
+            SourceSpecKind::Parquet(cfg) => SourceConfig::ParquetSourceConfig(
+                ParquetSourceConfig::new(schema.clone(), cfg.clone()),
+            ),
         };
         connector_configs
             .sources
@@ -43,12 +43,13 @@ fn connector_configs_from_spec(spec: &PipelineSpec) -> ConnectorConfigs {
             .schema_json
             .as_ref()
             .expect("request_source_sink.schema_json must be set");
-        let schema = Arc::new(
-            schema_from_json(schema_json)
-                .expect("failed to parse request_source_sink.schema_json as Arrow integration schema"),
-        );
+        let schema =
+            Arc::new(schema_from_json(schema_json).expect(
+                "failed to parse request_source_sink.schema_json as Arrow integration schema",
+            ));
         let request_source = RequestSourceConfig::new(req.clone()).set_schema(schema);
-        connector_configs.request_source = Some(SourceConfig::HttpRequestSourceConfig(request_source));
+        connector_configs.request_source =
+            Some(SourceConfig::HttpRequestSourceConfig(request_source));
         connector_configs.request_sink = req.sink.as_ref().map(|s| s.to_sink_config());
     }
     if let Some(sink) = &spec.sink {
@@ -96,7 +97,8 @@ fn compile_logical_graph_from_parts(
     }
 
     if let Some(req_src) = &connector_configs.request_source {
-        planner.register_request_source_sink(req_src.clone(), connector_configs.request_sink.clone());
+        planner
+            .register_request_source_sink(req_src.clone(), connector_configs.request_sink.clone());
     }
 
     if let Some(sink) = &connector_configs.sink {
@@ -139,11 +141,11 @@ fn compile_logical_graph_from_parts(
     graph
 }
 
-pub fn compile_logical_graph(spec: &PipelineSpec, connector_overrides: Option<&ConnectorConfigs>) -> LogicalGraph {
-    let sql = spec
-        .sql
-        .as_ref()
-        .expect("PipelineSpec has no sql");
+pub fn compile_logical_graph(
+    spec: &PipelineSpec,
+    connector_overrides: Option<&ConnectorConfigs>,
+) -> LogicalGraph {
+    let sql = spec.sql.as_ref().expect("PipelineSpec has no sql");
     let spec_connector_configs = connector_configs_from_spec(spec);
     let connector_configs_owned = if let Some(overrides) = connector_overrides {
         merge_connector_configs(spec_connector_configs, overrides)
@@ -172,10 +174,10 @@ mod tests {
 
     use arrow::datatypes::{DataType, Field, Schema};
 
+    use super::compile_logical_graph;
+    use crate::api::spec::pipeline::{ConnectorConfigs, ExecutionProfile, PipelineSpecBuilder};
     use crate::orchestrator::orchestrator::WorkerNode;
     use crate::orchestrator::task_assignment::TaskWorkerMapping;
-    use super::compile_logical_graph;
-    use crate::api::spec::pipeline::{ConnectorConfigs, PipelineSpecBuilder, ExecutionProfile};
     use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
     use crate::transport::channel::Channel;
 
@@ -214,11 +216,17 @@ mod tests {
         let mut connector_configs = ConnectorConfigs::default();
         connector_configs.sources.insert(
             "events".to_string(),
-            (SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), events_schema),
+            (
+                SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+                events_schema,
+            ),
         );
         connector_configs.sources.insert(
             "users".to_string(),
-            (SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])), users_schema),
+            (
+                SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+                users_schema,
+            ),
         );
         let spec = PipelineSpecBuilder::new()
             .with_execution_profile(ExecutionProfile::SingleWorker {
@@ -239,8 +247,10 @@ mod tests {
             )
             .build();
 
-        let mut graph1 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
-        let mut graph2 = compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
+        let mut graph1 =
+            compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
+        let mut graph2 =
+            compile_logical_graph(&spec, Some(&connector_configs)).to_execution_graph();
 
         let mapping1 = build_mock_vertex_mapping(&graph1);
         let mapping2 = build_mock_vertex_mapping(&graph2);
@@ -269,4 +279,3 @@ mod tests {
         );
     }
 }
-
