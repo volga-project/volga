@@ -9,7 +9,7 @@ use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTr
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    DueContinuation, DuePage, InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap,
+    DueWorkStream, InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap,
     WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRequestStore,
 };
 use crate::runtime::operators::window::tests::harness::{
@@ -83,16 +83,13 @@ impl WindowOperatorStore for RecordingWindowStore {
             .await
     }
 
-    async fn load_due_page(
-        &self,
-        namespace: &StateNamespace,
+    fn stream_due<'a>(
+        &'a self,
+        namespace: &'a StateNamespace,
         after: Option<Cursor>,
         through: Cursor,
-        continuation: Option<DueContinuation>,
-    ) -> Result<DuePage> {
-        self.inner
-            .load_due_page(namespace, after, through, continuation)
-            .await
+    ) -> DueWorkStream<'a> {
+        self.inner.stream_due(namespace, after, through)
     }
 
     async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {

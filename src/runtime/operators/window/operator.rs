@@ -6,7 +6,7 @@ use anyhow::Result;
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use futures::future;
+use futures::{future, TryStreamExt};
 
 use crate::common::message::Message;
 use crate::common::MAX_WATERMARK_VALUE;
@@ -139,15 +139,16 @@ impl WindowOperator {
         let after = self
             .watermark_frontier
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
-        let mut continuation = None;
+        let mut pages = state
+            .store()
+            .stream_due(state.namespace(), after, through);
         let mut batches = Vec::new();
-        loop {
-            let page = state
-                .store()
-                .load_due_page(state.namespace(), after, through, continuation)
-                .await
-                .expect("load due window triggers");
-            let futures = page.work.into_iter().map(|work| {
+        while let Some(work) = pages
+            .try_next()
+            .await
+            .expect("stream due window triggers")
+        {
+            let futures = work.into_iter().map(|work| {
                 advance_key(
                     state.store(),
                     work,
@@ -163,10 +164,6 @@ impl WindowOperator {
                     .await
                     .expect("advance due window triggers"),
             );
-            let Some(next) = page.continuation else {
-                break;
-            };
-            continuation = Some(next);
         }
         if batches.is_empty() {
             return RecordBatch::new_empty(self.output_schema.clone());

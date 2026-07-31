@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use datafusion::scalar::ScalarValue;
+use futures::TryStreamExt;
 
 use crate::runtime::checkpoint::SerializedRestore;
 use crate::runtime::operators::operator::{OperatorConfig, OperatorPollResult, OperatorTrait};
@@ -144,17 +145,10 @@ async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
     let partition = PartitionKey::new(&h.namespace, &key("A"));
     let meta = h.store.load_meta(&partition).await.expect("meta");
     assert!(meta.evaluation.is_none());
-    let due = h
+    let mut due = h
         .store
-        .load_due_page(
-            &h.namespace,
-            None,
-            Cursor::new(2000, u64::MAX),
-            None,
-        )
-        .await
-        .expect("due page");
-    assert!(due.work.is_empty());
+        .stream_due(&h.namespace, None, Cursor::new(2000, u64::MAX));
+    assert!(due.try_next().await.expect("due page").is_none());
 
     let mut wro = open_wro(h.store.clone(), h.namespace.clone()).await;
     assert_eq!(

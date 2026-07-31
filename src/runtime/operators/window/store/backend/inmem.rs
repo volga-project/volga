@@ -15,8 +15,7 @@ use tokio::sync::RwLock;
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
 
 use super::{
-    DueContinuation, DuePage, DueWindowWork, WindowBackendSnapshot, WindowOperatorStore,
-    WindowRequestStore,
+    DueWindowWork, DueWorkStream, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore,
 };
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
@@ -164,67 +163,64 @@ impl WindowOperatorStore for InMemWindowStore {
         Ok(())
     }
 
-    async fn load_due_page(
-        &self,
-        namespace: &StateNamespace,
+    fn stream_due<'a>(
+        &'a self,
+        namespace: &'a StateNamespace,
         after: Option<Cursor>,
         through: Cursor,
-        continuation: Option<DueContinuation>,
-    ) -> Result<DuePage> {
+    ) -> DueWorkStream<'a> {
         const PAGE_SIZE: usize = 256;
 
-        let resume_after = continuation
-            .map(|continuation| bincode::deserialize::<WindowTrigger>(&continuation.0))
-            .transpose()?;
-        let store = self.state.read().await;
-        let mut selected = store
-            .triggers
-            .iter()
-            .filter(|trigger| trigger.partition.namespace == namespace.bytes)
-            .filter(|trigger| after.map_or(true, |after| trigger.fire_at > after))
-            .filter(|trigger| trigger.fire_at <= through)
-            .filter(|trigger| {
-                resume_after
-                    .as_ref()
-                    .map_or(true, |resume_after| *trigger > resume_after)
-            })
-            .take(PAGE_SIZE + 1)
-            .cloned()
-            .collect::<Vec<_>>();
-        let has_more = selected.len() > PAGE_SIZE;
-        if has_more {
-            selected.pop();
-        }
-        let next = has_more
-            .then(|| selected.last())
-            .flatten()
-            .map(|trigger| bincode::serialize(trigger))
-            .transpose()?
-            .map(DueContinuation);
+        let store = self.clone();
+        let namespace = namespace.bytes.clone();
+        Box::pin(futures::stream::try_unfold(
+            (store, None::<WindowTrigger>),
+            move |(store, resume_after)| {
+                let namespace = namespace.clone();
+                async move {
+                    let state = store.state.read().await;
+                    let selected = state
+                        .triggers
+                        .iter()
+                        .filter(|trigger| trigger.partition.namespace == namespace)
+                        .filter(|trigger| after.map_or(true, |after| trigger.fire_at > after))
+                        .filter(|trigger| trigger.fire_at <= through)
+                        .filter(|trigger| {
+                            resume_after
+                                .as_ref()
+                                .map_or(true, |resume_after| *trigger > resume_after)
+                        })
+                        .take(PAGE_SIZE)
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    let Some(next) = selected.last().cloned() else {
+                        return Ok(None);
+                    };
 
-        let mut grouped = BTreeMap::<PartitionKey, Vec<WindowTrigger>>::new();
-        for trigger in selected {
-            grouped
-                .entry(trigger.partition.clone())
-                .or_default()
-                .push(trigger);
-        }
-        let work = grouped
-            .into_iter()
-            .map(|(partition, triggers)| DueWindowWork {
-                key_state: store
-                    .partitions
-                    .get(&partition)
-                    .map(|state| state.meta.clone())
-                    .unwrap_or_default(),
-                partition,
-                triggers,
-            })
-            .collect();
-        Ok(DuePage {
-            work,
-            continuation: next,
-        })
+                    let mut grouped = BTreeMap::<PartitionKey, Vec<WindowTrigger>>::new();
+                    for trigger in selected {
+                        grouped
+                            .entry(trigger.partition.clone())
+                            .or_default()
+                            .push(trigger);
+                    }
+                    let work = grouped
+                        .into_iter()
+                        .map(|(partition, triggers)| DueWindowWork {
+                            key_state: state
+                                .partitions
+                                .get(&partition)
+                                .map(|partition_state| partition_state.meta.clone())
+                                .unwrap_or_default(),
+                            partition,
+                            triggers,
+                        })
+                        .collect();
+                    drop(state);
+                    Ok(Some((work, (store, Some(next)))))
+                }
+            },
+        ))
     }
 
     async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()> {
@@ -340,6 +336,7 @@ impl WindowRequestStore for InMemWindowStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use futures::TryStreamExt;
 
     use crate::runtime::operators::window::aggs::test_utils;
     use crate::runtime::operators::window::model::{
@@ -714,27 +711,16 @@ mod tests {
             .await
             .unwrap();
 
-        let first = store
-            .load_due_page(
-                &namespace,
-                Some(Cursor::new(9, u64::MAX)),
-                Cursor::new(299, u64::MAX),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(first.work[0].triggers.len(), 256);
-        let second = store
-            .load_due_page(
-                &namespace,
-                Some(Cursor::new(9, u64::MAX)),
-                Cursor::new(299, u64::MAX),
-                first.continuation,
-            )
-            .await
-            .unwrap();
-        assert_eq!(second.work[0].triggers.len(), 34);
-        assert!(second.continuation.is_none());
+        let mut due = store.stream_due(
+            &namespace,
+            Some(Cursor::new(9, u64::MAX)),
+            Cursor::new(299, u64::MAX),
+        );
+        let first = due.try_next().await.unwrap().unwrap();
+        assert_eq!(first[0].triggers.len(), 256);
+        let second = due.try_next().await.unwrap().unwrap();
+        assert_eq!(second[0].triggers.len(), 34);
+        assert!(due.try_next().await.unwrap().is_none());
     }
 
     #[tokio::test]
@@ -783,17 +769,14 @@ mod tests {
         restored.restore(&namespace, &checkpoint).await.unwrap();
 
         assert_meta(&restored.load_meta(&partition).await.unwrap(), &meta);
-        let due = restored
-            .load_due_page(
-                &namespace,
-                Some(Cursor::new(1_000, u64::MAX)),
-                Cursor::new(2_000, u64::MAX),
-                None,
-            )
-            .await
-            .unwrap();
-        assert_eq!(due.work.len(), 1);
-        assert_eq!(due.work[0].triggers, vec![triggers[1].clone()]);
+        let mut due = restored.stream_due(
+            &namespace,
+            Some(Cursor::new(1_000, u64::MAX)),
+            Cursor::new(2_000, u64::MAX),
+        );
+        let work = due.try_next().await.unwrap().unwrap();
+        assert_eq!(work.len(), 1);
+        assert_eq!(work[0].triggers, vec![triggers[1].clone()]);
         assert_eq!(
             raw_cursors(
                 &restored

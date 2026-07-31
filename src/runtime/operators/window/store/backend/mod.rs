@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
@@ -51,14 +52,7 @@ pub struct DueWindowWork {
     pub triggers: Vec<WindowTrigger>,
 }
 
-#[derive(Debug, Clone)]
-pub struct DueContinuation(pub Vec<u8>);
-
-#[derive(Debug, Clone)]
-pub struct DuePage {
-    pub work: Vec<DueWindowWork>,
-    pub continuation: Option<DueContinuation>,
-}
+pub type DueWorkStream<'a> = BoxStream<'a, Result<Vec<DueWindowWork>>>;
 
 /// Store operations used by the sole Window Operator for a partition.
 #[async_trait]
@@ -76,13 +70,12 @@ pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
         meta: &KeyState,
         triggers: &[WindowTrigger],
     ) -> Result<()>;
-    async fn load_due_page(
-        &self,
-        namespace: &StateNamespace,
+    fn stream_due<'a>(
+        &'a self,
+        namespace: &'a StateNamespace,
         after: Option<Cursor>,
         through: Cursor,
-        continuation: Option<DueContinuation>,
-    ) -> Result<DuePage>;
+    ) -> DueWorkStream<'a>;
     async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()>;
     /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot>;
