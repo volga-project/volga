@@ -235,7 +235,6 @@ impl WindowOperatorStore for InMemWindowStore {
     }
 
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot> {
-        self.flush().await?;
         let store = self.state.read().await;
         let snapshot = store
             .partitions

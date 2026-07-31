@@ -23,7 +23,7 @@ use super::rebuild::produce_rebuild;
 use super::slide::produce_slide;
 
 /// Evaluate one page of durable row triggers for a key.
-pub async fn advance_due_work(
+pub async fn advance_key(
     store: &dyn WindowOperatorStore,
     work: DueWindowWork,
     window_configs: &BTreeMap<WindowId, WindowConfig>,

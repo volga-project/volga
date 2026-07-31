@@ -84,9 +84,7 @@ pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
         continuation: Option<DueContinuation>,
     ) -> Result<DuePage>;
     async fn commit_advance(&self, partition: &PartitionKey, meta: &KeyState) -> Result<()>;
-    async fn flush(&self) -> Result<()> {
-        Ok(())
-    }
+    /// Complete all pending writes before capturing the returned snapshot.
     async fn checkpoint(&self, namespace: &StateNamespace) -> Result<WindowBackendSnapshot>;
     async fn restore(
         &self,

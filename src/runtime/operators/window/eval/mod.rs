@@ -15,6 +15,6 @@ mod rebuild;
 mod slide;
 mod wro;
 
-pub use advance::advance_due_work;
+pub use advance::advance_key;
 pub use output::assemble_window_batch;
 pub use wro::evaluate_points;

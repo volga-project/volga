@@ -15,7 +15,7 @@ use crate::runtime::operators::operator::{
     MessageStream, OperatorBase, OperatorConfig, OperatorPollResult, OperatorTrait, OperatorType,
 };
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
-use crate::runtime::operators::window::eval::advance_due_work;
+use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
@@ -148,7 +148,7 @@ impl WindowOperator {
                 .await
                 .expect("load due window triggers");
             let futures = page.work.into_iter().map(|work| {
-                advance_due_work(
+                advance_key(
                     state.store(),
                     work,
                     self.window_configs.as_ref(),
