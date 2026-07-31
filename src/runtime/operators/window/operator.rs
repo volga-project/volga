@@ -19,7 +19,7 @@ use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
-use crate::runtime::operators::window::spec::{WindowAdvancePolicy, WindowSpec};
+use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
 use crate::runtime::operators::window::TileConfig;
@@ -67,7 +67,6 @@ pub struct WindowOperator {
     state: Option<Arc<WindowOperatorState>>,
     buffered_keys: HashSet<Key>,
     output_mode: WindowOutputMode,
-    advance_policy: WindowAdvancePolicy,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     ts_column_index: usize,
@@ -91,14 +90,6 @@ impl WindowOperator {
             _ => panic!("Expected WindowConfig, got {:?}", config),
         };
 
-        if matches!(
-            window_operator_config.spec.advance_policy,
-            WindowAdvancePolicy::OnIngest
-        ) && window_operator_config.output_mode != WindowOutputMode::StateOnly
-        {
-            panic!("OnIngest advance is only valid for state-only WO");
-        }
-
         let built = BuiltWindows::for_wo(
             &window_operator_config.window_exec,
             &window_operator_config.tiling_configs,
@@ -116,7 +107,6 @@ impl WindowOperator {
             state: None,
             buffered_keys: HashSet::new(),
             output_mode: window_operator_config.output_mode,
-            advance_policy: window_operator_config.spec.advance_policy,
             output_schema: built.output_schema,
             input_schema: built.input_schema,
             ts_column_index: built.ts_column_index,
@@ -269,14 +259,8 @@ impl OperatorTrait for WindowOperator {
                         .insert_batch(key, keyed_message.base.record_batch.clone())
                         .await;
                     if dropped < input_rows {
-                        if self.output_mode == WindowOutputMode::StateOnly
-                            && matches!(self.advance_policy, WindowAdvancePolicy::OnIngest)
-                        {
-                            let max = max_seen.expect("accepted ingest must update max_seen");
-                            let _ = self.process_key(key, max).await;
-                        } else {
-                            self.buffered_keys.insert(key.clone());
-                        }
+                        debug_assert!(max_seen.is_some());
+                        self.buffered_keys.insert(key.clone());
                     }
                     OperatorPollResult::Continue
                 }
