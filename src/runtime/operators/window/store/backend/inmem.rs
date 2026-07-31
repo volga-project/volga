@@ -22,6 +22,18 @@ use crate::runtime::operators::window::store::{
     KeyState, PartitionKey, StateNamespace, TileMap, WindowData,
 };
 
+const MAX_INLINE_CHECKPOINT_BYTES: usize = 3 * 1024 * 1024;
+
+fn validate_checkpoint_size(snapshot: &[u8]) -> Result<()> {
+    anyhow::ensure!(
+        snapshot.len() <= MAX_INLINE_CHECKPOINT_BYTES,
+        "in-memory window checkpoint is {} bytes, exceeding the development/test inline limit of {} bytes; use a durable state backend for larger state",
+        snapshot.len(),
+        MAX_INLINE_CHECKPOINT_BYTES,
+    );
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 struct PartitionState {
     meta: KeyState,
@@ -49,7 +61,8 @@ struct InMemState {
     triggers: BTreeSet<WindowTrigger>,
 }
 
-/// Reference backend. One read lock is the WRO snapshot boundary.
+/// Development/test reference backend with inline checkpoints limited to 3 MiB.
+/// One read lock is the WRO snapshot boundary.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
     state: Arc<RwLock<InMemState>>,
@@ -262,9 +275,9 @@ impl WindowOperatorStore for InMemWindowStore {
                 .cloned()
                 .collect(),
         };
-        Ok(WindowBackendSnapshot::InMemory {
-            snapshot: bincode::serialize(&checkpoint)?,
-        })
+        let snapshot = bincode::serialize(&checkpoint)?;
+        validate_checkpoint_size(&snapshot)?;
+        Ok(WindowBackendSnapshot::InMemory { snapshot })
     }
 
     async fn restore(
@@ -277,6 +290,7 @@ impl WindowOperatorStore for InMemWindowStore {
                 "in-memory window store requires in-memory restore data"
             ));
         };
+        validate_checkpoint_size(snapshot)?;
         let checkpoint: InMemCheckpoint = bincode::deserialize(snapshot)?;
         anyhow::ensure!(
             checkpoint.namespace.as_slice() == namespace.bytes.as_slice(),
