@@ -49,10 +49,11 @@ accumulator capability, optional tiling, and WRO current-row behavior.
 
 `WindowSpec` controls:
 
-- `advance_policy`: advance on watermarks, or on every ingest for state-only
-  request-serving topologies.
 - `lateness`: retention padding behind the largest window.
 - `tiling`: default tile granularities, with optional per-window overrides.
+
+Window state advances only on watermarks. State-only request-serving topologies
+still publish ingested raw rows and tiles immediately.
 
 The implementation currently requires timestamp-millisecond `ORDER BY` columns
 and `RANGE` frames.

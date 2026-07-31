@@ -12,7 +12,6 @@ use crate::runtime::operators::sink::sink_operator::SinkConfig;
 use crate::runtime::operators::source::source_operator::SourceConfig;
 use crate::runtime::operators::window::operator::WindowOutputMode;
 use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
-use crate::runtime::operators::window::spec::WindowAdvancePolicy;
 use crate::runtime::partition::PartitionType;
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::runtime::watermark::{TimeHint, WatermarkAssignConfig};
@@ -397,7 +396,6 @@ impl LogicalGraph {
         if let Some(node) = self.graph.node_weight_mut(top_window_node) {
             if let OperatorConfig::WindowConfig(ref mut config) = node.operator_config {
                 config.output_mode = WindowOutputMode::StateOnly;
-                config.spec.advance_policy = WindowAdvancePolicy::OnIngest;
             }
         }
         

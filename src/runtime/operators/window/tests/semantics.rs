@@ -9,14 +9,13 @@ use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOu
 use crate::runtime::operators::window::request::{
     WindowRequestOperator, WindowRequestOperatorConfig,
 };
-use crate::runtime::operators::window::spec::WindowAdvancePolicy;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowOperatorStore,
 };
 use crate::runtime::operators::window::tests::harness::{
-    assert_window_values, batch, key, keyed_message, runtime_context, window_exec_from_sql,
-    Harness, WoWroHarness,
+    assert_window_values, batch, key, keyed_message, runtime_context, watermark_message,
+    window_exec_from_sql, Harness, WoWroHarness,
 };
 
 const SQL: &str = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
@@ -145,24 +144,33 @@ async fn lateness_config_sets_retention_floor_in_meta() {
 }
 
 #[tokio::test]
-async fn on_ingest_advances_state_only_without_watermark() {
+async fn state_only_publishes_on_ingest_and_advances_on_watermark() {
     let exec = window_exec_from_sql(SQL).await;
     let mut cfg = WindowOperatorConfig::new(exec);
     cfg.output_mode = WindowOutputMode::StateOnly;
-    cfg.spec.advance_policy = WindowAdvancePolicy::OnIngest;
     let mut h = Harness::new(cfg).await;
     h.ingest(batch(vec![1000, 2000], vec![1.0, 2.0], vec!["A", "A"]), "A")
         .await;
 
     let partition = PartitionKey::new(&h.namespace, &key("A"));
     let meta = h.store.load_meta(&partition).await.expect("meta");
-    assert_eq!(meta.processed_pos, Some(Cursor::new(2000, 1)));
+    assert_eq!(meta.processed_pos, None);
 
     let mut wro = open_wro(h.store.clone(), h.namespace.clone()).await;
     assert_eq!(
         request_sum(&mut wro, "A", 2000).await,
         ScalarValue::Float64(Some(3.0))
     );
+
+    h.op.set_input(Some(Box::pin(futures::stream::iter(vec![
+        watermark_message(2000),
+    ]))));
+    assert!(matches!(
+        h.op.poll_next().await,
+        OperatorPollResult::Continue
+    ));
+    let meta = h.store.load_meta(&partition).await.expect("meta");
+    assert_eq!(meta.processed_pos, Some(Cursor::new(2000, 1)));
 }
 
 #[tokio::test]
