@@ -9,7 +9,9 @@ use crate::api::spec::connectors::{RequestSourceSinkSpec, SinkSpec, SourceSpec};
 use crate::api::spec::event_time::EventTimeSpec;
 use crate::api::spec::operators::{OperatorOverride, OperatorOverrides};
 use crate::api::spec::state::StateSpec;
-use crate::api::spec::state::{CheckpointStoreConfig, OperatorStateBackendConfig};
+use crate::api::spec::state::{
+    CheckpointStoreConfig, OperatorStateBackendConfig, RequestStoreConfig,
+};
 use crate::api::spec::worker_runtime::WorkerRuntimeSpec;
 use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 use crate::runtime::operators::sink::sink_operator::SinkConfig;
@@ -168,6 +170,11 @@ impl PipelineSpecBuilder {
         self
     }
 
+    pub fn with_request_store(mut self, request_store: RequestStoreConfig) -> Self {
+        self.spec.state.request_store = Some(request_store);
+        self
+    }
+
     pub fn with_operator_overrides_defaults(mut self, defaults: OperatorOverride) -> Self {
         self.spec.operator_overrides.defaults = defaults;
         self
@@ -237,13 +244,8 @@ impl PipelineSpec {
         if self.execution_profile.is_none() {
             return Err("execution profile must be set".to_string());
         }
-        if self.execution_mode == ExecutionMode::Request
-            && self.state.operator_backend == OperatorStateBackendConfig::InMemory
-        {
-            return Err(
-                "request mode requires a shared operator state backend; in_memory is streaming-only"
-                    .to_string(),
-            );
+        if self.execution_mode == ExecutionMode::Request && self.state.request_store.is_none() {
+            return Err("request mode requires a request store".to_string());
         }
         Ok(())
     }

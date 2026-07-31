@@ -2,7 +2,7 @@ use tonic::{Request, Response, Status};
 use tonic::transport::Endpoint;
 use std::sync::Arc;
 use std::pin::Pin;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::time::Duration;
@@ -107,64 +107,42 @@ impl WorkerService for WorkerServiceImpl {
             .iter()
             .map(|v| Arc::<str>::from(v.as_str()))
             .collect::<Vec<_>>();
-        let mut task_restore_data = HashMap::new();
-        for task_restore in req.task_restore_data {
-            let task = TaskKey {
-                vertex_id: task_restore.vertex_id,
-                task_index: task_restore.task_index,
-            };
-            let restore = SerializedRestore::new(task_restore.restore_data);
-            if task_restore_data.insert(task.clone(), restore).is_some() {
-                return Err(Status::invalid_argument(format!(
-                    "duplicate restore data for {} index={}",
-                    task.vertex_id, task.task_index
-                )));
-            }
-        }
-        for task in task_restore_data.keys() {
-            let Some(vertex) = execution_graph.get_vertex(&task.vertex_id) else {
-                return Err(Status::invalid_argument(format!(
-                    "restore data references unknown task {}",
-                    task.vertex_id
-                )));
-            };
-            if !vertex_ids
+        let task_restore_data = req
+            .task_restore_data
+            .into_iter()
+            .map(|task_restore| {
+                (
+                    TaskKey {
+                        vertex_id: task_restore.vertex_id,
+                        task_index: task_restore.task_index,
+                    },
+                    SerializedRestore::new(task_restore.restore_data),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let expected_restore_tasks = if restoring {
+            vertex_ids
                 .iter()
-                .any(|id| id.as_ref() == task.vertex_id.as_str())
-                || vertex.task_index != task.task_index
-            {
-                return Err(Status::invalid_argument(format!(
-                    "restore data is not assigned to this worker for {} index={}",
-                    task.vertex_id, task.task_index
-                )));
-            }
-            if !operator_config_requires_checkpoint(&vertex.operator_config) {
-                return Err(Status::invalid_argument(format!(
-                    "restore data provided for non-checkpointable task {} index={}",
-                    task.vertex_id, task.task_index
-                )));
-            }
-        }
-        for vertex_id in &vertex_ids {
-            let vertex = execution_graph
-                .get_vertex(vertex_id.as_ref())
-                .expect("configured vertex must exist");
-            let key = TaskKey {
-                vertex_id: vertex_id.as_ref().to_string(),
-                task_index: vertex.task_index,
-            };
-            let requires_restore = operator_config_requires_checkpoint(&vertex.operator_config);
-            if restoring && requires_restore && !task_restore_data.contains_key(&key) {
-                return Err(Status::invalid_argument(format!(
-                    "missing restore data for {} index={}",
-                    key.vertex_id, key.task_index
-                )));
-            }
-        }
-        if !restoring && !task_restore_data.is_empty() {
-            return Err(Status::invalid_argument(
-                "restore data provided for a fresh execution attempt",
-            ));
+                .filter_map(|vertex_id| {
+                    let vertex = execution_graph
+                        .get_vertex(vertex_id.as_ref())
+                        .expect("configured vertex must exist");
+                    operator_config_requires_checkpoint(&vertex.operator_config).then(|| TaskKey {
+                        vertex_id: vertex_id.as_ref().to_string(),
+                        task_index: vertex.task_index,
+                    })
+                })
+                .collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
+        let received_restore_tasks = task_restore_data.keys().cloned().collect::<HashSet<_>>();
+        if received_restore_tasks != expected_restore_tasks {
+            return Err(Status::invalid_argument(format!(
+                "restore data does not match assigned checkpointable tasks: expected {}, received {}",
+                expected_restore_tasks.len(),
+                received_restore_tasks.len()
+            )));
         }
 
         let transport_backend_type = resolve_transport_backend_type(&execution_graph, &payload.vertex_ids);
@@ -185,6 +163,7 @@ impl WorkerService for WorkerServiceImpl {
             worker_config.master_addr = Some(master_addr);
         }
         worker_config.operator_state_backend = spec.state.operator_backend.clone();
+        worker_config.request_store = spec.state.request_store.clone();
 
         let mut worker_guard = self.worker.lock().await;
         if worker_guard.is_running() {

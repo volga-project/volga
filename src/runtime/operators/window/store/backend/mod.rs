@@ -5,7 +5,7 @@ use arrow::array::RecordBatch;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::api::spec::state::OperatorStateBackendConfig;
+use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::runtime::operators::window::model::{
     KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun,
 };
@@ -16,20 +16,18 @@ mod inmem;
 
 pub use inmem::InMemWindowStore;
 
-pub fn create_window_operator_store(
-    backend: &OperatorStateBackendConfig,
-) -> Arc<dyn WindowOperatorStore> {
-    match backend {
-        OperatorStateBackendConfig::InMemory => Arc::new(InMemWindowStore::new()),
+pub async fn open_window_operator_store(
+    config: &OperatorStateBackendConfig,
+) -> Result<Arc<dyn WindowOperatorStore>> {
+    match config {
+        OperatorStateBackendConfig::InMemory => Ok(Arc::new(InMemWindowStore::new())),
     }
 }
 
-pub fn create_window_request_store(
-    backend: &OperatorStateBackendConfig,
-) -> Arc<dyn WindowRequestStore> {
-    match backend {
-        OperatorStateBackendConfig::InMemory => Arc::new(InMemWindowStore::new()),
-    }
+pub async fn open_window_request_store(
+    config: &RequestStoreConfig,
+) -> Result<Arc<dyn WindowRequestStore>> {
+    match *config {}
 }
 
 pub type AttemptToken = Vec<u8>;

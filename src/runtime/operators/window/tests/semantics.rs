@@ -37,7 +37,7 @@ async fn open_wro(
     cfg.exclude_current_row = true;
     let ctx = runtime_context();
     let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(cfg));
-    wro.set_store_and_namespace(store, namespace);
+    wro.set_state_with_store_and_ns(store, namespace);
     wro.open(&ctx).await.expect("wro open");
     wro
 }

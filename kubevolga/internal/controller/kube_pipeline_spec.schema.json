@@ -65,7 +65,8 @@
       "$ref": "#/$defs/StateSpec",
       "default": {
         "checkpoint_store": "in_memory",
-        "operator_backend": "in_memory"
+        "operator_backend": "in_memory",
+        "request_store": null
       }
     },
     "task_assignment_strategy": {
@@ -187,9 +188,21 @@
         "operator_backend": {
           "$ref": "#/$defs/OperatorStateBackendConfig",
           "default": "in_memory"
+        },
+        "request_store": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RequestStoreConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
         }
       }
     },
+    "RequestStoreConfig": false,
     "TaskWorkerAssignmentStrategyType": {
       "oneOf": [
         {

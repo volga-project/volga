@@ -2,7 +2,7 @@ use std::{collections::HashMap, sync::Arc};
 use tokio::sync::{mpsc, Mutex};
 use serde_json::Value;
 
-use crate::api::spec::state::OperatorStateBackendConfig;
+use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::common::types::PipelineId;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
@@ -18,7 +18,8 @@ pub struct RuntimeContext {
     job_config: HashMap<String, Value>,
     operator_states: Option<Arc<OperatorStates>>,
     execution_graph: Option<ExecutionGraph>,
-    state_backend: Option<OperatorStateBackendConfig>,
+    operator_state_backend: Option<OperatorStateBackendConfig>,
+    request_store: Option<RequestStoreConfig>,
     pipeline_id: Option<PipelineId>,
     operator_id: Option<String>,
     source_handles: Option<SourceHandles>,
@@ -43,7 +44,8 @@ impl RuntimeContext {
             job_config: job_config.unwrap_or_default(),
             operator_states,
             execution_graph,
-            state_backend: None,
+            operator_state_backend: None,
+            request_store: None,
             pipeline_id: None,
             operator_id: None,
             source_handles: None,
@@ -78,20 +80,26 @@ impl RuntimeContext {
             .expect("execution graph should be set")
     }
 
-    pub fn with_state_backend(
+    pub fn with_state_config(
         mut self,
-        state_backend: OperatorStateBackendConfig,
+        operator_state_backend: OperatorStateBackendConfig,
+        request_store: Option<RequestStoreConfig>,
         pipeline_id: PipelineId,
         operator_id: String,
     ) -> Self {
-        self.state_backend = Some(state_backend);
+        self.operator_state_backend = Some(operator_state_backend);
+        self.request_store = request_store;
         self.pipeline_id = Some(pipeline_id);
         self.operator_id = Some(operator_id);
         self
     }
 
-    pub fn state_backend(&self) -> Option<&OperatorStateBackendConfig> {
-        self.state_backend.as_ref()
+    pub fn operator_state_backend(&self) -> Option<&OperatorStateBackendConfig> {
+        self.operator_state_backend.as_ref()
+    }
+
+    pub fn request_store(&self) -> Option<&RequestStoreConfig> {
+        self.request_store.as_ref()
     }
 
     pub fn pipeline_id(&self) -> Option<&PipelineId> {

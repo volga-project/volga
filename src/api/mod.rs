@@ -18,5 +18,7 @@ pub use spec::pipeline::{ConnectorConfigs, ExecutionMode, ExecutionProfile, Pipe
 pub use crate::orchestrator::task_assignment::TaskWorkerAssignmentStrategyType;
 pub use spec::operators::{OperatorOverride, OperatorOverrides};
 pub use spec::connectors::{DatagenSpec, RequestSourceSinkSpec, SinkSpec, SourceSpec};
-pub use spec::state::{CheckpointStoreConfig, OperatorStateBackendConfig, StateSpec};
+pub use spec::state::{
+    CheckpointStoreConfig, OperatorStateBackendConfig, RequestStoreConfig, StateSpec,
+};
 pub use spec::worker_runtime::WorkerRuntimeSpec;

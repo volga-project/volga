@@ -124,7 +124,7 @@ impl Harness {
     ) -> Self {
         let ctx = runtime_context();
         let mut op = WindowOperator::new(OperatorConfig::WindowConfig(cfg));
-        op.set_store_and_namespace(operator_store, namespace.clone());
+        op.set_state_with_store_and_ns(operator_store, namespace.clone());
         op.open(&ctx).await.expect("open");
         Self {
             op,
@@ -218,7 +218,7 @@ impl WoWroHarness {
         }
         let wo_ctx = runtime_context();
         let mut wo = WindowOperator::new(OperatorConfig::WindowConfig(wo_cfg));
-        wo.set_store_and_namespace(operator_store, namespace.clone());
+        wo.set_state_with_store_and_ns(operator_store, namespace.clone());
         wo.open(&wo_ctx).await.expect("wo open");
 
         let mut req_cfg = WindowRequestOperatorConfig::from_window_operator_config(
@@ -233,7 +233,7 @@ impl WoWroHarness {
         }
         let wro_ctx = runtime_context();
         let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(req_cfg));
-        wro.set_store_and_namespace(request_store, namespace);
+        wro.set_state_with_store_and_ns(request_store, namespace);
         wro.open(&wro_ctx).await.expect("wro open");
 
         Self { wo, wro }

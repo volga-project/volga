@@ -15,10 +15,16 @@ pub enum OperatorStateBackendConfig {
     InMemory,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestStoreConfig {}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct StateSpec {
     #[serde(default)]
     pub checkpoint_store: CheckpointStoreConfig,
     #[serde(default)]
     pub operator_backend: OperatorStateBackendConfig,
+    #[serde(default)]
+    pub request_store: Option<RequestStoreConfig>,
 }

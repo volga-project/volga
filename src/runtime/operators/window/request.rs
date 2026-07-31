@@ -21,7 +21,7 @@ use crate::runtime::operators::window::model::WindowId;
 use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::store::{
-    create_window_request_store, PartitionKey, StateNamespace, WindowRequestStore,
+    open_window_request_store, PartitionKey, StateNamespace, WindowRequestStore,
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
@@ -99,7 +99,7 @@ impl WindowRequestOperator {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_store_and_namespace(
+    pub(crate) fn set_state_with_store_and_ns(
         &mut self,
         store: Arc<dyn WindowRequestStore>,
         namespace: StateNamespace,
@@ -174,17 +174,16 @@ impl OperatorTrait for WindowRequestOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await?;
         if self.store.is_none() {
-            let backend = context
-                .state_backend()
-                .expect("state backend must be configured for WindowRequestOperator");
-            self.store = Some(create_window_request_store(backend));
+            let request_store = context
+                .request_store()
+                .expect("request store must be configured for WindowRequestOperator");
+            self.store = Some(open_window_request_store(request_store).await?);
         }
         if self.namespace.is_none() {
             let owner_operator_id = self
                 .state_owner_operator_id
                 .as_deref()
-                .or_else(|| context.operator_id())
-                .expect("operator id must be configured for WindowRequestOperator");
+                .expect("state owner operator id must be configured for WindowRequestOperator");
             self.namespace = Some(StateNamespace::for_operator_task(
                 context
                     .pipeline_id()

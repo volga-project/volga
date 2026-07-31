@@ -15,7 +15,7 @@ use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
 // (serde/Result imports removed; this module does not serialize Worker directly)
-use crate::api::spec::state::OperatorStateBackendConfig;
+use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::operators::operator::OperatorType;
 use serde_json::Value;
@@ -35,6 +35,7 @@ pub struct WorkerConfig {
     pub master_addr: Option<String>,
     pub task_restore_data: HashMap<TaskKey, SerializedRestore>,
     pub operator_state_backend: OperatorStateBackendConfig,
+    pub request_store: Option<RequestStoreConfig>,
 }
 
 impl WorkerConfig {
@@ -57,6 +58,7 @@ impl WorkerConfig {
             master_addr: None,
             task_restore_data: HashMap::new(),
             operator_state_backend: OperatorStateBackendConfig::default(),
+            request_store: None,
         }
     }
 
@@ -378,8 +380,9 @@ impl Worker {
                 Some(self.operator_states.clone()),
                 Some(config.graph.clone()),
             )
-            .with_state_backend(
+            .with_state_config(
                 config.operator_state_backend.clone(),
+                config.request_store.clone(),
                 config.pipeline_id.clone(),
                 vertex.operator_id.clone(),
             );

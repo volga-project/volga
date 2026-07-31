@@ -21,12 +21,13 @@ use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::{WindowAdvancePolicy, WindowSpec};
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
-use crate::runtime::operators::window::store::{
-    create_window_operator_store, StateNamespace, WindowOperatorStore,
-};
+use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
+
+#[cfg(test)]
+use crate::runtime::operators::window::store::WindowOperatorStore;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowOutputMode {
@@ -124,7 +125,7 @@ impl WindowOperator {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_store_and_namespace(
+    pub(crate) fn set_state_with_store_and_ns(
         &mut self,
         store: Arc<dyn WindowOperatorStore>,
         namespace: StateNamespace,
@@ -202,9 +203,9 @@ impl OperatorTrait for WindowOperator {
 
         if self.state.is_none() {
             let backend = context
-                .state_backend()
+                .operator_state_backend()
                 .expect("state backend must be configured for WindowOperator");
-            let store = create_window_operator_store(backend);
+            let store = open_window_operator_store(backend).await?;
             let ns = StateNamespace::for_operator_task(
                 context
                     .pipeline_id()
