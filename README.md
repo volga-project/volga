@@ -210,6 +210,17 @@ cargo build
 cargo test
 ```
 
+# 🧪 Testing
+
+Use [`scripts/test`](scripts/README.md) for the supported test profiles,
+Docker/Kube environment setup, targeted filters, and repeatable stress runs.
+
+```bash
+scripts/test local
+scripts/test kube
+scripts/test stress --env local --all --runs-per-shard 10 --shards 2
+```
+
 # 🙇 Running Locally
 
 Build the runtime image and start a demo master/worker pipeline:

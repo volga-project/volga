@@ -1,0 +1,73 @@
+name: Rust tests
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Test profile
+        type: choice
+        options:
+          - local
+          - unit
+          - grpc
+          - kube
+          - all
+          - stress
+        default: local
+
+concurrency:
+  group: rust-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    if: github.event_name != 'schedule' && inputs.profile != 'stress'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: "0"
+      TEST_PROFILE: ${{ inputs.profile || 'local' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+      - uses: helm/kind-action@v1
+        if: env.TEST_PROFILE == 'kube' || env.TEST_PROFILE == 'all'
+        with:
+          install_only: true
+      - run: scripts/test "$TEST_PROFILE"
+      - if: always() && (env.TEST_PROFILE == 'kube' || env.TEST_PROFILE == 'all')
+        run: scripts/kube-test-env destroy
+
+  kube-stress:
+    if: github.event_name == 'schedule' || inputs.profile == 'stress'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+      - uses: helm/kind-action@v1
+        with:
+          install_only: true
+      - run: scripts/test stress --env kube --all --runs-per-shard 10 --shards 1 --fresh-cluster
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kube-stress-logs-shard-${{ matrix.shard }}
+          path: target/kube-stress/
+          if-no-files-found: warn
+          retention-days: 14

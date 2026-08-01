@@ -51,7 +51,10 @@ pub async fn start_client(
 
 pub async fn stream_grpc_many_clients_one_server() {
     println!("[TEST] Starting multi-client Arrow message streaming example");
-    let server_addr = "127.0.0.1:50053";
+    let server_addr = format!(
+        "127.0.0.1:{}",
+        crate::common::test_utils::gen_unique_grpc_port()
+    );
     
     // Create channels for server communication
     let (server_tx, mut server_rx) = mpsc::channel::<(Message, String)>(100);
@@ -61,9 +64,10 @@ pub async fn stream_grpc_many_clients_one_server() {
     
     println!("[TEST] Starting server task");
     // Start server with shutdown capability
+    let server_bind_addr = server_addr.clone();
     let server_handle = tokio::spawn(async move {
         start_server(
-            server_addr.to_string(), 
+            server_bind_addr,
             server_tx, 
             shutdown_rx
         ).await.unwrap();
@@ -92,8 +96,9 @@ pub async fn stream_grpc_many_clients_one_server() {
         let (client_tx, client_rx) = mpsc::channel::<(Message, String)>(100);
         
         // Start client task
+        let client_addr = server_addr.clone();
         let client_handle = tokio::spawn(async move {
-            start_client(format!("http://{}", server_addr), client_rx).await.unwrap();
+            start_client(format!("http://{}", client_addr), client_rx).await.unwrap();
         });
         client_handles.push(client_handle);
         

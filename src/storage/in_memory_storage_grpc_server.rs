@@ -261,6 +261,14 @@ impl InMemoryStorageServer {
     }
 }
 
+impl Drop for InMemoryStorageServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+        }
+    }
+}
+
 impl Clone for InMemoryStorageServiceImpl {
     fn clone(&self) -> Self {
         Self {

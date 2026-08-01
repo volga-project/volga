@@ -1,0 +1,15 @@
+[profile.default]
+slow-timeout = { period = "30s", terminate-after = 1 }
+fail-fast = false
+
+[profile.stress]
+slow-timeout = { period = "120s", terminate-after = 1 }
+fail-fast = false
+
+[[profile.default.overrides]]
+filter = "test(/::kube::/)"
+slow-timeout = { period = "90s", terminate-after = 1 }
+
+[[profile.stress.overrides]]
+filter = "test(/::kube::/)"
+slow-timeout = { period = "180s", terminate-after = 1 }

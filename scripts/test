@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export CARGO_TARGET_DIR="${VOLGA_CARGO_TARGET_DIR:-$ROOT/target}"
+
+cpu_count() {
+  getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
+}
+
+LOCAL_NETWORK_FILTER='
+test(/runtime::tests::(checkpoint_tests::local|recovery_tests::local|smoke_tests::local|request_source_e2e_test|watermark_streaming_e2e_test|worker_test|word_count_test)/)
+| test(/transport::(tests::transport_backend_matrix_test|grpc::grpc_streaming_service_test)/)
+'
+DOCKER_FILTER='
+test(/::docker::/)
+| test(/runtime::functions::source::kafka::integration_tests/)
+| test(parquet_s3_roundtrip_localstack)
+'
+KUBE_FILTER='test(/::kube::/)'
+BENCHMARK_FILTER='test(/benchmark/)'
+UNIT_FILTER="not ($LOCAL_NETWORK_FILTER | $DOCKER_FILTER | $KUBE_FILTER | $BENCHMARK_FILTER)"
+
+profile="${1:-unit}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+if [[ "$profile" == "stress" ]]; then
+  exec "$ROOT/scripts/stress-test" "$@"
+fi
+
+jobs_override=""
+build_jobs="$(cpu_count)"
+retries=0
+prepared=false
+filter_override=""
+nextest_profile=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --jobs)
+      jobs_override="$2"
+      shift 2
+      ;;
+    --build-jobs)
+      build_jobs="$2"
+      shift 2
+      ;;
+    --retries)
+      retries="$2"
+      shift 2
+      ;;
+    --prepared)
+      prepared=true
+      shift
+      ;;
+    --filter)
+      filter_override="$2"
+      shift 2
+      ;;
+    --nextest-profile)
+      nextest_profile="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+run_suite() {
+  local jobs="$1"
+  local ignored="$2"
+  local filter="$3"
+  local profile_args=()
+  if [[ -n "$nextest_profile" ]]; then
+    profile_args=(--profile "$nextest_profile")
+  fi
+  cargo nextest run \
+    --lib \
+    "${profile_args[@]}" \
+    --build-jobs "$build_jobs" \
+    --test-threads "$jobs" \
+    --retries "$retries" \
+    --run-ignored "$ignored" \
+    -E "$filter"
+}
+
+check_docker() {
+  "$ROOT/scripts/docker-test-env" setup
+}
+
+check_kube() {
+  local context="kind-${VOLGA_KIND_CLUSTER:-kubevolga}"
+  if [[ "$prepared" != true ]]; then
+    "$ROOT/scripts/kube-test-env" setup
+  fi
+  export VOLGA_KUBE_CONTEXT="$context"
+}
+
+cleanup_kube() {
+  "$ROOT/scripts/kube-test-env" cleanup || true
+}
+
+case "$profile" in
+  docker)
+    check_docker
+    ;;
+  kube)
+    check_kube
+    trap cleanup_kube EXIT
+    ;;
+  all)
+    check_docker
+    check_kube
+    trap cleanup_kube EXIT
+    ;;
+esac
+
+case "$profile" in
+  unit)
+    if [[ -n "$filter_override" ]]; then
+      run_suite "${jobs_override:-1}" default "$filter_override"
+    else
+      run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+    fi
+    ;;
+  grpc)
+    if [[ -n "$filter_override" ]]; then
+      run_suite "${jobs_override:-1}" default "$filter_override"
+    else
+      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+    fi
+    ;;
+  local)
+    if [[ -n "$filter_override" ]]; then
+      run_suite "${jobs_override:-1}" default "$filter_override"
+    else
+      run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+    fi
+    ;;
+  all)
+    run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+    run_suite "${jobs_override:-${VOLGA_TEST_GRPC_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+    run_suite "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
+    run_suite "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
+    ;;
+  docker)
+    run_suite "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
+    ;;
+  kube)
+    if [[ -n "$filter_override" ]]; then
+      run_suite "${jobs_override:-1}" ignored-only "$filter_override"
+    else
+      run_suite "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
+    fi
+    ;;
+  benchmark)
+    run_suite "${jobs_override:-1}" all "$BENCHMARK_FILTER"
+    ;;
+  *)
+    echo "usage: scripts/test {unit|grpc|local|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME]" >&2
+    exit 2
+    ;;
+esac

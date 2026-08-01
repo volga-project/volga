@@ -21,6 +21,15 @@ enum StreamOutcome {
     Transient(String),
 }
 
+fn worker_fatal_kind(reason: i32) -> FailureKind {
+    match WorkerFatalReasonProto::try_from(reason) {
+        Ok(WorkerFatalReasonProto::Panic) => FailureKind::WorkerPanic,
+        Ok(WorkerFatalReasonProto::TaskFailure) => FailureKind::TaskFailure,
+        Ok(WorkerFatalReasonProto::TransportDisconnect) => FailureKind::TransportDisconnect,
+        _ => panic!("unknown fatal reason: {reason:?}"),
+    }
+}
+
 pub struct WorkerHeartbeatMonitor {
     task_handle: tokio::task::JoinHandle<()>,
 }
@@ -185,18 +194,7 @@ impl WorkerHeartbeatMonitor {
                                 );
                             }
                             if !heartbeat.healthy {
-                                let kind = match WorkerFatalReasonProto::try_from(
-                                    heartbeat.fatal_reason,
-                                ) {
-                                    Ok(WorkerFatalReasonProto::Panic) => FailureKind::WorkerPanic,
-                                    Ok(WorkerFatalReasonProto::TaskFailure) => {
-                                        FailureKind::TaskFailure
-                                    }
-                                    Ok(WorkerFatalReasonProto::TransportDisconnect) => {
-                                        FailureKind::TransportDisconnect
-                                    }
-                                    _ => panic!("unknown fatal reason: {:?}", heartbeat.fatal_reason),
-                                };
+                                let kind = worker_fatal_kind(heartbeat.fatal_reason);
                                 return StreamOutcome::WorkerFatal(kind, heartbeat.fatal_message);
                             }
                         }
@@ -215,5 +213,19 @@ impl WorkerHeartbeatMonitor {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_panic_heartbeat_to_worker_panic() {
+        let reason = WorkerFatalReasonProto::Panic as i32;
+        assert!(matches!(
+            worker_fatal_kind(reason),
+            FailureKind::WorkerPanic
+        ));
     }
 }

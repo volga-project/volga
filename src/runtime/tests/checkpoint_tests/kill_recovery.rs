@@ -8,19 +8,42 @@ use crate::runtime::tests::cluster_harness::{
 };
 use crate::runtime::tests::recovery_tests::RecoveryTimeouts;
 
+use super::launch::CheckpointWorkload;
 use super::sink_oracle::assert_sink_matches_offline_datagen;
 use super::support::{
-    harness_finish_pipeline, shutdown_after, wait_for_checkpoint_completed,
+    advance_lifecycle_cursor, harness_finish_pipeline, shutdown_after,
+    wait_for_checkpoint_completed, wait_for_checkpoint_completed_id, wait_for_checkpoint_started,
     wait_until_attempt0_running,
 };
+
+async fn wait_for_sink_progress(
+    cluster: &TestCluster,
+    after_rows: usize,
+    timeout: std::time::Duration,
+) -> Result<usize> {
+    let started = tokio::time::Instant::now();
+    loop {
+        let rows = cluster.storage().snapshot().await?.row_count();
+        if rows > after_rows {
+            return Ok(rows);
+        }
+        if started.elapsed() >= timeout {
+            return Err(anyhow!(
+                "timed out waiting for sink rows to advance beyond {after_rows}"
+            ));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
 
 /// One kill after the first completed checkpoint, then finish + sink check.
 pub async fn run_checkpoint_worker_kill_recovery(
     env: RuntimeEnv,
     launch: PipelineLaunchSpec,
     mode: WorkerKillMode,
+    workload: CheckpointWorkload,
 ) -> Result<RecoveryReport> {
-    run_checkpoint_sequential_failures(env, launch, mode, 1).await
+    run_checkpoint_sequential_failures(env, launch, mode, 1, workload).await
 }
 
 /// After each completed checkpoint, kill one worker; repeat `failure_count` times;
@@ -30,6 +53,7 @@ pub async fn run_checkpoint_sequential_failures(
     launch: PipelineLaunchSpec,
     mode: WorkerKillMode,
     failure_count: usize,
+    workload: CheckpointWorkload,
 ) -> Result<RecoveryReport> {
     if failure_count == 0 {
         return Err(anyhow!("failure_count must be >= 1"));
@@ -49,12 +73,42 @@ pub async fn run_checkpoint_sequential_failures(
             .await?;
 
         for failure_idx in 0..failure_count {
-            let checkpoint_id = wait_for_checkpoint_completed(
-                &cluster.master(),
-                &mut cursor,
-                timeouts.attempt_running,
-            )
-            .await?;
+            let checkpoint_id = match workload {
+                CheckpointWorkload::PassThrough => {
+                    wait_for_checkpoint_completed(
+                        &cluster.master(),
+                        &mut cursor,
+                        timeouts.attempt_running,
+                    )
+                    .await?
+                }
+                CheckpointWorkload::Window => {
+                    wait_for_sink_progress(&cluster, 0, timeouts.attempt_running).await?;
+                    advance_lifecycle_cursor(&cluster.master(), &mut cursor).await?;
+                    let checkpoint_id = wait_for_checkpoint_started(
+                        &cluster.master(),
+                        &mut cursor,
+                        timeouts.attempt_running,
+                        1,
+                    )
+                    .await?;
+                    wait_for_checkpoint_completed_id(
+                        &cluster.master(),
+                        &mut cursor,
+                        timeouts.attempt_running,
+                        checkpoint_id,
+                    )
+                    .await?;
+                    let checkpoint_rows = cluster.storage().snapshot().await?.row_count();
+                    wait_for_sink_progress(
+                        &cluster,
+                        checkpoint_rows,
+                        timeouts.attempt_running,
+                    )
+                    .await?;
+                    checkpoint_id
+                }
+            };
 
             let target = &worker_ids[failure_idx % worker_ids.len()];
             println!(
@@ -114,12 +168,18 @@ pub async fn run_checkpoint_sequential_failures(
                 },
             )
             .await?;
+
+            // Cardinality can remain flat while restored sources replay rows already
+            // present in the non-transactional sink. Wait until replay catches up and
+            // the recovered attempt produces at least one new output identity.
+            let recovered_rows = cluster.storage().snapshot().await?.row_count();
+            wait_for_sink_progress(&cluster, recovered_rows, timeouts.attempt1_running).await?;
         }
 
         harness_finish_pipeline(&cluster, &mut cursor, env, failure_count).await?;
 
         let snapshot = cluster.storage().snapshot().await?;
-        assert_sink_matches_offline_datagen(&cluster.master(), &snapshot, env).await?;
+        assert_sink_matches_offline_datagen(&cluster.master(), &snapshot, env, workload).await?;
 
         let events = cluster.master().lifecycle_events_since(0).await?;
         let report = RecoveryReport::from_events(&events);

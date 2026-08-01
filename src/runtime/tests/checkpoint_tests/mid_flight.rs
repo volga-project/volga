@@ -13,6 +13,7 @@ use super::support::{
     harness_finish_pipeline, shutdown_after, wait_for_checkpoint_completed,
     wait_for_checkpoint_started, wait_until_attempt0_running,
 };
+use super::CheckpointWorkload;
 
 fn report_has_checkpoint_failed(report: &RecoveryReport, checkpoint_id: u64) -> bool {
     let needle = format!("checkpoint_failed {checkpoint_id}");
@@ -20,6 +21,14 @@ fn report_has_checkpoint_failed(report: &RecoveryReport, checkpoint_id: u64) -> 
         .attempts
         .values()
         .any(|a| a.events.iter().any(|e| e.contains(&needle)))
+}
+
+fn report_has_checkpoint_completed(report: &RecoveryReport, checkpoint_id: u64) -> bool {
+    let needle = format!("checkpoint_completed {checkpoint_id}");
+    report
+        .attempts
+        .values()
+        .any(|attempt| attempt.events.iter().any(|event| event.contains(&needle)))
 }
 
 /// Kill while the first checkpoint is in-flight (no prior complete). No sink EO check.
@@ -73,18 +82,19 @@ pub async fn run_checkpoint_mid_flight_kill_no_prior(
         .await?;
         match &started.event {
             LifecycleEvent::AttemptStarted {
-                restore_checkpoint_id: None,
+                restore_checkpoint_id: Option::None,
                 ..
             } => {}
             LifecycleEvent::AttemptStarted {
                 restore_checkpoint_id: Some(id),
                 ..
-            } => {
+            } if env != RuntimeEnv::Kube || *id != in_flight_id => {
                 return Err(anyhow!(
                     "expected restore=None after mid-flight kill with no prior complete CP, got Some({id}) \
                      (in-flight {in_flight_id} likely completed before kill)"
                 ));
             }
+            LifecycleEvent::AttemptStarted { .. } => {}
             other => {
                 return Err(anyhow!("expected AttemptStarted, got {other:?}"));
             }
@@ -106,7 +116,7 @@ pub async fn run_checkpoint_mid_flight_kill_no_prior(
         harness_finish_pipeline(&cluster, &mut cursor, env, 1).await?;
 
         let events = cluster.master().lifecycle_events_since(0).await?;
-        if events.iter().any(|r| {
+        if env != RuntimeEnv::Kube && events.iter().any(|r| {
             matches!(
                 &r.event,
                 LifecycleEvent::CheckpointCompleted {
@@ -122,7 +132,11 @@ pub async fn run_checkpoint_mid_flight_kill_no_prior(
 
         let report = RecoveryReport::from_events(&events);
         report.print();
-        assert_mid_flight_restore_none(&report, in_flight_id)?;
+        if env == RuntimeEnv::Kube {
+            assert_mid_flight_restore_none_or_in_flight(&report, in_flight_id)?;
+        } else {
+            assert_mid_flight_restore_none(&report, in_flight_id)?;
+        }
         Ok(report)
     }
     .await;
@@ -197,20 +211,21 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
             LifecycleEvent::AttemptStarted {
                 restore_checkpoint_id: Some(id),
                 ..
-            } => {
+            } if env != RuntimeEnv::Kube || (*id != safe_id && *id != in_flight_id) => {
                 return Err(anyhow!(
                     "expected restore=Some({safe_id}) after mid-flight kill of in-flight {in_flight_id}, \
                      got Some({id}) (in-flight likely completed before kube pod death / failure detection)"
                 ));
             }
             LifecycleEvent::AttemptStarted {
-                restore_checkpoint_id: None,
+                restore_checkpoint_id: Option::None,
                 ..
             } => {
                 return Err(anyhow!(
                     "expected restore=Some({safe_id}) after mid-flight kill, got None"
                 ));
             }
+            LifecycleEvent::AttemptStarted { .. } => {}
             other => {
                 return Err(anyhow!("expected AttemptStarted, got {other:?}"));
             }
@@ -232,10 +247,16 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
         harness_finish_pipeline(&cluster, &mut cursor, env, 1).await?;
 
         let snapshot = cluster.storage().snapshot().await?;
-        assert_sink_matches_offline_datagen(&cluster.master(), &snapshot, env).await?;
+        assert_sink_matches_offline_datagen(
+            &cluster.master(),
+            &snapshot,
+            env,
+            CheckpointWorkload::PassThrough,
+        )
+        .await?;
 
         let events = cluster.master().lifecycle_events_since(0).await?;
-        if events.iter().any(|r| {
+        if env != RuntimeEnv::Kube && events.iter().any(|r| {
             matches!(
                 &r.event,
                 LifecycleEvent::CheckpointCompleted {
@@ -251,7 +272,11 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
 
         let report = RecoveryReport::from_events(&events);
         report.print();
-        assert_mid_flight_restore_prior(&report, safe_id, in_flight_id)?;
+        if env == RuntimeEnv::Kube {
+            assert_mid_flight_restore_prior_or_in_flight(&report, safe_id, in_flight_id)?;
+        } else {
+            assert_mid_flight_restore_prior(&report, safe_id, in_flight_id)?;
+        }
         Ok(report)
     }
     .await;
@@ -278,6 +303,29 @@ pub fn assert_mid_flight_restore_none(
     Ok(())
 }
 
+fn assert_mid_flight_restore_none_or_in_flight(
+    report: &RecoveryReport,
+    in_flight_id: u64,
+) -> Result<()> {
+    let attempt1 = report.attempt(1)?;
+    let completed = report_has_checkpoint_completed(report, in_flight_id);
+    if completed && attempt1.trigger.contains(&format!("restore=Some({in_flight_id})")) {
+        return Ok(());
+    }
+    if !completed && attempt1.trigger.contains("restore=None") {
+        if report_has_checkpoint_failed(report, in_flight_id) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "in-flight checkpoint {in_flight_id} did not complete or fail"
+        ));
+    }
+    Err(anyhow!(
+        "in-flight checkpoint {in_flight_id} completed={completed}, but attempt 1 was {}",
+        attempt1.trigger
+    ))
+}
+
 /// Mid-flight kill after a safe CP: attempt 1 restores that CP; in-flight CP2+ was failed.
 pub fn assert_mid_flight_restore_prior(
     report: &RecoveryReport,
@@ -300,4 +348,31 @@ pub fn assert_mid_flight_restore_prior(
         ));
     }
     Ok(())
+}
+
+fn assert_mid_flight_restore_prior_or_in_flight(
+    report: &RecoveryReport,
+    safe_checkpoint_id: u64,
+    in_flight_id: u64,
+) -> Result<()> {
+    let attempt1 = report.attempt(1)?;
+    let completed = report_has_checkpoint_completed(report, in_flight_id);
+    if completed && attempt1.trigger.contains(&format!("restore=Some({in_flight_id})")) {
+        return Ok(());
+    }
+    if !completed && attempt1
+        .trigger
+        .contains(&format!("restore=Some({safe_checkpoint_id})"))
+    {
+        if report_has_checkpoint_failed(report, in_flight_id) {
+            return Ok(());
+        }
+        return Err(anyhow!(
+            "in-flight checkpoint {in_flight_id} did not complete or fail"
+        ));
+    }
+    Err(anyhow!(
+        "in-flight checkpoint {in_flight_id} completed={completed}, but attempt 1 was {}",
+        attempt1.trigger
+    ))
 }

@@ -21,7 +21,7 @@ use anyhow::Result;
 use crate::runtime::tests::cluster_harness::{RuntimeEnv, WorkerKillMode};
 use crate::runtime::tests::recovery_tests::{
     assert_multi_worker_multi_kill, assert_multi_worker_single_kill,
-    assert_single_worker_heartbeat_unavailable, assert_single_worker_pod_unhealthy,
+    assert_single_worker_abrupt_failure,
     multi_worker_recovery_launch_spec, run_worker_kill_recovery, run_workers_kill_recovery,
     single_worker_recovery_launch_spec,
 };
@@ -35,10 +35,10 @@ async fn test_kube_single_worker_kill_pod_poll_recovers() -> Result<()> {
         WorkerKillMode::Abrupt,
     )
     .await?;
-    assert_single_worker_pod_unhealthy(&target, &report)
+    assert_single_worker_abrupt_failure(&target, &report)
 }
 
-/// Poller off: expect HB dead-peer path (production consts bias HB ahead of state poll).
+/// Poller off: recovery must still succeed through one of the worker-loss detectors.
 #[tokio::test]
 #[ignore]
 async fn test_kube_single_worker_kill_pod_heartbeat_recovers() -> Result<()> {
@@ -48,7 +48,7 @@ async fn test_kube_single_worker_kill_pod_heartbeat_recovers() -> Result<()> {
         WorkerKillMode::Abrupt,
     )
     .await?;
-    assert_single_worker_heartbeat_unavailable(&target, &report)
+    assert_single_worker_abrupt_failure(&target, &report)
 }
 
 /// Multi-worker cluster: kill one pod (poll on); peers cascade and are reused.

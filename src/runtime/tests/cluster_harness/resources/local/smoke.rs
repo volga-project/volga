@@ -3,11 +3,12 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use uuid::Uuid;
 
-use super::common::{LocalMaster, LocalStorage, LocalWorkerPool, WorkerServerSlot};
+use super::common::{
+    wait_until_addr_listening, LocalMaster, LocalStorage, LocalWorkerPool, WorkerServerSlot,
+};
 use crate::orchestrator::local::{LocalTestOrchestrator, LocalWorkerOrchestrator};
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
-use crate::runtime::master::MasterConfig;
-use crate::runtime::master::LifecycleEventRecord;
+use crate::runtime::master::{LifecycleEventRecord, MasterConfig};
 use crate::storage::InMemoryStorageSnapshot;
 use crate::runtime::tests::cluster_harness::backend::ClusterBackend;
 use crate::runtime::tests::cluster_harness::{FaultAction, PipelineLaunchSpec, WorkerKillMode};
@@ -161,6 +162,9 @@ impl LocalClusterResources {
             .configure(MasterConfig::from_spec(spec, expected_workers))
             .await;
         master.server.start(&master.addr).await?;
+        wait_until_addr_listening(&master.addr, std::time::Duration::from_secs(5))
+            .await
+            .with_context(|| format!("waiting for master server on {}", master.addr))?;
 
         workers.start_all().await?;
         Ok(Self {

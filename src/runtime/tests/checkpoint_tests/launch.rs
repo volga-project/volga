@@ -7,9 +7,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
+use crate::api::spec::operators::{OperatorOverride, OperatorTuningSpec};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{PipelineSpecBuilder, TaskWorkerAssignmentStrategyType};
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
+use crate::runtime::operators::window::spec::WindowSpec;
+use crate::runtime::operators::window::{TileConfig, TimeGranularity};
 use crate::runtime::tests::cluster_harness::PipelineLaunchSpec;
 use crate::runtime::tests::launch_specs::worker_count_for;
 
@@ -24,8 +27,18 @@ pub const MULTI_FAILURE_COUNT: usize = 2;
 /// Hang guard only (per attempt `open`); harness finishes via `MasterHandle::stop_sources`.
 const SAFETY_DATAGEN_RUN_FOR_S: f64 = 300.0;
 const DATAGEN_RATE: f32 = 200.0;
+pub(super) const WINDOW_RANGE_MS: i64 = 10_000;
 
-pub(super) fn checkpoint_datagen_parts(parallelism: usize) -> (Arc<Schema>, DatagenSpec) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointWorkload {
+    PassThrough,
+    Window,
+}
+
+pub(super) fn checkpoint_datagen_parts(
+    parallelism: usize,
+    workload: CheckpointWorkload,
+) -> (Arc<Schema>, DatagenSpec) {
     let schema = Arc::new(Schema::new(vec![
         Field::new(
             "timestamp",
@@ -40,19 +53,29 @@ pub(super) fn checkpoint_datagen_parts(parallelism: usize) -> (Arc<Schema>, Data
         "timestamp".to_string(),
         FieldGenerator::IncrementalTimestamp {
             start_ms: 1_000,
-            step_ms: 1,
+            step_ms: match workload {
+                CheckpointWorkload::PassThrough => 1,
+                CheckpointWorkload::Window => 1_000,
+            },
         },
     );
     fields.insert(
         "key".to_string(),
         FieldGenerator::Key {
-            num_unique: parallelism * 8,
+            num_unique: parallelism
+                * match workload {
+                    CheckpointWorkload::PassThrough => 8,
+                    CheckpointWorkload::Window => 4,
+                },
         },
     );
     fields.insert(
         "value".to_string(),
         FieldGenerator::Values {
-            values: vec![ScalarValue::Float64(Some(1.0)), ScalarValue::Float64(Some(2.0))],
+            values: vec![
+                ScalarValue::Float64(Some(1.0)),
+                ScalarValue::Float64(Some(2.0)),
+            ],
         },
     );
     (
@@ -70,13 +93,16 @@ pub(super) fn checkpoint_datagen_parts(parallelism: usize) -> (Arc<Schema>, Data
 }
 
 /// Pipelined launch: `worker_count = parallelism / SLOTS_PER_NODE`.
-pub fn checkpoint_recovery_launch_spec(parallelism: usize) -> PipelineLaunchSpec {
+pub fn checkpoint_recovery_launch_spec(
+    parallelism: usize,
+    workload: CheckpointWorkload,
+) -> PipelineLaunchSpec {
     let assignment = TaskWorkerAssignmentStrategyType::Pipelined {
         slots_per_node: SLOTS_PER_NODE,
     };
     let worker_count = worker_count_for(&assignment, parallelism);
-    let (schema, datagen) = checkpoint_datagen_parts(parallelism);
-    let pipeline = PipelineSpecBuilder::new()
+    let (schema, datagen) = checkpoint_datagen_parts(parallelism, workload);
+    let mut builder = PipelineSpecBuilder::new()
         .with_parallelism(parallelism)
         .with_execution_profile(ExecutionProfile::MasterWorker {
             num_threads_per_task: 2,
@@ -86,8 +112,40 @@ pub fn checkpoint_recovery_launch_spec(parallelism: usize) -> PipelineLaunchSpec
             "datagen_source",
             SourceSpecKind::Datagen(datagen),
             schema_to_json(schema.as_ref()),
-        ))
-        .sql("SELECT timestamp, key, value FROM datagen_source")
+        ));
+
+    let sql = match workload {
+        CheckpointWorkload::PassThrough => "SELECT timestamp, key, value FROM datagen_source",
+        CheckpointWorkload::Window => {
+            let tiling = TileConfig::new(vec![
+                TimeGranularity::Seconds(1),
+                TimeGranularity::Seconds(5),
+            ])
+            .expect("valid checkpoint window tiling");
+            builder = builder
+                .with_out_of_orderness_ms(0)
+                .with_window_allowed_lateness_ms(Some(0))
+                .with_operator_overrides_defaults(OperatorOverride {
+                    tuning: Some(OperatorTuningSpec::Window(WindowSpec {
+                        lateness: None,
+                        tiling: Some(tiling),
+                    })),
+                    ..OperatorOverride::default()
+                });
+            "SELECT timestamp, key, value, \
+             SUM(value) OVER w AS sum_val, \
+             COUNT(value) OVER w AS cnt_val, \
+             AVG(value) OVER w AS avg_val, \
+             MIN(value) OVER w AS min_val, \
+             MAX(value) OVER w AS max_val \
+             FROM datagen_source \
+             WINDOW w AS (PARTITION BY key ORDER BY timestamp \
+             RANGE BETWEEN INTERVAL '10000' MILLISECOND PRECEDING AND CURRENT ROW)"
+        }
+    };
+
+    let pipeline = builder
+        .sql(sql)
         .with_sink(SinkSpec::in_memory_upsert(vec![
             "key".to_string(),
             "timestamp".to_string(),
@@ -99,5 +157,5 @@ pub fn checkpoint_recovery_launch_spec(parallelism: usize) -> PipelineLaunchSpec
 
 /// Multi-worker launch for sequential multi-failure stress (same indefinite datagen).
 pub fn checkpoint_multi_failure_launch_spec() -> PipelineLaunchSpec {
-    checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM)
+    checkpoint_recovery_launch_spec(MULTI_WORKER_PARALLELISM, CheckpointWorkload::PassThrough)
 }

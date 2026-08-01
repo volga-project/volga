@@ -5,7 +5,6 @@ use std::pin::Pin;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
-use tokio::time::Duration;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 
@@ -635,6 +634,7 @@ impl WorkerServer {
         println!("[WORKER_SERVER] WorkerService server stopped");
     }
 
+    #[cfg(test)]
     pub async fn run_until_stopped(
         &mut self,
         mut shutdown_rx: oneshot::Receiver<()>,
@@ -643,28 +643,18 @@ impl WorkerServer {
         tokio::select! {
             _ = &mut shutdown_rx => self.stop().await,
             result = &mut crash_rx => {
-                let inject_panic = result.unwrap_or(false);
-                self.kill_for_testing(inject_panic).await;
+                self.kill_for_testing(result.unwrap_or(false)).await;
             }
         }
     }
 
-    /// Local test kill. When `inject_panic` is true, reports `WorkerFatalReason::Panic`
-    /// and keeps the control gRPC server up long enough for heartbeat to deliver it
-    /// (master sees `WorkerPanic`); then tears down. Otherwise aborts immediately
-    /// (master typically sees slow `HeartbeatUnavailable` / reset-probe replace).
+    #[cfg(test)]
     pub async fn kill_for_testing(&mut self, inject_panic: bool) {
         if inject_panic {
-            {
-                let worker = self.service.worker.lock().await;
-                worker.health().report_fatal(
-                    WorkerFatalReason::Panic,
-                    "local test worker crash",
-                );
-            }
-            // Heartbeat pushes on broadcast + 1s tick; keep the server alive so the
-            // unhealthy payload can reach the master before we drop the stream.
-            tokio::time::sleep(Duration::from_millis(1000)).await;
+            let worker = self.service.worker.lock().await;
+            worker
+                .health()
+                .report_fatal(WorkerFatalReason::Panic, "local test worker crash");
         }
         if let Some(handle) = self.server_handle.take() {
             handle.abort();
@@ -672,6 +662,14 @@ impl WorkerServer {
         }
         let mut worker = self.service.worker.lock().await;
         worker.close();
+    }
+}
+
+impl Drop for WorkerServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+        }
     }
 }
 

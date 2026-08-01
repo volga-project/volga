@@ -18,6 +18,7 @@ use crate::storage::{InMemoryStorageClient, InMemoryStorageServer, InMemoryStora
 const WORKER_TASK_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 const WORKER_CRASH_TIMEOUT: Duration = Duration::from_secs(5);
 const ADDR_WAIT_TIMEOUT: Duration = Duration::from_secs(5);
+const WORKER_RUNTIME_THREADS: usize = 2;
 
 pub(super) struct LocalStorage {
     pub(super) addr: String,
@@ -29,6 +30,9 @@ impl LocalStorage {
         let addr = format!("127.0.0.1:{}", gen_unique_grpc_port());
         let mut server = InMemoryStorageServer::new();
         server.start(&addr).await?;
+        wait_until_addr_listening(&addr, ADDR_WAIT_TIMEOUT)
+            .await
+            .with_context(|| format!("waiting for storage server on {addr}"))?;
         Ok(Self { addr, server })
     }
 
@@ -97,6 +101,12 @@ impl WorkerServerSlot {
         self.process = Some(process);
         self.shutdown_tx = Some(shutdown_tx);
         self.crash_tx = Some(crash_tx);
+        if let Err(error) = wait_until_addr_listening(&self.addr, ADDR_WAIT_TIMEOUT).await {
+            self.stop().await;
+            return Err(error).with_context(|| {
+                format!("waiting for worker {} on {}", self.id, self.addr)
+            });
+        }
         Ok(())
     }
 
@@ -118,8 +128,7 @@ impl WorkerServerSlot {
             return;
         }
         if let Some(tx) = self.crash_tx.take() {
-            let inject_panic = matches!(mode, WorkerKillMode::Panic);
-            let _ = tx.send(inject_panic);
+            let _ = tx.send(matches!(mode, WorkerKillMode::Panic));
         }
         self.shutdown_tx.take();
         if let Some(handle) = self.process.take() {
@@ -197,7 +206,7 @@ async fn wait_until_addr_free(addr: &str, timeout: Duration) -> Result<()> {
     }
 }
 
-async fn wait_until_addr_listening(addr: &str, timeout: Duration) -> Result<()> {
+pub(super) async fn wait_until_addr_listening(addr: &str, timeout: Duration) -> Result<()> {
     let start = Instant::now();
     loop {
         if TcpStream::connect(addr).is_ok() {
@@ -224,7 +233,11 @@ fn spawn_worker_thread(
     worker_id: String,
     addr: String,
     orchestrator: Arc<dyn WorkerOrchestrator>,
-) -> Result<(JoinHandle<()>, oneshot::Sender<()>, oneshot::Sender<bool>)> {
+) -> Result<(
+    JoinHandle<()>,
+    oneshot::Sender<()>,
+    oneshot::Sender<bool>,
+)> {
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let (crash_tx, crash_rx) = oneshot::channel();
     let thread_name = format!("volga-worker-{worker_id}");
@@ -232,6 +245,7 @@ fn spawn_worker_thread(
         .name(thread_name.clone())
         .spawn(move || {
             let runtime = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(WORKER_RUNTIME_THREADS)
                 .enable_all()
                 .thread_name(format!("{thread_name}-rt"))
                 .build()

@@ -16,8 +16,8 @@ pub use kill_recovery::{
     run_checkpoint_worker_kill_recovery,
 };
 pub use launch::{
-    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec, MULTI_FAILURE_COUNT,
-    MULTI_WORKER_PARALLELISM, SINGLE_WORKER_PARALLELISM,
+    checkpoint_multi_failure_launch_spec, checkpoint_recovery_launch_spec, CheckpointWorkload,
+    MULTI_FAILURE_COUNT, MULTI_WORKER_PARALLELISM, SINGLE_WORKER_PARALLELISM,
 };
 pub use mid_flight::{
     assert_mid_flight_restore_none, assert_mid_flight_restore_prior,

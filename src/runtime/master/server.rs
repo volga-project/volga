@@ -78,3 +78,11 @@ impl MasterServer {
         }
     }
 }
+
+impl Drop for MasterServer {
+    fn drop(&mut self) {
+        if let Some(handle) = self.server_handle.take() {
+            handle.abort();
+        }
+    }
+}

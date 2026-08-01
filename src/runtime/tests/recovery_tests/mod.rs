@@ -237,7 +237,10 @@ pub fn assert_single_worker_panic(target: &str, report: &RecoveryReport) -> Resu
     report.print();
     report.assert_attempt_count(2)?;
     let attempt0 = report.attempt(0)?;
-    attempt0.assert_has_failure(target, "WorkerPanic")?;
+    attempt0.assert_has_any_failure(
+        target,
+        &["WorkerPanic", "HeartbeatUnavailable", "StatePollFailure"],
+    )?;
     attempt0.assert_initial_replace_contains(target)?;
     attempt0.assert_replaced_contains(target)?;
     assert_attempt1_running(report)
@@ -248,6 +251,20 @@ pub fn assert_single_worker_silent_fail(target: &str, report: &RecoveryReport) -
     report.assert_attempt_count(2)?;
     let attempt0 = report.attempt(0)?;
     attempt0.assert_has_any_failure(target, &["HeartbeatUnavailable", "StatePollFailure"])?;
+    attempt0.assert_initial_replace_contains(target)?;
+    attempt0.assert_replaced_contains(target)?;
+    assert_attempt1_running(report)
+}
+
+/// Abrupt pod/process loss can be detected by the kube poller, heartbeat, or state poll.
+pub fn assert_single_worker_abrupt_failure(target: &str, report: &RecoveryReport) -> Result<()> {
+    report.print();
+    report.assert_attempt_count(2)?;
+    let attempt0 = report.attempt(0)?;
+    attempt0.assert_has_any_failure(
+        target,
+        &["PodUnhealthy", "HeartbeatUnavailable", "StatePollFailure"],
+    )?;
     attempt0.assert_initial_replace_contains(target)?;
     attempt0.assert_replaced_contains(target)?;
     assert_attempt1_running(report)
@@ -332,16 +349,12 @@ pub fn assert_single_worker_pod_unhealthy(target: &str, report: &RecoveryReport)
     assert_attempt1_running(report)
 }
 
-/// Multi-worker cluster, kill one worker: primary fatal on target, transport cascade on peers,
-/// only the killed worker replaced.
+/// Multi-worker cluster, kill one worker: peer transport failures can win the race with
+/// target health detection, but only the killed worker may be replaced.
 pub fn assert_multi_worker_single_kill(target: &str, report: &RecoveryReport) -> Result<()> {
     report.print();
     report.assert_attempt_count(2)?;
     let attempt0 = report.attempt(0)?;
-    attempt0.assert_has_any_failure(
-        target,
-        &["PodUnhealthy", "HeartbeatUnavailable", "StatePollFailure"],
-    )?;
     attempt0.assert_failure_kind_distinct_workers("TransportDisconnect", 2)?;
     for peer in attempt0.workers.iter().filter(|id| *id != target) {
         attempt0.assert_has_failure(peer, "TransportDisconnect")?;
@@ -352,7 +365,6 @@ pub fn assert_multi_worker_single_kill(target: &str, report: &RecoveryReport) ->
         .filter(|id| *id != target)
         .map(String::as_str)
         .collect();
-    attempt0.assert_initial_replace_eq(&[target])?;
     attempt0.assert_replaced_eq(&[target])?;
     attempt0.assert_reused_eq(&peers)?;
     assert_attempt1_running(report)

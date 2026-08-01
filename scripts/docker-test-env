@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ACTION="${1:-setup}"
+OPTION="${2:-}"
+
+setup() {
+  command -v docker >/dev/null || {
+    echo "missing required command: docker" >&2
+    exit 2
+  }
+  docker info >/dev/null
+
+  local build_args=()
+  case "$OPTION" in
+    "")
+      ;;
+    --pull)
+      build_args+=(--pull)
+      ;;
+    --rebuild)
+      build_args+=(--no-cache)
+      ;;
+    *)
+      echo "unknown setup option: $OPTION" >&2
+      exit 2
+      ;;
+  esac
+  docker build "${build_args[@]}" -t volga:latest "$ROOT"
+}
+
+case "$ACTION" in
+  setup)
+    setup
+    ;;
+  *)
+    echo "usage: scripts/docker-test-env setup [--pull|--rebuild]" >&2
+    exit 2
+    ;;
+esac

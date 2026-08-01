@@ -36,6 +36,34 @@ pub(super) async fn wait_for_checkpoint_completed(
     }
 }
 
+pub(super) async fn wait_for_checkpoint_completed_id(
+    master: &MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+    checkpoint_id: u64,
+) -> Result<()> {
+    LifecycleOracle::wait_for(master, cursor, timeout, |event| {
+        matches!(
+            event,
+            LifecycleEvent::CheckpointCompleted {
+                checkpoint_id: id
+            } if *id == checkpoint_id
+        )
+    })
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn advance_lifecycle_cursor(
+    master: &MasterHandle,
+    cursor: &mut u64,
+) -> Result<()> {
+    for record in master.lifecycle_events_since(*cursor).await? {
+        *cursor = record.sequence;
+    }
+    Ok(())
+}
+
 pub(super) async fn wait_for_checkpoint_started(
     master: &MasterHandle,
     cursor: &mut u64,
