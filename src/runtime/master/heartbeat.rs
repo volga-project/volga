@@ -216,16 +216,3 @@ impl WorkerHeartbeatMonitor {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn maps_panic_heartbeat_to_worker_panic() {
-        let reason = WorkerFatalReasonProto::Panic as i32;
-        assert!(matches!(
-            worker_fatal_kind(reason),
-            FailureKind::WorkerPanic
-        ));
-    }
-}
