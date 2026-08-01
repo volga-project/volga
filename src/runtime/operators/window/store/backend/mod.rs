@@ -15,7 +15,7 @@ use super::WindowData;
 
 mod inmem;
 
-pub use inmem::InMemWindowStore;
+pub use inmem::{checkpoint_summary, InMemCheckpointSummary, InMemWindowStore};
 
 pub async fn open_window_operator_store(
     config: &OperatorStateBackendConfig,

@@ -43,6 +43,38 @@ struct PartitionCheckpoint {
     tiles: TileMap,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InMemCheckpointSummary {
+    pub partitions: usize,
+    pub raw_rows: usize,
+    pub triggers: usize,
+    pub min_cursor: Option<Cursor>,
+    pub max_cursor: Option<Cursor>,
+}
+
+pub fn checkpoint_summary(snapshot: &[u8]) -> Result<InMemCheckpointSummary> {
+    let checkpoint: InMemCheckpoint = bincode::deserialize(snapshot)?;
+    let mut raw_rows = 0;
+    let mut min_cursor: Option<Cursor> = None;
+    let mut max_cursor: Option<Cursor> = None;
+    for partition in checkpoint.partitions.values() {
+        raw_rows += partition.raw.len();
+        if let Some(cursor) = partition.raw.first_key_value().map(|(cursor, _)| *cursor) {
+            min_cursor = Some(min_cursor.map_or(cursor, |current| current.min(cursor)));
+        }
+        if let Some(cursor) = partition.raw.last_key_value().map(|(cursor, _)| *cursor) {
+            max_cursor = Some(max_cursor.map_or(cursor, |current| current.max(cursor)));
+        }
+    }
+    Ok(InMemCheckpointSummary {
+        partitions: checkpoint.partitions.len(),
+        raw_rows,
+        triggers: checkpoint.triggers.len(),
+        min_cursor,
+        max_cursor,
+    })
+}
+
 #[derive(Debug, Default)]
 struct InMemState {
     partitions: HashMap<PartitionKey, PartitionState>,

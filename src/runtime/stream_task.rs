@@ -681,6 +681,7 @@ impl StreamTask {
                         } else {
                             None
                         };
+                        let mut checkpoint_propagation = None;
                         if let Message::CheckpointBarrier(ref barrier) = message {
                             let checkpoint_id = barrier.checkpoint_id;
                             let propagation_phase = if is_source {
@@ -688,15 +689,6 @@ impl StreamTask {
                             } else {
                                 crate::runtime::master::server::master_service::CheckpointPropagationPhase::Aligned
                             };
-                            Self::report_checkpoint_propagation(
-                                &mut master_client,
-                                checkpoint_id,
-                                vertex_id.as_ref(),
-                                runtime_context.task_index(),
-                                execution_attempt_id,
-                                propagation_phase,
-                            )
-                            .await?;
 
                             if crate::runtime::operators::operator::operator_config_requires_checkpoint(operator.operator_config()) {
                                 println!(
@@ -737,6 +729,7 @@ impl StreamTask {
                             if let Some(ctrl) = &data_reader_control {
                                 ctrl.unblock_all();
                             }
+                            checkpoint_propagation = Some((checkpoint_id, propagation_phase));
                         }
 
                         // if vertex_id == "Window_1_2" {
@@ -779,6 +772,18 @@ impl StreamTask {
                             vertex_id.clone(),
                             status.clone()
                         ).await;
+
+                        if let Some((checkpoint_id, propagation_phase)) = checkpoint_propagation {
+                            Self::report_checkpoint_propagation(
+                                &mut master_client,
+                                checkpoint_id,
+                                vertex_id.as_ref(),
+                                runtime_context.task_index(),
+                                execution_attempt_id,
+                                propagation_phase,
+                            )
+                            .await?;
+                        }
 
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);

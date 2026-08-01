@@ -196,6 +196,13 @@ impl OperatorTrait for SourceOperator {
             !position.is_empty(),
             "checkpointable source produced empty position"
         );
+        if std::env::var_os("VOLGA_CHECKPOINT_DIAGNOSTICS").is_some() {
+            println!(
+                "[CHECKPOINT_DIAG] source records_generated={:?} checkpoint_bytes={}",
+                function.emit_count(),
+                position.len()
+            );
+        }
         Ok(SerializedCheckpoint::new(position))
     }
 

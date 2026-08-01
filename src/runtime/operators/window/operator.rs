@@ -20,7 +20,9 @@ use crate::runtime::operators::window::frame_utils::require_range_frame;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
-use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
+use crate::runtime::operators::window::store::{
+    checkpoint_summary, open_window_operator_store, StateNamespace, WindowBackendSnapshot,
+};
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
@@ -216,11 +218,25 @@ impl OperatorTrait for WindowOperator {
         self.base.operator_config()
     }
 
-    async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
+    async fn checkpoint(&mut self, checkpoint_id: u64) -> Result<SerializedCheckpoint> {
         let snapshot = self
             .state_ref()
             .checkpoint(self.watermark_frontier)
             .await?;
+        if std::env::var_os("VOLGA_CHECKPOINT_DIAGNOSTICS").is_some() {
+            if let WindowBackendSnapshot::InMemory { snapshot: backend } = &snapshot.backend {
+                let summary = checkpoint_summary(backend)?;
+                println!(
+                    "[CHECKPOINT_DIAG] window checkpoint_id={checkpoint_id} watermark={:?} partitions={} raw_rows={} triggers={} min_cursor={:?} max_cursor={:?}",
+                    snapshot.watermark_frontier,
+                    summary.partitions,
+                    summary.raw_rows,
+                    summary.triggers,
+                    summary.min_cursor,
+                    summary.max_cursor,
+                );
+            }
+        }
         Ok(SerializedCheckpoint::new(bincode::serialize(&snapshot)?))
     }
 
@@ -250,6 +266,13 @@ impl OperatorTrait for WindowOperator {
                             self.output_mode == WindowOutputMode::Emit,
                         )
                         .await;
+                    if dropped > 0 && std::env::var_os("VOLGA_CHECKPOINT_DIAGNOSTICS").is_some()
+                    {
+                        println!(
+                            "[CHECKPOINT_DIAG] window dropped_late_rows={dropped} watermark={:?}",
+                            self.watermark_frontier
+                        );
+                    }
                     debug_assert!(dropped <= input_rows);
                     OperatorPollResult::Continue
                 }
