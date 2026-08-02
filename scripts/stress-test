@@ -91,7 +91,13 @@ FAILURE_MARKER="$LOG_DIR/failed"
 
 run_suite() {
   local cluster="$1"
-  local args=("$ENVIRONMENT" --jobs 1 --retries "$RETRIES" --nextest-profile stress)
+  # Stress --env is the runtime environment; map to the matching run profile.
+  local profile
+  case "$ENVIRONMENT" in
+    local) profile="default" ;;
+    kube) profile="kube" ;;
+  esac
+  local args=("$profile" --jobs 1 --retries "$RETRIES" --nextest-profile stress)
   if [[ -n "$BUILD_JOBS" ]]; then
     args+=(--build-jobs "$BUILD_JOBS")
   fi

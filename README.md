@@ -216,7 +216,7 @@ Use [`scripts/test`](scripts/README.md) for the supported test profiles,
 Docker/Kube environment setup, targeted filters, and repeatable stress runs.
 
 ```bash
-scripts/test local
+scripts/test default
 scripts/test kube
 scripts/test stress --env local --all --runs-per-shard 10 --shards 2
 ```

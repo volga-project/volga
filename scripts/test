@@ -126,24 +126,25 @@ case "$profile" in
       run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
     fi
     ;;
-  grpc)
+  grpc-based)
     if [[ -n "$filter_override" ]]; then
       run_suite "${jobs_override:-1}" default "$filter_override"
     else
-      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+      # Default jobs=1: gRPC/port/process isolation until interference is fixed.
+      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
     fi
     ;;
-  local)
+  default)
     if [[ -n "$filter_override" ]]; then
       run_suite "${jobs_override:-1}" default "$filter_override"
     else
       run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
     fi
     ;;
   all)
     run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-    run_suite "${jobs_override:-${VOLGA_TEST_GRPC_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+    run_suite "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
     run_suite "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
     run_suite "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
     ;;
@@ -161,7 +162,7 @@ case "$profile" in
     run_suite "${jobs_override:-1}" all "$BENCHMARK_FILTER"
     ;;
   *)
-    echo "usage: scripts/test {unit|grpc|local|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME]" >&2
+    echo "usage: scripts/test {unit|grpc-based|default|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME]" >&2
     exit 2
     ;;
 esac

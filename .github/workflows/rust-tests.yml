@@ -12,13 +12,13 @@ on:
         description: Test profile
         type: choice
         options:
-          - local
+          - default
           - unit
-          - grpc
+          - grpc-based
           - kube
           - all
           - stress
-        default: local
+        default: default
 
 concurrency:
   group: rust-tests-${{ github.ref }}
@@ -31,7 +31,7 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
-      TEST_PROFILE: ${{ inputs.profile || 'local' }}
+      TEST_PROFILE: ${{ inputs.profile || 'default' }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -68,6 +68,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: kube-stress-logs-shard-${{ matrix.shard }}
-          path: target/kube-stress/
+          path: target/stress/
           if-no-files-found: warn
           retention-days: 14
