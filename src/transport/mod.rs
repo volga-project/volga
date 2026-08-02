@@ -2,6 +2,7 @@ pub mod batcher;
 pub mod channel;
 pub mod transport_client;
 pub mod transport_backend_actor;
+#[cfg(test)]
 pub mod test_utils;
 pub mod grpc;
 pub mod transport_backend;

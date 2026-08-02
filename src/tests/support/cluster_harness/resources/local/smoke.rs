@@ -141,7 +141,7 @@ impl LocalClusterResources {
         .with_spec(spec.clone());
         let worker_nodes = local_orchestrator.get_worker_nodes().await;
         let expected_workers = local_orchestrator.get_num_expected_workers().await;
-        let master_addr = format!("127.0.0.1:{}", crate::common::test_utils::gen_unique_grpc_port());
+        let master_addr = format!("127.0.0.1:{}", crate::common::ports::gen_unique_grpc_port());
         let worker_orchestrator: Arc<dyn WorkerOrchestrator> =
             Arc::new(LocalWorkerOrchestrator::new(master_addr.clone()));
         let workers = worker_nodes

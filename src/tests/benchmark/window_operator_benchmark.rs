@@ -5,7 +5,8 @@ use crate::{
         spec::pipeline::ExecutionProfile,
         ExecutionMode, PipelineSpecBuilder,
     },
-    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
+    common::ports::gen_unique_grpc_port,
+    common::test_utils::print_pipeline_state,
     tests::support::pipeline_exec,
     runtime::{
         functions::source::{

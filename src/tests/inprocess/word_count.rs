@@ -5,7 +5,8 @@ use crate::{
     },
     common::{
         message::Message,
-        test_utils::{gen_unique_grpc_port, print_pipeline_state},
+        ports::gen_unique_grpc_port,
+        test_utils::print_pipeline_state,
     },
     tests::support::pipeline_exec,
     runtime::{

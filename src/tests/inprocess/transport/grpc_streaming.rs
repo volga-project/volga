@@ -53,7 +53,7 @@ pub async fn stream_grpc_many_clients_one_server() {
     println!("[TEST] Starting multi-client Arrow message streaming example");
     let server_addr = format!(
         "127.0.0.1:{}",
-        crate::common::test_utils::gen_unique_grpc_port()
+        crate::common::ports::gen_unique_grpc_port()
     );
     
     // Create channels for server communication

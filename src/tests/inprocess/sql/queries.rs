@@ -1,5 +1,5 @@
 use crate::{
-    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{MAX_WATERMARK_VALUE, WatermarkMessage, message::Message, test_utils::{gen_unique_grpc_port, verify_message_records_match}}, tests::support::pipeline_exec, runtime::{operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}}, storage::{InMemoryStorageClient, InMemoryStorageServer}
+    api::{compile_logical_graph, ConnectorConfigs, PipelineSpecBuilder, spec::pipeline::ExecutionProfile}, common::{MAX_WATERMARK_VALUE, WatermarkMessage, message::Message, ports::gen_unique_grpc_port, test_utils::verify_message_records_match}, tests::support::pipeline_exec, runtime::{operators::{sink::sink_operator::SinkConfig, source::source_operator::{SourceConfig, VectorSourceConfig}}}, storage::{InMemoryStorageClient, InMemoryStorageServer}
 };
 use anyhow::Result;
 

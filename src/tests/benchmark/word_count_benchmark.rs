@@ -3,7 +3,8 @@ use crate::{
         compile_logical_graph, spec::connectors::SinkSpec, spec::pipeline::ExecutionProfile,
         ConnectorConfigs, PipelineSpecBuilder,
     },
-    common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
+    common::ports::gen_unique_grpc_port,
+    common::test_utils::print_pipeline_state,
     tests::support::pipeline_exec,
     runtime::{
         functions::source::word_count_source::BatchingMode,

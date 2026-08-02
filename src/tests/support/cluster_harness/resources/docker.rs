@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use uuid::Uuid;
 
-use crate::common::test_utils::gen_unique_grpc_port;
+use crate::common::ports::gen_unique_grpc_port;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest;
 use crate::runtime::master::server::master_service::GetLifecycleEventsRequest;

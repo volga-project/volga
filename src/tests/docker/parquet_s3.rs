@@ -3,9 +3,7 @@ use std::collections::HashMap;
 use testcontainers::core::WaitFor;
 use testcontainers::{clients::Cli, GenericImage, RunnableImage};
 
-use crate::runtime::functions::source::parquet::integration_tests::{
-    parquet_roundtrip_via_sink_and_source, test_schema,
-};
+use crate::tests::support::parquet::{parquet_roundtrip_via_sink_and_source, test_schema};
 
 async fn wait_for_localstack_ready(addr: &str) {
     for _ in 0..40 {

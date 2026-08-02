@@ -8,7 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::api::PipelineSpec;
-use crate::common::test_utils::gen_unique_grpc_port;
+use crate::common::ports::gen_unique_grpc_port;
 use crate::tests::support::cluster_harness::PipelineLaunchSpec;
 use crate::tests::support::cluster_harness::backend::ClusterBackend;
 use crate::tests::support::cluster_harness::FaultAction;

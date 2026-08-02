@@ -444,7 +444,7 @@ impl SourceFunctionTrait for HttpRequestSourceFunction {
 mod tests {
     use super::*;
     use crate::runtime::runtime_context::RuntimeContext;
-    use crate::common::test_utils::gen_unique_grpc_port;
+    use crate::common::ports::gen_unique_grpc_port;
     use arrow::datatypes::{DataType, Field, Schema};
     use tokio::time::{sleep, Duration};
     use futures::FutureExt;

@@ -1,5 +1,6 @@
 use crate::common::message::Message;
-use crate::common::test_utils::{create_test_string_batch, gen_unique_grpc_port, IdentityMapFunction};
+use crate::common::ports::gen_unique_grpc_port;
+use crate::common::test_utils::{create_test_string_batch, IdentityMapFunction};
 use crate::runtime::execution_graph::{gen_edge_id, ExecutionEdge, ExecutionGraph, ExecutionVertex};
 use crate::runtime::functions::map::MapFunction;
 use crate::runtime::operators::operator::OperatorConfig;

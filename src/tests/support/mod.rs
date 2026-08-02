@@ -1,5 +1,6 @@
 pub mod checkpoint;
 pub mod cluster_harness;
+pub mod parquet;
 pub mod launch_specs;
 pub mod many_to_many_harness;
 pub mod pipeline_exec;

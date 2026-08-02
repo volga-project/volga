@@ -28,4 +28,4 @@ pub type TaskId = VertexId;
 pub mod partition;
 pub mod collector;
 #[cfg(test)]
-pub mod tests;
+mod stream_task_actor_test;

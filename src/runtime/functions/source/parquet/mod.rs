@@ -205,5 +205,3 @@ fn hash_path(path: &ObjectPath) -> usize {
 
 #[cfg(test)]
 mod unit_tests;
-#[cfg(test)]
-pub mod integration_tests;

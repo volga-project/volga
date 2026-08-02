@@ -7,8 +7,9 @@ use crate::{
     },
     common::{
         message::Message,
+        ports::gen_unique_grpc_port,
         test_utils::{
-            create_test_string_batch, gen_unique_grpc_port, verify_message_records_match,
+            create_test_string_batch, verify_message_records_match,
         },
         WatermarkMessage, MAX_WATERMARK_VALUE,
     },

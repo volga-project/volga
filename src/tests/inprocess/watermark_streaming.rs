@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::api::spec::connectors::{SinkSpec, SourceSpec, SourceSpecKind};
 use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{compile_logical_graph, ExecutionMode, PipelineSpecBuilder};
-use crate::common::test_utils::gen_unique_grpc_port;
+use crate::common::ports::gen_unique_grpc_port;
 use crate::common::types::PipelineId;
 use crate::runtime::functions::source::datagen_source::{DatagenSpec, FieldGenerator};
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;

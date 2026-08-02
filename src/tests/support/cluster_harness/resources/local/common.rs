@@ -7,7 +7,7 @@ use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use tokio::sync::{oneshot, Mutex};
 
-use crate::common::test_utils::gen_unique_grpc_port;
+use crate::common::ports::gen_unique_grpc_port;
 use crate::orchestrator::local::LocalWorkerReplacement;
 use crate::orchestrator::orchestrator::{MasterOrchestrator, WorkerOrchestrator};
 use crate::runtime::master::server::MasterServer;

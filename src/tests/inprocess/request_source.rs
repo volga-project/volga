@@ -3,7 +3,8 @@ use crate::{
         logical_graph::LogicalGraph, spec::pipeline::ExecutionProfile, PipelineSpecBuilder,
         Planner, PlanningContext,
     },
-    common::test_utils::{gen_unique_grpc_port, IdentityMapFunction},
+    common::ports::gen_unique_grpc_port,
+    common::test_utils::IdentityMapFunction,
     tests::support::pipeline_exec,
     runtime::{
         functions::{
