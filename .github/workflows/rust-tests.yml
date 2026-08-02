@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   # default run (unit + inprocess).
-  default_tests:
+  default-tests:
     if: >
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
@@ -63,7 +63,7 @@ jobs:
       - run: scripts/test "$TEST_PROFILE"
 
   # Parallel, non-blocking (does not fail the workflow).
-  docker_tests:
+  docker-tests:
     if: >
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
@@ -98,7 +98,7 @@ jobs:
       - run: scripts/test docker
 
   # Parallel, non-blocking (does not fail the workflow).
-  kube_tests:
+  kube-tests:
     if: >
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
