@@ -5,7 +5,8 @@ on:
   push:
     branches: [master]
   schedule:
-    - cron: "17 */6 * * *"
+    # Hourly (GitHub may delay under load; cron minute granularity is the floor).
+    - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
       profile:
@@ -22,8 +23,9 @@ on:
         default: default
 
 concurrency:
-  group: rust-tests-${{ github.ref }}
-  cancel-in-progress: true
+  # PRs cancel superseded runs; scheduled stress must not cancel itself (jobs can exceed 1h).
+  group: rust-tests-${{ github.event_name == 'schedule' && 'schedule' || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
   # Required gate: unit + local gRPC harness.
