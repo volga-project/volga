@@ -6,8 +6,8 @@ ACTION="${1:-setup}"
 OPTION="${2:-}"
 
 # Testcontainers images used by the docker test profile. Keep tags in sync with:
-# - src/runtime/functions/source/kafka/integration_tests.rs (redpanda)
-# - src/runtime/functions/source/parquet/integration_tests.rs (localstack)
+# - src/tests/docker/kafka.rs (redpanda)
+# - src/tests/docker/parquet_s3.rs (localstack)
 PREFETCH_IMAGES=(
   "localstack/localstack:3.0"
   "redpandadata/redpanda:latest"
