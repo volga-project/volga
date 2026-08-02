@@ -146,7 +146,7 @@ pub(crate) async fn run_watermark_window_pipeline(
         .iter()
         .filter_map(|(vertex_id, metadata)| {
             metadata
-                .get(crate::runtime::observability::task_meta::WINDOW_ROWS_DROPPED_LATE)
+                .get(crate::runtime::operators::window::TASK_METADATA_ROWS_DROPPED_LATE)
                 .map(|dropped| (vertex_id, dropped))
         })
         .map(|(vertex_id, dropped)| {

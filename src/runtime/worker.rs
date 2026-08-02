@@ -5,7 +5,7 @@ use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::VertexId;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::metrics::{MetricsLabels, TaskMetrics, WorkerAggregateMetrics};
-use crate::runtime::observability::snapshot_types::StreamTaskStatus;
+use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
 use crate::transport::{transport_backend_actor::TransportBackendType, TransportBackend, TransportBackendTrait};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
@@ -245,7 +245,7 @@ impl Worker {
         let mut task_statuses: HashMap<VertexId, StreamTaskStatus> = HashMap::new();
         let mut task_metrics: HashMap<VertexId, TaskMetrics> = HashMap::new();
         let mut task_operator_metrics: HashMap<VertexId, TaskOperatorMetrics> = HashMap::new();
-        let mut task_metadata: HashMap<VertexId, HashMap<String, String>> = HashMap::new();
+        let mut task_metadata: HashMap<VertexId, TaskMetadata> = HashMap::new();
 
         for result in task_results {
             if let Ok((vertex_id, state)) = result {

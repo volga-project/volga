@@ -28,7 +28,7 @@ use crate::runtime::operators::window::store::{
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::observability::TaskMetadataReporter;
+use crate::runtime::observability::TaskMetadata;
 use crate::runtime::state::OperatorStates;
 
 pub fn test_input_schema() -> SchemaRef {
@@ -101,7 +101,7 @@ pub struct Harness {
     pub op: WindowOperator,
     pub store: Arc<InMemWindowStore>,
     pub namespace: StateNamespace,
-    pub task_metadata: TaskMetadataReporter,
+    pub task_metadata: TaskMetadata,
 }
 
 impl Harness {

@@ -3,4 +3,5 @@ pub mod source_operator;
 
 pub use source_handles::{
     race_interruptible, Interrupted, SourceHandle, SourceHandles, SourceInterrupt, SourceStats,
+    TASK_METADATA_RECORDS_GENERATED,
 };

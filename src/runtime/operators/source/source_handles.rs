@@ -10,6 +10,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 
 use crate::runtime::VertexId;
+use crate::runtime::observability::TaskMetadata;
+
+pub const TASK_METADATA_RECORDS_GENERATED: &str = "records_generated";
 
 /// Latched cancel + notify for interruptible source waits (checkpoint barrier yield).
 #[derive(Debug, Default)]
@@ -156,14 +159,14 @@ impl SourceHandles {
         }
     }
 
-    pub fn task_metadata(&self, vertex_id: &VertexId) -> HashMap<String, String> {
+    pub fn task_metadata(&self, vertex_id: &VertexId) -> TaskMetadata {
         let guard = self.inner.lock().unwrap();
         let Some(handle) = guard.get(vertex_id) else {
-            return HashMap::new();
+            return TaskMetadata::default();
         };
-        let mut meta = HashMap::new();
+        let meta = TaskMetadata::default();
         meta.insert(
-            crate::runtime::observability::task_meta::RECORDS_GENERATED.to_string(),
+            TASK_METADATA_RECORDS_GENERATED,
             handle.stats.records_generated().to_string(),
         );
         meta

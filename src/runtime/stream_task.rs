@@ -861,7 +861,7 @@ impl StreamTask {
             .source_handles()
             .map(|handles| handles.task_metadata(&self.vertex_id))
             .unwrap_or_default();
-        metadata.extend(self.runtime_context.task_metadata().snapshot());
+        metadata.extend(&self.runtime_context.task_metadata());
         TaskSnapshot {
             vertex_id: self.vertex_id.clone(),
             status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),
