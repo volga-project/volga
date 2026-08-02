@@ -8,9 +8,11 @@ cpu_count() {
   getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
 }
 
-LOCAL_NETWORK_FILTER='
+# Slow / process-isolating tests → nextest profile.grpc-based (90s).
+GRPC_BASED_FILTER='
 test(/runtime::tests::(checkpoint_tests::local|recovery_tests::local|smoke_tests::local|request_source_e2e_test|watermark_streaming_e2e_test|worker_test|word_count_test)/)
 | test(/transport::(tests::transport_backend_matrix_test|grpc::grpc_streaming_service_test)/)
+| test(/sql_testing::/)
 '
 DOCKER_FILTER='
 test(/::docker::/)
@@ -19,7 +21,7 @@ test(/::docker::/)
 '
 KUBE_FILTER='test(/::kube::/)'
 BENCHMARK_FILTER='test(/benchmark/)'
-UNIT_FILTER="not ($LOCAL_NETWORK_FILTER | $DOCKER_FILTER | $KUBE_FILTER | $BENCHMARK_FILTER)"
+UNIT_FILTER="not ($GRPC_BASED_FILTER | $DOCKER_FILTER | $KUBE_FILTER | $BENCHMARK_FILTER)"
 
 profile="${1:-unit}"
 if [[ $# -gt 0 ]]; then
@@ -82,7 +84,8 @@ run_suite() {
   local jobs="$2"
   local ignored="$3"
   local filter="$4"
-  local profile_args=()
+  # Nextest config profile (timeouts); CLI --nextest-profile overrides.
+  local nex_profile="${5:-default}"
   local rc=0
   local log_dir="${CARGO_TARGET_DIR}/test-runs"
   local log_file
@@ -90,14 +93,14 @@ run_suite() {
   log_file="$(mktemp "${log_dir}/${name}.XXXXXX")"
 
   if [[ -n "$nextest_profile" ]]; then
-    profile_args=(--profile "$nextest_profile")
+    nex_profile="$nextest_profile"
   fi
-  echo "==> suite ${name} (log: ${log_file})"
+  echo "==> suite ${name} (nextest-profile=${nex_profile}, log: ${log_file})"
   # final-status-level=fail: compact fail list at end of each suite without dumping all passes.
   set +e
   cargo nextest run \
     --lib \
-    "${profile_args[@]}" \
+    --profile "$nex_profile" \
     --build-jobs "$build_jobs" \
     --test-threads "$jobs" \
     --retries "$retries" \
@@ -158,10 +161,10 @@ case "$profile" in
     ;;
   grpc-based)
     if [[ -n "$filter_override" ]]; then
-      run_suite grpc-based "${jobs_override:-1}" default "$filter_override"
+      run_suite grpc-based "${jobs_override:-1}" default "$filter_override" grpc-based
     else
       # Default jobs=1: gRPC/port/process isolation until interference is fixed.
-      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
     fi
     ;;
   default)
@@ -169,23 +172,23 @@ case "$profile" in
       run_suite default "${jobs_override:-1}" default "$filter_override"
     else
       run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
     fi
     ;;
   all)
     run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-    run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
-    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
-    run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
+    run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
+    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
+    run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER" kube
     ;;
   docker)
-    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
+    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
     ;;
   kube)
     if [[ -n "$filter_override" ]]; then
-      run_suite kube "${jobs_override:-1}" ignored-only "$filter_override"
+      run_suite kube "${jobs_override:-1}" ignored-only "$filter_override" kube
     else
-      run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
+      run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER" kube
     fi
     ;;
   benchmark)

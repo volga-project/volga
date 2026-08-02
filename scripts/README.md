@@ -17,7 +17,7 @@ scripts/test all
 | Profile | What it runs |
 |---|---|
 | `unit` | Fast tests with no gRPC/cluster harness, Docker, or Kube |
-| `grpc-based` | Tests that use in-process gRPC / local cluster harness; default concurrency 1 to avoid interference |
+| `grpc-based` | Local gRPC/cluster harness, transport matrix, SQL suite; concurrency 1; nextest profile 90s |
 | `default` | `unit` + `grpc-based` (required PR/CI gate) |
 | `docker` | Docker / Localstack / Kafka-style ignored tests |
 | `kube` | `::kube::` ignored tests on Kind |
@@ -122,4 +122,5 @@ Stress options:
 --fresh-cluster          Recreate the Kind cluster before each iteration
 ```
 
-Stress uses the `stress` Nextest profile with a 180s timeout for kube tests.
+Timeouts are suite-scoped nextest profiles only (`default` 30s, `grpc-based` 90s,
+`docker` 120s, `kube` 90s, `stress` 180s) — no per-test overrides.

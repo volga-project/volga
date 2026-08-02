@@ -1,30 +1,25 @@
+# Timeouts are suite-scoped via nextest profiles (scripts/test picks the profile).
+# No per-test overrides — put slow tests in the matching suite filter instead.
+
 [profile.default]
 slow-timeout = { period = "30s", terminate-after = 1 }
 fail-fast = false
 
-[profile.stress]
+[profile.grpc-based]
+slow-timeout = { period = "90s", terminate-after = 1 }
+fail-fast = false
+
+# LocalStack / Kafka / docker-backed (scripts/test docker).
+[profile.docker]
 slow-timeout = { period = "120s", terminate-after = 1 }
 fail-fast = false
 
-[[profile.default.overrides]]
-filter = "test(/::kube::/)"
+# Kind / kube (scripts/test kube).
+[profile.kube]
 slow-timeout = { period = "90s", terminate-after = 1 }
+fail-fast = false
 
-# LocalStack / Kafka container bring-up often exceeds the 30s default.
-[[profile.default.overrides]]
-filter = "test(/::docker::/) | test(/kafka::integration_tests/) | test(parquet_s3_roundtrip_localstack)"
-slow-timeout = { period = "120s", terminate-after = 1 }
-
-# SQL suite runs many queries; CI hosts can exceed the 30s default (~15s locally).
-[[profile.default.overrides]]
-filter = "test(test_sql_queries)"
-slow-timeout = { period = "90s", terminate-after = 1 }
-
-# Multiple kill/restore cycles; 30s is too short on CI (often dies mid-attempt).
-[[profile.default.overrides]]
-filter = "test(sequential_checkpoint_failures_restore)"
-slow-timeout = { period = "120s", terminate-after = 1 }
-
-[[profile.stress.overrides]]
-filter = "test(/::kube::/)"
+# scripts/stress-test (kube-heavy).
+[profile.stress]
 slow-timeout = { period = "180s", terminate-after = 1 }
+fail-fast = false
