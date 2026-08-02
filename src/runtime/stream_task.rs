@@ -856,11 +856,12 @@ impl StreamTask {
     }
 
     pub async fn get_state(&self) -> TaskSnapshot {
-        let metadata = self
+        let mut metadata = self
             .runtime_context
             .source_handles()
             .map(|handles| handles.task_metadata(&self.vertex_id))
             .unwrap_or_default();
+        metadata.extend(self.runtime_context.task_metadata().snapshot());
         TaskSnapshot {
             vertex_id: self.vertex_id.clone(),
             status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),

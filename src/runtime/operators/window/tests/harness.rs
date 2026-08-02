@@ -28,6 +28,7 @@ use crate::runtime::operators::window::store::{
 };
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::observability::TaskMetadataReporter;
 use crate::runtime::state::OperatorStates;
 
 pub fn test_input_schema() -> SchemaRef {
@@ -100,6 +101,7 @@ pub struct Harness {
     pub op: WindowOperator,
     pub store: Arc<InMemWindowStore>,
     pub namespace: StateNamespace,
+    pub task_metadata: TaskMetadataReporter,
 }
 
 impl Harness {
@@ -123,6 +125,7 @@ impl Harness {
         namespace: StateNamespace,
     ) -> Self {
         let ctx = runtime_context();
+        let task_metadata = ctx.task_metadata();
         let mut op = WindowOperator::new(OperatorConfig::WindowConfig(cfg));
         op.set_state_with_store_and_ns(operator_store, namespace.clone());
         op.open(&ctx).await.expect("open");
@@ -130,6 +133,7 @@ impl Harness {
             op,
             store,
             namespace,
+            task_metadata,
         }
     }
 

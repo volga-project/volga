@@ -279,6 +279,52 @@ fn task_record_counts(snapshot: &PipelineSnapshot) -> Result<Vec<(i32, u64)>> {
     Ok(counts)
 }
 
+fn assert_no_window_late_drops(snapshot: &PipelineSnapshot) -> Result<()> {
+    let mut window_tasks = Vec::new();
+    for worker in snapshot.worker_states.values() {
+        for (vertex_id, meta) in &worker.task_metadata {
+            let Some(dropped) = meta.get(task_meta::WINDOW_ROWS_DROPPED_LATE) else {
+                continue;
+            };
+            let dropped = dropped.parse::<u64>().map_err(|e| {
+                anyhow!(
+                    "bad {} for {vertex_id}: {e}",
+                    task_meta::WINDOW_ROWS_DROPPED_LATE
+                )
+            })?;
+            let accepted = meta
+                .get(task_meta::WINDOW_ROWS_ACCEPTED)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "missing {} for window task {vertex_id}",
+                        task_meta::WINDOW_ROWS_ACCEPTED
+                    )
+                })?
+                .parse::<u64>()
+                .map_err(|e| {
+                    anyhow!(
+                        "bad {} for {vertex_id}: {e}",
+                        task_meta::WINDOW_ROWS_ACCEPTED
+                    )
+                })?;
+            window_tasks.push((vertex_id, accepted, dropped));
+        }
+    }
+    if window_tasks.is_empty() {
+        return Err(anyhow!(
+            "no window task metadata with {}",
+            task_meta::WINDOW_ROWS_DROPPED_LATE
+        ));
+    }
+    let dropped: u64 = window_tasks.iter().map(|(_, _, dropped)| *dropped).sum();
+    if dropped != 0 {
+        return Err(anyhow!(
+            "window dropped {dropped} late rows: {window_tasks:?}"
+        ));
+    }
+    Ok(())
+}
+
 fn aggregates_match(expected: &WindowAggregateRow, actual: &WindowAggregateRow) -> bool {
     const EPSILON: f64 = 1e-9;
     expected.value.to_bits() == actual.value.to_bits()
@@ -380,6 +426,7 @@ pub(super) async fn assert_sink_matches_offline_datagen(
     let input_rows = materialize_input_rows(&task_counts, workload)?;
 
     if workload == CheckpointWorkload::Window {
+        assert_no_window_late_drops(&snapshot)?;
         let expected = expected_window_rows(input_rows);
         let actual = window_sink_rows(storage)?;
         return assert_window_rows(&expected, &actual, env, total, &task_counts);
