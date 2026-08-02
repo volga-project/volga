@@ -20,6 +20,5 @@ pub use launch::{
     MULTI_FAILURE_COUNT, MULTI_WORKER_PARALLELISM, SINGLE_WORKER_PARALLELISM,
 };
 pub use mid_flight::{
-    assert_mid_flight_restore_none, assert_mid_flight_restore_prior,
     run_checkpoint_mid_flight_kill_after_safe, run_checkpoint_mid_flight_kill_no_prior,
 };
