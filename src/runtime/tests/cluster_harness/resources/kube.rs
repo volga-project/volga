@@ -29,18 +29,21 @@ struct KubeResources {
 }
 
 impl KubeResources {
-    fn stop(mut self) {
-        let _ = kubectl(&[
+    fn stop(mut self) -> Result<()> {
+        self.storage_port_forward.kill().ok();
+        self.master_port_forward.kill().ok();
+        kubectl(&[
             "-n",
             "default",
             "delete",
             "volgapipeline",
             &self.pipeline_name,
             "--ignore-not-found=true",
-        ]);
-        let _ = fs::remove_file(self.manifest_path);
-        let _ = self.storage_port_forward.kill();
-        let _ = self.master_port_forward.kill();
+            "--wait=true",
+        ])?;
+        wait_for_pipeline_deleted(&self.pipeline_name)?;
+        fs::remove_file(self.manifest_path).ok();
+        Ok(())
     }
 }
 
@@ -64,7 +67,7 @@ impl KubeCluster {
 #[async_trait]
 impl ClusterBackend for KubeCluster {
     async fn launch(&mut self, launch: PipelineLaunchSpec) -> Result<Vec<String>> {
-        let resources = KubeClusterResources::launch(launch)?;
+        let resources = KubeClusterResources::launch(launch).await?;
         let worker_ids = resources.worker_ids();
         self.resources = Some(resources);
         Ok(worker_ids)
@@ -84,7 +87,7 @@ impl ClusterBackend for KubeCluster {
 
     async fn shutdown(&mut self) -> Result<()> {
         if let Some(resources) = self.resources.as_mut() {
-            resources.shutdown();
+            resources.shutdown()?;
         }
         self.resources = None;
         Ok(())
@@ -144,10 +147,13 @@ impl ClusterBackend for KubeCluster {
 }
 
 impl KubeClusterResources {
-    pub fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
+    pub async fn launch(launch: PipelineLaunchSpec) -> Result<Self> {
         start_storage()?;
         let storage_port = gen_unique_grpc_port();
         let storage_port_forward = start_storage_port_forward(storage_port)?;
+        let storage_endpoint = format!("http://127.0.0.1:{storage_port}");
+        wait_for_local_port(storage_port, Duration::from_secs(30))?;
+        wait_for_empty_storage(&storage_endpoint).await?;
         let pipeline_name = format!("kube-harness-{}", Uuid::new_v4().simple());
         let manifest_path = write_pipeline_manifest(
             &pipeline_name,
@@ -160,7 +166,6 @@ impl KubeClusterResources {
         wait_for_pipeline(&pipeline_name)?;
         let master_port = gen_unique_grpc_port();
         let master_port_forward = start_master_port_forward(&pipeline_name, master_port)?;
-        wait_for_local_port(storage_port, Duration::from_secs(30))?;
         wait_for_local_port(master_port, Duration::from_secs(30))?;
 
         Ok(Self {
@@ -171,7 +176,7 @@ impl KubeClusterResources {
                 master_port_forward,
                 master_port,
             }),
-            storage_endpoint: format!("http://127.0.0.1:{storage_port}"),
+            storage_endpoint,
             expected_output_rows: launch.expected_output_rows,
             worker_ids: (0..launch.worker_count)
                 .map(|index| format!("{pipeline_name}-worker-{index}"))
@@ -230,16 +235,37 @@ impl KubeClusterResources {
         Ok(())
     }
 
-    pub fn shutdown(&mut self) {
+    pub fn shutdown(&mut self) -> Result<()> {
         if let Some(resources) = self.resources.take() {
-            resources.stop();
+            resources.stop()?;
         }
+        Ok(())
     }
 
     fn resources(&self) -> Result<&KubeResources> {
         self.resources
             .as_ref()
             .context("kube resources are stopped")
+    }
+}
+
+async fn wait_for_empty_storage(endpoint: &str) -> Result<()> {
+    let start = tokio::time::Instant::now();
+    loop {
+        let snapshot = InMemoryStorageClient::new(endpoint.to_string())
+            .await?
+            .snapshot()
+            .await?;
+        if snapshot.row_count() == 0 {
+            return Ok(());
+        }
+        if start.elapsed() > Duration::from_secs(30) {
+            return Err(anyhow!(
+                "storage at {endpoint} retained {} rows after reset",
+                snapshot.row_count()
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
 
@@ -252,7 +278,9 @@ fn start_storage() -> Result<()> {
         "delete",
         "deployment/volga-test-storage",
         "--ignore-not-found=true",
+        "--wait=true",
     ])?;
+    wait_for_no_pods("app.kubernetes.io/name=volga-test-storage")?;
     kubectl(&["apply", "-k", manifest_dir.to_str().unwrap()])?;
     kubectl(&[
         "-n",
@@ -327,8 +355,66 @@ fn wait_for_pipeline(pipeline_name: &str) -> Result<()> {
     }
 }
 
+fn wait_for_pipeline_deleted(pipeline_name: &str) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        let pipeline_deleted = kubectl(&[
+            "-n",
+            "default",
+            "get",
+            "volgapipeline",
+            pipeline_name,
+        ])
+        .is_err();
+        let pods_deleted = kubectl(&[
+            "-n",
+            "default",
+            "get",
+            "pods",
+            "-l",
+            &format!("volga.io/name={pipeline_name}"),
+            "-o",
+            "jsonpath={.items[*].metadata.name}",
+        ])?
+        .trim()
+        .is_empty();
+        if pipeline_deleted && pods_deleted {
+            return Ok(());
+        }
+        if start.elapsed() > Duration::from_secs(120) {
+            return Err(anyhow!(
+                "timeout waiting for pipeline {pipeline_name} pods to terminate"
+            ));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
+fn wait_for_no_pods(label: &str) -> Result<()> {
+    let start = std::time::Instant::now();
+    loop {
+        let pods = kubectl(&[
+            "-n",
+            "default",
+            "get",
+            "pods",
+            "-l",
+            label,
+            "-o",
+            "jsonpath={.items[*].metadata.name}",
+        ])?;
+        if pods.trim().is_empty() {
+            return Ok(());
+        }
+        if start.elapsed() > Duration::from_secs(120) {
+            return Err(anyhow!("timeout waiting for pods matching {label} to terminate"));
+        }
+        std::thread::sleep(Duration::from_secs(1));
+    }
+}
+
 fn start_storage_port_forward(local_port: u16) -> Result<Child> {
-    Command::new("kubectl")
+    kubectl_command()
         .args([
             "-n",
             "default",
@@ -343,7 +429,7 @@ fn start_storage_port_forward(local_port: u16) -> Result<Child> {
 }
 
 fn start_master_port_forward(pipeline_name: &str, local_port: u16) -> Result<Child> {
-    Command::new("kubectl")
+    kubectl_command()
         .args([
             "-n",
             "default",
@@ -436,7 +522,7 @@ async fn master_stop_sources(master_port: u16) -> Result<()> {
 }
 
 fn kubectl(args: &[&str]) -> Result<String> {
-    let output = Command::new("kubectl")
+    let output = kubectl_command()
         .args(args)
         .output()
         .with_context(|| format!("failed to execute kubectl {args:?}"))?;
@@ -447,4 +533,12 @@ fn kubectl(args: &[&str]) -> Result<String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn kubectl_command() -> Command {
+    let mut command = Command::new("kubectl");
+    if let Ok(context) = std::env::var("VOLGA_KUBE_CONTEXT") {
+        command.args(["--context", &context]);
+    }
+    command
 }

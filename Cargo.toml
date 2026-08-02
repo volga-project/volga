@@ -1,6 +1,9 @@
 [profile.dev]
 incremental = true
 
+[profile.test]
+debug = 0
+
 [profile.release]
 # Keep debug info for profiling
 debug = "line-tables-only"

@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ENVIRONMENT=""
+RUNS_PER_SHARD=10
+SHARDS=1
+FRESH_CLUSTER=false
+BUILD_JOBS=""
+RETRIES=0
+RUN_ALL=false
+FILTER=""
+RUN_ID="$(date +%Y%m%d%H%M%S)-$$"
+LOG_DIR="$ROOT/target/stress/$RUN_ID"
+
+usage() {
+  echo "usage: scripts/test stress --env {local|kube} (--all | --test NAME [--test NAME...] | --filter EXPR) [--runs-per-shard N] [--shards N] [--fresh-cluster] [--build-jobs N] [--retries N]" >&2
+}
+
+append_test() {
+  if [[ -n "$FILTER" ]]; then
+    FILTER+=" | "
+  fi
+  FILTER+="test($1)"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --env)
+      ENVIRONMENT="$2"
+      shift 2
+      ;;
+    --runs-per-shard|--runs-per-cluster)
+      RUNS_PER_SHARD="$2"
+      shift 2
+      ;;
+    --shards|--clusters)
+      SHARDS="$2"
+      shift 2
+      ;;
+    --fresh-cluster)
+      FRESH_CLUSTER=true
+      shift
+      ;;
+    --test)
+      append_test "$2"
+      shift 2
+      ;;
+    --filter)
+      [[ -z "$FILTER" ]] || { usage; exit 2; }
+      FILTER="$2"
+      shift 2
+      ;;
+    --all)
+      RUN_ALL=true
+      shift
+      ;;
+    --build-jobs)
+      BUILD_JOBS="$2"
+      shift 2
+      ;;
+    --retries)
+      RETRIES="$2"
+      shift 2
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+[[ "$ENVIRONMENT" == "local" || "$ENVIRONMENT" == "kube" ]] || { usage; exit 2; }
+[[ "$RUNS_PER_SHARD" =~ ^[1-9][0-9]*$ ]] || { usage; exit 2; }
+[[ "$SHARDS" =~ ^[1-9][0-9]*$ ]] || { usage; exit 2; }
+if [[ "$RUN_ALL" == true && -n "$FILTER" ]]; then
+  usage
+  exit 2
+fi
+if [[ "$RUN_ALL" != true && -z "$FILTER" ]]; then
+  usage
+  exit 2
+fi
+if [[ "$ENVIRONMENT" != "kube" && "$FRESH_CLUSTER" == true ]]; then
+  echo "--fresh-cluster is only valid with --env kube" >&2
+  exit 2
+fi
+
+mkdir -p "$LOG_DIR"
+FAILURE_MARKER="$LOG_DIR/failed"
+
+run_suite() {
+  local cluster="$1"
+  # Stress --env is the runtime environment; map to the matching run profile.
+  local profile
+  case "$ENVIRONMENT" in
+    local) profile="default" ;;
+    kube) profile="kube" ;;
+  esac
+  local args=("$profile" --jobs 1 --retries "$RETRIES" --nextest-profile stress)
+  if [[ -n "$BUILD_JOBS" ]]; then
+    args+=(--build-jobs "$BUILD_JOBS")
+  fi
+  if [[ "$RUN_ALL" != true ]]; then
+    args+=(--filter "$FILTER")
+  fi
+  if [[ "$ENVIRONMENT" == "kube" ]]; then
+    VOLGA_KIND_CLUSTER="$cluster" VOLGA_KUBE_CONTEXT="kind-$cluster" \
+      "$ROOT/scripts/test" "${args[@]}"
+  else
+    "$ROOT/scripts/test" "${args[@]}"
+  fi
+}
+
+run_shard() {
+  local shard="$1"
+  local cluster="volga-stress-${RUN_ID}-${shard}"
+  local log_file="$LOG_DIR/shard-$shard.log"
+  local run
+
+  cleanup_cluster() {
+    if [[ "$ENVIRONMENT" == "kube" ]]; then
+      VOLGA_KIND_CLUSTER="$cluster" "$ROOT/scripts/kube-test-env" destroy >>"$log_file" 2>&1 || true
+    fi
+  }
+  trap cleanup_cluster EXIT
+
+  for ((run = 1; run <= RUNS_PER_SHARD; run++)); do
+    [[ -e "$FAILURE_MARKER" ]] && return 0
+    if [[ "$ENVIRONMENT" == "kube" && ("$run" == 1 || "$FRESH_CLUSTER" == true) ]]; then
+      if [[ "$run" -gt 1 ]]; then
+        cleanup_cluster
+      fi
+      VOLGA_KIND_CLUSTER="$cluster" "$ROOT/scripts/kube-test-env" setup >>"$log_file" 2>&1
+    fi
+    echo "=== $ENVIRONMENT shard $shard run $run/$RUNS_PER_SHARD ===" | tee -a "$log_file"
+    if run_suite "$cluster" >>"$log_file" 2>&1; then
+      echo "=== $ENVIRONMENT shard $shard run $run: pass ===" | tee -a "$log_file"
+    else
+      echo "=== $ENVIRONMENT shard $shard run $run: fail ===" | tee -a "$log_file"
+      touch "$FAILURE_MARKER"
+      return 1
+    fi
+  done
+}
+
+pids=()
+for ((shard = 1; shard <= SHARDS; shard++)); do
+  run_shard "$shard" &
+  pids+=("$!")
+done
+
+failed=0
+for pid in "${pids[@]}"; do
+  if ! wait "$pid"; then
+    failed=1
+  fi
+done
+
+echo "Stress logs: $LOG_DIR"
+if [[ "$failed" -ne 0 ]]; then
+  rg -n "Error: |=== $ENVIRONMENT shard .*: fail ===" "$LOG_DIR" || true
+fi
+exit "$failed"

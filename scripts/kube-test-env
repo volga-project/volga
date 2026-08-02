@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CLUSTER_NAME="${VOLGA_KIND_CLUSTER:-kubevolga}"
+CONTEXT="kind-$CLUSTER_NAME"
+ACTION="${1:-setup}"
+REBUILD="${2:-}"
+
+require() {
+  command -v "$1" >/dev/null || {
+    echo "missing required command: $1" >&2
+    exit 2
+  }
+}
+
+cluster_exists() {
+  kind get clusters 2>/dev/null |
+    awk -v name="$CLUSTER_NAME" '$0 == name { found = 1 } END { exit !found }'
+}
+
+kubectl_test() {
+  kubectl --context "$CONTEXT" "$@"
+}
+
+cleanup_resources() {
+  if ! cluster_exists; then
+    return
+  fi
+
+  while IFS= read -r resource; do
+    if [[ -n "$resource" ]]; then
+      kubectl_test -n default delete "$resource" --ignore-not-found=true
+    fi
+  done < <(
+    kubectl_test -n default get volgapipeline -o name 2>/dev/null |
+      awk -F/ '$2 ~ /^kube-harness-/'
+  )
+
+  kubectl_test delete -k "$ROOT/kubevolga/config/test-storage" \
+    --ignore-not-found=true >/dev/null 2>&1 || true
+}
+
+setup() {
+  require docker
+  require kind
+  require kubectl
+  require make
+  docker info >/dev/null
+
+  if cluster_exists; then
+    echo "using existing Kind cluster: $CLUSTER_NAME"
+  else
+    kind create cluster --name "$CLUSTER_NAME"
+  fi
+  kubectl_test wait --for=condition=Ready nodes --all --timeout=120s
+
+  local build_args=()
+  if [[ "$REBUILD" == "--rebuild" ]]; then
+    build_args+=(--no-cache)
+  fi
+  docker build "${build_args[@]}" -t kubevolga:dev "$ROOT/kubevolga"
+  docker build "${build_args[@]}" -t volga:latest "$ROOT"
+
+  kind load docker-image kubevolga:dev --name "$CLUSTER_NAME"
+  kind load docker-image volga:latest --name "$CLUSTER_NAME"
+
+  make -C "$ROOT/kubevolga" \
+    KUBECTL="kubectl --context $CONTEXT" install deploy
+  kubectl_test wait --for=condition=Established \
+    crd/volgapipelines.volga.io --timeout=120s
+  cleanup_resources
+
+  kubectl_test -n kubevolga-system rollout restart deployment/kubevolga-operator
+  kubectl_test -n kubevolga-system rollout status \
+    deployment/kubevolga-operator --timeout=120s
+}
+
+destroy() {
+  require kind
+  if cluster_exists; then
+    kind delete cluster --name "$CLUSTER_NAME"
+  else
+    echo "Kind cluster does not exist: $CLUSTER_NAME"
+  fi
+}
+
+case "$ACTION" in
+  setup)
+    setup
+    ;;
+  cleanup)
+    require kind
+    require kubectl
+    cleanup_resources
+    ;;
+  destroy)
+    destroy
+    ;;
+  *)
+    echo "usage: scripts/kube-test-env {setup|cleanup|destroy} [--rebuild]" >&2
+    exit 2
+    ;;
+esac

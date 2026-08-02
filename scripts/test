@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export CARGO_TARGET_DIR="${VOLGA_CARGO_TARGET_DIR:-$ROOT/target}"
+
+cpu_count() {
+  getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
+}
+
+# Slow / process-isolating tests → nextest profile.grpc-based (90s).
+GRPC_BASED_FILTER='
+test(/runtime::tests::(checkpoint_tests::local|recovery_tests::local|smoke_tests::local|request_source_e2e_test|watermark_streaming_e2e_test|worker_test|word_count_test)/)
+| test(/transport::(tests::transport_backend_matrix_test|grpc::grpc_streaming_service_test)/)
+| test(/sql_testing::/)
+'
+DOCKER_FILTER='
+test(/::docker::/)
+| test(/runtime::functions::source::kafka::integration_tests/)
+| test(parquet_s3_roundtrip_localstack)
+'
+KUBE_FILTER='test(/::kube::/)'
+BENCHMARK_FILTER='test(/benchmark/)'
+UNIT_FILTER="not ($GRPC_BASED_FILTER | $DOCKER_FILTER | $KUBE_FILTER | $BENCHMARK_FILTER)"
+
+profile="${1:-unit}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
+
+if [[ "$profile" == "stress" ]]; then
+  exec "$ROOT/scripts/stress-test" "$@"
+fi
+
+jobs_override=""
+build_jobs="$(cpu_count)"
+retries=0
+prepared=false
+filter_override=""
+nextest_profile=""
+keep_going=false
+suite_status=0
+failed_suites=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --jobs)
+      jobs_override="$2"
+      shift 2
+      ;;
+    --build-jobs)
+      build_jobs="$2"
+      shift 2
+      ;;
+    --retries)
+      retries="$2"
+      shift 2
+      ;;
+    --prepared)
+      prepared=true
+      shift
+      ;;
+    --filter)
+      filter_override="$2"
+      shift 2
+      ;;
+    --nextest-profile)
+      nextest_profile="$2"
+      shift 2
+      ;;
+    --keep-going)
+      # Continue remaining suites after a suite failure (default / all).
+      keep_going=true
+      shift
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+run_suite() {
+  local name="$1"
+  local jobs="$2"
+  local ignored="$3"
+  local filter="$4"
+  # Nextest config profile (timeouts); CLI --nextest-profile overrides.
+  local nex_profile="${5:-default}"
+  local rc=0
+  local log_dir="${CARGO_TARGET_DIR}/test-runs"
+  local log_file
+  mkdir -p "$log_dir"
+  log_file="$(mktemp "${log_dir}/${name}.XXXXXX")"
+
+  if [[ -n "$nextest_profile" ]]; then
+    nex_profile="$nextest_profile"
+  fi
+  echo "==> suite ${name} (nextest-profile=${nex_profile}, log: ${log_file})"
+  # final-status-level=fail: compact fail list at end of each suite without dumping all passes.
+  set +e
+  cargo nextest run \
+    --lib \
+    --profile "$nex_profile" \
+    --build-jobs "$build_jobs" \
+    --test-threads "$jobs" \
+    --retries "$retries" \
+    --run-ignored "$ignored" \
+    --failure-output final \
+    --final-status-level fail \
+    -E "$filter" 2>&1 | tee "$log_file"
+  rc=${PIPESTATUS[0]}
+  set -e
+  if [[ "$rc" -ne 0 ]]; then
+    suite_status="$rc"
+    failed_suites+=("${name} (exit ${rc}, log ${log_file})")
+    if [[ "$keep_going" != true ]]; then
+      exit "$rc"
+    fi
+    echo "suite ${name} failed (exit $rc); continuing because --keep-going" >&2
+  fi
+}
+
+check_docker() {
+  "$ROOT/scripts/docker-test-env" setup
+}
+
+check_kube() {
+  local context="kind-${VOLGA_KIND_CLUSTER:-kubevolga}"
+  if [[ "$prepared" != true ]]; then
+    "$ROOT/scripts/kube-test-env" setup
+  fi
+  export VOLGA_KUBE_CONTEXT="$context"
+}
+
+cleanup_kube() {
+  "$ROOT/scripts/kube-test-env" cleanup || true
+}
+
+case "$profile" in
+  docker)
+    check_docker
+    ;;
+  kube)
+    check_kube
+    trap cleanup_kube EXIT
+    ;;
+  all)
+    check_docker
+    check_kube
+    trap cleanup_kube EXIT
+    ;;
+esac
+
+case "$profile" in
+  unit)
+    if [[ -n "$filter_override" ]]; then
+      run_suite unit "${jobs_override:-1}" default "$filter_override"
+    else
+      run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+    fi
+    ;;
+  grpc-based)
+    if [[ -n "$filter_override" ]]; then
+      run_suite grpc-based "${jobs_override:-1}" default "$filter_override" grpc-based
+    else
+      # Default jobs=1: gRPC/port/process isolation until interference is fixed.
+      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
+    fi
+    ;;
+  default)
+    if [[ -n "$filter_override" ]]; then
+      run_suite default "${jobs_override:-1}" default "$filter_override"
+    else
+      run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
+    fi
+    ;;
+  all)
+    run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+    run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
+    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
+    run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER" kube
+    ;;
+  docker)
+    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
+    ;;
+  kube)
+    if [[ -n "$filter_override" ]]; then
+      run_suite kube "${jobs_override:-1}" ignored-only "$filter_override" kube
+    else
+      run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER" kube
+    fi
+    ;;
+  benchmark)
+    run_suite benchmark "${jobs_override:-1}" all "$BENCHMARK_FILTER"
+    ;;
+  *)
+    echo "usage: scripts/test {unit|grpc-based|default|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME] [--keep-going]" >&2
+    exit 2
+    ;;
+esac
+
+if [[ "${#failed_suites[@]}" -gt 0 ]]; then
+  echo "======== failed suites ========" >&2
+  printf '  - %s\n' "${failed_suites[@]}" >&2
+  echo "Per-suite logs under ${CARGO_TARGET_DIR}/test-runs/; grep FAIL in those files for test names." >&2
+fi
+
+exit "$suite_status"

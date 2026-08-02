@@ -1,7 +1,8 @@
 //! Shared waits / harness finish for checkpoint e2e runners.
 
 use anyhow::{anyhow, Result};
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use crate::runtime::master::LifecycleEvent;
 use crate::runtime::tests::cluster_harness::{LifecycleOracle, MasterHandle, RuntimeEnv, TestCluster};
@@ -36,6 +37,34 @@ pub(super) async fn wait_for_checkpoint_completed(
     }
 }
 
+pub(super) async fn wait_for_checkpoint_completed_id(
+    master: &MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+    checkpoint_id: u64,
+) -> Result<()> {
+    LifecycleOracle::wait_for(master, cursor, timeout, |event| {
+        matches!(
+            event,
+            LifecycleEvent::CheckpointCompleted {
+                checkpoint_id: id
+            } if *id == checkpoint_id
+        )
+    })
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn advance_lifecycle_cursor(
+    master: &MasterHandle,
+    cursor: &mut u64,
+) -> Result<()> {
+    for record in master.lifecycle_events_since(*cursor).await? {
+        *cursor = record.sequence;
+    }
+    Ok(())
+}
+
 pub(super) async fn wait_for_checkpoint_started(
     master: &MasterHandle,
     cursor: &mut u64,
@@ -67,13 +96,42 @@ fn finish_timeout(env: RuntimeEnv, failure_count: usize) -> Duration {
     base + Duration::from_secs(20 * failure_count as u64)
 }
 
-/// After the scenario is done: stop sources, then wait for `PipelineFinished`.
+/// Stop sources (after any in-flight CP settles), then wait for `PipelineFinished`.
 pub(super) async fn harness_finish_pipeline(
     cluster: &TestCluster,
     cursor: &mut u64,
     env: RuntimeEnv,
     failure_count: usize,
 ) -> Result<()> {
+    // Avoid StopSources during an in-flight CP (timeout → empty-replace recovery).
+    let idle_timeout = match env {
+        RuntimeEnv::Local => Duration::from_secs(4),
+        RuntimeEnv::Kube | RuntimeEnv::Docker => Duration::from_secs(45),
+    };
+    let started = Instant::now();
+    loop {
+        let mut open = HashSet::new();
+        for record in cluster.master().lifecycle_events_since(0).await? {
+            match record.event {
+                LifecycleEvent::CheckpointStarted { checkpoint_id, .. } => {
+                    open.insert(checkpoint_id);
+                }
+                LifecycleEvent::CheckpointCompleted { checkpoint_id }
+                | LifecycleEvent::CheckpointFailed { checkpoint_id, .. } => {
+                    open.remove(&checkpoint_id);
+                }
+                _ => {}
+            }
+        }
+        if open.is_empty() {
+            break;
+        }
+        if started.elapsed() >= idle_timeout {
+            return Err(anyhow!("in-flight checkpoint(s) {open:?} before stop_sources"));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
     cluster.master().stop_sources().await?;
     LifecycleOracle::wait_for(
         &cluster.master(),

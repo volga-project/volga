@@ -3,8 +3,8 @@ use arrow::array::StringArray;
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
 use arrow::compute::concat_batches;
-use rand::Rng;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::net::TcpListener;
 use std::sync::Mutex;
 use lazy_static::lazy_static;
 use async_trait::async_trait;
@@ -24,19 +24,20 @@ pub fn create_test_string_batch(data: Vec<String>) -> RecordBatch {
 }
 
 lazy_static! {
-    static ref USED_PORTS: Mutex<HashMap<u16, bool>> = Mutex::new(HashMap::new());
+    static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
 }
 
 pub fn gen_unique_grpc_port() -> u16 {
     let mut used_ports = USED_PORTS.lock().unwrap();
-    
+
     loop {
-        
-        let port = rand::thread_rng().gen_range(50000..60000);
-        
-        // Check if port is already used
-        if !used_ports.contains_key(&port) {
-            used_ports.insert(port, true);
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .expect("failed to ask the OS for an available test port");
+        let port = listener
+            .local_addr()
+            .expect("test port listener has no local address")
+            .port();
+        if used_ports.insert(port) {
             return port;
         }
     }
