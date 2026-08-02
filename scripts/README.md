@@ -16,11 +16,11 @@ scripts/test all
 
 | Profile | What it runs |
 |---|---|
-| `unit` | Fast tests with no in-process e2e harness, Docker, or Kube |
-| `inprocess` | Local gRPC/cluster harness under `e2e::inprocess`; concurrency 1; nextest profile 90s |
+| `unit` | Fast tests with no in-process harness, Docker, or Kube |
+| `inprocess` | Local gRPC/cluster harness under `tests::inprocess`; concurrency 1; nextest profile 90s |
 | `default` | `unit` + `inprocess` (required PR/CI gate) |
-| `docker` | `e2e::docker::` ignored tests (LocalStack, Kafka, etc.) |
-| `kube` | `e2e::kube::` ignored tests on Kind |
+| `docker` | `tests::docker::` ignored tests (LocalStack, Kafka, etc.) |
+| `kube` | `tests::kube::` ignored tests on Kind |
 | `all` | `default` + `docker` + `kube` |
 | `benchmark` | Benchmark filter |
 | `stress` | Repeat a suite or selected tests; see below |

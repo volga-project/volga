@@ -9,9 +9,9 @@ cpu_count() {
 }
 
 # Slow / process-isolating tests → nextest profile.inprocess (90s).
-INPROCESS_FILTER='test(/e2e::inprocess::/)'
-DOCKER_FILTER='test(/e2e::docker::/)'
-KUBE_FILTER='test(/e2e::kube::/)'
+INPROCESS_FILTER='test(/tests::inprocess::/)'
+DOCKER_FILTER='test(/tests::docker::/)'
+KUBE_FILTER='test(/tests::kube::/)'
 BENCHMARK_FILTER='test(/benchmark/)'
 UNIT_FILTER="not ($INPROCESS_FILTER | $DOCKER_FILTER | $KUBE_FILTER | $BENCHMARK_FILTER)"
 

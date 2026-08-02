@@ -1,0 +1,155 @@
+//! Shared waits / harness finish for checkpoint suite runners.
+
+use anyhow::{anyhow, Result};
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+use crate::runtime::master::LifecycleEvent;
+use crate::tests::support::cluster_harness::{LifecycleOracle, MasterHandle, RuntimeEnv, TestCluster};
+
+pub(super) async fn wait_until_attempt0_running(
+    master: &MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+) -> Result<()> {
+    LifecycleOracle::wait_for(master, cursor, timeout, |event| {
+        matches!(
+            event,
+            LifecycleEvent::AttemptRunning { attempt_id: 0, .. }
+        )
+    })
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn wait_for_checkpoint_completed(
+    master: &MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+) -> Result<u64> {
+    let record = LifecycleOracle::wait_for(master, cursor, timeout, |event| {
+        matches!(event, LifecycleEvent::CheckpointCompleted { .. })
+    })
+    .await?;
+    match record.event {
+        LifecycleEvent::CheckpointCompleted { checkpoint_id } => Ok(checkpoint_id),
+        other => Err(anyhow!("expected CheckpointCompleted, got {other:?}")),
+    }
+}
+
+pub(super) async fn wait_for_checkpoint_completed_id(
+    master: &MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+    checkpoint_id: u64,
+) -> Result<()> {
+    LifecycleOracle::wait_for(master, cursor, timeout, |event| {
+        matches!(
+            event,
+            LifecycleEvent::CheckpointCompleted {
+                checkpoint_id: id
+            } if *id == checkpoint_id
+        )
+    })
+    .await?;
+    Ok(())
+}
+
+pub(super) async fn advance_lifecycle_cursor(
+    master: &MasterHandle,
+    cursor: &mut u64,
+) -> Result<()> {
+    for record in master.lifecycle_events_since(*cursor).await? {
+        *cursor = record.sequence;
+    }
+    Ok(())
+}
+
+pub(super) async fn wait_for_checkpoint_started(
+    master: &MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+    min_checkpoint_id: u64,
+) -> Result<u64> {
+    let record = LifecycleOracle::wait_for(master, cursor, timeout, |event| {
+        matches!(
+            event,
+            LifecycleEvent::CheckpointStarted {
+                checkpoint_id,
+                ..
+            } if *checkpoint_id >= min_checkpoint_id
+        )
+    })
+    .await?;
+    match record.event {
+        LifecycleEvent::CheckpointStarted { checkpoint_id, .. } => Ok(checkpoint_id),
+        other => Err(anyhow!("expected CheckpointStarted, got {other:?}")),
+    }
+}
+
+fn finish_timeout(env: RuntimeEnv, failure_count: usize) -> Duration {
+    let base = match env {
+        RuntimeEnv::Local => Duration::from_secs(30),
+        RuntimeEnv::Kube | RuntimeEnv::Docker => Duration::from_secs(180),
+    };
+    // Drain after harness StopSources; slack grows with prior recoveries.
+    base + Duration::from_secs(20 * failure_count as u64)
+}
+
+/// Stop sources (after any in-flight CP settles), then wait for `PipelineFinished`.
+pub(super) async fn harness_finish_pipeline(
+    cluster: &TestCluster,
+    cursor: &mut u64,
+    env: RuntimeEnv,
+    failure_count: usize,
+) -> Result<()> {
+    // Avoid StopSources during an in-flight CP (timeout → empty-replace recovery).
+    let idle_timeout = match env {
+        RuntimeEnv::Local => Duration::from_secs(4),
+        RuntimeEnv::Kube | RuntimeEnv::Docker => Duration::from_secs(45),
+    };
+    let started = Instant::now();
+    loop {
+        let mut open = HashSet::new();
+        for record in cluster.master().lifecycle_events_since(0).await? {
+            match record.event {
+                LifecycleEvent::CheckpointStarted { checkpoint_id, .. } => {
+                    open.insert(checkpoint_id);
+                }
+                LifecycleEvent::CheckpointCompleted { checkpoint_id }
+                | LifecycleEvent::CheckpointFailed { checkpoint_id, .. } => {
+                    open.remove(&checkpoint_id);
+                }
+                _ => {}
+            }
+        }
+        if open.is_empty() {
+            break;
+        }
+        if started.elapsed() >= idle_timeout {
+            return Err(anyhow!("in-flight checkpoint(s) {open:?} before stop_sources"));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    cluster.master().stop_sources().await?;
+    LifecycleOracle::wait_for(
+        &cluster.master(),
+        cursor,
+        finish_timeout(env, failure_count),
+        |event| matches!(event, LifecycleEvent::PipelineFinished),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Always tear down cluster resources (kube `VolgaPipeline` delete, local workers, etc.).
+pub(super) async fn shutdown_after<T>(cluster: &TestCluster, result: Result<T>) -> Result<T> {
+    match cluster.shutdown().await {
+        Ok(()) => result,
+        Err(shutdown_err) => match result {
+            Ok(_) => Err(shutdown_err),
+            Err(test_err) => Err(test_err),
+        },
+    }
+}

@@ -6,7 +6,7 @@ use crate::{
         ExecutionMode, PipelineSpecBuilder,
     },
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    e2e::support::pipeline_exec,
+    tests::support::pipeline_exec,
     runtime::{
         functions::source::{
             datagen_source::{DatagenSourceConfig, FieldGenerator},

@@ -6,4 +6,4 @@ pub mod orchestrator;
 pub mod storage;
 
 #[cfg(test)]
-pub mod e2e;
+pub mod tests;
