@@ -16,4 +16,4 @@ Profiled suite tests live under `src/tests/` and compile only with `cargo test -
 - Put new suite tests under **`inprocess`**, **`docker`**, or **`kube`** depending on runtime env.
 - **`docker`** and **`kube`** entrypoint tests must stay **`#[ignore]`** (run via `scripts/test docker` / `scripts/test kube`).
 - Do not add gRPC/port-binding tests to the **unit** suite — they belong in **`inprocess`** (`test(/tests::inprocess::/)`).
-- Reuse helpers from `support/` rather than duplicating harness code under `runtime::tests`.
+- Reuse helpers from `support/` rather than duplicating harness code under product modules.
