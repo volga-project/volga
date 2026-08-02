@@ -20,6 +20,11 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "test(test_sql_queries)"
 slow-timeout = { period = "90s", terminate-after = 1 }
 
+# Multiple kill/restore cycles; 30s is too short on CI (often dies mid-attempt).
+[[profile.default.overrides]]
+filter = "test(sequential_checkpoint_failures_restore)"
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 [[profile.stress.overrides]]
 filter = "test(/::kube::/)"
 slow-timeout = { period = "180s", terminate-after = 1 }
