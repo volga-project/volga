@@ -55,12 +55,20 @@ setup() {
   fi
   kubectl_test wait --for=condition=Ready nodes --all --timeout=120s
 
-  local build_args=()
+  # Shared Buildx/GHA cache with the docker job (scope=volga-image).
   if [[ "$REBUILD" == "--rebuild" ]]; then
-    build_args+=(--no-cache)
+    "$ROOT/scripts/docker-test-env" build --rebuild
+    "$ROOT/scripts/docker-test-env" build --rebuild \
+      --tag kubevolga:dev \
+      --context "$ROOT/kubevolga" \
+      --scope kubevolga-image
+  else
+    "$ROOT/scripts/docker-test-env" build
+    "$ROOT/scripts/docker-test-env" build \
+      --tag kubevolga:dev \
+      --context "$ROOT/kubevolga" \
+      --scope kubevolga-image
   fi
-  docker build "${build_args[@]}" -t kubevolga:dev "$ROOT/kubevolga"
-  docker build "${build_args[@]}" -t volga:latest "$ROOT"
 
   kind load docker-image kubevolga:dev --name "$CLUSTER_NAME"
   kind load docker-image volga:latest --name "$CLUSTER_NAME"

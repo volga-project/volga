@@ -58,6 +58,14 @@ suites start. `scripts/docker-test-env setup` prefetches testcontainers images
 (LocalStack, Redpanda) before building `volga:latest`. Kube uses the Kind
 cluster named by `VOLGA_KIND_CLUSTER` (default: `kubevolga`).
 
+### CI image cache
+
+On GitHub Actions, `volga:latest` (and `kubevolga:dev` for kube) build through
+Buildx with `cache-from` / `cache-to` `type=gha`. Docker and kube jobs share
+scope `volga-image`, so a warm cook layer from one job speeds up the other on
+later runs. Locally the scripts keep plain `docker build` unless you set
+`VOLGA_DOCKER_CACHE=gha` (requires Buildx + Actions cache credentials).
+
 ## Options
 
 All profiles accept:

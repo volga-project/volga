@@ -3,7 +3,9 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ACTION="${1:-setup}"
-OPTION="${2:-}"
+if [[ $# -gt 0 ]]; then
+  shift
+fi
 
 # Testcontainers images used by the docker test profile. Keep tags in sync with:
 # - src/tests/docker/kafka.rs (redpanda)
@@ -13,12 +15,101 @@ PREFETCH_IMAGES=(
   "redpandadata/redpanda:latest"
 )
 
+OPTION=""
+IMAGE_TAG="volga:latest"
+IMAGE_CONTEXT="$ROOT"
+CACHE_SCOPE="volga-image"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pull|--rebuild)
+      OPTION="$1"
+      shift
+      ;;
+    --tag)
+      IMAGE_TAG="$2"
+      shift 2
+      ;;
+    --context)
+      IMAGE_CONTEXT="$2"
+      shift 2
+      ;;
+    --scope)
+      CACHE_SCOPE="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
 prefetch_images() {
   local image
   for image in "${PREFETCH_IMAGES[@]}"; do
     echo "prefetching ${image}"
     docker pull "${image}"
   done
+}
+
+# Use Buildx + GitHub Actions cache when available (shared by docker/kube CI jobs).
+# VOLGA_DOCKER_CACHE=gha|off|auto (default auto: gha on GitHub Actions).
+use_gha_cache() {
+  local mode="${VOLGA_DOCKER_CACHE:-auto}"
+  case "$mode" in
+    gha) return 0 ;;
+    off) return 1 ;;
+    auto)
+      [[ "${GITHUB_ACTIONS:-}" == "true" ]] || return 1
+      docker buildx version >/dev/null 2>&1 || return 1
+      return 0
+      ;;
+    *)
+      echo "unknown VOLGA_DOCKER_CACHE=${mode} (expected gha|off|auto)" >&2
+      exit 2
+      ;;
+  esac
+}
+
+build_image() {
+  local tag="$1"
+  local context="$2"
+  local scope="$3"
+  local build_args=()
+
+  case "$OPTION" in
+    "")
+      ;;
+    --pull)
+      build_args+=(--pull)
+      ;;
+    --rebuild)
+      build_args+=(--no-cache)
+      ;;
+  esac
+
+  if use_gha_cache; then
+    echo "building ${tag} with buildx (cache scope=${scope})"
+    docker buildx build \
+      --load \
+      --tag "$tag" \
+      --cache-from "type=gha,scope=${scope}" \
+      --cache-to "type=gha,mode=max,scope=${scope}" \
+      "${build_args[@]}" \
+      "$context"
+  else
+    echo "building ${tag} with docker build"
+    docker build "${build_args[@]}" -t "$tag" "$context"
+  fi
+}
+
+build() {
+  command -v docker >/dev/null || {
+    echo "missing required command: docker" >&2
+    exit 2
+  }
+  docker info >/dev/null
+  build_image "$IMAGE_TAG" "$IMAGE_CONTEXT" "$CACHE_SCOPE"
 }
 
 setup() {
@@ -29,28 +120,15 @@ setup() {
   docker info >/dev/null
 
   prefetch_images
-
-  local build_args=()
-  case "$OPTION" in
-    "")
-      ;;
-    --pull)
-      build_args+=(--pull)
-      ;;
-    --rebuild)
-      build_args+=(--no-cache)
-      ;;
-    *)
-      echo "unknown setup option: $OPTION" >&2
-      exit 2
-      ;;
-  esac
-  docker build "${build_args[@]}" -t volga:latest "$ROOT"
+  build_image "$IMAGE_TAG" "$IMAGE_CONTEXT" "$CACHE_SCOPE"
 }
 
 case "$ACTION" in
   setup)
     setup
+    ;;
+  build)
+    build
     ;;
   prefetch)
     command -v docker >/dev/null || {
@@ -61,7 +139,7 @@ case "$ACTION" in
     prefetch_images
     ;;
   *)
-    echo "usage: scripts/docker-test-env {setup|prefetch} [--pull|--rebuild]" >&2
+    echo "usage: scripts/docker-test-env {setup|build|prefetch} [--pull|--rebuild] [--tag TAG] [--context DIR] [--scope NAME]" >&2
     exit 2
     ;;
 esac

@@ -28,8 +28,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
-  # Required gate: unit + local gRPC harness.
-  test:
+  # default run (unit + inprocess).
+  default_tests:
     if: >
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
@@ -63,7 +63,7 @@ jobs:
       - run: scripts/test "$TEST_PROFILE"
 
   # Parallel, non-blocking (does not fail the workflow).
-  docker:
+  docker_tests:
     if: >
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
@@ -75,6 +75,7 @@ jobs:
     continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
+      VOLGA_DOCKER_CACHE: gha
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -93,10 +94,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - uses: docker/setup-buildx-action@v3
       - run: scripts/test docker
 
   # Parallel, non-blocking (does not fail the workflow).
-  kube:
+  kube_tests:
     if: >
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
@@ -108,6 +110,7 @@ jobs:
     continue-on-error: true
     env:
       CARGO_INCREMENTAL: "0"
+      VOLGA_DOCKER_CACHE: gha
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -126,6 +129,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - uses: docker/setup-buildx-action@v3
       - uses: helm/kind-action@v1
         with:
           install_only: true
@@ -143,6 +147,7 @@ jobs:
         shard: [1, 2, 3]
     env:
       CARGO_INCREMENTAL: "0"
+      VOLGA_DOCKER_CACHE: gha
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
@@ -161,6 +166,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+      - uses: docker/setup-buildx-action@v3
       - uses: helm/kind-action@v1
         with:
           install_only: true
