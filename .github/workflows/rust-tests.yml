@@ -40,6 +40,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake \
             pkg-config \
+            protobuf-compiler \
+            libprotobuf-dev \
             libcurl4-openssl-dev \
             libssl-dev \
             libsasl2-dev
@@ -72,6 +74,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             cmake \
             pkg-config \
+            protobuf-compiler \
+            libprotobuf-dev \
             libcurl4-openssl-dev \
             libssl-dev \
             libsasl2-dev
