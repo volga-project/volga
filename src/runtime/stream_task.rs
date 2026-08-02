@@ -12,7 +12,7 @@ use crate::{
             METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
             METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
         },
-        observability::snapshot_types::{TaskSnapshot, StreamTaskStatus},
+        observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
         operators::operator::{
             create_operator, MessageStream, OperatorConfig, OperatorPollResult, OperatorTrait,
             OperatorType,
@@ -856,11 +856,8 @@ impl StreamTask {
     }
 
     pub async fn get_state(&self) -> TaskSnapshot {
-        let mut metadata = self
-            .runtime_context
-            .source_handles()
-            .map(|handles| handles.task_metadata(&self.vertex_id))
-            .unwrap_or_default();
+        // Detach from the live bag so later operator writes do not mutate the snapshot.
+        let metadata = TaskMetadata::default();
         metadata.extend(&self.runtime_context.task_metadata());
         TaskSnapshot {
             vertex_id: self.vertex_id.clone(),

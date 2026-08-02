@@ -14,8 +14,11 @@ use crate::runtime::operators::operator::{
     operator_config_requires_checkpoint, MessageStream, OperatorBase, OperatorConfig,
     OperatorPollResult, OperatorTrait, OperatorType,
 };
+use crate::runtime::observability::TaskMetadata;
 use crate::runtime::runtime_context::RuntimeContext;
 use super::source_handles::{SourceHandle, SourceInterrupt};
+
+pub const TASK_METADATA_RECORDS_GENERATED: &str = "records_generated";
 
 #[derive(Debug, Clone)]
 pub struct VectorSourceConfig {
@@ -139,6 +142,7 @@ impl std::fmt::Display for SourceConfig {
 pub struct SourceOperator {
     base: OperatorBase,
     handle: Option<Arc<SourceHandle>>,
+    task_metadata: TaskMetadata,
 }
 
 impl SourceOperator {
@@ -151,6 +155,7 @@ impl SourceOperator {
         Self {
             base: OperatorBase::new_with_function(source_function, config),
             handle: None,
+            task_metadata: TaskMetadata::default(),
         }
     }
 
@@ -169,6 +174,8 @@ impl OperatorTrait for SourceOperator {
         if let Some(handles) = context.source_handles() {
             self.handle = Some(handles.register(context.vertex_id_arc()));
         }
+        self.task_metadata = context.task_metadata();
+        self.task_metadata.set(TASK_METADATA_RECORDS_GENERATED, 0);
         self.base.open(context).await?;
         Ok(())
     }
@@ -204,8 +211,8 @@ impl OperatorTrait for SourceOperator {
         let function = self.base.get_function_mut::<SourceFunction>().unwrap();
         anyhow::ensure!(!position.is_empty(), "empty source position on restore");
         function.restore_position(&position).await?;
-        if let (Some(handle), Some(n)) = (self.handle.as_ref(), function.emit_count()) {
-            handle.stats.set_records_generated(n);
+        if let Some(n) = function.emit_count() {
+            self.task_metadata.set(TASK_METADATA_RECORDS_GENERATED, n);
         }
         Ok(())
     }
@@ -232,13 +239,14 @@ impl OperatorTrait for SourceOperator {
                 OperatorPollResult::Ready(Message::Watermark(watermark))
             }
             FetchResult::Data(message) => {
-                if let Some(handle) = self.handle.as_ref() {
-                    match &message {
-                        Message::Regular(_) | Message::Keyed(_) => {
-                            handle.stats.add_records(message.num_records());
-                        }
-                        Message::Watermark(_) | Message::CheckpointBarrier(_) => {}
+                match &message {
+                    Message::Regular(_) | Message::Keyed(_) => {
+                        self.task_metadata.increment_u64(
+                            TASK_METADATA_RECORDS_GENERATED,
+                            message.num_records() as u64,
+                        );
                     }
+                    Message::Watermark(_) | Message::CheckpointBarrier(_) => {}
                 }
                 OperatorPollResult::Ready(message)
             }

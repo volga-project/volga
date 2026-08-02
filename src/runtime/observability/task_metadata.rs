@@ -17,13 +17,6 @@ impl TaskMetadata {
             .insert(key.to_string(), value.to_string());
     }
 
-    pub fn insert(&self, key: impl Into<String>, value: impl Into<String>) {
-        self.values
-            .lock()
-            .expect("task metadata lock poisoned")
-            .insert(key.into(), value.into());
-    }
-
     pub fn increment_u64(&self, key: &str, delta: u64) {
         let mut values = self.values.lock().expect("task metadata lock poisoned");
         let next = values
