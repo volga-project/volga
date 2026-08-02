@@ -129,21 +129,6 @@ cleanup_kube() {
 }
 
 case "$profile" in
-  docker)
-    check_docker
-    ;;
-  kube)
-    check_kube
-    trap cleanup_kube EXIT
-    ;;
-  all)
-    check_docker
-    check_kube
-    trap cleanup_kube EXIT
-    ;;
-esac
-
-case "$profile" in
   unit)
     if [[ -n "$filter_override" ]]; then
       run_suite unit "${jobs_override:-1}" default "$filter_override"
@@ -168,15 +153,22 @@ case "$profile" in
     fi
     ;;
   all)
+    # unit + inprocess first; docker/kube env setup only right before those suites.
     run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
     run_suite inprocess "${jobs_override:-${VOLGA_TEST_INPROCESS_JOBS:-1}}" default "$INPROCESS_FILTER" inprocess
+    check_docker
     run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
+    check_kube
+    trap cleanup_kube EXIT
     run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER" kube
     ;;
   docker)
+    check_docker
     run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
     ;;
   kube)
+    check_kube
+    trap cleanup_kube EXIT
     if [[ -n "$filter_override" ]]; then
       run_suite kube "${jobs_override:-1}" ignored-only "$filter_override" kube
     else
