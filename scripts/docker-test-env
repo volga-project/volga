@@ -5,12 +5,30 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ACTION="${1:-setup}"
 OPTION="${2:-}"
 
+# Testcontainers images used by the docker test profile. Keep tags in sync with:
+# - src/runtime/functions/source/kafka/integration_tests.rs (redpanda)
+# - src/runtime/functions/source/parquet/integration_tests.rs (localstack)
+PREFETCH_IMAGES=(
+  "localstack/localstack:3.0"
+  "redpandadata/redpanda:latest"
+)
+
+prefetch_images() {
+  local image
+  for image in "${PREFETCH_IMAGES[@]}"; do
+    echo "prefetching ${image}"
+    docker pull "${image}"
+  done
+}
+
 setup() {
   command -v docker >/dev/null || {
     echo "missing required command: docker" >&2
     exit 2
   }
   docker info >/dev/null
+
+  prefetch_images
 
   local build_args=()
   case "$OPTION" in
@@ -34,8 +52,16 @@ case "$ACTION" in
   setup)
     setup
     ;;
+  prefetch)
+    command -v docker >/dev/null || {
+      echo "missing required command: docker" >&2
+      exit 2
+    }
+    docker info >/dev/null
+    prefetch_images
+    ;;
   *)
-    echo "usage: scripts/docker-test-env setup [--pull|--rebuild]" >&2
+    echo "usage: scripts/docker-test-env {setup|prefetch} [--pull|--rebuild]" >&2
     exit 2
     ;;
 esac

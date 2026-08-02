@@ -10,6 +10,11 @@ fail-fast = false
 filter = "test(/::kube::/)"
 slow-timeout = { period = "90s", terminate-after = 1 }
 
+# LocalStack / Kafka container bring-up often exceeds the 30s default.
+[[profile.default.overrides]]
+filter = "test(/::docker::/) | test(/kafka::integration_tests/) | test(parquet_s3_roundtrip_localstack)"
+slow-timeout = { period = "120s", terminate-after = 1 }
+
 [[profile.stress.overrides]]
 filter = "test(/::kube::/)"
 slow-timeout = { period = "180s", terminate-after = 1 }

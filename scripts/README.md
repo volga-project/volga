@@ -18,15 +18,21 @@ scripts/test all
 |---|---|
 | `unit` | Fast tests with no gRPC/cluster harness, Docker, or Kube |
 | `grpc-based` | Tests that use in-process gRPC / local cluster harness; default concurrency 1 to avoid interference |
-| `default` | `unit` + `grpc-based` (PR/CI default) |
+| `default` | `unit` + `grpc-based` (required PR/CI gate) |
 | `docker` | Docker / Localstack / Kafka-style ignored tests |
 | `kube` | `::kube::` ignored tests on Kind |
 | `all` | `default` + `docker` + `kube` |
 | `benchmark` | Benchmark filter |
 | `stress` | Repeat a suite or selected tests; see below |
 
-`docker`, `kube`, and `all` prepare their required environment. Kube tests use
-the Kind cluster named by `VOLGA_KIND_CLUSTER` (default: `kubevolga`).
+CI runs `default` as the required job, plus parallel non-blocking `docker` and
+`kube` jobs on PRs. Scheduled runs only exercise kube stress.
+
+`docker`, `kube`, and `all` prepare their required environment. `docker` /
+`scripts/docker-test-env setup` prefetches testcontainers images (LocalStack,
+Redpanda) before building `volga:latest`, so pulls do not happen mid-test.
+Kube tests use the Kind cluster named by `VOLGA_KIND_CLUSTER` (default:
+`kubevolga`).
 
 ## Options
 
