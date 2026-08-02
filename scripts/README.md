@@ -52,11 +52,11 @@ gh workflow run rust-tests.yml --ref "$(git branch --show-current)" -f profile=s
 the required `test` job with that profile (and may still start sibling
 docker/kube jobs unless you pick an env-only profile).
 
-`docker`, `kube`, and `all` prepare their required environment. `docker` /
-`scripts/docker-test-env setup` prefetches testcontainers images (LocalStack,
-Redpanda) before building `volga:latest`, so pulls do not happen mid-test.
-Kube tests use the Kind cluster named by `VOLGA_KIND_CLUSTER` (default:
-`kubevolga`).
+`docker` and `kube` prepare their environment immediately before that suite.
+`all` runs `unit` + `inprocess` first, then docker/Kind setup only when those
+suites start. `scripts/docker-test-env setup` prefetches testcontainers images
+(LocalStack, Redpanda) before building `volga:latest`. Kube uses the Kind
+cluster named by `VOLGA_KIND_CLUSTER` (default: `kubevolga`).
 
 ## Options
 
