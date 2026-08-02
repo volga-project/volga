@@ -78,41 +78,33 @@ scripts/test default --filter 'test(test_local_multi_worker_window_checkpoint_re
 
 ## Stress runs
 
-The stress runner repeats an environment suite or selected tests in parallel
-shards. It writes one log per shard under `target/stress/` and stops scheduling
-new iterations after the first failure.
-
-`--env` selects the runtime environment (`local` = process harness, `kube` =
-Kind). It is mapped to the matching run profile (`local` → `default`,
-`kube` → `kube`).
+The stress runner repeats the **kube** suite (or selected kube tests) across
+parallel shards. It writes one log per shard under `target/stress/` and stops
+scheduling new iterations after the first failure. Prefer `--env kube` (Kind);
+CI schedule and on-demand `profile=stress` use the same path.
 
 ```bash
-# One process-harness test across four parallel shards.
-scripts/test stress --env local \
-  --test test_local_multi_worker_window_checkpoint_restore \
-  --runs-per-shard 20 --shards 4
+# Full kube profile, fresh Kind cluster each iteration.
+scripts/test stress --env kube --all \
+  --runs-per-shard 10 --shards 3 --fresh-cluster
 
-# Multiple Kube tests with a fresh Kind cluster per iteration.
+# Selected kube tests.
 scripts/test stress --env kube \
   --test test_kube_multi_worker_window_checkpoint_restore \
   --test test_kube_mid_flight_checkpoint_kill_after_safe_restores_prior \
   --runs-per-shard 10 --shards 3 --fresh-cluster
-
-# Repeat the full environment profile.
-scripts/test stress --env local --all --runs-per-shard 10 --shards 2
 ```
 
 Stress options:
 
 ```text
---env {local|kube}       Required runtime environment
---all                    Run the complete environment profile
+--env kube               Kind runtime (required for the supported stress path)
+--all                    Run the complete kube profile
 --test NAME              Run an exact test name; repeat for multiple tests
 --filter EXPR            Supply a Nextest filter expression directly
 --runs-per-shard N       Maximum iterations per shard
---shards N               Parallel host shards or isolated Kube clusters
---fresh-cluster          Recreate the Kind cluster before each Kube iteration
+--shards N               Parallel isolated Kind clusters
+--fresh-cluster          Recreate the Kind cluster before each iteration
 ```
 
-Stress uses the `stress` Nextest profile with longer timeouts: 120 seconds for
-local/process tests and 180 seconds for Kube tests.
+Stress uses the `stress` Nextest profile with a 180s timeout for kube tests.

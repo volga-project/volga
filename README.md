@@ -207,7 +207,6 @@ ctx.execute()?;
 git clone https://github.com/volga-project/volga
 cd volga
 cargo build
-cargo test
 ```
 
 # 🧪 Testing
@@ -218,7 +217,7 @@ Docker/Kube environment setup, targeted filters, and repeatable stress runs.
 ```bash
 scripts/test default
 scripts/test kube
-scripts/test stress --env local --all --runs-per-shard 10 --shards 2
+scripts/test stress --env kube --all --runs-per-shard 10 --shards 2 --fresh-cluster
 ```
 
 # 🙇 Running Locally
