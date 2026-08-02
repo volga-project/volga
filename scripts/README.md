@@ -5,7 +5,7 @@ build cache, environment setup, filters, and concurrency defaults.
 
 ```bash
 scripts/test unit
-scripts/test grpc-based
+scripts/test inprocess
 scripts/test default
 scripts/test docker
 scripts/test kube
@@ -16,11 +16,11 @@ scripts/test all
 
 | Profile | What it runs |
 |---|---|
-| `unit` | Fast tests with no gRPC/cluster harness, Docker, or Kube |
-| `grpc-based` | Local gRPC/cluster harness, transport matrix, SQL suite; concurrency 1; nextest profile 90s |
-| `default` | `unit` + `grpc-based` (required PR/CI gate) |
-| `docker` | Docker / Localstack / Kafka-style ignored tests |
-| `kube` | `::kube::` ignored tests on Kind |
+| `unit` | Fast tests with no in-process harness, Docker, or Kube |
+| `inprocess` | Local gRPC/cluster harness under `tests::inprocess`; concurrency 1; nextest profile 90s |
+| `default` | `unit` + `inprocess` (required PR/CI gate) |
+| `docker` | `tests::docker::` ignored tests (LocalStack, Kafka, etc.) |
+| `kube` | `tests::kube::` ignored tests on Kind |
 | `all` | `default` + `docker` + `kube` |
 | `benchmark` | Benchmark filter |
 | `stress` | Repeat a suite or selected tests; see below |
@@ -31,7 +31,7 @@ CI runs `default` as the required job, plus parallel non-blocking `docker` and
 ### One-off CI runs (`workflow_dispatch`)
 
 GitHub → **Actions** → **Rust tests** → **Run workflow**: pick branch +
-`profile` (`default` / `unit` / `grpc-based` / `docker` / `kube` / `all` /
+`profile` (`default` / `unit` / `inprocess` / `docker` / `kube` / `all` /
 `stress`).
 
 Or from the CLI (same inputs):
@@ -48,15 +48,23 @@ gh workflow run rust-tests.yml --ref "$(git branch --show-current)" -f profile=s
 ```
 
 `stress` skips the normal test/docker/kube jobs and only runs `kube-stress`.
-`docker` / `kube` run just that env job. `unit` / `grpc-based` / `default` run
+`docker` / `kube` run just that env job. `unit` / `inprocess` / `default` run
 the required `test` job with that profile (and may still start sibling
 docker/kube jobs unless you pick an env-only profile).
 
-`docker`, `kube`, and `all` prepare their required environment. `docker` /
-`scripts/docker-test-env setup` prefetches testcontainers images (LocalStack,
-Redpanda) before building `volga:latest`, so pulls do not happen mid-test.
-Kube tests use the Kind cluster named by `VOLGA_KIND_CLUSTER` (default:
-`kubevolga`).
+`docker` and `kube` prepare their environment immediately before that suite.
+`all` runs `unit` + `inprocess` first, then docker/Kind setup only when those
+suites start. `scripts/docker-test-env setup` prefetches testcontainers images
+(LocalStack, Redpanda) before building `volga:latest`. Kube uses the Kind
+cluster named by `VOLGA_KIND_CLUSTER` (default: `kubevolga`).
+
+### CI image cache
+
+On GitHub Actions, `volga:latest` (and `kubevolga:dev` for kube) build through
+Buildx with `cache-from` / `cache-to` `type=gha`. Docker and kube jobs share
+scope `volga-image`, so a warm cook layer from one job speeds up the other on
+later runs. Locally the scripts keep plain `docker build` unless you set
+`VOLGA_DOCKER_CACHE=gha` (requires Buildx + Actions cache credentials).
 
 ## Options
 
@@ -87,7 +95,7 @@ Debug a single failure without replaying the whole `all` run:
 
 ```bash
 rg '^\\s*FAIL ' target/test-runs/*.log
-scripts/test grpc-based --filter 'test(test_local_single_worker_window_checkpoint_restore)'
+scripts/test inprocess --filter 'test(test_local_single_worker_window_checkpoint_restore)'
 # or: cargo nextest run --lib --no-capture -E 'test(<exact_name>)'
 ```
 
@@ -122,5 +130,5 @@ Stress options:
 --fresh-cluster          Recreate the Kind cluster before each iteration
 ```
 
-Timeouts are suite-scoped nextest profiles only (`default` 30s, `grpc-based` 90s,
+Timeouts are suite-scoped nextest profiles only (`default` 30s, `inprocess` 90s,
 `docker` 120s, `kube` 90s, `stress` 180s) — no per-test overrides.

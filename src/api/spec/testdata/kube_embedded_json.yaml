@@ -1,4 +1,7 @@
 execution_mode: Streaming
+execution_profile:
+  MasterWorker:
+    num_threads_per_task: 2
 parallelism: 1
 task_assignment_strategy: OperatorPerWorker
 sources:

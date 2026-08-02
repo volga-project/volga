@@ -5,7 +5,7 @@
 slow-timeout = { period = "30s", terminate-after = 1 }
 fail-fast = false
 
-[profile.grpc-based]
+[profile.inprocess]
 slow-timeout = { period = "90s", terminate-after = 1 }
 fail-fast = false
 

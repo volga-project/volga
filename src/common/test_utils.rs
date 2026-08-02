@@ -1,13 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use arrow::array::StringArray;
 use arrow::datatypes::{Schema, Field, DataType};
 use arrow::record_batch::RecordBatch;
 use arrow::compute::concat_batches;
-use std::collections::{HashMap, HashSet};
-use std::net::TcpListener;
-use std::sync::Mutex;
-use lazy_static::lazy_static;
 use async_trait::async_trait;
+
+pub use crate::common::ports::gen_unique_grpc_port;
 
 use crate::common::Message;
 use crate::runtime::functions::map::MapFunctionTrait;
@@ -22,27 +21,6 @@ pub fn create_test_string_batch(data: Vec<String>) -> RecordBatch {
     let array = StringArray::from(data);
     RecordBatch::try_new(Arc::new(schema), vec![Arc::new(array)]).unwrap()
 }
-
-lazy_static! {
-    static ref USED_PORTS: Mutex<HashSet<u16>> = Mutex::new(HashSet::new());
-}
-
-pub fn gen_unique_grpc_port() -> u16 {
-    let mut used_ports = USED_PORTS.lock().unwrap();
-
-    loop {
-        let listener = TcpListener::bind("127.0.0.1:0")
-            .expect("failed to ask the OS for an available test port");
-        let port = listener
-            .local_addr()
-            .expect("test port listener has no local address")
-            .port();
-        if used_ports.insert(port) {
-            return port;
-        }
-    }
-}
-
 
 pub fn print_pipeline_state(
     pipeline_state: &PipelineSnapshot,

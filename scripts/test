@@ -8,20 +8,12 @@ cpu_count() {
   getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4
 }
 
-# Slow / process-isolating tests → nextest profile.grpc-based (90s).
-GRPC_BASED_FILTER='
-test(/runtime::tests::(checkpoint_tests::local|recovery_tests::local|smoke_tests::local|request_source_e2e_test|watermark_streaming_e2e_test|worker_test|word_count_test)/)
-| test(/transport::(tests::transport_backend_matrix_test|grpc::grpc_streaming_service_test)/)
-| test(/sql_testing::/)
-'
-DOCKER_FILTER='
-test(/::docker::/)
-| test(/runtime::functions::source::kafka::integration_tests/)
-| test(parquet_s3_roundtrip_localstack)
-'
-KUBE_FILTER='test(/::kube::/)'
+# Slow / process-isolating tests → nextest profile.inprocess (90s).
+INPROCESS_FILTER='test(/tests::inprocess::/)'
+DOCKER_FILTER='test(/tests::docker::/)'
+KUBE_FILTER='test(/tests::kube::/)'
 BENCHMARK_FILTER='test(/benchmark/)'
-UNIT_FILTER="not ($GRPC_BASED_FILTER | $DOCKER_FILTER | $KUBE_FILTER | $BENCHMARK_FILTER)"
+UNIT_FILTER="not ($INPROCESS_FILTER | $DOCKER_FILTER | $KUBE_FILTER | $BENCHMARK_FILTER)"
 
 profile="${1:-unit}"
 if [[ $# -gt 0 ]]; then
@@ -137,21 +129,6 @@ cleanup_kube() {
 }
 
 case "$profile" in
-  docker)
-    check_docker
-    ;;
-  kube)
-    check_kube
-    trap cleanup_kube EXIT
-    ;;
-  all)
-    check_docker
-    check_kube
-    trap cleanup_kube EXIT
-    ;;
-esac
-
-case "$profile" in
   unit)
     if [[ -n "$filter_override" ]]; then
       run_suite unit "${jobs_override:-1}" default "$filter_override"
@@ -159,12 +136,12 @@ case "$profile" in
       run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
     fi
     ;;
-  grpc-based)
+  inprocess)
     if [[ -n "$filter_override" ]]; then
-      run_suite grpc-based "${jobs_override:-1}" default "$filter_override" grpc-based
+      run_suite inprocess "${jobs_override:-1}" default "$filter_override" inprocess
     else
       # Default jobs=1: gRPC/port/process isolation until interference is fixed.
-      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
+      run_suite inprocess "${jobs_override:-${VOLGA_TEST_INPROCESS_JOBS:-1}}" default "$INPROCESS_FILTER" inprocess
     fi
     ;;
   default)
@@ -172,19 +149,26 @@ case "$profile" in
       run_suite default "${jobs_override:-1}" default "$filter_override"
     else
       run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
+      run_suite inprocess "${jobs_override:-${VOLGA_TEST_INPROCESS_JOBS:-1}}" default "$INPROCESS_FILTER" inprocess
     fi
     ;;
   all)
+    # unit + inprocess first; docker/kube env setup only right before those suites.
     run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-    run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$GRPC_BASED_FILTER" grpc-based
+    run_suite inprocess "${jobs_override:-${VOLGA_TEST_INPROCESS_JOBS:-1}}" default "$INPROCESS_FILTER" inprocess
+    check_docker
     run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
+    check_kube
+    trap cleanup_kube EXIT
     run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER" kube
     ;;
   docker)
+    check_docker
     run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER" docker
     ;;
   kube)
+    check_kube
+    trap cleanup_kube EXIT
     if [[ -n "$filter_override" ]]; then
       run_suite kube "${jobs_override:-1}" ignored-only "$filter_override" kube
     else
@@ -195,7 +179,7 @@ case "$profile" in
     run_suite benchmark "${jobs_override:-1}" all "$BENCHMARK_FILTER"
     ;;
   *)
-    echo "usage: scripts/test {unit|grpc-based|default|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME] [--keep-going]" >&2
+    echo "usage: scripts/test {unit|inprocess|default|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME] [--keep-going]" >&2
     exit 2
     ;;
 esac

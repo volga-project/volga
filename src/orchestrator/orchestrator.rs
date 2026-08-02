@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::api::PipelineSpec;
 use crate::common::failure::FailureEvent;
-use crate::common::test_utils::gen_unique_grpc_port;
+use crate::common::ports::gen_unique_grpc_port;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

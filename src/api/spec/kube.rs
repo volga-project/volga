@@ -139,8 +139,14 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/api/spec/testdata/kube_embedded_json.yaml");
         let yaml = fs::read_to_string(&path).expect("read test fixture yaml");
-        let kube_spec: KubePipelineSpec =
+        // Same path as prod: YAML document → JSON value → KubePipelineSpec (orchestrator
+        // reads pipelineSpec as JSON from the CRD; kubectl has already YAML→JSON'd it).
+        let yaml_value: serde_yaml::Value =
             serde_yaml::from_str(&yaml).expect("parse kube embedded json yaml fixture");
+        let json_value =
+            serde_json::to_value(yaml_value).expect("yaml value to json");
+        let kube_spec: KubePipelineSpec =
+            serde_json::from_value(json_value).expect("deserialize KubePipelineSpec from json");
 
         let spec = PipelineSpec::try_from(kube_spec).expect("kube spec should parse");
         assert_eq!(spec.sources.len(), 1);
