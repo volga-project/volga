@@ -67,7 +67,7 @@ impl Serialize for TaskMetadata {
     }
 }
 
-impl<'de> Deserialize for TaskMetadata {
+impl<'de> Deserialize<'de> for TaskMetadata {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
