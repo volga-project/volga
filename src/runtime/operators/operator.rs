@@ -11,7 +11,7 @@ use crate::runtime::operators::map::map_operator::MapOperator;
 use crate::runtime::operators::reduce::reduce_operator::ReduceOperator;
 use crate::runtime::operators::sink::sink_operator::{SinkConfig, SinkOperator};
 use crate::runtime::operators::source::source_operator::{SourceConfig, SourceOperator};
-use crate::runtime::operators::window::operator::{WindowOperatorConfig, WindowOperator};
+use crate::runtime::operators::window::operator::{WindowOperator, WindowOperatorConfig};
 use crate::runtime::operators::window::request::WindowRequestOperatorConfig;
 use crate::runtime::operators::window::WindowRequestOperator;
 use crate::runtime::runtime_context::RuntimeContext;

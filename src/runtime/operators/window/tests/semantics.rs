@@ -17,6 +17,9 @@ use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, key, keyed_message, runtime_context, watermark_message,
     window_exec_from_sql, Harness, WoWroHarness,
 };
+use crate::runtime::operators::window::{
+    TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
+};
 
 const SQL: &str = r#"SELECT timestamp, value, partition_key, SUM(value) OVER w as sum_val
 FROM test_table
@@ -131,6 +134,16 @@ async fn watermark_rejects_late_rows_for_unseen_key() {
     let partition = PartitionKey::new(&h.namespace, &key("B"));
     let meta = h.store.load_key_state(&partition).await.expect("state");
     assert_eq!(meta.next_seq, 0);
+    assert_eq!(
+        h.task_metadata.get(TASK_METADATA_ROWS_ACCEPTED).as_deref(),
+        Some("0")
+    );
+    assert_eq!(
+        h.task_metadata
+            .get(TASK_METADATA_ROWS_DROPPED_LATE)
+            .as_deref(),
+        Some("1")
+    );
 }
 
 #[tokio::test]

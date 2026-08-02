@@ -8,7 +8,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::runtime::functions::source::datagen_source::{
     DatagenSourceConfig, DatagenSourceFunction,
 };
-use crate::runtime::observability::{task_meta, PipelineSnapshot};
+use crate::runtime::observability::PipelineSnapshot;
+use crate::runtime::operators::source::TASK_METADATA_RECORDS_GENERATED;
+use crate::runtime::operators::window::{
+    TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
+};
 use crate::tests::support::cluster_harness::{MasterHandle, RuntimeEnv};
 use crate::storage::InMemoryStorageSnapshot;
 
@@ -259,7 +263,7 @@ fn task_record_counts(snapshot: &PipelineSnapshot) -> Result<Vec<(i32, u64)>> {
     let mut counts = Vec::new();
     for worker in snapshot.worker_states.values() {
         for (vertex_id, meta) in &worker.task_metadata {
-            let Some(records) = meta.get(task_meta::RECORDS_GENERATED) else {
+            let Some(records) = meta.get(TASK_METADATA_RECORDS_GENERATED) else {
                 continue;
             };
             let task_index = task_index_from_vertex_id(vertex_id.as_ref())?;
@@ -273,10 +277,56 @@ fn task_record_counts(snapshot: &PipelineSnapshot) -> Result<Vec<(i32, u64)>> {
     if counts.is_empty() {
         return Err(anyhow!(
             "no task metadata with {} in pipeline snapshot",
-            task_meta::RECORDS_GENERATED
+            TASK_METADATA_RECORDS_GENERATED
         ));
     }
     Ok(counts)
+}
+
+fn assert_no_window_late_drops(snapshot: &PipelineSnapshot) -> Result<()> {
+    let mut window_tasks = Vec::new();
+    for worker in snapshot.worker_states.values() {
+        for (vertex_id, meta) in &worker.task_metadata {
+            let Some(dropped) = meta.get(TASK_METADATA_ROWS_DROPPED_LATE) else {
+                continue;
+            };
+            let dropped = dropped.parse::<u64>().map_err(|e| {
+                anyhow!(
+                    "bad {} for {vertex_id}: {e}",
+                    TASK_METADATA_ROWS_DROPPED_LATE
+                )
+            })?;
+            let accepted = meta
+                .get(TASK_METADATA_ROWS_ACCEPTED)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "missing {} for window task {vertex_id}",
+                        TASK_METADATA_ROWS_ACCEPTED
+                    )
+                })?
+                .parse::<u64>()
+                .map_err(|e| {
+                    anyhow!(
+                        "bad {} for {vertex_id}: {e}",
+                        TASK_METADATA_ROWS_ACCEPTED
+                    )
+                })?;
+            window_tasks.push((vertex_id, accepted, dropped));
+        }
+    }
+    if window_tasks.is_empty() {
+        return Err(anyhow!(
+            "no window task metadata with {}",
+            TASK_METADATA_ROWS_DROPPED_LATE
+        ));
+    }
+    let dropped: u64 = window_tasks.iter().map(|(_, _, dropped)| *dropped).sum();
+    if dropped != 0 {
+        return Err(anyhow!(
+            "window dropped {dropped} late rows: {window_tasks:?}"
+        ));
+    }
+    Ok(())
 }
 
 fn aggregates_match(expected: &WindowAggregateRow, actual: &WindowAggregateRow) -> bool {
@@ -380,6 +430,7 @@ pub(super) async fn assert_sink_matches_offline_datagen(
     let input_rows = materialize_input_rows(&task_counts, workload)?;
 
     if workload == CheckpointWorkload::Window {
+        assert_no_window_late_drops(&snapshot)?;
         let expected = expected_window_rows(input_rows);
         let actual = window_sink_rows(storage)?;
         return assert_window_rows(&expected, &actual, env, total, &task_counts);

@@ -18,7 +18,9 @@ mod tests;
 
 pub use config::{BuiltWindows, WindowConfig};
 pub use model::{Cursor, Tile, TimeGranularity};
-pub use operator::{WindowOperator, WindowOutputMode};
+pub use operator::{
+    WindowOperator, WindowOutputMode, TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
+};
 pub use request::WindowRequestOperator;
 pub use store::{InMemWindowStore, StateNamespace, WindowOperatorStore, WindowRequestStore};
 pub use tile::TileConfig;

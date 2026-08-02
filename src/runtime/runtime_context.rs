@@ -7,6 +7,7 @@ use crate::common::types::PipelineId;
 use crate::runtime::execution_graph::ExecutionGraph;
 use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
 use crate::runtime::operators::source::SourceHandles;
+use crate::runtime::observability::TaskMetadata;
 use crate::runtime::state::OperatorStates;
 use crate::runtime::VertexId;
 
@@ -23,6 +24,7 @@ pub struct RuntimeContext {
     pipeline_id: Option<PipelineId>,
     operator_id: Option<String>,
     source_handles: Option<SourceHandles>,
+    task_metadata: TaskMetadata,
 
     request_sink_source_request_receiver: Option<Arc<Mutex<mpsc::Receiver<PendingRequest>>>>,
     request_sink_source_response_sender: Option<mpsc::Sender<Message>>,
@@ -49,6 +51,7 @@ impl RuntimeContext {
             pipeline_id: None,
             operator_id: None,
             source_handles: None,
+            task_metadata: TaskMetadata::default(),
             request_sink_source_request_receiver: None,
             request_sink_source_response_sender: None,
         }
@@ -116,6 +119,10 @@ impl RuntimeContext {
 
     pub fn source_handles(&self) -> Option<&SourceHandles> {
         self.source_handles.as_ref()
+    }
+
+    pub fn task_metadata(&self) -> TaskMetadata {
+        self.task_metadata.clone()
     }
 
     pub fn set_request_sink_source_request_receiver(

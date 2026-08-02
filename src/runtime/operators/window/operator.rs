@@ -23,10 +23,14 @@ use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateS
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::observability::TaskMetadata;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 
 #[cfg(test)]
 use crate::runtime::operators::window::store::WindowOperatorStore;
+
+pub const TASK_METADATA_ROWS_ACCEPTED: &str = "window_rows_accepted";
+pub const TASK_METADATA_ROWS_DROPPED_LATE: &str = "window_rows_dropped_late";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowOutputMode {
@@ -69,6 +73,7 @@ pub struct WindowOperator {
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     ts_column_index: usize,
+    task_metadata: TaskMetadata,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -108,6 +113,7 @@ impl WindowOperator {
             output_schema: built.output_schema,
             input_schema: built.input_schema,
             ts_column_index: built.ts_column_index,
+            task_metadata: TaskMetadata::default(),
         }
     }
 
@@ -174,6 +180,10 @@ impl WindowOperator {
 impl OperatorTrait for WindowOperator {
     async fn open(&mut self, context: &RuntimeContext) -> Result<()> {
         self.base.open(context).await?;
+        self.task_metadata = context.task_metadata();
+        self.task_metadata.set(TASK_METADATA_ROWS_ACCEPTED, 0);
+        self.task_metadata
+            .set(TASK_METADATA_ROWS_DROPPED_LATE, 0);
 
         if self.state.is_none() {
             let backend = context
@@ -251,6 +261,12 @@ impl OperatorTrait for WindowOperator {
                         )
                         .await;
                     debug_assert!(dropped <= input_rows);
+                    self.task_metadata.increment_u64(
+                        TASK_METADATA_ROWS_ACCEPTED,
+                        (input_rows - dropped) as u64,
+                    );
+                    self.task_metadata
+                        .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
                     OperatorPollResult::Continue
                 }
                 Message::Watermark(watermark) => {

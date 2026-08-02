@@ -140,6 +140,28 @@ pub(crate) async fn run_watermark_window_pipeline(
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(10)).await;
     worker.signal_tasks_run().await;
     wait_for_status(&worker, StreamTaskStatus::Finished, Duration::from_secs(60)).await;
+    let worker_snapshot = worker.get_state().await;
+    let window_drops = worker_snapshot
+        .task_metadata
+        .iter()
+        .filter_map(|(vertex_id, metadata)| {
+            metadata
+                .get(crate::runtime::operators::window::TASK_METADATA_ROWS_DROPPED_LATE)
+                .map(|dropped| (vertex_id, dropped))
+        })
+        .map(|(vertex_id, dropped)| {
+            dropped
+                .parse::<u64>()
+                .map(|dropped| (vertex_id, dropped))
+                .map_err(|e| anyhow::anyhow!("bad window_rows_dropped_late for {vertex_id}: {e}"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    anyhow::ensure!(
+        !window_drops.is_empty(),
+        "no window late-drop accounting in worker snapshot"
+    );
+    let late_dropped: u64 = window_drops.iter().map(|(_, dropped)| *dropped).sum();
+    assert_eq!(late_dropped, 0, "window pipeline dropped late rows");
     worker.signal_tasks_close().await;
     wait_for_status(&worker, StreamTaskStatus::Closed, Duration::from_secs(10)).await;
     worker.close();

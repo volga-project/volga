@@ -7,7 +7,9 @@ use crate::runtime::operators::window::operator::WindowOperatorConfig;
 use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, run_wo, window_exec_from_sql, Harness, WoWroHarness,
 };
-use crate::runtime::operators::window::{TileConfig, TimeGranularity};
+use crate::runtime::operators::window::{
+    TileConfig, TimeGranularity, TASK_METADATA_ROWS_ACCEPTED, TASK_METADATA_ROWS_DROPPED_LATE,
+};
 
 #[tokio::test]
 async fn drop_post_frontier_late_events() {
@@ -31,6 +33,16 @@ WINDOW w AS (
     let out = h.watermark_and_output(3000).await;
     let _ = h.drain_passthrough_watermark().await;
     assert_eq!(out.num_rows(), 0);
+    assert_eq!(
+        h.task_metadata.get(TASK_METADATA_ROWS_ACCEPTED).as_deref(),
+        Some("2")
+    );
+    assert_eq!(
+        h.task_metadata
+            .get(TASK_METADATA_ROWS_DROPPED_LATE)
+            .as_deref(),
+        Some("1")
+    );
 }
 
 #[tokio::test]
@@ -50,6 +62,16 @@ WINDOW w AS (
     let wm = h.drain_passthrough_watermark().await;
     assert_eq!(wm, MAX_WATERMARK_VALUE);
     assert_eq!(out.num_rows(), 1);
+    assert_eq!(
+        h.task_metadata.get(TASK_METADATA_ROWS_ACCEPTED).as_deref(),
+        Some("1")
+    );
+    assert_eq!(
+        h.task_metadata
+            .get(TASK_METADATA_ROWS_DROPPED_LATE)
+            .as_deref(),
+        Some("0")
+    );
 }
 
 #[tokio::test]

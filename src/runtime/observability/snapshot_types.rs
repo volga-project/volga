@@ -8,6 +8,7 @@ use crate::runtime::VertexId;
 use crate::runtime::metrics::TaskMetrics;
 use anyhow::Result;
 use crate::storage::StorageStatsSnapshot;
+use super::task_metadata::TaskMetadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StreamTaskStatus {
@@ -31,18 +32,13 @@ impl From<u8> for StreamTaskStatus {
     }
 }
 
-/// Convention keys for [`TaskSnapshot::metadata`] / [`WorkerSnapshot::task_metadata`].
-pub mod task_meta {
-    pub const RECORDS_GENERATED: &str = "records_generated";
-}
-
 #[derive(Debug, Clone)]
 pub struct TaskSnapshot {
     pub vertex_id: VertexId,
     pub status: StreamTaskStatus,
     pub metrics: TaskMetrics,
-    /// Opaque string KV for harness/debug (e.g. source `records_generated`).
-    pub metadata: HashMap<String, String>,
+    /// Opaque operator data for harness/debug (e.g. source `records_generated`).
+    pub metadata: TaskMetadata,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +54,7 @@ pub struct WorkerSnapshot {
     pub task_statuses: HashMap<VertexId, StreamTaskStatus>,
     pub worker_metrics: Option<WorkerAggregateMetrics>,
     pub task_operator_metrics: HashMap<VertexId, TaskOperatorMetrics>,
-    pub task_metadata: HashMap<VertexId, HashMap<String, String>>,
+    pub task_metadata: HashMap<VertexId, TaskMetadata>,
 }
 
 impl WorkerSnapshot {
