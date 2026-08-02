@@ -36,6 +36,8 @@ retries=0
 prepared=false
 filter_override=""
 nextest_profile=""
+keep_going=false
+suite_status=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --jobs)
@@ -62,6 +64,11 @@ while [[ $# -gt 0 ]]; do
       nextest_profile="$2"
       shift 2
       ;;
+    --keep-going)
+      # Continue remaining suites after a suite failure (default / all).
+      keep_going=true
+      shift
+      ;;
     *)
       echo "unknown argument: $1" >&2
       exit 2
@@ -74,6 +81,7 @@ run_suite() {
   local ignored="$2"
   local filter="$3"
   local profile_args=()
+  local rc=0
   if [[ -n "$nextest_profile" ]]; then
     profile_args=(--profile "$nextest_profile")
   fi
@@ -84,7 +92,14 @@ run_suite() {
     --test-threads "$jobs" \
     --retries "$retries" \
     --run-ignored "$ignored" \
-    -E "$filter"
+    -E "$filter" || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    suite_status="$rc"
+    if [[ "$keep_going" != true ]]; then
+      exit "$rc"
+    fi
+    echo "suite failed (exit $rc); continuing because --keep-going" >&2
+  fi
 }
 
 check_docker() {
@@ -162,7 +177,9 @@ case "$profile" in
     run_suite "${jobs_override:-1}" all "$BENCHMARK_FILTER"
     ;;
   *)
-    echo "usage: scripts/test {unit|grpc-based|default|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME]" >&2
+    echo "usage: scripts/test {unit|grpc-based|default|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME] [--keep-going]" >&2
     exit 2
     ;;
 esac
+
+exit "$suite_status"

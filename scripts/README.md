@@ -68,12 +68,14 @@ All profiles accept:
 --retries N           Nextest retries per test
 --filter EXPR         Nextest filter expression
 --nextest-profile P   Nextest profile name
+--keep-going          After a suite fails, continue remaining suites (default/all)
 ```
 
 `--filter` runs only the matching tests for the selected profile. For example:
 
 ```bash
 scripts/test default --filter 'test(test_local_multi_worker_window_checkpoint_restore)'
+scripts/test all --keep-going
 ```
 
 ## Stress runs
