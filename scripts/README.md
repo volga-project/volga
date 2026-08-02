@@ -78,6 +78,19 @@ scripts/test default --filter 'test(test_local_multi_worker_window_checkpoint_re
 scripts/test all --keep-going
 ```
 
+With `--keep-going`, a final **failed suites** list is printed and each suite is
+teed to `target/test-runs/<suite>.*.log`. Nextest is configured for
+`--failure-output final` / `--final-status-level fail` so failure details and
+names show at the end of each suite without drowning the scrollback.
+
+Debug a single failure without replaying the whole `all` run:
+
+```bash
+rg '^\\s*FAIL ' target/test-runs/*.log
+scripts/test grpc-based --filter 'test(test_local_single_worker_window_checkpoint_restore)'
+# or: cargo nextest run --lib --no-capture -E 'test(<exact_name>)'
+```
+
 ## Stress runs
 
 The stress runner repeats the **kube** suite (or selected kube tests) across

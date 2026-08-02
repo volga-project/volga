@@ -38,6 +38,7 @@ filter_override=""
 nextest_profile=""
 keep_going=false
 suite_status=0
+failed_suites=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --jobs)
@@ -77,14 +78,23 @@ while [[ $# -gt 0 ]]; do
 done
 
 run_suite() {
-  local jobs="$1"
-  local ignored="$2"
-  local filter="$3"
+  local name="$1"
+  local jobs="$2"
+  local ignored="$3"
+  local filter="$4"
   local profile_args=()
   local rc=0
+  local log_dir="${CARGO_TARGET_DIR}/test-runs"
+  local log_file
+  mkdir -p "$log_dir"
+  log_file="$(mktemp "${log_dir}/${name}.XXXXXX")"
+
   if [[ -n "$nextest_profile" ]]; then
     profile_args=(--profile "$nextest_profile")
   fi
+  echo "==> suite ${name} (log: ${log_file})"
+  # final-status-level=fail: compact fail list at end of each suite without dumping all passes.
+  set +e
   cargo nextest run \
     --lib \
     "${profile_args[@]}" \
@@ -92,13 +102,18 @@ run_suite() {
     --test-threads "$jobs" \
     --retries "$retries" \
     --run-ignored "$ignored" \
-    -E "$filter" || rc=$?
+    --failure-output final \
+    --final-status-level fail \
+    -E "$filter" 2>&1 | tee "$log_file"
+  rc=${PIPESTATUS[0]}
+  set -e
   if [[ "$rc" -ne 0 ]]; then
     suite_status="$rc"
+    failed_suites+=("${name} (exit ${rc}, log ${log_file})")
     if [[ "$keep_going" != true ]]; then
       exit "$rc"
     fi
-    echo "suite failed (exit $rc); continuing because --keep-going" >&2
+    echo "suite ${name} failed (exit $rc); continuing because --keep-going" >&2
   fi
 }
 
@@ -136,50 +151,56 @@ esac
 case "$profile" in
   unit)
     if [[ -n "$filter_override" ]]; then
-      run_suite "${jobs_override:-1}" default "$filter_override"
+      run_suite unit "${jobs_override:-1}" default "$filter_override"
     else
-      run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+      run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
     fi
     ;;
   grpc-based)
     if [[ -n "$filter_override" ]]; then
-      run_suite "${jobs_override:-1}" default "$filter_override"
+      run_suite grpc-based "${jobs_override:-1}" default "$filter_override"
     else
       # Default jobs=1: gRPC/port/process isolation until interference is fixed.
-      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
     fi
     ;;
   default)
     if [[ -n "$filter_override" ]]; then
-      run_suite "${jobs_override:-1}" default "$filter_override"
+      run_suite default "${jobs_override:-1}" default "$filter_override"
     else
-      run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-      run_suite "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+      run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+      run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
     fi
     ;;
   all)
-    run_suite "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
-    run_suite "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
-    run_suite "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
-    run_suite "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
+    run_suite unit "${jobs_override:-${VOLGA_TEST_UNIT_JOBS:-$(cpu_count)}}" default "$UNIT_FILTER"
+    run_suite grpc-based "${jobs_override:-${VOLGA_TEST_GRPC_BASED_JOBS:-1}}" default "$LOCAL_NETWORK_FILTER"
+    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
+    run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
     ;;
   docker)
-    run_suite "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
+    run_suite docker "${jobs_override:-${VOLGA_TEST_DOCKER_JOBS:-1}}" ignored-only "$DOCKER_FILTER"
     ;;
   kube)
     if [[ -n "$filter_override" ]]; then
-      run_suite "${jobs_override:-1}" ignored-only "$filter_override"
+      run_suite kube "${jobs_override:-1}" ignored-only "$filter_override"
     else
-      run_suite "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
+      run_suite kube "${jobs_override:-${VOLGA_TEST_KUBE_JOBS:-1}}" ignored-only "$KUBE_FILTER"
     fi
     ;;
   benchmark)
-    run_suite "${jobs_override:-1}" all "$BENCHMARK_FILTER"
+    run_suite benchmark "${jobs_override:-1}" all "$BENCHMARK_FILTER"
     ;;
   *)
     echo "usage: scripts/test {unit|grpc-based|default|all|docker|kube|stress|benchmark} [--jobs N] [--build-jobs N] [--retries N] [--filter EXPR] [--nextest-profile NAME] [--keep-going]" >&2
     exit 2
     ;;
 esac
+
+if [[ "${#failed_suites[@]}" -gt 0 ]]; then
+  echo "======== failed suites ========" >&2
+  printf '  - %s\n' "${failed_suites[@]}" >&2
+  echo "Per-suite logs under ${CARGO_TARGET_DIR}/test-runs/; grep FAIL in those files for test names." >&2
+fi
 
 exit "$suite_status"
