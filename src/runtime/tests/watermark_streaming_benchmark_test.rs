@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 
-use crate::runtime::tests::watermark_streaming_e2e_test::run_watermark_window_pipeline;
+use crate::e2e::inprocess::watermark_streaming::run_watermark_window_pipeline;
 
 #[derive(Debug, Clone)]
 struct BenchCase {

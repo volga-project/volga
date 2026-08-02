@@ -4,7 +4,7 @@ use crate::{
         ConnectorConfigs, PipelineSpecBuilder,
     },
     common::test_utils::{gen_unique_grpc_port, print_pipeline_state},
-    runtime::tests::pipeline_exec,
+    e2e::support::pipeline_exec,
     runtime::{
         functions::source::word_count_source::BatchingMode,
         metrics::{LatencyMetrics, LATENCY_BUCKET_BOUNDARIES},

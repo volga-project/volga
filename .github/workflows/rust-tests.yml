@@ -15,7 +15,7 @@ on:
         options:
           - default
           - unit
-          - grpc-based
+          - inprocess
           - docker
           - kube
           - all
@@ -68,7 +68,7 @@ jobs:
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
       inputs.profile != 'unit' &&
-      inputs.profile != 'grpc-based' &&
+      inputs.profile != 'inprocess' &&
       inputs.profile != 'kube'
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -101,7 +101,7 @@ jobs:
       github.event_name != 'schedule' &&
       inputs.profile != 'stress' &&
       inputs.profile != 'unit' &&
-      inputs.profile != 'grpc-based' &&
+      inputs.profile != 'inprocess' &&
       inputs.profile != 'docker'
     runs-on: ubuntu-latest
     timeout-minutes: 60
