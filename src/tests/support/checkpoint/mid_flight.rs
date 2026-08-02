@@ -72,6 +72,7 @@ pub async fn run_checkpoint_mid_flight_kill_no_prior(
             &cluster.master(),
             &mut cursor,
             timeouts.recovery_started + timeouts.replacement + timeouts.attempt1_running,
+            "AttemptStarted attempt=1 after mid-flight kill (no prior)",
             |event| {
                 matches!(
                     event,
@@ -84,6 +85,7 @@ pub async fn run_checkpoint_mid_flight_kill_no_prior(
             &cluster.master(),
             &mut cursor,
             timeouts.attempt1_running,
+            "AttemptRunning attempt=1 after mid-flight kill (no prior)",
             |event| {
                 matches!(
                     event,
@@ -155,6 +157,7 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
             &cluster.master(),
             &mut cursor,
             timeouts.recovery_started + timeouts.replacement + timeouts.attempt1_running,
+            "AttemptStarted attempt=1 after mid-flight kill (after safe)",
             |event| {
                 matches!(
                     event,
@@ -167,6 +170,7 @@ pub async fn run_checkpoint_mid_flight_kill_after_safe(
             &cluster.master(),
             &mut cursor,
             timeouts.attempt1_running,
+            "AttemptRunning attempt=1 after mid-flight kill (after safe)",
             |event| {
                 matches!(
                     event,

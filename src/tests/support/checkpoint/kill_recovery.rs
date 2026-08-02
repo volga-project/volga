@@ -1,19 +1,21 @@
 //! Kill after completed checkpoint(s), restore, sink/offline check.
 
 use anyhow::{anyhow, Result};
+use std::time::{Duration, Instant};
 
 use crate::runtime::master::LifecycleEvent;
 use crate::tests::support::cluster_harness::{
-    LifecycleOracle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster, WorkerKillMode,
+    LifecycleOracle, MasterHandle, PipelineLaunchSpec, RecoveryReport, RuntimeEnv, TestCluster,
+    WorkerKillMode,
 };
 use crate::tests::support::recovery::RecoveryTimeouts;
 
 use super::launch::CheckpointWorkload;
 use super::sink_oracle::assert_sink_matches_offline_datagen;
 use super::support::{
-    advance_lifecycle_cursor, harness_finish_pipeline, shutdown_after,
+    advance_lifecycle_cursor, checkpoint_idle_timeout, harness_finish_pipeline, shutdown_after,
     wait_for_checkpoint_completed, wait_for_checkpoint_completed_id, wait_for_checkpoint_started,
-    wait_until_attempt0_running,
+    wait_until_attempt0_running, wait_until_attempt_running, wait_until_checkpoints_idle,
 };
 
 async fn wait_for_sink_progress(
@@ -34,6 +36,71 @@ async fn wait_for_sink_progress(
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
     }
+}
+
+/// After an intentional kill: restore AttemptStarted + kill-target replaced.
+/// `ReplacementRequested` / `RecoveryStarted` can precede `AttemptStarted`, so both
+/// conditions are tracked in one cursor scan.
+async fn wait_for_kill_restore(
+    master: &MasterHandle,
+    cursor: &mut u64,
+    timeout: Duration,
+    target: &str,
+    min_restore_checkpoint_id: u64,
+    min_attempt_id: u64,
+) -> Result<u64> {
+    let started = Instant::now();
+    let start_cursor = *cursor;
+    let mut restore_attempt: Option<u64> = None;
+    let mut target_replaced = false;
+    let expecting = format!(
+        "AttemptStarted restore>={min_restore_checkpoint_id} attempt>={min_attempt_id} \
+         and replace containing {target}"
+    );
+
+    while !(restore_attempt.is_some() && target_replaced) {
+        for record in master.lifecycle_events_since(*cursor).await? {
+            *cursor = record.sequence;
+            match &record.event {
+                LifecycleEvent::RecoveryStarted {
+                    replacement_worker_ids,
+                    ..
+                } if replacement_worker_ids.iter().any(|id| id == target) => {
+                    target_replaced = true;
+                }
+                LifecycleEvent::ReplacementRequested { worker_ids }
+                    if worker_ids.iter().any(|id| id == target) =>
+                {
+                    target_replaced = true;
+                }
+                LifecycleEvent::AttemptStarted {
+                    attempt_id,
+                    restore_checkpoint_id: Some(id),
+                } if *id >= min_restore_checkpoint_id && *attempt_id >= min_attempt_id => {
+                    restore_attempt = Some(*attempt_id);
+                }
+                _ => {}
+            }
+        }
+        if let (Some(attempt_id), true) = (restore_attempt, target_replaced) {
+            return Ok(attempt_id);
+        }
+        if started.elapsed() >= timeout {
+            return Err(anyhow!(
+                "{}",
+                LifecycleOracle::timeout_diagnostics(
+                    master,
+                    &expecting,
+                    start_cursor,
+                    *cursor,
+                    started.elapsed(),
+                )
+                .await
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    Err(anyhow!("unreachable: wait_for_kill_restore loop exited"))
 }
 
 /// One kill after the first completed checkpoint, then finish + sink check.
@@ -59,20 +126,36 @@ pub async fn run_checkpoint_sequential_failures(
         return Err(anyhow!("failure_count must be >= 1"));
     }
     let timeouts = RecoveryTimeouts::for_env(env);
+    let idle_timeout = checkpoint_idle_timeout(env);
     let cluster = TestCluster::launch(env, launch).await?;
     let result = async {
         let worker_ids = cluster.worker_ids();
         if worker_ids.is_empty() {
             return Err(anyhow!("expected at least one worker"));
         }
+        let expected_workers = worker_ids.len();
         let mut cursor = 0;
         let mut next_attempt: u64 = 1;
+        let mut current_attempt: u64 = 0;
 
         cluster.start_execution().await?;
         wait_until_attempt0_running(&cluster.master(), &mut cursor, timeouts.attempt_running)
             .await?;
 
         for failure_idx in 0..failure_count {
+            // Stabilize before waiting for the next kill CP: attempt running, no in-flight CP.
+            if failure_idx > 0 {
+                wait_until_attempt_running(
+                    &cluster.master(),
+                    &mut cursor,
+                    timeouts.attempt1_running,
+                    current_attempt,
+                    expected_workers,
+                )
+                .await?;
+            }
+            wait_until_checkpoints_idle(&cluster.master(), idle_timeout).await?;
+
             let checkpoint_id = match workload {
                 CheckpointWorkload::PassThrough => {
                     wait_for_checkpoint_completed(
@@ -110,6 +193,9 @@ pub async fn run_checkpoint_sequential_failures(
                 }
             };
 
+            // Another interval CP may start after the waited completion; idle again before kill.
+            wait_until_checkpoints_idle(&cluster.master(), idle_timeout).await?;
+
             let target = &worker_ids[failure_idx % worker_ids.len()];
             println!(
                 "[TEST] sequential-failure {}/{} kill worker={target} after checkpoint>={checkpoint_id}",
@@ -122,59 +208,30 @@ pub async fn run_checkpoint_sequential_failures(
                 .kill_with(mode)
                 .await?;
 
-            // Restore id may be > waited id if another CP completed before the kill landed.
-            let started = LifecycleOracle::wait_for(
+            // Per-cycle signal: restore from a completed CP + kill target replaced.
+            // Do not require AttemptRunning / sink growth here (non-transactional sink
+            // often stays flat during replay); that runs once before finish.
+            let attempt_id = wait_for_kill_restore(
                 &cluster.master(),
                 &mut cursor,
                 timeouts.recovery_started + timeouts.replacement + timeouts.attempt1_running,
-                |event| {
-                    matches!(
-                        event,
-                        LifecycleEvent::AttemptStarted {
-                            restore_checkpoint_id: Some(id),
-                            ..
-                        } if *id >= checkpoint_id
-                    )
-                },
+                target,
+                checkpoint_id,
+                next_attempt,
             )
             .await?;
-            let attempt_id = match started.event {
-                LifecycleEvent::AttemptStarted { attempt_id, .. } => attempt_id,
-                other => {
-                    return Err(anyhow!(
-                        "expected AttemptStarted after kill, got {other:?}"
-                    ))
-                }
-            };
-            if attempt_id < next_attempt {
-                return Err(anyhow!(
-                    "expected attempt_id >= {next_attempt} after failure {failure_idx}, got {attempt_id}"
-                ));
-            }
             next_attempt = attempt_id + 1;
-
-            LifecycleOracle::wait_for(
-                &cluster.master(),
-                &mut cursor,
-                timeouts.attempt1_running,
-                |event| {
-                    matches!(
-                        event,
-                        LifecycleEvent::AttemptRunning {
-                            attempt_id: id,
-                            ..
-                        } if *id == attempt_id
-                    )
-                },
-            )
-            .await?;
-
-            // Cardinality can remain flat while restored sources replay rows already
-            // present in the non-transactional sink. Wait until replay catches up and
-            // the recovered attempt produces at least one new output identity.
-            let recovered_rows = cluster.storage().snapshot().await?.row_count();
-            wait_for_sink_progress(&cluster, recovered_rows, timeouts.attempt1_running).await?;
+            current_attempt = attempt_id;
         }
+
+        wait_until_attempt_running(
+            &cluster.master(),
+            &mut cursor,
+            timeouts.attempt1_running,
+            current_attempt,
+            expected_workers,
+        )
+        .await?;
 
         harness_finish_pipeline(&cluster, &mut cursor, env, failure_count).await?;
 
@@ -190,9 +247,16 @@ pub async fn run_checkpoint_sequential_failures(
     shutdown_after(&cluster, result).await
 }
 
+fn parse_restore_checkpoint_id(trigger: &str) -> Option<u64> {
+    let marker = "restore=Some(";
+    let start = trigger.find(marker)? + marker.len();
+    let end = start + trigger[start..].find(')')?;
+    trigger[start..end].parse().ok()
+}
+
 pub fn assert_checkpoint_restore(
     report: &RecoveryReport,
-    expected_checkpoint_id: u64,
+    min_checkpoint_id: u64,
     expected_workers: usize,
 ) -> Result<()> {
     // Extra recoveries can follow (e.g. later CP timeout); require restore on attempt 1.
@@ -210,13 +274,13 @@ pub fn assert_checkpoint_restore(
         ));
     }
     let attempt1 = report.attempt(1)?;
-    if !attempt1.trigger.contains(&format!("restore=Some({expected_checkpoint_id})")) {
-        return Err(anyhow!(
-            "attempt 1 trigger missing restore=Some({expected_checkpoint_id}): {}",
+    match parse_restore_checkpoint_id(&attempt1.trigger) {
+        Some(id) if id >= min_checkpoint_id => Ok(()),
+        _ => Err(anyhow!(
+            "attempt 1 trigger missing restore=Some(id>={min_checkpoint_id}): {}",
             attempt1.trigger
-        ));
+        )),
     }
-    Ok(())
 }
 
 /// At least `min_failures` attempts restored from a checkpoint; multi-worker on attempt 0.

@@ -99,9 +99,11 @@ impl LifecycleOracle {
         master: &MasterHandle,
         cursor: &mut u64,
         timeout: Duration,
+        expecting: &str,
         predicate: impl Fn(&LifecycleEvent) -> bool,
     ) -> Result<LifecycleEventRecord> {
         let started = tokio::time::Instant::now();
+        let start_cursor = *cursor;
         loop {
             for record in master.lifecycle_events_since(*cursor).await? {
                 *cursor = record.sequence;
@@ -110,10 +112,83 @@ impl LifecycleOracle {
                 }
             }
             if started.elapsed() >= timeout {
-                return Err(anyhow!("timed out waiting for lifecycle event"));
+                return Err(anyhow!(
+                    "{}",
+                    Self::timeout_diagnostics(
+                        master,
+                        expecting,
+                        start_cursor,
+                        *cursor,
+                        started.elapsed(),
+                    )
+                    .await
+                ));
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+    }
+
+    /// Shared timeout context for lifecycle waits (cursor + recent events + attempt summary).
+    pub async fn timeout_diagnostics(
+        master: &MasterHandle,
+        expecting: &str,
+        start_cursor: u64,
+        cursor: u64,
+        elapsed: Duration,
+    ) -> String {
+        const RECENT: usize = 20;
+        let events = master.lifecycle_events_since(0).await.unwrap_or_default();
+        let report = RecoveryReport::from_events(&events);
+        let recent = {
+            let lines: Vec<String> = events
+                .iter()
+                .rev()
+                .take(RECENT)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .map(|r| format!("  seq={} {:?}", r.sequence, r.event))
+                .collect();
+            if lines.is_empty() {
+                "  (none)".to_string()
+            } else {
+                lines.join("\n")
+            }
+        };
+        let attempts = {
+            let lines: Vec<String> = report
+                .attempts
+                .values()
+                .map(|a| {
+                    format!(
+                        "  attempt {}: trigger={} workers={:?} failures={} recovered={}",
+                        a.attempt_id,
+                        a.trigger,
+                        a.workers,
+                        a.failures.len(),
+                        a.recovered
+                    )
+                })
+                .collect();
+            if lines.is_empty() {
+                "  (none)".to_string()
+            } else {
+                lines.join("\n")
+            }
+        };
+        let outcome = if report.outcome.is_empty() {
+            "(none)".to_string()
+        } else {
+            report.outcome.clone()
+        };
+        format!(
+            "timed out waiting for lifecycle event: {expecting}\n\
+             start_cursor={start_cursor} cursor={cursor} elapsed={elapsed:?}\n\
+             attempts ({}):\n{attempts}\n\
+             outcome={outcome}\n\
+             last {RECENT} events:\n{recent}",
+            report.attempts.len(),
+        )
     }
 
     pub fn print_recovery_stats(events: &[LifecycleEventRecord]) {
