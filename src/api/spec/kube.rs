@@ -139,8 +139,12 @@ mod tests {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("src/api/spec/testdata/kube_embedded_json.yaml");
         let yaml = fs::read_to_string(&path).expect("read test fixture yaml");
-        let kube_spec: KubePipelineSpec =
+        let mut kube_spec: KubePipelineSpec =
             serde_yaml::from_str(&yaml).expect("parse kube embedded json yaml fixture");
+        // Fixture omits profile (serde_yaml enum tags are awkward); validate() requires one.
+        kube_spec.execution_profile = Some(ExecutionProfile::MasterWorker {
+            num_threads_per_task: 2,
+        });
 
         let spec = PipelineSpec::try_from(kube_spec).expect("kube spec should parse");
         assert_eq!(spec.sources.len(), 1);
