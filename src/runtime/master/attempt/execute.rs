@@ -60,11 +60,16 @@ impl ExecutionAttempt {
                     return Ok(self.await_failure_window_and_recover(failure).await);
                 }
                 _ = optional_tick(&mut checkpoint_tick) => {
-                    if let Err(error) = self.begin_checkpoint().await {
-                        println!(
-                            "[MASTER] Interval checkpoint skipped attempt={}: {}",
-                            self.id, error
-                        );
+                    match self.begin_checkpoint().await {
+                        Ok(_) => {}
+                        // Expected after StopSources; do not spam.
+                        Err(error) if error == "sources stopped for drain" => {}
+                        Err(error) => {
+                            println!(
+                                "[MASTER] Interval checkpoint skipped attempt={}: {}",
+                                self.id, error
+                            );
+                        }
                     }
                 }
                 state_poll = async {
@@ -130,6 +135,7 @@ impl ExecutionAttempt {
                 CheckpointStartError::NoCheckpointableTasks => {
                     "no checkpointable tasks".to_string()
                 }
+                CheckpointStartError::Disabled => "sources stopped for drain".to_string(),
             })?;
         println!(
             "[MASTER] Triggering checkpoint {} attempt={}",

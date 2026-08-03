@@ -159,6 +159,10 @@ done
 
 echo "Stress logs: $LOG_DIR"
 if [[ "$failed" -ne 0 ]]; then
-  rg -n "Error: |=== $ENVIRONMENT shard .*: fail ===" "$LOG_DIR" || true
+  if command -v rg >/dev/null 2>&1; then
+    rg -n "Error: |=== $ENVIRONMENT shard .*: fail ===" "$LOG_DIR" || true
+  else
+    grep -REn "Error: |=== $ENVIRONMENT shard .*: fail ===" "$LOG_DIR" || true
+  fi
 fi
 exit "$failed"
