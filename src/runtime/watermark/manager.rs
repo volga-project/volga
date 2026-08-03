@@ -8,17 +8,8 @@ use arrow::record_batch::RecordBatch;
 use tokio::sync::Mutex;
 
 use crate::common::message::{Message, WatermarkMessage};
-use crate::runtime::operators::operator::OperatorConfig;
-
-use datafusion::physical_plan::expressions::Column;
 
 use super::confg::{TimeHint, WatermarkAssignConfig};
-
-#[derive(Debug, Clone)]
-enum TsColumnSpec {
-    Index(usize),
-    ColumnName(String),
-}
 
 #[derive(Debug, Default, Clone)]
 struct UpstreamWatermarkProgress {
@@ -28,66 +19,33 @@ struct UpstreamWatermarkProgress {
 
 /// Stateful event-time watermark generator.
 ///
-/// Progress is tracked **per upstream vertex id** so we can attach this generator to a downstream
-/// task (e.g. Window) while still simulating independent upstream watermark production.
+/// Progress is tracked **per upstream vertex id** (sources use the task's own id; map/preprocess
+/// uses the message upstream id).
 #[derive(Debug)]
 pub struct WatermarkAssignerState {
     out_of_orderness_ms: u64,
-    ts_column: TsColumnSpec,
+    ts_column_name: String,
     per_upstream: HashMap<String, UpstreamWatermarkProgress>,
 }
 
 impl WatermarkAssignerState {
-    pub fn new(cfg: WatermarkAssignConfig, operator_config: Option<&OperatorConfig>) -> Self {
-        let ts_column = match cfg.time_hint {
-            Some(TimeHint::WindowOrderByColumn) => TsColumnSpec::Index(
-                Self::derive_window_ts_column_index(
-                    operator_config.expect("WindowOrderByColumn requires operator_config"),
-                ),
-            ),
-            Some(TimeHint::ColumnName { name }) => TsColumnSpec::ColumnName(name),
-            None => {
-                // Auto-resolve only for Window vertices.
-                TsColumnSpec::Index(Self::derive_window_ts_column_index(
-                    operator_config.expect("Auto-resolve requires operator_config"),
-                ))
-            }
-        };
-
+    pub fn new(cfg: WatermarkAssignConfig) -> Self {
+        let TimeHint::ColumnName { name } = cfg.time_hint;
         Self {
             out_of_orderness_ms: cfg.out_of_orderness_ms,
-            ts_column,
+            ts_column_name: name,
             per_upstream: HashMap::new(),
         }
     }
 
-    fn derive_window_ts_column_index(operator_config: &OperatorConfig) -> usize {
-        let OperatorConfig::WindowConfig(window_cfg) = operator_config else {
-            panic!("WatermarkAssign auto-resolve requires Window vertex or explicit time hint");
-        };
-        window_cfg.window_exec.window_expr()[0]
-            .order_by()[0]
-            .expr
-            .as_any()
-            .downcast_ref::<Column>()
-            .expect("Expected Column expression in Window ORDER BY")
-            .index()
-    }
-
     fn resolve_ts_column_index(&self, batch: &RecordBatch) -> usize {
-        match &self.ts_column {
-            TsColumnSpec::Index(idx) => *idx,
-            TsColumnSpec::ColumnName(name) => batch
-                .schema()
-                .index_of(name)
-                .unwrap_or_else(|_| {
-                    panic!(
-                        "WatermarkAssign failed: missing column '{}' in schema {:?}",
-                        name,
-                        batch.schema()
-                    )
-                }),
-        }
+        batch.schema().index_of(&self.ts_column_name).unwrap_or_else(|_| {
+            panic!(
+                "WatermarkAssign failed: missing column '{}' in schema {:?}",
+                self.ts_column_name,
+                batch.schema()
+            )
+        })
     }
 
     fn batch_max_ts_ms(&self, batch: &RecordBatch, ts_column_index: usize) -> Option<u64> {
@@ -180,13 +138,12 @@ pub struct WatermarkManager {
 impl WatermarkManager {
     pub fn new(
         watermark_assign: Option<WatermarkAssignConfig>,
-        operator_config: Option<&OperatorConfig>,
         upstream_vertices: Vec<String>,
         upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
         current_watermark: Arc<AtomicU64>,
     ) -> Self {
         let idle_timeout_ms = watermark_assign.as_ref().and_then(|cfg| cfg.idle_timeout_ms);
-        let assigner = watermark_assign.map(|cfg| WatermarkAssignerState::new(cfg, operator_config));
+        let assigner = watermark_assign.map(WatermarkAssignerState::new);
         let last_seen_processing_time = upstream_vertices
             .iter()
             .map(|u| (u.clone(), Instant::now()))
@@ -339,12 +296,12 @@ mod tests {
 
         let cfg = WatermarkAssignConfig {
             out_of_orderness_ms: 0,
-            time_hint: Some(TimeHint::ColumnName {
+            time_hint: TimeHint::ColumnName {
                 name: "ts_ms".to_string(),
-            }),
+            },
             idle_timeout_ms: Some(WatermarkAssignConfig::DEFAULT_IDLE_TIMEOUT_MS),
         };
-        let mut assigner = WatermarkAssignerState::new(cfg, None);
+        let mut assigner = WatermarkAssignerState::new(cfg);
 
         let wm1 = assigner.on_data_message("upA", &msg).unwrap();
         assert_eq!(wm1.metadata.upstream_vertex_id.as_deref(), Some("upA"));
@@ -386,17 +343,14 @@ mod tests {
 
         let cfg = WatermarkAssignConfig::new(
             0,
-            Some(TimeHint::ColumnName {
+            TimeHint::ColumnName {
                 name: "ts_ms".to_string(),
-            }),
+            },
         );
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
             Arc::<str>::from("v0"),
-            OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
-                crate::common::test_utils::IdentityMapFunction,
-            )),
             Some(cfg),
             vec!["u0".to_string()],
             Arc::new(Mutex::new(HashMap::new())),
@@ -460,17 +414,14 @@ mod tests {
         let input = Box::pin(stream::iter(vec![m0, m1]));
         let cfg = WatermarkAssignConfig::new(
             0,
-            Some(TimeHint::ColumnName {
+            TimeHint::ColumnName {
                 name: "ts_ms".to_string(),
-            }),
+            },
         );
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
             Arc::<str>::from("v0"),
-            OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
-                crate::common::test_utils::IdentityMapFunction,
-            )),
             Some(cfg),
             vec!["u0".to_string(), "u1".to_string()],
             Arc::new(Mutex::new(HashMap::new())),
@@ -523,18 +474,15 @@ mod tests {
 
         let mut cfg = WatermarkAssignConfig::new(
             0,
-            Some(TimeHint::ColumnName {
+            TimeHint::ColumnName {
                 name: "ts_ms".to_string(),
-            }),
+            },
         );
         cfg.idle_timeout_ms = Some(1);
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
             Arc::<str>::from("v0"),
-            OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
-                crate::common::test_utils::IdentityMapFunction,
-            )),
             Some(cfg),
             vec!["u0".to_string(), "u1".to_string()],
             Arc::new(Mutex::new(HashMap::new())),
@@ -580,18 +528,15 @@ mod tests {
 
         let mut cfg = WatermarkAssignConfig::new(
             0,
-            Some(TimeHint::ColumnName {
+            TimeHint::ColumnName {
                 name: "ts_ms".to_string(),
-            }),
+            },
         );
         cfg.idle_timeout_ms = None;
 
         let mut out = StreamTask::create_preprocessed_input_stream(
             input,
             Arc::<str>::from("v0"),
-            OperatorConfig::MapConfig(crate::runtime::functions::map::MapFunction::new_custom(
-                crate::common::test_utils::IdentityMapFunction,
-            )),
             Some(cfg),
             vec!["u0".to_string(), "u1".to_string()],
             Arc::new(Mutex::new(HashMap::new())),
