@@ -180,11 +180,9 @@ jobs:
           schedule_mode=dispatch
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
             # Free org ~18 usable concurrent runners in practice. Alternate so
-            # each suite gets a dedicated wave (not half the pool). Both use
-            # 15×100 under job timeout 180m:
-            # - inproc window restore ≈ 10–15s/run → ~25–40m
-            # - kube --all + fresh Kind is heavier; 100 runs may span >1h and
-            #   rely on schedule concurrency (cancel-in-progress: false).
+            # each suite gets a dedicated wave (not half the pool), 15 machines:
+            # - inproc 100× window restore ≈ 10–15s/run → ~25–40m
+            # - kube 50× --all + fresh Kind (heavier per run; may still span >1h)
             # Cron fires at UTC hours 0,4,8,12,16,20 — alternate by slot so we
             # do not always land on the same suite (hour%2 would be stuck on even).
             hour=$((10#$(date -u +%H)))
