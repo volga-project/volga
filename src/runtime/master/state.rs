@@ -280,6 +280,37 @@ impl MasterState {
         self.current_attempt_id.load(Ordering::SeqCst)
     }
 
+    pub(super) async fn enable_checkpoints(&self) {
+        self.checkpoints.lock().await.set_enabled(true);
+    }
+
+    /// Stop taking new checkpoints and drop any in-flight one (pipeline is draining).
+    pub(super) async fn disable_checkpoints_for_drain(
+        &self,
+        attempt_id: u64,
+    ) -> Result<Option<u64>, String> {
+        let mut checkpoints = self.checkpoints.lock().await;
+        checkpoints.set_enabled(false);
+        let checkpoint_id = checkpoints
+            .abort_in_flight()
+            .await
+            .map_err(|error| format!("failed to remove aborted checkpoint: {error}"))?;
+        drop(checkpoints);
+        if let Some(checkpoint_id) = checkpoint_id {
+            self.record_lifecycle_event(LifecycleEvent::CheckpointFailed {
+                checkpoint_id,
+                attempt_id,
+                detail: "aborted: sources stopped for drain".to_string(),
+            })
+            .await;
+            println!(
+                "[MASTER] Checkpoint {} aborted: sources stopped for drain attempt={}",
+                checkpoint_id, attempt_id
+            );
+        }
+        Ok(checkpoint_id)
+    }
+
     pub(super) async fn begin_checkpoint(
         &self,
         attempt_id: u64,

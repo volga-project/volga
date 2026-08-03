@@ -61,19 +61,24 @@ impl ExecutionAttempt {
                     return Ok(self.await_failure_window_and_recover(failure).await);
                 }
                 _ = optional_tick(&mut checkpoint_tick) => {
-                    if let Err(error) = self.begin_checkpoint().await {
-                        // Throttle: interval ticks spam while a CP is stuck; include progress.
-                        if last_in_flight_skip_log.elapsed() >= Duration::from_secs(2) {
-                            last_in_flight_skip_log = Instant::now();
-                            let progress = self
-                                .state
-                                .in_flight_checkpoint_progress()
-                                .await
-                                .unwrap_or_else(|| "no in-flight progress".to_string());
-                            println!(
-                                "[MASTER] Interval checkpoint skipped attempt={}: {} ({})",
-                                self.id, error, progress
-                            );
+                    match self.begin_checkpoint().await {
+                        Ok(_) => {}
+                        // Expected after StopSources; do not spam.
+                        Err(error) if error == "sources stopped for drain" => {}
+                        Err(error) => {
+                            // Throttle: interval ticks spam while a CP is stuck; include progress.
+                            if last_in_flight_skip_log.elapsed() >= Duration::from_secs(2) {
+                                last_in_flight_skip_log = Instant::now();
+                                let progress = self
+                                    .state
+                                    .in_flight_checkpoint_progress()
+                                    .await
+                                    .unwrap_or_else(|| "no in-flight progress".to_string());
+                                println!(
+                                    "[MASTER] Interval checkpoint skipped attempt={}: {} ({})",
+                                    self.id, error, progress
+                                );
+                            }
                         }
                     }
                 }
@@ -145,6 +150,7 @@ impl ExecutionAttempt {
                 CheckpointStartError::NoCheckpointableTasks => {
                     "no checkpointable tasks".to_string()
                 }
+                CheckpointStartError::Disabled => "sources stopped for drain".to_string(),
             })?;
         println!(
             "[MASTER] Triggering checkpoint {} attempt={}",
