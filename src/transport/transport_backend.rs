@@ -193,7 +193,9 @@ impl TransportBackend {
                 .parse()
                 .expect("[GRPC_BACKEND] invalid listen address");
             let service = MessageStreamServiceImpl::new(server_tx);
-            let svc = MessageStreamServiceServer::new(service);
+            let svc = MessageStreamServiceServer::new(service)
+                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
 
             println!("[GRPC_BACKEND] Starting gRPC server on {}", addr);
 
