@@ -14,8 +14,6 @@ on:
         type: choice
         options:
           - default
-          - unit
-          - inprocess
           - docker
           - kube
           - all
@@ -34,16 +32,13 @@ jobs:
       github.event_name != 'schedule' && (
         github.event_name != 'workflow_dispatch' ||
         inputs.profile == 'default' ||
-        inputs.profile == 'unit' ||
-        inputs.profile == 'inprocess' ||
         inputs.profile == 'all'
       )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       CARGO_INCREMENTAL: "0"
-      # `all` still uses this job for default only; docker/kube run as sibling jobs.
-      TEST_PROFILE: ${{ inputs.profile == 'all' && 'default' || inputs.profile || 'default' }}
+      TEST_PROFILE: default
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
