@@ -118,7 +118,7 @@ pub(crate) async fn run_watermark_window_pipeline(
     exec_graph.configure_channels(None, None);
     let vertex_ids = exec_graph.get_vertices().keys().cloned().collect();
 
-    // Sanity: ensure we actually built a window operator (planner-side watermark placement should attach to it).
+    // Sanity: window exists; watermark assign is on Source (pre-KeyBy), not Window.
     assert!(
         exec_graph
             .get_vertices()
@@ -126,6 +126,26 @@ pub(crate) async fn run_watermark_window_pipeline(
             .any(|v| matches!(v.operator_config, OperatorConfig::WindowConfig(_))),
         "expected execution graph to contain a Window operator"
     );
+    let assign_vertices: Vec<_> = exec_graph
+        .get_vertices()
+        .values()
+        .filter(|v| v.watermark_assign.is_some())
+        .collect();
+    assert!(
+        !assign_vertices.is_empty(),
+        "expected watermark_assign on at least one vertex"
+    );
+    for v in &assign_vertices {
+        assert!(
+            matches!(v.operator_config, OperatorConfig::SourceConfig(_)),
+            "watermark_assign should be on Source, got {:?}",
+            v.operator_config
+        );
+        assert!(
+            !matches!(v.operator_config, OperatorConfig::WindowConfig(_)),
+            "Window must not have watermark_assign"
+        );
+    }
 
     let mut worker = Worker::from_config(WorkerConfig::new(
         "wm-e2e-worker".to_string(),

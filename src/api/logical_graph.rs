@@ -77,18 +77,31 @@ impl LogicalGraph {
         self.watermarks_enabled = enabled;
     }
 
+    pub fn watermarks_enabled(&self) -> bool {
+        self.watermarks_enabled
+    }
+
     pub(crate) fn set_event_time(&mut self, event_time: EventTimeSpec) {
         self.event_time = event_time;
+        // Refresh ooo/idle on assign configs attached during planning.
+        for node in self.graph.node_weights_mut() {
+            if let Some(cfg) = node.watermark_assign.as_mut() {
+                cfg.out_of_orderness_ms = self.event_time.watermark.out_of_orderness_ms;
+                if let Some(idle) = self.event_time.watermark.idle_timeout_ms {
+                    cfg.idle_timeout_ms = Some(idle);
+                }
+            }
+        }
     }
 
     pub fn event_time(&self) -> &EventTimeSpec {
         &self.event_time
     }
 
-    fn auto_watermark_assign_config(&self) -> WatermarkAssignConfig {
+    pub(crate) fn watermark_assign_config_for_column(&self, column_name: String) -> WatermarkAssignConfig {
         let mut cfg = WatermarkAssignConfig::new(
             self.event_time.watermark.out_of_orderness_ms,
-            Some(TimeHint::WindowOrderByColumn),
+            TimeHint::ColumnName { name: column_name },
         );
         if let Some(idle) = self.event_time.watermark.idle_timeout_ms {
             cfg.idle_timeout_ms = Some(idle);
@@ -181,65 +194,11 @@ impl LogicalGraph {
 
     /// Convert logical graph to execution graph using parallelism from each logical node
     pub fn to_execution_graph(&self) -> ExecutionGraph {
-        // Planner-side heuristic watermark assigner placement:
-        // For now, for each Source, find the closest downstream Window operator(s) and attach a watermark assigner there.
-        // This keeps watermark generation as a StreamTask feature (no dedicated operator) while preserving
-        // downstream min-upstream watermark merge semantics.
+        // Watermark assign placement is decided during planning (event-time lineage) and stored
+        // on LogicalNode.watermark_assign. Execution mapping is a simple copy.
         //
-        // TODO: extend placement for joins/unions (multiple-input operators), where "closest window" is ambiguous
-        // and per-input watermark generation needs careful handling.
-        let mut auto_watermark_assign: HashMap<String, WatermarkAssignConfig> = HashMap::new();
-        if self.watermarks_enabled {
-            let source_nodes: Vec<NodeIndex> = self
-                .graph
-                .node_indices()
-                .filter(|&idx| matches!(self.graph[idx].operator_config, OperatorConfig::SourceConfig(_)))
-                .collect();
-
-            for src in source_nodes {
-            // Layered BFS: stop at first layer that contains any window node(s).
-            let mut visited: HashMap<NodeIndex, ()> = HashMap::new();
-            let mut frontier: Vec<NodeIndex> = vec![src];
-            visited.insert(src, ());
-
-            loop {
-                // Next layer
-                let mut next: Vec<NodeIndex> = Vec::new();
-                for &n in &frontier {
-                    for neigh in self.graph.neighbors_directed(n, Direction::Outgoing) {
-                        if visited.contains_key(&neigh) {
-                            continue;
-                        }
-                        visited.insert(neigh, ());
-                        next.push(neigh);
-                    }
-                }
-
-                if next.is_empty() {
-                    break;
-                }
-
-                let windows_at_layer: Vec<NodeIndex> = next
-                    .iter()
-                    .copied()
-                    .filter(|&idx| matches!(self.graph[idx].operator_config, OperatorConfig::WindowConfig(_)))
-                    .collect();
-                if !windows_at_layer.is_empty() {
-                    let assign = self.auto_watermark_assign_config();
-                    for w in windows_at_layer {
-                        let op_id = self.graph[w].operator_id.clone();
-                        auto_watermark_assign
-                            .entry(op_id)
-                            .or_insert_with(|| assign.clone());
-                    }
-                    break;
-                }
-
-                frontier = next;
-            }
-            }
-        } else {
-            // In Batch mode we expect no watermark assignment at all.
+        // TODO: extend placement for joins/unions (multiple-input operators / per-branch assign).
+        if !self.watermarks_enabled {
             debug_assert!(
                 self.graph.node_weights().all(|n| n.watermark_assign.is_none()),
                 "watermarks_disabled but some logical nodes have watermark_assign configured"
@@ -270,10 +229,7 @@ impl LogicalGraph {
                     i as i32,
                 );
                 let mut execution_vertex = execution_vertex;
-                execution_vertex.watermark_assign = logical_node
-                    .watermark_assign
-                    .clone()
-                    .or_else(|| auto_watermark_assign.get(&logical_node.operator_id).cloned());
+                execution_vertex.watermark_assign = logical_node.watermark_assign.clone();
 
                 execution_graph.add_vertex(execution_vertex);
                 execution_vertex_ids.push(execution_vertex_id);

@@ -322,7 +322,6 @@ impl StreamTask {
     pub(crate) fn create_preprocessed_input_stream(
         input_stream: MessageStream,
         vertex_id: VertexId,
-        operator_config: OperatorConfig,
         watermark_assign: Option<WatermarkAssignConfig>,
         upstream_vertices: Vec<String>,
         upstream_watermarks: Arc<Mutex<HashMap<String, u64>>>,
@@ -336,7 +335,6 @@ impl StreamTask {
             let mut input_stream = input_stream;
             let mut watermark_manager = WatermarkManager::new(
                 watermark_assign,
-                Some(&operator_config),
                 upstream_vertices.clone(),
                 upstream_watermarks.clone(),
                 current_watermark.clone(),
@@ -591,7 +589,6 @@ impl StreamTask {
                 .get_vertex(&vertex_id)
                 .expect("vertex should exist in execution graph");
             let watermark_assign = vertex_meta.watermark_assign.clone();
-            let vertex_operator_config = vertex_meta.operator_config.clone();
 
             // Runtime invariant: watermark assigners must not run in Batch mode.
             // Batch pipelines rely on source completion to emit a terminal MAX_WATERMARK_VALUE.
@@ -610,7 +607,6 @@ impl StreamTask {
             let mut source_watermark_manager = if is_source {
                 Some(WatermarkManager::new(
                     watermark_assign.clone(),
-                    Some(&vertex_operator_config),
                     upstream_vertices.clone(),
                     upstream_watermarks.clone(),
                     current_watermark.clone(),
@@ -631,7 +627,6 @@ impl StreamTask {
                 let preprocessed_stream = Self::create_preprocessed_input_stream(
                     input_stream,
                     vertex_id.clone(),
-                    vertex_operator_config.clone(),
                     watermark_assign.clone(),
                     upstream_vertices.clone(),
                     upstream_watermarks.clone(),
