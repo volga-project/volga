@@ -5,7 +5,10 @@ on:
   push:
     branches: [master]
   schedule:
-    # Hourly (GitHub may delay under load; cron minute granularity is the floor).
+    # Hourly; stress-config alternates inproc (even UTC hour) vs kube (odd) so
+    # each suite can use the full Free-plan pool (20 concurrent jobs) instead of
+    # splitting. Each suite therefore runs about every 2h. Long jobs rely on
+    # schedule concurrency (cancel-in-progress: false) so a overrun is not killed.
     - cron: "17 * * * *"
   workflow_dispatch:
     inputs:
@@ -21,7 +24,7 @@ on:
           - inproc-stress
         default: default
       stress_test:
-        description: "Exact test name for inproc-stress (ignored otherwise)"
+        description: "Exact test name for inproc-stress / kube-stress (kube: test_kube_*; empty or schedule → all kube tests)"
         type: string
         default: test_local_multi_worker_window_checkpoint_restore
       stress_machines:
@@ -167,15 +170,30 @@ jobs:
       machine_ids: ${{ steps.config.outputs.machine_ids }}
       shards_per_machine: ${{ steps.config.outputs.shards_per_machine }}
       runs_per_shard: ${{ steps.config.outputs.runs_per_shard }}
+      # schedule: kube | inproc; workflow_dispatch: dispatch
+      schedule_mode: ${{ steps.config.outputs.schedule_mode }}
     steps:
       - id: config
         shell: bash
         run: |
           set -euo pipefail
+          schedule_mode=dispatch
           if [[ "${{ github.event_name }}" == "schedule" ]]; then
-            machines=3
+            # Free org ~18 usable concurrent runners in practice. Alternate so
+            # each suite gets a dedicated wave (not half the pool). Both use
+            # 15×100 under job timeout 180m:
+            # - inproc window restore ≈ 10–15s/run → ~25–40m
+            # - kube --all + fresh Kind is heavier; 100 runs may span >1h and
+            #   rely on schedule concurrency (cancel-in-progress: false).
+            hour=$((10#$(date -u +%H)))
             shards=1
-            runs=10
+            machines=15
+            runs=100
+            if (( hour % 2 == 0 )); then
+              schedule_mode=inproc
+            else
+              schedule_mode=kube
+            fi
           else
             machines="${{ inputs.stress_machines }}"
             shards="${{ inputs.stress_shards_per_machine }}"
@@ -188,17 +206,18 @@ jobs:
               exit 2
             fi
           done
-          if (( machines > 16 )); then
-            echo "stress_machines max is 16, got: $machines" >&2
+          if (( machines > 32 )); then
+            echo "stress_machines max is 32, got: $machines" >&2
             exit 2
           fi
           machine_ids="$(python3 -c "import json; print(json.dumps(list(range(1, int('${machines}') + 1))))")"
-          echo "machines=$machines shards_per_machine=$shards runs_per_shard=$runs"
+          echo "schedule_mode=$schedule_mode machines=$machines shards_per_machine=$shards runs_per_shard=$runs"
           echo "machine_ids=$machine_ids"
           {
             echo "machine_ids=$machine_ids"
             echo "shards_per_machine=$shards"
             echo "runs_per_shard=$runs"
+            echo "schedule_mode=$schedule_mode"
           } >> "$GITHUB_OUTPUT"
 
   kube-stress:
@@ -206,7 +225,10 @@ jobs:
     if: >
       always() &&
       needs.stress-config.result == 'success' &&
-      (github.event_name == 'schedule' || inputs.profile == 'kube-stress')
+      (
+        (github.event_name == 'schedule' && needs.stress-config.outputs.schedule_mode == 'kube') ||
+        (github.event_name == 'workflow_dispatch' && inputs.profile == 'kube-stress')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -243,11 +265,21 @@ jobs:
           set -euo pipefail
           shards="${{ needs.stress-config.outputs.shards_per_machine }}"
           runs="${{ needs.stress-config.outputs.runs_per_shard }}"
+          test_name="${{ inputs.stress_test }}"
           echo "kube-stress machine=${{ matrix.machine }} shards_per_machine=$shards runs_per_shard=$runs"
-          scripts/test stress --env kube --all \
-            --runs-per-shard "$runs" \
-            --shards "$shards" \
-            --fresh-cluster
+          # Schedule / unset / inproc-default → full kube suite. On-demand can pin a test_kube_*.
+          if [[ "${{ github.event_name }}" != "schedule" && -n "$test_name" && "$test_name" == test_kube_* ]]; then
+            echo "kube-stress test=$test_name"
+            scripts/test stress --env kube --test "$test_name" \
+              --runs-per-shard "$runs" \
+              --shards "$shards" \
+              --fresh-cluster
+          else
+            scripts/test stress --env kube --all \
+              --runs-per-shard "$runs" \
+              --shards "$shards" \
+              --fresh-cluster
+          fi
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -262,8 +294,10 @@ jobs:
     if: >
       always() &&
       needs.stress-config.result == 'success' &&
-      github.event_name == 'workflow_dispatch' &&
-      inputs.profile == 'inproc-stress'
+      (
+        (github.event_name == 'schedule' && needs.stress-config.outputs.schedule_mode == 'inproc') ||
+        (github.event_name == 'workflow_dispatch' && inputs.profile == 'inproc-stress')
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -296,6 +330,10 @@ jobs:
           test_name="${{ inputs.stress_test }}"
           shards="${{ needs.stress-config.outputs.shards_per_machine }}"
           runs="${{ needs.stress-config.outputs.runs_per_shard }}"
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            # Scheduled inproc focuses on the window restore path (same as on-demand default).
+            test_name="test_local_multi_worker_window_checkpoint_restore"
+          fi
           if [[ -z "$test_name" ]]; then
             echo "stress_test input is required for inproc-stress" >&2
             exit 2
