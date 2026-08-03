@@ -216,7 +216,9 @@ impl InMemoryStorageServer {
         let addr = addr.parse()?;
         let service = in_memory_storage_service::in_memory_storage_service_server::InMemoryStorageServiceServer::new(
             self.service.clone()
-        );
+        )
+        .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
 
         println!("[IN_MEMORY_STORAGE_SERVER] Starting InMemoryStorageService server on {}", addr);
         
@@ -225,7 +227,7 @@ impl InMemoryStorageServer {
         
         let server_handle = tokio::spawn(async move {
             match tonic::transport::Server::builder()
-                .max_frame_size(Some(12 * 1024 * 1024)) // 12MB
+                .max_frame_size(Some(crate::common::GRPC_MAX_MESSAGE_BYTES as u32))
                 .add_service(service)
                 .serve_with_shutdown(addr, async {
                     shutdown_receiver.await.ok();

@@ -114,7 +114,11 @@ pub(super) async fn connect_worker_client(
     endpoint
         .connect()
         .await
-        .map(WorkerServiceClient::new)
+        .map(|channel| {
+            WorkerServiceClient::new(channel)
+                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+        })
         .map_err(|e| format!("connect to {addr} failed: {e}"))
 }
 

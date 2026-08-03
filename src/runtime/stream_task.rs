@@ -556,6 +556,11 @@ impl StreamTask {
                 Some(
                     MasterServiceClient::connect(endpoint)
                         .await
+                        .map(|client| {
+                            client
+                                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+                                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+                        })
                         .map_err(|e| anyhow::anyhow!("Failed to connect to master service: {}", e))?,
                 )
             } else {

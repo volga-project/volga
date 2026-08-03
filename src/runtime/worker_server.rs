@@ -504,7 +504,9 @@ impl WorkerServer {
         let addr = addr.parse()?;
         let service = worker_service::worker_service_server::WorkerServiceServer::new(
             self.service.clone()
-        );
+        )
+        .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
 
         println!("[WORKER_SERVER] Starting WorkerService server on {}", addr);
         
@@ -550,7 +552,10 @@ impl WorkerServer {
             match endpoint.clone().connect().await {
                 Ok(channel) => match tokio::time::timeout(
                     rpc_timeout,
-                    MasterServiceClient::new(channel).register_worker(tonic::Request::new(req)),
+                    MasterServiceClient::new(channel)
+                        .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+                        .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+                        .register_worker(tonic::Request::new(req)),
                 )
                 .await
                 {

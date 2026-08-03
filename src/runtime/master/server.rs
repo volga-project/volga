@@ -50,7 +50,9 @@ impl MasterServer {
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
         let addr = addr.parse()?;
         let service =
-            master_service::master_service_server::MasterServiceServer::new(self.service.clone());
+            master_service::master_service_server::MasterServiceServer::new(self.service.clone())
+                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
 
         println!("[MASTER_SERVER] Starting MasterService server on {}", addr);
 
