@@ -48,6 +48,7 @@ impl ExecutionAttempt {
         let checkpoint_interval = runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL);
         let checkpoint_timeout = runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT);
         let mut checkpoint_tick = optional_interval(checkpoint_interval);
+        let mut last_in_flight_skip_log = Instant::now() - Duration::from_secs(60);
 
         loop {
             tokio::select! {
@@ -61,10 +62,19 @@ impl ExecutionAttempt {
                 }
                 _ = optional_tick(&mut checkpoint_tick) => {
                     if let Err(error) = self.begin_checkpoint().await {
-                        println!(
-                            "[MASTER] Interval checkpoint skipped attempt={}: {}",
-                            self.id, error
-                        );
+                        // Throttle: interval ticks spam while a CP is stuck; include progress.
+                        if last_in_flight_skip_log.elapsed() >= Duration::from_secs(2) {
+                            last_in_flight_skip_log = Instant::now();
+                            let progress = self
+                                .state
+                                .in_flight_checkpoint_progress()
+                                .await
+                                .unwrap_or_else(|| "no in-flight progress".to_string());
+                            println!(
+                                "[MASTER] Interval checkpoint skipped attempt={}: {} ({})",
+                                self.id, error, progress
+                            );
+                        }
                     }
                 }
                 state_poll = async {
@@ -88,11 +98,16 @@ impl ExecutionAttempt {
                         .in_flight_checkpoint_timed_out(checkpoint_timeout)
                         .await
                     {
+                        let progress = self
+                            .state
+                            .in_flight_checkpoint_progress()
+                            .await
+                            .unwrap_or_default();
                         self.abort_in_flight(format!("checkpoint {checkpoint_id} timed out"))
                             .await;
                         println!(
-                            "[MASTER] Checkpoint timeout attempt={} checkpoint_id={}",
-                            self.id, checkpoint_id
+                            "[MASTER] Checkpoint timeout attempt={} checkpoint_id={} {}",
+                            self.id, checkpoint_id, progress
                         );
                         return Ok(AttemptOutcome::Recover(HashSet::new()));
                     }

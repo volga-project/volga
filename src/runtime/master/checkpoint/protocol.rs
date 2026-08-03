@@ -22,6 +22,26 @@ pub(super) struct CheckpointProtocol {
     completed: BTreeSet<u64>,
 }
 
+fn format_task_key(task: &TaskKey) -> String {
+    format!("{}/{}", task.vertex_id, task.task_index)
+}
+
+fn format_missing_tasks(expected: &HashSet<TaskKey>, have: &HashSet<TaskKey>) -> String {
+    const MAX_SHOW: usize = 8;
+    let mut missing: Vec<String> = expected
+        .difference(have)
+        .map(format_task_key)
+        .collect();
+    missing.sort();
+    let total = missing.len();
+    if total > MAX_SHOW {
+        missing.truncate(MAX_SHOW);
+        format!("{},…(+{})", missing.join(","), total - MAX_SHOW)
+    } else {
+        missing.join(",")
+    }
+}
+
 impl CheckpointProtocol {
     pub(super) fn in_flight_id(&self) -> Option<u64> {
         self.in_flight.as_ref().map(|c| c.checkpoint_id)
@@ -34,6 +54,28 @@ impl CheckpointProtocol {
         } else {
             None
         }
+    }
+
+    /// Human-readable in-flight ack/align progress for diagnostics.
+    pub(super) fn in_flight_progress_summary(
+        &self,
+        expected_acks: &HashSet<TaskKey>,
+        expected_aligns: &HashSet<TaskKey>,
+    ) -> Option<String> {
+        let in_flight = self.in_flight.as_ref()?;
+        let missing_acks = format_missing_tasks(expected_acks, &in_flight.acks);
+        let missing_aligns = format_missing_tasks(expected_aligns, &in_flight.aligns);
+        Some(format!(
+            "checkpoint_id={} elapsed={:?} acks={}/{} missing_acks=[{}] aligns={}/{} missing_aligns=[{}]",
+            in_flight.checkpoint_id,
+            in_flight.started_at.elapsed(),
+            in_flight.acks.len(),
+            expected_acks.len(),
+            missing_acks,
+            in_flight.aligns.len(),
+            expected_aligns.len(),
+            missing_aligns,
+        ))
     }
 
     pub(super) fn start(

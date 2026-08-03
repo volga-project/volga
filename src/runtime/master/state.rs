@@ -323,6 +323,10 @@ impl MasterState {
             .in_flight_timed_out(timeout)
     }
 
+    pub(super) async fn in_flight_checkpoint_progress(&self) -> Option<String> {
+        self.checkpoints.lock().await.in_flight_progress_summary()
+    }
+
     /// Journal barrier progress and count it toward completion (with state acks).
     /// Drops stale attempts and unknown ids; rejects are soft so tasks are not failed.
     pub(super) async fn report_checkpoint_propagation(
@@ -341,6 +345,15 @@ impl MasterState {
             let mut cps = self.checkpoints.lock().await;
             // Only in-flight CPs accept barrier progress (Completed implies align already done).
             if cps.in_flight_id() != Some(checkpoint_id) {
+                println!(
+                    "[MASTER][CHECKPOINT] ignore barrier progress checkpoint_id={} in_flight={:?} task={}/{} phase={:?} attempt={}",
+                    checkpoint_id,
+                    cps.in_flight_id(),
+                    task.vertex_id,
+                    task.task_index,
+                    phase,
+                    execution_attempt_id
+                );
                 return Ok(());
             }
             cps.note_barrier_progress(checkpoint_id, task.clone())

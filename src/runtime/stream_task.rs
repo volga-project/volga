@@ -93,13 +93,24 @@ impl CheckpointAligner {
         }
 
         self.reader_control.block_upstream(&upstream_vertex_id);
-        self.seen_upstreams.insert(upstream_vertex_id);
+        self.seen_upstreams.insert(upstream_vertex_id.clone());
 
         if self.seen_upstreams.len() == self.upstream_count {
+            println!(
+                "[CHECKPOINT] aligned checkpoint_id={} upstreams={}/{}",
+                checkpoint_id, self.upstream_count, self.upstream_count
+            );
             self.current_checkpoint = None;
             self.seen_upstreams.clear();
             return Ok(Some(checkpoint_id));
         }
+        println!(
+            "[CHECKPOINT] aligning checkpoint_id={} from={} seen={}/{}",
+            checkpoint_id,
+            upstream_vertex_id,
+            self.seen_upstreams.len(),
+            self.upstream_count
+        );
         Ok(None)
     }
 

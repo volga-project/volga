@@ -108,6 +108,11 @@ impl Checkpoints {
         self.protocol.in_flight_timed_out(timeout)
     }
 
+    pub fn in_flight_progress_summary(&self) -> Option<String> {
+        self.protocol
+            .in_flight_progress_summary(&self.expected_acks, &self.expected_aligns)
+    }
+
     pub fn latest_complete(&self) -> Option<u64> {
         self.protocol.latest_complete()
     }
@@ -141,11 +146,27 @@ impl Checkpoints {
             &self.expected_acks,
             &self.expected_aligns,
         );
-        if !matches!(outcome, CheckpointAckOutcome::Rejected(_)) {
+        if matches!(outcome, CheckpointAckOutcome::Rejected(_)) {
+            println!(
+                "[MASTER][CHECKPOINT] state_ack rejected task={}/{} checkpoint_id={} outcome={:?}",
+                task.vertex_id, task.task_index, checkpoint_id, outcome
+            );
+        } else {
             self.pending
                 .entry(checkpoint_id)
                 .or_default()
-                .insert(task, checkpoint);
+                .insert(task.clone(), checkpoint);
+            if matches!(outcome, CheckpointAckOutcome::Completed) {
+                println!(
+                    "[MASTER][CHECKPOINT] state_ack task={}/{} completed checkpoint_id={}",
+                    task.vertex_id, task.task_index, checkpoint_id
+                );
+            } else if let Some(summary) = self.in_flight_progress_summary() {
+                println!(
+                    "[MASTER][CHECKPOINT] state_ack task={}/{} pending {}",
+                    task.vertex_id, task.task_index, summary
+                );
+            }
         }
         self.finish_if_completed(checkpoint_id, outcome).await
     }
@@ -158,10 +179,26 @@ impl Checkpoints {
     ) -> anyhow::Result<CheckpointAckOutcome> {
         let outcome = self.protocol.align(
             checkpoint_id,
-            task,
+            task.clone(),
             &self.expected_acks,
             &self.expected_aligns,
         );
+        if matches!(outcome, CheckpointAckOutcome::Rejected(_)) {
+            println!(
+                "[MASTER][CHECKPOINT] barrier_align rejected task={}/{} checkpoint_id={} outcome={:?}",
+                task.vertex_id, task.task_index, checkpoint_id, outcome
+            );
+        } else if matches!(outcome, CheckpointAckOutcome::Completed) {
+            println!(
+                "[MASTER][CHECKPOINT] barrier_align task={}/{} completed checkpoint_id={}",
+                task.vertex_id, task.task_index, checkpoint_id
+            );
+        } else if let Some(summary) = self.in_flight_progress_summary() {
+            println!(
+                "[MASTER][CHECKPOINT] barrier_align task={}/{} pending {}",
+                task.vertex_id, task.task_index, summary
+            );
+        }
         self.finish_if_completed(checkpoint_id, outcome).await
     }
 
