@@ -1,4 +1,5 @@
 pub mod logical_graph;
+pub mod event_time_placement;
 pub mod planner;
 #[cfg(test)]
 pub mod logical_optimizer_examples;
