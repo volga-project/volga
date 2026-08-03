@@ -26,7 +26,8 @@ scripts/test all
 | `stress` | Repeat a suite or selected tests; see below |
 
 CI runs `default` as the required job, plus parallel non-blocking `docker` and
-`kube` jobs on PRs. Scheduled runs only exercise kube stress.
+`kube` jobs on PRs. Scheduled runs alternate **inproc** and **kube** stress
+(even/odd UTC hour) so each can use the full Free-plan runner pool (20).
 
 ### One-off CI runs (`workflow_dispatch`)
 
@@ -41,11 +42,17 @@ Stress knobs (shared by `kube-stress` / `inproc-stress`):
 | `stress_machines` | `3` | GitHub runners (machine isolation) |
 | `stress_shards_per_machine` | `1` | Parallel stress processes per runner |
 | `stress_runs_per_shard` | `10` | Iterations per process |
-| `stress_test` | (inproc default) | Exact test name; `inproc-stress` only |
+| `stress_test` | (inproc default) | Exact test name; `inproc-stress` / `kube-stress` (`test_kube_*`) |
 
-Schedule uses 3 machines × 1 shard × 10 runs (kube). Prefer
-`stress_shards_per_machine=1` so parallelism comes from machines, not
-co-tenancy on one runner.
+Scheduled stress (every 4h UTC; suites alternate each tick → each suite ~8h):
+
+| UTC hours (cron `17 */4`) | Suite | Shape | Notes |
+| --- | --- | --- | --- |
+| 0, 8, 16 | inproc | 15 × 1 × 100 | `test_local_multi_worker_window_checkpoint_restore` (~25–40m) |
+| 4, 12, 20 | kube | 15 × 1 × 50 | full kube suite + fresh Kind (heavier per run) |
+
+Prefer `stress_shards_per_machine=1` so parallelism comes from machines, not
+co-tenancy on one runner. Sized for ~18 usable Free-plan runners (leave headroom).
 
 Or from the CLI (same inputs):
 
