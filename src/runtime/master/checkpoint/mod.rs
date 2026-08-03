@@ -20,6 +20,8 @@ pub use store::{create_checkpoint_store, CheckpointStore, InMemoryCheckpointStor
 pub enum CheckpointStartError {
     AlreadyInFlight { checkpoint_id: u64 },
     NoCheckpointableTasks,
+    /// Sources were stopped for drain; new checkpoints must not start.
+    Disabled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +55,8 @@ pub struct Checkpoints {
     protocol: CheckpointProtocol,
     store: Option<Arc<dyn CheckpointStore>>,
     pending: HashMap<u64, HashMap<TaskKey, SerializedCheckpoint>>,
+    /// Cleared on `StopSources` so interval ticks cannot open a CP on a draining graph.
+    enabled: bool,
 }
 
 impl Default for Checkpoints {
@@ -65,6 +69,7 @@ impl Default for Checkpoints {
             protocol: CheckpointProtocol::default(),
             store: None,
             pending: HashMap::new(),
+            enabled: true,
         }
     }
 }
@@ -85,9 +90,17 @@ impl Checkpoints {
         self.store = Some(store);
         self.protocol = CheckpointProtocol::default();
         self.pending.clear();
+        self.enabled = true;
+    }
+
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 
     pub fn start(&mut self) -> Result<u64, CheckpointStartError> {
+        if !self.enabled {
+            return Err(CheckpointStartError::Disabled);
+        }
         self.protocol
             .start(&self.expected_acks, &self.expected_aligns)
     }
@@ -282,6 +295,18 @@ mod tests {
         assert!(cps.load(id).await.is_err());
         assert_eq!(cps.abort_in_flight().await.unwrap(), Some(id));
         assert!(cps.load(id).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_rejects_start() {
+        let mut cps = Checkpoints::default();
+        let acks: HashSet<_> = [task("a", 0)].into_iter().collect();
+        let aligns = acks.clone();
+        cps.configure(pipeline(), acks, aligns, 1, store());
+        cps.set_enabled(false);
+        assert_eq!(cps.start(), Err(CheckpointStartError::Disabled));
+        cps.set_enabled(true);
+        assert!(cps.start().is_ok());
     }
 
     #[tokio::test]
