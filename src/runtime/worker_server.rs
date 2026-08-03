@@ -187,17 +187,23 @@ impl WorkerService for WorkerServiceImpl {
     ) -> Result<Response<GetWorkerStateResponse>, Status> {
         self.validate_execution_attempt(request.get_ref().execution_attempt_id)
             .await?;
-        let worker_guard = self.worker.lock().await;
-        if !worker_guard.is_configured() {
-            return Err(Status::failed_precondition(
-                "worker is not configured for this attempt",
-            ));
-        }
-        let state = worker_guard.get_state().await;
+        // Clone poll inputs under the lock, then release before awaiting task asks.
+        // Holding `Mutex<Worker>` across get_state starved concurrent control RPCs
+        // (stop_sources / heartbeat / second poll) and could hang PipelineFinished.
+        let poll = {
+            let worker_guard = self.worker.lock().await;
+            if !worker_guard.is_configured() {
+                return Err(Status::failed_precondition(
+                    "worker is not configured for this attempt",
+                ));
+            }
+            worker_guard.state_poll_handles()
+        };
+        let state = Worker::finish_state_poll(poll).await;
         let state_bytes = bincode::serialize(&state).map_err(|e| {
             Status::internal(format!("Failed to serialize worker state: {}", e))
         })?;
-        
+
         Ok(Response::new(GetWorkerStateResponse {
             worker_state_bytes: state_bytes,
         }))

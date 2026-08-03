@@ -284,6 +284,10 @@ impl MasterState {
         self.checkpoints.lock().await.set_enabled(true);
     }
 
+    pub(super) async fn checkpoints_enabled(&self) -> bool {
+        self.checkpoints.lock().await.enabled()
+    }
+
     /// Stop taking new checkpoints and drop any in-flight one (pipeline is draining).
     pub(super) async fn disable_checkpoints_for_drain(
         &self,

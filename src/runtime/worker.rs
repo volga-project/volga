@@ -70,6 +70,20 @@ impl WorkerConfig {
 
 // WorkerState moved to runtime/observability/snapshot_types.rs
 
+/// Inputs for refreshing worker state without holding `Mutex<Worker>` across asks.
+pub enum WorkerStatePoll {
+    Cached(Arc<tokio::sync::Mutex<WorkerSnapshot>>),
+    Live {
+        worker_id: String,
+        pipeline_id: PipelineId,
+        task_runtime_handles: HashMap<VertexId, Handle>,
+        task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
+        graph: ExecutionGraph,
+        operator_states: Arc<OperatorStates>,
+        worker_state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
+    },
+}
+
 pub struct Worker {
     worker_id: String,
     health: Arc<WorkerHealth>,
@@ -612,29 +626,61 @@ impl Worker {
     }
 
     pub async fn get_state(&self) -> WorkerSnapshot {
-        if self.running.load(Ordering::SeqCst) {
-            let config = self
-                .config
-                .as_ref()
-                .expect("Worker must be configured before use");
-            let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
-                .map(|(k, v)| (k.clone(), v.handle().clone()))
-                .collect();
-            let task_actors = self.task_actors.clone();
-            let graph = config.graph.clone();
-            let state = self.worker_state.clone();
-            Self::poll_and_update_tasks_state(
-                config.worker_id.clone(),
-                config.pipeline_id.clone(),
+        Self::finish_state_poll(self.state_poll_handles()).await
+    }
+
+    /// Clone everything needed for a state refresh so callers can drop
+    /// `Mutex<Worker>` before awaiting task-actor asks.
+    pub fn state_poll_handles(&self) -> WorkerStatePoll {
+        if !self.running.load(Ordering::SeqCst) {
+            return WorkerStatePoll::Cached(self.worker_state.clone());
+        }
+        let config = self
+            .config
+            .as_ref()
+            .expect("Worker must be configured before use");
+        let task_runtime_handles: HashMap<VertexId, Handle> = self
+            .task_runtimes
+            .iter()
+            .map(|(k, v)| (k.clone(), v.handle().clone()))
+            .collect();
+        WorkerStatePoll::Live {
+            worker_id: config.worker_id.clone(),
+            pipeline_id: config.pipeline_id.clone(),
+            task_runtime_handles,
+            task_actors: self.task_actors.clone(),
+            graph: config.graph.clone(),
+            operator_states: self.operator_states.clone(),
+            worker_state: self.worker_state.clone(),
+        }
+    }
+
+    pub async fn finish_state_poll(poll: WorkerStatePoll) -> WorkerSnapshot {
+        match poll {
+            WorkerStatePoll::Cached(state) => state.lock().await.clone(),
+            WorkerStatePoll::Live {
+                worker_id,
+                pipeline_id,
                 task_runtime_handles,
                 task_actors,
                 graph,
-                self.operator_states.clone(),
-                state,
-                None,
-            ).await;
+                operator_states,
+                worker_state,
+            } => {
+                Self::poll_and_update_tasks_state(
+                    worker_id,
+                    pipeline_id,
+                    task_runtime_handles,
+                    task_actors,
+                    graph,
+                    operator_states,
+                    worker_state.clone(),
+                    None,
+                )
+                .await;
+                worker_state.lock().await.clone()
+            }
         }
-        self.worker_state.lock().await.clone()
     }
 
     pub fn operator_states(&self) -> Arc<OperatorStates> {

@@ -73,6 +73,14 @@ impl WorkerSnapshot {
         self.task_statuses.values().all(|_status| *_status == status)
     }
 
+    /// Drain complete: every task has stopped producing (`Finished` or already `Closed`).
+    pub fn all_tasks_drained(&self) -> bool {
+        !self.task_statuses.is_empty()
+            && self.task_statuses.values().all(|status| {
+                matches!(status, StreamTaskStatus::Finished | StreamTaskStatus::Closed)
+            })
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         Ok(bincode::serialize(self)?)
     }

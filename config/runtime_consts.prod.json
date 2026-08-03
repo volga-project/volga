@@ -10,6 +10,7 @@
   "master.heartbeat_send_interval": "1s",
   "master.worker_connect_timeout": "2s",
   "master.state_poll_interval": "2s",
+  "master.state_poll_timeout": "10s",
   "master.reset_worker_timeout": "5s",
   "master.registry_wait_tick": "500ms",
   "master.checkpoint_interval": "30s",

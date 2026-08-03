@@ -1,10 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 
 use tokio::time::{interval_at, sleep, timeout, Duration, Instant};
 
 use crate::runtime::consts::{
     runtime_consts, MASTER_CHECKPOINT_INTERVAL, MASTER_CHECKPOINT_TIMEOUT,
-    MASTER_FAILURE_AGGREGATION_WINDOW, MASTER_STATE_POLL_INTERVAL,
+    MASTER_FAILURE_AGGREGATION_WINDOW, MASTER_STATE_POLL_INTERVAL, MASTER_STATE_POLL_TIMEOUT,
 };
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
@@ -18,6 +19,7 @@ use super::{AttemptOutcome, ExecutionAttempt};
 
 const STATUS_POLL: Duration = Duration::from_millis(100);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(30);
+const DRAIN_DIGEST_INTERVAL: Duration = Duration::from_secs(2);
 
 pub(super) struct StatePoll {
     pub states: HashMap<String, WorkerSnapshot>,
@@ -44,10 +46,12 @@ impl ExecutionAttempt {
             self.failure_tx.clone(),
         );
         let poll_interval = runtime_consts().duration(MASTER_STATE_POLL_INTERVAL);
+        let poll_rpc_timeout = runtime_consts().duration(MASTER_STATE_POLL_TIMEOUT);
         let mut poll = interval_at(Instant::now() + poll_interval, poll_interval);
         let checkpoint_interval = runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL);
         let checkpoint_timeout = runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT);
         let mut checkpoint_tick = optional_interval(checkpoint_interval);
+        let mut last_drain_digest = Instant::now() - DRAIN_DIGEST_INTERVAL;
 
         loop {
             tokio::select! {
@@ -74,7 +78,7 @@ impl ExecutionAttempt {
                 }
                 state_poll = async {
                     poll.tick().await;
-                    poll_client_states(&self.clients, &self.state).await
+                    poll_client_states(&self.clients, &self.state, poll_rpc_timeout).await
                 } => {
                     if !state_poll.failures.is_empty() {
                         for (worker_id, error) in &state_poll.failures {
@@ -101,14 +105,22 @@ impl ExecutionAttempt {
                         );
                         return Ok(AttemptOutcome::Recover(HashSet::new()));
                     }
-                    if all_have_status(
-                        &state_poll.states,
-                        &self.clients,
-                        StreamTaskStatus::Finished,
-                    ) {
+                    if all_drained(&state_poll.states, &self.clients) {
                         self.abort_in_flight("pipeline finished with in-flight checkpoint")
                             .await;
                         return Ok(AttemptOutcome::Finished);
+                    }
+                    // After StopSources, checkpoints are disabled — log status digests so a
+                    // stuck/partial drain is visible instead of silent harness timeout.
+                    if !self.state.checkpoints_enabled().await
+                        && last_drain_digest.elapsed() >= DRAIN_DIGEST_INTERVAL
+                    {
+                        last_drain_digest = Instant::now();
+                        println!(
+                            "[MASTER] Drain poll attempt={} {}",
+                            self.id,
+                            state_poll_digest(&state_poll.states, &self.clients)
+                        );
                     }
                 }
             }
@@ -229,8 +241,9 @@ async fn wait_for_status(
     timeout: Option<Duration>,
 ) -> Result<(), HashSet<String>> {
     let start = Instant::now();
+    let poll_rpc_timeout = runtime_consts().duration(MASTER_STATE_POLL_TIMEOUT);
     loop {
-        let poll = poll_client_states(clients, state).await;
+        let poll = poll_client_states(clients, state, poll_rpc_timeout).await;
         if !poll.failures.is_empty() {
             return Err(poll
                 .failures
@@ -291,10 +304,19 @@ async fn optional_tick(tick: &mut Option<tokio::time::Interval>) {
 async fn poll_client_states(
     clients: &HashMap<String, WorkerClient>,
     state: &MasterState,
+    rpc_timeout: Duration,
 ) -> StatePoll {
     let futures = clients.iter().map(|(worker_id, client)| {
         let worker_id = worker_id.clone();
-        async move { (worker_id, client.get_worker_state().await) }
+        async move {
+            let result = match timeout(rpc_timeout, client.get_worker_state()).await {
+                Ok(result) => result,
+                Err(_) => Err(WorkerCallError::Unreachable(format!(
+                    "get_worker_state timed out after {rpc_timeout:?}"
+                ))),
+            };
+            (worker_id, result)
+        }
     });
     let mut states = HashMap::new();
     let mut failures = Vec::new();
@@ -324,4 +346,71 @@ fn all_have_status(
                 .map(|state| !state.task_statuses.is_empty() && state.all_tasks_have_status(status))
                 .unwrap_or(false)
         })
+}
+
+fn all_drained(
+    states: &HashMap<String, WorkerSnapshot>,
+    clients: &HashMap<String, WorkerClient>,
+) -> bool {
+    !clients.is_empty()
+        && clients.keys().all(|worker_id| {
+            states
+                .get(worker_id)
+                .map(|state| state.all_tasks_drained())
+                .unwrap_or(false)
+        })
+}
+
+fn state_poll_digest(
+    states: &HashMap<String, WorkerSnapshot>,
+    clients: &HashMap<String, WorkerClient>,
+) -> String {
+    let mut out = String::new();
+    for worker_id in clients.keys() {
+        if !out.is_empty() {
+            out.push_str("; ");
+        }
+        match states.get(worker_id) {
+            None => {
+                let _ = write!(out, "{worker_id}=missing");
+            }
+            Some(state) if state.task_statuses.is_empty() => {
+                let _ = write!(out, "{worker_id}=empty");
+            }
+            Some(state) => {
+                let mut created = 0usize;
+                let mut opened = 0usize;
+                let mut running = 0usize;
+                let mut finished = 0usize;
+                let mut closed = 0usize;
+                let mut non_terminal = Vec::new();
+                for (vertex_id, status) in &state.task_statuses {
+                    match status {
+                        StreamTaskStatus::Created => created += 1,
+                        StreamTaskStatus::Opened => opened += 1,
+                        StreamTaskStatus::Running => running += 1,
+                        StreamTaskStatus::Finished => finished += 1,
+                        StreamTaskStatus::Closed => closed += 1,
+                    }
+                    if !matches!(
+                        status,
+                        StreamTaskStatus::Finished | StreamTaskStatus::Closed
+                    ) {
+                        if non_terminal.len() < 4 {
+                            non_terminal.push(format!("{vertex_id}={status:?}"));
+                        }
+                    }
+                }
+                let _ = write!(
+                    out,
+                    "{worker_id}=n={} created={created} opened={opened} running={running} finished={finished} closed={closed}",
+                    state.task_statuses.len(),
+                );
+                if !non_terminal.is_empty() {
+                    let _ = write!(out, " pending=[{}]", non_terminal.join(","));
+                }
+            }
+        }
+    }
+    out
 }

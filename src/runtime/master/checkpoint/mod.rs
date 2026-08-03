@@ -97,6 +97,10 @@ impl Checkpoints {
         self.enabled = enabled;
     }
 
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
     pub fn start(&mut self) -> Result<u64, CheckpointStartError> {
         if !self.enabled {
             return Err(CheckpointStartError::Disabled);
