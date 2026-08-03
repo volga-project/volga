@@ -22,7 +22,7 @@ use crate::runtime::operators::window::store::{
     KeyState, PartitionKey, StateNamespace, TileMap, WindowData,
 };
 
-const MAX_INLINE_CHECKPOINT_BYTES: usize = 3 * 1024 * 1024;
+const MAX_INLINE_CHECKPOINT_BYTES: usize = 8 * 1024 * 1024;
 
 fn validate_checkpoint_size(snapshot: &[u8]) -> Result<()> {
     anyhow::ensure!(
@@ -61,7 +61,7 @@ struct InMemState {
     triggers: BTreeSet<WindowTrigger>,
 }
 
-/// Development/test reference backend with inline checkpoints limited to 3 MiB.
+/// Development/test reference backend with inline checkpoints limited to 8 MiB.
 /// One read lock is the WRO snapshot boundary.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
@@ -276,6 +276,13 @@ impl WindowOperatorStore for InMemWindowStore {
                 .collect(),
         };
         let snapshot = bincode::serialize(&checkpoint)?;
+        println!(
+            "[WINDOW][INMEM] checkpoint size={} bytes (limit={} bytes, partitions={}, triggers={})",
+            snapshot.len(),
+            MAX_INLINE_CHECKPOINT_BYTES,
+            checkpoint.partitions.len(),
+            checkpoint.triggers.len(),
+        );
         validate_checkpoint_size(&snapshot)?;
         Ok(WindowBackendSnapshot::InMemory { snapshot })
     }
