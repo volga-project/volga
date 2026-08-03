@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: Test profile
+        description: "Test profile (default=unit+inprocess; all=default+docker+kube)"
         type: choice
         options:
           - default
@@ -28,13 +28,16 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'schedule' }}
 
 jobs:
-  # default run (unit + inprocess).
+  # unit + inprocess. PR/push run the full suite (same as dispatch `all`).
   default-tests:
     if: >
-      github.event_name != 'schedule' &&
-      inputs.profile != 'stress' &&
-      inputs.profile != 'docker' &&
-      inputs.profile != 'kube'
+      github.event_name != 'schedule' && (
+        github.event_name != 'workflow_dispatch' ||
+        inputs.profile == 'default' ||
+        inputs.profile == 'unit' ||
+        inputs.profile == 'inprocess' ||
+        inputs.profile == 'all'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -63,13 +66,14 @@ jobs:
       - run: scripts/test "$TEST_PROFILE"
 
   # Parallel, non-blocking (does not fail the workflow).
+  # PR/push (full suite) or dispatch: docker | all.
   docker-tests:
     if: >
-      github.event_name != 'schedule' &&
-      inputs.profile != 'stress' &&
-      inputs.profile != 'unit' &&
-      inputs.profile != 'inprocess' &&
-      inputs.profile != 'kube'
+      github.event_name != 'schedule' && (
+        github.event_name != 'workflow_dispatch' ||
+        inputs.profile == 'docker' ||
+        inputs.profile == 'all'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 45
     continue-on-error: true
@@ -98,13 +102,14 @@ jobs:
       - run: scripts/test docker
 
   # Parallel, non-blocking (does not fail the workflow).
+  # PR/push (full suite) or dispatch: kube | all.
   kube-tests:
     if: >
-      github.event_name != 'schedule' &&
-      inputs.profile != 'stress' &&
-      inputs.profile != 'unit' &&
-      inputs.profile != 'inprocess' &&
-      inputs.profile != 'docker'
+      github.event_name != 'schedule' && (
+        github.event_name != 'workflow_dispatch' ||
+        inputs.profile == 'kube' ||
+        inputs.profile == 'all'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 60
     continue-on-error: true
