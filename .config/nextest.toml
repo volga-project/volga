@@ -19,7 +19,9 @@ fail-fast = false
 slow-timeout = { period = "90s", terminate-after = 1 }
 fail-fast = false
 
-# scripts/stress-test (kube-heavy).
+# scripts/stress-test (kube-heavy). Must exceed harness kube kill-restore
+# budget (recovery_started+replacement+attempt1_running ≈ 300s) so nextest
+# does not mask LifecycleOracle diagnostics on slow replaces.
 [profile.stress]
-slow-timeout = { period = "180s", terminate-after = 1 }
+slow-timeout = { period = "360s", terminate-after = 1 }
 fail-fast = false
