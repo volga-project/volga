@@ -69,23 +69,32 @@ impl ExecutionAttempt {
     }
 
     pub(in crate::runtime::master) async fn finish(&mut self) {
-        self.state.clear_workers_execution_attempt().await;
+        let rpc_timeout = runtime_consts().duration(MASTER_RESET_WORKER_TIMEOUT);
+        println!(
+            "[MASTER] finish: close_worker_tasks attempt={} workers={} timeout={rpc_timeout:?}",
+            self.id,
+            self.clients.len(),
+        );
+        // Close first (while workers still bound to this attempt). Clearing the
+        // registry before close made finish hangs harder to distinguish from drain stalls.
         let close_tasks: Vec<_> = self
             .clients
             .iter()
             .map(|(worker_id, client)| {
                 let worker_id = worker_id.clone();
                 async move {
-                    log_close(
-                        "close_worker_tasks",
-                        &worker_id,
-                        client.close_worker_tasks().await,
-                    );
+                    match timeout(rpc_timeout, client.close_worker_tasks()).await {
+                        Ok(result) => log_close("close_worker_tasks", &worker_id, result),
+                        Err(_) => println!(
+                            "[MASTER] finish: close_worker_tasks timed out on {worker_id}"
+                        ),
+                    }
                 }
             })
             .collect();
         futures::future::join_all(close_tasks).await;
 
+        println!("[MASTER] finish: waiting for Closed attempt={}", self.id);
         if let Err(workers) = self.wait_status(StreamTaskStatus::Closed).await {
             println!(
                 "[MASTER] finish: workers did not reach Closed (continuing cleanup): {:?}",
@@ -93,14 +102,27 @@ impl ExecutionAttempt {
             );
         }
 
+        self.state.clear_workers_execution_attempt().await;
+
+        println!(
+            "[MASTER] finish: shutdown_worker attempt={} workers={}",
+            self.id,
+            self.clients.len(),
+        );
         let shutdown_workers: Vec<_> = self
             .clients
             .drain()
             .map(|(worker_id, client)| async move {
-                log_close("shutdown_worker", &worker_id, client.shutdown_worker().await);
+                match timeout(rpc_timeout, client.shutdown_worker()).await {
+                    Ok(result) => log_close("shutdown_worker", &worker_id, result),
+                    Err(_) => println!(
+                        "[MASTER] finish: shutdown_worker timed out on {worker_id}"
+                    ),
+                }
             })
             .collect();
         futures::future::join_all(shutdown_workers).await;
+        println!("[MASTER] finish: cleanup done attempt={}", self.id);
     }
 }
 

@@ -289,8 +289,17 @@ impl WorkerService for WorkerServiceImpl {
     ) -> Result<Response<CloseWorkerTasksResponse>, Status> {
         self.validate_execution_attempt(request.get_ref().execution_attempt_id)
             .await?;
-        let mut worker_guard = self.worker.lock().await;
-        worker_guard.signal_tasks_close().await;
+        // Drop Mutex<Worker> before actor asks — holding it across Close starved
+        // concurrent get_worker_state / heartbeat and could hang finish().
+        let handles = {
+            let worker_guard = self.worker.lock().await;
+            worker_guard.task_signal_handles()
+        };
+        Worker::send_signal_with_handles(
+            handles,
+            crate::runtime::stream_task_actor::StreamTaskMessage::Close,
+        )
+        .await;
         println!("[WORKER_SERVER] Tasks closed successfully");
         Ok(Response::new(CloseWorkerTasksResponse {
             success: true,

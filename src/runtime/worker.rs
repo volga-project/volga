@@ -12,7 +12,7 @@ use std::{collections::HashMap};
 use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use kameo::{spawn, prelude::ActorRef};
 use tokio::runtime::{Builder, Handle, Runtime};
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
 use futures::future::join_all;
 // (serde/Result imports removed; this module does not serialize Worker directly)
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
@@ -606,22 +606,52 @@ impl Worker {
         }
     }
 
+    /// Clone actor refs + runtime handles so callers can drop `Mutex<Worker>`
+    /// before awaiting asks (same pattern as state poll).
+    pub fn task_signal_handles(&self) -> Vec<(VertexId, Handle, ActorRef<StreamTaskActor>)> {
+        self.task_runtimes
+            .iter()
+            .filter_map(|(vertex_id, runtime)| {
+                let task_ref = self.task_actors.get(vertex_id)?.clone();
+                Some((vertex_id.clone(), runtime.handle().clone(), task_ref))
+            })
+            .collect()
+    }
+
     async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
+        Self::send_signal_with_handles(self.task_signal_handles(), signal).await;
+    }
+
+    pub async fn send_signal_with_handles(
+        handles: Vec<(VertexId, Handle, ActorRef<StreamTaskActor>)>,
+        signal: StreamTaskMessage,
+    ) {
         println!("[WORKER] Sending {:?} signal to all task actors", signal);
-        
-        for (vertex_id, task_runtime) in &self.task_runtimes {
-            let vertex_id = vertex_id.clone();
-            let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
+        // Fan out in parallel; a single stuck ask must not block the rest (or close RPC).
+        let ask_timeout = Duration::from_secs(2);
+        let futs = handles.into_iter().map(|(vertex_id, handle, task_ref)| {
             let signal_clone = signal.clone();
             let signal_for_error = signal.clone();
-            let fut = task_runtime.spawn(async move {
-                if let Err(e) = task_ref.ask(signal_clone).await {
-                    eprintln!("Error sending {:?} signal to task {}: {}", signal_for_error, vertex_id, e);
+            async move {
+                let ask = handle.spawn(async move { task_ref.ask(signal_clone).await });
+                match timeout(ask_timeout, ask).await {
+                    Ok(Ok(Ok(_))) => {}
+                    Ok(Ok(Err(e))) => eprintln!(
+                        "Error sending {:?} signal to task {}: {}",
+                        signal_for_error, vertex_id, e
+                    ),
+                    Ok(Err(e)) => eprintln!(
+                        "Error joining {:?} signal to task {}: {}",
+                        signal_for_error, vertex_id, e
+                    ),
+                    Err(_) => eprintln!(
+                        "Timeout sending {:?} signal to task {} after {:?}",
+                        signal_for_error, vertex_id, ask_timeout
+                    ),
                 }
-            });
-            let _ = fut.await;
-        }
-
+            }
+        });
+        join_all(futs).await;
         println!("[WORKER] {:?} signal sent to all task actors", signal);
     }
 

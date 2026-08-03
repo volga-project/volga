@@ -106,15 +106,20 @@ impl ExecutionAttempt {
                         return Ok(AttemptOutcome::Recover(HashSet::new()));
                     }
                     if all_drained(&state_poll.states, &self.clients) {
+                        println!(
+                            "[MASTER] Pipeline drained attempt={} {}",
+                            self.id,
+                            state_poll_digest(&state_poll.states, &self.clients)
+                        );
                         self.abort_in_flight("pipeline finished with in-flight checkpoint")
                             .await;
                         return Ok(AttemptOutcome::Finished);
                     }
-                    // After StopSources, checkpoints are disabled — log status digests so a
-                    // stuck/partial drain is visible instead of silent harness timeout.
-                    if !self.state.checkpoints_enabled().await
-                        && last_drain_digest.elapsed() >= DRAIN_DIGEST_INTERVAL
-                    {
+                    // Log while draining (CP disabled and/or some tasks already Finished) so a
+                    // stuck partial drain is visible instead of a silent harness timeout.
+                    let draining = !self.state.checkpoints_enabled().await
+                        || has_terminal_tasks(&state_poll.states);
+                    if draining && last_drain_digest.elapsed() >= DRAIN_DIGEST_INTERVAL {
                         last_drain_digest = Instant::now();
                         println!(
                             "[MASTER] Drain poll attempt={} {}",
@@ -323,7 +328,9 @@ async fn poll_client_states(
     for (worker_id, result) in futures::future::join_all(futures).await {
         match result {
             Ok(worker_state) => {
-                states.insert(worker_state.worker_id.clone(), worker_state);
+                // Key by the client map id (request target), not the snapshot's
+                // self-reported worker_id — mismatch would make all_drained stuck.
+                states.insert(worker_id, worker_state);
             }
             Err(error) => failures.push((worker_id, error)),
         }
@@ -359,6 +366,14 @@ fn all_drained(
                 .map(|state| state.all_tasks_drained())
                 .unwrap_or(false)
         })
+}
+
+fn has_terminal_tasks(states: &HashMap<String, WorkerSnapshot>) -> bool {
+    states.values().any(|state| {
+        state.task_statuses.values().any(|status| {
+            matches!(status, StreamTaskStatus::Finished | StreamTaskStatus::Closed)
+        })
+    })
 }
 
 fn state_poll_digest(
