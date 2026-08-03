@@ -191,11 +191,12 @@ jobs:
             slot=$(( hour / 4 ))
             shards=1
             machines=15
-            runs=100
             if (( slot % 2 == 0 )); then
               schedule_mode=inproc
+              runs=100
             else
               schedule_mode=kube
+              runs=50
             fi
           else
             machines="${{ inputs.stress_machines }}"
