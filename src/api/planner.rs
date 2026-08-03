@@ -20,7 +20,7 @@ use datafusion::logical_expr::{
 use datafusion::physical_plan::aggregates::AggregateExec;
 use datafusion::common::{Result, DataFusionError};
 use datafusion::common::tree_node::TreeNodeRecursion;
-use datafusion::common::tree_node::{TreeNode, TreeNodeVisitor};
+use datafusion::common::tree_node::TreeNodeVisitor;
 use datafusion::prelude::SessionContext;
 use datafusion::physical_planner::{DefaultPhysicalPlanner, PhysicalPlanner};
 use datafusion::sql::TableReference;
@@ -28,9 +28,7 @@ use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
 
-use super::event_time_placement::{
-    plan_node_key, resolve_event_time_assign_site, validate_assign_before_window_keyby, AssignSite,
-};
+use super::event_time_placement::apply_auto_watermark_assigns;
 use super::logical_graph::{LogicalNode, LogicalGraph};
 use crate::api::ExecutionMode;
 use crate::runtime::functions::key_by::key_by_function::{DataFusionKeyFunction};
@@ -114,8 +112,6 @@ pub struct Planner {
     logical_graph: LogicalGraph,
     node_stack: Vec<NodeIndex>,
     context: PlanningContext,
-    /// DF plan node pointer identity → logical graph node (for watermark assign placement).
-    df_plan_to_node: HashMap<usize, NodeIndex>,
 }
 
 #[derive(Clone)]
@@ -170,7 +166,6 @@ impl Planner {
             logical_graph: LogicalGraph::new(),
             node_stack: Vec::new(),
             context,
-            df_plan_to_node: HashMap::new(),
         }
     }
 
@@ -197,71 +192,15 @@ impl Planner {
 
     pub fn logical_plan_to_graph(&mut self, logical_plan: &LogicalPlan) -> Result<LogicalGraph> {
         self.node_stack.clear();
-        self.df_plan_to_node.clear();
 
         let optimized_plan = self.optimize_plan(logical_plan.clone())?;
         optimized_plan.visit_with_subqueries(self)?;
-        self.apply_auto_watermark_assigns(&optimized_plan)?;
+        // Batch mode forbids watermark_assign on StreamTasks.
+        if self.context.execution_mode != ExecutionMode::Batch {
+            apply_auto_watermark_assigns(&optimized_plan, &mut self.logical_graph)?;
+        }
 
         Ok(self.logical_graph.clone())
-    }
-
-    fn apply_auto_watermark_assigns(&mut self, plan: &LogicalPlan) -> Result<()> {
-        // Batch mode forbids watermark_assign on StreamTasks.
-        if self.context.execution_mode == ExecutionMode::Batch {
-            return Ok(());
-        }
-        if !self.logical_graph.watermarks_enabled() {
-            return Ok(());
-        }
-
-        let mut sites: Vec<(usize, AssignSite)> = Vec::new();
-        plan.apply(|node| {
-            if let LogicalPlan::Window(window) = node {
-                let site = resolve_event_time_assign_site(window)?;
-                sites.push((plan_node_key(node), site));
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })?;
-
-        for (window_plan_key, site) in sites {
-            let assign_idx = *self.df_plan_to_node.get(&site.plan_node_key).ok_or_else(|| {
-                DataFusionError::Plan(format!(
-                    "no logical node mapped for event-time assign site (column={})",
-                    site.column_name
-                ))
-            })?;
-            let window_idx = *self.df_plan_to_node.get(&window_plan_key).ok_or_else(|| {
-                DataFusionError::Plan(
-                    "no logical node mapped for window during watermark placement".to_string(),
-                )
-            })?;
-
-            validate_assign_before_window_keyby(&self.logical_graph, assign_idx, window_idx)?;
-
-            let cfg = self
-                .logical_graph
-                .watermark_assign_config_for_column(site.column_name.clone());
-            let node = self
-                .logical_graph
-                .get_node_by_index_mut(assign_idx)
-                .expect("assign node index must exist");
-            match &node.watermark_assign {
-                Some(existing) => {
-                    if existing.time_hint != cfg.time_hint {
-                        return Err(DataFusionError::Plan(format!(
-                            "conflicting watermark assign time hints on {}: {:?} vs {:?}",
-                            node.operator_id, existing.time_hint, cfg.time_hint
-                        )));
-                    }
-                }
-                None => {
-                    node.watermark_assign = Some(cfg);
-                }
-            }
-        }
-
-        Ok(())
     }
 
     pub fn sql_to_graph(&mut self, sql: &str) -> Result<LogicalGraph> {
@@ -519,15 +458,11 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
         // Process node and create operator
         match node {
             LogicalPlan::TableScan(table_scan) => {
-                self.create_source_node(table_scan, self.context.parallelism)?;
-                let idx = *self.node_stack.last().expect("source node just pushed");
-                self.df_plan_to_node.insert(plan_node_key(node), idx);
+                self.create_source_node(table_scan, self.context.parallelism)?
             }
             
             LogicalPlan::Projection(projection) => {
-                self.create_projection_node(projection, self.context.parallelism)?;
-                let idx = *self.node_stack.last().expect("projection node just pushed");
-                self.df_plan_to_node.insert(plan_node_key(node), idx);
+                self.create_projection_node(projection, self.context.parallelism)?
             }
             
             LogicalPlan::Filter(filter) => {
@@ -543,9 +478,6 @@ impl<'a> TreeNodeVisitor<'a> for Planner {
             }
             LogicalPlan::Window(window) => {
                 self.handle_window(window, self.context.parallelism)?;
-                // Stack top is KeyBy, then Window (handle_window pushes window then keyby).
-                let window_idx = self.node_stack[self.node_stack.len() - 2];
-                self.df_plan_to_node.insert(plan_node_key(node), window_idx);
             }
             
             // skip subqueries as they simply wrap other plans
