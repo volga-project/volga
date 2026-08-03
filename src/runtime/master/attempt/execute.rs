@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
+use std::future::pending;
+
 use tokio::time::{interval_at, sleep, timeout, Duration, Instant};
 
 use crate::runtime::consts::{
@@ -54,6 +56,10 @@ impl ExecutionAttempt {
         let mut last_drain_digest = Instant::now() - DRAIN_DIGEST_INTERVAL;
 
         loop {
+            // When draining, park the checkpoint arm entirely. A no-op tick still wins
+            // `biased` select over state_poll and cancels in-flight get_worker_state,
+            // so slow polls never complete and PipelineFinished hangs.
+            let checkpoints_enabled = self.state.checkpoints_enabled();
             tokio::select! {
                 biased;
 
@@ -63,24 +69,8 @@ impl ExecutionAttempt {
                     self.abort_in_flight("attempt failed").await;
                     return Ok(self.await_failure_window_and_recover(failure).await);
                 }
-                _ = optional_tick(&mut checkpoint_tick) => {
-                    if !self.state.checkpoints_enabled() {
-                        // StopSources published disabled via AtomicBool; skip without
-                        // contending on the checkpoints mutex.
-                    } else {
-                        match self.begin_checkpoint().await {
-                            Ok(_) => {}
-                            // Expected after StopSources; do not spam.
-                            Err(error) if error == "sources stopped for drain" => {}
-                            Err(error) => {
-                                println!(
-                                    "[MASTER] Interval checkpoint skipped attempt={}: {}",
-                                    self.id, error
-                                );
-                            }
-                        }
-                    }
-                }
+                // Prefer state_poll over checkpoint ticks so a slow get_worker_state is not
+                // cancelled every checkpoint interval (biased + arm cancel).
                 state_poll = async {
                     poll.tick().await;
                     poll_client_states(&self.clients, &self.state, poll_rpc_timeout).await
@@ -132,6 +122,25 @@ impl ExecutionAttempt {
                             self.id,
                             state_poll_digest(&state_poll.states, &self.clients)
                         );
+                    }
+                }
+                _ = async {
+                    if checkpoints_enabled {
+                        optional_tick(&mut checkpoint_tick).await;
+                    } else {
+                        pending::<()>().await;
+                    }
+                } => {
+                    match self.begin_checkpoint().await {
+                        Ok(_) => {}
+                        // Expected after StopSources; do not spam.
+                        Err(error) if error == "sources stopped for drain" => {}
+                        Err(error) => {
+                            println!(
+                                "[MASTER] Interval checkpoint skipped attempt={}: {}",
+                                self.id, error
+                            );
+                        }
                     }
                 }
             }
