@@ -182,7 +182,7 @@ jobs:
             # Free org ~18 usable concurrent runners in practice. Alternate so
             # each suite gets a dedicated wave (not half the pool), 15 machines:
             # - inproc 100× window restore ≈ 10–15s/run → ~25–40m
-            # - kube 50× --all + fresh Kind (heavier per run; may still span >1h)
+            # - kube 10× --all + fresh Kind ≈ 3–4m/outer-run historically → ~30–45m
             # Cron fires at UTC hours 0,4,8,12,16,20 — alternate by slot so we
             # do not always land on the same suite (hour%2 would be stuck on even).
             hour=$((10#$(date -u +%H)))
@@ -194,7 +194,7 @@ jobs:
               runs=100
             else
               schedule_mode=kube
-              runs=50
+              runs=10
             fi
           else
             machines="${{ inputs.stress_machines }}"
