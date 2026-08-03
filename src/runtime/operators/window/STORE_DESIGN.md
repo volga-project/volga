@@ -539,6 +539,19 @@ it is not part of the cache key.
 It needs point get, put, invalidation, and optionally batched gets. Logical
 scans are assembled from bucket point reads. WRO bypasses cache.
 
+### Scylla consistency
+
+Minimal setup is single DC, RF=3. Because we need read-your-write after publish,
+use `LOCAL_QUORUM` for both data reads and writes (`W+R > RF`). Head claim/publish
+is LWT with `LOCAL_SERIAL` + learn `LOCAL_QUORUM`:
+
+- **WO write:** non-LWT data @ `LOCAL_QUORUM`; one head LWT per publish (fence + visibility).
+- **WO read (cache miss):** head lookup + data @ `LOCAL_QUORUM` (writer pointer).
+- **WRO read:** head pin + data @ `LOCAL_QUORUM` (serving pointer) for one coherent snapshot.
+
+**Possible future improvement:** generation + `USING TIMESTAMP` may avoid LWT on
+each publish; still quorum everywhere. Explore it only if LWT latency hurts.
+
 ### State Prune/Cleanup
 
 Retain versions reachable from writer heads, serving heads, recovery bases, and
