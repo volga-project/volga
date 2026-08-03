@@ -64,15 +64,20 @@ impl ExecutionAttempt {
                     return Ok(self.await_failure_window_and_recover(failure).await);
                 }
                 _ = optional_tick(&mut checkpoint_tick) => {
-                    match self.begin_checkpoint().await {
-                        Ok(_) => {}
-                        // Expected after StopSources; do not spam.
-                        Err(error) if error == "sources stopped for drain" => {}
-                        Err(error) => {
-                            println!(
-                                "[MASTER] Interval checkpoint skipped attempt={}: {}",
-                                self.id, error
-                            );
+                    if !self.state.checkpoints_enabled() {
+                        // StopSources published disabled via AtomicBool; skip without
+                        // contending on the checkpoints mutex.
+                    } else {
+                        match self.begin_checkpoint().await {
+                            Ok(_) => {}
+                            // Expected after StopSources; do not spam.
+                            Err(error) if error == "sources stopped for drain" => {}
+                            Err(error) => {
+                                println!(
+                                    "[MASTER] Interval checkpoint skipped attempt={}: {}",
+                                    self.id, error
+                                );
+                            }
                         }
                     }
                 }
@@ -92,6 +97,18 @@ impl ExecutionAttempt {
                         self.abort_in_flight("state poll failure").await;
                         return Ok(execution_poll_outcome(&state_poll.failures));
                     }
+                    // Drain detection must not wait on the checkpoints mutex — CP report/save
+                    // handlers can hold that lock across await and would stall PipelineFinished.
+                    if all_drained(&state_poll.states, &self.clients) {
+                        println!(
+                            "[MASTER] Pipeline drained attempt={} {}",
+                            self.id,
+                            state_poll_digest(&state_poll.states, &self.clients)
+                        );
+                        self.abort_in_flight("pipeline finished with in-flight checkpoint")
+                            .await;
+                        return Ok(AttemptOutcome::Finished);
+                    }
                     if let Some(checkpoint_id) = self
                         .state
                         .in_flight_checkpoint_timed_out(checkpoint_timeout)
@@ -105,19 +122,8 @@ impl ExecutionAttempt {
                         );
                         return Ok(AttemptOutcome::Recover(HashSet::new()));
                     }
-                    if all_drained(&state_poll.states, &self.clients) {
-                        println!(
-                            "[MASTER] Pipeline drained attempt={} {}",
-                            self.id,
-                            state_poll_digest(&state_poll.states, &self.clients)
-                        );
-                        self.abort_in_flight("pipeline finished with in-flight checkpoint")
-                            .await;
-                        return Ok(AttemptOutcome::Finished);
-                    }
-                    // Log while draining (CP disabled and/or some tasks already Finished) so a
-                    // stuck partial drain is visible instead of a silent harness timeout.
-                    let draining = !self.state.checkpoints_enabled().await
+                    // Lock-free enabled flag: digest path must not take checkpoints mutex.
+                    let draining = !self.state.checkpoints_enabled()
                         || has_terminal_tasks(&state_poll.states);
                     if draining && last_drain_digest.elapsed() >= DRAIN_DIGEST_INTERVAL {
                         last_drain_digest = Instant::now();

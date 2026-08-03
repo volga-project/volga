@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::Mutex;
@@ -152,6 +152,8 @@ impl fmt::Display for WorkerReadinessError {
 pub(super) struct MasterState {
     config: Mutex<Option<MasterConfig>>,
     checkpoints: Mutex<Checkpoints>,
+    /// Lock-free mirror of `Checkpoints::enabled` for the run-loop drain path.
+    checkpoints_enabled: AtomicBool,
     pub orchestrator: Arc<dyn MasterOrchestrator>,
     workers: Mutex<WorkerRegistry>,
     latest_pipeline_snapshot: Mutex<Option<PipelineSnapshot>>,
@@ -166,6 +168,7 @@ impl MasterState {
         Self {
             config: Mutex::new(None),
             checkpoints: Mutex::new(Checkpoints::default()),
+            checkpoints_enabled: AtomicBool::new(true),
             orchestrator,
             workers: Mutex::new(WorkerRegistry::default()),
             latest_pipeline_snapshot: Mutex::new(None),
@@ -250,6 +253,7 @@ impl MasterState {
             retention,
             checkpoint_store,
         );
+        self.checkpoints_enabled.store(true, Ordering::SeqCst);
         *self.config.lock().await = Some(config);
     }
 
@@ -282,10 +286,12 @@ impl MasterState {
 
     pub(super) async fn enable_checkpoints(&self) {
         self.checkpoints.lock().await.set_enabled(true);
+        self.checkpoints_enabled.store(true, Ordering::SeqCst);
     }
 
-    pub(super) async fn checkpoints_enabled(&self) -> bool {
-        self.checkpoints.lock().await.enabled()
+    /// Lock-free; kept in sync with `Checkpoints::enabled` by enable/disable.
+    pub(super) fn checkpoints_enabled(&self) -> bool {
+        self.checkpoints_enabled.load(Ordering::SeqCst)
     }
 
     /// Stop taking new checkpoints and drop any in-flight one (pipeline is draining).
@@ -293,6 +299,9 @@ impl MasterState {
         &self,
         attempt_id: u64,
     ) -> Result<Option<u64>, String> {
+        // Publish disabled before taking the mutex so the run loop can observe drain
+        // even if a report handler is holding `checkpoints` across store IO.
+        self.checkpoints_enabled.store(false, Ordering::SeqCst);
         let mut checkpoints = self.checkpoints.lock().await;
         checkpoints.set_enabled(false);
         let checkpoint_id = checkpoints
@@ -372,16 +381,20 @@ impl MasterState {
             return Ok(());
         }
 
-        let outcome = {
+        let (outcome, persist) = {
             let mut cps = self.checkpoints.lock().await;
             // Only in-flight CPs accept barrier progress (Completed implies align already done).
             if cps.in_flight_id() != Some(checkpoint_id) {
                 return Ok(());
             }
             cps.note_barrier_progress(checkpoint_id, task.clone())
-                .await
                 .map_err(|error| format!("failed to update checkpoint store: {error}"))?
         };
+        if let Some(persist) = persist {
+            Checkpoints::apply_persist(persist)
+                .await
+                .map_err(|error| format!("failed to persist checkpoint: {error}"))?;
+        }
 
         self.record_lifecycle_event(LifecycleEvent::CheckpointPropagation {
             checkpoint_id,
@@ -436,13 +449,16 @@ impl MasterState {
                 task.vertex_id, task.task_index
             ));
         }
-        let outcome = self
-            .checkpoints
-            .lock()
-            .await
-            .report(checkpoint_id, task, checkpoint)
-            .await
-            .map_err(|error| format!("failed to update checkpoint store: {error}"))?;
+        let (outcome, persist) = {
+            let mut cps = self.checkpoints.lock().await;
+            cps.report(checkpoint_id, task, checkpoint)
+                .map_err(|error| format!("failed to update checkpoint store: {error}"))?
+        };
+        if let Some(persist) = persist {
+            Checkpoints::apply_persist(persist)
+                .await
+                .map_err(|error| format!("failed to persist checkpoint: {error}"))?;
+        }
 
         match outcome {
             CheckpointAckOutcome::Completed => {
