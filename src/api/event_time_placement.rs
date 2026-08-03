@@ -1,25 +1,38 @@
 //! Resolve where auto watermark assigners should attach by walking DataFusion
 //! plan lineage from a window's ORDER BY event-time column to its defining site.
 
+use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
 use datafusion::common::{Column, DataFusionError, Result};
 use datafusion::logical_expr::{Expr, LogicalPlan, Projection, Window};
+use datafusion::physical_plan::expressions::Column as PhysicalColumn;
 use petgraph::graph::NodeIndex;
 use petgraph::Direction;
 
 use super::logical_graph::LogicalGraph;
+use crate::runtime::functions::map::MapFunction;
 use crate::runtime::operators::operator::OperatorConfig;
 
 /// Plan site where a watermark assigner should be attached.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssignSite {
-    /// Column name in the assign site's output schema.
-    pub column_name: String,
-    /// Identity of the defining [`LogicalPlan`] node (`ptr` as usize).
-    pub plan_node_key: usize,
+pub enum AssignSite {
+    Source {
+        /// DF table name (lineage / diagnostics; graph match uses unique upstream Source).
+        table_name: String,
+        /// Column name in the source output schema.
+        column_name: String,
+    },
+    /// Projection that defines a computed (non-column) event-time expression.
+    Projection {
+        column_name: String,
+    },
 }
 
-pub fn plan_node_key(plan: &LogicalPlan) -> usize {
-    plan as *const LogicalPlan as usize
+impl AssignSite {
+    pub fn column_name(&self) -> &str {
+        match self {
+            Self::Source { column_name, .. } | Self::Projection { column_name } => column_name,
+        }
+    }
 }
 
 fn unwrap_alias(expr: &Expr) -> &Expr {
@@ -107,18 +120,16 @@ pub fn resolve_event_time_assign_site(window: &Window) -> Result<AssignSite> {
                         current = proj.input.as_ref();
                     }
                     _ => {
-                        // Computed (or otherwise non-column) expression — assign here.
-                        return Ok(AssignSite {
+                        return Ok(AssignSite::Projection {
                             column_name: col.name.clone(),
-                            plan_node_key: plan_node_key(current),
                         });
                     }
                 }
             }
-            LogicalPlan::TableScan(_) => {
-                return Ok(AssignSite {
+            LogicalPlan::TableScan(scan) => {
+                return Ok(AssignSite::Source {
+                    table_name: scan.table_name.table().to_string(),
                     column_name: col.name.clone(),
-                    plan_node_key: plan_node_key(current),
                 });
             }
             LogicalPlan::Join(_) | LogicalPlan::Union(_) => {
@@ -157,6 +168,23 @@ fn reaches(graph: &LogicalGraph, from: NodeIndex, to: NodeIndex) -> bool {
     false
 }
 
+fn window_keyby(graph: &LogicalGraph, window_idx: NodeIndex) -> Result<NodeIndex> {
+    graph
+        .get_neighbors(window_idx, Direction::Incoming)
+        .into_iter()
+        .find(|&idx| {
+            matches!(
+                graph.get_node_by_index(idx).operator_config,
+                OperatorConfig::KeyByConfig(_)
+            )
+        })
+        .ok_or_else(|| {
+            DataFusionError::Plan(
+                "window has no KeyBy predecessor for watermark placement validation".to_string(),
+            )
+        })
+}
+
 /// Assign site must be upstream of the window's KeyBy (fragmenting edge), and must not
 /// land on KeyBy/Window themselves.
 pub fn validate_assign_before_window_keyby(
@@ -174,25 +202,142 @@ pub fn validate_assign_before_window_keyby(
         ));
     }
 
-    let keyby_idx = graph
-        .get_neighbors(window_idx, Direction::Incoming)
-        .into_iter()
-        .find(|&idx| {
-            matches!(
-                graph.get_node_by_index(idx).operator_config,
-                OperatorConfig::KeyByConfig(_)
-            )
-        })
-        .ok_or_else(|| {
-            DataFusionError::Plan(
-                "window has no KeyBy predecessor for watermark placement validation".to_string(),
-            )
-        })?;
-
+    let keyby_idx = window_keyby(graph, window_idx)?;
     if !reaches(graph, assign_idx, keyby_idx) {
         return Err(DataFusionError::Plan(
             "event-time assign site must be upstream of the window's KeyBy".to_string(),
         ));
+    }
+
+    Ok(())
+}
+
+fn window_order_by_column_name(graph: &LogicalGraph, window_idx: NodeIndex) -> Option<String> {
+    let OperatorConfig::WindowConfig(cfg) = &graph.get_node_by_index(window_idx).operator_config
+    else {
+        return None;
+    };
+    let order = cfg.window_exec.window_expr().first()?.order_by().first()?;
+    order
+        .expr
+        .as_any()
+        .downcast_ref::<PhysicalColumn>()
+        .map(|c| c.name().to_string())
+}
+
+fn projection_defines_computed_column(map: &MapFunction, column_name: &str) -> bool {
+    let MapFunction::Projection(proj) = map else {
+        return false;
+    };
+    for (idx, field) in proj.out_schema().fields().iter().enumerate() {
+        if field.name() != column_name {
+            continue;
+        }
+        let Some(expr) = proj.exprs().get(idx) else {
+            return false;
+        };
+        return !matches!(unwrap_alias(expr), Expr::Column(_));
+    }
+    false
+}
+
+fn find_assign_node(
+    graph: &LogicalGraph,
+    site: &AssignSite,
+    window_idxs: &[NodeIndex],
+) -> Result<NodeIndex> {
+    let keybys = window_idxs
+        .iter()
+        .map(|&w| window_keyby(graph, w))
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut candidates = Vec::new();
+    for idx in graph.get_all_node_indices() {
+        if !keybys.iter().all(|&kb| reaches(graph, idx, kb)) {
+            continue;
+        }
+        match (site, &graph.get_node_by_index(idx).operator_config) {
+            (AssignSite::Source { .. }, OperatorConfig::SourceConfig(_)) => {
+                candidates.push(idx);
+            }
+            (AssignSite::Projection { column_name }, OperatorConfig::MapConfig(map))
+                if projection_defines_computed_column(map, column_name) =>
+            {
+                candidates.push(idx);
+            }
+            _ => {}
+        }
+    }
+
+    match candidates.as_slice() {
+        [only] => Ok(*only),
+        [] => Err(DataFusionError::Plan(format!(
+            "no logical node found for watermark assign site {site:?}"
+        ))),
+        _ => Err(DataFusionError::Plan(format!(
+            "ambiguous logical nodes for watermark assign site {site:?}: {} candidates",
+            candidates.len()
+        ))),
+    }
+}
+
+fn attach_assign(graph: &mut LogicalGraph, assign_idx: NodeIndex, column_name: String) -> Result<()> {
+    let cfg = graph.watermark_assign_config_for_column(column_name);
+    let node = graph
+        .get_node_by_index_mut(assign_idx)
+        .expect("assign node index must exist");
+    match &node.watermark_assign {
+        Some(existing) => {
+            if existing.time_hint != cfg.time_hint {
+                return Err(DataFusionError::Plan(format!(
+                    "conflicting watermark assign time hints on {}: {:?} vs {:?}",
+                    node.operator_id, existing.time_hint, cfg.time_hint
+                )));
+            }
+        }
+        None => {
+            node.watermark_assign = Some(cfg);
+        }
+    }
+    Ok(())
+}
+
+/// Attach auto watermark assign configs on the defining Source/Projection nodes for each
+/// window in `plan`. Call after the logical graph has been built from that plan.
+pub fn apply_auto_watermark_assigns(plan: &LogicalPlan, graph: &mut LogicalGraph) -> Result<()> {
+    if !graph.watermarks_enabled() {
+        return Ok(());
+    }
+
+    let mut jobs: Vec<(AssignSite, String)> = Vec::new();
+    plan.apply(|node| {
+        if let LogicalPlan::Window(window) = node {
+            let site = resolve_event_time_assign_site(window)?;
+            let et = event_time_column_from_window(window)?;
+            jobs.push((site, et.name));
+        }
+        Ok(TreeNodeRecursion::Continue)
+    })?;
+
+    for (site, window_et_name) in jobs {
+        let window_idxs: Vec<NodeIndex> = graph
+            .get_all_node_indices()
+            .into_iter()
+            .filter(|&idx| {
+                window_order_by_column_name(graph, idx).as_deref() == Some(window_et_name.as_str())
+            })
+            .collect();
+        if window_idxs.is_empty() {
+            return Err(DataFusionError::Plan(format!(
+                "no window operator with ORDER BY column '{window_et_name}' for watermark placement"
+            )));
+        }
+
+        let assign_idx = find_assign_node(graph, &site, &window_idxs)?;
+        for &window_idx in &window_idxs {
+            validate_assign_before_window_keyby(graph, assign_idx, window_idx)?;
+        }
+        attach_assign(graph, assign_idx, site.column_name().to_string())?;
     }
 
     Ok(())
@@ -203,7 +348,6 @@ mod tests {
     use super::*;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datafusion::catalog::MemTable;
-    use datafusion::common::tree_node::{TreeNode, TreeNodeRecursion};
     use datafusion::prelude::SessionContext;
     use std::sync::Arc;
 
@@ -239,18 +383,6 @@ mod tests {
         found.expect("expected a Window in plan")
     }
 
-    fn find_plan_by_key<'a>(plan: &'a LogicalPlan, key: usize) -> Option<&'a LogicalPlan> {
-        let mut found = None;
-        plan.apply(|node| {
-            if plan_node_key(node) == key {
-                found = Some(node);
-            }
-            Ok(TreeNodeRecursion::Continue)
-        })
-        .unwrap();
-        found
-    }
-
     #[tokio::test]
     async fn lineage_passthrough_column_stops_at_source() {
         let plan = plan_sql(
@@ -262,9 +394,13 @@ mod tests {
         .await;
         let window = find_window(&plan);
         let site = resolve_event_time_assign_site(&window).unwrap();
-        assert_eq!(site.column_name, "timestamp");
-        let site_plan = find_plan_by_key(&plan, site.plan_node_key).unwrap();
-        assert!(matches!(site_plan, LogicalPlan::TableScan(_)));
+        assert_eq!(
+            site,
+            AssignSite::Source {
+                table_name: "events".to_string(),
+                column_name: "timestamp".to_string(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -278,10 +414,13 @@ mod tests {
         .await;
         let window = find_window(&plan);
         let site = resolve_event_time_assign_site(&window).unwrap();
-        // After unwrapping the alias, assign on the source under the original column name.
-        assert_eq!(site.column_name, "timestamp");
-        let site_plan = find_plan_by_key(&plan, site.plan_node_key).unwrap();
-        assert!(matches!(site_plan, LogicalPlan::TableScan(_)));
+        assert_eq!(
+            site,
+            AssignSite::Source {
+                table_name: "events".to_string(),
+                column_name: "timestamp".to_string(),
+            }
+        );
     }
 
     #[tokio::test]
@@ -295,9 +434,12 @@ mod tests {
         .await;
         let window = find_window(&plan);
         let site = resolve_event_time_assign_site(&window).unwrap();
-        assert_eq!(site.column_name, "event_time");
-        let site_plan = find_plan_by_key(&plan, site.plan_node_key).unwrap();
-        assert!(matches!(site_plan, LogicalPlan::Projection(_)));
+        assert_eq!(
+            site,
+            AssignSite::Projection {
+                column_name: "event_time".to_string(),
+            }
+        );
     }
 
     #[tokio::test]
