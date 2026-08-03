@@ -10,15 +10,32 @@ on:
   workflow_dispatch:
     inputs:
       profile:
-        description: "Test profile (default=unit+inprocess; all=default+docker+kube)"
+        description: "Test profile (default=unit+inprocess; all=default+docker+kube; kube-stress / inproc-stress)"
         type: choice
         options:
           - default
           - docker
           - kube
           - all
-          - stress
+          - kube-stress
+          - inproc-stress
         default: default
+      stress_test:
+        description: "Exact test name for inproc-stress (ignored otherwise)"
+        type: string
+        default: test_local_multi_worker_window_checkpoint_restore
+      stress_machines:
+        description: "CI runners (machines) for kube-stress / inproc-stress"
+        type: string
+        default: "3"
+      stress_shards_per_machine:
+        description: "Parallel stress processes per machine (kube default 1 = one Kind cluster)"
+        type: string
+        default: "1"
+      stress_runs_per_shard:
+        description: "Iterations per shard for kube-stress / inproc-stress"
+        type: string
+        default: "10"
 
 concurrency:
   # PRs cancel superseded runs; scheduled stress must not cancel itself (jobs can exceed 1h).
@@ -137,14 +154,65 @@ jobs:
       - if: always()
         run: scripts/kube-test-env destroy
 
+  # Resolve machines × shards-per-machine for stress jobs.
+  # machine = GitHub runner (isolation); shard = parallel process on that runner
+  # (kube: usually 1 = one Kind cluster; inproc: usually 1 to avoid interference).
+  stress-config:
+    if: >
+      github.event_name == 'schedule' ||
+      inputs.profile == 'kube-stress' ||
+      inputs.profile == 'inproc-stress'
+    runs-on: ubuntu-latest
+    outputs:
+      machine_ids: ${{ steps.config.outputs.machine_ids }}
+      shards_per_machine: ${{ steps.config.outputs.shards_per_machine }}
+      runs_per_shard: ${{ steps.config.outputs.runs_per_shard }}
+    steps:
+      - id: config
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${{ github.event_name }}" == "schedule" ]]; then
+            machines=3
+            shards=1
+            runs=10
+          else
+            machines="${{ inputs.stress_machines }}"
+            shards="${{ inputs.stress_shards_per_machine }}"
+            runs="${{ inputs.stress_runs_per_shard }}"
+          fi
+          for name in machines shards runs; do
+            val="${!name}"
+            if [[ ! "$val" =~ ^[1-9][0-9]*$ ]]; then
+              echo "$name must be a positive integer, got: $val" >&2
+              exit 2
+            fi
+          done
+          if (( machines > 16 )); then
+            echo "stress_machines max is 16, got: $machines" >&2
+            exit 2
+          fi
+          machine_ids="$(python3 -c "import json; print(json.dumps(list(range(1, int('${machines}') + 1))))")"
+          echo "machines=$machines shards_per_machine=$shards runs_per_shard=$runs"
+          echo "machine_ids=$machine_ids"
+          {
+            echo "machine_ids=$machine_ids"
+            echo "shards_per_machine=$shards"
+            echo "runs_per_shard=$runs"
+          } >> "$GITHUB_OUTPUT"
+
   kube-stress:
-    if: github.event_name == 'schedule' || inputs.profile == 'stress'
+    needs: stress-config
+    if: >
+      always() &&
+      needs.stress-config.result == 'success' &&
+      (github.event_name == 'schedule' || inputs.profile == 'kube-stress')
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        machine: ${{ fromJSON(needs.stress-config.outputs.machine_ids) }}
     env:
       CARGO_INCREMENTAL: "0"
       VOLGA_DOCKER_CACHE: gha
@@ -170,11 +238,77 @@ jobs:
       - uses: helm/kind-action@v1
         with:
           install_only: true
-      - run: scripts/test stress --env kube --all --runs-per-shard 10 --shards 1 --fresh-cluster
+      - name: Run kube stress
+        run: |
+          set -euo pipefail
+          shards="${{ needs.stress-config.outputs.shards_per_machine }}"
+          runs="${{ needs.stress-config.outputs.runs_per_shard }}"
+          echo "kube-stress machine=${{ matrix.machine }} shards_per_machine=$shards runs_per_shard=$runs"
+          scripts/test stress --env kube --all \
+            --runs-per-shard "$runs" \
+            --shards "$shards" \
+            --fresh-cluster
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: kube-stress-logs-shard-${{ matrix.shard }}
+          name: kube-stress-logs-machine-${{ matrix.machine }}
+          path: target/stress/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # Inprocess stress with the same machine × shard knobs (machine = runner isolation).
+  inproc-stress:
+    needs: stress-config
+    if: >
+      always() &&
+      needs.stress-config.result == 'success' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.profile == 'inproc-stress'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        machine: ${{ fromJSON(needs.stress-config.outputs.machine_ids) }}
+    env:
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake \
+            pkg-config \
+            protobuf-compiler \
+            libprotobuf-dev \
+            libcurl4-openssl-dev \
+            libssl-dev \
+            libsasl2-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Run inproc stress
+        run: |
+          set -euo pipefail
+          test_name="${{ inputs.stress_test }}"
+          shards="${{ needs.stress-config.outputs.shards_per_machine }}"
+          runs="${{ needs.stress-config.outputs.runs_per_shard }}"
+          if [[ -z "$test_name" ]]; then
+            echo "stress_test input is required for inproc-stress" >&2
+            exit 2
+          fi
+          echo "inproc-stress machine=${{ matrix.machine }} test=$test_name shards_per_machine=$shards runs_per_shard=$runs"
+          scripts/test stress --env local \
+            --test "$test_name" \
+            --runs-per-shard "$runs" \
+            --shards "$shards"
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: inproc-stress-logs-machine-${{ matrix.machine }}
           path: target/stress/
           if-no-files-found: warn
           retention-days: 14

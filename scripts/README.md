@@ -31,8 +31,21 @@ CI runs `default` as the required job, plus parallel non-blocking `docker` and
 ### One-off CI runs (`workflow_dispatch`)
 
 GitHub → **Actions** → **Rust tests** → **Run workflow**: pick branch +
-`profile` (`default` / `unit` / `inprocess` / `docker` / `kube` / `all` /
-`stress`).
+`profile` (`default` / `docker` / `kube` / `all` / `kube-stress` /
+`inproc-stress`).
+
+Stress knobs (shared by `kube-stress` / `inproc-stress`):
+
+| Input | Default | Meaning |
+| --- | --- | --- |
+| `stress_machines` | `3` | GitHub runners (machine isolation) |
+| `stress_shards_per_machine` | `1` | Parallel stress processes per runner |
+| `stress_runs_per_shard` | `10` | Iterations per process |
+| `stress_test` | (inproc default) | Exact test name; `inproc-stress` only |
+
+Schedule uses 3 machines × 1 shard × 10 runs (kube). Prefer
+`stress_shards_per_machine=1` so parallelism comes from machines, not
+co-tenancy on one runner.
 
 Or from the CLI (same inputs):
 
@@ -43,11 +56,25 @@ gh workflow run rust-tests.yml --ref "$(git branch --show-current)" -f profile=d
 # Kube-only
 gh workflow run rust-tests.yml --ref "$(git branch --show-current)" -f profile=kube
 
-# On-demand kube stress (3 shards, same as the schedule)
-gh workflow run rust-tests.yml --ref "$(git branch --show-current)" -f profile=stress
+# On-demand kube stress (same shape as the schedule)
+gh workflow run rust-tests.yml --ref "$(git branch --show-current)" \
+  -f profile=kube-stress \
+  -f stress_machines=3 \
+  -f stress_shards_per_machine=1 \
+  -f stress_runs_per_shard=10
+
+# On-demand inprocess stress for one test (4 isolated runners)
+gh workflow run rust-tests.yml --ref "$(git branch --show-current)" \
+  -f profile=inproc-stress \
+  -f stress_test=test_local_multi_worker_window_checkpoint_restore \
+  -f stress_machines=4 \
+  -f stress_shards_per_machine=1 \
+  -f stress_runs_per_shard=10
 ```
 
-`stress` skips the normal test/docker/kube jobs and only runs `kube-stress`.
+`kube-stress` / `inproc-stress` skip the normal test/docker/kube jobs.
+`inproc-stress` runs `scripts/test stress --env local` for `stress_test`.
+Logs upload per machine from `target/stress/`.
 `docker` / `kube` run just that env job. `unit` / `inprocess` / `default` run
 the required `test` job with that profile (and may still start sibling
 docker/kube jobs unless you pick an env-only profile).
@@ -104,7 +131,7 @@ scripts/test inprocess --filter 'test(test_local_single_worker_window_checkpoint
 The stress runner repeats the **kube** suite (or selected kube tests) across
 parallel shards. It writes one log per shard under `target/stress/` and stops
 scheduling new iterations after the first failure. Prefer `--env kube` (Kind);
-CI schedule and on-demand `profile=stress` use the same path.
+CI schedule and on-demand `profile=kube-stress` use the same path.
 
 ```bash
 # Full kube profile, fresh Kind cluster each iteration.
