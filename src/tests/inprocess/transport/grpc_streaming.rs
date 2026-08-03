@@ -20,7 +20,9 @@ pub async fn start_server(
     println!("[SERVER] Starting gRPC server on {}", addr);
     let addr = addr.parse()?;
     let service = MessageStreamServiceImpl::new(tx);
-    let svc = MessageStreamServiceServer::new(service);
+    let svc = MessageStreamServiceServer::new(service)
+        .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
+        .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
 
     println!("[SERVER] gRPC server listening on {}", addr);
     let router = Server::builder().add_service(svc);

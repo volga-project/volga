@@ -1,6 +1,7 @@
 use tonic::{Request, Response, Status};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
+use crate::common::grpc::GRPC_MAX_MESSAGE_BYTES;
 use crate::common::message::Message;
 use crate::runtime::consts::{
     runtime_consts, TRANSPORT_GRPC_CONNECT_MAX_RETRIES, TRANSPORT_GRPC_CONNECT_RETRY_DELAY,
@@ -81,6 +82,9 @@ impl MessageStreamClient {
         for attempt in 0..=max_retries {
             match MessageStreamServiceClient::connect(addr.clone()).await {
                 Ok(client) => {
+                    let client = client
+                        .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES)
+                        .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES);
                     println!("[GRPC_CLIENT] Successfully connected to {} after {} attempts", addr, attempt + 1);
                     return Ok(Self { client });
                 }
