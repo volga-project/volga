@@ -57,6 +57,10 @@ impl ProjectionFunction {
     pub fn out_schema(&self) -> DFSchemaRef {
         self.out_schema.clone()
     }
+
+    pub fn exprs(&self) -> &[Expr] {
+        &self.exprs
+    }
 }
 
 #[async_trait]
