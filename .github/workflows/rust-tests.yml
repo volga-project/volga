@@ -5,11 +5,11 @@ on:
   push:
     branches: [master]
   schedule:
-    # Hourly; stress-config alternates inproc (even UTC hour) vs kube (odd) so
-    # each suite can use the full Free-plan pool (20 concurrent jobs) instead of
-    # splitting. Each suite therefore runs about every 2h. Long jobs rely on
-    # schedule concurrency (cancel-in-progress: false) so a overrun is not killed.
-    - cron: "17 * * * *"
+    # Every 4h; stress-config alternates inproc vs kube on each tick so each
+    # suite can use ~15 runners without sharing the Free-plan pool. Each suite
+    # therefore runs about every 8h. Long jobs rely on schedule concurrency
+    # (cancel-in-progress: false) so an overrun is not killed.
+    - cron: "17 */4 * * *"
   workflow_dispatch:
     inputs:
       profile:
@@ -185,11 +185,14 @@ jobs:
             # - inproc window restore ≈ 10–15s/run → ~25–40m
             # - kube --all + fresh Kind is heavier; 100 runs may span >1h and
             #   rely on schedule concurrency (cancel-in-progress: false).
+            # Cron fires at UTC hours 0,4,8,12,16,20 — alternate by slot so we
+            # do not always land on the same suite (hour%2 would be stuck on even).
             hour=$((10#$(date -u +%H)))
+            slot=$(( hour / 4 ))
             shards=1
             machines=15
             runs=100
-            if (( hour % 2 == 0 )); then
+            if (( slot % 2 == 0 )); then
               schedule_mode=inproc
             else
               schedule_mode=kube

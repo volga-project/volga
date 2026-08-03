@@ -44,12 +44,12 @@ Stress knobs (shared by `kube-stress` / `inproc-stress`):
 | `stress_runs_per_shard` | `10` | Iterations per process |
 | `stress_test` | (inproc default) | Exact test name; `inproc-stress` / `kube-stress` (`test_kube_*`) |
 
-Scheduled stress (hourly cron, suites alternate every other hour):
+Scheduled stress (every 4h UTC; suites alternate each tick → each suite ~8h):
 
-| UTC hour | Suite | Shape | Notes |
+| UTC hours (cron `17 */4`) | Suite | Shape | Notes |
 | --- | --- | --- | --- |
-| even | inproc | 15 × 1 × 100 | `test_local_multi_worker_window_checkpoint_restore` (~25–40m) |
-| odd | kube | 15 × 1 × 100 | full kube suite + fresh Kind (may exceed 1h) |
+| 0, 8, 16 | inproc | 15 × 1 × 100 | `test_local_multi_worker_window_checkpoint_restore` (~25–40m) |
+| 4, 12, 20 | kube | 15 × 1 × 100 | full kube suite + fresh Kind (may exceed 1h) |
 
 Prefer `stress_shards_per_machine=1` so parallelism comes from machines, not
 co-tenancy on one runner. Sized for ~18 usable Free-plan runners (leave headroom).
