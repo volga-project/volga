@@ -263,6 +263,6 @@ pub(super) fn schedule_ask_error(
 ) -> ScheduleError {
     match error {
         SendError::HandlerError(error) => error,
-        other => ScheduleError::Terminal(other.to_string()),
+        other => ScheduleError::Terminal(format!("{other:?}")),
     }
 }

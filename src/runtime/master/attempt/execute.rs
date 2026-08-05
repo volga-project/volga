@@ -185,18 +185,27 @@ impl ExecutionAttempt {
         failure: FailureEvent,
         actor_ref: ActorRef<Self>,
     ) {
-        let Some(slot) = self.run.as_mut() else {
-            return;
+        let aggregating = match self.run.as_ref() {
+            Some(slot) => slot.aggregating.is_some(),
+            None => return,
         };
-        if let Some(events) = slot.aggregating.as_mut() {
+        if aggregating {
             self.record_failure(&failure).await;
-            events.push(failure);
+            if let Some(events) = self
+                .run
+                .as_mut()
+                .and_then(|slot| slot.aggregating.as_mut())
+            {
+                events.push(failure);
+            }
             return;
         }
 
         self.abort_in_flight("attempt failed").await;
         self.record_failure(&failure).await;
-        slot.aggregating = Some(vec![failure]);
+        if let Some(slot) = self.run.as_mut() {
+            slot.aggregating = Some(vec![failure]);
+        }
 
         let window = runtime_consts().duration(MASTER_FAILURE_AGGREGATION_WINDOW);
         tokio::spawn(async move {
