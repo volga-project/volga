@@ -12,11 +12,13 @@ use tokio::task::JoinHandle;
 use crate::common::failure::FailureEvent;
 use crate::orchestrator::orchestrator::WorkerHealthWatchHandle;
 use super::state::{MasterState, PipelineContext};
-use super::worker_client::WorkerClient;
 
 mod execute;
 mod schedule;
+mod session;
 mod teardown;
+
+use session::WorkerSession;
 
 /// Current execution-attempt run phase. Owned by [`ExecutionAttempt`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +51,7 @@ pub(super) enum ScheduleError {
     },
 }
 
-/// Live execution attempt: owns phase and the run loop (via mailbox ticks).
+/// Live execution attempt: owns phase; worker I/O goes through [`WorkerSession`]s.
 #[derive(Actor)]
 pub(super) struct ExecutionAttempt {
     id: u64,
@@ -57,7 +59,7 @@ pub(super) struct ExecutionAttempt {
     state: Arc<MasterState>,
     pipeline: Arc<PipelineContext>,
     phase: AttemptPhase,
-    clients: HashMap<String, WorkerClient>,
+    sessions: HashMap<String, ActorRef<WorkerSession>>,
     failure_tx: mpsc::Sender<FailureEvent>,
     failure_rx: Option<mpsc::Receiver<FailureEvent>>,
     /// Set while `Run` is in progress; completed by tick/failure handlers.
@@ -70,6 +72,8 @@ struct RunSlot {
     _health_poll: Option<WorkerHealthWatchHandle>,
     /// Failures collected during the aggregation window after the first fatal.
     aggregating: Option<Vec<FailureEvent>>,
+    /// One outstanding poll RPC batch at a time (keeps mailbox free for `Drain`).
+    poll_in_flight: bool,
 }
 
 // --- public messages ---
@@ -78,7 +82,7 @@ pub(super) struct Schedule;
 
 pub(super) struct Run;
 
-/// StopSources: enter draining and abort any in-flight checkpoint.
+/// StopSources: enter draining, abort in-flight CP, stop sources on sessions.
 pub(super) struct Drain;
 
 pub(super) struct Finish;
@@ -91,6 +95,11 @@ pub(super) struct PollTick;
 pub(super) struct CheckpointTick;
 pub(super) struct FailureMsg(pub(super) FailureEvent);
 pub(super) struct AggWindowEnd;
+pub(super) struct CheckpointBarriersDone {
+    pub(super) checkpoint_id: u64,
+    pub(super) error: Option<String>,
+}
+pub(super) struct PollResult(pub(super) execute::StatePoll);
 
 impl ExecutionAttempt {
     pub(super) fn spawn(
@@ -106,7 +115,7 @@ impl ExecutionAttempt {
             state,
             pipeline,
             phase: AttemptPhase::Running,
-            clients: HashMap::new(),
+            sessions: HashMap::new(),
             failure_tx,
             failure_rx: Some(failure_rx),
             run: None,
@@ -118,6 +127,13 @@ impl ExecutionAttempt {
             slot.run_loop.abort();
             slot.reply.send(outcome);
         }
+    }
+
+    fn session_list(&self) -> Vec<(String, ActorRef<WorkerSession>)> {
+        self.sessions
+            .iter()
+            .map(|(id, session)| (id.clone(), session.clone()))
+            .collect()
     }
 }
 
@@ -152,6 +168,7 @@ impl Message<Run> for ExecutionAttempt {
             run_loop,
             _health_poll: health_poll,
             aggregating: None,
+            poll_in_flight: false,
         });
         delegated
     }
@@ -179,7 +196,25 @@ impl Message<Drain> for ExecutionAttempt {
                 checkpoint_id, self.id
             );
         }
-        Ok(checkpoint_id)
+        let sessions = self.session_list();
+        let futures = sessions.into_iter().map(|(worker_id, session)| async move {
+            match session.ask(session::StopSources).await {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(format!("{worker_id}: stop_sources rejected")),
+                Err(error) => Err(format!("{worker_id}: {error:?}")),
+            }
+        });
+        let mut errors = Vec::new();
+        for result in futures::future::join_all(futures).await {
+            if let Err(error) = result {
+                errors.push(error);
+            }
+        }
+        if errors.is_empty() {
+            Ok(checkpoint_id)
+        } else {
+            Err(format!("stop_sources failed: {}", errors.join("; ")))
+        }
     }
 }
 
@@ -215,9 +250,21 @@ impl Message<PollTick> for ExecutionAttempt {
     async fn handle(
         &mut self,
         _msg: PollTick,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.on_poll_tick(ctx.actor_ref()).await;
+    }
+}
+
+impl Message<PollResult> for ExecutionAttempt {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: PollResult,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.on_poll_tick().await;
+        self.on_poll_result(msg.0).await;
     }
 }
 
@@ -227,9 +274,21 @@ impl Message<CheckpointTick> for ExecutionAttempt {
     async fn handle(
         &mut self,
         _msg: CheckpointTick,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.on_checkpoint_tick(ctx.actor_ref()).await;
+    }
+}
+
+impl Message<CheckpointBarriersDone> for ExecutionAttempt {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: CheckpointBarriersDone,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.on_checkpoint_tick().await;
+        self.on_checkpoint_barriers_done(msg).await;
     }
 }
 

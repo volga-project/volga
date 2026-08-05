@@ -5,6 +5,7 @@ use tokio::time::timeout;
 use crate::runtime::consts::{runtime_consts, MASTER_RESET_WORKER_TIMEOUT};
 use crate::runtime::observability::StreamTaskStatus;
 
+use super::session::{CloseTasks, ResetWorker, ShutdownWorker};
 use super::ExecutionAttempt;
 
 impl ExecutionAttempt {
@@ -19,13 +20,12 @@ impl ExecutionAttempt {
             .await;
         let reset_timeout = runtime_consts().duration(MASTER_RESET_WORKER_TIMEOUT);
         let reset_futures: Vec<_> = self
-            .clients
+            .sessions
             .drain()
-            .map(|(worker_id, client)| async move {
-                (
-                    worker_id,
-                    timeout(reset_timeout, client.reset_worker()).await,
-                )
+            .map(|(worker_id, session)| async move {
+                let result = timeout(reset_timeout, session.ask(ResetWorker)).await;
+                let _ = session.stop_gracefully().await;
+                (worker_id, result)
             })
             .collect();
 
@@ -41,7 +41,7 @@ impl ExecutionAttempt {
                 }
                 Ok(Err(error)) => {
                     println!(
-                        "[MASTER] reset_worker failed for {}: {}; replacing",
+                        "[MASTER] reset_worker failed for {}: {:?}; replacing",
                         worker_id, error
                     );
                     replace.insert(worker_id);
@@ -68,16 +68,17 @@ impl ExecutionAttempt {
     pub(in crate::runtime::master) async fn finish(&mut self) {
         self.state.clear_workers_execution_attempt().await;
         let close_tasks: Vec<_> = self
-            .clients
+            .sessions
             .iter()
-            .map(|(worker_id, client)| {
+            .map(|(worker_id, session)| {
                 let worker_id = worker_id.clone();
+                let session = session.clone();
                 async move {
-                    log_close(
-                        "close_worker_tasks",
-                        &worker_id,
-                        client.close_worker_tasks().await,
-                    );
+                    let result = session
+                        .ask(CloseTasks)
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{error:?}"));
+                    log_close("close_worker_tasks", &worker_id, result);
                 }
             })
             .collect();
@@ -91,10 +92,15 @@ impl ExecutionAttempt {
         }
 
         let shutdown_workers: Vec<_> = self
-            .clients
+            .sessions
             .drain()
-            .map(|(worker_id, client)| async move {
-                log_close("shutdown_worker", &worker_id, client.shutdown_worker().await);
+            .map(|(worker_id, session)| async move {
+                let result = session
+                    .ask(ShutdownWorker)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{error:?}"));
+                log_close("shutdown_worker", &worker_id, result);
+                let _ = session.stop_gracefully().await;
             })
             .collect();
         futures::future::join_all(shutdown_workers).await;
