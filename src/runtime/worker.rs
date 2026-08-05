@@ -9,12 +9,12 @@ use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
 use crate::transport::{transport_backend_actor::TransportBackendType, TransportBackend, TransportBackendTrait};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use kameo::{spawn, prelude::ActorRef};
+use std::sync::{Arc, RwLock, atomic::{AtomicBool, Ordering}};
+use kameo::message::{Context, Message};
+use kameo::{prelude::ActorRef, spawn, Actor};
 use tokio::runtime::{Builder, Handle, Runtime};
 use tokio::time::{sleep, Duration};
 use futures::future::join_all;
-// (serde/Result imports removed; this module does not serialize Worker directly)
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::operators::operator::OperatorType;
@@ -68,11 +68,41 @@ impl WorkerConfig {
     }
 }
 
-// WorkerState moved to runtime/observability/snapshot_types.rs
+/// Identity snapshot for heartbeat / attempt fencing (cheap ask).
+#[derive(Debug, Clone)]
+pub struct WorkerIdentity {
+    pub worker_id: String,
+    pub pipeline_id: Option<String>,
+    pub execution_attempt_id: u64,
+    pub configured: bool,
+    pub running: bool,
+}
 
+// --- control-plane messages (WorkerService + tests) ---
+
+pub struct Configure(pub WorkerConfig);
+pub struct Start;
+pub struct RunTasks;
+pub struct CloseTasks;
+pub struct GetState;
+pub struct GetIdentity;
+pub struct GetHealth;
+pub struct StopSources;
+pub struct TriggerBarrier(pub u64);
+/// Close nested runtimes and return to an empty shell (same ActorRef / health).
+pub struct Reset;
+/// Tear down for process exit (same as Reset today for local cleanup).
+pub struct Close;
+/// In-process test orchestration (not used by gRPC).
+pub struct RunTestLifecycle {
+    pub state_updates: Option<mpsc::Sender<WorkerSnapshot>>,
+}
+
+#[derive(Actor)]
 pub struct Worker {
     worker_id: String,
-    health: Arc<WorkerHealth>,
+    /// Current health bus; replaced on reset so stale tasks cannot poison recovery.
+    health_bus: Arc<RwLock<Arc<WorkerHealth>>>,
     config: Option<WorkerConfig>,
     task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
@@ -97,9 +127,10 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(worker_id: String) -> Self {
+        let health = Arc::new(WorkerHealth::new());
         Self {
             worker_id: worker_id.clone(),
-            health: Arc::new(WorkerHealth::new()),
+            health_bus: Arc::new(RwLock::new(health)),
             config: None,
             task_actors: HashMap::new(),
             backend_actor: None,
@@ -119,19 +150,30 @@ impl Worker {
         }
     }
 
-    pub fn from_config(config: WorkerConfig) -> Self {
-        let mut worker = Self::new(config.worker_id.clone());
-        worker.configure(config);
-        worker
+    pub fn spawn(worker_id: String) -> (ActorRef<Self>, Arc<RwLock<Arc<WorkerHealth>>>) {
+        let worker = Self::new(worker_id);
+        let health_bus = worker.health_bus.clone();
+        (spawn(worker), health_bus)
     }
 
-    pub fn configure(&mut self, config: WorkerConfig) {
+    /// Spawn and configure in one step (tests).
+    pub async fn spawn_configured(config: WorkerConfig) -> ActorRef<Self> {
+        let worker_id = config.worker_id.clone();
+        let (actor, _) = Self::spawn(worker_id);
+        actor
+            .ask(Configure(config))
+            .await
+            .expect("configure worker actor");
+        actor
+    }
+
+    fn configure(&mut self, config: WorkerConfig) {
         if self.running.load(Ordering::SeqCst) {
             panic!("Cannot configure worker while it is running");
         }
         // Fresh incarnation: drop any sticky fatal from a previous execution attempt so this
         // worker is not immediately reported unhealthy after a recovery reset.
-        self.health.clear();
+        self.health().clear();
         self.source_handles.clear();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
@@ -191,7 +233,14 @@ impl Worker {
     }
 
     pub fn health(&self) -> Arc<WorkerHealth> {
-        self.health.clone()
+        self.health_bus.read().expect("health bus lock").clone()
+    }
+
+    fn replace_health(&mut self) {
+        *self
+            .health_bus
+            .write()
+            .expect("health bus lock") = Arc::new(WorkerHealth::new());
     }
 
     pub fn is_configured(&self) -> bool {
@@ -341,7 +390,7 @@ impl Worker {
             .clone();
 
         let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
-            TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health.clone())),
+            TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health())),
         };
         let mut transport_client_configs = backend.init_channels(&config.graph, config.vertex_ids.clone());
 
@@ -403,7 +452,7 @@ impl Worker {
                 transport_cfg,
                 runtime_context,
                 config.graph.clone(),
-                self.health.clone(),
+                self.health(),
                 config
                     .task_restore_data
                     .get(&TaskKey {
@@ -512,7 +561,7 @@ impl Worker {
             .map(|(k, v)| (k.clone(), v.handle().clone()))
             .collect();
 
-        let health = self.health.clone();
+        let health = self.health();
         let handle = tokio::spawn(async move {
             let mut fatal_events = health.subscribe();
             // A fatal may already be present (e.g. reported just before subscribing).
@@ -641,48 +690,10 @@ impl Worker {
         self.operator_states.clone()
     }
 
-    /// Tear down nested runtimes. Safe to call from async (blocking work uses
-    /// `block_in_place` / a disposer thread). Idempotent.
-    /// Prefer replacing with `Worker::new` when possible — `Drop` calls this.
-    pub fn close(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
-        if let Some(handle) = self.fatal_watcher_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.tasks_state_polling_handle.take() {
-            handle.abort();
-        }
-        self.request_source_processor.take();
-        self.task_actors.clear();
-        self.config = None;
-        self.health.clear();
-
-        // Run transport Close on its runtime before disposing it — backend cleanup
-        // (stop gRPC server, drain client/reader/writer tasks) lives on that message.
-        if let Some(backend_runtime) = self.transport_backend_runtime.as_ref() {
-            if let Some(backend_actor) = self.backend_actor.take() {
-                let handle = backend_runtime.handle().clone();
-                let close = async move {
-                    let _ = backend_actor
-                        .ask(TransportBackendActorMessage::Close)
-                        .await;
-                };
-                // Cannot `block_in_place` on current-thread runtimes (e.g. default
-                // `#[tokio::test]`); always offload when a Tokio context is entered.
-                if tokio::runtime::Handle::try_current().is_ok() {
-                    if let Ok(join) = std::thread::Builder::new()
-                        .name("worker-transport-close".into())
-                        .spawn(move || handle.block_on(close))
-                    {
-                        let _ = join.join();
-                    }
-                } else {
-                    handle.block_on(close);
-                }
-            }
-        }
-        self.backend_actor = None;
-
+    /// Tear down nested runtimes. Idempotent. Keeps `worker_id` and `health`.
+    /// Prefer [`Self::close_async`] from actor handlers so transport Close is awaited
+    /// on the mailbox runtime instead of `block_on` from a sync path.
+    fn close_sync_dispose_runtimes(&mut self) {
         let mut runtimes = Vec::new();
         if let Some(runtime) = self.transport_backend_runtime.take() {
             runtimes.push(runtime);
@@ -711,28 +722,99 @@ impl Worker {
         println!("[WORKER] Cleanup completed");
     }
 
+    async fn close_async(&mut self) {
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.fatal_watcher_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.tasks_state_polling_handle.take() {
+            handle.abort();
+        }
+        if !self.task_actors.is_empty() {
+            self.signal_tasks_close().await;
+        }
+        self.request_source_processor.take();
+        self.task_actors.clear();
+        self.config = None;
+        self.health().clear();
+
+        // Transport backend uses a 1-thread runtime; awaiting Close on that runtime from
+        // within itself deadlocks (Close joins tasks spawned on the same runtime). Match
+        // drain-tip `close()`: run the ask on a dedicated thread via `block_on`.
+        if let Some(backend_runtime) = self.transport_backend_runtime.as_ref() {
+            if let Some(backend_actor) = self.backend_actor.take() {
+                let handle = backend_runtime.handle().clone();
+                let close = async move {
+                    let _ = backend_actor
+                        .ask(TransportBackendActorMessage::Close)
+                        .await;
+                };
+                if tokio::runtime::Handle::try_current().is_ok() {
+                    if let Ok(join) = std::thread::Builder::new()
+                        .name("worker-transport-close".into())
+                        .spawn(move || handle.block_on(close))
+                    {
+                        let _ = join.join();
+                    }
+                } else {
+                    handle.block_on(close);
+                }
+            }
+        } else {
+            self.backend_actor = None;
+        }
+
+        self.close_sync_dispose_runtimes();
+    }
+
+    /// Close then restore empty shell fields. Keeps the ActorRef and health-bus
+    /// slot; replaces the inner [`WorkerHealth`] so stale tasks cannot poison
+    /// the next attempt (matches drain-tip `Worker::new` on reset).
+    async fn reset_async(&mut self) {
+        self.close_async().await;
+        self.replace_health();
+        self.worker_state = Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
+            self.worker_id.clone(),
+            PipelineId(String::new()),
+        )));
+        self.operator_states = Arc::new(OperatorStates::new());
+        self.running = Arc::new(AtomicBool::new(false));
+        self.source_handles = Arc::new(SourceHandles::new());
+    }
+
+    fn identity(&self) -> WorkerIdentity {
+        WorkerIdentity {
+            worker_id: self.worker_id.clone(),
+            pipeline_id: self.pipeline_id(),
+            execution_attempt_id: self.execution_attempt_id(),
+            configured: self.is_configured(),
+            running: self.is_running(),
+        }
+    }
+
     // control functions
-    pub async fn start(&mut self) {
+    async fn start(&mut self) -> Result<(), String> {
         if !self.is_configured() {
-            panic!("Worker must be configured before start");
+            return Err("Worker is not configured yet".to_string());
         }
         self.start_request_source_processor_if_needed().await;
         self.spawn_actors().await;
         self.start_tasks(None).await;
+        Ok(())
     }
 
-    pub async fn signal_tasks_run(&mut self) {
+    async fn signal_tasks_run(&mut self) {
         self.start_transport_backend().await;
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Run).await;
     }
 
-    pub async fn signal_tasks_close(&mut self) {
+    async fn signal_tasks_close(&mut self) {
         self.send_signal_to_task_actors(crate::runtime::stream_task_actor::StreamTaskMessage::Close).await;
     }
 
     /// Cooperative source stop for harness-driven pipeline finish.
     /// Returns `false` if the worker is not configured.
-    pub fn stop_sources(&mut self) -> bool {
+    fn stop_sources(&mut self) -> bool {
         if !self.is_configured() {
             println!("[WORKER] Rejecting stop_sources: worker not configured");
             return false;
@@ -783,29 +865,17 @@ impl Worker {
         true
     }
 
-    // This should only be used for testing - simulates worker execution
-    // In real environment master is used to coordinate worker lifecycle
-    pub async fn execute_worker_lifecycle_for_testing(
+    /// In-process test lifecycle (master normally coordinates this).
+    async fn run_test_lifecycle(
         &mut self,
-    ) {
-        self._execute_worker_lifecycle_for_testing(None).await
-    }
-
-    pub async fn execute_worker_lifecycle_for_testing_with_state_updates(
-        &mut self,
-        state_udpates_sender: mpsc::Sender<WorkerSnapshot>
-    ) {
-        self._execute_worker_lifecycle_for_testing(Some(state_udpates_sender)).await
-    }
-
-    async fn _execute_worker_lifecycle_for_testing(
-        &mut self,
-        state_updates_sender: Option<mpsc::Sender<WorkerSnapshot>>
+        state_updates_sender: Option<mpsc::Sender<WorkerSnapshot>>,
     ) {
         println!("[WORKER] Starting worker execution");
-        
+
         if state_updates_sender.is_none() {
-            self.start().await;
+            self.start()
+                .await
+                .expect("test lifecycle requires configured worker");
         } else {
             self.start_request_source_processor_if_needed().await;
             self.spawn_actors().await;
@@ -850,15 +920,164 @@ impl Worker {
         ).await;
 
         println!("[WORKER] All tasks closed, cleaning up");
-        
-        self.close();
+
+        self.close_async().await;
 
         println!("[WORKER] Worker execution completed");
     }
 }
 
+impl Message<Configure> for Worker {
+    type Reply = Result<(), String>;
+
+    async fn handle(
+        &mut self,
+        msg: Configure,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if self.is_running() {
+            return Err("Worker is already running; reset before reconfigure".to_string());
+        }
+        self.reset_async().await;
+        self.configure(msg.0);
+        Ok(())
+    }
+}
+
+impl Message<Start> for Worker {
+    type Reply = Result<(), String>;
+
+    async fn handle(&mut self, _msg: Start, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.start().await
+    }
+}
+
+impl Message<RunTasks> for Worker {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: RunTasks,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.signal_tasks_run().await;
+    }
+}
+
+impl Message<CloseTasks> for Worker {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        _msg: CloseTasks,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.signal_tasks_close().await;
+    }
+}
+
+impl Message<GetState> for Worker {
+    type Reply = Result<WorkerSnapshot, String>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetState,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.get_state().await)
+    }
+}
+
+impl Message<GetIdentity> for Worker {
+    type Reply = Result<WorkerIdentity, String>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetIdentity,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.identity())
+    }
+}
+
+impl Message<GetHealth> for Worker {
+    type Reply = Result<Arc<WorkerHealth>, String>;
+
+    async fn handle(
+        &mut self,
+        _msg: GetHealth,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        Ok(self.health())
+    }
+}
+
+impl Message<StopSources> for Worker {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        _msg: StopSources,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.stop_sources()
+    }
+}
+
+impl Message<TriggerBarrier> for Worker {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        msg: TriggerBarrier,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.trigger_checkpoint_barrier(msg.0).await
+    }
+}
+
+impl Message<Reset> for Worker {
+    type Reply = ();
+
+    async fn handle(&mut self, _msg: Reset, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.reset_async().await;
+    }
+}
+
+impl Message<Close> for Worker {
+    type Reply = ();
+
+    async fn handle(&mut self, _msg: Close, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+        self.close_async().await;
+    }
+}
+
+impl Message<RunTestLifecycle> for Worker {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: RunTestLifecycle,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.run_test_lifecycle(msg.state_updates).await;
+    }
+}
+
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.close();
+        self.running.store(false, Ordering::SeqCst);
+        if let Some(handle) = self.fatal_watcher_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.tasks_state_polling_handle.take() {
+            handle.abort();
+        }
+        self.request_source_processor.take();
+        self.task_actors.clear();
+        self.config = None;
+        self.backend_actor = None;
+        // Best-effort runtime dispose; async Close should have run via Reset/Close.
+        self.close_sync_dispose_runtimes();
     }
 }

@@ -147,20 +147,30 @@ pub(crate) async fn run_watermark_window_pipeline(
         );
     }
 
-    let mut worker = Worker::from_config(WorkerConfig::new(
+    let worker = Worker::spawn_configured(WorkerConfig::new(
         "wm-e2e-worker".to_string(),
         PipelineId(Uuid::new_v4().to_string()),
         exec_graph,
         vertex_ids,
         2,
         TransportBackendType::Grpc,
-    ));
+    ))
+    .await;
 
-    worker.start().await;
+    worker
+        .ask(crate::runtime::worker::Start)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(10)).await;
-    worker.signal_tasks_run().await;
+    worker
+        .ask(crate::runtime::worker::RunTasks)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     wait_for_status(&worker, StreamTaskStatus::Finished, Duration::from_secs(60)).await;
-    let worker_snapshot = worker.get_state().await;
+    let worker_snapshot = worker
+        .ask(crate::runtime::worker::GetState)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let window_drops = worker_snapshot
         .task_metadata
         .iter()
@@ -182,9 +192,13 @@ pub(crate) async fn run_watermark_window_pipeline(
     );
     let late_dropped: u64 = window_drops.iter().map(|(_, dropped)| *dropped).sum();
     assert_eq!(late_dropped, 0, "window pipeline dropped late rows");
-    worker.signal_tasks_close().await;
+    worker
+        .ask(crate::runtime::worker::CloseTasks)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     wait_for_status(&worker, StreamTaskStatus::Closed, Duration::from_secs(10)).await;
-    worker.close();
+    let _ = worker.ask(crate::runtime::worker::Close).await;
+    let _ = worker.stop_gracefully().await;
 
     let mut storage_client =
         InMemoryStorageClient::new(format!("http://{}", storage_server_addr)).await?;

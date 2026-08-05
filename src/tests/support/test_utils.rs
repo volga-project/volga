@@ -4,8 +4,10 @@ use std::time::Duration;
 use arrow::array::{Float64Array, StringArray, TimestampMillisecondArray};
 use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 
+use kameo::actor::ActorRef;
+
 use crate::runtime::observability::snapshot_types::StreamTaskStatus;
-use crate::runtime::worker::Worker;
+use crate::runtime::worker::{GetState, Worker};
 
 pub fn create_window_input_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
@@ -19,10 +21,14 @@ pub fn create_window_input_schema() -> Arc<Schema> {
     ]))
 }
 
-pub async fn wait_for_status(worker: &Worker, status: StreamTaskStatus, timeout: Duration) {
+pub async fn wait_for_status(
+    worker: &ActorRef<Worker>,
+    status: StreamTaskStatus,
+    timeout: Duration,
+) {
     let start = std::time::Instant::now();
     loop {
-        let st = worker.get_state().await;
+        let st = worker.ask(GetState).await.expect("GetState from worker actor");
         if st.all_tasks_in(&[status]) {
             return;
         }

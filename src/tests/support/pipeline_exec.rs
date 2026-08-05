@@ -7,7 +7,7 @@ use crate::api::spec::pipeline::ExecutionProfile;
 use crate::api::{LogicalGraph, PipelineSpec};
 use crate::common::types::PipelineId;
 use crate::runtime::observability::{PipelineSnapshot, WorkerSnapshot};
-use crate::runtime::worker::{Worker, WorkerConfig};
+use crate::runtime::worker::{Close, GetState, RunTestLifecycle, Worker, WorkerConfig};
 use crate::transport::transport_backend_actor::TransportBackendType;
 
 pub async fn execute_with_state_updates(
@@ -26,7 +26,7 @@ pub async fn execute_with_state_updates(
         _ => panic!("Execution profile must be SingleWorker"),
     };
 
-    let mut worker_config = WorkerConfig::new(
+    let worker_config = WorkerConfig::new(
         worker_id.clone(),
         pipeline_id,
         execution_graph,
@@ -34,7 +34,7 @@ pub async fn execute_with_state_updates(
         num_threads_per_task,
         TransportBackendType::Grpc,
     );
-    let mut worker = Worker::from_config(worker_config);
+    let worker = Worker::spawn_configured(worker_config).await;
 
     if let Some(pipeline_state_sender) = state_updates_sender {
         let (worker_state_sender, mut worker_state_receiver) = mpsc::channel::<WorkerSnapshot>(100);
@@ -44,18 +44,32 @@ pub async fn execute_with_state_updates(
             while let Some(worker_state) = worker_state_receiver.recv().await {
                 let mut worker_states = StdHashMap::new();
                 worker_states.insert(worker_id_clone.clone(), worker_state);
-                let _ = pipeline_sender.send(PipelineSnapshot::new(worker_states)).await;
+                let _ = pipeline_sender
+                    .send(PipelineSnapshot::new(worker_states))
+                    .await;
             }
         });
         worker
-            .execute_worker_lifecycle_for_testing_with_state_updates(worker_state_sender)
-            .await;
+            .ask(RunTestLifecycle {
+                state_updates: Some(worker_state_sender),
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("RunTestLifecycle: {e:?}"))?;
     } else {
-        worker.execute_worker_lifecycle_for_testing().await;
+        worker
+            .ask(RunTestLifecycle {
+                state_updates: None,
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("RunTestLifecycle: {e:?}"))?;
     }
 
-    let worker_state = worker.get_state().await;
-    worker.close();
+    let worker_state = worker
+        .ask(GetState)
+        .await
+        .map_err(|e| anyhow::anyhow!("GetState: {e:?}"))?;
+    let _ = worker.ask(Close).await;
+    let _ = worker.stop_gracefully().await;
 
     let mut worker_states = StdHashMap::new();
     worker_states.insert(worker_id, worker_state);
