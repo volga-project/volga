@@ -2,24 +2,22 @@ use std::fmt;
 
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
-use tonic::transport::Endpoint;
 use tonic::Code;
 
 use crate::api::PipelineSpec;
+use crate::common::failure::FailureEvent;
+use crate::common::grpc::worker::worker_client;
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
+use crate::runtime::consts::{runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY};
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::worker_config_utils::WorkerInitPayload;
-use crate::runtime::consts::{
-    runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY, MASTER_WORKER_CONNECT_TIMEOUT,
-};
 
-use crate::common::failure::FailureEvent;
 use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
-    worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
-    ShutdownWorkerRequest, StopSourcesRequest, ConfigureWorkerRequest, GetWorkerStateRequest,
-    RunWorkerTasksRequest, StartWorkerRequest, TaskRestoreData, TriggerCheckpointBarrierRequest,
+    worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ConfigureWorkerRequest,
+    GetWorkerStateRequest, ResetWorkerRequest, RunWorkerTasksRequest, ShutdownWorkerRequest,
+    StartWorkerRequest, StopSourcesRequest, TaskRestoreData, TriggerCheckpointBarrierRequest,
 };
 
 enum Attempt<T> {
@@ -107,18 +105,8 @@ where
 pub(super) async fn connect_worker_client(
     addr: &str,
 ) -> Result<WorkerServiceClient<tonic::transport::Channel>, String> {
-    let connect_timeout = runtime_consts().duration(MASTER_WORKER_CONNECT_TIMEOUT);
-    let endpoint = Endpoint::from_shared(format!("http://{addr}"))
-        .map_err(|e| format!("invalid worker endpoint {addr}: {e}"))?
-        .connect_timeout(connect_timeout);
-    endpoint
-        .connect()
+    worker_client(addr)
         .await
-        .map(|channel| {
-            WorkerServiceClient::new(channel)
-                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-        })
         .map_err(|e| format!("connect to {addr} failed: {e}"))
 }
 

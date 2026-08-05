@@ -6,6 +6,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use uuid::Uuid;
 
+use crate::common::grpc::master::{control_plane_config, master_client_with_retry};
+use crate::common::grpc::RetryPolicy;
 use crate::common::ports::gen_unique_grpc_port;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest;
@@ -289,17 +291,12 @@ impl DockerClusterResources {
 }
 
 async fn connect_master(port: u16) -> Result<MasterServiceClient<tonic::transport::Channel>> {
-    let endpoint = format!("http://127.0.0.1:{port}");
-    let start = tokio::time::Instant::now();
-    loop {
-        match MasterServiceClient::connect(endpoint.clone()).await {
-            Ok(client) => return Ok(client),
-            Err(error) if start.elapsed() > Duration::from_secs(20) => {
-                return Err(anyhow!("failed to connect to master: {error}"));
-            }
-            Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
-        }
-    }
+    let addr = format!("127.0.0.1:{port}");
+    // Harness-local poll (not runtime_consts): same as prior loop of connect every 500ms up to ~20s.
+    let retry = RetryPolicy::fixed(40, Duration::from_millis(500));
+    master_client_with_retry(&addr, &control_plane_config(), &retry)
+        .await
+        .map_err(|error| anyhow!("failed to connect to master: {error}"))
 }
 
 async fn fetch_lifecycle_events(
