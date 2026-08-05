@@ -15,7 +15,7 @@ use crate::tests::support::cluster_harness::FaultAction;
 use crate::storage::InMemoryStorageSnapshot;
 use crate::runtime::master::LifecycleEvent;
 use crate::runtime::master::LifecycleEventRecord;
-use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
+use crate::common::grpc::master::{control_plane_config, master_client};
 use crate::runtime::master::server::master_service::GetLifecycleEventsRequest;
 use crate::storage::InMemoryStorageClient;
 use async_trait::async_trait;
@@ -462,8 +462,11 @@ async fn fetch_lifecycle_events(
     master_port: u16,
     sequence: u64,
 ) -> Result<Vec<LifecycleEventRecord>> {
-    let mut client =
-        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let mut client = master_client(
+        &format!("127.0.0.1:{master_port}"),
+        &control_plane_config(),
+    )
+    .await?;
     client
         .get_lifecycle_events(tonic::Request::new(GetLifecycleEventsRequest {
             after_sequence: sequence,
@@ -492,8 +495,11 @@ async fn fetch_lifecycle_events(
 async fn master_latest_pipeline_snapshot(
     master_port: u16,
 ) -> Result<Option<crate::runtime::observability::PipelineSnapshot>> {
-    let mut client =
-        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let mut client = master_client(
+        &format!("127.0.0.1:{master_port}"),
+        &control_plane_config(),
+    )
+    .await?;
     let response = client
         .get_latest_pipeline_snapshot(tonic::Request::new(
             crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest {},
@@ -507,8 +513,11 @@ async fn master_latest_pipeline_snapshot(
 }
 
 async fn master_stop_sources(master_port: u16) -> Result<()> {
-    let mut client =
-        MasterServiceClient::connect(format!("http://127.0.0.1:{master_port}")).await?;
+    let mut client = master_client(
+        &format!("127.0.0.1:{master_port}"),
+        &control_plane_config(),
+    )
+    .await?;
     let response = client
         .stop_sources(tonic::Request::new(
             crate::runtime::master::server::master_service::StopSourcesRequest {},
