@@ -346,6 +346,11 @@ pub fn apply_auto_watermark_assigns(plan: &LogicalPlan, graph: &mut LogicalGraph
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::logical_graph::LogicalNode;
+    use crate::api::planner::{Planner, PlanningContext};
+    use crate::runtime::operators::operator::OperatorConfig;
+    use crate::runtime::operators::source::source_operator::{SourceConfig, VectorSourceConfig};
+    use crate::runtime::watermark::TimeHint;
     use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
     use datafusion::catalog::MemTable;
     use datafusion::prelude::SessionContext;
@@ -383,6 +388,36 @@ mod tests {
         found.expect("expected a Window in plan")
     }
 
+    fn planner_with_events() -> Planner {
+        let mut planner = Planner::new(PlanningContext::new(SessionContext::new()));
+        planner.register_source(
+            "events".to_string(),
+            SourceConfig::VectorSourceConfig(VectorSourceConfig::new(vec![])),
+            events_schema(),
+        );
+        planner
+    }
+
+    fn assign_nodes(graph: &LogicalGraph) -> Vec<&LogicalNode> {
+        graph
+            .get_nodes()
+            .filter(|n| n.watermark_assign.is_some())
+            .collect()
+    }
+
+    fn assert_time_hint_column(node: &LogicalNode, expected: &str) {
+        let hint = &node
+            .watermark_assign
+            .as_ref()
+            .expect("expected watermark_assign")
+            .time_hint;
+        assert!(
+            matches!(hint, TimeHint::ColumnName { name } if name == expected),
+            "expected ColumnName({expected}), got {hint:?} on {}",
+            node.operator_id
+        );
+    }
+
     #[tokio::test]
     async fn lineage_passthrough_column_stops_at_source() {
         let plan = plan_sql(
@@ -390,6 +425,26 @@ mod tests {
              SUM(value) OVER (PARTITION BY key ORDER BY timestamp \
              RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value \
              FROM events",
+        )
+        .await;
+        let window = find_window(&plan);
+        let site = resolve_event_time_assign_site(&window).unwrap();
+        assert_eq!(
+            site,
+            AssignSite::Source {
+                table_name: "events".to_string(),
+                column_name: "timestamp".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_filter_on_path_still_stops_at_source() {
+        let plan = plan_sql(
+            "SELECT timestamp, key, value, \
+             SUM(value) OVER (PARTITION BY key ORDER BY timestamp \
+             RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value \
+             FROM events WHERE value > 0",
         )
         .await;
         let window = find_window(&plan);
@@ -443,6 +498,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn lineage_rename_above_computed_stops_on_defining_projection() {
+        // Use the unoptimized plan so nested projs are not folded away: peel
+        // `event_time` → `et`, then stop on the computed Projection output `et`.
+        let ctx = SessionContext::new();
+        let table = MemTable::try_new(events_schema(), vec![vec![]]).unwrap();
+        ctx.register_table("events", Arc::new(table)).unwrap();
+        let sql = "SELECT event_time, key, value, \
+             SUM(value) OVER (PARTITION BY key ORDER BY event_time \
+             RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value \
+             FROM ( \
+               SELECT et AS event_time, key, value FROM ( \
+                 SELECT timestamp + INTERVAL '0' MILLISECOND AS et, key, value FROM events \
+               ) \
+             )";
+        let df = ctx.sql(sql).await.unwrap();
+        let plan = df.logical_plan().clone();
+        let window = find_window(&plan);
+        let site = resolve_event_time_assign_site(&window).unwrap();
+        assert_eq!(
+            site,
+            AssignSite::Projection {
+                column_name: "et".to_string(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn lineage_order_by_non_column_errors() {
+        let plan = plan_sql(
+            "SELECT timestamp, key, value, \
+             SUM(value) OVER (PARTITION BY key ORDER BY timestamp + INTERVAL '0' MILLISECOND \
+             RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value \
+             FROM events",
+        )
+        .await;
+        let window = find_window(&plan);
+        let err = resolve_event_time_assign_site(&window).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("window ORDER BY must be a column"),
+            "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
     async fn lineage_join_on_path_errors() {
         let ctx = SessionContext::new();
         let table = MemTable::try_new(events_schema(), vec![vec![]]).unwrap();
@@ -462,6 +562,121 @@ mod tests {
         assert!(
             msg.contains("unsupported for auto watermark placement"),
             "unexpected error: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_passthrough_attaches_on_source_not_keyby_or_window() {
+        let mut planner = planner_with_events();
+        let graph = planner
+            .sql_to_graph(
+                "SELECT timestamp, key, value, \
+                 SUM(value) OVER (PARTITION BY key ORDER BY timestamp \
+                 RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value \
+                 FROM events",
+            )
+            .unwrap();
+
+        let assigns = assign_nodes(&graph);
+        assert_eq!(assigns.len(), 1, "expected exactly one assign site");
+        assert!(
+            matches!(assigns[0].operator_config, OperatorConfig::SourceConfig(_)),
+            "expected Source assign, got {:?}",
+            assigns[0].operator_config
+        );
+        assert_time_hint_column(assigns[0], "timestamp");
+
+        for node in graph.get_nodes() {
+            if matches!(
+                node.operator_config,
+                OperatorConfig::KeyByConfig(_) | OperatorConfig::WindowConfig(_)
+            ) {
+                assert!(
+                    node.watermark_assign.is_none(),
+                    "KeyBy/Window must not have watermark_assign: {}",
+                    node.operator_id
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_computed_attaches_on_projection_map_not_source() {
+        let mut planner = planner_with_events();
+        let graph = planner
+            .sql_to_graph(
+                "SELECT event_time, key, value, \
+                 SUM(value) OVER (PARTITION BY key ORDER BY event_time \
+                 RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value \
+                 FROM (SELECT timestamp + INTERVAL '0' MILLISECOND AS event_time, key, value FROM events)",
+            )
+            .unwrap();
+
+        let assigns = assign_nodes(&graph);
+        assert_eq!(assigns.len(), 1, "expected exactly one assign site");
+        assert!(
+            matches!(
+                assigns[0].operator_config,
+                OperatorConfig::MapConfig(MapFunction::Projection(_))
+            ),
+            "expected Projection Map assign, got {:?}",
+            assigns[0].operator_config
+        );
+        assert_time_hint_column(assigns[0], "event_time");
+
+        for node in graph.get_nodes() {
+            if matches!(node.operator_config, OperatorConfig::SourceConfig(_)) {
+                assert!(
+                    node.watermark_assign.is_none(),
+                    "Source must not have assign when event-time is computed downstream"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_two_windows_same_event_time_share_one_assign() {
+        let mut planner = planner_with_events();
+        let graph = planner
+            .sql_to_graph(
+                "SELECT timestamp, key, value, \
+                 SUM(value) OVER (PARTITION BY key ORDER BY timestamp \
+                 RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value, \
+                 AVG(value) OVER (PARTITION BY key ORDER BY timestamp \
+                 RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as avg_value \
+                 FROM events",
+            )
+            .unwrap();
+
+        let assigns = assign_nodes(&graph);
+        assert_eq!(
+            assigns.len(),
+            1,
+            "same ORDER BY column should attach once, got {} assign nodes",
+            assigns.len()
+        );
+        assert!(matches!(
+            assigns[0].operator_config,
+            OperatorConfig::SourceConfig(_)
+        ));
+        assert_time_hint_column(assigns[0], "timestamp");
+    }
+
+    #[tokio::test]
+    async fn apply_noop_when_watermarks_disabled() {
+        let plan = plan_sql(
+            "SELECT timestamp, key, value, \
+             SUM(value) OVER (PARTITION BY key ORDER BY timestamp \
+             RANGE BETWEEN INTERVAL '1000' MILLISECOND PRECEDING AND CURRENT ROW) as sum_value \
+             FROM events",
+        )
+        .await;
+        let mut graph = LogicalGraph::new();
+        graph.set_watermarks_enabled(false);
+        apply_auto_watermark_assigns(&plan, &mut graph).unwrap();
+        assert!(
+            assign_nodes(&graph).is_empty(),
+            "disabled watermarks must not attach assigns"
         );
     }
 }
