@@ -1,5 +1,6 @@
 //! Master checkpoint domain: protocol + task checkpoint storage.
 
+mod actor;
 mod protocol;
 mod restore;
 mod store;
@@ -11,6 +12,11 @@ use std::time::Duration;
 use crate::common::types::PipelineId;
 use crate::runtime::checkpoint::{CompletedCheckpoint, SerializedCheckpoint};
 
+pub use actor::{
+    AbortInFlightCheckpoint, CheckpointCoordinator, ConfigureCheckpoints, InFlightCheckpointId,
+    InFlightCheckpointTimedOut, LatestCompleteCheckpoint, LoadCheckpoint, NoteBarrierProgress,
+    ReportCheckpoint, StartCheckpoint,
+};
 pub use crate::runtime::checkpoint::TaskKey;
 use protocol::CheckpointProtocol;
 pub use restore::RestorePlanner;
@@ -41,8 +47,9 @@ pub enum CheckpointAckReject {
 }
 
 /// Checkpoint protocol + completed-checkpoint store.
+/// Owned by [`CheckpointCoordinator`]; not shared behind a mutex.
 #[derive(Debug)]
-pub struct Checkpoints {
+pub(super) struct Checkpoints {
     /// Tasks that must report operator checkpoint data.
     expected_acks: HashSet<TaskKey>,
     /// All tasks that must report barrier progress (Injected or Aligned).
@@ -121,7 +128,7 @@ impl Checkpoints {
             .ok_or_else(|| anyhow::anyhow!("completed checkpoint {checkpoint_id} not found"))
     }
 
-    /// Record operator state and its ack. May complete if aligns are already done.
+    /// Record operator state and its ack. May complete (and persist) if aligns are done.
     pub async fn report(
         &mut self,
         checkpoint_id: u64,
@@ -148,7 +155,7 @@ impl Checkpoints {
         self.finish_if_completed(checkpoint_id, outcome).await
     }
 
-    /// Record barrier Injected/Aligned for a task. May complete if acks are already done.
+    /// Record barrier Injected/Aligned for a task. May complete (and persist) if acks are done.
     pub async fn note_barrier_progress(
         &mut self,
         checkpoint_id: u64,
@@ -168,26 +175,28 @@ impl Checkpoints {
         checkpoint_id: u64,
         outcome: CheckpointAckOutcome,
     ) -> anyhow::Result<CheckpointAckOutcome> {
-        if matches!(outcome, CheckpointAckOutcome::Completed) {
-            let tasks = self.pending.remove(&checkpoint_id).unwrap_or_default();
-            anyhow::ensure!(
-                tasks.len() == self.expected_acks.len(),
-                "checkpoint {checkpoint_id} completed without all task state"
-            );
-            self.store()?
-                .save(
-                    self.pipeline_id()?,
-                    CompletedCheckpoint {
-                        checkpoint_id,
-                        tasks,
-                    },
-                )
-                .await?;
-            for pruned_id in self.protocol.retain_completed(self.retention) {
-                self.store()?
-                    .remove(self.pipeline_id()?, pruned_id)
-                    .await?;
-            }
+        if !matches!(outcome, CheckpointAckOutcome::Completed) {
+            return Ok(outcome);
+        }
+        let tasks = self.pending.remove(&checkpoint_id).unwrap_or_default();
+        anyhow::ensure!(
+            tasks.len() == self.expected_acks.len(),
+            "checkpoint {checkpoint_id} completed without all task state"
+        );
+        let prune = self.protocol.retain_completed(self.retention);
+        let pipeline_id = self.pipeline_id()?.clone();
+        let store = Arc::clone(self.store()?);
+        store
+            .save(
+                &pipeline_id,
+                CompletedCheckpoint {
+                    checkpoint_id,
+                    tasks,
+                },
+            )
+            .await?;
+        for pruned_id in prune {
+            store.remove(&pipeline_id, pruned_id).await?;
         }
         Ok(outcome)
     }
