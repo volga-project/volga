@@ -21,6 +21,8 @@ pub const MASTER_HEARTBEAT_SEND_INTERVAL: &str = "master.heartbeat_send_interval
 pub const MASTER_WORKER_CONNECT_TIMEOUT: &str = "master.worker_connect_timeout";
 /// How often `run()` polls `get_worker_state` (completion + unreachable detection).
 pub const MASTER_STATE_POLL_INTERVAL: &str = "master.state_poll_interval";
+/// Bound on each `get_worker_state` RPC inside the run-loop poll (hang → poll failure).
+pub const MASTER_STATE_POLL_TIMEOUT: &str = "master.state_poll_timeout";
 /// Bound on `reset_worker` RPCs during attempt teardown (failed → expand replace set).
 pub const MASTER_RESET_WORKER_TIMEOUT: &str = "master.reset_worker_timeout";
 /// Sleep between worker-registry readiness polls (discovery / replacement wait).
@@ -62,6 +64,7 @@ const DURATION_KEYS: &[&str] = &[
     MASTER_HEARTBEAT_SEND_INTERVAL,
     MASTER_WORKER_CONNECT_TIMEOUT,
     MASTER_STATE_POLL_INTERVAL,
+    MASTER_STATE_POLL_TIMEOUT,
     MASTER_RESET_WORKER_TIMEOUT,
     MASTER_REGISTRY_WAIT_TICK,
     MASTER_CHECKPOINT_INTERVAL,

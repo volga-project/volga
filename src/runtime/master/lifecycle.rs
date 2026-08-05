@@ -3,7 +3,10 @@
 
 use std::sync::Arc;
 
-use super::attempt::{AttemptOutcome, ExecutionAttempt, ScheduleError};
+use super::attempt::{
+    schedule_ask_error, AttemptOutcome, ExecutionAttempt, Finish, Recover, Run, Schedule,
+    ScheduleError,
+};
 use super::events::LifecycleEvent;
 use super::state::{MasterState, PipelineContext};
 use crate::runtime::consts::{runtime_consts, MASTER_RECOVERY_BUDGET};
@@ -31,48 +34,62 @@ impl MasterLifecycle {
                 })
                 .await;
             self.state.set_current_attempt_id(execution_attempt_id);
-            let mut attempt = ExecutionAttempt::new(
+            let attempt = ExecutionAttempt::spawn(
                 execution_attempt_id,
                 restore_checkpoint_id,
                 self.state.clone(),
                 pipeline.clone(),
             );
-            let schedule_outcome = match attempt.schedule().await {
+            self.state.set_current_attempt(attempt.clone());
+
+            let schedule_outcome = match attempt.ask(Schedule).await {
                 Ok(()) => {
                     println!("[MASTER] Scheduling ok attempt={}", execution_attempt_id);
-                    match attempt.run().await {
+                    match attempt.ask(Run).await {
                         Ok(outcome) => outcome,
                         Err(error) => {
+                            self.state.clear_current_attempt();
+                            let detail = error.to_string();
                             self.state
                                 .record_lifecycle_event(LifecycleEvent::PipelineFailed {
-                                    detail: error.to_string(),
+                                    detail: detail.clone(),
                                 })
                                 .await;
-                            return Err(error);
+                            let _ = attempt.stop_gracefully().await;
+                            return Err(anyhow::anyhow!(detail));
                         }
                     }
                 }
-                Err(ScheduleError::Terminal(detail)) => {
-                    self.state
-                        .record_lifecycle_event(LifecycleEvent::PipelineFailed {
-                            detail: detail.clone(),
-                        })
-                        .await;
-                    // TODO AttemptOutcome terminal here
-                    return Err(anyhow::anyhow!("terminal scheduling failure: {}", detail));
-                }
-                Err(ScheduleError::Recoverable { replace, detail }) => {
-                    println!(
-                        "[MASTER] Scheduling failed attempt={}: {} replace={:?}",
-                        execution_attempt_id, detail, replace
-                    );
-                    AttemptOutcome::Recover(replace)
-                }
+                Err(error) => match schedule_ask_error(error) {
+                    ScheduleError::Terminal(detail) => {
+                        self.state.clear_current_attempt();
+                        self.state
+                            .record_lifecycle_event(LifecycleEvent::PipelineFailed {
+                                detail: detail.clone(),
+                            })
+                            .await;
+                        let _ = attempt.stop_gracefully().await;
+                        return Err(anyhow::anyhow!("terminal scheduling failure: {}", detail));
+                    }
+                    ScheduleError::Recoverable { replace, detail } => {
+                        println!(
+                            "[MASTER] Scheduling failed attempt={}: {} replace={:?}",
+                            execution_attempt_id, detail, replace
+                        );
+                        AttemptOutcome::Recover(replace)
+                    }
+                },
             };
 
             match schedule_outcome {
                 AttemptOutcome::Finished => {
-                    attempt.finish().await;
+                    if let Err(error) = attempt.ask(Finish).await {
+                        self.state.clear_current_attempt();
+                        let _ = attempt.stop_gracefully().await;
+                        return Err(anyhow::anyhow!("finish failed: {error}"));
+                    }
+                    self.state.clear_current_attempt();
+                    let _ = attempt.stop_gracefully().await;
                     self.state
                         .record_lifecycle_event(LifecycleEvent::PipelineFinished)
                         .await;
@@ -81,6 +98,8 @@ impl MasterLifecycle {
                 }
                 AttemptOutcome::Recover(replace) => {
                     if execution_attempt_id >= runtime_consts().u64(MASTER_RECOVERY_BUDGET) {
+                        self.state.clear_current_attempt();
+                        let _ = attempt.stop_gracefully().await;
                         return Err(anyhow::anyhow!(
                             "recovery budget exhausted after {} attempts",
                             runtime_consts().u64(MASTER_RECOVERY_BUDGET)
@@ -101,7 +120,13 @@ impl MasterLifecycle {
                         execution_attempt_id,
                         replace
                     );
-                    attempt.recover(replace).await?;
+                    if let Err(error) = attempt.ask(Recover(replace)).await {
+                        self.state.clear_current_attempt();
+                        let _ = attempt.stop_gracefully().await;
+                        return Err(anyhow::anyhow!(error));
+                    }
+                    self.state.clear_current_attempt();
+                    let _ = attempt.stop_gracefully().await;
 
                     execution_attempt_id += 1;
                     restore_checkpoint_id = self.state.latest_complete_checkpoint().await;

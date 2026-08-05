@@ -105,6 +105,16 @@ impl Master {
             .current_execution_worker_endpoints()
             .await
             .ok_or_else(|| "no workers on current execution attempt".to_string())?;
+        let attempt = self
+            .state
+            .current_attempt()
+            .ok_or_else(|| "no current execution attempt".to_string())?;
+        // Drain (phase + abort in-flight CP) before stopping sources so a tick
+        // cannot open a barrier on an already-draining graph.
+        attempt
+            .ask(attempt::Drain)
+            .await
+            .map_err(|error| error.to_string())?;
         let futures = workers.iter().map(|(worker_id, addr)| {
             let worker_id = worker_id.clone();
             let addr = addr.clone();
@@ -151,6 +161,9 @@ impl Master {
                 } => format!("already in flight checkpoint_id={checkpoint_id}"),
                 crate::runtime::master::checkpoint::CheckpointStartError::NoCheckpointableTasks => {
                     "no checkpointable tasks".to_string()
+                }
+                crate::runtime::master::checkpoint::CheckpointStartError::Draining => {
+                    "sources stopped for drain".to_string()
                 }
             })
     }

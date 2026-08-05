@@ -1,20 +1,27 @@
 use std::collections::{HashMap, HashSet};
 
-use tokio::time::{interval_at, sleep, timeout, Duration, Instant};
+use kameo::actor::ActorRef;
+use tokio::time::{
+    interval_at, sleep, timeout, Duration, Instant, MissedTickBehavior,
+};
 
+use crate::common::failure::{workers_to_replace, FailureEvent, FailureKind};
+use crate::orchestrator::orchestrator::WorkerHealthWatchHandle;
 use crate::runtime::consts::{
     runtime_consts, MASTER_CHECKPOINT_INTERVAL, MASTER_CHECKPOINT_TIMEOUT,
-    MASTER_FAILURE_AGGREGATION_WINDOW, MASTER_STATE_POLL_INTERVAL,
+    MASTER_FAILURE_AGGREGATION_WINDOW, MASTER_STATE_POLL_INTERVAL, MASTER_STATE_POLL_TIMEOUT,
 };
 use crate::runtime::observability::snapshot_types::{PipelineSnapshot, WorkerSnapshot};
 use crate::runtime::observability::StreamTaskStatus;
 
-use crate::common::failure::{workers_to_replace, FailureEvent, FailureKind};
 use super::super::checkpoint::CheckpointStartError;
-use super::super::state::MasterState;
 use super::super::events::LifecycleEvent;
+use super::super::state::MasterState;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
-use super::{AttemptOutcome, ExecutionAttempt};
+use super::{
+    AggWindowEnd, AttemptOutcome, AttemptPhase, CheckpointTick, ExecutionAttempt, FailureMsg,
+    PollTick,
+};
 
 const STATUS_POLL: Duration = Duration::from_millis(100);
 const STATUS_TIMEOUT: Duration = Duration::from_secs(30);
@@ -38,76 +45,191 @@ impl ExecutionAttempt {
         .await
     }
 
-    pub(in crate::runtime::master) async fn run(&mut self) -> anyhow::Result<AttemptOutcome> {
-        let _health_poll = self.state.orchestrator.run_health_poll(
-            self.clients.keys().cloned().collect(),
-            self.failure_tx.clone(),
-        );
+    pub(super) fn run(
+        &mut self,
+        actor_ref: ActorRef<Self>,
+    ) -> (tokio::task::JoinHandle<()>, Option<WorkerHealthWatchHandle>) {
+        let failure_rx = self
+            .failure_rx
+            .take()
+            .expect("failure_rx available once per attempt");
+        let worker_ids: HashSet<_> = self.clients.keys().cloned().collect();
+        let health_poll = self
+            .state
+            .orchestrator
+            .run_health_poll(worker_ids, self.failure_tx.clone());
+
         let poll_interval = runtime_consts().duration(MASTER_STATE_POLL_INTERVAL);
-        let mut poll = interval_at(Instant::now() + poll_interval, poll_interval);
         let checkpoint_interval = runtime_consts().duration(MASTER_CHECKPOINT_INTERVAL);
-        let checkpoint_timeout = runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT);
-        let mut checkpoint_tick = optional_interval(checkpoint_interval);
 
-        loop {
-            tokio::select! {
-                biased;
-
-                failure = self.failure_rx.recv() => {
-                    let failure =
-                        failure.ok_or_else(|| anyhow::anyhow!("failure channel closed"))?;
-                    self.abort_in_flight("attempt failed").await;
-                    return Ok(self.await_failure_window_and_recover(failure).await);
-                }
-                _ = optional_tick(&mut checkpoint_tick) => {
-                    if let Err(error) = self.begin_checkpoint().await {
-                        println!(
-                            "[MASTER] Interval checkpoint skipped attempt={}: {}",
-                            self.id, error
-                        );
-                    }
-                }
-                state_poll = async {
-                    poll.tick().await;
-                    poll_client_states(&self.clients, &self.state).await
-                } => {
-                    if !state_poll.failures.is_empty() {
-                        for (worker_id, error) in &state_poll.failures {
-                            self.record_failure(&FailureEvent {
-                                worker_id: worker_id.clone(),
-                                kind: FailureKind::StatePollFailure,
-                                detail: error.to_string(),
-                            })
-                            .await;
+        let run_loop = tokio::spawn(async move {
+            let mut poll = interval_at(Instant::now() + poll_interval, poll_interval);
+            let mut checkpoint_tick = optional_interval(checkpoint_interval);
+            let mut failure_rx = failure_rx;
+            loop {
+                // Wait only. Checkpoint arm before poll so a slow get_worker_state
+                // cannot starve CheckpointStarted under `biased`.
+                tokio::select! {
+                    biased;
+                    failure = failure_rx.recv() => {
+                        match failure {
+                            Some(failure) => {
+                                if actor_ref.tell(FailureMsg(failure)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
                         }
-                        self.abort_in_flight("state poll failure").await;
-                        return Ok(execution_poll_outcome(&state_poll.failures));
                     }
-                    if let Some(checkpoint_id) = self
-                        .state
-                        .in_flight_checkpoint_timed_out(checkpoint_timeout)
-                        .await
-                    {
-                        self.abort_in_flight(format!("checkpoint {checkpoint_id} timed out"))
-                            .await;
-                        println!(
-                            "[MASTER] Checkpoint timeout attempt={} checkpoint_id={}",
-                            self.id, checkpoint_id
-                        );
-                        return Ok(AttemptOutcome::Recover(HashSet::new()));
+                    _ = optional_tick(&mut checkpoint_tick) => {
+                        if actor_ref.tell(CheckpointTick).await.is_err() {
+                            break;
+                        }
                     }
-                    if all_have_status(
-                        &state_poll.states,
-                        &self.clients,
-                        StreamTaskStatus::Finished,
-                    ) {
-                        self.abort_in_flight("pipeline finished with in-flight checkpoint")
-                            .await;
-                        return Ok(AttemptOutcome::Finished);
+                    _ = poll.tick() => {
+                        if actor_ref.tell(PollTick).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        (run_loop, health_poll)
+    }
+
+    pub(super) async fn on_poll_tick(&mut self) {
+        let Some(slot) = self.run.as_ref() else {
+            return;
+        };
+        if slot.aggregating.is_some() {
+            return;
+        }
+
+        let poll_rpc_timeout = runtime_consts().duration(MASTER_STATE_POLL_TIMEOUT);
+        let checkpoint_timeout = runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT);
+        let state_poll = poll_client_states(&self.clients, &self.state, poll_rpc_timeout).await;
+
+        if !state_poll.failures.is_empty() {
+            for (worker_id, error) in &state_poll.failures {
+                self.record_failure(&FailureEvent {
+                    worker_id: worker_id.clone(),
+                    kind: FailureKind::StatePollFailure,
+                    detail: error.to_string(),
+                })
+                .await;
+            }
+            self.abort_in_flight("state poll failure").await;
+            self.complete_run(Ok(execution_poll_outcome(&state_poll.failures)));
+            return;
+        }
+        if all_workers(&state_poll.states, &self.clients, |s| {
+            s.all_tasks_in(&[StreamTaskStatus::Finished, StreamTaskStatus::Closed])
+        }) {
+            self.abort_in_flight("pipeline finished with in-flight checkpoint")
+                .await;
+            self.complete_run(Ok(AttemptOutcome::Finished));
+            return;
+        }
+        if let Some(checkpoint_id) = self
+            .state
+            .in_flight_checkpoint_timed_out(checkpoint_timeout)
+            .await
+        {
+            self.abort_in_flight(format!("checkpoint {checkpoint_id} timed out"))
+                .await;
+            println!(
+                "[MASTER] Checkpoint timeout attempt={} checkpoint_id={}",
+                self.id, checkpoint_id
+            );
+            self.complete_run(Ok(AttemptOutcome::Recover(HashSet::new())));
+            return;
+        }
+        if self.phase == AttemptPhase::Checkpointing
+            && self.state.in_flight_checkpoint_id().await.is_none()
+        {
+            self.phase.clear_checkpointing();
+        }
+    }
+
+    pub(super) async fn on_checkpoint_tick(&mut self) {
+        match self.run.as_ref() {
+            Some(slot) if slot.aggregating.is_none() => {}
+            _ => return,
+        }
+        if self.phase != AttemptPhase::Running {
+            return;
+        }
+        match self.begin_checkpoint().await {
+            Ok(_) => self.phase = AttemptPhase::Checkpointing,
+            Err(error) => {
+                if self.phase == AttemptPhase::Draining {
+                    println!(
+                        "[MASTER] Skip checkpoint; draining attempt={}",
+                        self.id
+                    );
+                } else {
+                    println!(
+                        "[MASTER] Interval checkpoint skipped attempt={}: {}",
+                        self.id, error
+                    );
+                    if self.state.in_flight_checkpoint_id().await.is_some() {
+                        self.phase = AttemptPhase::Checkpointing;
                     }
                 }
             }
         }
+    }
+
+    pub(super) async fn on_failure(
+        &mut self,
+        failure: FailureEvent,
+        actor_ref: ActorRef<Self>,
+    ) {
+        let Some(slot) = self.run.as_mut() else {
+            return;
+        };
+        if let Some(events) = slot.aggregating.as_mut() {
+            self.record_failure(&failure).await;
+            events.push(failure);
+            return;
+        }
+
+        self.abort_in_flight("attempt failed").await;
+        self.record_failure(&failure).await;
+        slot.aggregating = Some(vec![failure]);
+
+        let window = runtime_consts().duration(MASTER_FAILURE_AGGREGATION_WINDOW);
+        tokio::spawn(async move {
+            sleep(window).await;
+            let _ = actor_ref.tell(AggWindowEnd).await;
+        });
+    }
+
+    pub(super) async fn on_agg_window_end(&mut self) {
+        let Some(slot) = self.run.as_mut() else {
+            return;
+        };
+        let Some(events) = slot.aggregating.take() else {
+            return;
+        };
+
+        let replace = workers_to_replace(&events);
+        let involved: HashSet<_> = events.iter().map(|e| e.worker_id.clone()).collect();
+        let reused: Vec<_> = involved
+            .into_iter()
+            .filter(|id| !replace.contains(id))
+            .collect();
+        println!(
+            "[MASTER] Failure window done attempt={} events={} replace={:?} reusable={:?}",
+            self.id,
+            events.len(),
+            replace,
+            reused
+        );
+        for worker_id in &replace {
+            self.clients.remove(worker_id);
+        }
+        self.complete_run(Ok(AttemptOutcome::Recover(replace)));
     }
 
     async fn abort_in_flight(&self, reason: impl Into<String>) {
@@ -119,11 +241,15 @@ impl ExecutionAttempt {
 
     /// Start a checkpoint on master and trigger barriers on all workers.
     async fn begin_checkpoint(&self) -> Result<u64, String> {
+        if self.phase == AttemptPhase::Draining {
+            return Err("sources stopped for drain".to_string());
+        }
         let checkpoint_id = self
             .state
             .begin_checkpoint(self.id)
             .await
             .map_err(|error| match error {
+                CheckpointStartError::Draining => "sources stopped for drain".to_string(),
                 CheckpointStartError::AlreadyInFlight { checkpoint_id } => {
                     format!("already in flight checkpoint_id={checkpoint_id}")
                 }
@@ -156,50 +282,6 @@ impl ExecutionAttempt {
         Ok(checkpoint_id)
     }
 
-    /// Record the first failure, wait the aggregation window for cascade fatals, then decide.
-    async fn await_failure_window_and_recover(
-        &mut self,
-        first: FailureEvent,
-    ) -> AttemptOutcome {
-        let mut events = Vec::new();
-        self.record_failure(&first).await;
-        events.push(first);
-
-        let window = runtime_consts().duration(MASTER_FAILURE_AGGREGATION_WINDOW);
-        let deadline = Instant::now() + window;
-        while let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
-            if remaining.is_zero() {
-                break;
-            }
-            match timeout(remaining, self.failure_rx.recv()).await {
-                Ok(Some(failure)) => {
-                    self.record_failure(&failure).await;
-                    events.push(failure);
-                }
-                Ok(None) => break,
-                Err(_) => break,
-            }
-        }
-
-        let replace = workers_to_replace(&events);
-        let involved: HashSet<_> = events.iter().map(|e| e.worker_id.clone()).collect();
-        let reused: Vec<_> = involved
-            .into_iter()
-            .filter(|id| !replace.contains(id))
-            .collect();
-        println!(
-            "[MASTER] Failure window done attempt={} events={} replace={:?} reusable={:?}",
-            self.id,
-            events.len(),
-            replace,
-            reused
-        );
-        for worker_id in &replace {
-            self.clients.remove(worker_id);
-        }
-        AttemptOutcome::Recover(replace)
-    }
-
     async fn record_failure(&self, failure: &FailureEvent) {
         self.state
             .record_lifecycle_event(LifecycleEvent::WorkerFailure {
@@ -223,8 +305,9 @@ async fn wait_for_status(
     timeout: Option<Duration>,
 ) -> Result<(), HashSet<String>> {
     let start = Instant::now();
+    let poll_rpc_timeout = runtime_consts().duration(MASTER_STATE_POLL_TIMEOUT);
     loop {
-        let poll = poll_client_states(clients, state).await;
+        let poll = poll_client_states(clients, state, poll_rpc_timeout).await;
         if !poll.failures.is_empty() {
             return Err(poll
                 .failures
@@ -232,7 +315,7 @@ async fn wait_for_status(
                 .map(|(worker_id, _)| worker_id)
                 .collect());
         }
-        if all_have_status(&poll.states, clients, status) {
+        if all_workers(&poll.states, clients, |s| s.all_tasks_in(&[status])) {
             return Ok(());
         }
         if let Some(timeout) = timeout {
@@ -243,10 +326,7 @@ async fn wait_for_status(
                         !poll
                             .states
                             .get(*worker_id)
-                            .map(|worker_state| {
-                                !worker_state.task_statuses.is_empty()
-                                    && worker_state.all_tasks_have_status(status)
-                            })
+                            .map(|s| s.all_tasks_in(&[status]))
                             .unwrap_or(false)
                     })
                     .cloned()
@@ -269,7 +349,11 @@ fn optional_interval(period: Duration) -> Option<tokio::time::Interval> {
     if period.is_zero() {
         None
     } else {
-        Some(interval_at(Instant::now() + period, period))
+        let mut interval = interval_at(Instant::now() + period, period);
+        // Skip backlog after a slow begin_checkpoint; Burst would wake the
+        // checkpoint arm in a tight loop once the arm is re-enabled.
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        Some(interval)
     }
 }
 
@@ -285,10 +369,19 @@ async fn optional_tick(tick: &mut Option<tokio::time::Interval>) {
 async fn poll_client_states(
     clients: &HashMap<String, WorkerClient>,
     state: &MasterState,
+    rpc_timeout: Duration,
 ) -> StatePoll {
     let futures = clients.iter().map(|(worker_id, client)| {
         let worker_id = worker_id.clone();
-        async move { (worker_id, client.get_worker_state().await) }
+        async move {
+            let result = match timeout(rpc_timeout, client.get_worker_state()).await {
+                Ok(result) => result,
+                Err(_) => Err(WorkerCallError::Unreachable(format!(
+                    "get_worker_state timed out after {rpc_timeout:?}"
+                ))),
+            };
+            (worker_id, result)
+        }
     });
     let mut states = HashMap::new();
     let mut failures = Vec::new();
@@ -306,16 +399,13 @@ async fn poll_client_states(
     StatePoll { states, failures }
 }
 
-fn all_have_status(
+fn all_workers(
     states: &HashMap<String, WorkerSnapshot>,
     clients: &HashMap<String, WorkerClient>,
-    status: StreamTaskStatus,
+    pred: impl Fn(&WorkerSnapshot) -> bool,
 ) -> bool {
     !clients.is_empty()
-        && clients.keys().all(|worker_id| {
-            states
-                .get(worker_id)
-                .map(|state| !state.task_statuses.is_empty() && state.all_tasks_have_status(status))
-                .unwrap_or(false)
-        })
+        && clients
+            .keys()
+            .all(|worker_id| states.get(worker_id).map(&pred).unwrap_or(false))
 }

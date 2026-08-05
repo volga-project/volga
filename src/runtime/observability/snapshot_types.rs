@@ -69,8 +69,13 @@ impl WorkerSnapshot {
         }
     }
 
-    pub fn all_tasks_have_status(&self, status: StreamTaskStatus) -> bool {
-        self.task_statuses.values().all(|_status| *_status == status)
+    /// True when there is at least one task and every task status is in `allowed`.
+    pub fn all_tasks_in(&self, allowed: &[StreamTaskStatus]) -> bool {
+        !self.task_statuses.is_empty()
+            && self
+                .task_statuses
+                .values()
+                .all(|status| allowed.contains(status))
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
