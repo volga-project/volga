@@ -7,7 +7,7 @@ use tonic::{Request, Response, Status};
 use crate::common::grpc::server_builder;
 use crate::common::grpc::spawn_with_shutdown;
 use crate::common::grpc::storage::storage_server;
-use crate::common::grpc::{GrpcConfig, GrpcServeHandle};
+use crate::common::grpc::GrpcServeHandle;
 use crate::common::message::Message;
 
 pub use crate::common::grpc::stubs::in_memory_storage_service;
@@ -215,10 +215,9 @@ impl InMemoryStorageServer {
 
         println!("[IN_MEMORY_STORAGE_SERVER] Starting InMemoryStorageService server on {addr}");
 
-        let cfg = GrpcConfig::default_limits();
         self.serve = Some(spawn_with_shutdown(
             addr,
-            server_builder(&cfg).add_service(service),
+            server_builder().add_service(service),
         ));
         Ok(())
     }

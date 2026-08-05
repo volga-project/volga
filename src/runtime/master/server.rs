@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use super::service::MasterServiceImpl;
 use crate::common::grpc::{
-    master::{control_plane_config, master_server},
-    server_builder, spawn_with_shutdown, GrpcServeHandle,
+    master::master_server, server_builder, spawn_with_shutdown, GrpcServeHandle,
 };
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::master::MasterConfig;
@@ -54,10 +53,9 @@ impl MasterServer {
 
         println!("[MASTER_SERVER] Starting MasterService server on {}", addr);
 
-        let cfg = control_plane_config();
         self.serve = Some(spawn_with_shutdown(
             addr,
-            server_builder(&cfg).add_service(service),
+            server_builder().add_service(service),
         ));
         Ok(())
     }

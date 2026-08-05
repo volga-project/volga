@@ -1,6 +1,6 @@
 use crate::common::grpc::server_builder;
 use crate::common::grpc::serve_with_shutdown;
-use crate::common::grpc::transport::{message_stream_server, transport_config};
+use crate::common::grpc::transport::message_stream_server;
 use crate::common::key::Key;
 use crate::common::message::Message;
 use crate::transport::grpc::grpc_streaming_service::{MessageStreamClient, MessageStreamServiceImpl};
@@ -22,8 +22,7 @@ pub async fn start_server(
     let svc = message_stream_server(service);
 
     println!("[SERVER] gRPC server listening on {}", addr);
-    let cfg = transport_config();
-    let router = server_builder(&cfg).add_service(svc);
+    let router = server_builder().add_service(svc);
     serve_with_shutdown(addr, router, async {
         let _ = shutdown.await;
         println!("[SERVER] Received shutdown signal");

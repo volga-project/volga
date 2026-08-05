@@ -7,7 +7,7 @@ pub mod key;
 pub mod types;
 pub mod failure;
 
-pub use grpc::{GrpcConfig, GrpcServeHandle, RetryPolicy, GRPC_MAX_MESSAGE_BYTES};
+pub use grpc::{GrpcConfig, GrpcServeHandle, GRPC_MAX_MESSAGE_BYTES};
 
 pub use message::*;
 pub use key::Key;

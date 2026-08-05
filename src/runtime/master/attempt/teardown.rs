@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use tokio::time::timeout;
 
-use crate::common::grpc::worker::master_to_worker_policy;
+use crate::runtime::consts::{runtime_consts, MASTER_RESET_WORKER_TIMEOUT};
 use crate::runtime::observability::StreamTaskStatus;
 
 use super::ExecutionAttempt;
@@ -17,7 +17,7 @@ impl ExecutionAttempt {
             .state
             .abort_in_flight_checkpoint(self.id, "recovering".to_string())
             .await;
-        let reset_timeout = master_to_worker_policy().reset_worker_timeout;
+        let reset_timeout = runtime_consts().duration(MASTER_RESET_WORKER_TIMEOUT);
         let reset_futures: Vec<_> = self
             .clients
             .drain()
