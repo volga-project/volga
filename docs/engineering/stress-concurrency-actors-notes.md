@@ -7,6 +7,7 @@ master control plane. Update facts/links as PRs merge.
 **Rough timeframe:** Aug 2026  
 **Primary PR:** [#195](https://github.com/volga-project/volga/pull/195) — ExecutionAttempt actor + StopSources Drain  
 **Related:** [#193](https://github.com/volga-project/volga/pull/193) Worker mutex, [#194](https://github.com/volga-project/volga/pull/194) CheckpointCoordinator, [#191](https://github.com/volga-project/volga/issues/191) / [#192](https://github.com/volga-project/volga/issues/192) follow-ups  
+**Sink oracle / EO gap:** [#198](https://github.com/volga-project/volga/issues/198) (tighten after [#150](https://github.com/volga-project/volga/issues/150) 1PC)  
 **Signature test:** `test_local_multi_worker_window_checkpoint_restore`
 
 ---
@@ -320,6 +321,9 @@ Suggested beat sheet:
    (WorkerSession).
 6. **Stack PRs need a clean master base** or every review becomes archaeology.
 7. **Interim shared state is OK if named and linked to the follow-up** (#191/#192).
+8. **Idempotent upsert ≠ exactly-once set equality** — same key overwrites; it
+   does not retract orphans past a restored cut. Stress will surface that as a
+   different red than a hang; don’t “fix” the control plane for an oracle gap.
 
 ---
 
@@ -337,6 +341,7 @@ Suggested beat sheet:
 | CI stress jobs | `.github/workflows/rust-tests.yml` |
 | Signature test | `src/tests/inprocess/checkpoint.rs` |
 | Harness settle / finish | `src/tests/support/checkpoint/support.rs`, `kill_recovery.rs` |
+| Sink / offline oracle | `src/tests/support/checkpoint/sink_oracle.rs` |
 
 ---
 
@@ -345,7 +350,7 @@ Suggested beat sheet:
 - Confirm final stress verdict on #195 tip (15×100) before claiming “fixed in
   production CI.”
 - Distinguish **hang** failures vs **oracle mismatch** (e.g. key-set overshoot)
-  — not every stress red is the same bug.
+  — not every stress red is the same bug; see §13 / #198.
 - WorkerSession + spawn is the thin version of “I/O not on decision mailbox”;
   full Worker actor (#191) and master plane (#192) are still unfinished.
 - kameo `DelegatedReply` / bounded mailbox details are version-sensitive
@@ -358,6 +363,7 @@ Suggested beat sheet:
 - “1,500 checkpoint restores and a Drain race: from shared phase to actors”
 - “StopSources couldn’t Stop: stress-driven actorization of a Rust control plane”
 - “Your `select!` is a scheduler: finding a PipelineFinished hang with CI stress”
+- “Same stress job, second bug: idempotent keys and a non-transactional sink”
 
 ---
 
@@ -400,7 +406,109 @@ flowchart LR
   fanout -->|tell PollResult / BarriersDone| mailbox
 ```
 
+### Sink overshoot after restore (not a hang)
+
+```mermaid
+sequenceDiagram
+  participant Src as Sources
+  participant Sink as Upsert sink
+  participant Oracle as Offline oracle
+  Note over Src: CP3 cut = N_cut
+  Src->>Sink: windows for N_cut+1 … N_prekill
+  Note over Src: kill / restore CP3 (rewind)
+  Src->>Src: regenerate until StopSources<br/>final count may be &lt; N_prekill
+  Oracle->>Oracle: expected from final records_generated only
+  Note over Sink,Oracle: actual = expected ∪ orphans<br/>idempotent upsert does not delete
+```
+
+---
+
+## 13. Sequel the same stress found: idempotency ≠ exactly-once
+
+After the Drain/actor work, inproc stress on #195 mostly stopped hanging. The
+next red was a **different** failure class — easy to misread as “recovery is
+wrong” if you only look at `exit code 1`.
+
+### Stress hit
+
+- Run: [actions/runs/30978621025](https://github.com/volga-project/volga/actions/runs/30978621025)
+  — job `inproc-stress (2)`, SHA `a4055e3` (pre–oracle-relax tip of #195)
+- Test: `test_local_multi_worker_window_checkpoint_restore`, machine shard run
+  **78/100** after 77 passes
+- Error:
+
+```text
+window sink key-set mismatch: expected=2100 actual=2120 total_generated=2100
+task_counts=[(0, 580), (1, 580), (2, 360), (3, 580)]
+```
+
+Master path for that run (compressed):
+
+```text
+attempt 0 → CP1, CP2, CP3 complete
+worker-2 TransportDisconnect + worker-1 HeartbeatUnavailable
+recover replace={worker-1}, attempt 1 restore=Some(3)
+StopSources ok → PipelineFinished
+oracle: key-set size fail
+```
+
+### What the oracle had already proved
+
+Window assertion order matters for diagnosis:
+
+1. For every **expected** key: present in sink + aggregates match
+2. Then: `expected.len() == actual.len()` (local only; kube already skipped)
+
+So all **2100** offline-expected rows were correct. Failure was **+20 orphan**
+keys only — overshoot, not missing data or wrong aggregates.
+
+### Why “we use idempotent keys” does not imply exact set equality
+
+Upsert identity is `{datagen_key}|{timestamp}`. Idempotency ⇒ same key
+overwrites. It does **not** retract sink rows when sources rewind.
+
+```text
+1. CP N completes — sources at cut N_cut
+2. Before kill — sources continue; windows for N_cut+1 … N_prekill land in sink
+3. Kill / restore from CP N — sources rewind to N_cut; sink is not cleared
+4. Restored attempt runs to StopSources/finish
+   final records_generated can be below pre-kill high water (task 2 → 360 vs
+   peers at 580 in the failing run)
+5. Offline expected = materialize(final task counts only)
+6. actual = expected ∪ orphans  →  overshoot
+```
+
+Recovery did not “mint different keys for the same events.” It **never
+regenerated** those post-cut events again, while the non-transactional upsert
+sink kept them. Pass-through already documented this
+(`TODO(exactly-once)` in `sink_oracle.rs`) and allowed overshoot; window local
+still required exact equality — inconsistent with kube and with the sink model.
+
+| Symptom | Interpretation |
+| --- | --- |
+| Missing expected keys / wrong aggregates | Runtime correctness bug — fail hard |
+| Extra keys only after kill/restore | Known gap until sink commit is checkpoint-aligned |
+
+### What we did / what waits on 1PC
+
+- **Issue:** [#198](https://github.com/volga-project/volga/issues/198) — linked to
+  [#150](https://github.com/volga-project/volga/issues/150) (2PC/1PC InMemoryStorage sink)
+- **Interim:** relax window oracle to match pass-through — `expected ⊆ actual`,
+  allow overshoot; still fail on missing / bad aggregates (#195 follow-up commit)
+- **After #150 lands:** tighten **exact** key-set equality again for pass-through
+  and window checkpoint tests (local + kube). That is the real “EO” check; the
+  interim policy is honesty about today’s sink, not a permanent product claim.
+
+### Why this belongs in the same post
+
+Same CI product, same signature test, same week: stress first found a **control-
+plane hang** (Drain vs run loop), then — once that path finished reliably —
+exposed a **sink semantics** gap that single-run CI rarely hits. Two bugs, one
+tooling story; mis-attributing the second as an actor regression would have sent
+us hunting the wrong layer.
+
 ---
 
 *End of notes. Trim ruthlessly for the public post; keep failure logs and one
-concrete timeline as the emotional center.*
+concrete timeline as the emotional center. Hang timeline + overshoot timeline
+are both worth keeping if the post argues “stress finds classes of bugs.”*
