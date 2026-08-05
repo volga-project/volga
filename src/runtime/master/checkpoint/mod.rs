@@ -40,26 +40,6 @@ pub enum CheckpointAckReject {
     AlreadyComplete,
 }
 
-/// Store IO prepared under the checkpoints lock; apply after releasing it.
-pub(super) struct PendingPersist {
-    pipeline_id: PipelineId,
-    store: Arc<dyn CheckpointStore>,
-    checkpoint: CompletedCheckpoint,
-    prune: Vec<u64>,
-}
-
-impl PendingPersist {
-    pub(super) async fn apply(self) -> anyhow::Result<()> {
-        self.store
-            .save(&self.pipeline_id, self.checkpoint)
-            .await?;
-        for pruned_id in self.prune {
-            self.store.remove(&self.pipeline_id, pruned_id).await?;
-        }
-        Ok(())
-    }
-}
-
 /// Checkpoint protocol + completed-checkpoint store.
 #[derive(Debug)]
 pub struct Checkpoints {
@@ -142,17 +122,15 @@ impl Checkpoints {
     }
 
     /// Record operator state and its ack. May complete if aligns are already done.
-    /// Returns store work to run after releasing `Mutex<Checkpoints>`.
-    pub fn report(
+    pub async fn report(
         &mut self,
         checkpoint_id: u64,
         task: TaskKey,
         checkpoint: SerializedCheckpoint,
-    ) -> anyhow::Result<(CheckpointAckOutcome, Option<PendingPersist>)> {
+    ) -> anyhow::Result<CheckpointAckOutcome> {
         if !self.expected_acks.contains(&task) {
-            return Ok((
-                CheckpointAckOutcome::Rejected(CheckpointAckReject::UnexpectedTask),
-                None,
+            return Ok(CheckpointAckOutcome::Rejected(
+                CheckpointAckReject::UnexpectedTask,
             ));
         }
         let outcome = self.protocol.ack(
@@ -167,49 +145,51 @@ impl Checkpoints {
                 .or_default()
                 .insert(task, checkpoint);
         }
-        self.finish_if_completed(checkpoint_id, outcome)
+        self.finish_if_completed(checkpoint_id, outcome).await
     }
 
     /// Record barrier Injected/Aligned for a task. May complete if acks are already done.
-    /// Returns store work to run after releasing `Mutex<Checkpoints>`.
-    pub fn note_barrier_progress(
+    pub async fn note_barrier_progress(
         &mut self,
         checkpoint_id: u64,
         task: TaskKey,
-    ) -> anyhow::Result<(CheckpointAckOutcome, Option<PendingPersist>)> {
+    ) -> anyhow::Result<CheckpointAckOutcome> {
         let outcome = self.protocol.align(
             checkpoint_id,
             task,
             &self.expected_acks,
             &self.expected_aligns,
         );
-        self.finish_if_completed(checkpoint_id, outcome)
+        self.finish_if_completed(checkpoint_id, outcome).await
     }
 
-    fn finish_if_completed(
+    async fn finish_if_completed(
         &mut self,
         checkpoint_id: u64,
         outcome: CheckpointAckOutcome,
-    ) -> anyhow::Result<(CheckpointAckOutcome, Option<PendingPersist>)> {
-        if !matches!(outcome, CheckpointAckOutcome::Completed) {
-            return Ok((outcome, None));
+    ) -> anyhow::Result<CheckpointAckOutcome> {
+        if matches!(outcome, CheckpointAckOutcome::Completed) {
+            let tasks = self.pending.remove(&checkpoint_id).unwrap_or_default();
+            anyhow::ensure!(
+                tasks.len() == self.expected_acks.len(),
+                "checkpoint {checkpoint_id} completed without all task state"
+            );
+            self.store()?
+                .save(
+                    self.pipeline_id()?,
+                    CompletedCheckpoint {
+                        checkpoint_id,
+                        tasks,
+                    },
+                )
+                .await?;
+            for pruned_id in self.protocol.retain_completed(self.retention) {
+                self.store()?
+                    .remove(self.pipeline_id()?, pruned_id)
+                    .await?;
+            }
         }
-        let tasks = self.pending.remove(&checkpoint_id).unwrap_or_default();
-        anyhow::ensure!(
-            tasks.len() == self.expected_acks.len(),
-            "checkpoint {checkpoint_id} completed without all task state"
-        );
-        let prune = self.protocol.retain_completed(self.retention);
-        let persist = PendingPersist {
-            pipeline_id: self.pipeline_id()?.clone(),
-            store: Arc::clone(self.store()?),
-            checkpoint: CompletedCheckpoint {
-                checkpoint_id,
-                tasks,
-            },
-            prune,
-        };
-        Ok((outcome, Some(persist)))
+        Ok(outcome)
     }
 
     fn pipeline_id(&self) -> anyhow::Result<&PipelineId> {
@@ -248,25 +228,17 @@ mod tests {
         SerializedCheckpoint::new(vec![value])
     }
 
-    async fn apply(
-        result: anyhow::Result<(CheckpointAckOutcome, Option<PendingPersist>)>,
-    ) -> CheckpointAckOutcome {
-        let (outcome, persist) = result.unwrap();
-        if let Some(persist) = persist {
-            persist.apply().await.unwrap();
-        }
-        outcome
-    }
-
     async fn complete(cps: &mut Checkpoints, id_hint: u64) -> u64 {
         let id = cps.start().unwrap();
         assert_eq!(id, id_hint);
         assert_eq!(
-            apply(cps.report(id, task("a", 0), checkpoint(id as u8))).await,
+            cps.report(id, task("a", 0), checkpoint(id as u8))
+                .await
+                .unwrap(),
             CheckpointAckOutcome::Pending
         );
         assert_eq!(
-            apply(cps.note_barrier_progress(id, task("a", 0))).await,
+            cps.note_barrier_progress(id, task("a", 0)).await.unwrap(),
             CheckpointAckOutcome::Completed
         );
         id
@@ -302,7 +274,7 @@ mod tests {
         cps.configure(pipeline(), acks, aligns, 1, store());
         let id = cps.start().unwrap();
         assert_eq!(
-            apply(cps.report(id, task("a", 0), checkpoint(1))).await,
+            cps.report(id, task("a", 0), checkpoint(1)).await.unwrap(),
             CheckpointAckOutcome::Pending
         );
         assert!(cps.load(id).await.is_err());
@@ -318,15 +290,21 @@ mod tests {
         cps.configure(pipeline(), acks, aligns, 1, store());
         let id = cps.start().unwrap();
         assert_eq!(
-            apply(cps.note_barrier_progress(id, task("src", 0))).await,
+            cps.note_barrier_progress(id, task("src", 0))
+                .await
+                .unwrap(),
             CheckpointAckOutcome::Pending
         );
         assert_eq!(
-            apply(cps.report(id, task("src", 0), checkpoint(1))).await,
+            cps.report(id, task("src", 0), checkpoint(1))
+                .await
+                .unwrap(),
             CheckpointAckOutcome::Pending
         );
         assert_eq!(
-            apply(cps.note_barrier_progress(id, task("sink", 0))).await,
+            cps.note_barrier_progress(id, task("sink", 0))
+                .await
+                .unwrap(),
             CheckpointAckOutcome::Completed
         );
     }

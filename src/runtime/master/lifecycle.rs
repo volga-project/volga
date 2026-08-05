@@ -40,7 +40,7 @@ impl MasterLifecycle {
                 self.state.clone(),
                 pipeline.clone(),
             );
-            self.state.set_current_attempt(attempt.clone());
+            self.state.set_current_attempt(attempt.clone()).await;
 
             let schedule_outcome = match attempt.ask(Schedule).await {
                 Ok(()) => {
@@ -48,7 +48,7 @@ impl MasterLifecycle {
                     match attempt.ask(Run).await {
                         Ok(outcome) => outcome,
                         Err(error) => {
-                            self.state.clear_current_attempt();
+                            self.state.clear_current_attempt().await;
                             let detail = error.to_string();
                             self.state
                                 .record_lifecycle_event(LifecycleEvent::PipelineFailed {
@@ -62,7 +62,7 @@ impl MasterLifecycle {
                 }
                 Err(error) => match schedule_ask_error(error) {
                     ScheduleError::Terminal(detail) => {
-                        self.state.clear_current_attempt();
+                        self.state.clear_current_attempt().await;
                         self.state
                             .record_lifecycle_event(LifecycleEvent::PipelineFailed {
                                 detail: detail.clone(),
@@ -84,11 +84,11 @@ impl MasterLifecycle {
             match schedule_outcome {
                 AttemptOutcome::Finished => {
                     if let Err(error) = attempt.ask(Finish).await {
-                        self.state.clear_current_attempt();
+                        self.state.clear_current_attempt().await;
                         let _ = attempt.stop_gracefully().await;
                         return Err(anyhow::anyhow!("finish failed: {error}"));
                     }
-                    self.state.clear_current_attempt();
+                    self.state.clear_current_attempt().await;
                     let _ = attempt.stop_gracefully().await;
                     self.state
                         .record_lifecycle_event(LifecycleEvent::PipelineFinished)
@@ -98,7 +98,7 @@ impl MasterLifecycle {
                 }
                 AttemptOutcome::Recover(replace) => {
                     if execution_attempt_id >= runtime_consts().u64(MASTER_RECOVERY_BUDGET) {
-                        self.state.clear_current_attempt();
+                        self.state.clear_current_attempt().await;
                         let _ = attempt.stop_gracefully().await;
                         return Err(anyhow::anyhow!(
                             "recovery budget exhausted after {} attempts",
@@ -121,11 +121,11 @@ impl MasterLifecycle {
                         replace
                     );
                     if let Err(error) = attempt.ask(Recover(replace)).await {
-                        self.state.clear_current_attempt();
+                        self.state.clear_current_attempt().await;
                         let _ = attempt.stop_gracefully().await;
                         return Err(anyhow::anyhow!(error));
                     }
-                    self.state.clear_current_attempt();
+                    self.state.clear_current_attempt().await;
                     let _ = attempt.stop_gracefully().await;
 
                     execution_attempt_id += 1;

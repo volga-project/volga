@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 
 use kameo::actor::ActorRef;
 use tokio::sync::Mutex;
@@ -161,7 +161,7 @@ pub(super) struct MasterState {
     lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
     current_attempt_id: AtomicU64,
     /// Handle to the live attempt actor (StopSources `ask`s `Drain` here).
-    current_attempt: StdMutex<Option<ActorRef<ExecutionAttempt>>>,
+    current_attempt: Mutex<Option<ActorRef<ExecutionAttempt>>>,
 }
 
 impl MasterState {
@@ -176,20 +176,20 @@ impl MasterState {
             lifecycle_events: Mutex::new(LifecycleJournal::default()),
             lifecycle_event_tx,
             current_attempt_id: AtomicU64::new(0),
-            current_attempt: StdMutex::new(None),
+            current_attempt: Mutex::new(None),
         }
     }
 
-    pub(super) fn set_current_attempt(&self, attempt: ActorRef<ExecutionAttempt>) {
-        *self.current_attempt.lock().unwrap() = Some(attempt);
+    pub(super) async fn set_current_attempt(&self, attempt: ActorRef<ExecutionAttempt>) {
+        *self.current_attempt.lock().await = Some(attempt);
     }
 
-    pub(super) fn clear_current_attempt(&self) {
-        *self.current_attempt.lock().unwrap() = None;
+    pub(super) async fn clear_current_attempt(&self) {
+        *self.current_attempt.lock().await = None;
     }
 
-    pub(super) fn current_attempt(&self) -> Option<ActorRef<ExecutionAttempt>> {
-        self.current_attempt.lock().unwrap().clone()
+    pub(super) async fn current_attempt(&self) -> Option<ActorRef<ExecutionAttempt>> {
+        self.current_attempt.lock().await.clone()
     }
 
     /// Assign the scheduled worker set to `execution_attempt_id` (registry SoT).
@@ -325,21 +325,16 @@ impl MasterState {
             return Ok(());
         }
 
-        let (outcome, persist) = {
+        let outcome = {
             let mut cps = self.checkpoints.lock().await;
             // Only in-flight CPs accept barrier progress (Completed implies align already done).
             if cps.in_flight_id() != Some(checkpoint_id) {
                 return Ok(());
             }
             cps.note_barrier_progress(checkpoint_id, task.clone())
+                .await
                 .map_err(|error| format!("failed to update checkpoint store: {error}"))?
         };
-        if let Some(persist) = persist {
-            persist
-                .apply()
-                .await
-                .map_err(|error| format!("failed to persist checkpoint: {error}"))?;
-        }
 
         self.record_lifecycle_event(LifecycleEvent::CheckpointPropagation {
             checkpoint_id,
@@ -394,17 +389,12 @@ impl MasterState {
                 task.vertex_id, task.task_index
             ));
         }
-        let (outcome, persist) = {
+        let outcome = {
             let mut cps = self.checkpoints.lock().await;
             cps.report(checkpoint_id, task, checkpoint)
+                .await
                 .map_err(|error| format!("failed to update checkpoint store: {error}"))?
         };
-        if let Some(persist) = persist {
-            persist
-                .apply()
-                .await
-                .map_err(|error| format!("failed to persist checkpoint: {error}"))?;
-        }
 
         match outcome {
             CheckpointAckOutcome::Completed => {

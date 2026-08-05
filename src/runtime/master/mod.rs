@@ -103,6 +103,7 @@ impl Master {
         let attempt = self
             .state
             .current_attempt()
+            .await
             .ok_or_else(|| "no current execution attempt".to_string())?;
         attempt
             .ask(attempt::Drain)
