@@ -237,22 +237,13 @@ impl DockerClusterResources {
                 .into_inner();
             if response.has_snapshot {
                 let snapshot: PipelineSnapshot = bincode::deserialize(&response.snapshot_bytes)?;
-                let all_workers_have_tasks = snapshot
-                    .worker_states
-                    .values()
-                    .all(|worker| !worker.task_statuses.is_empty());
                 let all_done = snapshot.worker_states.values().all(|worker| {
-                    worker.task_statuses.values().all(|status| {
-                        matches!(
-                            status,
-                            StreamTaskStatus::Finished | StreamTaskStatus::Closed
-                        )
-                    })
+                    worker.all_tasks_in(&[
+                        StreamTaskStatus::Finished,
+                        StreamTaskStatus::Closed,
+                    ])
                 });
-                if all_workers_have_tasks
-                    && all_done
-                    && snapshot.worker_states.len() == self.expected_workers
-                {
+                if all_done && snapshot.worker_states.len() == self.expected_workers {
                     break;
                 }
             }

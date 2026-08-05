@@ -8,6 +8,9 @@ use crate::runtime::consts::{runtime_consts, MASTER_DISCOVERY_TIMEOUT, MASTER_RE
 
 use super::super::events::LifecycleEvent;
 use super::super::worker_client::{WorkerCallError, WorkerClient};
+use super::session::{
+    map_session_error, Configure, RunTasks, StartHeartbeat, StartWorker, WorkerSession,
+};
 use super::{ExecutionAttempt, ScheduleError};
 
 impl ExecutionAttempt {
@@ -55,7 +58,7 @@ impl ExecutionAttempt {
         self.configure_all(&mapping, restore_plan).await?;
         self.start_all().await?;
         self.wait_opened().await?;
-        self.start_heartbeats();
+        self.start_heartbeats().await;
         self.run_all().await?;
         let worker_ids: Vec<String> = nodes.keys().cloned().collect();
         self.state
@@ -96,24 +99,26 @@ impl ExecutionAttempt {
                     .push((task, restore));
             }
         }
-        let futures = self.clients.iter().map(|(worker_id, client)| {
+        let futures = self.sessions.iter().map(|(worker_id, session)| {
             let worker_id = worker_id.clone();
+            let session = session.clone();
             let pipeline_id = self.pipeline.pipeline_id.clone();
             let spec = self.pipeline.spec.clone();
             let vertex_ids = worker_tasks.get(&worker_id).cloned().unwrap_or_default();
             let task_restore_data = restore_by_worker.remove(&worker_id).unwrap_or_default();
             let mapping = mapping.clone();
             async move {
-                let result = client.configure(
-                    worker_id.clone(),
-                    pipeline_id,
-                    spec,
-                    vertex_ids,
-                    mapping,
-                    task_restore_data,
-                    restoring,
-                )
-                .await;
+                let result = session
+                    .ask(Configure {
+                        pipeline_id,
+                        spec,
+                        vertex_ids,
+                        mapping,
+                        task_restore_data,
+                        restoring,
+                    })
+                    .await
+                    .map_err(map_session_error);
                 (worker_id, result)
             }
         });
@@ -156,7 +161,9 @@ impl ExecutionAttempt {
         &mut self,
         nodes: &HashMap<String, WorkerNode>,
     ) -> Result<(), ScheduleError> {
-        self.clients.clear();
+        for (_, session) in self.sessions.drain() {
+            let _ = session.stop_gracefully().await;
+        }
         let execution_attempt_id = self.id;
         let futures = nodes.iter().map(|(worker_id, node)| {
             let worker_id = worker_id.clone();
@@ -176,7 +183,8 @@ impl ExecutionAttempt {
         for (worker_id, result) in futures::future::join_all(futures).await {
             match result {
                 Ok(client) => {
-                    self.clients.insert(worker_id, client);
+                    self.sessions
+                        .insert(worker_id.clone(), WorkerSession::spawn(worker_id, client));
                 }
                 Err(error) => errors.push(Err(ScheduleError::Recoverable {
                     replace: HashSet::from([worker_id.clone()]),
@@ -187,21 +195,32 @@ impl ExecutionAttempt {
         merge_errors(errors)
     }
 
-    fn start_heartbeats(&mut self) {
-        for (worker_id, client) in &mut self.clients {
-            client.start_heartbeat(worker_id.clone(), self.failure_tx.clone());
-        }
+    async fn start_heartbeats(&self) {
+        let failure_tx = self.failure_tx.clone();
+        let futures = self.sessions.values().map(|session| {
+            let session = session.clone();
+            let failure_tx = failure_tx.clone();
+            async move {
+                let _ = session.ask(StartHeartbeat { failure_tx }).await;
+            }
+        });
+        futures::future::join_all(futures).await;
     }
 
     async fn start_all(&self) -> Result<(), ScheduleError> {
-        let futures = self.clients.iter().map(|(worker_id, client)| async move {
-            client
-                .start_worker()
-                .await
-                .map_err(|error| ScheduleError::Recoverable {
-                    replace: HashSet::from([worker_id.clone()]),
-                    detail: format!("{}: {}", worker_id, error),
-                })
+        let futures = self.sessions.iter().map(|(worker_id, session)| {
+            let worker_id = worker_id.clone();
+            let session = session.clone();
+            async move {
+                session
+                    .ask(StartWorker)
+                    .await
+                    .map_err(map_session_error)
+                    .map_err(|error| ScheduleError::Recoverable {
+                        replace: HashSet::from([worker_id.clone()]),
+                        detail: format!("{}: {}", worker_id, error),
+                    })
+            }
         });
         merge_errors(futures::future::join_all(futures).await)
     }
@@ -217,14 +236,19 @@ impl ExecutionAttempt {
     }
 
     async fn run_all(&self) -> Result<(), ScheduleError> {
-        let futures = self.clients.iter().map(|(worker_id, client)| async move {
-            client
-                .run_worker_tasks()
-                .await
-                .map_err(|error| ScheduleError::Recoverable {
-                    replace: HashSet::from([worker_id.clone()]),
-                    detail: format!("{}: {}", worker_id, error),
-                })
+        let futures = self.sessions.iter().map(|(worker_id, session)| {
+            let worker_id = worker_id.clone();
+            let session = session.clone();
+            async move {
+                session
+                    .ask(RunTasks)
+                    .await
+                    .map_err(map_session_error)
+                    .map_err(|error| ScheduleError::Recoverable {
+                        replace: HashSet::from([worker_id.clone()]),
+                        detail: format!("{}: {}", worker_id, error),
+                    })
+            }
         });
         merge_errors(futures::future::join_all(futures).await)
     }

@@ -3,6 +3,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use kameo::actor::ActorRef;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
@@ -18,6 +19,7 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
+use super::attempt::ExecutionAttempt;
 use super::checkpoint::{
     create_checkpoint_store, CheckpointAckOutcome, CheckpointStartError, Checkpoints,
     RestorePlanner, TaskKey,
@@ -158,6 +160,8 @@ pub(super) struct MasterState {
     lifecycle_events: Mutex<LifecycleJournal>,
     lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
     current_attempt_id: AtomicU64,
+    /// Handle to the live attempt actor (StopSources `ask`s `Drain` here).
+    current_attempt: Mutex<Option<ActorRef<ExecutionAttempt>>>,
 }
 
 impl MasterState {
@@ -172,7 +176,20 @@ impl MasterState {
             lifecycle_events: Mutex::new(LifecycleJournal::default()),
             lifecycle_event_tx,
             current_attempt_id: AtomicU64::new(0),
+            current_attempt: Mutex::new(None),
         }
+    }
+
+    pub(super) async fn set_current_attempt(&self, attempt: ActorRef<ExecutionAttempt>) {
+        *self.current_attempt.lock().await = Some(attempt);
+    }
+
+    pub(super) async fn clear_current_attempt(&self) {
+        *self.current_attempt.lock().await = None;
+    }
+
+    pub(super) async fn current_attempt(&self) -> Option<ActorRef<ExecutionAttempt>> {
+        self.current_attempt.lock().await.clone()
     }
 
     /// Assign the scheduled worker set to `execution_attempt_id` (registry SoT).
@@ -189,33 +206,6 @@ impl MasterState {
 
     pub(super) async fn clear_workers_execution_attempt(&self) {
         self.workers.lock().await.clear_execution_attempt();
-    }
-
-    /// Workers on the current execution attempt, with control-plane endpoints.
-    pub(super) async fn current_execution_worker_endpoints(
-        &self,
-    ) -> Option<(u64, Vec<(String, String)>)> {
-        let execution_attempt_id = self.current_attempt_id();
-        let workers = self.workers.lock().await;
-        let mut endpoints: Vec<_> = workers
-            .workers
-            .iter()
-            .filter_map(|(worker_id, record)| {
-                if record.execution_attempt_id != Some(execution_attempt_id) {
-                    return None;
-                }
-                let node = record.discovered.as_ref()?;
-                Some((
-                    worker_id.clone(),
-                    format!("{}:{}", node.worker_ip, node.worker_port),
-                ))
-            })
-            .collect();
-        if endpoints.is_empty() {
-            return None;
-        }
-        endpoints.sort_by(|(left, _), (right, _)| left.cmp(right));
-        Some((execution_attempt_id, endpoints))
     }
 
     pub(super) fn checkpointable_tasks_for_graph(execution_graph: &ExecutionGraph) -> Vec<TaskKey> {
@@ -298,13 +288,7 @@ impl MasterState {
         attempt_id: u64,
         detail: String,
     ) -> Result<Option<u64>, String> {
-        let checkpoint_id = self
-            .checkpoints
-            .lock()
-            .await
-            .abort_in_flight()
-            .await
-            .map_err(|error| format!("failed to remove aborted checkpoint: {error}"))?;
+        let checkpoint_id = self.checkpoints.lock().await.abort_in_flight();
         if let Some(checkpoint_id) = checkpoint_id {
             self.record_lifecycle_event(LifecycleEvent::CheckpointFailed {
                 checkpoint_id,
@@ -321,6 +305,10 @@ impl MasterState {
             .lock()
             .await
             .in_flight_timed_out(timeout)
+    }
+
+    pub(super) async fn in_flight_checkpoint_id(&self) -> Option<u64> {
+        self.checkpoints.lock().await.in_flight_id()
     }
 
     /// Journal barrier progress and count it toward completion (with state acks).
@@ -401,13 +389,12 @@ impl MasterState {
                 task.vertex_id, task.task_index
             ));
         }
-        let outcome = self
-            .checkpoints
-            .lock()
-            .await
-            .report(checkpoint_id, task, checkpoint)
-            .await
-            .map_err(|error| format!("failed to update checkpoint store: {error}"))?;
+        let outcome = {
+            let mut cps = self.checkpoints.lock().await;
+            cps.report(checkpoint_id, task, checkpoint)
+                .await
+                .map_err(|error| format!("failed to update checkpoint store: {error}"))?
+        };
 
         match outcome {
             CheckpointAckOutcome::Completed => {

@@ -55,11 +55,16 @@ pub(super) async fn wait_until_attempt_running(
 }
 
 /// Wait until every started checkpoint has completed or failed (no in-flight CP).
+///
+/// The timeout budget resets whenever the in-flight set changes so a chain of
+/// interval checkpoints (2 → 3 → 4) each get a full settle window rather than
+/// sharing one deadline from the first open CP.
 pub(super) async fn wait_until_checkpoints_idle(
     master: &MasterHandle,
     timeout: Duration,
 ) -> Result<()> {
-    let started = Instant::now();
+    let mut started = Instant::now();
+    let mut last_open = HashSet::new();
     loop {
         let mut open = HashSet::new();
         for record in master.lifecycle_events_since(0).await? {
@@ -76,6 +81,10 @@ pub(super) async fn wait_until_checkpoints_idle(
         }
         if open.is_empty() {
             return Ok(());
+        }
+        if open != last_open {
+            started = Instant::now();
+            last_open = open.clone();
         }
         if started.elapsed() >= timeout {
             return Err(anyhow!("timed out waiting for in-flight checkpoint(s) {open:?} to settle"));

@@ -92,12 +92,10 @@ impl Checkpoints {
             .start(&self.expected_acks, &self.expected_aligns)
     }
 
-    pub async fn abort_in_flight(&mut self) -> anyhow::Result<Option<u64>> {
-        let Some(checkpoint_id) = self.protocol.abort_in_flight() else {
-            return Ok(None);
-        };
+    pub fn abort_in_flight(&mut self) -> Option<u64> {
+        let checkpoint_id = self.protocol.abort_in_flight()?;
         self.pending.remove(&checkpoint_id);
-        Ok(Some(checkpoint_id))
+        Some(checkpoint_id)
     }
 
     pub fn in_flight_id(&self) -> Option<u64> {
@@ -234,7 +232,7 @@ mod tests {
         let id = cps.start().unwrap();
         assert_eq!(id, id_hint);
         assert_eq!(
-            cps.report(id, task("a", 0), checkpoint(id as u8),)
+            cps.report(id, task("a", 0), checkpoint(id as u8))
                 .await
                 .unwrap(),
             CheckpointAckOutcome::Pending
@@ -276,11 +274,11 @@ mod tests {
         cps.configure(pipeline(), acks, aligns, 1, store());
         let id = cps.start().unwrap();
         assert_eq!(
-            cps.report(id, task("a", 0), checkpoint(1),).await.unwrap(),
+            cps.report(id, task("a", 0), checkpoint(1)).await.unwrap(),
             CheckpointAckOutcome::Pending
         );
         assert!(cps.load(id).await.is_err());
-        assert_eq!(cps.abort_in_flight().await.unwrap(), Some(id));
+        assert_eq!(cps.abort_in_flight(), Some(id));
         assert!(cps.load(id).await.is_err());
     }
 
@@ -292,11 +290,13 @@ mod tests {
         cps.configure(pipeline(), acks, aligns, 1, store());
         let id = cps.start().unwrap();
         assert_eq!(
-            cps.note_barrier_progress(id, task("src", 0)).await.unwrap(),
+            cps.note_barrier_progress(id, task("src", 0))
+                .await
+                .unwrap(),
             CheckpointAckOutcome::Pending
         );
         assert_eq!(
-            cps.report(id, task("src", 0), checkpoint(1),)
+            cps.report(id, task("src", 0), checkpoint(1))
                 .await
                 .unwrap(),
             CheckpointAckOutcome::Pending
