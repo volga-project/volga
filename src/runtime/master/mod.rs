@@ -7,9 +7,8 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::master::checkpoint::TaskKey;
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 
-pub mod worker_service {
-    tonic::include_proto!("worker_service");
-}
+/// Re-export generated stubs (single include lives in `common::grpc::stubs`).
+pub use crate::common::grpc::stubs::worker_service;
 
 pub mod checkpoint;
 pub mod events;

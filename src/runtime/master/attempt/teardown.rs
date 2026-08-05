@@ -17,17 +17,14 @@ impl ExecutionAttempt {
             .state
             .abort_in_flight_checkpoint(self.id, "recovering".to_string())
             .await;
+        let reset_timeout = runtime_consts().duration(MASTER_RESET_WORKER_TIMEOUT);
         let reset_futures: Vec<_> = self
             .clients
             .drain()
             .map(|(worker_id, client)| async move {
                 (
                     worker_id,
-                    timeout(
-                        runtime_consts().duration(MASTER_RESET_WORKER_TIMEOUT),
-                        client.reset_worker(),
-                    )
-                    .await,
+                    timeout(reset_timeout, client.reset_worker()).await,
                 )
             })
             .collect();
