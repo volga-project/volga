@@ -1,23 +1,22 @@
-use tonic::{Request, Response, Status};
 use std::collections::HashMap;
 use std::sync::Arc;
+
 use tokio::sync::Mutex;
+use tonic::{Request, Response, Status};
+
+use crate::common::grpc::server_builder;
+use crate::common::grpc::spawn_with_shutdown;
+use crate::common::grpc::storage::storage_server;
+use crate::common::grpc::{GrpcConfig, GrpcServeHandle};
 use crate::common::message::Message;
 
-pub mod in_memory_storage_service {
-    tonic::include_proto!("in_memory_storage_service");
-}
+pub use crate::common::grpc::stubs::in_memory_storage_service;
 
 use in_memory_storage_service::{
-    in_memory_storage_service_server::InMemoryStorageService,
-    AppendRequest, AppendResponse,
-    AppendManyRequest, AppendManyResponse,
-    InsertRequest, InsertResponse,
-    InsertKeyedManyRequest, InsertKeyedManyResponse,
-    GetVectorRequest, GetVectorResponse,
-    GetMapRequest, GetMapResponse,
-    DrainVectorRequest, DrainVectorResponse,
-    DrainMapRequest, DrainMapResponse,
+    in_memory_storage_service_server::InMemoryStorageService, AppendManyRequest, AppendManyResponse,
+    AppendRequest, AppendResponse, DrainMapRequest, DrainMapResponse, DrainVectorRequest,
+    DrainVectorResponse, GetMapRequest, GetMapResponse, GetVectorRequest, GetVectorResponse,
+    InsertKeyedManyRequest, InsertKeyedManyResponse, InsertRequest, InsertResponse,
 };
 
 /// Server implementation of the InMemoryStorageService
@@ -198,75 +197,46 @@ impl InMemoryStorageService for InMemoryStorageServiceImpl {
 /// Server that hosts the InMemoryStorageService
 pub struct InMemoryStorageServer {
     service: InMemoryStorageServiceImpl,
-    server_handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_sender: Option<tokio::sync::oneshot::Sender<()>>,
+    serve: Option<GrpcServeHandle>,
 }
 
 impl InMemoryStorageServer {
     pub fn new() -> Self {
         Self {
             service: InMemoryStorageServiceImpl::new(),
-            server_handle: None,
-            shutdown_sender: None,
+            serve: None,
         }
     }
 
     /// Start the gRPC server on the specified address
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
         let addr = addr.parse()?;
-        let service = in_memory_storage_service::in_memory_storage_service_server::InMemoryStorageServiceServer::new(
-            self.service.clone()
-        )
-        .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-        .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
+        let service = storage_server(self.service.clone());
 
-        println!("[IN_MEMORY_STORAGE_SERVER] Starting InMemoryStorageService server on {}", addr);
-        
-        // Create shutdown channel
-        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
-        
-        let server_handle = tokio::spawn(async move {
-            match tonic::transport::Server::builder()
-                .max_frame_size(Some(crate::common::GRPC_MAX_MESSAGE_BYTES as u32))
-                .add_service(service)
-                .serve_with_shutdown(addr, async {
-                    shutdown_receiver.await.ok();
-                    println!("[IN_MEMORY_STORAGE_SERVER] Received shutdown signal");
-                })
-                .await {
-                Ok(_) => println!("[IN_MEMORY_STORAGE_SERVER] Server shutdown gracefully"),
-                Err(e) => eprintln!("[IN_MEMORY_STORAGE_SERVER] Server error: {}", e),
-            }
-        });
+        println!("[IN_MEMORY_STORAGE_SERVER] Starting InMemoryStorageService server on {addr}");
 
-        self.server_handle = Some(server_handle);
-        self.shutdown_sender = Some(shutdown_sender);
+        let cfg = GrpcConfig::default_limits();
+        self.serve = Some(spawn_with_shutdown(
+            addr,
+            server_builder(&cfg).add_service(service),
+        ));
         Ok(())
     }
 
     /// Stop the gRPC server gracefully
     pub async fn stop(&mut self) {
-        // First, send shutdown signal for graceful shutdown
-        if let Some(shutdown_sender) = self.shutdown_sender.take() {
+        if let Some(mut serve) = self.serve.take() {
             println!("[IN_MEMORY_STORAGE_SERVER] Sending graceful shutdown signal...");
-            let _ = shutdown_sender.send(());
-        }
-        
-        // Then wait for the server to finish
-        if let Some(handle) = self.server_handle.take() {
-            match handle.await {
-                Ok(_) => println!("[IN_MEMORY_STORAGE_SERVER] Server stopped gracefully"),
-                Err(e) if e.is_cancelled() => println!("[IN_MEMORY_STORAGE_SERVER] Server stopped (cancelled)"),
-                Err(e) => eprintln!("[IN_MEMORY_STORAGE_SERVER] Server stopped with error: {}", e),
-            }
+            serve.stop().await;
+            println!("[IN_MEMORY_STORAGE_SERVER] Server stopped gracefully");
         }
     }
 }
 
 impl Drop for InMemoryStorageServer {
     fn drop(&mut self) {
-        if let Some(handle) = self.server_handle.take() {
-            handle.abort();
+        if let Some(mut serve) = self.serve.take() {
+            serve.abort();
         }
     }
 }

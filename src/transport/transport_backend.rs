@@ -11,11 +11,9 @@ use crate::transport::batch_channel::{batch_bounded_channel, BatchReceiver, Batc
 use crate::transport::channel::Channel;
 use crate::transport::grpc::grpc_streaming_service::{
     MessageStreamClient, MessageStreamServiceImpl,
-    message_stream::message_stream_service_server::MessageStreamServiceServer,
 };
 use crate::transport::TransportBackendTrait;
 use async_trait::async_trait;
-use tonic::transport::Server;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
@@ -193,20 +191,18 @@ impl TransportBackend {
                 .parse()
                 .expect("[GRPC_BACKEND] invalid listen address");
             let service = MessageStreamServiceImpl::new(server_tx);
-            let svc = MessageStreamServiceServer::new(service)
-                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
+            let svc = crate::common::grpc::transport::message_stream_server(service);
 
             println!("[GRPC_BACKEND] Starting gRPC server on {}", addr);
 
-            Server::builder()
-                .add_service(svc)
-                .serve_with_shutdown(addr, async {
-                    let _ = shutdown_rx.await;
-                    println!("[SERVER] Received shutdown signal");
-                })
-                .await
-                .expect("[GRPC_BACKEND] gRPC server failed");
+            let cfg = crate::common::grpc::transport::transport_config();
+            let router = crate::common::grpc::server_builder(&cfg).add_service(svc);
+            crate::common::grpc::serve_with_shutdown(addr, router, async {
+                let _ = shutdown_rx.await;
+                println!("[SERVER] Received shutdown signal");
+            })
+            .await
+            .expect("[GRPC_BACKEND] gRPC server failed");
         });
         self.server_handle = Some(server_handle);
 

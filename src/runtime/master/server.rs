@@ -1,27 +1,28 @@
 use std::sync::Arc;
 
 use super::service::MasterServiceImpl;
+use crate::common::grpc::{
+    master::{control_plane_config, master_server},
+    server_builder, spawn_with_shutdown, GrpcServeHandle,
+};
 use crate::orchestrator::orchestrator::MasterOrchestrator;
 use crate::runtime::master::MasterConfig;
 use crate::runtime::master::LifecycleEventRecord;
 
-pub mod master_service {
-    tonic::include_proto!("master_service");
-}
+/// Re-export generated stubs (single include lives in `common::grpc::stubs`).
+pub use crate::common::grpc::stubs::master_service;
 
 /// Server that hosts MasterService
 pub struct MasterServer {
     service: MasterServiceImpl,
-    server_handle: Option<tokio::task::JoinHandle<()>>,
-    shutdown_sender: Option<tokio::sync::oneshot::Sender<()>>,
+    serve: Option<GrpcServeHandle>,
 }
 
 impl MasterServer {
     pub fn new(orchestrator: Arc<dyn MasterOrchestrator>) -> Self {
         Self {
             service: MasterServiceImpl::new(orchestrator),
-            server_handle: None,
-            shutdown_sender: None,
+            serve: None,
         }
     }
 
@@ -49,42 +50,29 @@ impl MasterServer {
 
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
         let addr = addr.parse()?;
-        let service =
-            master_service::master_service_server::MasterServiceServer::new(self.service.clone())
-                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
+        let service = master_server(self.service.clone());
 
         println!("[MASTER_SERVER] Starting MasterService server on {}", addr);
 
-        let (shutdown_sender, shutdown_receiver) = tokio::sync::oneshot::channel::<()>();
-        let server_handle = tokio::spawn(async move {
-            let _ = tonic::transport::Server::builder()
-                .add_service(service)
-                .serve_with_shutdown(addr, async {
-                    shutdown_receiver.await.ok();
-                })
-                .await;
-        });
-
-        self.server_handle = Some(server_handle);
-        self.shutdown_sender = Some(shutdown_sender);
+        let cfg = control_plane_config();
+        self.serve = Some(spawn_with_shutdown(
+            addr,
+            server_builder(&cfg).add_service(service),
+        ));
         Ok(())
     }
 
     pub async fn stop(&mut self) {
-        if let Some(shutdown_sender) = self.shutdown_sender.take() {
-            let _ = shutdown_sender.send(());
-        }
-        if let Some(handle) = self.server_handle.take() {
-            let _ = handle.await;
+        if let Some(mut serve) = self.serve.take() {
+            serve.stop().await;
         }
     }
 }
 
 impl Drop for MasterServer {
     fn drop(&mut self) {
-        if let Some(handle) = self.server_handle.take() {
-            handle.abort();
+        if let Some(mut serve) = self.serve.take() {
+            serve.abort();
         }
     }
 }

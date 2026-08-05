@@ -32,6 +32,7 @@ use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 // serde imports removed; this module does not define serializable DTOs directly.
+use crate::common::grpc::master::{control_plane_config, master_client as connect_master_client};
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
@@ -540,21 +541,18 @@ impl StreamTask {
             }
 
             // Optional master client used for checkpoint reporting.
-            let mut master_client: Option<MasterServiceClient<tonic::transport::Channel>> = if let Some(master_addr) = master_addr {
-                let endpoint = format!("http://{}", master_addr);
-                Some(
-                    MasterServiceClient::connect(endpoint)
-                        .await
-                        .map(|client| {
-                            client
-                                .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-                                .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-                        })
-                        .map_err(|e| anyhow::anyhow!("Failed to connect to master service: {}", e))?,
-                )
-            } else {
-                None
-            };
+            let mut master_client: Option<MasterServiceClient<tonic::transport::Channel>> =
+                if let Some(master_addr) = master_addr {
+                    Some(
+                        connect_master_client(&master_addr, &control_plane_config())
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!("Failed to connect to master service: {}", e)
+                            })?,
+                    )
+                } else {
+                    None
+                };
 
             operator.open(&runtime_context).await?;
             println!("{:?} Operator {:?} opened with {} output edges", timestamp(), vertex_id, num_output_edges);

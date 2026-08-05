@@ -1,43 +1,44 @@
-use tonic::{Request, Response, Status};
-use tonic::transport::Endpoint;
-use std::sync::Arc;
-use std::pin::Pin;
 use std::collections::{HashMap, HashSet};
-use tokio::sync::Mutex;
+use std::pin::Pin;
+use std::sync::Arc;
+
 use tokio::sync::oneshot;
+use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
+use tonic::{Request, Response, Status};
 
-use crate::orchestrator::orchestrator::WorkerOrchestrator;
+use crate::common::grpc::master::{master_client, worker_register_config};
+use crate::common::grpc::server_builder;
+use crate::common::grpc::spawn_with_shutdown;
+use crate::common::grpc::worker::worker_server;
+use crate::common::grpc::{GrpcConfig, GrpcServeHandle};
 use crate::common::types::PipelineId;
+use crate::orchestrator::orchestrator::WorkerOrchestrator;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::consts::{
     runtime_consts, WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT, WORKER_HEARTBEAT_SEND_INTERVAL,
-    WORKER_REGISTER_CONNECT_TIMEOUT, WORKER_REGISTER_MAX_RETRIES, WORKER_REGISTER_RETRY_DELAY,
-    WORKER_REGISTER_RPC_TIMEOUT,
+    WORKER_REGISTER_MAX_RETRIES, WORKER_REGISTER_RETRY_DELAY, WORKER_REGISTER_RPC_TIMEOUT,
 };
 use crate::runtime::health::WorkerFatalReason;
-use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
-use crate::runtime::worker_config_utils::{build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type, WorkerInitPayload};
 use crate::runtime::worker::{Worker, WorkerConfig};
+use crate::runtime::worker_config_utils::{
+    build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type,
+    WorkerInitPayload,
+};
 
-pub mod worker_service {
-    tonic::include_proto!("worker_service");
-}
+/// Re-export generated stubs (single include lives in `common::grpc::stubs`).
+pub use crate::common::grpc::stubs::worker_service;
 
 use worker_service::{
-    worker_service_server::WorkerService,
-    ConfigureWorkerRequest, ConfigureWorkerResponse,
-    GetWorkerStateRequest, GetWorkerStateResponse,
-    StartWorkerRequest, StartWorkerResponse,
-    RunWorkerTasksRequest, RunWorkerTasksResponse,
-    CloseWorkerTasksRequest, CloseWorkerTasksResponse,
-    ResetWorkerRequest, ResetWorkerResponse, ShutdownWorkerRequest, ShutdownWorkerResponse,
-    TriggerCheckpointBarrierRequest, TriggerCheckpointBarrierResponse,
-    StopSourcesRequest, StopSourcesResponse,
-    MasterHeartbeatMessage, WorkerHeartbeatMessage,
-    WorkerFatalReason as WorkerFatalReasonProto,
+    worker_service_server::WorkerService, CloseWorkerTasksRequest, CloseWorkerTasksResponse,
+    ConfigureWorkerRequest, ConfigureWorkerResponse, GetWorkerStateRequest, GetWorkerStateResponse,
+    MasterHeartbeatMessage, ResetWorkerRequest, ResetWorkerResponse, RunWorkerTasksRequest,
+    RunWorkerTasksResponse, ShutdownWorkerRequest, ShutdownWorkerResponse, StartWorkerRequest,
+    StartWorkerResponse, StopSourcesRequest, StopSourcesResponse, TriggerCheckpointBarrierRequest,
+    TriggerCheckpointBarrierResponse, WorkerFatalReason as WorkerFatalReasonProto,
+    WorkerHeartbeatMessage,
 };
 
 /// Server implementation of the WorkerService
@@ -477,7 +478,7 @@ impl WorkerService for WorkerServiceImpl {
 /// Server that hosts the WorkerService
 pub struct WorkerServer {
     service: WorkerServiceImpl,
-    server_handle: Option<tokio::task::JoinHandle<()>>,
+    serve: Option<GrpcServeHandle>,
     close_worker_rx: Option<oneshot::Receiver<()>>,
     worker_id: String,
     orchestrator: Arc<dyn WorkerOrchestrator>,
@@ -493,7 +494,7 @@ impl WorkerServer {
                 orchestrator.clone(),
                 close_worker_notify,
             ),
-            server_handle: None,
+            serve: None,
             close_worker_rx: Some(close_worker_rx),
             worker_id,
             orchestrator,
@@ -502,31 +503,23 @@ impl WorkerServer {
 
     pub async fn start(&mut self, addr: &str) -> anyhow::Result<()> {
         let addr = addr.parse()?;
-        let service = worker_service::worker_service_server::WorkerServiceServer::new(
-            self.service.clone()
-        )
-        .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-        .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES);
+        let service = worker_server(self.service.clone());
 
         println!("[WORKER_SERVER] Starting WorkerService server on {}", addr);
-        
-        let server_handle = tokio::spawn(async move {
-            tonic::transport::Server::builder()
-                .add_service(service)
-                .serve(addr)
-                .await
-                .unwrap();
-        });
 
-        self.server_handle = Some(server_handle);
+        let cfg = GrpcConfig::default_limits();
+        self.serve = Some(spawn_with_shutdown(
+            addr,
+            server_builder(&cfg).add_service(service),
+        ));
         Ok(())
     }
 
     pub async fn register_with_master(&mut self) -> anyhow::Result<()> {
         let max_retries = runtime_consts().u64(WORKER_REGISTER_MAX_RETRIES) as u32;
         let retry_delay = runtime_consts().duration(WORKER_REGISTER_RETRY_DELAY);
-        let connect_timeout = runtime_consts().duration(WORKER_REGISTER_CONNECT_TIMEOUT);
         let rpc_timeout = runtime_consts().duration(WORKER_REGISTER_RPC_TIMEOUT);
+        let cfg = worker_register_config();
 
         let master_addr = self.orchestrator.get_master_service_addr().await;
         if master_addr.is_empty() {
@@ -540,8 +533,6 @@ impl WorkerServer {
             "[WORKER_SERVER] Registering with master: worker_id={} master_addr={}",
             self.worker_id, master_addr
         );
-        let endpoint = format!("http://{}", master_addr);
-        let endpoint = Endpoint::from_shared(endpoint)?.connect_timeout(connect_timeout);
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 0..max_retries {
             let req = crate::runtime::master::server::master_service::RegisterWorkerRequest {
@@ -549,13 +540,10 @@ impl WorkerServer {
                 ..Default::default()
             };
 
-            match endpoint.clone().connect().await {
-                Ok(channel) => match tokio::time::timeout(
+            match master_client(&master_addr, &cfg).await {
+                Ok(mut client) => match tokio::time::timeout(
                     rpc_timeout,
-                    MasterServiceClient::new(channel)
-                        .max_decoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-                        .max_encoding_message_size(crate::common::GRPC_MAX_MESSAGE_BYTES)
-                        .register_worker(tonic::Request::new(req)),
+                    client.register_worker(tonic::Request::new(req)),
                 )
                 .await
                 {
@@ -609,11 +597,13 @@ impl WorkerServer {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| anyhow::anyhow!(
-            "Failed to register worker {} to master {} for unknown reason",
-            self.worker_id,
-            master_addr
-        )))
+        Err(last_err.unwrap_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to register worker {} to master {} for unknown reason",
+                self.worker_id,
+                master_addr
+            )
+        }))
     }
 
     pub async fn wait_for_close_request(&mut self) {
@@ -632,9 +622,8 @@ impl WorkerServer {
             let mut worker_guard = self.service.worker.lock().await;
             worker_guard.close();
         }
-        if let Some(handle) = self.server_handle.take() {
-            handle.abort();
-            let _ = handle.await;
+        if let Some(mut serve) = self.serve.take() {
+            serve.stop().await;
         }
         println!("[WORKER_SERVER] WorkerService server stopped");
     }
@@ -661,9 +650,8 @@ impl WorkerServer {
                 .health()
                 .report_fatal(WorkerFatalReason::Panic, "local test worker crash");
         }
-        if let Some(handle) = self.server_handle.take() {
-            handle.abort();
-            let _ = handle.await;
+        if let Some(mut serve) = self.serve.take() {
+            serve.abort();
         }
         let mut worker = self.service.worker.lock().await;
         worker.close();
@@ -672,8 +660,8 @@ impl WorkerServer {
 
 impl Drop for WorkerServer {
     fn drop(&mut self) {
-        if let Some(handle) = self.server_handle.take() {
-            handle.abort();
+        if let Some(mut serve) = self.serve.take() {
+            serve.abort();
         }
     }
 }

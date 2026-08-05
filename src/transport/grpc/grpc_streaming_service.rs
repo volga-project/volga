@@ -1,21 +1,16 @@
-use tonic::{Request, Response, Status};
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
-use crate::common::grpc::GRPC_MAX_MESSAGE_BYTES;
-use crate::common::message::Message;
-use crate::runtime::consts::{
-    runtime_consts, TRANSPORT_GRPC_CONNECT_MAX_RETRIES, TRANSPORT_GRPC_CONNECT_RETRY_DELAY,
-};
+use tonic::{Request, Response, Status};
 
-pub mod message_stream {
-    tonic::include_proto!("message_stream");
-}
+use crate::common::grpc::transport::message_stream_client as connect_message_stream_client;
+use crate::common::message::Message;
+
+/// Re-export generated stubs (single include lives in `common::grpc::stubs`).
+pub use crate::common::grpc::stubs::message_stream;
 
 use message_stream::{
-    message_stream_service_server::MessageStreamService, GrpcMessage, EmptyResponse,
+    message_stream_service_client::MessageStreamServiceClient,
+    message_stream_service_server::MessageStreamService, EmptyResponse, GrpcMessage,
 };
-
-use crate::transport::grpc::grpc_streaming_service::message_stream::message_stream_service_client::MessageStreamServiceClient;
 
 /// Server implementation of the MessageStreamService
 #[derive(Default)]
@@ -26,9 +21,7 @@ pub struct MessageStreamServiceImpl {
 
 impl MessageStreamServiceImpl {
     pub fn new(tx: mpsc::Sender<(Message, String)>) -> Self {
-        Self {
-            tx: Some(tx),
-        }
+        Self { tx: Some(tx) }
     }
 }
 
@@ -45,10 +38,10 @@ impl MessageStreamService for MessageStreamServiceImpl {
         while let Some(message) = stream.message().await? {
             let message_data = message.message_data;
             let channel_id = message.channel_id;
-            
+
             // Deserialize the message
             let deserialized_message = Message::from_bytes(&message_data);
-            
+
             // Send to application via channel
             if let Err(e) = tx.send((deserialized_message, channel_id)).await {
                 eprintln!("[SERVER] Failed to send message to application: {}", e);
@@ -67,40 +60,9 @@ pub struct MessageStreamClient {
 
 impl MessageStreamClient {
     pub async fn connect(addr: String) -> Result<Self, Box<dyn std::error::Error>> {
-        let max_retries = runtime_consts().u64(TRANSPORT_GRPC_CONNECT_MAX_RETRIES) as u32;
-        let delay = runtime_consts().duration(TRANSPORT_GRPC_CONNECT_RETRY_DELAY);
-        Self::connect_with_retry(addr, max_retries, delay).await
-    }
-
-    pub async fn connect_with_retry(
-        addr: String, 
-        max_retries: u32, 
-        delay: Duration
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut last_error = None;
-
-        for attempt in 0..=max_retries {
-            match MessageStreamServiceClient::connect(addr.clone()).await {
-                Ok(client) => {
-                    let client = client
-                        .max_decoding_message_size(GRPC_MAX_MESSAGE_BYTES)
-                        .max_encoding_message_size(GRPC_MAX_MESSAGE_BYTES);
-                    println!("[GRPC_CLIENT] Successfully connected to {} after {} attempts", addr, attempt + 1);
-                    return Ok(Self { client });
-                }
-                Err(e) => {
-                    last_error = Some(e);
-                    if attempt < max_retries {
-                        println!("[GRPC_CLIENT] Connection attempt {} failed for {}: {}. Retrying in {:?}...", 
-                                attempt + 1, addr, last_error.as_ref().unwrap(), delay);
-                        sleep(delay).await;
-                    }
-                }
-            }
-        }
-
-        Err(format!("Failed to connect to {} after {} attempts. Last error: {}", 
-                   addr, max_retries + 1, last_error.unwrap()).into())
+        let client = connect_message_stream_client(&addr).await?;
+        println!("[GRPC_CLIENT] Successfully connected to {addr}");
+        Ok(Self { client })
     }
 
     pub async fn stream_messages(
@@ -116,12 +78,11 @@ impl MessageStreamClient {
                     message_data,
                     channel_id,
                 }
-            }
+            },
         );
 
         let request = Request::new(stream);
         let _response = self.client.stream_messages(request).await?;
-        
         Ok(())
     }
 }
