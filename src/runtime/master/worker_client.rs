@@ -1,25 +1,22 @@
 use std::fmt;
 
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
-use tonic::transport::Endpoint;
+use tokio::time::sleep;
 use tonic::Code;
 
 use crate::api::PipelineSpec;
+use crate::common::failure::FailureEvent;
+use crate::common::grpc::worker::{master_to_worker, worker_client};
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::worker_config_utils::WorkerInitPayload;
-use crate::runtime::consts::{
-    runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY, MASTER_WORKER_CONNECT_TIMEOUT,
-};
 
-use crate::common::failure::FailureEvent;
 use super::heartbeat::WorkerHeartbeatMonitor;
 use super::worker_service::{
-    worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ResetWorkerRequest,
-    ShutdownWorkerRequest, StopSourcesRequest, ConfigureWorkerRequest, GetWorkerStateRequest,
-    RunWorkerTasksRequest, StartWorkerRequest, TaskRestoreData, TriggerCheckpointBarrierRequest,
+    worker_service_client::WorkerServiceClient, CloseWorkerTasksRequest, ConfigureWorkerRequest,
+    GetWorkerStateRequest, ResetWorkerRequest, RunWorkerTasksRequest, ShutdownWorkerRequest,
+    StartWorkerRequest, StopSourcesRequest, TaskRestoreData, TriggerCheckpointBarrierRequest,
 };
 
 enum Attempt<T> {
@@ -44,10 +41,6 @@ impl fmt::Display for WorkerCallError {
 }
 
 impl std::error::Error for WorkerCallError {}
-
-fn retry_delay(attempt: u32) -> Duration {
-    runtime_consts().duration(MASTER_RPC_RETRY_DELAY) * (attempt + 1)
-}
 
 fn is_retryable_status(status: &tonic::Status) -> bool {
     matches!(
@@ -77,8 +70,9 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Attempt<T>>,
 {
+    let cfg = master_to_worker();
     let mut last_error = None;
-    for attempt in 0..runtime_consts().u64(MASTER_RPC_MAX_RETRIES) as u32 {
+    for attempt in 0..cfg.max_attempts {
         match op().await {
             Attempt::Done(v) => return Ok(v),
             Attempt::Fail(e) => return Err(e),
@@ -91,30 +85,23 @@ where
                     msg
                 );
                 last_error = Some(msg);
-                if attempt + 1 < runtime_consts().u64(MASTER_RPC_MAX_RETRIES) as u32 {
-                    sleep(retry_delay(attempt)).await;
+                if attempt + 1 < cfg.max_attempts {
+                    sleep(cfg.retry_delay).await;
                 }
             }
         }
     }
     Err(WorkerCallError::Unreachable(format!(
         "{} failed on {} after {} attempts: {:?}",
-        op_name, target, runtime_consts().u64(MASTER_RPC_MAX_RETRIES), last_error
+        op_name, target, cfg.max_attempts, last_error
     )))
 }
 
-/// Dial worker control gRPC with a bounded connect timeout (see `MASTER_WORKER_CONNECT_TIMEOUT`).
 pub(super) async fn connect_worker_client(
     addr: &str,
 ) -> Result<WorkerServiceClient<tonic::transport::Channel>, String> {
-    let connect_timeout = runtime_consts().duration(MASTER_WORKER_CONNECT_TIMEOUT);
-    let endpoint = Endpoint::from_shared(format!("http://{addr}"))
-        .map_err(|e| format!("invalid worker endpoint {addr}: {e}"))?
-        .connect_timeout(connect_timeout);
-    endpoint
-        .connect()
+    worker_client(addr)
         .await
-        .map(WorkerServiceClient::new)
         .map_err(|e| format!("connect to {addr} failed: {e}"))
 }
 

@@ -1,15 +1,14 @@
-use crate::common::message::Message;
+use crate::common::grpc::server_builder;
+use crate::common::grpc::serve_with_shutdown;
+use crate::common::grpc::transport::message_stream_server;
 use crate::common::key::Key;
-use crate::transport::grpc::grpc_streaming_service::{
-    MessageStreamClient, MessageStreamServiceImpl,
-    message_stream::message_stream_service_server::MessageStreamServiceServer,
-};
-use arrow::array::{StringArray, Int64Array};
-use arrow::datatypes::{Schema, Field, DataType};
-use tonic::transport::Server;
+use crate::common::message::Message;
+use crate::transport::grpc::grpc_streaming_service::{MessageStreamClient, MessageStreamServiceImpl};
+use arrow::array::{Int64Array, StringArray};
+use arrow::datatypes::{DataType, Field, Schema};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use std::collections::HashMap;
 
 /// Start the gRPC server with custom shutdown signal
 pub async fn start_server(
@@ -20,18 +19,15 @@ pub async fn start_server(
     println!("[SERVER] Starting gRPC server on {}", addr);
     let addr = addr.parse()?;
     let service = MessageStreamServiceImpl::new(tx);
-    let svc = MessageStreamServiceServer::new(service);
+    let svc = message_stream_server(service);
 
     println!("[SERVER] gRPC server listening on {}", addr);
-    let router = Server::builder().add_service(svc);
-
-    // Graceful shutdown on custom signal
-    router
-        .serve_with_shutdown(addr, async {
-            let _ = shutdown.await;
-            println!("[SERVER] Received shutdown signal");
-        })
-        .await?;
+    let router = server_builder().add_service(svc);
+    serve_with_shutdown(addr, router, async {
+        let _ = shutdown.await;
+        println!("[SERVER] Received shutdown signal");
+    })
+    .await?;
 
     println!("[SERVER] Server stopped");
     Ok(())
