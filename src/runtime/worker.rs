@@ -319,7 +319,7 @@ impl Worker {
             
             let all_ready = {
                 let state_guard = state.lock().await;
-                state_guard.all_tasks_have_status(target_status)
+                state_guard.all_tasks_in(&[target_status])
             };
             
             if all_ready {

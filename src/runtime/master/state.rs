@@ -18,6 +18,7 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::runtime::observability::snapshot_types::PipelineSnapshot;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
+use super::attempt::{AttemptPhase, AtomicAttemptPhase};
 use super::checkpoint::{
     create_checkpoint_store, CheckpointAckOutcome, CheckpointStartError, Checkpoints,
     RestorePlanner, TaskKey,
@@ -158,6 +159,8 @@ pub(super) struct MasterState {
     lifecycle_events: Mutex<LifecycleJournal>,
     lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
     current_attempt_id: AtomicU64,
+    /// Current attempt run phase (shared with `ExecutionAttempt` / StopSources).
+    attempt_phase: Arc<AtomicAttemptPhase>,
 }
 
 impl MasterState {
@@ -172,7 +175,12 @@ impl MasterState {
             lifecycle_events: Mutex::new(LifecycleJournal::default()),
             lifecycle_event_tx,
             current_attempt_id: AtomicU64::new(0),
+            attempt_phase: Arc::new(AtomicAttemptPhase::new(AttemptPhase::Running)),
         }
+    }
+
+    pub(super) fn attempt_phase(&self) -> Arc<AtomicAttemptPhase> {
+        Arc::clone(&self.attempt_phase)
     }
 
     /// Assign the scheduled worker set to `execution_attempt_id` (registry SoT).
@@ -280,10 +288,41 @@ impl MasterState {
         self.current_attempt_id.load(Ordering::SeqCst)
     }
 
+    /// Enter drain and abort any in-flight checkpoint (StopSources).
+    pub(super) async fn abort_for_drain(
+        &self,
+        attempt_id: u64,
+    ) -> Result<Option<u64>, String> {
+        self.attempt_phase.set(AttemptPhase::Draining);
+        let checkpoint_id = self
+            .checkpoints
+            .lock()
+            .await
+            .abort_in_flight()
+            .await
+            .map_err(|error| format!("failed to remove aborted checkpoint: {error}"))?;
+        if let Some(checkpoint_id) = checkpoint_id {
+            self.record_lifecycle_event(LifecycleEvent::CheckpointFailed {
+                checkpoint_id,
+                attempt_id,
+                detail: "aborted: sources stopped for drain".to_string(),
+            })
+            .await;
+            println!(
+                "[MASTER] Checkpoint {} aborted: sources stopped for drain attempt={}",
+                checkpoint_id, attempt_id
+            );
+        }
+        Ok(checkpoint_id)
+    }
+
     pub(super) async fn begin_checkpoint(
         &self,
         attempt_id: u64,
     ) -> Result<u64, CheckpointStartError> {
+        if self.attempt_phase.get() == AttemptPhase::Draining {
+            return Err(CheckpointStartError::Draining);
+        }
         let checkpoint_id = self.checkpoints.lock().await.start()?;
         self.record_lifecycle_event(LifecycleEvent::CheckpointStarted {
             checkpoint_id,
@@ -323,6 +362,10 @@ impl MasterState {
             .in_flight_timed_out(timeout)
     }
 
+    pub(super) async fn in_flight_checkpoint_id(&self) -> Option<u64> {
+        self.checkpoints.lock().await.in_flight_id()
+    }
+
     /// Journal barrier progress and count it toward completion (with state acks).
     /// Drops stale attempts and unknown ids; rejects are soft so tasks are not failed.
     pub(super) async fn report_checkpoint_propagation(
@@ -337,16 +380,21 @@ impl MasterState {
             return Ok(());
         }
 
-        let outcome = {
+        let (outcome, persist) = {
             let mut cps = self.checkpoints.lock().await;
             // Only in-flight CPs accept barrier progress (Completed implies align already done).
             if cps.in_flight_id() != Some(checkpoint_id) {
                 return Ok(());
             }
             cps.note_barrier_progress(checkpoint_id, task.clone())
-                .await
                 .map_err(|error| format!("failed to update checkpoint store: {error}"))?
         };
+        if let Some(persist) = persist {
+            persist
+                .apply()
+                .await
+                .map_err(|error| format!("failed to persist checkpoint: {error}"))?;
+        }
 
         self.record_lifecycle_event(LifecycleEvent::CheckpointPropagation {
             checkpoint_id,
@@ -401,13 +449,17 @@ impl MasterState {
                 task.vertex_id, task.task_index
             ));
         }
-        let outcome = self
-            .checkpoints
-            .lock()
-            .await
-            .report(checkpoint_id, task, checkpoint)
-            .await
-            .map_err(|error| format!("failed to update checkpoint store: {error}"))?;
+        let (outcome, persist) = {
+            let mut cps = self.checkpoints.lock().await;
+            cps.report(checkpoint_id, task, checkpoint)
+                .map_err(|error| format!("failed to update checkpoint store: {error}"))?
+        };
+        if let Some(persist) = persist {
+            persist
+                .apply()
+                .await
+                .map_err(|error| format!("failed to persist checkpoint: {error}"))?;
+        }
 
         match outcome {
             CheckpointAckOutcome::Completed => {

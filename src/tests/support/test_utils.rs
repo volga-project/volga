@@ -23,7 +23,7 @@ pub async fn wait_for_status(worker: &Worker, status: StreamTaskStatus, timeout:
     let start = std::time::Instant::now();
     loop {
         let st = worker.get_state().await;
-        if !st.task_statuses.is_empty() && st.all_tasks_have_status(status) {
+        if st.all_tasks_in(&[status]) {
             return;
         }
         if start.elapsed() > timeout {
