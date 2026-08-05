@@ -93,7 +93,8 @@ impl RetryPolicy {
         }
     }
 
-    fn delay_for_attempt(&self, attempt: u32) -> Duration {
+    /// Delay before the next attempt after `attempt` (0-based) failed.
+    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
         match self.backoff {
             RetryBackoff::Fixed => self.base_delay,
             RetryBackoff::Linear => self.base_delay.saturating_mul(attempt.saturating_add(1)),

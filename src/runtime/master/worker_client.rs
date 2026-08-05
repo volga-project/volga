@@ -1,15 +1,14 @@
 use std::fmt;
 
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration};
+use tokio::time::sleep;
 use tonic::Code;
 
 use crate::api::PipelineSpec;
 use crate::common::failure::FailureEvent;
-use crate::common::grpc::worker::worker_client;
+use crate::common::grpc::worker::{master_to_worker_policy, worker_client};
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
-use crate::runtime::consts::{runtime_consts, MASTER_RPC_MAX_RETRIES, MASTER_RPC_RETRY_DELAY};
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::worker_config_utils::WorkerInitPayload;
 
@@ -43,10 +42,6 @@ impl fmt::Display for WorkerCallError {
 
 impl std::error::Error for WorkerCallError {}
 
-fn retry_delay(attempt: u32) -> Duration {
-    runtime_consts().duration(MASTER_RPC_RETRY_DELAY) * (attempt + 1)
-}
-
 fn is_retryable_status(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
@@ -75,8 +70,9 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Attempt<T>>,
 {
+    let retry = master_to_worker_policy().rpc_retry;
     let mut last_error = None;
-    for attempt in 0..runtime_consts().u64(MASTER_RPC_MAX_RETRIES) as u32 {
+    for attempt in 0..retry.max_attempts {
         match op().await {
             Attempt::Done(v) => return Ok(v),
             Attempt::Fail(e) => return Err(e),
@@ -89,15 +85,15 @@ where
                     msg
                 );
                 last_error = Some(msg);
-                if attempt + 1 < runtime_consts().u64(MASTER_RPC_MAX_RETRIES) as u32 {
-                    sleep(retry_delay(attempt)).await;
+                if attempt + 1 < retry.max_attempts {
+                    sleep(retry.delay_for_attempt(attempt)).await;
                 }
             }
         }
     }
     Err(WorkerCallError::Unreachable(format!(
         "{} failed on {} after {} attempts: {:?}",
-        op_name, target, runtime_consts().u64(MASTER_RPC_MAX_RETRIES), last_error
+        op_name, target, retry.max_attempts, last_error
     )))
 }
 
