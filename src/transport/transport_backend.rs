@@ -195,8 +195,7 @@ impl TransportBackend {
 
             println!("[GRPC_BACKEND] Starting gRPC server on {}", addr);
 
-            let cfg = crate::common::grpc::transport::transport_config();
-            let router = crate::common::grpc::server_builder(&cfg).add_service(svc);
+            let router = crate::common::grpc::server_builder().add_service(svc);
             crate::common::grpc::serve_with_shutdown(addr, router, async {
                 let _ = shutdown_rx.await;
                 println!("[SERVER] Received shutdown signal");

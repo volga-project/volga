@@ -8,11 +8,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::Stream;
 use tonic::{Request, Response, Status};
 
-use crate::common::grpc::master::{master_client, worker_register_policy};
+use crate::common::grpc::master::{master_client, worker_register};
 use crate::common::grpc::server_builder;
 use crate::common::grpc::spawn_with_shutdown;
 use crate::common::grpc::worker::worker_server;
-use crate::common::grpc::{GrpcConfig, GrpcServeHandle};
+use crate::common::grpc::GrpcServeHandle;
 use crate::common::types::PipelineId;
 use crate::orchestrator::orchestrator::WorkerOrchestrator;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
@@ -506,16 +506,18 @@ impl WorkerServer {
 
         println!("[WORKER_SERVER] Starting WorkerService server on {}", addr);
 
-        let cfg = GrpcConfig::default_limits();
         self.serve = Some(spawn_with_shutdown(
             addr,
-            server_builder(&cfg).add_service(service),
+            server_builder().add_service(service),
         ));
         Ok(())
     }
 
     pub async fn register_with_master(&mut self) -> anyhow::Result<()> {
-        let policy = worker_register_policy();
+        let cfg = worker_register();
+        let rpc_timeout = cfg
+            .rpc_timeout
+            .expect("worker_register config sets rpc_timeout");
 
         let master_addr = self.orchestrator.get_master_service_addr().await;
         if master_addr.is_empty() {
@@ -530,15 +532,18 @@ impl WorkerServer {
             self.worker_id, master_addr
         );
         let mut last_err: Option<anyhow::Error> = None;
-        for attempt in 0..policy.retry.max_attempts {
+        for attempt in 0..cfg.max_attempts {
             let req = crate::runtime::master::server::master_service::RegisterWorkerRequest {
                 worker_id: self.worker_id.clone(),
                 ..Default::default()
             };
 
-            match master_client(&master_addr, &policy.dial).await {
+            // Single dial attempt per outer loop iteration (connect_timeout from cfg).
+            let mut dial = cfg.clone();
+            dial.max_attempts = 1;
+            match master_client(&master_addr, &dial).await {
                 Ok(mut client) => match tokio::time::timeout(
-                    policy.rpc_timeout,
+                    rpc_timeout,
                     client.register_worker(tonic::Request::new(req)),
                 )
                 .await
@@ -568,7 +573,7 @@ impl WorkerServer {
                         last_err = Some(anyhow::anyhow!(
                             "register_worker RPC timeout on attempt {} after {:?}: {}",
                             attempt + 1,
-                            policy.rpc_timeout,
+                            rpc_timeout,
                             e
                         ));
                     }
@@ -582,14 +587,14 @@ impl WorkerServer {
                 }
             }
 
-            if attempt + 1 < policy.retry.max_attempts {
+            if attempt + 1 < cfg.max_attempts {
                 println!(
                     "[WORKER_SERVER] Registration retry: worker_id={} attempt={}/{}",
                     self.worker_id,
                     attempt + 1,
-                    policy.retry.max_attempts
+                    cfg.max_attempts
                 );
-                tokio::time::sleep(policy.retry.delay_for_attempt(attempt)).await;
+                tokio::time::sleep(cfg.retry_delay).await;
             }
         }
 

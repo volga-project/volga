@@ -6,8 +6,8 @@ use std::time::Duration;
 use anyhow::{anyhow, Context, Result};
 use uuid::Uuid;
 
-use crate::common::grpc::master::{control_plane_config, master_client_with_retry};
-use crate::common::grpc::RetryPolicy;
+use crate::common::grpc::master::master_client;
+use crate::common::grpc::GrpcConfig;
 use crate::common::ports::gen_unique_grpc_port;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use crate::runtime::master::server::master_service::GetLatestPipelineSnapshotRequest;
@@ -292,9 +292,9 @@ impl DockerClusterResources {
 
 async fn connect_master(port: u16) -> Result<MasterServiceClient<tonic::transport::Channel>> {
     let addr = format!("127.0.0.1:{port}");
-    // Harness-local poll (not runtime_consts): same as prior loop of connect every 500ms up to ~20s.
-    let retry = RetryPolicy::fixed(40, Duration::from_millis(500));
-    master_client_with_retry(&addr, &control_plane_config(), &retry)
+    // Harness-local poll: connect every 500ms up to ~20s.
+    let cfg = GrpcConfig::new().with_retries(40, Duration::from_millis(500));
+    master_client(&addr, &cfg)
         .await
         .map_err(|error| anyhow!("failed to connect to master: {error}"))
 }
