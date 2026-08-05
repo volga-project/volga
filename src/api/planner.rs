@@ -28,6 +28,7 @@ use datafusion::optimizer::analyzer::type_coercion::TypeCoercion;
 use datafusion::optimizer::analyzer::AnalyzerRule;
 use petgraph::graph::NodeIndex;
 
+use super::event_time_placement::apply_auto_watermark_assigns;
 use super::logical_graph::{LogicalNode, LogicalGraph};
 use crate::api::ExecutionMode;
 use crate::runtime::functions::key_by::key_by_function::{DataFusionKeyFunction};
@@ -194,7 +195,11 @@ impl Planner {
 
         let optimized_plan = self.optimize_plan(logical_plan.clone())?;
         optimized_plan.visit_with_subqueries(self)?;
-        
+        // Batch mode forbids watermark_assign on StreamTasks.
+        if self.context.execution_mode != ExecutionMode::Batch {
+            apply_auto_watermark_assigns(&optimized_plan, &mut self.logical_graph)?;
+        }
+
         Ok(self.logical_graph.clone())
     }
 
@@ -938,6 +943,21 @@ mod tests {
             (NodeType::KeyBy, NodeType::Window, PartitionType::Hash, 1),
             (NodeType::Window, NodeType::Projection, PartitionType::RoundRobin, 1),
         ]);
+
+        // Event-time lineage: assign on Source (defining site), not Window/KeyBy.
+        assert!(
+            nodes[3].watermark_assign.is_some(),
+            "expected watermark_assign on Source"
+        );
+        assert!(
+            matches!(
+                &nodes[3].watermark_assign.as_ref().unwrap().time_hint,
+                crate::runtime::watermark::TimeHint::ColumnName { name } if name == "event_time"
+            ),
+            "expected ColumnName(event_time) time hint on Source"
+        );
+        assert!(nodes[1].watermark_assign.is_none(), "Window must not have watermark_assign");
+        assert!(nodes[2].watermark_assign.is_none(), "KeyBy must not have watermark_assign");
     }
 
     #[tokio::test]
