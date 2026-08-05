@@ -208,33 +208,6 @@ impl MasterState {
         self.workers.lock().await.clear_execution_attempt();
     }
 
-    /// Workers on the current execution attempt, with control-plane endpoints.
-    pub(super) async fn current_execution_worker_endpoints(
-        &self,
-    ) -> Option<(u64, Vec<(String, String)>)> {
-        let execution_attempt_id = self.current_attempt_id();
-        let workers = self.workers.lock().await;
-        let mut endpoints: Vec<_> = workers
-            .workers
-            .iter()
-            .filter_map(|(worker_id, record)| {
-                if record.execution_attempt_id != Some(execution_attempt_id) {
-                    return None;
-                }
-                let node = record.discovered.as_ref()?;
-                Some((
-                    worker_id.clone(),
-                    format!("{}:{}", node.worker_ip, node.worker_port),
-                ))
-            })
-            .collect();
-        if endpoints.is_empty() {
-            return None;
-        }
-        endpoints.sort_by(|(left, _), (right, _)| left.cmp(right));
-        Some((execution_attempt_id, endpoints))
-    }
-
     pub(super) fn checkpointable_tasks_for_graph(execution_graph: &ExecutionGraph) -> Vec<TaskKey> {
         execution_graph
             .get_vertices()

@@ -20,8 +20,6 @@ pub use store::{create_checkpoint_store, CheckpointStore, InMemoryCheckpointStor
 pub enum CheckpointStartError {
     AlreadyInFlight { checkpoint_id: u64 },
     NoCheckpointableTasks,
-    /// Attempt phase is `Draining` after StopSources.
-    Draining,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -100,12 +100,6 @@ impl Master {
 
     /// Cooperative source stop: attempt `Drain` (phase + abort CP + session stop_sources).
     pub async fn stop_sources(&self) -> Result<(), String> {
-        let execution_attempt_id = self
-            .state
-            .current_execution_worker_endpoints()
-            .await
-            .map(|(id, _)| id)
-            .ok_or_else(|| "no workers on current execution attempt".to_string())?;
         let attempt = self
             .state
             .current_attempt()
@@ -116,7 +110,7 @@ impl Master {
             .map_err(|error| error.to_string())?;
         println!(
             "[MASTER] StopSources ok execution_attempt={}",
-            execution_attempt_id
+            self.state.current_attempt_id()
         );
         Ok(())
     }
@@ -134,9 +128,6 @@ impl Master {
                 } => format!("already in flight checkpoint_id={checkpoint_id}"),
                 crate::runtime::master::checkpoint::CheckpointStartError::NoCheckpointableTasks => {
                     "no checkpointable tasks".to_string()
-                }
-                crate::runtime::master::checkpoint::CheckpointStartError::Draining => {
-                    "sources stopped for drain".to_string()
                 }
             })
     }

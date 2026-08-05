@@ -139,10 +139,15 @@ impl ExecutionAttempt {
                 .await;
             }
             self.abort_in_flight("state poll failure").await;
-            self.complete_run(Ok(execution_poll_outcome(&state_poll.failures)));
+            let replace = state_poll
+                .failures
+                .iter()
+                .map(|(worker_id, _)| worker_id.clone())
+                .collect();
+            self.complete_run(Ok(AttemptOutcome::Recover(replace)));
             return;
         }
-        if all_workers(&state_poll.states, &self.sessions, |s| {
+        if all_workers(&state_poll.states, self.sessions.keys(), |s| {
             s.all_tasks_in(&[StreamTaskStatus::Finished, StreamTaskStatus::Closed])
         }) {
             self.abort_in_flight("pipeline finished with in-flight checkpoint")
@@ -183,7 +188,6 @@ impl ExecutionAttempt {
             Ok(checkpoint_id) => checkpoint_id,
             Err(error) => {
                 let detail = match error {
-                    CheckpointStartError::Draining => "sources stopped for drain".to_string(),
                     CheckpointStartError::AlreadyInFlight { checkpoint_id } => {
                         format!("already in flight checkpoint_id={checkpoint_id}")
                     }
@@ -191,19 +195,12 @@ impl ExecutionAttempt {
                         "no checkpointable tasks".to_string()
                     }
                 };
-                if self.phase == AttemptPhase::Draining {
-                    println!(
-                        "[MASTER] Skip checkpoint; draining attempt={}",
-                        self.id
-                    );
-                } else {
-                    println!(
-                        "[MASTER] Interval checkpoint skipped attempt={}: {}",
-                        self.id, detail
-                    );
-                    if self.state.in_flight_checkpoint_id().await.is_some() {
-                        self.phase = AttemptPhase::Checkpointing;
-                    }
+                println!(
+                    "[MASTER] Interval checkpoint skipped attempt={}: {}",
+                    self.id, detail
+                );
+                if self.state.in_flight_checkpoint_id().await.is_some() {
+                    self.phase = AttemptPhase::Checkpointing;
                 }
                 return;
             }
@@ -352,7 +349,11 @@ async fn wait_for_status(
                 .map(|(worker_id, _)| worker_id)
                 .collect());
         }
-        if all_session_workers(&poll.states, sessions, |s| s.all_tasks_in(&[status])) {
+        if all_workers(
+            &poll.states,
+            sessions.iter().map(|(worker_id, _)| worker_id),
+            |s| s.all_tasks_in(&[status]),
+        ) {
             return Ok(());
         }
         if let Some(timeout) = timeout {
@@ -392,14 +393,6 @@ async fn trigger_checkpoint_barriers(
         }
     }
     None
-}
-
-fn execution_poll_outcome(failures: &[(String, WorkerCallError)]) -> AttemptOutcome {
-    let replace = failures
-        .iter()
-        .map(|(worker_id, _)| worker_id.clone())
-        .collect();
-    AttemptOutcome::Recover(replace)
 }
 
 fn optional_interval(period: Duration) -> Option<tokio::time::Interval> {
@@ -457,24 +450,17 @@ async fn poll_session_states(
     StatePoll { states, failures }
 }
 
-fn all_workers(
+fn all_workers<'a>(
     states: &HashMap<String, WorkerSnapshot>,
-    sessions: &HashMap<String, ActorRef<WorkerSession>>,
+    worker_ids: impl IntoIterator<Item = &'a String>,
     pred: impl Fn(&WorkerSnapshot) -> bool,
 ) -> bool {
-    !sessions.is_empty()
-        && sessions
-            .keys()
-            .all(|worker_id| states.get(worker_id).map(&pred).unwrap_or(false))
-}
-
-fn all_session_workers(
-    states: &HashMap<String, WorkerSnapshot>,
-    sessions: &[(String, ActorRef<WorkerSession>)],
-    pred: impl Fn(&WorkerSnapshot) -> bool,
-) -> bool {
-    !sessions.is_empty()
-        && sessions.iter().all(|(worker_id, _)| {
-            states.get(worker_id).map(&pred).unwrap_or(false)
-        })
+    let mut any = false;
+    for worker_id in worker_ids {
+        any = true;
+        if !states.get(worker_id).map(&pred).unwrap_or(false) {
+            return false;
+        }
+    }
+    any
 }

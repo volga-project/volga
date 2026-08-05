@@ -175,7 +175,7 @@ impl Message<Run> for ExecutionAttempt {
 }
 
 impl Message<Drain> for ExecutionAttempt {
-    type Reply = Result<Option<u64>, String>;
+    type Reply = Result<(), String>;
 
     async fn handle(
         &mut self,
@@ -211,7 +211,7 @@ impl Message<Drain> for ExecutionAttempt {
             }
         }
         if errors.is_empty() {
-            Ok(checkpoint_id)
+            Ok(())
         } else {
             Err(format!("stop_sources failed: {}", errors.join("; ")))
         }
