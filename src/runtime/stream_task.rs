@@ -32,7 +32,8 @@ use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, SystemTime, UNIX_EPOCH}};
 // serde imports removed; this module does not define serializable DTOs directly.
-use crate::common::grpc::master::{control_plane_config, master_client as connect_master_client};
+use crate::common::grpc::master::master_client as connect_master_client;
+use crate::common::grpc::GrpcConfig;
 use crate::runtime::master::server::master_service::master_service_client::MasterServiceClient;
 use std::sync::atomic::AtomicBool;
 use crate::runtime::VertexId;
@@ -544,7 +545,7 @@ impl StreamTask {
             let mut master_client: Option<MasterServiceClient<tonic::transport::Channel>> =
                 if let Some(master_addr) = master_addr {
                     Some(
-                        connect_master_client(&master_addr, &control_plane_config())
+                        connect_master_client(&master_addr, &GrpcConfig::new())
                             .await
                             .map_err(|e| {
                                 anyhow::anyhow!("Failed to connect to master service: {}", e)

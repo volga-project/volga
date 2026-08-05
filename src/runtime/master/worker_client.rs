@@ -6,7 +6,7 @@ use tonic::Code;
 
 use crate::api::PipelineSpec;
 use crate::common::failure::FailureEvent;
-use crate::common::grpc::worker::{master_to_worker_policy, worker_client};
+use crate::common::grpc::worker::{master_to_worker, worker_client};
 use crate::orchestrator::task_assignment::TaskWorkerMapping;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
@@ -70,9 +70,9 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Attempt<T>>,
 {
-    let retry = master_to_worker_policy().rpc_retry;
+    let cfg = master_to_worker();
     let mut last_error = None;
-    for attempt in 0..retry.max_attempts {
+    for attempt in 0..cfg.max_attempts {
         match op().await {
             Attempt::Done(v) => return Ok(v),
             Attempt::Fail(e) => return Err(e),
@@ -85,19 +85,18 @@ where
                     msg
                 );
                 last_error = Some(msg);
-                if attempt + 1 < retry.max_attempts {
-                    sleep(retry.delay_for_attempt(attempt)).await;
+                if attempt + 1 < cfg.max_attempts {
+                    sleep(cfg.retry_delay).await;
                 }
             }
         }
     }
     Err(WorkerCallError::Unreachable(format!(
         "{} failed on {} after {} attempts: {:?}",
-        op_name, target, retry.max_attempts, last_error
+        op_name, target, cfg.max_attempts, last_error
     )))
 }
 
-/// Dial worker control gRPC with a bounded connect timeout (see `MASTER_WORKER_CONNECT_TIMEOUT`).
 pub(super) async fn connect_worker_client(
     addr: &str,
 ) -> Result<WorkerServiceClient<tonic::transport::Channel>, String> {
