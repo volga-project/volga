@@ -21,7 +21,7 @@ async fn test_many_to_many_local_only_harness() {
     };
 
     run_many_to_many_case(config, || -> Box<dyn TransportBackendTrait> {
-        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new())))
+        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new()), 0))
     })
     .await;
 }
@@ -41,7 +41,7 @@ async fn test_many_to_many_remote_only_harness() {
     };
 
     run_many_to_many_case(config, || -> Box<dyn TransportBackendTrait> {
-        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new())))
+        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new()), 0))
     })
     .await;
 }
@@ -61,7 +61,7 @@ async fn test_many_to_many_mixed_local_remote_harness() {
     };
 
     run_many_to_many_case(config, || -> Box<dyn TransportBackendTrait> {
-        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new())))
+        Box::new(TransportBackend::new(Arc::new(WorkerHealth::new()), 0))
     })
     .await;
 }

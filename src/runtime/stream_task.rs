@@ -509,6 +509,7 @@ impl StreamTask {
                 vertex_id.clone(),
                 transport_client_config,
                 run_loop_health,
+                execution_attempt_id,
             );
             
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
@@ -844,6 +845,7 @@ impl StreamTask {
         let run_loop_handle = tokio::spawn(run_loop.map(move |result| {
             if let Err(error) = &result {
                 worker_health.report_fatal(
+                    execution_attempt_id,
                     WorkerFatalReason::TaskFailure,
                     format!("StreamTask {} failed: {}", task_vertex_id, error),
                 );

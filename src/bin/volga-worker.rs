@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
         } else {
             WorkerFatalReason::Panic
         };
-        worker_health.report_fatal(reason, panic_msg);
+        worker_health.report_fatal(worker_health.execution_attempt_id(), reason, panic_msg);
     }));
     worker_server.start(&bind_addr).await?;
     worker_server.register_with_master().await?;

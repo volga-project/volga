@@ -181,6 +181,7 @@ pub struct DataWriter {
     pub senders: HashMap<String, BatchSender>,
     metrics_labels: Option<MetricsLabels>,
     worker_health: Arc<WorkerHealth>,
+    execution_attempt_id: u64,
     // batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
@@ -193,6 +194,7 @@ impl DataWriter {
         senders: HashMap<String, BatchSender>,
         metrics_labels: Option<MetricsLabels>,
         worker_health: Arc<WorkerHealth>,
+        execution_attempt_id: u64,
     ) -> Self {
         let batching_config = BatcherConfig::default();
         // let batcher = Batcher::new(batching_config.clone(), senders.clone());
@@ -202,6 +204,7 @@ impl DataWriter {
             senders,
             metrics_labels,
             worker_health,
+            execution_attempt_id,
             // batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
@@ -281,6 +284,7 @@ impl DataWriter {
                     }
                     Ok(Err(_)) => {
                         self.worker_health.report_fatal(
+                            self.execution_attempt_id,
                             WorkerFatalReason::TransportDisconnect,
                             format!(
                                 "DataWriter {:?} channel {} closed",
@@ -316,7 +320,12 @@ pub struct TransportClient {
 }
 
 impl TransportClient {
-    pub fn new(vertex_id: VertexId, config: TransportClientConfig, worker_health: Arc<WorkerHealth>) -> Self {
+    pub fn new(
+        vertex_id: VertexId,
+        config: TransportClientConfig,
+        worker_health: Arc<WorkerHealth>,
+        execution_attempt_id: u64,
+    ) -> Self {
         let mut reader: Option<DataReader> = None;
         let mut writer: Option<DataWriter> = None;
 
@@ -331,6 +340,7 @@ impl TransportClient {
                 senders,
                 metrics_labels,
                 worker_health,
+                execution_attempt_id,
             ));
         }
 

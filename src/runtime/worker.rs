@@ -9,7 +9,7 @@ use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
 use crate::transport::{transport_backend_actor::TransportBackendType, TransportBackend, TransportBackendTrait};
 use crate::transport::transport_backend_actor::{TransportBackendActor, TransportBackendActorMessage};
 use std::{collections::HashMap};
-use std::sync::{Arc, RwLock, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use kameo::message::{Context, Message};
 use kameo::{prelude::ActorRef, spawn, Actor};
 use tokio::runtime::{Builder, Handle, Runtime};
@@ -101,8 +101,7 @@ pub struct RunTestLifecycle {
 #[derive(Actor)]
 pub struct Worker {
     worker_id: String,
-    /// Current health bus; replaced on reset so stale tasks cannot poison recovery.
-    health_bus: Arc<RwLock<Arc<WorkerHealth>>>,
+    health: Arc<WorkerHealth>,
     config: Option<WorkerConfig>,
     task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
     backend_actor: Option<ActorRef<TransportBackendActor>>,
@@ -127,10 +126,9 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(worker_id: String) -> Self {
-        let health = Arc::new(WorkerHealth::new());
         Self {
             worker_id: worker_id.clone(),
-            health_bus: Arc::new(RwLock::new(health)),
+            health: Arc::new(WorkerHealth::new()),
             config: None,
             task_actors: HashMap::new(),
             backend_actor: None,
@@ -150,10 +148,10 @@ impl Worker {
         }
     }
 
-    pub fn spawn(worker_id: String) -> (ActorRef<Self>, Arc<RwLock<Arc<WorkerHealth>>>) {
+    pub fn spawn(worker_id: String) -> (ActorRef<Self>, Arc<WorkerHealth>) {
         let worker = Self::new(worker_id);
-        let health_bus = worker.health_bus.clone();
-        (spawn(worker), health_bus)
+        let health = worker.health.clone();
+        (spawn(worker), health)
     }
 
     /// Spawn and configure in one step (tests).
@@ -171,9 +169,10 @@ impl Worker {
         if self.running.load(Ordering::SeqCst) {
             panic!("Cannot configure worker while it is running");
         }
-        // Fresh incarnation: drop any sticky fatal from a previous execution attempt so this
-        // worker is not immediately reported unhealthy after a recovery reset.
-        self.health().clear();
+        // Bind health to this attempt so stale tasks from a prior incarnation cannot
+        // report_fatal into the live heartbeat (they still hold the old attempt id).
+        self.health
+            .bind_execution_attempt(config.execution_attempt_id);
         self.source_handles.clear();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
@@ -233,14 +232,7 @@ impl Worker {
     }
 
     pub fn health(&self) -> Arc<WorkerHealth> {
-        self.health_bus.read().expect("health bus lock").clone()
-    }
-
-    fn replace_health(&mut self) {
-        *self
-            .health_bus
-            .write()
-            .expect("health bus lock") = Arc::new(WorkerHealth::new());
+        self.health.clone()
     }
 
     pub fn is_configured(&self) -> bool {
@@ -390,7 +382,10 @@ impl Worker {
             .clone();
 
         let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
-            TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health())),
+            TransportBackendType::Grpc => Box::new(TransportBackend::new(
+                self.health(),
+                config.execution_attempt_id,
+            )),
         };
         let mut transport_client_configs = backend.init_channels(&config.graph, config.vertex_ids.clone());
 
@@ -736,7 +731,6 @@ impl Worker {
         self.request_source_processor.take();
         self.task_actors.clear();
         self.config = None;
-        self.health().clear();
 
         // Transport backend uses a 1-thread runtime; awaiting Close on that runtime from
         // within itself deadlocks (Close joins tasks spawned on the same runtime). Match
@@ -767,12 +761,11 @@ impl Worker {
         self.close_sync_dispose_runtimes();
     }
 
-    /// Close then restore empty shell fields. Keeps the ActorRef and health-bus
-    /// slot; replaces the inner [`WorkerHealth`] so stale tasks cannot poison
-    /// the next attempt (matches drain-tip `Worker::new` on reset).
+    /// Close then restore empty shell fields (same ActorRef + health Arc).
+    /// Sticky fatal is cleared here; attempt fencing advances on the next configure.
     async fn reset_async(&mut self) {
         self.close_async().await;
-        self.replace_health();
+        self.health.clear();
         self.worker_state = Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
             self.worker_id.clone(),
             PipelineId(String::new()),

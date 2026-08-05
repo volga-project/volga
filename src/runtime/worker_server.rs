@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use kameo::actor::ActorRef;
 use tokio::sync::oneshot;
@@ -47,8 +47,8 @@ use worker_service::{
 /// Server implementation of the WorkerService — thin adapter over [`Worker`] actor.
 pub struct WorkerServiceImpl {
     worker: ActorRef<Worker>,
-    /// Shared with [`Worker`]; inner `Arc` is swapped on reset/configure.
-    health_bus: Arc<RwLock<Arc<crate::runtime::health::WorkerHealth>>>,
+    /// Process-lifetime health bus; fenced by execution_attempt_id on report_fatal.
+    health: Arc<crate::runtime::health::WorkerHealth>,
     orchestrator: Arc<dyn WorkerOrchestrator>,
     close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
@@ -59,10 +59,10 @@ impl WorkerServiceImpl {
         orchestrator: Arc<dyn WorkerOrchestrator>,
         close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     ) -> Self {
-        let (worker, health_bus) = Worker::spawn(worker_id);
+        let (worker, health) = Worker::spawn(worker_id);
         Self {
             worker,
-            health_bus,
+            health,
             orchestrator,
             close_worker_notify,
         }
@@ -387,9 +387,8 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<tonic::Streaming<MasterHeartbeatMessage>>,
     ) -> Result<Response<Self::StreamHeartbeatStream>, Status> {
         let mut inbound = request.into_inner();
-        let health_bus = self.health_bus.clone();
-        let mut fatal_health = health_bus.read().expect("health bus lock").clone();
-        let mut fatal_events = fatal_health.subscribe();
+        let health = self.health.clone();
+        let mut fatal_events = health.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<WorkerHeartbeatMessage, Status>>(32);
         let worker = self.worker.clone();
 
@@ -401,12 +400,6 @@ impl WorkerService for WorkerServiceImpl {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                let health = health_bus.read().expect("health bus lock").clone();
-                if !Arc::ptr_eq(&health, &fatal_health) {
-                    fatal_health = health.clone();
-                    fatal_events = fatal_health.subscribe();
-                }
-
                 tokio::select! {
                     _ = interval.tick() => {
                         let Ok(identity) = worker.ask(GetIdentity).await else {
@@ -644,7 +637,7 @@ impl WorkerServer {
     }
 
     pub async fn worker_health(&self) -> Arc<crate::runtime::health::WorkerHealth> {
-        self.service.health_bus.read().expect("health bus lock").clone()
+        self.service.health.clone()
     }
 
     /// Stop the gRPC server
@@ -673,11 +666,12 @@ impl WorkerServer {
     #[cfg(test)]
     pub async fn kill_for_testing(&mut self, inject_panic: bool) {
         if inject_panic {
-            self.service
-                .health_bus
-                .read()
-                .expect("health bus lock")
-                .report_fatal(WorkerFatalReason::Panic, "local test worker crash");
+            let health = &self.service.health;
+            health.report_fatal(
+                health.execution_attempt_id(),
+                WorkerFatalReason::Panic,
+                "local test worker crash",
+            );
         }
         if let Some(mut serve) = self.serve.take() {
             serve.abort();
@@ -698,7 +692,7 @@ impl Clone for WorkerServiceImpl {
     fn clone(&self) -> Self {
         Self {
             worker: self.worker.clone(),
-            health_bus: self.health_bus.clone(),
+            health: self.health.clone(),
             orchestrator: self.orchestrator.clone(),
             close_worker_notify: self.close_worker_notify.clone(),
         }
