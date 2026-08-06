@@ -124,7 +124,8 @@ impl WorkerInner {
             .name("worker-runtime-dispose".into())
             .spawn(move || {
                 for runtime in runtimes {
-                    runtime.shutdown_timeout(Duration::from_secs(30));
+                    // Short: tasks are already closed/aborted; keep reset under master timeout.
+                    runtime.shutdown_timeout(Duration::from_secs(1));
                 }
             })
         else {
@@ -145,7 +146,7 @@ impl WorkerInner {
             handle.abort();
         }
 
-        // Close joins each task run loop (hard barrier).
+        // Close: signal after Finished; abort mid-run so dispose cannot hang.
         if !self.task_actors.is_empty() {
             self.signal_tasks_close().await;
         }

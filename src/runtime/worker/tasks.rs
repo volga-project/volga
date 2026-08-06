@@ -438,21 +438,25 @@ impl WorkerInner {
     pub(crate) async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
         println!("[WORKER] Sending {:?} signal to all task actors", signal);
 
-        for (vertex_id, task_runtime) in &self.task_runtimes {
-            let vertex_id = vertex_id.clone();
-            let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
-            let signal_clone = signal.clone();
-            let signal_for_error = signal.clone();
-            let fut = task_runtime.spawn(async move {
-                if let Err(e) = task_ref.ask(signal_clone).await {
-                    eprintln!(
-                        "Error sending {:?} signal to task {}: {}",
-                        signal_for_error, vertex_id, e
-                    );
-                }
-            });
-            let _ = fut.await;
-        }
+        let futs: Vec<_> = self
+            .task_runtimes
+            .iter()
+            .map(|(vertex_id, task_runtime)| {
+                let vertex_id = vertex_id.clone();
+                let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
+                let signal_clone = signal.clone();
+                let signal_for_error = signal.clone();
+                task_runtime.spawn(async move {
+                    if let Err(e) = task_ref.ask(signal_clone).await {
+                        eprintln!(
+                            "Error sending {:?} signal to task {}: {}",
+                            signal_for_error, vertex_id, e
+                        );
+                    }
+                })
+            })
+            .collect();
+        let _ = join_all(futs).await;
 
         println!("[WORKER] {:?} signal sent to all task actors", signal);
     }

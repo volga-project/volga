@@ -809,14 +809,16 @@ impl StreamTask {
                                 status.clone(),
                             )
                             .await;
-                            status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                            break;
                         } else {
-                            panic!(
-                                "StreamTask {}: upstream ended without terminal watermark",
+                            // Peer/transport teardown can drop the input without a max watermark.
+                            println!(
+                                "{:?} StreamTask {}: upstream ended without terminal watermark; finishing",
+                                timestamp(),
                                 vertex_id.as_ref()
                             );
                         }
+                        status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+                        break;
                     }
                     OperatorPollResult::Continue => { /* no output */ }
                 }
@@ -851,33 +853,6 @@ impl StreamTask {
         self.run_loop_handle = Some(run_loop_handle);
     }
 
-    /// Signal close and join the run loop. Idempotent.
-    ///
-    /// The run loop only observes the close watch after leaving `Running`, so a mid-run
-    /// close must force `Finished` first. Join is bounded; on timeout the task is aborted.
-    pub async fn close(&mut self) {
-        if let Some(sender) = self.close_signal_sender.as_ref() {
-            let _ = sender.send(true);
-        }
-        let status = self.status.load(Ordering::SeqCst);
-        if status == StreamTaskStatus::Created as u8
-            || status == StreamTaskStatus::Opened as u8
-            || status == StreamTaskStatus::Running as u8
-        {
-            self.status
-                .store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-        }
-        if let Some(handle) = self.run_loop_handle.take() {
-            let abort = handle.abort_handle();
-            if tokio::time::timeout(Duration::from_secs(10), handle)
-                .await
-                .is_err()
-            {
-                abort.abort();
-            }
-        }
-    }
-
     pub async fn get_state(&self) -> TaskSnapshot {
         // Detach from the live bag so later operator writes do not mutate the snapshot.
         let metadata = TaskMetadata::default();
@@ -895,9 +870,20 @@ impl StreamTask {
         let _ = run_signal_sender.send(true);
     }
 
-    pub fn signal_to_close(&mut self) {
+    /// Set the close watch. If still mid-run, abort the run loop (watch is only
+    /// observed after Finished). After Finished, signal alone runs operator.close.
+    pub fn close(&mut self) {
         if let Some(close_signal_sender) = self.close_signal_sender.as_ref() {
             let _ = close_signal_sender.send(true);
+        }
+        let status = self.status.load(Ordering::SeqCst);
+        if status == StreamTaskStatus::Created as u8
+            || status == StreamTaskStatus::Opened as u8
+            || status == StreamTaskStatus::Running as u8
+        {
+            if let Some(handle) = self.run_loop_handle.take() {
+                handle.abort();
+            }
         }
     }
 

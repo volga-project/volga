@@ -34,8 +34,7 @@ impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::Close => {
-                // Join the run loop so worker reset is a hard barrier.
-                self.task.close().await;
+                self.task.close();
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::GetState => {
