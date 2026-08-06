@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
 
 use kameo::prelude::ActorRef;
 use tokio::runtime::{Builder, Runtime};
@@ -105,7 +104,11 @@ impl WorkerInner {
         self.config.execution_attempt_id
     }
 
-    /// Join barrier for nested Tokio runtimes. Prefer after tasks/transport have exited.
+    /// Drop nested Tokio runtimes after tasks/transport have been signaled/aborted.
+    ///
+    /// Must stay well under `master.reset_worker_timeout` (2s local). Sequential
+    /// `shutdown_timeout` per task runtime blew that budget (N vertices × timeout)
+    /// and late Reset retries then tore down the replacement worker.
     pub(crate) fn close_sync_dispose_runtimes(&mut self) {
         let mut runtimes = Vec::new();
         if let Some(runtime) = self.transport_backend_runtime.take() {
@@ -117,21 +120,9 @@ impl WorkerInner {
         for (_, runtime) in self.task_runtimes.drain() {
             runtimes.push(runtime);
         }
-        if runtimes.is_empty() {
-            return;
+        for runtime in runtimes {
+            runtime.shutdown_background();
         }
-        let Ok(handle) = std::thread::Builder::new()
-            .name("worker-runtime-dispose".into())
-            .spawn(move || {
-                for runtime in runtimes {
-                    // Short: tasks are already closed/aborted; keep reset under master timeout.
-                    runtime.shutdown_timeout(Duration::from_secs(1));
-                }
-            })
-        else {
-            return;
-        };
-        let _ = handle.join();
         println!("[WORKER] Cleanup completed");
     }
 
