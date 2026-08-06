@@ -158,17 +158,23 @@ pub(crate) async fn run_watermark_window_pipeline(
     .await;
 
     worker
-        .ask(crate::runtime::worker::Start)
+        .ask(crate::runtime::worker::Start {
+            execution_attempt_id: 0,
+        })
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     wait_for_status(&worker, StreamTaskStatus::Opened, Duration::from_secs(10)).await;
     worker
-        .ask(crate::runtime::worker::RunTasks)
+        .ask(crate::runtime::worker::RunTasks {
+            execution_attempt_id: 0,
+        })
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     wait_for_status(&worker, StreamTaskStatus::Finished, Duration::from_secs(60)).await;
     let worker_snapshot = worker
-        .ask(crate::runtime::worker::GetState)
+        .ask(crate::runtime::worker::GetState {
+            execution_attempt_id: 0,
+        })
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     let window_drops = worker_snapshot
@@ -193,7 +199,9 @@ pub(crate) async fn run_watermark_window_pipeline(
     let late_dropped: u64 = window_drops.iter().map(|(_, dropped)| *dropped).sum();
     assert_eq!(late_dropped, 0, "window pipeline dropped late rows");
     worker
-        .ask(crate::runtime::worker::CloseTasks)
+        .ask(crate::runtime::worker::CloseTasks {
+            execution_attempt_id: 0,
+        })
         .await
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
     wait_for_status(&worker, StreamTaskStatus::Closed, Duration::from_secs(10)).await;

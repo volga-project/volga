@@ -65,7 +65,9 @@ pub async fn execute_with_state_updates(
     }
 
     let worker_state = worker
-        .ask(GetState)
+        .ask(GetState {
+            execution_attempt_id: 0,
+        })
         .await
         .map_err(|e| anyhow::anyhow!("GetState: {e:?}"))?;
     let _ = worker.ask(Close).await;

@@ -28,7 +28,12 @@ pub async fn wait_for_status(
 ) {
     let start = std::time::Instant::now();
     loop {
-        let st = worker.ask(GetState).await.expect("GetState from worker actor");
+        let st = worker
+            .ask(GetState {
+                execution_attempt_id: 0,
+            })
+            .await
+            .expect("GetState from worker actor");
         if st.all_tasks_in(&[status]) {
             return;
         }
