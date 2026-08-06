@@ -282,7 +282,8 @@ jobs:
               --shards "$shards" \
               --fresh-cluster
           fi
-      - if: always()
+      # Skip on cancelled so "Cancel workflow" is not blocked by 15× artifact upload.
+      - if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
           name: kube-stress-logs-machine-${{ matrix.machine }}
@@ -345,7 +346,8 @@ jobs:
             --test "$test_name" \
             --runs-per-shard "$runs" \
             --shards "$shards"
-      - if: always()
+      # Skip on cancelled so "Cancel workflow" is not blocked by 15× artifact upload.
+      - if: success() || failure()
         uses: actions/upload-artifact@v4
         with:
           name: inproc-stress-logs-machine-${{ matrix.machine }}
