@@ -144,7 +144,31 @@ run_shard() {
   done
 }
 
+# Job control: each background shard gets its own process group (pgid == pid) so
+# CI "Cancel workflow" (SIGTERM) and local Ctrl+C can kill nextest/cargo trees.
+set -m
+
 pids=()
+
+kill_shards() {
+  local sig="${1:-TERM}"
+  local pid
+  for pid in "${pids[@]:-}"; do
+    kill "-${sig}" -- "-${pid}" 2>/dev/null || kill "-${sig}" "${pid}" 2>/dev/null || true
+  done
+}
+
+on_cancel() {
+  echo "Stress cancelled; stopping shards..." >&2
+  touch "$FAILURE_MARKER"
+  kill_shards TERM
+  sleep 1
+  kill_shards KILL
+  echo "Stress logs: $LOG_DIR" >&2
+  exit 130
+}
+trap on_cancel INT TERM
+
 for ((shard = 1; shard <= SHARDS; shard++)); do
   run_shard "$shard" &
   pids+=("$!")
@@ -154,8 +178,17 @@ failed=0
 for pid in "${pids[@]}"; do
   if ! wait "$pid"; then
     failed=1
+    touch "$FAILURE_MARKER"
+    # First shard failure: stop siblings instead of waiting for their remaining runs.
+    kill_shards TERM
+    sleep 1
+    kill_shards KILL
+    wait 2>/dev/null || true
+    break
   fi
 done
+
+trap - INT TERM
 
 echo "Stress logs: $LOG_DIR"
 if [[ "$failed" -ne 0 ]]; then
