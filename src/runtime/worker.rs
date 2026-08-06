@@ -68,16 +68,6 @@ impl WorkerConfig {
     }
 }
 
-/// Identity snapshot for heartbeat / attempt fencing (cheap ask).
-#[derive(Debug, Clone)]
-pub struct WorkerIdentity {
-    pub worker_id: String,
-    pub pipeline_id: Option<String>,
-    pub execution_attempt_id: u64,
-    pub configured: bool,
-    pub running: bool,
-}
-
 // --- control-plane messages (WorkerService + tests) ---
 
 pub struct Configure(pub WorkerConfig);
@@ -85,8 +75,6 @@ pub struct Start;
 pub struct RunTasks;
 pub struct CloseTasks;
 pub struct GetState;
-pub struct GetIdentity;
-pub struct GetHealth;
 pub struct StopSources;
 pub struct TriggerBarrier(pub u64);
 /// Close nested runtimes and return to an empty shell (same ActorRef / health).
@@ -775,16 +763,6 @@ impl Worker {
         self.source_handles = Arc::new(SourceHandles::new());
     }
 
-    fn identity(&self) -> WorkerIdentity {
-        WorkerIdentity {
-            worker_id: self.worker_id.clone(),
-            pipeline_id: self.pipeline_id(),
-            execution_attempt_id: self.execution_attempt_id(),
-            configured: self.is_configured(),
-            running: self.is_running(),
-        }
-    }
-
     // control functions
     async fn start(&mut self) -> Result<(), String> {
         if !self.is_configured() {
@@ -978,30 +956,6 @@ impl Message<GetState> for Worker {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         Ok(self.get_state().await)
-    }
-}
-
-impl Message<GetIdentity> for Worker {
-    type Reply = Result<WorkerIdentity, String>;
-
-    async fn handle(
-        &mut self,
-        _msg: GetIdentity,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        Ok(self.identity())
-    }
-}
-
-impl Message<GetHealth> for Worker {
-    type Reply = Result<Arc<WorkerHealth>, String>;
-
-    async fn handle(
-        &mut self,
-        _msg: GetHealth,
-        _ctx: &mut Context<Self, Self::Reply>,
-    ) -> Self::Reply {
-        Ok(self.health())
     }
 }
 

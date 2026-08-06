@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use kameo::actor::ActorRef;
 use tokio::sync::oneshot;
@@ -23,8 +23,8 @@ use crate::runtime::consts::{
 use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::worker::{
-    Close, CloseTasks, Configure, GetIdentity, GetState, Reset, RunTasks, Start, StopSources,
-    TriggerBarrier, Worker, WorkerConfig,
+    Close, CloseTasks, Configure, GetState, Reset, RunTasks, Start, StopSources, TriggerBarrier,
+    Worker, WorkerConfig,
 };
 use crate::runtime::worker_config_utils::{
     build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type,
@@ -44,11 +44,22 @@ use worker_service::{
     WorkerHeartbeatMessage,
 };
 
+/// gRPC-facing binding for attempt fencing / heartbeat (updated on configure/reset).
+#[derive(Debug, Clone)]
+struct WorkerBinding {
+    worker_id: String,
+    pipeline_id: String,
+    execution_attempt_id: u64,
+    configured: bool,
+}
+
 /// Server implementation of the WorkerService — thin adapter over [`Worker`] actor.
 pub struct WorkerServiceImpl {
     worker: ActorRef<Worker>,
     /// Process-lifetime health bus; fenced by execution_attempt_id on report_fatal.
     health: Arc<crate::runtime::health::WorkerHealth>,
+    /// Mirror of configure/reset binding — avoids mailbox peeks for fencing/HB.
+    binding: Arc<RwLock<WorkerBinding>>,
     orchestrator: Arc<dyn WorkerOrchestrator>,
     close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
@@ -59,25 +70,45 @@ impl WorkerServiceImpl {
         orchestrator: Arc<dyn WorkerOrchestrator>,
         close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     ) -> Self {
-        let (worker, health) = Worker::spawn(worker_id);
+        let (worker, health) = Worker::spawn(worker_id.clone());
         Self {
             worker,
             health,
+            binding: Arc::new(RwLock::new(WorkerBinding {
+                worker_id,
+                pipeline_id: String::new(),
+                execution_attempt_id: 0,
+                configured: false,
+            })),
             orchestrator,
             close_worker_notify,
         }
     }
 
-    async fn validate_execution_attempt(&self, execution_attempt_id: u64) -> Result<(), Status> {
-        let identity = self
-            .worker
-            .ask(GetIdentity)
-            .await
-            .map_err(|e| Status::internal(format!("worker ask failed: {e:?}")))?;
-        if execution_attempt_id != identity.execution_attempt_id {
+    fn binding_snapshot(&self) -> WorkerBinding {
+        self.binding.read().expect("worker binding lock").clone()
+    }
+
+    fn bind(&self, execution_attempt_id: u64, pipeline_id: String) {
+        let mut binding = self.binding.write().expect("worker binding lock");
+        binding.execution_attempt_id = execution_attempt_id;
+        binding.pipeline_id = pipeline_id;
+        binding.configured = true;
+    }
+
+    fn unbind(&self) {
+        let mut binding = self.binding.write().expect("worker binding lock");
+        binding.execution_attempt_id = 0;
+        binding.pipeline_id.clear();
+        binding.configured = false;
+    }
+
+    fn validate_execution_attempt(&self, execution_attempt_id: u64) -> Result<(), Status> {
+        let binding = self.binding_snapshot();
+        if execution_attempt_id != binding.execution_attempt_id {
             return Err(Status::failed_precondition(format!(
                 "stale worker command execution attempt: got {}, current {}",
-                execution_attempt_id, identity.execution_attempt_id
+                execution_attempt_id, binding.execution_attempt_id
             )));
         }
         Ok(())
@@ -156,6 +187,7 @@ impl WorkerService for WorkerServiceImpl {
             resolve_transport_backend_type(&execution_graph, &payload.vertex_ids);
         let num_threads_per_task = resolve_num_threads_per_task(&spec);
 
+        let pipeline_id = payload.pipeline_id.clone();
         let mut worker_config = WorkerConfig::new(
             payload.worker_id,
             PipelineId(payload.pipeline_id),
@@ -180,6 +212,7 @@ impl WorkerService for WorkerServiceImpl {
                 kameo::error::SendError::HandlerError(msg) => Status::failed_precondition(msg),
                 other => Status::internal(format!("configure ask failed: {other:?}")),
             })?;
+        self.bind(execution_attempt_id, pipeline_id);
 
         Ok(Response::new(ConfigureWorkerResponse {
             success: true,
@@ -192,14 +225,8 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<GetWorkerStateRequest>,
     ) -> Result<Response<GetWorkerStateResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let identity = self
-            .worker
-            .ask(GetIdentity)
-            .await
-            .map_err(|e| Status::internal(format!("worker ask failed: {e:?}")))?;
-        if !identity.configured {
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)?;
+        if !self.binding_snapshot().configured {
             return Err(Status::failed_precondition(
                 "worker is not configured for this attempt",
             ));
@@ -222,8 +249,7 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<StartWorkerRequest>,
     ) -> Result<Response<StartWorkerResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)?;
         self.worker.ask(Start).await.map_err(|e| match e {
             kameo::error::SendError::HandlerError(msg) => Status::failed_precondition(msg),
             other => Status::internal(format!("start ask failed: {other:?}")),
@@ -239,8 +265,7 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<RunWorkerTasksRequest>,
     ) -> Result<Response<RunWorkerTasksResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)?;
         self.worker
             .ask(RunTasks)
             .await
@@ -261,6 +286,7 @@ impl WorkerService for WorkerServiceImpl {
             .ask(Reset)
             .await
             .map_err(|e| Status::internal(format!("reset ask failed: {e:?}")))?;
+        self.unbind();
         println!("[WORKER_SERVER] Worker reset successfully");
         Ok(Response::new(ResetWorkerResponse {
             success: true,
@@ -272,12 +298,12 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<ShutdownWorkerRequest>,
     ) -> Result<Response<ShutdownWorkerResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)?;
         self.worker
             .ask(Close)
             .await
             .map_err(|e| Status::internal(format!("close ask failed: {e:?}")))?;
+        self.unbind();
 
         let mut notify_guard = self.close_worker_notify.lock().await;
         if let Some(tx) = notify_guard.take() {
@@ -295,8 +321,7 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<CloseWorkerTasksRequest>,
     ) -> Result<Response<CloseWorkerTasksResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
+        self.validate_execution_attempt(request.get_ref().execution_attempt_id)?;
         self.worker
             .ask(CloseTasks)
             .await
@@ -313,18 +338,8 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<TriggerCheckpointBarrierRequest>,
     ) -> Result<Response<TriggerCheckpointBarrierResponse>, Status> {
         let req = request.into_inner();
-        let identity = self
-            .worker
-            .ask(GetIdentity)
-            .await
-            .map_err(|e| Status::internal(format!("worker ask failed: {e:?}")))?;
-        if req.execution_attempt_id != identity.execution_attempt_id {
-            return Err(Status::failed_precondition(format!(
-                "stale worker command execution attempt: got {}, current {}",
-                req.execution_attempt_id, identity.execution_attempt_id
-            )));
-        }
-        if !identity.configured {
+        self.validate_execution_attempt(req.execution_attempt_id)?;
+        if !self.binding_snapshot().configured {
             return Ok(Response::new(TriggerCheckpointBarrierResponse {
                 success: false,
                 error_message: "worker is not configured for this attempt".to_string(),
@@ -350,18 +365,8 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<StopSourcesRequest>,
     ) -> Result<Response<StopSourcesResponse>, Status> {
         let req = request.into_inner();
-        let identity = self
-            .worker
-            .ask(GetIdentity)
-            .await
-            .map_err(|e| Status::internal(format!("worker ask failed: {e:?}")))?;
-        if req.execution_attempt_id != identity.execution_attempt_id {
-            return Err(Status::failed_precondition(format!(
-                "stale worker command execution attempt: got {}, current {}",
-                req.execution_attempt_id, identity.execution_attempt_id
-            )));
-        }
-        if !identity.configured {
+        self.validate_execution_attempt(req.execution_attempt_id)?;
+        if !self.binding_snapshot().configured {
             return Ok(Response::new(StopSourcesResponse {
                 success: false,
                 error_message: "worker is not configured for this attempt".to_string(),
@@ -388,9 +393,9 @@ impl WorkerService for WorkerServiceImpl {
     ) -> Result<Response<Self::StreamHeartbeatStream>, Status> {
         let mut inbound = request.into_inner();
         let health = self.health.clone();
+        let binding = self.binding.clone();
         let mut fatal_events = health.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<WorkerHeartbeatMessage, Status>>(32);
-        let worker = self.worker.clone();
 
         tokio::spawn(async move {
             let mut last_master_msg_at = std::time::Instant::now();
@@ -402,9 +407,7 @@ impl WorkerService for WorkerServiceImpl {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let Ok(identity) = worker.ask(GetIdentity).await else {
-                            break;
-                        };
+                        let snap = binding.read().expect("worker binding lock").clone();
                         let fatal = health.last_fatal();
                         let (healthy, fatal_reason, fatal_message) = match fatal {
                             Some(f) => (
@@ -428,8 +431,8 @@ impl WorkerService for WorkerServiceImpl {
                         };
                         if tx
                             .send(Ok(WorkerHeartbeatMessage {
-                                worker_id: identity.worker_id,
-                                pipeline_id: identity.pipeline_id.unwrap_or_default(),
+                                worker_id: snap.worker_id,
+                                pipeline_id: snap.pipeline_id,
                                 sent_at_ms: std::time::SystemTime::now()
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .unwrap_or_default()
@@ -437,8 +440,8 @@ impl WorkerService for WorkerServiceImpl {
                                 healthy,
                                 fatal_reason,
                                 fatal_message,
-                                execution_attempt_id: identity.execution_attempt_id,
-                                configured: identity.configured,
+                                execution_attempt_id: snap.execution_attempt_id,
+                                configured: snap.configured,
                             }))
                             .await
                             .is_err()
@@ -452,9 +455,7 @@ impl WorkerService for WorkerServiceImpl {
                     }
                     event = fatal_events.recv() => {
                         if let Ok(fatal) = event {
-                            let Ok(identity) = worker.ask(GetIdentity).await else {
-                                break;
-                            };
+                            let snap = binding.read().expect("worker binding lock").clone();
                             let fatal_reason = match fatal.reason {
                                 WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
                                 WorkerFatalReason::TransportDisconnect => {
@@ -466,8 +467,8 @@ impl WorkerService for WorkerServiceImpl {
                             };
                             let _ = tx
                                 .send(Ok(WorkerHeartbeatMessage {
-                                    worker_id: identity.worker_id,
-                                    pipeline_id: identity.pipeline_id.unwrap_or_default(),
+                                    worker_id: snap.worker_id,
+                                    pipeline_id: snap.pipeline_id,
                                     sent_at_ms: std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH)
                                         .unwrap_or_default()
@@ -475,8 +476,8 @@ impl WorkerService for WorkerServiceImpl {
                                     healthy: false,
                                     fatal_reason,
                                     fatal_message: fatal.message,
-                                    execution_attempt_id: identity.execution_attempt_id,
-                                    configured: identity.configured,
+                                    execution_attempt_id: snap.execution_attempt_id,
+                                    configured: snap.configured,
                                 }))
                                 .await;
                         }
@@ -693,6 +694,7 @@ impl Clone for WorkerServiceImpl {
         Self {
             worker: self.worker.clone(),
             health: self.health.clone(),
+            binding: self.binding.clone(),
             orchestrator: self.orchestrator.clone(),
             close_worker_notify: self.close_worker_notify.clone(),
         }

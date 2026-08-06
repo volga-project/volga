@@ -66,7 +66,6 @@ impl ExecutionAttempt {
     }
 
     pub(in crate::runtime::master) async fn finish(&mut self) {
-        let rpc_timeout = runtime_consts().duration(MASTER_RESET_WORKER_TIMEOUT);
         // Close first (while workers still bound to this attempt).
         let close_tasks: Vec<_> = self
             .sessions
@@ -75,19 +74,11 @@ impl ExecutionAttempt {
                 let worker_id = worker_id.clone();
                 let session = session.clone();
                 async move {
-                    match timeout(rpc_timeout, session.ask(CloseTasks)).await {
-                        Ok(Ok(success)) => {
-                            log_close("close_worker_tasks", &worker_id, Ok(success))
-                        }
-                        Ok(Err(error)) => log_close(
-                            "close_worker_tasks",
-                            &worker_id,
-                            Err(anyhow::anyhow!("{error:?}")),
-                        ),
-                        Err(_) => println!(
-                            "[MASTER] finish: close_worker_tasks timed out on {worker_id}"
-                        ),
-                    }
+                    let result = session
+                        .ask(CloseTasks)
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{error:?}"));
+                    log_close("close_worker_tasks", &worker_id, result);
                 }
             })
             .collect();
@@ -106,17 +97,11 @@ impl ExecutionAttempt {
             .sessions
             .drain()
             .map(|(worker_id, session)| async move {
-                match timeout(rpc_timeout, session.ask(ShutdownWorker)).await {
-                    Ok(Ok(success)) => log_close("shutdown_worker", &worker_id, Ok(success)),
-                    Ok(Err(error)) => log_close(
-                        "shutdown_worker",
-                        &worker_id,
-                        Err(anyhow::anyhow!("{error:?}")),
-                    ),
-                    Err(_) => println!(
-                        "[MASTER] finish: shutdown_worker timed out on {worker_id}"
-                    ),
-                }
+                let result = session
+                    .ask(ShutdownWorker)
+                    .await
+                    .map_err(|error| anyhow::anyhow!("{error:?}"));
+                log_close("shutdown_worker", &worker_id, result);
                 let _ = session.stop_gracefully().await;
             })
             .collect();
