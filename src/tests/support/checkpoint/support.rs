@@ -200,6 +200,7 @@ pub(super) async fn harness_finish_pipeline(
     // Avoid StopSources during an in-flight CP (timeout → empty-replace recovery).
     wait_until_checkpoints_idle(&cluster.master(), checkpoint_idle_timeout(env)).await?;
 
+    // Sets lifecycle intent=Finish; drain runs now or after the next stable attempt.
     cluster.master().stop_sources().await?;
     LifecycleOracle::wait_for(
         &cluster.master(),

@@ -103,7 +103,8 @@ impl ExecutionAttempt {
             let Some(slot) = self.run.as_mut() else {
                 return;
             };
-            if slot.aggregating.is_some() || slot.poll_in_flight {
+            // Aggregation must not freeze observation; only one poll batch at a time.
+            if slot.poll_in_flight {
                 return;
             }
             slot.poll_in_flight = true;
@@ -123,12 +124,30 @@ impl ExecutionAttempt {
                 return;
             };
             slot.poll_in_flight = false;
-            if slot.aggregating.is_some() {
-                return;
+        }
+
+        // FailureAggregation owns Recover: fold poll failures into the window.
+        if self.phase == AttemptPhase::FailureAggregation {
+            for (worker_id, error) in state_poll.failures {
+                let failure = FailureEvent {
+                    worker_id,
+                    kind: FailureKind::StatePollFailure,
+                    detail: error.to_string(),
+                };
+                self.record_failure(&failure).await;
+                if let Some(events) = self
+                    .run
+                    .as_mut()
+                    .and_then(|slot| slot.failure_events.as_mut())
+                {
+                    events.push(failure);
+                }
             }
+            return;
         }
 
         let checkpoint_timeout = runtime_consts().duration(MASTER_CHECKPOINT_TIMEOUT);
+        let draining = self.phase == AttemptPhase::Draining;
         if !state_poll.failures.is_empty() {
             for (worker_id, error) in &state_poll.failures {
                 self.record_failure(&FailureEvent {
@@ -138,14 +157,17 @@ impl ExecutionAttempt {
                 })
                 .await;
             }
-            self.abort_in_flight("state poll failure").await;
-            let replace = state_poll
-                .failures
-                .iter()
-                .map(|(worker_id, _)| worker_id.clone())
-                .collect();
-            self.complete_run(Ok(AttemptOutcome::Recover(replace)));
-            return;
+            // Draining owns Finish: do not divert into Recover.
+            if !draining {
+                self.abort_in_flight("state poll failure").await;
+                let replace = state_poll
+                    .failures
+                    .iter()
+                    .map(|(worker_id, _)| worker_id.clone())
+                    .collect();
+                self.complete_run(Ok(AttemptOutcome::Recover(replace)));
+                return;
+            }
         }
         if all_workers(&state_poll.states, self.sessions.keys(), |s| {
             s.all_tasks_in(&[StreamTaskStatus::Finished, StreamTaskStatus::Closed])
@@ -166,6 +188,9 @@ impl ExecutionAttempt {
                 "[MASTER] Checkpoint timeout attempt={} checkpoint_id={}",
                 self.id, checkpoint_id
             );
+            if draining {
+                return;
+            }
             self.complete_run(Ok(AttemptOutcome::Recover(HashSet::new())));
             return;
         }
@@ -177,11 +202,7 @@ impl ExecutionAttempt {
     }
 
     pub(super) async fn on_checkpoint_tick(&mut self, actor_ref: ActorRef<Self>) {
-        match self.run.as_ref() {
-            Some(slot) if slot.aggregating.is_none() => {}
-            _ => return,
-        }
-        if self.phase != AttemptPhase::Running {
+        if self.run.is_none() || self.phase != AttemptPhase::Running {
             return;
         }
         let checkpoint_id = match self.state.begin_checkpoint(self.id).await {
@@ -251,16 +272,20 @@ impl ExecutionAttempt {
         failure: FailureEvent,
         actor_ref: ActorRef<Self>,
     ) {
-        let aggregating = match self.run.as_ref() {
-            Some(slot) => slot.aggregating.is_some(),
-            None => return,
-        };
-        if aggregating {
+        if self.run.is_none() {
+            return;
+        }
+        // Draining owns Finish; late fatals are recorded only.
+        if self.phase == AttemptPhase::Draining {
+            self.record_failure(&failure).await;
+            return;
+        }
+        if self.phase == AttemptPhase::FailureAggregation {
             self.record_failure(&failure).await;
             if let Some(events) = self
                 .run
                 .as_mut()
-                .and_then(|slot| slot.aggregating.as_mut())
+                .and_then(|slot| slot.failure_events.as_mut())
             {
                 events.push(failure);
             }
@@ -269,8 +294,9 @@ impl ExecutionAttempt {
 
         self.abort_in_flight("attempt failed").await;
         self.record_failure(&failure).await;
+        self.phase = AttemptPhase::FailureAggregation;
         if let Some(slot) = self.run.as_mut() {
-            slot.aggregating = Some(vec![failure]);
+            slot.failure_events = Some(vec![failure]);
         }
 
         let window = runtime_consts().duration(MASTER_FAILURE_AGGREGATION_WINDOW);
@@ -281,10 +307,13 @@ impl ExecutionAttempt {
     }
 
     pub(super) async fn on_agg_window_end(&mut self) {
+        if self.phase != AttemptPhase::FailureAggregation {
+            return;
+        }
         let Some(slot) = self.run.as_mut() else {
             return;
         };
-        let Some(events) = slot.aggregating.take() else {
+        let Some(events) = slot.failure_events.take() else {
             return;
         };
 

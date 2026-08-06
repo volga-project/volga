@@ -27,6 +27,7 @@ use super::checkpoint::{
 use super::events::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord, LifecycleJournal,
 };
+use super::lifecycle::MasterLifecycle;
 use super::MasterConfig;
 
 pub(super) struct PipelineContext {
@@ -160,8 +161,10 @@ pub(super) struct MasterState {
     lifecycle_events: Mutex<LifecycleJournal>,
     lifecycle_event_tx: broadcast::Sender<LifecycleEventRecord>,
     current_attempt_id: AtomicU64,
-    /// Handle to the live attempt actor (StopSources `ask`s `Drain` here).
+    /// Live attempt (lifecycle supervises; Drain goes through lifecycle intent).
     current_attempt: Mutex<Option<ActorRef<ExecutionAttempt>>>,
+    /// Job supervisor actor (`RequestFinish` / attempt loop).
+    lifecycle: Mutex<Option<ActorRef<MasterLifecycle>>>,
 }
 
 impl MasterState {
@@ -177,6 +180,7 @@ impl MasterState {
             lifecycle_event_tx,
             current_attempt_id: AtomicU64::new(0),
             current_attempt: Mutex::new(None),
+            lifecycle: Mutex::new(None),
         }
     }
 
@@ -190,6 +194,18 @@ impl MasterState {
 
     pub(super) async fn current_attempt(&self) -> Option<ActorRef<ExecutionAttempt>> {
         self.current_attempt.lock().await.clone()
+    }
+
+    pub(super) async fn set_lifecycle(&self, lifecycle: ActorRef<MasterLifecycle>) {
+        *self.lifecycle.lock().await = Some(lifecycle);
+    }
+
+    pub(super) async fn clear_lifecycle(&self) {
+        *self.lifecycle.lock().await = None;
+    }
+
+    pub(super) async fn lifecycle(&self) -> Option<ActorRef<MasterLifecycle>> {
+        self.lifecycle.lock().await.clone()
     }
 
     /// Assign the scheduled worker set to `execution_attempt_id` (registry SoT).
