@@ -2,6 +2,7 @@
 
 mod config;
 mod handlers;
+mod inner;
 mod lifecycle;
 mod messages;
 mod tasks;
@@ -12,43 +13,26 @@ pub use messages::{
     Shutdown, Start, StopSources, TriggerBarrier,
 };
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use kameo::prelude::{spawn, ActorRef};
 use kameo::Actor;
-use tokio::runtime::Runtime;
 
 use crate::common::types::PipelineId;
-use crate::runtime::functions::source::request_source::RequestSourceProcessor;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
-use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::state::OperatorStates;
-use crate::runtime::stream_task_actor::StreamTaskActor;
-use crate::runtime::VertexId;
-use crate::transport::transport_backend_actor::TransportBackendActor;
 
+use inner::WorkerInner;
+
+/// Process-stable actor shell. Configure-scoped state lives in [`WorkerInner`].
 #[derive(Actor)]
 pub struct Worker {
     pub(crate) worker_id: String,
     pub(crate) health: Arc<WorkerHealth>,
-    pub(crate) config: Option<WorkerConfig>,
-    pub(crate) task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
-    pub(crate) backend_actor: Option<ActorRef<TransportBackendActor>>,
-    pub(crate) task_runtimes: HashMap<VertexId, Runtime>,
-    pub(crate) transport_backend_runtime: Option<Runtime>,
-    pub(crate) worker_state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
-    pub(crate) operator_states: Arc<OperatorStates>,
-    pub(crate) running: Arc<AtomicBool>,
-    pub(crate) tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Watches the process health bus; on a fatal event it quiesces tasks so a broken
-    /// worker stops producing while the master drives a recovery reset.
-    pub(crate) fatal_watcher_handle: Option<tokio::task::JoinHandle<()>>,
-    pub(crate) request_source_processor: Option<RequestSourceProcessor>,
-    pub(crate) request_source_processor_runtime: Option<Runtime>,
-    pub(crate) source_handles: Arc<SourceHandles>,
+    pub(crate) inner: Option<WorkerInner>,
+    /// Last snapshot retained after close/reset for late GetState (tests / finish).
+    pub(crate) last_snapshot: WorkerSnapshot,
 }
 
 impl Worker {
@@ -56,22 +40,8 @@ impl Worker {
         Self {
             worker_id: worker_id.clone(),
             health: Arc::new(WorkerHealth::new()),
-            config: None,
-            task_actors: HashMap::new(),
-            backend_actor: None,
-            task_runtimes: HashMap::new(),
-            transport_backend_runtime: None,
-            worker_state: Arc::new(tokio::sync::Mutex::new(WorkerSnapshot::new(
-                worker_id,
-                PipelineId(String::new()),
-            ))),
-            operator_states: Arc::new(OperatorStates::new()),
-            running: Arc::new(AtomicBool::new(false)),
-            tasks_state_polling_handle: None,
-            fatal_watcher_handle: None,
-            request_source_processor: None,
-            request_source_processor_runtime: None,
-            source_handles: Arc::new(SourceHandles::new()),
+            inner: None,
+            last_snapshot: WorkerSnapshot::new(worker_id, PipelineId(String::new())),
         }
     }
 
@@ -97,11 +67,11 @@ impl Worker {
     }
 
     pub fn is_configured(&self) -> bool {
-        self.config.is_some()
+        self.inner.is_some()
     }
 
     pub fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
+        self.inner.as_ref().is_some_and(|i| i.is_running())
     }
 
     pub fn worker_id(&self) -> String {
@@ -109,25 +79,25 @@ impl Worker {
     }
 
     pub fn pipeline_id(&self) -> Option<String> {
-        self.config
+        self.inner
             .as_ref()
-            .map(|cfg| cfg.pipeline_id.0.clone())
+            .map(|i| i.config.pipeline_id.0.clone())
     }
 
     pub fn execution_attempt_id(&self) -> u64 {
-        self.config
+        self.inner
             .as_ref()
-            .map(|cfg| cfg.execution_attempt_id)
+            .map(|i| i.execution_attempt_id())
             .unwrap_or_default()
     }
 
     pub fn operator_states(&self) -> Arc<OperatorStates> {
-        self.operator_states.clone()
+        self.inner
+            .as_ref()
+            .map(|i| i.operator_states.clone())
+            .unwrap_or_else(|| Arc::new(OperatorStates::new()))
     }
 
-    /// Tear down nested runtimes. Idempotent. Keeps `worker_id` and `health`.
-    /// Prefer [`Self::close_async`] from actor handlers so transport Close is awaited
-    /// on the mailbox runtime instead of `block_on` from a sync path.
     pub(crate) fn identity(&self) -> WorkerIdentity {
         WorkerIdentity {
             worker_id: self.worker_id.clone(),
@@ -148,23 +118,16 @@ impl Worker {
         Ok(())
     }
 
-    // control functions
+    pub(crate) fn require_inner(&mut self) -> Result<&mut WorkerInner, String> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| "Worker is not configured yet".to_string())
+    }
 }
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        self.running.store(false, Ordering::SeqCst);
-        if let Some(handle) = self.fatal_watcher_handle.take() {
-            handle.abort();
-        }
-        if let Some(handle) = self.tasks_state_polling_handle.take() {
-            handle.abort();
-        }
-        self.request_source_processor.take();
-        self.task_actors.clear();
-        self.config = None;
-        self.backend_actor = None;
-        // Best-effort runtime dispose; async Close should have run via Reset/Close.
-        self.close_sync_dispose_runtimes();
+        // Prefer Reset/Close paths; Drop is best-effort if the actor is torn down abruptly.
+        let _ = self.inner.take();
     }
 }

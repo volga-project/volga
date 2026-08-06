@@ -44,8 +44,7 @@ impl Message<RunTasks> for Worker {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.require_attempt(msg.execution_attempt_id)?;
-        self.signal_tasks_run().await;
-        Ok(())
+        self.signal_tasks_run().await
     }
 }
 
@@ -58,8 +57,7 @@ impl Message<CloseTasks> for Worker {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.require_attempt(msg.execution_attempt_id)?;
-        self.signal_tasks_close().await;
-        Ok(())
+        self.signal_tasks_close().await
     }
 }
 

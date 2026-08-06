@@ -20,7 +20,6 @@ use crate::runtime::metrics::{
 };
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
-use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::OperatorStates;
 use crate::runtime::stream_task::StreamTask;
@@ -31,9 +30,10 @@ use crate::transport::transport_backend_actor::{
 };
 use crate::transport::{TransportBackend, TransportBackendTrait};
 
+use super::inner::WorkerInner;
 use super::Worker;
 
-impl Worker {
+impl WorkerInner {
     pub(crate) async fn poll_and_update_tasks_state(
         worker_id: String,
         pipeline_id: PipelineId,
@@ -42,7 +42,7 @@ impl Worker {
         graph: ExecutionGraph,
         operator_states: Arc<OperatorStates>,
         state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
-        state_update_sender: Option<mpsc::Sender<WorkerSnapshot>>
+        state_update_sender: Option<mpsc::Sender<WorkerSnapshot>>,
     ) {
         let mut task_futures = Vec::new();
         for (vertex_id, runtime) in &task_runtimes {
@@ -51,7 +51,10 @@ impl Worker {
 
             let task_ref = task_ref.clone();
             let fut = runtime.spawn(async move {
-                (vertex_id.clone(), task_ref.ask(StreamTaskMessage::GetState).await.unwrap())
+                (
+                    vertex_id.clone(),
+                    task_ref.ask(StreamTaskMessage::GetState).await.unwrap(),
+                )
             });
             task_futures.push(fut);
         }
@@ -82,38 +85,40 @@ impl Worker {
             .into_iter()
             .map(|(k, v)| (k.as_ref().to_string(), v))
             .collect();
-        let worker_metrics = WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
+        let worker_metrics =
+            WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
         worker_metrics.record();
         emit_poll_derived_gauges(&worker_metrics);
 
-        // Update shared WorkerState
         {
             let mut state_guard = state.lock().await;
             state_guard.task_statuses = task_statuses;
             state_guard.set_metrics(worker_metrics);
             state_guard.task_operator_metrics = task_operator_metrics;
             state_guard.task_metadata = task_metadata;
-            // state_guard.worker_metrics.set_tasks_metrics(task_metrics.clone());
             if state_update_sender.is_some() {
-                state_update_sender.unwrap().send(state_guard.clone()).await.unwrap();
+                state_update_sender
+                    .unwrap()
+                    .send(state_guard.clone())
+                    .await
+                    .unwrap();
             }
-        } // Release lock before sleep
+        }
     }
 
     pub async fn wait_for_all_tasks_status(
         state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
         running: Arc<AtomicBool>,
         target_status: StreamTaskStatus,
-        timeout_s: Option<u64>
+        timeout_s: Option<u64>,
     ) {
         println!("[WORKER] Waiting for all tasks to be {:?}", target_status);
-        
+
         let start_time = std::time::Instant::now();
-        
+
         while running.load(Ordering::SeqCst) {
-            // Check timeout if needed
-            if timeout_s.is_some() && start_time.elapsed() > Duration::from_secs(timeout_s.unwrap()) {
-                // Print statuses that are different from expected
+            if timeout_s.is_some() && start_time.elapsed() > Duration::from_secs(timeout_s.unwrap())
+            {
                 let state_guard = state.lock().await;
                 let mut different_statuses = Vec::new();
                 for (task_id, status) in &state_guard.task_statuses {
@@ -121,51 +126,56 @@ impl Worker {
                         different_statuses.push((task_id.clone(), *status));
                     }
                 }
-                
+
                 if !different_statuses.is_empty() {
-                    println!("[WORKER] Timeout waiting for {:?}. Tasks with different statuses:", target_status);
+                    println!(
+                        "[WORKER] Timeout waiting for {:?}. Tasks with different statuses:",
+                        target_status
+                    );
                     for (task_id, status) in different_statuses {
                         println!("  - {}: {:?}", task_id, status);
                     }
                 }
-                
-                panic!("Timeout waiting for all tasks to be {:?} after {:?}s", target_status, timeout_s.unwrap());
+
+                panic!(
+                    "Timeout waiting for all tasks to be {:?} after {:?}s",
+                    target_status,
+                    timeout_s.unwrap()
+                );
             }
-            
+
             let all_ready = {
                 let state_guard = state.lock().await;
                 state_guard.all_tasks_in(&[target_status])
             };
-            
+
             if all_ready {
                 println!("[WORKER] All tasks are {:?}", target_status);
                 break;
             }
-            
-            // TODO configure this
+
             sleep(Duration::from_millis(50)).await;
         }
     }
 
     pub async fn spawn_actors(&mut self) {
         println!("[WORKER] Spawning actors");
-        let config = self
-            .config
-            .as_ref()
-            .expect("Worker must be configured before use")
-            .clone();
+        let config = self.config.clone();
 
         let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
             TransportBackendType::Grpc => Box::new(TransportBackend::new(
-                self.health(),
+                self.health.clone(),
                 config.execution_attempt_id,
             )),
         };
-        let mut transport_client_configs = backend.init_channels(&config.graph, config.vertex_ids.clone());
+        let mut transport_client_configs =
+            backend.init_channels(&config.graph, config.vertex_ids.clone());
 
-        let backend_actor_task = self.transport_backend_runtime.as_ref().unwrap().spawn(async{
-            return spawn(TransportBackendActor::new(backend))
-        });
+        let backend_actor_task = self
+            .transport_backend_runtime
+            .as_ref()
+            .unwrap()
+            .spawn(async { spawn(TransportBackendActor::new(backend)) });
         let backend_actor_ref = backend_actor_task.await.unwrap();
         self.backend_actor = Some(backend_actor_ref);
 
@@ -175,9 +185,11 @@ impl Worker {
                 .graph
                 .get_vertex(vertex_id.as_ref())
                 .expect("Vertex should exist");
-            let task_runtime = self.task_runtimes.get(vertex_id).expect("Task runtime should exist");
+            let task_runtime = self
+                .task_runtimes
+                .get(vertex_id)
+                .expect("Task runtime should exist");
 
-            // Create runtime context for the vertex
             let mut runtime_context = RuntimeContext::new(
                 vertex_id.clone(),
                 vertex.task_index,
@@ -191,8 +203,14 @@ impl Worker {
                         "execution_attempt_id".to_string(),
                         Value::from(config.execution_attempt_id),
                     );
-                    cfg.insert("pipeline_id".to_string(), Value::String(config.pipeline_id.0.clone()));
-                    cfg.insert("worker_id".to_string(), Value::String(config.worker_id.clone()));
+                    cfg.insert(
+                        "pipeline_id".to_string(),
+                        Value::String(config.pipeline_id.0.clone()),
+                    );
+                    cfg.insert(
+                        "worker_id".to_string(),
+                        Value::String(config.worker_id.clone()),
+                    );
                     Some(cfg)
                 },
                 Some(self.operator_states.clone()),
@@ -206,10 +224,15 @@ impl Worker {
             );
             runtime_context.set_source_handles(self.source_handles.clone());
             if let Some(request_source_processor) = &self.request_source_processor {
-                runtime_context.set_request_sink_source_request_receiver(request_source_processor.get_shared_request_receiver().clone());
-                runtime_context.set_request_sink_source_response_sender(request_source_processor.get_response_sender());
+                runtime_context.set_request_sink_source_request_receiver(
+                    request_source_processor
+                        .get_shared_request_receiver()
+                        .clone(),
+                );
+                runtime_context.set_request_sink_source_response_sender(
+                    request_source_processor.get_response_sender(),
+                );
             }
-            // Create the task and its actor in the task's runtime
             let mut transport_cfg = transport_client_configs.remove(vertex_id).unwrap();
             transport_cfg.set_metrics_labels(MetricsLabels {
                 pipeline_id: config.pipeline_id.0.clone(),
@@ -221,7 +244,7 @@ impl Worker {
                 transport_cfg,
                 runtime_context,
                 config.graph.clone(),
-                self.health(),
+                self.health.clone(),
                 config
                     .task_restore_data
                     .get(&TaskKey {
@@ -231,9 +254,7 @@ impl Worker {
                     .cloned(),
             );
             let task_actor = StreamTaskActor::new(task);
-            let task_ref = task_runtime.spawn(async{
-                return spawn(task_actor)
-            });
+            let task_ref = task_runtime.spawn(async { spawn(task_actor) });
             let task_actor_ref = task_ref.await.unwrap();
             self.task_actors.insert(vertex_id.clone(), task_actor_ref);
         }
@@ -242,17 +263,12 @@ impl Worker {
     }
 
     pub(crate) async fn start_tasks(
-        &mut self, 
-        state_updates_sender: Option<mpsc::Sender<WorkerSnapshot>>
+        &mut self,
+        state_updates_sender: Option<mpsc::Sender<WorkerSnapshot>>,
     ) {
         println!("[WORKER] Starting tasks");
-        let config = self
-            .config
-            .as_ref()
-            .expect("Worker must be configured before use")
-            .clone();
+        let config = self.config.clone();
 
-        // Start all tasks
         let mut start_futures = Vec::new();
         for (vertex_id, task_runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
@@ -260,18 +276,20 @@ impl Worker {
 
             let task_ref = task_ref.clone();
             let fut = task_runtime.spawn(async move {
-                if let Err(e) = task_ref.ask(crate::runtime::stream_task_actor::StreamTaskMessage::Start).await {
+                if let Err(e) = task_ref
+                    .ask(crate::runtime::stream_task_actor::StreamTaskMessage::Start)
+                    .await
+                {
                     eprintln!("Error starting task {}: {}", vertex_id, e);
                 }
             });
             start_futures.push(fut);
         }
-        
+
         for f in start_futures {
             let _ = f.await.unwrap();
         }
 
-        // Start tasks state polling loop
         self.running.store(true, Ordering::SeqCst);
         let running = self.running.clone();
         let task_actors = self.task_actors.clone();
@@ -280,12 +298,14 @@ impl Worker {
         let operator_states = self.operator_states.clone();
         let worker_id = config.worker_id.clone();
         let pipeline_id = config.pipeline_id.clone();
-        
-        let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
+
+        let task_runtime_handles: HashMap<VertexId, Handle> = self
+            .task_runtimes
+            .iter()
             .map(|(k, v)| (k.clone(), v.handle().clone()))
             .collect();
-        
-        let polling_handle = tokio::spawn(async move { 
+
+        let polling_handle = tokio::spawn(async move {
             while running.load(Ordering::SeqCst) {
                 Self::poll_and_update_tasks_state(
                     worker_id.clone(),
@@ -296,10 +316,10 @@ impl Worker {
                     operator_states.clone(),
                     state.clone(),
                     state_updates_sender.clone(),
-                ).await;
+                )
+                .await;
                 sleep(Duration::from_millis(100)).await;
             }
-            // final poll
             Self::poll_and_update_tasks_state(
                 worker_id.clone(),
                 pipeline_id.clone(),
@@ -309,7 +329,8 @@ impl Worker {
                 operator_states.clone(),
                 state,
                 state_updates_sender.clone(),
-            ).await;
+            )
+            .await;
         });
 
         self.tasks_state_polling_handle = Some(polling_handle);
@@ -319,9 +340,6 @@ impl Worker {
         println!("[WORKER] Started all tasks");
     }
 
-    /// Watch the worker-scoped health bus. On the first fatal event, quiesce all tasks
-    /// (send Close) so a broken worker stops producing. The master observes the worker
-    /// as unhealthy (via heartbeat) and drives a recovery reset independently.
     pub(crate) fn spawn_fatal_watcher(&mut self) {
         let task_actors = self.task_actors.clone();
         let task_runtime_handles: HashMap<VertexId, Handle> = self
@@ -330,10 +348,9 @@ impl Worker {
             .map(|(k, v)| (k.clone(), v.handle().clone()))
             .collect();
 
-        let health = self.health();
+        let health = self.health.clone();
         let handle = tokio::spawn(async move {
             let mut fatal_events = health.subscribe();
-            // A fatal may already be present (e.g. reported just before subscribing).
             if health.last_fatal().is_none() {
                 loop {
                     match fatal_events.recv().await {
@@ -362,31 +379,38 @@ impl Worker {
 
     pub(crate) async fn start_transport_backend(&mut self) {
         let backend_actor_ref = self.backend_actor.as_ref().unwrap().clone();
-        self.transport_backend_runtime.as_ref().unwrap().spawn(async move {
-            backend_actor_ref.ask(TransportBackendActorMessage::Start).await.unwrap()
-        }).await.unwrap();
+        self.transport_backend_runtime
+            .as_ref()
+            .unwrap()
+            .spawn(async move {
+                backend_actor_ref
+                    .ask(TransportBackendActorMessage::Start)
+                    .await
+                    .unwrap()
+            })
+            .await
+            .unwrap();
     }
 
     pub(crate) async fn start_request_source_processor_if_needed(&mut self) {
-        let config = self
-            .config
-            .as_ref()
-            .expect("Worker must be configured before use")
-            .clone();
+        let config = self.config.clone();
         if let Some(request_runtime) = &self.request_source_processor_runtime {
-            let request_source_config = extract_request_source_config(&config.graph).expect("request_source_config should be set");
+            let request_source_config = extract_request_source_config(&config.graph)
+                .expect("request_source_config should be set");
             println!("[WORKER] Starting request source processor");
-            
+
             let mut processor = RequestSourceProcessor::new(request_source_config);
-            
-            // Start the processor in its dedicated runtime
-            let (processor, start_result) = request_runtime.spawn(async move {
-                let result = processor.start().await;
-                (processor, result)
-            }).await.unwrap();
-            
+
+            let (processor, start_result) = request_runtime
+                .spawn(async move {
+                    let result = processor.start().await;
+                    (processor, result)
+                })
+                .await
+                .unwrap();
+
             self.request_source_processor = Some(processor);
-            
+
             if let Err(e) = start_result {
                 panic!("Failed to start request source processor: {}", e);
             }
@@ -395,24 +419,28 @@ impl Worker {
 
     pub(crate) async fn stop_request_source_processor_if_needed(&mut self) {
         if let Some(mut processor) = self.request_source_processor.take() {
-            let request_runtime = self.request_source_processor_runtime.as_ref().expect("request_source_processor_runtime should be set");
+            let request_runtime = self
+                .request_source_processor_runtime
+                .as_ref()
+                .expect("request_source_processor_runtime should be set");
             println!("[WORKER] Stopping request source processor");
-            
-            let stop_result = request_runtime.spawn(async move {
-                processor.stop().await
-            }).await.unwrap();
-            
+
+            let stop_result = request_runtime
+                .spawn(async move { processor.stop().await })
+                .await
+                .unwrap();
+
             if let Err(e) = stop_result {
                 panic!("Failed to stop request source processor: {}", e);
             }
-            
+
             println!("[WORKER] Request source processor stopped");
         }
     }
 
     pub(crate) async fn send_signal_to_task_actors(&mut self, signal: StreamTaskMessage) {
         println!("[WORKER] Sending {:?} signal to all task actors", signal);
-        
+
         for (vertex_id, task_runtime) in &self.task_runtimes {
             let vertex_id = vertex_id.clone();
             let task_ref = self.task_actors.get(&vertex_id).unwrap().clone();
@@ -420,7 +448,10 @@ impl Worker {
             let signal_for_error = signal.clone();
             let fut = task_runtime.spawn(async move {
                 if let Err(e) = task_ref.ask(signal_clone).await {
-                    eprintln!("Error sending {:?} signal to task {}: {}", signal_for_error, vertex_id, e);
+                    eprintln!(
+                        "Error sending {:?} signal to task {}: {}",
+                        signal_for_error, vertex_id, e
+                    );
                 }
             });
             let _ = fut.await;
@@ -431,28 +462,35 @@ impl Worker {
 
     pub async fn get_state(&self) -> WorkerSnapshot {
         if self.running.load(Ordering::SeqCst) {
-            let config = self
-                .config
-                .as_ref()
-                .expect("Worker must be configured before use");
-            let task_runtime_handles: HashMap<VertexId, Handle> = self.task_runtimes.iter()
+            let task_runtime_handles: HashMap<VertexId, Handle> = self
+                .task_runtimes
+                .iter()
                 .map(|(k, v)| (k.clone(), v.handle().clone()))
                 .collect();
             let task_actors = self.task_actors.clone();
-            let graph = config.graph.clone();
+            let graph = self.config.graph.clone();
             let state = self.worker_state.clone();
             Self::poll_and_update_tasks_state(
-                config.worker_id.clone(),
-                config.pipeline_id.clone(),
+                self.config.worker_id.clone(),
+                self.config.pipeline_id.clone(),
                 task_runtime_handles,
                 task_actors,
                 graph,
                 self.operator_states.clone(),
                 state,
                 None,
-            ).await;
+            )
+            .await;
         }
         self.worker_state.lock().await.clone()
     }
+}
 
+impl Worker {
+    pub async fn get_state(&self) -> WorkerSnapshot {
+        match &self.inner {
+            Some(inner) => inner.get_state().await,
+            None => self.last_snapshot.clone(),
+        }
+    }
 }
