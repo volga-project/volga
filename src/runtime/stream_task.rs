@@ -852,12 +852,29 @@ impl StreamTask {
     }
 
     /// Signal close and join the run loop. Idempotent.
+    ///
+    /// The run loop only observes the close watch after leaving `Running`, so a mid-run
+    /// close must force `Finished` first. Join is bounded; on timeout the task is aborted.
     pub async fn close(&mut self) {
         if let Some(sender) = self.close_signal_sender.as_ref() {
             let _ = sender.send(true);
         }
+        let status = self.status.load(Ordering::SeqCst);
+        if status == StreamTaskStatus::Created as u8
+            || status == StreamTaskStatus::Opened as u8
+            || status == StreamTaskStatus::Running as u8
+        {
+            self.status
+                .store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+        }
         if let Some(handle) = self.run_loop_handle.take() {
-            let _ = handle.await;
+            let abort = handle.abort_handle();
+            if tokio::time::timeout(Duration::from_secs(10), handle)
+                .await
+                .is_err()
+            {
+                abort.abort();
+            }
         }
     }
 
@@ -890,9 +907,14 @@ impl StreamTask {
     }
 
     async fn wait_for_signal(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>, skip_on_finished: bool) {
+        // Already signaled before we started waiting (e.g. forced mid-run close).
+        if *receiver.borrow() {
+            return;
+        }
+
         let timeout = Duration::from_millis(50000);
         let start_time = SystemTime::now();
-        
+
         loop {
             if skip_on_finished {
                 let current_status = status.load(Ordering::SeqCst);
@@ -907,14 +929,8 @@ impl StreamTask {
             }
 
             match tokio::time::timeout(Duration::from_millis(50), receiver.changed()).await {
-                Ok(_) => {
-                    // Signal received
-                    return;
-                }
-                Err(_) => {
-                    // Timeout, continue loop to check status
-                    continue;
-                }
+                Ok(_) => return,
+                Err(_) => continue,
             }
         }
     }
