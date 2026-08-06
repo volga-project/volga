@@ -893,11 +893,6 @@ impl StreamTask {
     }
 
     async fn wait_for_signal(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>, skip_on_finished: bool) {
-        // Already signaled before we started waiting (e.g. forced mid-run close).
-        if *receiver.borrow() {
-            return;
-        }
-
         let timeout = Duration::from_millis(50000);
         let start_time = SystemTime::now();
 
