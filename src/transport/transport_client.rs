@@ -196,7 +196,7 @@ impl DataWriter {
     ) -> Self {
         let batching_config = BatcherConfig::default();
         // let batcher = Batcher::new(batching_config.clone(), senders.clone());
-        
+
         Self {
             vertex_id,
             senders,
@@ -316,7 +316,11 @@ pub struct TransportClient {
 }
 
 impl TransportClient {
-    pub fn new(vertex_id: VertexId, config: TransportClientConfig, worker_health: Arc<WorkerHealth>) -> Self {
+    pub fn new(
+        vertex_id: VertexId,
+        config: TransportClientConfig,
+        worker_health: Arc<WorkerHealth>,
+    ) -> Self {
         let mut reader: Option<DataReader> = None;
         let mut writer: Option<DataWriter> = None;
 

@@ -6,6 +6,7 @@ use volga::orchestrator::docker::DockerWorkerOrchestrator;
 use volga::orchestrator::kube::KubeWorkerOrchestrator;
 use volga::orchestrator::orchestrator::WorkerOrchestrator;
 use volga::runtime::health::WorkerFatalReason;
+use volga::runtime::worker::ReportFatal;
 use volga::runtime::worker_server::WorkerServer;
 
 async fn shutdown_signal() {
@@ -56,7 +57,7 @@ async fn main() -> Result<()> {
         .unwrap_or(false);
     let (worker_id, orchestrator) = build_worker_bootstrap().await?;
     let mut worker_server = WorkerServer::new(worker_id.clone(), orchestrator);
-    let worker_health = worker_server.worker_health().await;
+    let worker = worker_server.worker_ref();
     std::panic::set_hook(Box::new(move |panic_info| {
         let panic_msg = panic_info.to_string();
         let reason = if panic_msg.contains("[GRPC_BACKEND]") {
@@ -64,7 +65,13 @@ async fn main() -> Result<()> {
         } else {
             WorkerFatalReason::Panic
         };
-        worker_health.report_fatal(reason, panic_msg);
+        // Sync enqueue; no-op if Inner is gone / mailbox full.
+        let _ = worker
+            .tell(ReportFatal {
+                reason,
+                message: panic_msg,
+            })
+            .try_send();
     }));
     worker_server.start(&bind_addr).await?;
     worker_server.register_with_master().await?;

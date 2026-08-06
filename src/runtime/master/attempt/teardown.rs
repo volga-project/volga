@@ -66,7 +66,7 @@ impl ExecutionAttempt {
     }
 
     pub(in crate::runtime::master) async fn finish(&mut self) {
-        self.state.clear_workers_execution_attempt().await;
+        // Close first (while workers still bound to this attempt).
         let close_tasks: Vec<_> = self
             .sessions
             .iter()
@@ -90,6 +90,8 @@ impl ExecutionAttempt {
                 workers
             );
         }
+
+        self.state.clear_workers_execution_attempt().await;
 
         let shutdown_workers: Vec<_> = self
             .sessions

@@ -505,11 +505,8 @@ impl StreamTask {
         let run_loop = async move {
             let mut operator = create_operator(operator_config);
             
-            let mut transport_client = TransportClient::new(
-                vertex_id.clone(),
-                transport_client_config,
-                run_loop_health,
-            );
+            let mut transport_client =
+                TransportClient::new(vertex_id.clone(), transport_client_config, run_loop_health);
             
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
@@ -812,14 +809,16 @@ impl StreamTask {
                                 status.clone(),
                             )
                             .await;
-                            status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
-                            break;
                         } else {
-                            panic!(
-                                "StreamTask {}: upstream ended without terminal watermark",
+                            // Peer/transport teardown can drop the input without a max watermark.
+                            println!(
+                                "{:?} StreamTask {}: upstream ended without terminal watermark; finishing",
+                                timestamp(),
                                 vertex_id.as_ref()
                             );
                         }
+                        status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
+                        break;
                     }
                     OperatorPollResult::Continue => { /* no output */ }
                 }
@@ -850,7 +849,7 @@ impl StreamTask {
             }
             result
         }));
-        
+
         self.run_loop_handle = Some(run_loop_handle);
     }
 
@@ -871,9 +870,21 @@ impl StreamTask {
         let _ = run_signal_sender.send(true);
     }
 
-    pub fn signal_to_close(&mut self) {
-        let close_signal_sender = self.close_signal_sender.as_ref().unwrap();
-        let _ = close_signal_sender.send(true);
+    /// Set the close watch. If still mid-run, abort the run loop (watch is only
+    /// observed after Finished). After Finished, signal alone runs operator.close.
+    pub fn close(&mut self) {
+        if let Some(close_signal_sender) = self.close_signal_sender.as_ref() {
+            let _ = close_signal_sender.send(true);
+        }
+        let status = self.status.load(Ordering::SeqCst);
+        if status == StreamTaskStatus::Created as u8
+            || status == StreamTaskStatus::Opened as u8
+            || status == StreamTaskStatus::Running as u8
+        {
+            if let Some(handle) = self.run_loop_handle.take() {
+                handle.abort();
+            }
+        }
     }
 
     pub fn signal_trigger_checkpoint(&mut self, checkpoint_id: u64) {
@@ -884,7 +895,7 @@ impl StreamTask {
     async fn wait_for_signal(mut receiver: watch::Receiver<bool>, status: Arc<AtomicU8>, skip_on_finished: bool) {
         let timeout = Duration::from_millis(50000);
         let start_time = SystemTime::now();
-        
+
         loop {
             if skip_on_finished {
                 let current_status = status.load(Ordering::SeqCst);
@@ -899,14 +910,8 @@ impl StreamTask {
             }
 
             match tokio::time::timeout(Duration::from_millis(50), receiver.changed()).await {
-                Ok(_) => {
-                    // Signal received
-                    return;
-                }
-                Err(_) => {
-                    // Timeout, continue loop to check status
-                    continue;
-                }
+                Ok(_) => return,
+                Err(_) => continue,
             }
         }
     }

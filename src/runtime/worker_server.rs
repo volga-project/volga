@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
 use std::sync::Arc;
 
+use kameo::actor::ActorRef;
 use tokio::sync::oneshot;
 use tokio::sync::Mutex;
 use tokio_stream::wrappers::ReceiverStream;
@@ -21,7 +22,10 @@ use crate::runtime::consts::{
 };
 use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
-use crate::runtime::worker::{Worker, WorkerConfig};
+use crate::runtime::worker::{
+    Close, CloseTasks, Configure, GetIdentity, GetState, ReportFatal, Reset, RunTasks, Shutdown,
+    Start, StopSources, TriggerBarrier, Worker, WorkerConfig,
+};
 use crate::runtime::worker_config_utils::{
     build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type,
     WorkerInitPayload,
@@ -40,9 +44,9 @@ use worker_service::{
     WorkerHeartbeatMessage,
 };
 
-/// Server implementation of the WorkerService
+/// Server implementation of the WorkerService — thin adapter over [`Worker`] actor.
 pub struct WorkerServiceImpl {
-    worker: Arc<Mutex<Worker>>,
+    worker: ActorRef<Worker>,
     orchestrator: Arc<dyn WorkerOrchestrator>,
     close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
@@ -53,27 +57,20 @@ impl WorkerServiceImpl {
         orchestrator: Arc<dyn WorkerOrchestrator>,
         close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     ) -> Self {
-        let worker = Worker::new(worker_id);
         Self {
-            worker: Arc::new(Mutex::new(worker)),
+            worker: Worker::spawn(worker_id),
             orchestrator,
             close_worker_notify,
         }
     }
 
-    async fn validate_execution_attempt(
-        &self,
-        execution_attempt_id: u64,
-    ) -> Result<(), Status> {
-        let worker_guard = self.worker.lock().await;
-        let current_execution_attempt_id = worker_guard.execution_attempt_id();
-        if execution_attempt_id != current_execution_attempt_id {
-            return Err(Status::failed_precondition(format!(
-                "stale worker command execution attempt: got {}, current {}",
-                execution_attempt_id, current_execution_attempt_id
-            )));
+    fn map_handler_err<M: std::fmt::Debug>(
+        error: kameo::error::SendError<M, String>,
+    ) -> Status {
+        match error {
+            kameo::error::SendError::HandlerError(msg) => Status::failed_precondition(msg),
+            other => Status::internal(format!("worker ask failed: {other:?}")),
         }
-        Ok(())
     }
 }
 
@@ -81,6 +78,7 @@ impl WorkerServiceImpl {
 impl WorkerService for WorkerServiceImpl {
     type StreamHeartbeatStream =
         Pin<Box<dyn Stream<Item = Result<WorkerHeartbeatMessage, Status>> + Send + 'static>>;
+
     async fn configure_worker(
         &self,
         request: Request<ConfigureWorkerRequest>,
@@ -144,7 +142,8 @@ impl WorkerService for WorkerServiceImpl {
             )));
         }
 
-        let transport_backend_type = resolve_transport_backend_type(&execution_graph, &payload.vertex_ids);
+        let transport_backend_type =
+            resolve_transport_backend_type(&execution_graph, &payload.vertex_ids);
         let num_threads_per_task = resolve_num_threads_per_task(&spec);
 
         let mut worker_config = WorkerConfig::new(
@@ -164,15 +163,13 @@ impl WorkerService for WorkerServiceImpl {
         worker_config.operator_state_backend = spec.state.operator_backend.clone();
         worker_config.request_store = spec.state.request_store.clone();
 
-        let mut worker_guard = self.worker.lock().await;
-        if worker_guard.is_running() {
-            return Err(Status::failed_precondition(
-                "Worker is already running; reset before reconfigure",
-            ));
-        }
-        let worker_id = worker_guard.worker_id();
-        *worker_guard = Worker::new(worker_id);
-        worker_guard.configure(worker_config);
+        self.worker
+            .ask(Configure(worker_config))
+            .await
+            .map_err(|e| match e {
+                kameo::error::SendError::HandlerError(msg) => Status::failed_precondition(msg),
+                other => Status::internal(format!("configure ask failed: {other:?}")),
+            })?;
 
         Ok(Response::new(ConfigureWorkerResponse {
             success: true,
@@ -185,19 +182,18 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<GetWorkerStateRequest>,
     ) -> Result<Response<GetWorkerStateResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let worker_guard = self.worker.lock().await;
-        if !worker_guard.is_configured() {
-            return Err(Status::failed_precondition(
-                "worker is not configured for this attempt",
-            ));
-        }
-        let state = worker_guard.get_state().await;
+        let attempt = request.get_ref().execution_attempt_id;
+        let state = self
+            .worker
+            .ask(GetState {
+                execution_attempt_id: attempt,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
         let state_bytes = bincode::serialize(&state).map_err(|e| {
             Status::internal(format!("Failed to serialize worker state: {}", e))
         })?;
-        
+
         Ok(Response::new(GetWorkerStateResponse {
             worker_state_bytes: state_bytes,
         }))
@@ -207,13 +203,12 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<StartWorkerRequest>,
     ) -> Result<Response<StartWorkerResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let mut worker_guard = self.worker.lock().await;
-        if !worker_guard.is_configured() {
-            return Err(Status::failed_precondition("Worker is not configured yet"));
-        }
-        worker_guard.start().await;
+        self.worker
+            .ask(Start {
+                execution_attempt_id: request.get_ref().execution_attempt_id,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
         println!("[WORKER_SERVER] Worker started successfully");
         Ok(Response::new(StartWorkerResponse {
             success: true,
@@ -225,10 +220,12 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<RunWorkerTasksRequest>,
     ) -> Result<Response<RunWorkerTasksResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let mut worker_guard = self.worker.lock().await;
-        worker_guard.signal_tasks_run().await;
+        self.worker
+            .ask(RunTasks {
+                execution_attempt_id: request.get_ref().execution_attempt_id,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
         println!("[WORKER_SERVER] Tasks started successfully");
         Ok(Response::new(RunWorkerTasksResponse {
             success: true,
@@ -241,14 +238,11 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<ResetWorkerRequest>,
     ) -> Result<Response<ResetWorkerResponse>, Status> {
         let _ = request;
-        // Reuse probe: drop current Worker (Drop → shutdown) and leave an empty shell.
-        let mut worker_guard = self.worker.lock().await;
-        let worker_id = worker_guard.worker_id();
-        *worker_guard = Worker::new(worker_id);
-        drop(worker_guard);
-
+        self.worker
+            .ask(Reset)
+            .await
+            .map_err(|e| Status::internal(format!("reset ask failed: {e:?}")))?;
         println!("[WORKER_SERVER] Worker reset successfully");
-
         Ok(Response::new(ResetWorkerResponse {
             success: true,
             error_message: String::new(),
@@ -259,11 +253,12 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<ShutdownWorkerRequest>,
     ) -> Result<Response<ShutdownWorkerResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let mut worker_guard = self.worker.lock().await;
-        worker_guard.close();
-        drop(worker_guard);
+        self.worker
+            .ask(Shutdown {
+                execution_attempt_id: request.get_ref().execution_attempt_id,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
 
         let mut notify_guard = self.close_worker_notify.lock().await;
         if let Some(tx) = notify_guard.take() {
@@ -281,10 +276,12 @@ impl WorkerService for WorkerServiceImpl {
         &self,
         request: Request<CloseWorkerTasksRequest>,
     ) -> Result<Response<CloseWorkerTasksResponse>, Status> {
-        self.validate_execution_attempt(request.get_ref().execution_attempt_id)
-            .await?;
-        let mut worker_guard = self.worker.lock().await;
-        worker_guard.signal_tasks_close().await;
+        self.worker
+            .ask(CloseTasks {
+                execution_attempt_id: request.get_ref().execution_attempt_id,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
         println!("[WORKER_SERVER] Tasks closed successfully");
         Ok(Response::new(CloseWorkerTasksResponse {
             success: true,
@@ -297,24 +294,14 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<TriggerCheckpointBarrierRequest>,
     ) -> Result<Response<TriggerCheckpointBarrierResponse>, Status> {
         let req = request.into_inner();
-        // Attempt + configured under one lock so reset/close cannot race past validation.
-        let mut worker_guard = self.worker.lock().await;
-        let current_execution_attempt_id = worker_guard.execution_attempt_id();
-        if req.execution_attempt_id != current_execution_attempt_id {
-            return Err(Status::failed_precondition(format!(
-                "stale worker command execution attempt: got {}, current {}",
-                req.execution_attempt_id, current_execution_attempt_id
-            )));
-        }
-        if !worker_guard.is_configured() {
-            return Ok(Response::new(TriggerCheckpointBarrierResponse {
-                success: false,
-                error_message: "worker is not configured for this attempt".to_string(),
-            }));
-        }
-        let triggered = worker_guard
-            .trigger_checkpoint_barrier(req.checkpoint_id)
-            .await;
+        let triggered = self
+            .worker
+            .ask(TriggerBarrier {
+                checkpoint_id: req.checkpoint_id,
+                execution_attempt_id: req.execution_attempt_id,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
         Ok(Response::new(TriggerCheckpointBarrierResponse {
             success: triggered,
             error_message: if triggered {
@@ -330,21 +317,13 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<StopSourcesRequest>,
     ) -> Result<Response<StopSourcesResponse>, Status> {
         let req = request.into_inner();
-        let mut worker_guard = self.worker.lock().await;
-        let current_execution_attempt_id = worker_guard.execution_attempt_id();
-        if req.execution_attempt_id != current_execution_attempt_id {
-            return Err(Status::failed_precondition(format!(
-                "stale worker command execution attempt: got {}, current {}",
-                req.execution_attempt_id, current_execution_attempt_id
-            )));
-        }
-        if !worker_guard.is_configured() {
-            return Ok(Response::new(StopSourcesResponse {
-                success: false,
-                error_message: "worker is not configured for this attempt".to_string(),
-            }));
-        }
-        let stopped = worker_guard.stop_sources();
+        let stopped = self
+            .worker
+            .ask(StopSources {
+                execution_attempt_id: req.execution_attempt_id,
+            })
+            .await
+            .map_err(Self::map_handler_err)?;
         Ok(Response::new(StopSourcesResponse {
             success: stopped,
             error_message: if stopped {
@@ -360,11 +339,6 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<tonic::Streaming<MasterHeartbeatMessage>>,
     ) -> Result<Response<Self::StreamHeartbeatStream>, Status> {
         let mut inbound = request.into_inner();
-        let health = {
-            let worker_guard = self.worker.lock().await;
-            worker_guard.health()
-        };
-        let mut fatal_events = health.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<WorkerHeartbeatMessage, Status>>(32);
         let worker = self.worker.clone();
 
@@ -378,92 +352,20 @@ impl WorkerService for WorkerServiceImpl {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let (worker_id, pipeline_id, execution_attempt_id, configured) = {
-                            let worker_guard = worker.lock().await;
-                            (
-                                worker_guard.worker_id(),
-                                worker_guard.pipeline_id().unwrap_or_default(),
-                                worker_guard.execution_attempt_id(),
-                                worker_guard.is_configured(),
-                            )
+                        let Ok(identity) = worker.ask(GetIdentity).await else {
+                            break;
                         };
-                        let fatal = health.last_fatal();
-                        let (healthy, fatal_reason, fatal_message) = match fatal {
-                            Some(f) => (
-                                false,
-                                match f.reason {
-                                    WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
-                                    WorkerFatalReason::TransportDisconnect => WorkerFatalReasonProto::TransportDisconnect as i32,
-                                    WorkerFatalReason::TaskFailure => WorkerFatalReasonProto::TaskFailure as i32,
-                                },
-                                f.message,
-                            ),
-                            None => (
-                                true,
-                                WorkerFatalReasonProto::Unspecified as i32,
-                                String::new(),
-                            ),
-                        };
-                        if tx.send(Ok(WorkerHeartbeatMessage {
-                            worker_id,
-                            pipeline_id,
-                            sent_at_ms: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64,
-                            healthy,
-                            fatal_reason,
-                            fatal_message,
-                            execution_attempt_id,
-                            configured,
-                        })).await.is_err() {
+                        if tx.send(Ok(heartbeat_message(&identity))).await.is_err() {
                             break;
                         }
-
-                        // If master stops talking for too long, stop this stream loop.
-                        // Worker shutdown-on-master-loss policy will be added separately.
                         if last_master_msg_at.elapsed() > master_silence {
                             break;
                         }
                     }
-                    event = fatal_events.recv() => {
-                        if let Ok(fatal) = event {
-                            let (worker_id, pipeline_id, execution_attempt_id, configured) = {
-                                let worker_guard = worker.lock().await;
-                                (
-                                    worker_guard.worker_id(),
-                                    worker_guard.pipeline_id().unwrap_or_default(),
-                                    worker_guard.execution_attempt_id(),
-                                    worker_guard.is_configured(),
-                                )
-                            };
-                            let fatal_reason = match fatal.reason {
-                                WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
-                                WorkerFatalReason::TransportDisconnect => WorkerFatalReasonProto::TransportDisconnect as i32,
-                                WorkerFatalReason::TaskFailure => WorkerFatalReasonProto::TaskFailure as i32,
-                            };
-                            let _ = tx.send(Ok(WorkerHeartbeatMessage {
-                                worker_id,
-                                pipeline_id,
-                                sent_at_ms: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis() as u64,
-                                healthy: false,
-                                fatal_reason,
-                                fatal_message: fatal.message,
-                                execution_attempt_id,
-                                configured,
-                            })).await;
-                        }
-                    }
                     msg = inbound.message() => {
                         match msg {
-                            Ok(Some(_)) => {
-                                last_master_msg_at = std::time::Instant::now();
-                            }
-                            Ok(None) => break,
-                            Err(_) => break,
+                            Ok(Some(_)) => last_master_msg_at = std::time::Instant::now(),
+                            Ok(None) | Err(_) => break,
                         }
                     }
                 }
@@ -471,6 +373,42 @@ impl WorkerService for WorkerServiceImpl {
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+}
+
+fn heartbeat_message(
+    identity: &crate::runtime::worker::WorkerIdentity,
+) -> WorkerHeartbeatMessage {
+    let (healthy, fatal_reason, fatal_message) = match &identity.last_fatal {
+        Some(f) => (
+            false,
+            match f.reason {
+                WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
+                WorkerFatalReason::TransportDisconnect => {
+                    WorkerFatalReasonProto::TransportDisconnect as i32
+                }
+                WorkerFatalReason::TaskFailure => WorkerFatalReasonProto::TaskFailure as i32,
+            },
+            f.message.clone(),
+        ),
+        None => (
+            true,
+            WorkerFatalReasonProto::Unspecified as i32,
+            String::new(),
+        ),
+    };
+    WorkerHeartbeatMessage {
+        worker_id: identity.worker_id.clone(),
+        pipeline_id: identity.pipeline_id.clone().unwrap_or_default(),
+        sent_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        healthy,
+        fatal_reason,
+        fatal_message,
+        execution_attempt_id: identity.execution_attempt_id,
+        configured: identity.configured,
     }
 }
 
@@ -538,7 +476,6 @@ impl WorkerServer {
                 ..Default::default()
             };
 
-            // Single dial attempt per outer loop iteration (connect_timeout from cfg).
             let mut dial = cfg.clone();
             dial.max_attempts = 1;
             match master_client(&master_addr, &dial).await {
@@ -613,16 +550,13 @@ impl WorkerServer {
         }
     }
 
-    pub async fn worker_health(&self) -> Arc<crate::runtime::health::WorkerHealth> {
-        self.service.worker.lock().await.health()
+    pub fn worker_ref(&self) -> ActorRef<Worker> {
+        self.service.worker.clone()
     }
 
     /// Stop the gRPC server
     pub async fn stop(&mut self) {
-        {
-            let mut worker_guard = self.service.worker.lock().await;
-            worker_guard.close();
-        }
+        let _ = self.service.worker.ask(Close).await;
         if let Some(mut serve) = self.serve.take() {
             serve.stop().await;
         }
@@ -646,16 +580,19 @@ impl WorkerServer {
     #[cfg(test)]
     pub async fn kill_for_testing(&mut self, inject_panic: bool) {
         if inject_panic {
-            let worker = self.service.worker.lock().await;
-            worker
-                .health()
-                .report_fatal(WorkerFatalReason::Panic, "local test worker crash");
+            let _ = self
+                .service
+                .worker
+                .ask(ReportFatal {
+                    reason: WorkerFatalReason::Panic,
+                    message: "local test worker crash".to_string(),
+                })
+                .await;
         }
         if let Some(mut serve) = self.serve.take() {
             serve.abort();
         }
-        let mut worker = self.service.worker.lock().await;
-        worker.close();
+        let _ = self.service.worker.ask(Close).await;
     }
 }
 
@@ -675,4 +612,4 @@ impl Clone for WorkerServiceImpl {
             close_worker_notify: self.close_worker_notify.clone(),
         }
     }
-} 
+}

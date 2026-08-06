@@ -34,7 +34,7 @@ impl kameo::message::Message<StreamTaskMessage> for StreamTaskActor {
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::Close => {
-                self.task.signal_to_close();
+                self.task.close();
                 Ok(self.task.get_state().await)
             }
             StreamTaskMessage::GetState => {

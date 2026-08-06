@@ -1,4 +1,5 @@
 use std::sync::Mutex;
+
 use tokio::sync::broadcast;
 
 #[derive(Clone, Debug)]
@@ -14,6 +15,7 @@ pub struct WorkerFatalEvent {
     pub message: String,
 }
 
+/// Per-incarnation fatal bus. Owned by [`crate::runtime::worker::WorkerInner`].
 #[derive(Debug)]
 pub struct WorkerHealth {
     tx: broadcast::Sender<WorkerFatalEvent>,
@@ -43,20 +45,10 @@ impl WorkerHealth {
                 *guard = Some(event.clone());
             }
         }
-
         let _ = self.tx.send(event);
     }
 
     pub fn last_fatal(&self) -> Option<WorkerFatalEvent> {
         self.last_fatal.lock().ok().and_then(|g| g.clone())
-    }
-
-    /// Clear the sticky "last fatal". Must be called when a worker is
-    /// (re)configured for a new execution attempt so a stale fatal from a previous
-    /// incarnation does not immediately mark the fresh worker as unhealthy.
-    pub fn clear(&self) {
-        if let Ok(mut guard) = self.last_fatal.lock() {
-            *guard = None;
-        }
     }
 }
