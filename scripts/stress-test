@@ -145,7 +145,9 @@ run_shard() {
 }
 
 # Job control: each background shard gets its own process group (pgid == pid) so
-# CI "Cancel workflow" (SIGTERM) and local Ctrl+C can kill nextest/cargo trees.
+# Cancel/Ctrl+C can kill nextest/cargo trees. Background jobs ignore SIGINT under
+# monitor mode — the parent trap must receive the signal (CI steps should `exec`
+# this script) and forward TERM/KILL.
 set -m
 
 pids=()
@@ -159,15 +161,17 @@ kill_shards() {
 }
 
 on_cancel() {
+  # Prevent re-entry while we tear down.
+  trap - INT TERM HUP
   echo "Stress cancelled; stopping shards..." >&2
   touch "$FAILURE_MARKER"
   kill_shards TERM
-  sleep 1
+  sleep 0.2
   kill_shards KILL
   echo "Stress logs: $LOG_DIR" >&2
   exit 130
 }
-trap on_cancel INT TERM
+trap on_cancel INT TERM HUP
 
 for ((shard = 1; shard <= SHARDS; shard++)); do
   run_shard "$shard" &
@@ -181,14 +185,14 @@ for pid in "${pids[@]}"; do
     touch "$FAILURE_MARKER"
     # First shard failure: stop siblings instead of waiting for their remaining runs.
     kill_shards TERM
-    sleep 1
+    sleep 0.2
     kill_shards KILL
     wait 2>/dev/null || true
     break
   fi
 done
 
-trap - INT TERM
+trap - INT TERM HUP
 
 echo "Stress logs: $LOG_DIR"
 if [[ "$failed" -ne 0 ]]; then
