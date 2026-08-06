@@ -43,8 +43,8 @@ pub(super) struct RequestFinish;
 
 struct RunFinished(Result<AttemptOutcome, String>);
 
-/// Attempt run loop is armed; safe to `Drain` if intent is `Finish`.
-pub(super) struct AttemptRunArmed;
+/// Attempt run loop has started; safe to `Drain` if intent is `Finish`.
+pub(super) struct RunStarted;
 
 impl MasterLifecycle {
     pub(super) fn spawn(state: Arc<MasterState>) -> ActorRef<Self> {
@@ -123,7 +123,7 @@ impl MasterLifecycle {
                     };
                     let _ = lifecycle.tell(RunFinished(result)).await;
                 });
-                // Drain runs on AttemptRunArmed (after Run arms the poll loop).
+                // Drain runs on RunStarted (after Run starts the poll loop).
                 Ok(())
             }
             Err(error) => match schedule_ask_error(error) {
@@ -300,12 +300,12 @@ impl Message<RunFinished> for MasterLifecycle {
     }
 }
 
-impl Message<AttemptRunArmed> for MasterLifecycle {
+impl Message<RunStarted> for MasterLifecycle {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        _msg: AttemptRunArmed,
+        _msg: RunStarted,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.intent == PipelineIntent::Finish {

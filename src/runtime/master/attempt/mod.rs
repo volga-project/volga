@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::common::failure::FailureEvent;
 use crate::orchestrator::orchestrator::WorkerHealthWatchHandle;
-use super::lifecycle::{AttemptRunArmed, MasterLifecycle};
+use super::lifecycle::{RunStarted, MasterLifecycle};
 use super::state::{MasterState, PipelineContext};
 
 mod execute;
@@ -179,7 +179,7 @@ impl Message<Run> for ExecutionAttempt {
             failure_events: None,
             poll_in_flight: false,
         });
-        let _ = self.lifecycle.tell(AttemptRunArmed).await;
+        let _ = self.lifecycle.tell(RunStarted).await;
         delegated
     }
 }
