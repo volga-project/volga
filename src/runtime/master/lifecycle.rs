@@ -41,10 +41,10 @@ pub(super) struct Start(pub PipelineContext);
 /// Cooperative pipeline finish: set intent and drain when the attempt allows it.
 pub(super) struct RequestFinish;
 
-struct RunFinished(Result<AttemptOutcome, String>);
+struct RunComplete(Result<AttemptOutcome, String>);
 
 /// Attempt run loop has started; safe to `Drain` if intent is `Finish`.
-pub(super) struct RunStarted;
+pub(super) struct RunLoopStarted;
 
 impl MasterLifecycle {
     pub(super) fn spawn(state: Arc<MasterState>) -> ActorRef<Self> {
@@ -121,9 +121,9 @@ impl MasterLifecycle {
                         Ok(outcome) => Ok(outcome),
                         Err(error) => Err(error.to_string()),
                     };
-                    let _ = lifecycle.tell(RunFinished(result)).await;
+                    let _ = lifecycle.tell(RunComplete(result)).await;
                 });
-                // Drain runs on RunStarted (after Run starts the poll loop).
+                // Drain runs on RunLoopStarted (after Run sets up the poll loop).
                 Ok(())
             }
             Err(error) => match schedule_ask_error(error) {
@@ -145,7 +145,7 @@ impl MasterLifecycle {
                     );
                     // Bounce through the mailbox to avoid async recursion with handle_outcome.
                     let _ = self_ref
-                        .tell(RunFinished(Ok(AttemptOutcome::Recover(replace))))
+                        .tell(RunComplete(Ok(AttemptOutcome::Recover(replace))))
                         .await;
                     Ok(())
                 }
@@ -277,12 +277,12 @@ impl Message<RequestFinish> for MasterLifecycle {
     }
 }
 
-impl Message<RunFinished> for MasterLifecycle {
+impl Message<RunComplete> for MasterLifecycle {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        msg: RunFinished,
+        msg: RunComplete,
         ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.execute_reply.is_none() {
@@ -300,12 +300,12 @@ impl Message<RunFinished> for MasterLifecycle {
     }
 }
 
-impl Message<RunStarted> for MasterLifecycle {
+impl Message<RunLoopStarted> for MasterLifecycle {
     type Reply = ();
 
     async fn handle(
         &mut self,
-        _msg: RunStarted,
+        _msg: RunLoopStarted,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.intent == PipelineIntent::Finish {
