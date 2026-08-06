@@ -570,7 +570,7 @@ job-level “please finish.”
 1. **Job (`MasterLifecycle` actor)** — intent `Run` | `Finish`.  
    `StopSources` → `RequestFinish` (always accepts once execute started).  
    Drain is issued only when the current attempt is stably runnable; after
-   recover, `AttemptRunArmed` re-tries drain if intent is still `Finish`.
+   recover, `RunStarted` re-tries drain if intent is still `Finish`.
 2. **Attempt** — exclusive phases  
    `Running` | `Checkpointing` | `FailureAggregation` | `Draining` → one
    terminal (`Recover` or `Finished`).  
@@ -582,7 +582,7 @@ job-level “please finish.”
 Master gRPC StopSources
   → lifecycle.ask(RequestFinish)     // intent = Finish
   → try Drain when attempt Running
-  → if FailureAggregation / recovering: wait; drain on next AttemptRunArmed
+  → if FailureAggregation / recovering: wait; drain on next RunStarted
 
 ExecutionAttempt
   Running ──fatal──► FailureAggregation ──window──► Recover
@@ -623,7 +623,7 @@ sequenceDiagram
     Att-->>Life: ok
   else FailureAggregation / no run yet
     Note over Life: defer drain
-    Att-->>Life: AttemptRunArmed
+    Att-->>Life: RunStarted
     Life->>Att: Drain
   end
   Att-->>Life: Run outcome Finished
