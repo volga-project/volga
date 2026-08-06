@@ -29,8 +29,10 @@ impl Worker {
         self.health
             .set_execution_attempt(config.execution_attempt_id);
         self.source_handles.clear();
-        let mut config = config;
-        config.worker_id = self.worker_id.clone();
+        assert_eq!(
+            config.worker_id, self.worker_id,
+            "configure worker_id must match process worker_id"
+        );
         println!(
             "[WORKER] Configuring worker_id={} pipeline_id={} vertices={} threads_per_task={}",
             config.worker_id,
