@@ -105,10 +105,6 @@ impl WorkerInner {
     }
 
     /// Drop nested Tokio runtimes after tasks/transport have been signaled/aborted.
-    ///
-    /// Must stay well under `master.reset_worker_timeout` (2s local). Sequential
-    /// `shutdown_timeout` per task runtime blew that budget (N vertices × timeout)
-    /// and late Reset retries then tore down the replacement worker.
     pub(crate) fn close_sync_dispose_runtimes(&mut self) {
         let mut runtimes = Vec::new();
         if let Some(runtime) = self.transport_backend_runtime.take() {
