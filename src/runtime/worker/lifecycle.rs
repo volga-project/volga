@@ -27,7 +27,7 @@ impl Worker {
         // Bind health to this attempt so stale tasks from a prior incarnation cannot
         // report_fatal into the live heartbeat (they still hold the old attempt id).
         self.health
-            .bind_execution_attempt(config.execution_attempt_id);
+            .set_execution_attempt(config.execution_attempt_id);
         self.source_handles.clear();
         let mut config = config;
         config.worker_id = self.worker_id.clone();
