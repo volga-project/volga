@@ -6,7 +6,7 @@ master control plane. Update facts/links as PRs merge.
 
 **Rough timeframe:** Aug 2026  
 **Primary PR:** [#195](https://github.com/volga-project/volga/pull/195) — ExecutionAttempt actor + StopSources Drain  
-**Related:** [#193](https://github.com/volga-project/volga/pull/193) Worker mutex, [#194](https://github.com/volga-project/volga/pull/194) CheckpointCoordinator, [#191](https://github.com/volga-project/volga/issues/191) / [#192](https://github.com/volga-project/volga/issues/192) follow-ups  
+**Related:** [#200](https://github.com/volga-project/volga/pull/200) MasterLifecycle actor / Finish intent, [#193](https://github.com/volga-project/volga/pull/193) Worker-as-actor (stacked on #200), [#194](https://github.com/volga-project/volga/pull/194) CheckpointCoordinator, [#191](https://github.com/volga-project/volga/issues/191) / [#192](https://github.com/volga-project/volga/issues/192) follow-ups  
 **Sink oracle / EO gap:** [#198](https://github.com/volga-project/volga/issues/198) (tighten after [#150](https://github.com/volga-project/volga/issues/150) 1PC)  
 **Signature test:** `test_local_multi_worker_window_checkpoint_restore`
 
@@ -194,6 +194,8 @@ Half-measure rejected: tiny mpsc “mailbox” beside kameo for drain only.
 
 ### 6.1 Target shape (master attempt plane)
 
+*As of #195 (later superseded for StopSources routing — see §14 / #200):*
+
 ```text
 MasterLifecycle
   └─ ask Schedule / Run / Finish / Recover
@@ -279,12 +281,13 @@ latency problems.
 
 | Work | Role |
 | --- | --- |
-| [#193](https://github.com/volga-project/volga/pull/193) | Worker: `Arc` + sync inner mutex; no tokio mutex across task `ask`s; finish RPC timeouts |
+| [#200](https://github.com/volga-project/volga/pull/200) | `MasterLifecycle` actor; Finish intent; exclusive `FailureAggregation` / `Draining` (§14) |
+| [#193](https://github.com/volga-project/volga/pull/193) | Worker-as-actor + Close/dispose; stacked on #200 |
 | [#194](https://github.com/volga-project/volga/pull/194) | `CheckpointCoordinator` actor; drop `PendingPersist` unlock dance |
-| [#191](https://github.com/volga-project/volga/issues/191) | Full Worker-as-actor (beyond interim mutex) |
+| [#191](https://github.com/volga-project/volga/issues/191) | Full Worker-as-actor tracking (largely #193) |
 | [#192](https://github.com/volga-project/volga/issues/192) | Retire `MasterState` mutex bag as control plane |
 
-Intended merge order: **195 → 193 → 194**, then 191/192 as larger arcs.
+Intended merge order: **195 → 200 → 193 → 194**, then 192 as a larger arc.
 
 ---
 
@@ -305,6 +308,8 @@ Suggested beat sheet:
    first Drain is enough.
 8. **PR hygiene** — wrong-base merge, gRPC orphaned off master, rebase so the
    feature PR is readable.
+9. **Third hang class** — after Drain vs CP/poll was fixed, stress found
+   Drain vs **failure aggregation** (§14); job intent had to leave the attempt.
 
 ---
 
@@ -324,6 +329,9 @@ Suggested beat sheet:
 8. **Idempotent upsert ≠ exactly-once set equality** — same key overwrites; it
    does not retract orphans past a restored cut. Stress will surface that as a
    different red than a hang; don’t “fix” the control plane for an oracle gap.
+9. **One terminal intent per attempt** — Recover (failure window) and Finish
+   (drain) must not share an attempt; job-level Finish intent belongs on the
+   lifecycle supervisor, not as attempt-local deferral hacks (§14).
 
 ---
 
@@ -331,12 +339,12 @@ Suggested beat sheet:
 
 | Area | Path |
 | --- | --- |
-| Attempt actor + phase + Drain | `src/runtime/master/attempt/mod.rs` |
-| run_loop, poll/CP handlers | `src/runtime/master/attempt/execute.rs` |
+| Attempt actor + exclusive phases + Drain | `src/runtime/master/attempt/mod.rs` |
+| run_loop, poll/CP / FailureAggregation | `src/runtime/master/attempt/execute.rs` |
 | WorkerSession | `src/runtime/master/attempt/session.rs` |
-| Lifecycle ask Schedule/Run | `src/runtime/master/lifecycle.rs` |
-| StopSources → ask Drain | `src/runtime/master/mod.rs` |
-| Attempt ref on state | `src/runtime/master/state.rs` |
+| Lifecycle actor (intent, attempt loop) | `src/runtime/master/lifecycle.rs` |
+| StopSources → `RequestFinish` | `src/runtime/master/mod.rs` |
+| Lifecycle + attempt refs on state | `src/runtime/master/state.rs` |
 | Stress runner | `scripts/stress-test`, `scripts/README.md` |
 | CI stress jobs | `.github/workflows/rust-tests.yml` |
 | Signature test | `src/tests/inprocess/checkpoint.rs` |
@@ -347,14 +355,15 @@ Suggested beat sheet:
 
 ## 10. Open items / honesty box for the post
 
-- Confirm final stress verdict on #195 tip (15×100) before claiming “fixed in
-  production CI.”
-- Distinguish **hang** failures vs **oracle mismatch** (e.g. key-set overshoot)
-  — not every stress red is the same bug; see §13 / #198.
+- Confirm final stress verdict on #200+#193 tip (15×100) before claiming “fixed
+  in production CI.”
+- Distinguish **hang** classes: Drain vs CP/poll (§4), Drain vs failure
+  aggregation (§14), vs **oracle mismatch** (§13 / #198).
 - WorkerSession + spawn is the thin version of “I/O not on decision mailbox”;
-  full Worker actor (#191) and master plane (#192) are still unfinished.
+  Worker actor is #193; master plane mutex bag still #192.
 - kameo `DelegatedReply` / bounded mailbox details are version-sensitive
   (we used kameo 0.16).
+- §6.1 “ask Drain from gRPC” is historical; current routing is §14.
 
 ---
 
@@ -509,6 +518,121 @@ us hunting the wrong layer.
 
 ---
 
+## 14. Sequel again: Drain vs failure aggregation (job intent)
+
+After §4’s Drain-vs-CP/poll hang was fixed and Worker Close/dispose races were
+hardened on #193, the same 15×100 window stress still produced
+`timed out waiting for lifecycle event: PipelineFinished` — with a **different**
+mechanism. Worth keeping as a third failure class for the post.
+
+### Stress hit (compressed)
+
+- Runs on #193 tip while Drain/Recover still co-owned the attempt, e.g.
+  [actions/runs/31088119392](https://github.com/volga-project/volga/actions/runs/31088119392)
+  job `inproc-stress (15)`, run **19/100**
+- Timeline pattern:
+
+```text
+attempt 0: CP1 ok → kill worker-1 → FailureAggregation → Recover replace={worker-1}
+attempt 1: restore=Some(1), Schedule/Run arms
+           peer-connect TransportDisconnect (worker-1 → worker-2 gRPC) opens
+             FailureAggregation window
+           harness: AttemptRunning + CP idle → StopSources (Drain)
+           AggWindowEnd ignored or Recover diverted mid-drain
+           workers Close/cleanup → master polls tcp-fail / stale attempt
+           → never PipelineFinished
+```
+
+Interesting detail: **`Failure window ignored … (draining)`** in logs meant the
+“don’t Recover while draining” guard *worked* — and still hung. The bug was not
+only Recover stealing Finish; **aggregation also starved finish observation**
+(poll results gated while `aggregating`), so by the time the window cleared,
+workers had already exited.
+
+### Why patches piled up
+
+Local attempt-level rules kept fighting each other:
+
+| Patch | Intent | Hole |
+| --- | --- | --- |
+| Ignore Recover while `Draining` | Finish owns the attempt | Aggregation still blocked polls; workers gone before `Finished` observed |
+| Clear aggregation on Drain entry | Unblock polls | Dropped a real Recover intent; still mixed two terminals on one attempt |
+| Reject `StopSources` while aggregating | Recover wins | Leaked an internal debounce as a public API error; harness retry felt wrong |
+
+Root smell (same as §5): **two terminal intents on one attempt** — failure
+window → `Recover`, cooperative stop → `Finished` — with no supervisor owning
+job-level “please finish.”
+
+### What we converged on (#200)
+
+**Two state machines, not attempt-local deferral:**
+
+1. **Job (`MasterLifecycle` actor)** — intent `Run` | `Finish`.  
+   `StopSources` → `RequestFinish` (always accepts once execute started).  
+   Drain is issued only when the current attempt is stably runnable; after
+   recover, `AttemptRunArmed` re-tries drain if intent is still `Finish`.
+2. **Attempt** — exclusive phases  
+   `Running` | `Checkpointing` | `FailureAggregation` | `Draining` → one
+   terminal (`Recover` or `Finished`).  
+   `Drain` accepted only from `Running`/`Checkpointing`.  
+   Failure aggregation window **kept** (batch replace-set); it must not freeze
+   observation, and must not overlap `Draining`.
+
+```text
+Master gRPC StopSources
+  → lifecycle.ask(RequestFinish)     // intent = Finish
+  → try Drain when attempt Running
+  → if FailureAggregation / recovering: wait; drain on next AttemptRunArmed
+
+ExecutionAttempt
+  Running ──fatal──► FailureAggregation ──window──► Recover
+         └──Drain──► Draining ──poll Finished|Closed──► Finished
+```
+
+**Not required for the model:** attempt-local `finish_requested`. That is just
+a deferred mailbox on the wrong actor. Job intent on the supervisor is the
+clean version of the same idea.
+
+**Stacking for review:** #200 (master) under #193 (worker) — little code
+interference; stress needs both planes green.
+
+### Details worth stealing for the post
+
+- Harness contract was always “stable `AttemptRunning` → one StopSources →
+  `PipelineFinished`.” It never promised StopSources during recovery; the race
+  was restore peer-connect fatals landing in the same millisecond as finish.
+- `AttemptRunning` is a weak “healthy” signal after restore (tasks Run before
+  all peer transports are up).
+- Actor serialization already removed data races; the remaining bugs were
+  **ill-defined state transitions** (overlays: `aggregating` flag on `Running`
+  while also `Draining`).
+- Naming: `Aggregating` → `FailureAggregation` so the phase reads as the
+  product feature, not a generic buffer.
+
+### Diagram (after #200)
+
+```mermaid
+sequenceDiagram
+  participant GRPC as StopSources gRPC
+  participant Life as MasterLifecycle
+  participant Att as ExecutionAttempt
+  GRPC->>Life: RequestFinish
+  Life->>Life: intent = Finish
+  alt attempt Running
+    Life->>Att: Drain
+    Att-->>Life: ok
+  else FailureAggregation / no run yet
+    Note over Life: defer drain
+    Att-->>Life: AttemptRunArmed
+    Life->>Att: Drain
+  end
+  Att-->>Life: Run outcome Finished
+  Life-->>Life: PipelineFinished
+```
+
+---
+
 *End of notes. Trim ruthlessly for the public post; keep failure logs and one
-concrete timeline as the emotional center. Hang timeline + overshoot timeline
-are both worth keeping if the post argues “stress finds classes of bugs.”*
+concrete timeline as the emotional center. Hang (§4) + aggregation (§14) +
+overshoot (§13) are three classes if the post argues “stress finds classes of
+bugs.”*
