@@ -11,6 +11,7 @@ use tokio::task::JoinHandle;
 
 use crate::common::failure::FailureEvent;
 use crate::orchestrator::orchestrator::WorkerHealthWatchHandle;
+use super::lifecycle::{AttemptRunArmed, MasterLifecycle};
 use super::state::{MasterState, PipelineContext};
 
 mod execute;
@@ -20,20 +21,25 @@ mod teardown;
 
 use session::WorkerSession;
 
-/// Current execution-attempt run phase. Owned by [`ExecutionAttempt`].
+/// Exclusive attempt phases. FailureAggregation and Draining never overlap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AttemptPhase {
     Running,
     Checkpointing,
+    FailureAggregation,
     Draining,
 }
 
 impl AttemptPhase {
-    /// `Checkpointing` → `Running`; leave `Draining` alone.
+    /// `Checkpointing` → `Running`; leave terminal-ish phases alone.
     fn clear_checkpointing(&mut self) {
         if *self == Self::Checkpointing {
             *self = Self::Running;
         }
+    }
+
+    fn accepts_drain(self) -> bool {
+        matches!(self, Self::Running | Self::Checkpointing)
     }
 }
 
@@ -58,6 +64,7 @@ pub(super) struct ExecutionAttempt {
     restore_checkpoint_id: Option<u64>,
     state: Arc<MasterState>,
     pipeline: Arc<PipelineContext>,
+    lifecycle: ActorRef<MasterLifecycle>,
     phase: AttemptPhase,
     sessions: HashMap<String, ActorRef<WorkerSession>>,
     failure_tx: mpsc::Sender<FailureEvent>,
@@ -70,8 +77,8 @@ struct RunSlot {
     reply: ReplySender<Result<AttemptOutcome, String>>,
     run_loop: JoinHandle<()>,
     _health_poll: Option<WorkerHealthWatchHandle>,
-    /// Failures collected during the aggregation window after the first fatal.
-    aggregating: Option<Vec<FailureEvent>>,
+    /// Failures collected during [`AttemptPhase::FailureAggregation`].
+    failure_events: Option<Vec<FailureEvent>>,
     /// One outstanding poll RPC batch at a time (keeps mailbox free for `Drain`).
     poll_in_flight: bool,
 }
@@ -82,7 +89,7 @@ pub(super) struct Schedule;
 
 pub(super) struct Run;
 
-/// StopSources: enter draining, abort in-flight CP, stop sources on sessions.
+/// Enter draining when phase allows (`Running` / `Checkpointing` only).
 pub(super) struct Drain;
 
 pub(super) struct Finish;
@@ -107,6 +114,7 @@ impl ExecutionAttempt {
         restore_checkpoint_id: Option<u64>,
         state: Arc<MasterState>,
         pipeline: Arc<PipelineContext>,
+        lifecycle: ActorRef<MasterLifecycle>,
     ) -> ActorRef<Self> {
         let (failure_tx, failure_rx) = mpsc::channel(256);
         kameo::spawn(Self {
@@ -114,6 +122,7 @@ impl ExecutionAttempt {
             restore_checkpoint_id,
             state,
             pipeline,
+            lifecycle,
             phase: AttemptPhase::Running,
             sessions: HashMap::new(),
             failure_tx,
@@ -167,9 +176,10 @@ impl Message<Run> for ExecutionAttempt {
             reply,
             run_loop,
             _health_poll: health_poll,
-            aggregating: None,
+            failure_events: None,
             poll_in_flight: false,
         });
+        let _ = self.lifecycle.tell(AttemptRunArmed).await;
         delegated
     }
 }
@@ -182,6 +192,16 @@ impl Message<Drain> for ExecutionAttempt {
         _msg: Drain,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        if self.run.is_none() {
+            return Err("no active run".to_string());
+        }
+        if self.phase == AttemptPhase::Draining {
+            return Ok(());
+        }
+        if !self.phase.accepts_drain() {
+            return Err(format!("attempt phase {:?} does not accept drain", self.phase));
+        }
+
         self.phase = AttemptPhase::Draining;
         let checkpoint_id = self
             .state

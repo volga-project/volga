@@ -21,7 +21,7 @@ mod lifecycle;
 mod state;
 mod worker_client;
 
-use lifecycle::MasterLifecycle;
+use lifecycle::{MasterLifecycle, RequestFinish, Start};
 use state::MasterState;
 pub use events::{CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord};
 
@@ -98,22 +98,17 @@ impl Master {
         self.state.latest_complete_checkpoint().await
     }
 
-    /// Cooperative source stop: attempt `Drain` (phase + abort CP + session stop_sources).
+    /// Cooperative job finish: lifecycle sets intent=`Finish` and drains when runnable.
     pub async fn stop_sources(&self) -> Result<(), String> {
-        let attempt = self
+        let lifecycle = self
             .state
-            .current_attempt()
+            .lifecycle()
             .await
-            .ok_or_else(|| "no current execution attempt".to_string())?;
-        attempt
-            .ask(attempt::Drain)
+            .ok_or_else(|| "lifecycle not started".to_string())?;
+        lifecycle
+            .ask(RequestFinish)
             .await
-            .map_err(|error| error.to_string())?;
-        println!(
-            "[MASTER] StopSources ok execution_attempt={}",
-            self.state.current_attempt_id()
-        );
-        Ok(())
+            .map_err(|error| error.to_string())
     }
 
     /// Begin a checkpoint without going through the run-loop.
@@ -150,6 +145,14 @@ impl Master {
     /// Run execution attempts until the pipeline finishes or recovery is exhausted.
     pub async fn execute(&self) -> anyhow::Result<()> {
         let pipeline = self.state.pipeline_context().await?;
-        MasterLifecycle::new(self.state.clone()).run(pipeline).await
+        let lifecycle = MasterLifecycle::spawn(self.state.clone());
+        self.state.set_lifecycle(lifecycle.clone()).await;
+        let result = lifecycle.ask(Start(pipeline)).await;
+        self.state.clear_lifecycle().await;
+        let _ = lifecycle.stop_gracefully().await;
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => Err(anyhow::anyhow!(error.to_string())),
+        }
     }
 }
