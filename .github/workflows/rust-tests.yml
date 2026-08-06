@@ -270,14 +270,16 @@ jobs:
           test_name="${{ inputs.stress_test }}"
           echo "kube-stress machine=${{ matrix.machine }} shards_per_machine=$shards runs_per_shard=$runs"
           # Schedule / unset / inproc-default → full kube suite. On-demand can pin a test_kube_*.
+          # exec: stress-test must be the step main process so Cancel (SIGINT/SIGTERM)
+          # hits its trap. A wrapper bash exiting leaves set -m shards immune to SIGINT.
           if [[ "${{ github.event_name }}" != "schedule" && -n "$test_name" && "$test_name" == test_kube_* ]]; then
             echo "kube-stress test=$test_name"
-            scripts/test stress --env kube --test "$test_name" \
+            exec scripts/test stress --env kube --test "$test_name" \
               --runs-per-shard "$runs" \
               --shards "$shards" \
               --fresh-cluster
           else
-            scripts/test stress --env kube --all \
+            exec scripts/test stress --env kube --all \
               --runs-per-shard "$runs" \
               --shards "$shards" \
               --fresh-cluster
@@ -342,7 +344,9 @@ jobs:
             exit 2
           fi
           echo "inproc-stress machine=${{ matrix.machine }} test=$test_name shards_per_machine=$shards runs_per_shard=$runs"
-          scripts/test stress --env local \
+          # exec: stress-test must be the step main process so Cancel (SIGINT/SIGTERM)
+          # hits its trap. A wrapper bash exiting leaves set -m shards immune to SIGINT.
+          exec scripts/test stress --env local \
             --test "$test_name" \
             --runs-per-shard "$runs" \
             --shards "$shards"
