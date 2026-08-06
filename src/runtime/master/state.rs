@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kameo::actor::ActorRef;
+use kameo::spawn;
 use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::time::{sleep, Duration, Instant};
@@ -21,8 +22,10 @@ use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 
 use super::attempt::ExecutionAttempt;
 use super::checkpoint::{
-    create_checkpoint_store, CheckpointAckOutcome, CheckpointStartError, Checkpoints,
-    RestorePlanner, TaskKey,
+    create_checkpoint_store, AbortInFlightCheckpoint, CheckpointAckOutcome, CheckpointCoordinator,
+    CheckpointStartError, ConfigureCheckpoints, InFlightCheckpointId, InFlightCheckpointTimedOut,
+    LatestCompleteCheckpoint, LoadCheckpoint, NoteBarrierProgress, ReportCheckpoint,
+    RestorePlanner, StartCheckpoint, TaskKey,
 };
 use super::events::{
     CheckpointPropagationPhase, LifecycleEvent, LifecycleEventRecord, LifecycleJournal,
@@ -154,7 +157,7 @@ impl fmt::Display for WorkerReadinessError {
 
 pub(super) struct MasterState {
     config: Mutex<Option<MasterConfig>>,
-    checkpoints: Mutex<Checkpoints>,
+    checkpoints: ActorRef<CheckpointCoordinator>,
     pub orchestrator: Arc<dyn MasterOrchestrator>,
     workers: Mutex<WorkerRegistry>,
     latest_pipeline_snapshot: Mutex<Option<PipelineSnapshot>>,
@@ -172,7 +175,7 @@ impl MasterState {
         let (lifecycle_event_tx, _) = broadcast::channel(256);
         Self {
             config: Mutex::new(None),
-            checkpoints: Mutex::new(Checkpoints::default()),
+            checkpoints: spawn(CheckpointCoordinator::default()),
             orchestrator,
             workers: Mutex::new(WorkerRegistry::default()),
             latest_pipeline_snapshot: Mutex::new(None),
@@ -249,13 +252,16 @@ impl MasterState {
             })
             .collect();
         let retention = runtime_consts().u64(MASTER_CHECKPOINT_RETENTION) as usize;
-        self.checkpoints.lock().await.configure(
-            pipeline_id,
-            expected_acks.into_iter().collect(),
-            expected_aligns,
-            retention,
-            checkpoint_store,
-        );
+        self.checkpoints
+            .ask(ConfigureCheckpoints {
+                pipeline_id,
+                expected_acks: expected_acks.into_iter().collect(),
+                expected_aligns,
+                retention,
+                store: checkpoint_store,
+            })
+            .await
+            .expect("checkpoint coordinator");
         *self.config.lock().await = Some(config);
     }
 
@@ -290,7 +296,11 @@ impl MasterState {
         &self,
         attempt_id: u64,
     ) -> Result<u64, CheckpointStartError> {
-        let checkpoint_id = self.checkpoints.lock().await.start()?;
+        // kameo flattens `Result` replies: Ok(id) / Err(SendError::HandlerError(start_err)).
+        let checkpoint_id = match self.checkpoints.ask(StartCheckpoint).await {
+            Ok(checkpoint_id) => checkpoint_id,
+            Err(error) => return Err(error.unwrap_err()),
+        };
         self.record_lifecycle_event(LifecycleEvent::CheckpointStarted {
             checkpoint_id,
             attempt_id,
@@ -304,7 +314,11 @@ impl MasterState {
         attempt_id: u64,
         detail: String,
     ) -> Result<Option<u64>, String> {
-        let checkpoint_id = self.checkpoints.lock().await.abort_in_flight();
+        let checkpoint_id = self
+            .checkpoints
+            .ask(AbortInFlightCheckpoint)
+            .await
+            .map_err(|error| format!("checkpoint coordinator: {error}"))?;
         if let Some(checkpoint_id) = checkpoint_id {
             self.record_lifecycle_event(LifecycleEvent::CheckpointFailed {
                 checkpoint_id,
@@ -318,13 +332,18 @@ impl MasterState {
 
     pub(super) async fn in_flight_checkpoint_timed_out(&self, timeout: Duration) -> Option<u64> {
         self.checkpoints
-            .lock()
+            .ask(InFlightCheckpointTimedOut(timeout))
             .await
-            .in_flight_timed_out(timeout)
+            .ok()
+            .flatten()
     }
 
     pub(super) async fn in_flight_checkpoint_id(&self) -> Option<u64> {
-        self.checkpoints.lock().await.in_flight_id()
+        self.checkpoints
+            .ask(InFlightCheckpointId)
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Journal barrier progress and count it toward completion (with state acks).
@@ -341,15 +360,16 @@ impl MasterState {
             return Ok(());
         }
 
-        let outcome = {
-            let mut cps = self.checkpoints.lock().await;
-            // Only in-flight CPs accept barrier progress (Completed implies align already done).
-            if cps.in_flight_id() != Some(checkpoint_id) {
-                return Ok(());
-            }
-            cps.note_barrier_progress(checkpoint_id, task.clone())
-                .await
-                .map_err(|error| format!("failed to update checkpoint store: {error}"))?
+        let outcome = self
+            .checkpoints
+            .ask(NoteBarrierProgress {
+                checkpoint_id,
+                task: task.clone(),
+            })
+            .await
+            .map_err(|error| format!("failed to update checkpoint store: {error}"))?;
+        let Some(outcome) = outcome else {
+            return Ok(());
         };
 
         self.record_lifecycle_event(LifecycleEvent::CheckpointPropagation {
@@ -405,12 +425,15 @@ impl MasterState {
                 task.vertex_id, task.task_index
             ));
         }
-        let outcome = {
-            let mut cps = self.checkpoints.lock().await;
-            cps.report(checkpoint_id, task, checkpoint)
-                .await
-                .map_err(|error| format!("failed to update checkpoint store: {error}"))?
-        };
+        let outcome = self
+            .checkpoints
+            .ask(ReportCheckpoint {
+                checkpoint_id,
+                task,
+                checkpoint,
+            })
+            .await
+            .map_err(|error| format!("failed to update checkpoint store: {error}"))?;
 
         match outcome {
             CheckpointAckOutcome::Completed => {
@@ -428,9 +451,7 @@ impl MasterState {
     pub(super) async fn plan_restore(&self, checkpoint_id: u64) -> Result<RestorePlan, String> {
         let completed = self
             .checkpoints
-            .lock()
-            .await
-            .load(checkpoint_id)
+            .ask(LoadCheckpoint(checkpoint_id))
             .await
             .map_err(|error| format!("failed to load checkpoint: {error}"))?;
         let target_graph = {
@@ -445,7 +466,11 @@ impl MasterState {
     }
 
     pub(super) async fn latest_complete_checkpoint(&self) -> Option<u64> {
-        self.checkpoints.lock().await.latest_complete()
+        self.checkpoints
+            .ask(LatestCompleteCheckpoint)
+            .await
+            .ok()
+            .flatten()
     }
 
     pub(super) async fn publish_snapshot(&self, snapshot: PipelineSnapshot) {
