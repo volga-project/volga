@@ -4,8 +4,8 @@ use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 
 use super::config::WorkerIdentity;
 use super::messages::{
-    Close, CloseTasks, Configure, GetIdentity, GetState, Reset, RunTasks, RunTestLifecycle,
-    Shutdown, Start, StopSources, TriggerBarrier,
+    Close, CloseTasks, Configure, GetIdentity, GetState, ReportFatal, Reset, RunTasks,
+    RunTestLifecycle, Shutdown, Start, StopSources, TriggerBarrier,
 };
 use super::Worker;
 
@@ -83,6 +83,20 @@ impl Message<GetIdentity> for Worker {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         Ok(self.identity())
+    }
+}
+
+impl Message<ReportFatal> for Worker {
+    type Reply = ();
+
+    async fn handle(
+        &mut self,
+        msg: ReportFatal,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        if let Some(inner) = &self.inner {
+            inner.health.report_fatal(msg.reason, msg.message);
+        }
     }
 }
 

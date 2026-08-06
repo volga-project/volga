@@ -9,8 +9,8 @@ mod tasks;
 
 pub use config::{WorkerConfig, WorkerIdentity};
 pub use messages::{
-    Close, CloseTasks, Configure, GetIdentity, GetState, Reset, RunTasks, RunTestLifecycle,
-    Shutdown, Start, StopSources, TriggerBarrier,
+    Close, CloseTasks, Configure, GetIdentity, GetState, ReportFatal, Reset, RunTasks,
+    RunTestLifecycle, Shutdown, Start, StopSources, TriggerBarrier,
 };
 
 use std::sync::Arc;
@@ -19,7 +19,6 @@ use kameo::prelude::{spawn, ActorRef};
 use kameo::Actor;
 
 use crate::common::types::PipelineId;
-use crate::runtime::health::WorkerHealthSlot;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::state::OperatorStates;
 
@@ -28,7 +27,6 @@ use inner::WorkerInner;
 #[derive(Actor)]
 pub struct Worker {
     pub(crate) worker_id: String,
-    pub(crate) health_slot: WorkerHealthSlot,
     pub(crate) inner: Option<WorkerInner>,
     pub(crate) last_snapshot: WorkerSnapshot,
 }
@@ -37,31 +35,24 @@ impl Worker {
     pub fn new(worker_id: String) -> Self {
         Self {
             worker_id: worker_id.clone(),
-            health_slot: WorkerHealthSlot::new(),
             inner: None,
             last_snapshot: WorkerSnapshot::new(worker_id, PipelineId(String::new())),
         }
     }
 
-    pub fn spawn(worker_id: String) -> (ActorRef<Self>, WorkerHealthSlot) {
-        let worker = Self::new(worker_id);
-        let health_slot = worker.health_slot.clone();
-        (spawn(worker), health_slot)
+    pub fn spawn(worker_id: String) -> ActorRef<Self> {
+        spawn(Self::new(worker_id))
     }
 
     /// Spawn and configure in one step (tests).
     pub async fn spawn_configured(config: WorkerConfig) -> ActorRef<Self> {
         let worker_id = config.worker_id.clone();
-        let (actor, _) = Self::spawn(worker_id);
+        let actor = Self::spawn(worker_id);
         actor
             .ask(Configure(config))
             .await
             .expect("configure worker actor");
         actor
-    }
-
-    pub fn health_slot(&self) -> WorkerHealthSlot {
-        self.health_slot.clone()
     }
 
     pub fn is_configured(&self) -> bool {
@@ -102,6 +93,10 @@ impl Worker {
             pipeline_id: self.pipeline_id(),
             execution_attempt_id: self.execution_attempt_id(),
             configured: self.is_configured(),
+            last_fatal: self
+                .inner
+                .as_ref()
+                .and_then(|i| i.health.last_fatal()),
         }
     }
 
@@ -126,6 +121,5 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         let _ = self.inner.take();
-        self.health_slot.clear();
     }
 }

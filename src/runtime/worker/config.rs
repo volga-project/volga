@@ -59,4 +59,5 @@ pub struct WorkerIdentity {
     pub pipeline_id: Option<String>,
     pub execution_attempt_id: u64,
     pub configured: bool,
+    pub last_fatal: Option<crate::runtime::health::WorkerFatalEvent>,
 }

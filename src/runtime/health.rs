@@ -1,6 +1,5 @@
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
-use parking_lot::RwLock;
 use tokio::sync::broadcast;
 
 #[derive(Clone, Debug)]
@@ -16,7 +15,7 @@ pub struct WorkerFatalEvent {
     pub message: String,
 }
 
-/// Per-incarnation fatal bus. Recreated on configure; orphaned on reset/close.
+/// Per-incarnation fatal bus. Owned by [`crate::runtime::worker::WorkerInner`].
 #[derive(Debug)]
 pub struct WorkerHealth {
     tx: broadcast::Sender<WorkerFatalEvent>,
@@ -51,29 +50,5 @@ impl WorkerHealth {
 
     pub fn last_fatal(&self) -> Option<WorkerFatalEvent> {
         self.last_fatal.lock().ok().and_then(|g| g.clone())
-    }
-}
-
-/// Process-stable pointer to the current [`WorkerHealth`].
-#[derive(Clone, Debug, Default)]
-pub struct WorkerHealthSlot {
-    current: Arc<RwLock<Option<Arc<WorkerHealth>>>>,
-}
-
-impl WorkerHealthSlot {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn install(&self, health: Arc<WorkerHealth>) {
-        *self.current.write() = Some(health);
-    }
-
-    pub fn clear(&self) {
-        *self.current.write() = None;
-    }
-
-    pub fn get(&self) -> Option<Arc<WorkerHealth>> {
-        self.current.read().clone()
     }
 }

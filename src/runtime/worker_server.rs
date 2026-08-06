@@ -20,11 +20,11 @@ use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::consts::{
     runtime_consts, WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT, WORKER_HEARTBEAT_SEND_INTERVAL,
 };
-use crate::runtime::health::{WorkerFatalReason, WorkerHealthSlot};
+use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::worker::{
-    Close, CloseTasks, Configure, GetIdentity, GetState, Reset, RunTasks, Shutdown, Start,
-    StopSources, TriggerBarrier, Worker, WorkerConfig,
+    Close, CloseTasks, Configure, GetIdentity, GetState, ReportFatal, Reset, RunTasks, Shutdown,
+    Start, StopSources, TriggerBarrier, Worker, WorkerConfig,
 };
 use crate::runtime::worker_config_utils::{
     build_execution_graph, resolve_num_threads_per_task, resolve_transport_backend_type,
@@ -47,8 +47,6 @@ use worker_service::{
 /// Server implementation of the WorkerService — thin adapter over [`Worker`] actor.
 pub struct WorkerServiceImpl {
     worker: ActorRef<Worker>,
-    /// Points at the current incarnation's health bus (swapped on configure/reset).
-    health_slot: WorkerHealthSlot,
     orchestrator: Arc<dyn WorkerOrchestrator>,
     close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
@@ -59,10 +57,8 @@ impl WorkerServiceImpl {
         orchestrator: Arc<dyn WorkerOrchestrator>,
         close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     ) -> Self {
-        let (worker, health_slot) = Worker::spawn(worker_id);
         Self {
-            worker,
-            health_slot,
+            worker: Worker::spawn(worker_id),
             orchestrator,
             close_worker_notify,
         }
@@ -343,7 +339,6 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<tonic::Streaming<MasterHeartbeatMessage>>,
     ) -> Result<Response<Self::StreamHeartbeatStream>, Status> {
         let mut inbound = request.into_inner();
-        let health_slot = self.health_slot.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<WorkerHeartbeatMessage, Status>>(32);
         let worker = self.worker.clone();
 
@@ -360,12 +355,7 @@ impl WorkerService for WorkerServiceImpl {
                         let Ok(identity) = worker.ask(GetIdentity).await else {
                             break;
                         };
-                        let fatal = health_slot.get().and_then(|h| h.last_fatal());
-                        if tx
-                            .send(Ok(heartbeat_message(&identity, fatal.as_ref())))
-                            .await
-                            .is_err()
-                        {
+                        if tx.send(Ok(heartbeat_message(&identity))).await.is_err() {
                             break;
                         }
                         if last_master_msg_at.elapsed() > master_silence {
@@ -388,9 +378,8 @@ impl WorkerService for WorkerServiceImpl {
 
 fn heartbeat_message(
     identity: &crate::runtime::worker::WorkerIdentity,
-    fatal: Option<&crate::runtime::health::WorkerFatalEvent>,
 ) -> WorkerHeartbeatMessage {
-    let (healthy, fatal_reason, fatal_message) = match fatal {
+    let (healthy, fatal_reason, fatal_message) = match &identity.last_fatal {
         Some(f) => (
             false,
             match f.reason {
@@ -561,8 +550,8 @@ impl WorkerServer {
         }
     }
 
-    pub fn health_slot(&self) -> WorkerHealthSlot {
-        self.service.health_slot.clone()
+    pub fn worker_ref(&self) -> ActorRef<Worker> {
+        self.service.worker.clone()
     }
 
     /// Stop the gRPC server
@@ -591,9 +580,14 @@ impl WorkerServer {
     #[cfg(test)]
     pub async fn kill_for_testing(&mut self, inject_panic: bool) {
         if inject_panic {
-            if let Some(health) = self.service.health_slot.get() {
-                health.report_fatal(WorkerFatalReason::Panic, "local test worker crash");
-            }
+            let _ = self
+                .service
+                .worker
+                .ask(ReportFatal {
+                    reason: WorkerFatalReason::Panic,
+                    message: "local test worker crash".to_string(),
+                })
+                .await;
         }
         if let Some(mut serve) = self.serve.take() {
             serve.abort();
@@ -614,7 +608,6 @@ impl Clone for WorkerServiceImpl {
     fn clone(&self) -> Self {
         Self {
             worker: self.worker.clone(),
-            health_slot: self.health_slot.clone(),
             orchestrator: self.orchestrator.clone(),
             close_worker_notify: self.close_worker_notify.clone(),
         }

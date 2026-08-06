@@ -1,11 +1,19 @@
 use tokio::sync::mpsc;
 
+use crate::runtime::health::WorkerFatalReason;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 
 use super::config::WorkerConfig;
 
 #[derive(Debug)]
 pub struct Configure(pub WorkerConfig);
+
+/// Report a fatal into the current incarnation (no-op if unconfigured).
+#[derive(Debug)]
+pub struct ReportFatal {
+    pub reason: WorkerFatalReason,
+    pub message: String,
+}
 
 /// Fenced start for an execution attempt.
 #[derive(Debug)]
@@ -43,7 +51,7 @@ pub struct TriggerBarrier {
     pub execution_attempt_id: u64,
 }
 
-/// Close nested runtimes and return to an empty shell (same ActorRef / health).
+/// Close nested runtimes and return to an empty shell (same ActorRef).
 #[derive(Debug)]
 pub struct Reset;
 

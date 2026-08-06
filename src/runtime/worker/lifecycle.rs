@@ -28,16 +28,13 @@ impl Worker {
             config.num_threads_per_task
         );
 
-        let inner = WorkerInner::from_config(config);
-        self.health_slot.install(inner.health.clone());
-        self.inner = Some(inner);
+        self.inner = Some(WorkerInner::from_config(config));
     }
 
     pub(crate) async fn close_async(&mut self) {
         if let Some(inner) = self.inner.take() {
             self.last_snapshot = inner.close().await;
         }
-        self.health_slot.clear();
     }
 
     pub(crate) async fn reset_async(&mut self) {
