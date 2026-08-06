@@ -66,7 +66,6 @@ impl TestDataWriterActor {
                 transport_client_config.writer_senders.unwrap(),
                 transport_client_config.metrics_labels,
                 std::sync::Arc::new(WorkerHealth::new()),
-                0,
             ),
         }
     }

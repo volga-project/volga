@@ -163,10 +163,7 @@ impl WorkerInner {
         let config = self.config.clone();
 
         let mut backend: Box<dyn TransportBackendTrait> = match config.transport_backend_type {
-            TransportBackendType::Grpc => Box::new(TransportBackend::new(
-                self.health.clone(),
-                config.execution_attempt_id,
-            )),
+            TransportBackendType::Grpc => Box::new(TransportBackend::new(self.health.clone())),
         };
         let mut transport_client_configs =
             backend.init_channels(&config.graph, config.vertex_ids.clone());

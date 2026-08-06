@@ -73,14 +73,13 @@ pub struct TransportBackend {
     shutdown_rx: Option<oneshot::Receiver<()>>,
     running: Arc<AtomicBool>,
     worker_health: Arc<WorkerHealth>,
-    execution_attempt_id: u64,
 }
 
 impl TransportBackend {
     const GRPC_SERVER_QUEUE_SIZE: usize = 10; // single mpsc channel reading from grpc server and forwarding to local clients (readers)
     const GRPC_CLIENT_QUEUE_SIZE: usize = 10; // mpsc channel per peer node, reading local client (writers) and forwarding to remote grpc clients
 
-    pub fn new(worker_health: Arc<WorkerHealth>, execution_attempt_id: u64) -> Self {
+    pub fn new(worker_health: Arc<WorkerHealth>) -> Self {
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         Self {
             server_handle: None,
@@ -97,7 +96,6 @@ impl TransportBackend {
             shutdown_rx: Some(shutdown_rx),
             running: Arc::new(AtomicBool::new(false)),
             worker_health,
-            execution_attempt_id,
         }
     }
 
@@ -210,7 +208,6 @@ impl TransportBackend {
         // Route messages from gRPC server ingress to remote input channel queues.
         let running = self.running.clone();
         let worker_health = self.worker_health.clone();
-        let execution_attempt_id = self.execution_attempt_id;
         let reader_task = tokio::spawn(async move {
             while running.load(std::sync::atomic::Ordering::Relaxed) {
                 match time::timeout(Duration::from_millis(100), server_rx.recv()).await {
@@ -224,7 +221,6 @@ impl TransportBackend {
                                 Ok(Ok(())) => break,
                                 Ok(Err(e)) => {
                                     worker_health.report_fatal(
-                                        execution_attempt_id,
                                         WorkerFatalReason::TransportDisconnect,
                                         format!(
                                             "[GRPC_BACKEND] Failed to forward message to channel {}: {}",
@@ -240,7 +236,6 @@ impl TransportBackend {
                     Ok(None) => {
                         if running.load(std::sync::atomic::Ordering::Relaxed) {
                             worker_health.report_fatal(
-                                execution_attempt_id,
                                 WorkerFatalReason::TransportDisconnect,
                                 "[GRPC_BACKEND] Server channel closed".to_string(),
                             );
@@ -266,7 +261,6 @@ impl TransportBackend {
             self.channel_to_node.take().expect("Remote channel mapping should be found");
         let nodes = self.nodes.take().expect("Remote nodes should be found");
         let worker_health = self.worker_health.clone();
-        let execution_attempt_id = self.execution_attempt_id;
         let mut client_txs: HashMap<NodeId, mpsc::Sender<(Message, ChannelId)>> = HashMap::new();
 
         for (peer_node_id, peer_node_ip, target_port) in nodes {
@@ -279,7 +273,6 @@ impl TransportBackend {
                     Ok(client) => client,
                     Err(e) => {
                         worker_health.report_fatal(
-                            execution_attempt_id,
                             WorkerFatalReason::TransportDisconnect,
                             format!(
                                 "[GRPC_BACKEND] failed to connect remote node {}: {}",
@@ -291,7 +284,6 @@ impl TransportBackend {
                 };
                 if let Err(e) = client.stream_messages(client_rx).await {
                     worker_health.report_fatal(
-                        execution_attempt_id,
                         WorkerFatalReason::TransportDisconnect,
                         format!("[GRPC_BACKEND] remote stream_messages failed: {}", e),
                     );
@@ -303,7 +295,6 @@ impl TransportBackend {
         // Route remote output channel queues to per-node gRPC clients.
         let running = self.running.clone();
         let worker_health = self.worker_health.clone();
-        let execution_attempt_id = self.execution_attempt_id;
         let writer_task = tokio::spawn(async move {
             let mut receiver_futures = Vec::new();
 
@@ -342,7 +333,6 @@ impl TransportBackend {
                                         Ok(Ok(())) => break,
                                         Ok(Err(e)) => {
                                             worker_health.report_fatal(
-                                                execution_attempt_id,
                                                 WorkerFatalReason::TransportDisconnect,
                                                 format!(
                                                     "[GRPC_BACKEND] Failed to send message to client {}: {}",

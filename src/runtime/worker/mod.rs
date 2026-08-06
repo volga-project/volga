@@ -19,19 +19,17 @@ use kameo::prelude::{spawn, ActorRef};
 use kameo::Actor;
 
 use crate::common::types::PipelineId;
-use crate::runtime::health::WorkerHealth;
+use crate::runtime::health::WorkerHealthSlot;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::state::OperatorStates;
 
 use inner::WorkerInner;
 
-/// Process-stable actor shell. Configure-scoped state lives in [`WorkerInner`].
 #[derive(Actor)]
 pub struct Worker {
     pub(crate) worker_id: String,
-    pub(crate) health: Arc<WorkerHealth>,
+    pub(crate) health_slot: WorkerHealthSlot,
     pub(crate) inner: Option<WorkerInner>,
-    /// Last snapshot retained after close/reset for late GetState (tests / finish).
     pub(crate) last_snapshot: WorkerSnapshot,
 }
 
@@ -39,16 +37,16 @@ impl Worker {
     pub fn new(worker_id: String) -> Self {
         Self {
             worker_id: worker_id.clone(),
-            health: Arc::new(WorkerHealth::new()),
+            health_slot: WorkerHealthSlot::new(),
             inner: None,
             last_snapshot: WorkerSnapshot::new(worker_id, PipelineId(String::new())),
         }
     }
 
-    pub fn spawn(worker_id: String) -> (ActorRef<Self>, Arc<WorkerHealth>) {
+    pub fn spawn(worker_id: String) -> (ActorRef<Self>, WorkerHealthSlot) {
         let worker = Self::new(worker_id);
-        let health = worker.health.clone();
-        (spawn(worker), health)
+        let health_slot = worker.health_slot.clone();
+        (spawn(worker), health_slot)
     }
 
     /// Spawn and configure in one step (tests).
@@ -62,8 +60,8 @@ impl Worker {
         actor
     }
 
-    pub fn health(&self) -> Arc<WorkerHealth> {
-        self.health.clone()
+    pub fn health_slot(&self) -> WorkerHealthSlot {
+        self.health_slot.clone()
     }
 
     pub fn is_configured(&self) -> bool {
@@ -127,7 +125,7 @@ impl Worker {
 
 impl Drop for Worker {
     fn drop(&mut self) {
-        // Prefer Reset/Close paths; Drop is best-effort if the actor is torn down abruptly.
         let _ = self.inner.take();
+        self.health_slot.clear();
     }
 }

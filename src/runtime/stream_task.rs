@@ -505,12 +505,8 @@ impl StreamTask {
         let run_loop = async move {
             let mut operator = create_operator(operator_config);
             
-            let mut transport_client = TransportClient::new(
-                vertex_id.clone(),
-                transport_client_config,
-                run_loop_health,
-                execution_attempt_id,
-            );
+            let mut transport_client =
+                TransportClient::new(vertex_id.clone(), transport_client_config, run_loop_health);
             
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
@@ -845,15 +841,24 @@ impl StreamTask {
         let run_loop_handle = tokio::spawn(run_loop.map(move |result| {
             if let Err(error) = &result {
                 worker_health.report_fatal(
-                    execution_attempt_id,
                     WorkerFatalReason::TaskFailure,
                     format!("StreamTask {} failed: {}", task_vertex_id, error),
                 );
             }
             result
         }));
-        
+
         self.run_loop_handle = Some(run_loop_handle);
+    }
+
+    /// Signal close and join the run loop. Idempotent.
+    pub async fn close(&mut self) {
+        if let Some(sender) = self.close_signal_sender.as_ref() {
+            let _ = sender.send(true);
+        }
+        if let Some(handle) = self.run_loop_handle.take() {
+            let _ = handle.await;
+        }
     }
 
     pub async fn get_state(&self) -> TaskSnapshot {
@@ -874,8 +879,9 @@ impl StreamTask {
     }
 
     pub fn signal_to_close(&mut self) {
-        let close_signal_sender = self.close_signal_sender.as_ref().unwrap();
-        let _ = close_signal_sender.send(true);
+        if let Some(close_signal_sender) = self.close_signal_sender.as_ref() {
+            let _ = close_signal_sender.send(true);
+        }
     }
 
     pub fn signal_trigger_checkpoint(&mut self, checkpoint_id: u64) {

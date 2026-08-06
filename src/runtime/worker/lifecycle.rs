@@ -15,14 +15,11 @@ impl Worker {
         if self.is_running() {
             panic!("Cannot configure worker while it is running");
         }
-        // Bind health to this attempt so stale tasks from a prior incarnation cannot
-        // report_fatal into the live heartbeat (they still hold the old attempt id).
-        self.health
-            .set_execution_attempt(config.execution_attempt_id);
         assert_eq!(
             config.worker_id, self.worker_id,
             "configure worker_id must match process worker_id"
         );
+        assert!(self.inner.is_none(), "configure requires prior reset/close");
         println!(
             "[WORKER] Configuring worker_id={} pipeline_id={} vertices={} threads_per_task={}",
             config.worker_id,
@@ -31,25 +28,20 @@ impl Worker {
             config.num_threads_per_task
         );
 
-        // Prior incarnation must already be taken (reset/close). Drop any leftover.
-        if let Some(prev) = self.inner.take() {
-            drop(prev);
-        }
-
-        self.inner = Some(WorkerInner::from_config(self.health.clone(), config));
+        let inner = WorkerInner::from_config(config);
+        self.health_slot.install(inner.health.clone());
+        self.inner = Some(inner);
     }
 
     pub(crate) async fn close_async(&mut self) {
         if let Some(inner) = self.inner.take() {
             self.last_snapshot = inner.close().await;
         }
+        self.health_slot.clear();
     }
 
-    /// Close then drop the incarnation (same ActorRef + health Arc).
-    /// Sticky fatal is cleared here; attempt fencing advances on the next configure.
     pub(crate) async fn reset_async(&mut self) {
         self.close_async().await;
-        self.health.clear();
     }
 
     pub(crate) async fn start(&mut self) -> Result<(), String> {

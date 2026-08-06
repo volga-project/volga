@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use kameo::prelude::ActorRef;
 use tokio::runtime::{Builder, Runtime};
@@ -39,7 +40,8 @@ pub(crate) struct WorkerInner {
 }
 
 impl WorkerInner {
-    pub(crate) fn from_config(health: Arc<WorkerHealth>, config: WorkerConfig) -> Self {
+    pub(crate) fn from_config(config: WorkerConfig) -> Self {
+        let health = Arc::new(WorkerHealth::new());
         let mut task_runtimes = HashMap::new();
         for vertex_id in &config.vertex_ids {
             let task_runtime = Builder::new_multi_thread()
@@ -103,6 +105,7 @@ impl WorkerInner {
         self.config.execution_attempt_id
     }
 
+    /// Join barrier for nested Tokio runtimes. Prefer after tasks/transport have exited.
     pub(crate) fn close_sync_dispose_runtimes(&mut self) {
         let mut runtimes = Vec::new();
         if let Some(runtime) = self.transport_backend_runtime.take() {
@@ -121,7 +124,7 @@ impl WorkerInner {
             .name("worker-runtime-dispose".into())
             .spawn(move || {
                 for runtime in runtimes {
-                    runtime.shutdown_background();
+                    runtime.shutdown_timeout(Duration::from_secs(30));
                 }
             })
         else {
@@ -131,15 +134,18 @@ impl WorkerInner {
         println!("[WORKER] Cleanup completed");
     }
 
-    /// Tear down this incarnation. Consumes `self` so the outer Worker can drop it.
+    /// Tear down this incarnation. Joins tasks and transport before disposing runtimes.
     pub(crate) async fn close(mut self) -> WorkerSnapshot {
-        self.running.store(false, Ordering::SeqCst);
+        // Stop background watchers first so they cannot race Close.
         if let Some(handle) = self.fatal_watcher_handle.take() {
             handle.abort();
         }
+        self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.tasks_state_polling_handle.take() {
             handle.abort();
         }
+
+        // Close joins each task run loop (hard barrier).
         if !self.task_actors.is_empty() {
             self.signal_tasks_close().await;
         }
@@ -178,6 +184,11 @@ impl WorkerInner {
 
 impl Drop for WorkerInner {
     fn drop(&mut self) {
+        if !self.task_actors.is_empty() || self.backend_actor.is_some() {
+            panic!(
+                "WorkerInner dropped with live tasks/transport — reset must call close() first"
+            );
+        }
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.fatal_watcher_handle.take() {
             handle.abort();
@@ -186,8 +197,6 @@ impl Drop for WorkerInner {
             handle.abort();
         }
         self.request_source_processor.take();
-        self.task_actors.clear();
-        self.backend_actor = None;
         self.close_sync_dispose_runtimes();
     }
 }

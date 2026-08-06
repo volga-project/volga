@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         .unwrap_or(false);
     let (worker_id, orchestrator) = build_worker_bootstrap().await?;
     let mut worker_server = WorkerServer::new(worker_id.clone(), orchestrator);
-    let worker_health = worker_server.worker_health().await;
+    let health_slot = worker_server.health_slot();
     std::panic::set_hook(Box::new(move |panic_info| {
         let panic_msg = panic_info.to_string();
         let reason = if panic_msg.contains("[GRPC_BACKEND]") {
@@ -64,7 +64,9 @@ async fn main() -> Result<()> {
         } else {
             WorkerFatalReason::Panic
         };
-        worker_health.report_fatal(worker_health.execution_attempt_id(), reason, panic_msg);
+        if let Some(health) = health_slot.get() {
+            health.report_fatal(reason, panic_msg);
+        }
     }));
     worker_server.start(&bind_addr).await?;
     worker_server.register_with_master().await?;

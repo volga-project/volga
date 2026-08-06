@@ -20,7 +20,7 @@ use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::consts::{
     runtime_consts, WORKER_HEARTBEAT_MASTER_SILENCE_TIMEOUT, WORKER_HEARTBEAT_SEND_INTERVAL,
 };
-use crate::runtime::health::WorkerFatalReason;
+use crate::runtime::health::{WorkerFatalReason, WorkerHealthSlot};
 use crate::runtime::operators::operator::operator_config_requires_checkpoint;
 use crate::runtime::worker::{
     Close, CloseTasks, Configure, GetIdentity, GetState, Reset, RunTasks, Shutdown, Start,
@@ -47,8 +47,8 @@ use worker_service::{
 /// Server implementation of the WorkerService — thin adapter over [`Worker`] actor.
 pub struct WorkerServiceImpl {
     worker: ActorRef<Worker>,
-    /// Process-lifetime health bus; fenced by execution_attempt_id on report_fatal.
-    health: Arc<crate::runtime::health::WorkerHealth>,
+    /// Points at the current incarnation's health bus (swapped on configure/reset).
+    health_slot: WorkerHealthSlot,
     orchestrator: Arc<dyn WorkerOrchestrator>,
     close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
 }
@@ -59,10 +59,10 @@ impl WorkerServiceImpl {
         orchestrator: Arc<dyn WorkerOrchestrator>,
         close_worker_notify: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     ) -> Self {
-        let (worker, health) = Worker::spawn(worker_id);
+        let (worker, health_slot) = Worker::spawn(worker_id);
         Self {
             worker,
-            health,
+            health_slot,
             orchestrator,
             close_worker_notify,
         }
@@ -343,8 +343,7 @@ impl WorkerService for WorkerServiceImpl {
         request: Request<tonic::Streaming<MasterHeartbeatMessage>>,
     ) -> Result<Response<Self::StreamHeartbeatStream>, Status> {
         let mut inbound = request.into_inner();
-        let health = self.health.clone();
-        let mut fatal_events = health.subscribe();
+        let health_slot = self.health_slot.clone();
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<WorkerHeartbeatMessage, Status>>(32);
         let worker = self.worker.clone();
 
@@ -361,89 +360,22 @@ impl WorkerService for WorkerServiceImpl {
                         let Ok(identity) = worker.ask(GetIdentity).await else {
                             break;
                         };
-                        let fatal = health.last_fatal();
-                        let (healthy, fatal_reason, fatal_message) = match fatal {
-                            Some(f) => (
-                                false,
-                                match f.reason {
-                                    WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
-                                    WorkerFatalReason::TransportDisconnect => {
-                                        WorkerFatalReasonProto::TransportDisconnect as i32
-                                    }
-                                    WorkerFatalReason::TaskFailure => {
-                                        WorkerFatalReasonProto::TaskFailure as i32
-                                    }
-                                },
-                                f.message,
-                            ),
-                            None => (
-                                true,
-                                WorkerFatalReasonProto::Unspecified as i32,
-                                String::new(),
-                            ),
-                        };
+                        let fatal = health_slot.get().and_then(|h| h.last_fatal());
                         if tx
-                            .send(Ok(WorkerHeartbeatMessage {
-                                worker_id: identity.worker_id,
-                                pipeline_id: identity.pipeline_id.unwrap_or_default(),
-                                sent_at_ms: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .unwrap_or_default()
-                                    .as_millis() as u64,
-                                healthy,
-                                fatal_reason,
-                                fatal_message,
-                                execution_attempt_id: identity.execution_attempt_id,
-                                configured: identity.configured,
-                            }))
+                            .send(Ok(heartbeat_message(&identity, fatal.as_ref())))
                             .await
                             .is_err()
                         {
                             break;
                         }
-
                         if last_master_msg_at.elapsed() > master_silence {
                             break;
                         }
                     }
-                    event = fatal_events.recv() => {
-                        if let Ok(fatal) = event {
-                            let Ok(identity) = worker.ask(GetIdentity).await else {
-                                break;
-                            };
-                            let fatal_reason = match fatal.reason {
-                                WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
-                                WorkerFatalReason::TransportDisconnect => {
-                                    WorkerFatalReasonProto::TransportDisconnect as i32
-                                }
-                                WorkerFatalReason::TaskFailure => {
-                                    WorkerFatalReasonProto::TaskFailure as i32
-                                }
-                            };
-                            let _ = tx
-                                .send(Ok(WorkerHeartbeatMessage {
-                                    worker_id: identity.worker_id,
-                                    pipeline_id: identity.pipeline_id.unwrap_or_default(),
-                                    sent_at_ms: std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_millis() as u64,
-                                    healthy: false,
-                                    fatal_reason,
-                                    fatal_message: fatal.message,
-                                    execution_attempt_id: identity.execution_attempt_id,
-                                    configured: identity.configured,
-                                }))
-                                .await;
-                        }
-                    }
                     msg = inbound.message() => {
                         match msg {
-                            Ok(Some(_)) => {
-                                last_master_msg_at = std::time::Instant::now();
-                            }
-                            Ok(None) => break,
-                            Err(_) => break,
+                            Ok(Some(_)) => last_master_msg_at = std::time::Instant::now(),
+                            Ok(None) | Err(_) => break,
                         }
                     }
                 }
@@ -451,6 +383,43 @@ impl WorkerService for WorkerServiceImpl {
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+}
+
+fn heartbeat_message(
+    identity: &crate::runtime::worker::WorkerIdentity,
+    fatal: Option<&crate::runtime::health::WorkerFatalEvent>,
+) -> WorkerHeartbeatMessage {
+    let (healthy, fatal_reason, fatal_message) = match fatal {
+        Some(f) => (
+            false,
+            match f.reason {
+                WorkerFatalReason::Panic => WorkerFatalReasonProto::Panic as i32,
+                WorkerFatalReason::TransportDisconnect => {
+                    WorkerFatalReasonProto::TransportDisconnect as i32
+                }
+                WorkerFatalReason::TaskFailure => WorkerFatalReasonProto::TaskFailure as i32,
+            },
+            f.message.clone(),
+        ),
+        None => (
+            true,
+            WorkerFatalReasonProto::Unspecified as i32,
+            String::new(),
+        ),
+    };
+    WorkerHeartbeatMessage {
+        worker_id: identity.worker_id.clone(),
+        pipeline_id: identity.pipeline_id.clone().unwrap_or_default(),
+        sent_at_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64,
+        healthy,
+        fatal_reason,
+        fatal_message,
+        execution_attempt_id: identity.execution_attempt_id,
+        configured: identity.configured,
     }
 }
 
@@ -592,8 +561,8 @@ impl WorkerServer {
         }
     }
 
-    pub async fn worker_health(&self) -> Arc<crate::runtime::health::WorkerHealth> {
-        self.service.health.clone()
+    pub fn health_slot(&self) -> WorkerHealthSlot {
+        self.service.health_slot.clone()
     }
 
     /// Stop the gRPC server
@@ -622,12 +591,9 @@ impl WorkerServer {
     #[cfg(test)]
     pub async fn kill_for_testing(&mut self, inject_panic: bool) {
         if inject_panic {
-            let health = &self.service.health;
-            health.report_fatal(
-                health.execution_attempt_id(),
-                WorkerFatalReason::Panic,
-                "local test worker crash",
-            );
+            if let Some(health) = self.service.health_slot.get() {
+                health.report_fatal(WorkerFatalReason::Panic, "local test worker crash");
+            }
         }
         if let Some(mut serve) = self.serve.take() {
             serve.abort();
@@ -648,7 +614,7 @@ impl Clone for WorkerServiceImpl {
     fn clone(&self) -> Self {
         Self {
             worker: self.worker.clone(),
-            health: self.health.clone(),
+            health_slot: self.health_slot.clone(),
             orchestrator: self.orchestrator.clone(),
             close_worker_notify: self.close_worker_notify.clone(),
         }
