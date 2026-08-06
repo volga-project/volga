@@ -1,4 +1,4 @@
-//! Pipeline lifecycle actor: job intent + attempt supervision.
+//! Pipeline lifecycle actor: pipeline intent + attempt supervision.
 //!
 //! `RequestFinish` sets intent=`Finish` and drains only when the current attempt
 //! is stably runnable. Recovering attempts are left alone; drain is retried after
@@ -20,7 +20,7 @@ use super::state::{MasterState, PipelineContext};
 use crate::runtime::consts::{runtime_consts, MASTER_RECOVERY_BUDGET};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum JobIntent {
+enum PipelineIntent {
     Run,
     Finish,
 }
@@ -28,7 +28,7 @@ enum JobIntent {
 #[derive(Actor)]
 pub(super) struct MasterLifecycle {
     state: Arc<MasterState>,
-    intent: JobIntent,
+    intent: PipelineIntent,
     pipeline: Option<Arc<PipelineContext>>,
     execute_reply: Option<ReplySender<Result<(), String>>>,
     attempt_id: u64,
@@ -38,7 +38,7 @@ pub(super) struct MasterLifecycle {
 
 pub(super) struct Start(pub PipelineContext);
 
-/// Cooperative job finish: set intent and drain when the attempt allows it.
+/// Cooperative pipeline finish: set intent and drain when the attempt allows it.
 pub(super) struct RequestFinish;
 
 struct RunFinished(Result<AttemptOutcome, String>);
@@ -50,7 +50,7 @@ impl MasterLifecycle {
     pub(super) fn spawn(state: Arc<MasterState>) -> ActorRef<Self> {
         kameo::spawn(Self {
             state,
-            intent: JobIntent::Run,
+            intent: PipelineIntent::Run,
             pipeline: None,
             execute_reply: None,
             attempt_id: 0,
@@ -65,7 +65,7 @@ impl MasterLifecycle {
         }
         self.pipeline = None;
         self.current = None;
-        self.intent = JobIntent::Run;
+        self.intent = PipelineIntent::Run;
     }
 
     async fn try_drain(&self) {
@@ -245,7 +245,7 @@ impl Message<Start> for MasterLifecycle {
         }
 
         println!("[MASTER] Starting pipeline lifecycle");
-        self.intent = JobIntent::Run;
+        self.intent = PipelineIntent::Run;
         self.pipeline = Some(Arc::new(msg.0));
         self.execute_reply = Some(reply);
         self.attempt_id = 0;
@@ -271,7 +271,7 @@ impl Message<RequestFinish> for MasterLifecycle {
         if self.execute_reply.is_none() {
             return Err("lifecycle not started".to_string());
         }
-        self.intent = JobIntent::Finish;
+        self.intent = PipelineIntent::Finish;
         self.try_drain().await;
         Ok(())
     }
@@ -308,7 +308,7 @@ impl Message<AttemptRunArmed> for MasterLifecycle {
         _msg: AttemptRunArmed,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        if self.intent == JobIntent::Finish {
+        if self.intent == PipelineIntent::Finish {
             self.try_drain().await;
         }
     }
