@@ -1,13 +1,11 @@
 //! Worker-scoped registry: shared [`OperatorStore`]s + per-task [`OperatorTaskState`]s.
 
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use dashmap::DashMap;
-use tokio::sync::Notify;
 
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::VertexId;
@@ -17,15 +15,12 @@ use super::session::StateSessionHandle;
 use super::store::OperatorStore;
 use super::task_state::OperatorTaskState;
 
-/// Worker-scoped state runtime: one session, stores keyed by kind, task states by vertex.
+/// Worker-scoped state runtime: optional session, stores keyed by kind, task states by vertex.
 pub struct StateRegistry {
-    session: StateSessionHandle,
+    session: Option<StateSessionHandle>,
     tracker: Arc<StateResourceTracker>,
-    stores: Mutex<HashMap<OperatorKind, Arc<dyn Any + Send + Sync>>>,
-    /// Stores that implement maintenance (same Arcs as `stores` when registered).
-    operator_stores: Mutex<HashMap<OperatorKind, Arc<dyn OperatorStore>>>,
+    stores: Mutex<HashMap<OperatorKind, Arc<dyn OperatorStore>>>,
     task_states: DashMap<VertexId, Arc<dyn OperatorTaskState>>,
-    notifies: DashMap<VertexId, Arc<Notify>>,
     maintenance_enabled: AtomicBool,
 }
 
@@ -42,28 +37,23 @@ impl std::fmt::Debug for StateRegistry {
 
 impl Default for StateRegistry {
     fn default() -> Self {
-        Self::new(
-            StateSessionHandle::InMem,
-            Arc::new(StateResourceTracker::new()),
-        )
+        Self::new(None, Arc::new(StateResourceTracker::new()))
     }
 }
 
 impl StateRegistry {
-    pub fn new(session: StateSessionHandle, tracker: Arc<StateResourceTracker>) -> Self {
+    pub fn new(session: Option<StateSessionHandle>, tracker: Arc<StateResourceTracker>) -> Self {
         Self {
             session,
             tracker,
             stores: Mutex::new(HashMap::new()),
-            operator_stores: Mutex::new(HashMap::new()),
             task_states: DashMap::new(),
-            notifies: DashMap::new(),
             maintenance_enabled: AtomicBool::new(false),
         }
     }
 
-    pub fn session(&self) -> &StateSessionHandle {
-        &self.session
+    pub fn session(&self) -> Option<&StateSessionHandle> {
+        self.session.as_ref()
     }
 
     pub fn tracker(&self) -> &Arc<StateResourceTracker> {
@@ -79,33 +69,21 @@ impl StateRegistry {
     }
 
     /// Get or create a shared store for `kind` (one backend per worker).
-    pub fn get_or_insert_store<T, F>(&self, kind: OperatorKind, factory: F) -> Arc<T>
+    pub fn get_or_insert_store<F>(&self, kind: OperatorKind, factory: F) -> Arc<dyn OperatorStore>
     where
-        T: OperatorStore + Send + Sync + 'static,
-        F: FnOnce() -> Arc<T>,
+        F: FnOnce(Option<&StateSessionHandle>) -> Arc<dyn OperatorStore>,
     {
         let mut stores = self.stores.lock().expect("state registry stores");
         if let Some(existing) = stores.get(&kind) {
-            return existing
-                .clone()
-                .downcast::<T>()
-                .expect("operator store kind type mismatch");
+            return existing.clone();
         }
-        let created = factory();
-        {
-            let mut operator_stores = self.operator_stores.lock().expect("operator stores");
-            operator_stores.insert(kind, created.clone() as Arc<dyn OperatorStore>);
-        }
-        stores.insert(kind, created.clone() as Arc<dyn Any + Send + Sync>);
+        let created = factory(self.session.as_ref());
+        stores.insert(kind, created.clone());
         created
     }
 
     pub fn insert_task_state(&self, vertex_id: VertexId, state: Arc<dyn OperatorTaskState>) {
-        let id = vertex_id.clone();
         self.task_states.insert(vertex_id, state);
-        if let Some(n) = self.notifies.get(&id) {
-            n.notify_waiters();
-        }
     }
 
     pub fn remove_task_state(&self, vertex_id: &str) {
@@ -118,23 +96,6 @@ impl StateRegistry {
             .map(|entry| entry.value().clone())
     }
 
-    pub async fn wait_for_task_state(&self, vertex_id: &str) -> Arc<dyn OperatorTaskState> {
-        loop {
-            if let Some(state) = self.get_task_state(vertex_id) {
-                return state;
-            }
-            let notify = self
-                .notifies
-                .entry(Arc::<str>::from(vertex_id))
-                .or_insert_with(|| Arc::new(Notify::new()))
-                .clone();
-            if let Some(state) = self.get_task_state(vertex_id) {
-                return state;
-            }
-            notify.notified().await;
-        }
-    }
-
     pub fn task_states(&self, kind: OperatorKind) -> Vec<Arc<dyn OperatorTaskState>> {
         self.task_states
             .iter()
@@ -143,24 +104,25 @@ impl StateRegistry {
             .collect()
     }
 
-    /// One cleaner tick: per registered store, maintain each matching task state.
+    /// One cleaner tick: one parallel loop per op kind; within a kind, all task states join.
     pub async fn run_maintenance_once(&self) -> Result<()> {
-        let stores: Vec<(OperatorKind, Arc<dyn OperatorStore>)> = self
-            .operator_stores
+        let work: Vec<(OperatorKind, Arc<dyn OperatorStore>)> = self
+            .stores
             .lock()
             .expect("operator stores")
             .iter()
             .map(|(k, s)| (*k, s.clone()))
             .collect();
-        for (kind, store) in stores {
+        let kind_futs = work.into_iter().map(|(kind, store)| {
             let states = self.task_states(kind);
-            let futs = states.iter().map(|state| {
-                let store = store.clone();
-                let state = state.clone();
-                async move { store.maintain(state.as_ref()).await }
-            });
-            futures::future::try_join_all(futs).await?;
-        }
+            async move {
+                let futs = states.iter().map(|state| {
+                    store.maintain(state.state_namespace(), state.as_ref())
+                });
+                futures::future::try_join_all(futs).await
+            }
+        });
+        futures::future::try_join_all(kind_futs).await?;
         Ok(())
     }
 }

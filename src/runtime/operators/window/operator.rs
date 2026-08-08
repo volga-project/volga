@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -302,7 +303,9 @@ impl OperatorTrait for WindowOperator {
                         RecordBatch::new_empty(self.output_schema.clone())
                     };
                     if advances_frontier {
-                        state.set_watermark_frontier(wm_ts);
+                        state
+                            .watermark_frontier
+                            .store(wm_ts, Ordering::Release);
                     }
 
                     self.base

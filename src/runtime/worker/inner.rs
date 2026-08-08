@@ -72,8 +72,10 @@ impl WorkerInner {
             config.pipeline_id.clone(),
         )));
 
+        let session = StateSessionHandle::connect(&config.operator_state_backend)
+            .expect("state session init");
         let state_registry = Arc::new(StateRegistry::new(
-            StateSessionHandle::InMem,
+            session,
             Arc::new(StateResourceTracker::new()),
         ));
         state_registry.set_maintenance_enabled(config.state_maintenance_enabled);

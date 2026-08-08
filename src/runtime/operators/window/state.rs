@@ -1,6 +1,7 @@
 use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::Arc;
 
 use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -18,6 +19,9 @@ use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::state::OperatorTaskState;
 
+/// Sentinel in [`WindowOperatorState::watermark_frontier`]: no frontier yet.
+pub const WATERMARK_UNSET: i64 = i64::MIN;
+
 /// Runtime state owned by the WO (per task / state namespace).
 #[derive(Debug)]
 pub struct WindowOperatorState {
@@ -25,7 +29,8 @@ pub struct WindowOperatorState {
     namespace: StateNamespace,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
-    watermark_frontier: RwLock<Option<i64>>,
+    /// Task watermark frontier; [`WATERMARK_UNSET`] until the first advance.
+    pub watermark_frontier: AtomicI64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +52,7 @@ impl WindowOperatorState {
             namespace,
             ts_column_index,
             window_configs,
-            watermark_frontier: RwLock::new(None),
+            watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
         }
     }
 
@@ -60,15 +65,8 @@ impl WindowOperatorState {
     }
 
     pub fn watermark_frontier(&self) -> Option<i64> {
-        *self.watermark_frontier.read().expect("watermark lock")
-    }
-
-    pub fn set_watermark_frontier(&self, watermark: i64) {
-        *self.watermark_frontier.write().expect("watermark lock") = Some(watermark);
-    }
-
-    pub fn set_watermark_frontier_opt(&self, watermark: Option<i64>) {
-        *self.watermark_frontier.write().expect("watermark lock") = watermark;
+        let v = self.watermark_frontier.load(Ordering::Acquire);
+        (v != WATERMARK_UNSET).then_some(v)
     }
 
     pub fn partition(&self, key: &Key) -> PartitionKey {
@@ -89,7 +87,10 @@ impl WindowOperatorState {
             "window checkpoint namespace does not match runtime namespace",
         );
         self.store.restore(&self.namespace, &restore.backend).await?;
-        self.set_watermark_frontier_opt(restore.watermark_frontier);
+        self.watermark_frontier.store(
+            restore.watermark_frontier.unwrap_or(WATERMARK_UNSET),
+            Ordering::Release,
+        );
         Ok(())
     }
 
