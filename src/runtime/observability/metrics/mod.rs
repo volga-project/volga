@@ -27,11 +27,12 @@ pub const METRIC_STREAM_TASK_RECORDS_SENT: &str = "volga_stream_task_records_sen
 pub const METRIC_STREAM_TASK_RECORDS_RECV: &str = "volga_stream_task_records_recv";
 pub const METRIC_STREAM_TASK_BYTES_SENT: &str = "volga_stream_task_bytes_sent";
 pub const METRIC_STREAM_TASK_BYTES_RECV: &str = "volga_stream_task_bytes_recv";
-pub const METRIC_STREAM_TASK_LATENCY: &str = "volga_stream_task_latency";
-pub const METRIC_STREAM_TASK_LATENCY_99: &str = "volga_stream_task_latency_99";
-pub const METRIC_STREAM_TASK_LATENCY_95: &str = "volga_stream_task_latency_95";
-pub const METRIC_STREAM_TASK_LATENCY_50: &str = "volga_stream_task_latency_50";
-pub const METRIC_STREAM_TASK_LATENCY_AVG: &str = "volga_stream_task_latency_avg";
+/// Path latency histogram: `recv − ingest` (ms). Omit when ingest is absent.
+pub const METRIC_STREAM_TASK_PATH_LATENCY: &str = "volga_stream_task_path_latency";
+pub const METRIC_STREAM_TASK_PATH_LATENCY_99: &str = "volga_stream_task_path_latency_99";
+pub const METRIC_STREAM_TASK_PATH_LATENCY_95: &str = "volga_stream_task_path_latency_95";
+pub const METRIC_STREAM_TASK_PATH_LATENCY_50: &str = "volga_stream_task_path_latency_50";
+pub const METRIC_STREAM_TASK_PATH_LATENCY_AVG: &str = "volga_stream_task_path_latency_avg";
 pub const METRIC_STREAM_TASK_TX_QUEUE_SIZE: &str = "volga_stream_task_tx_queue_size";
 pub const METRIC_STREAM_TASK_TX_QUEUE_REM: &str = "volga_stream_task_tx_queue_rem";
 pub const METRIC_STREAM_TASK_BACKPRESSURE_RATIO: &str = "volga_stream_task_backpressure_ratio";
@@ -47,10 +48,10 @@ pub const METRIC_OPERATOR_RECORDS_SENT: &str = "volga_operator_records_sent";
 pub const METRIC_OPERATOR_RECORDS_RECV: &str = "volga_operator_records_recv";
 pub const METRIC_OPERATOR_BYTES_SENT: &str = "volga_operator_bytes_sent";
 pub const METRIC_OPERATOR_BYTES_RECV: &str = "volga_operator_bytes_recv";
-pub const METRIC_OPERATOR_LATENCY_99: &str = "volga_operator_latency_99";
-pub const METRIC_OPERATOR_LATENCY_95: &str = "volga_operator_latency_95";
-pub const METRIC_OPERATOR_LATENCY_50: &str = "volga_operator_latency_50";
-pub const METRIC_OPERATOR_LATENCY_AVG: &str = "volga_operator_latency_avg";
+pub const METRIC_OPERATOR_PATH_LATENCY_99: &str = "volga_operator_path_latency_99";
+pub const METRIC_OPERATOR_PATH_LATENCY_95: &str = "volga_operator_path_latency_95";
+pub const METRIC_OPERATOR_PATH_LATENCY_50: &str = "volga_operator_path_latency_50";
+pub const METRIC_OPERATOR_PATH_LATENCY_AVG: &str = "volga_operator_path_latency_avg";
 
 // Label constants
 pub const LABEL_VERTEX_ID: &str = "vertex_id";
@@ -88,7 +89,8 @@ pub const LATENCY_HISTOGRAM_LEN: usize = LATENCY_BUCKET_BOUNDARIES.len() + 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LatencyMetrics {
-    pub latency_histogram: Vec<u64>, // latency is calculated from ingestion time to this task
+    /// Cumulative hist buckets (finite bounds + trailing +Inf count).
+    pub latency_histogram: Vec<u64>,
     pub p99: f64,
     pub p95: f64,
     pub p50: f64,
@@ -244,7 +246,7 @@ impl ThroughputMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskMetrics {
     pub vertex_id: String,
-    pub latency_stats: LatencyMetrics,
+    pub path_latency: LatencyMetrics,
     pub throughput_stast: ThroughputMetrics,
     pub backpressure_per_peer: HashMap<String, f64>,
 }
@@ -253,7 +255,7 @@ impl TaskMetrics {
     pub fn empty(vertex_id: impl Into<String>) -> Self {
         Self {
             vertex_id: vertex_id.into(),
-            latency_stats: LatencyMetrics::new(vec![0u64; LATENCY_HISTOGRAM_LEN]),
+            path_latency: LatencyMetrics::new(vec![0u64; LATENCY_HISTOGRAM_LEN]),
             throughput_stast: ThroughputMetrics::new(0, 0, 0, 0, 0, 0),
             backpressure_per_peer: HashMap::new(),
         }
@@ -264,18 +266,20 @@ impl TaskMetrics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorAggregateMetrics {
     pub operator_id: String,
-    pub latency_metrics: LatencyMetrics,
+    pub path_latency: LatencyMetrics,
     pub throughput_metrics: ThroughputMetrics,
 }
 
 impl OperatorAggregateMetrics {
     pub fn new(operator_id: String, task_metrics: Vec<TaskMetrics>) -> Self {
-        let latency_stats = LatencyMetrics::merge(task_metrics.iter().map(|m| &m.latency_stats).collect());
-        let throughput_stats = ThroughputMetrics::merge(task_metrics.iter().map(|m| &m.throughput_stast).collect());
+        let path_latency =
+            LatencyMetrics::merge(task_metrics.iter().map(|m| &m.path_latency).collect());
+        let throughput_stats =
+            ThroughputMetrics::merge(task_metrics.iter().map(|m| &m.throughput_stast).collect());
 
         OperatorAggregateMetrics {
             operator_id,
-            latency_metrics: latency_stats,
+            path_latency,
             throughput_metrics: throughput_stats,
         }
     }
@@ -368,59 +372,57 @@ impl WorkerAggregateMetrics {
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
             ).set(throughput.bytes_recv as f64);
             
-            // Record latency metrics
             gauge!(
-                METRIC_OPERATOR_LATENCY_99,
+                METRIC_OPERATOR_PATH_LATENCY_99,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(operator_metrics.latency_metrics.p99);
+            ).set(operator_metrics.path_latency.p99);
             gauge!(
-                METRIC_OPERATOR_LATENCY_95,
+                METRIC_OPERATOR_PATH_LATENCY_95,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(operator_metrics.latency_metrics.p95);
+            ).set(operator_metrics.path_latency.p95);
             gauge!(
-                METRIC_OPERATOR_LATENCY_50,
+                METRIC_OPERATOR_PATH_LATENCY_50,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(operator_metrics.latency_metrics.p50);
+            ).set(operator_metrics.path_latency.p50);
             gauge!(
-                METRIC_OPERATOR_LATENCY_AVG,
+                METRIC_OPERATOR_PATH_LATENCY_AVG,
                 LABEL_OPERATOR_ID => operator_id.clone(),
-                LABEL_WORKER_ID => self.worker_id.clone(),  
+                LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(operator_metrics.latency_metrics.avg);
+            ).set(operator_metrics.path_latency.avg);
         }
-        
-        // Record stream task latency metrics
+
         for (vertex_id, task_metrics) in self.tasks_metrics.iter() {
             gauge!(
-                METRIC_STREAM_TASK_LATENCY_99,
+                METRIC_STREAM_TASK_PATH_LATENCY_99,
                 LABEL_VERTEX_ID => vertex_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(task_metrics.latency_stats.p99);
+            ).set(task_metrics.path_latency.p99);
             gauge!(
-                METRIC_STREAM_TASK_LATENCY_95,
+                METRIC_STREAM_TASK_PATH_LATENCY_95,
                 LABEL_VERTEX_ID => vertex_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(task_metrics.latency_stats.p95);
+            ).set(task_metrics.path_latency.p95);
             gauge!(
-                METRIC_STREAM_TASK_LATENCY_50,
+                METRIC_STREAM_TASK_PATH_LATENCY_50,
                 LABEL_VERTEX_ID => vertex_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(task_metrics.latency_stats.p50);
+            ).set(task_metrics.path_latency.p50);
             gauge!(
-                METRIC_STREAM_TASK_LATENCY_AVG,
+                METRIC_STREAM_TASK_PATH_LATENCY_AVG,
                 LABEL_VERTEX_ID => vertex_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).set(task_metrics.latency_stats.avg);
+            ).set(task_metrics.path_latency.avg);
         }
     }
 }
@@ -747,25 +749,23 @@ impl PipelineStateHistory {
             });
         }
         
-        // Aggregate latency histograms per task across all samples
-        let mut latency_histograms_per_task: HashMap<String, Vec<&LatencyMetrics>> = HashMap::new();
+        // Aggregate path-latency histograms per task across all samples
+        let mut path_latency_hists_per_task: HashMap<String, Vec<&LatencyMetrics>> = HashMap::new();
         
         for (_timestamp, pipeline_state) in &self.samples {
             for (_worker_id, worker_state) in &pipeline_state.worker_states {
                 if let Some(worker_metrics) = &worker_state.worker_metrics {
                     for (vertex_id, task_metrics) in &worker_metrics.tasks_metrics {
-                        latency_histograms_per_task.entry(vertex_id.clone())
+                        path_latency_hists_per_task.entry(vertex_id.clone())
                             .or_insert_with(Vec::new)
-                            .push(&task_metrics.latency_stats);
+                            .push(&task_metrics.path_latency);
                     }
                 }
             }
         }
         
-        // Merge histograms and calculate stats for each task
-        for (vertex_id, latency_metrics_vec) in latency_histograms_per_task {
-            let merged_latency = LatencyMetrics::merge(latency_metrics_vec);
-            latency_per_task.insert(vertex_id, merged_latency);
+        for (vertex_id, hist_vec) in path_latency_hists_per_task {
+            latency_per_task.insert(vertex_id, LatencyMetrics::merge(hist_vec));
         }
         
         FinalStats {
@@ -891,7 +891,7 @@ fn parse_all_stream_task_metrics(
         records_recv: u64,
         bytes_sent: u64,
         bytes_recv: u64,
-        latency_histogram: Option<Vec<u64>>,
+        path_latency_histogram: Option<Vec<u64>>,
         backpressure_per_peer: HashMap<String, f64>,
     }
 
@@ -924,8 +924,8 @@ fn parse_all_stream_task_metrics(
                 _ => {}
             },
             Value::Histogram(histogram_counts) => {
-                if sample.metric == METRIC_STREAM_TASK_LATENCY {
-                    acc.latency_histogram =
+                if sample.metric == METRIC_STREAM_TASK_PATH_LATENCY {
+                    acc.path_latency_histogram =
                         Some(convert_histogram_counts_to_buckets(&histogram_counts));
                 }
             }
@@ -944,14 +944,14 @@ fn parse_all_stream_task_metrics(
     by_vertex
         .into_iter()
         .map(|(vertex_id, acc)| {
-            let latency_histogram = acc
-                .latency_histogram
-                .unwrap_or_else(|| vec![0u64; LATENCY_HISTOGRAM_LEN]);
             (
                 vertex_id.clone(),
                 TaskMetrics {
                     vertex_id,
-                    latency_stats: LatencyMetrics::new(latency_histogram),
+                    path_latency: LatencyMetrics::new(
+                        acc.path_latency_histogram
+                            .unwrap_or_else(|| vec![0u64; LATENCY_HISTOGRAM_LEN]),
+                    ),
                     throughput_stast: ThroughputMetrics::new(
                         acc.messages_sent,
                         acc.messages_recv,
@@ -1060,25 +1060,21 @@ mod tests {
             LABEL_WORKER_ID => labels.worker_id.clone()
         ).increment(512);
         
-        // Define latency measurements to record
-        let latency_measurements = [5.0, 25.0, 150.0, 2.5, 75.0];
-        
-        // Record latencies using metrics
-        for &latency in &latency_measurements {
+        let path_measurements = [5.0, 25.0, 150.0, 2.5, 75.0];
+        for &latency in &path_measurements {
             histogram!(
-                METRIC_STREAM_TASK_LATENCY,
+                METRIC_STREAM_TASK_PATH_LATENCY,
                 LABEL_VERTEX_ID => vertex_id.clone(),
                 LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                 LABEL_WORKER_ID => labels.worker_id.clone()
-            ).record(latency);
+            )
+            .record(latency);
         }
-        
-        // Build expected histogram manually
-        let expected_histogram = build_expected_histogram(&latency_measurements, &LATENCY_BUCKET_BOUNDARIES);
-        
+
+        let expected_path = build_expected_histogram(&path_measurements, &LATENCY_BUCKET_BOUNDARIES);
+
         let parsed_metrics = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
-        
-        // Verify the parsed stream task metrics
+
         assert_eq!(parsed_metrics.vertex_id, vertex_id);
         assert_eq!(parsed_metrics.throughput_stast.messages_sent, 5);
         assert_eq!(parsed_metrics.throughput_stast.messages_recv, 3);
@@ -1086,68 +1082,40 @@ mod tests {
         assert_eq!(parsed_metrics.throughput_stast.records_recv, 15);
         assert_eq!(parsed_metrics.throughput_stast.bytes_sent, 1024);
         assert_eq!(parsed_metrics.throughput_stast.bytes_recv, 512);
-        
-        // Verify histogram has data
-        assert!(!parsed_metrics.latency_stats.latency_histogram.is_empty(), "Histogram should not be empty");
-        
-        // Verify exact match between expected and parsed histogram (finite + +Inf)
+
+        assert_eq!(parsed_metrics.path_latency.latency_histogram, expected_path);
         assert_eq!(
-            parsed_metrics.latency_stats.latency_histogram.len(), 
-            expected_histogram.len(),
-            "Histogram should have finite buckets plus +Inf"
+            *parsed_metrics.path_latency.latency_histogram.last().unwrap(),
+            path_measurements.len() as u64
         );
-        assert_eq!(
-            parsed_metrics.latency_stats.latency_histogram.len(),
-            LATENCY_HISTOGRAM_LEN
-        );
-        
-        for (i, (&expected, &actual)) in expected_histogram.iter().zip(parsed_metrics.latency_stats.latency_histogram.iter()).enumerate() {
-            let boundary_label = if i < LATENCY_BUCKET_BOUNDARIES.len() {
-                format!("{}ms", LATENCY_BUCKET_BOUNDARIES[i])
-            } else {
-                "+Inf".to_string()
-            };
-            assert_eq!(
-                actual, expected,
-                "Bucket {} mismatch: expected {}, got {} (boundary: {})", 
-                i, expected, actual, boundary_label
-            );
-        }
-        
-        // Verify we recorded all latency values (+Inf cumulative)
-        let total_count = parsed_metrics.latency_stats.latency_histogram.last().unwrap_or(&0);
-        assert_eq!(*total_count, latency_measurements.len() as u64, 
-                   "Should have recorded {} latency measurements", latency_measurements.len());
-        
-        // Test vertex isolation with a second vertex
+
         let vertex_b = "task_b".to_string();
         counter!(
             METRIC_STREAM_TASK_MESSAGES_SENT,
             LABEL_VERTEX_ID => vertex_b.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone()
-        ).increment(1);
+        )
+        .increment(1);
         counter!(
             METRIC_STREAM_TASK_RECORDS_SENT,
             LABEL_VERTEX_ID => vertex_b.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone()
-        ).increment(50);
-        
+        )
+        .increment(50);
+
         let metrics_b = get_stream_task_metrics(Arc::<str>::from(vertex_b.clone()), Some(&labels));
-        
-        // Verify isolation - vertex B should only see its own metrics
+
         assert_eq!(metrics_b.vertex_id, vertex_b);
         assert_eq!(metrics_b.throughput_stast.messages_sent, 1);
         assert_eq!(metrics_b.throughput_stast.records_sent, 50);
-        assert_eq!(metrics_b.throughput_stast.messages_recv, 0); // Not set for vertex B
-        
-        // Verify original vertex still has correct metrics
+        assert_eq!(metrics_b.throughput_stast.messages_recv, 0);
+
         let metrics_a_again = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
         assert_eq!(metrics_a_again.throughput_stast.messages_sent, 5);
         assert_eq!(metrics_a_again.throughput_stast.records_sent, 25);
 
-        // One scrape returns both vertices
         let all = scrape_stream_task_metrics(Some(&labels));
         assert_eq!(all.get(&vertex_id).unwrap().throughput_stast.messages_sent, 5);
         assert_eq!(all.get(&vertex_b).unwrap().throughput_stast.messages_sent, 1);
@@ -1167,7 +1135,7 @@ mod tests {
         let latency_measurements = [10.0, 10_000.0];
         for &latency in &latency_measurements {
             histogram!(
-                METRIC_STREAM_TASK_LATENCY,
+                METRIC_STREAM_TASK_PATH_LATENCY,
                 LABEL_VERTEX_ID => vertex_id.clone(),
                 LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                 LABEL_WORKER_ID => labels.worker_id.clone()
@@ -1178,11 +1146,11 @@ mod tests {
         let expected = build_expected_histogram(&latency_measurements, &LATENCY_BUCKET_BOUNDARIES);
         let parsed = get_stream_task_metrics(Arc::<str>::from(vertex_id), Some(&labels));
 
-        assert_eq!(parsed.latency_stats.latency_histogram, expected);
-        assert_eq!(*parsed.latency_stats.latency_histogram.last().unwrap(), 2);
+        assert_eq!(parsed.path_latency.latency_histogram, expected);
+        assert_eq!(*parsed.path_latency.latency_histogram.last().unwrap(), 2);
         // Last finite cumulative count should be 1 (only the 10ms sample)
         assert_eq!(
-            parsed.latency_stats.latency_histogram[LATENCY_BUCKET_BOUNDARIES.len() - 1],
+            parsed.path_latency.latency_histogram[LATENCY_BUCKET_BOUNDARIES.len() - 1],
             1
         );
 

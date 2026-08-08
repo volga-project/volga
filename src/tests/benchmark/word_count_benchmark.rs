@@ -159,7 +159,7 @@ async fn poll_pipeline_state_updates(
             let records_per_sec = records_diff as f64 / time_diff;
 
             // Calculate average latency from histogram
-            let latency_ms = sink_operator_metrics.latency_metrics.avg;
+            let latency_ms = sink_operator_metrics.path_latency.avg;
 
             benchmark_metrics.add_sample(messages_per_sec, records_per_sec, latency_ms);
         }

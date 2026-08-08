@@ -393,7 +393,7 @@ async fn test_window_request_benchmark() -> Result<()> {
     }
 
     if !final_stats.latency_per_task.is_empty() {
-        println!("\nLatency Statistics (per task, merged histogram over all history):");
+        println!("\nPath latency (per task, merged histogram over all history):");
         for (task_id, latency_stats) in &final_stats.latency_per_task {
             println!("  Task: {}", task_id);
             println!("    Avg: {:.2} ms", latency_stats.avg);

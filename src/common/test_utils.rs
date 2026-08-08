@@ -89,11 +89,11 @@ pub fn print_pipeline_state(
                     println!("      Records Recv: {} (total)", operator_metrics.throughput_metrics.records_recv);
                     println!("      Bytes Sent: {} (total)", operator_metrics.throughput_metrics.bytes_sent);
                     println!("      Bytes Recv: {} (total)", operator_metrics.throughput_metrics.bytes_recv);
-                    println!("    Latency:");
-                    println!("      P99: {:.2}ms", operator_metrics.latency_metrics.p99);
-                    println!("      P95: {:.2}ms", operator_metrics.latency_metrics.p95);
-                    println!("      P50: {:.2}ms", operator_metrics.latency_metrics.p50);
-                    println!("      Avg: {:.2}ms", operator_metrics.latency_metrics.avg);
+                    println!("    Path latency:");
+                    println!("      P99: {:.2}ms", operator_metrics.path_latency.p99);
+                    println!("      P95: {:.2}ms", operator_metrics.path_latency.p95);
+                    println!("      P50: {:.2}ms", operator_metrics.path_latency.p50);
+                    println!("      Avg: {:.2}ms", operator_metrics.path_latency.avg);
                     has_operator_metrics = true;
                 }
             }
@@ -129,11 +129,11 @@ pub fn print_pipeline_state(
                         }
                     }
                     
-                    println!("    Latency:");
-                    println!("      P99: {:.2}ms", task_metrics.latency_stats.p99);
-                    println!("      P95: {:.2}ms", task_metrics.latency_stats.p95);
-                    println!("      P50: {:.2}ms", task_metrics.latency_stats.p50);
-                    println!("      Avg: {:.2}ms", task_metrics.latency_stats.avg);
+                    println!("    Path latency:");
+                    println!("      P99: {:.2}ms", task_metrics.path_latency.p99);
+                    println!("      P95: {:.2}ms", task_metrics.path_latency.p95);
+                    println!("      P50: {:.2}ms", task_metrics.path_latency.p50);
+                    println!("      Avg: {:.2}ms", task_metrics.path_latency.avg);
                     if !task_metrics.backpressure_per_peer.is_empty() {
                         println!("    Backpressure per Peer:");
                         for (peer_id, ratio) in &task_metrics.backpressure_per_peer {

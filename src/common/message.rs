@@ -16,7 +16,7 @@ impl BaseMessage {
     pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
         Self {
             record_batch,
-            metadata: MessageMetadata { upstream_vertex_id, ingest_timestamp, extras }
+            metadata: MessageMetadata::new(upstream_vertex_id, ingest_timestamp, extras),
         }
     }
 
@@ -104,6 +104,18 @@ pub struct MessageMetadata {
 }
 
 impl MessageMetadata {
+    pub fn new(
+        upstream_vertex_id: Option<String>,
+        ingest_timestamp: Option<u64>,
+        extras: Option<HashMap<String, String>>,
+    ) -> Self {
+        Self {
+            upstream_vertex_id,
+            ingest_timestamp,
+            extras,
+        }
+    }
+
     pub fn get_memory_size(&self) -> usize {
         // Option<u64> = 8 bytes, Option<String> = 24 bytes + string length
         let mut len = 0;
@@ -119,7 +131,7 @@ impl MessageMetadata {
             }
         }
         
-        8 + 24 + 24 + len // u64 + Option<String> + Option<HashMap> + content
+        8 + 24 + 24 + len // ingest u64 + Option<String> + Option<HashMap> + content
     }
 }
 
@@ -202,11 +214,7 @@ impl WatermarkMessage {
     pub fn new(upstream_vertex_id: String, watermark_value: u64, ingest_timestamp: Option<u64>) -> Self {
         Self {
             watermark_value,
-            metadata: MessageMetadata {
-                upstream_vertex_id: Some(upstream_vertex_id),
-                ingest_timestamp,
-                extras: None
-            }
+            metadata: MessageMetadata::new(Some(upstream_vertex_id), ingest_timestamp, None),
         }
     }
 
@@ -253,11 +261,7 @@ impl CheckpointBarrierMessage {
         Self {
             checkpoint_id,
             execution_attempt_id,
-            metadata: MessageMetadata {
-                upstream_vertex_id: Some(upstream_vertex_id),
-                ingest_timestamp,
-                extras: None,
-            },
+            metadata: MessageMetadata::new(Some(upstream_vertex_id), ingest_timestamp, None),
         }
     }
 
