@@ -1,4 +1,4 @@
-use metrics::{counter, gauge};
+use metrics::gauge;
 use serde::{Deserialize, Serialize};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use metrics_exporter_tcp::TcpBuilder;
@@ -81,8 +81,10 @@ pub struct MetricsLabels {
     pub worker_id: String,
 }
 
-// Histogram bucket boundaries, milliseconds
+// Histogram bucket boundaries, milliseconds (Prometheus also emits a trailing +Inf bucket).
 pub const LATENCY_BUCKET_BOUNDARIES: [f64; 12] = [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0];
+/// Finite Prom buckets plus the trailing `+Inf` cumulative count.
+pub const LATENCY_HISTOGRAM_LEN: usize = LATENCY_BUCKET_BOUNDARIES.len() + 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LatencyMetrics {
@@ -107,11 +109,11 @@ impl LatencyMetrics {
 
     pub fn merge(latency_stats: Vec<&LatencyMetrics>) -> Self {
         if latency_stats.is_empty() {
-            return Self::new(vec![0u64; LATENCY_BUCKET_BOUNDARIES.len()]);
+            return Self::new(vec![0u64; LATENCY_HISTOGRAM_LEN]);
         }
 
         // Merge histograms by summing corresponding buckets
-        let mut merged_histogram = vec![0u64; LATENCY_BUCKET_BOUNDARIES.len()];
+        let mut merged_histogram = vec![0u64; LATENCY_HISTOGRAM_LEN];
         for stats in latency_stats.iter() {
             for (i, bucket) in merged_histogram.iter_mut().enumerate() {
                 if i < stats.latency_histogram.len() {
@@ -126,11 +128,11 @@ impl LatencyMetrics {
     /// Calculate histogram statistics (p99, p95, p50, avg) from a histogram
     pub fn calculate_stats(histogram: &Vec<u64>) -> (f64, f64, f64, f64) {
         // Handle edge cases
-        if histogram.is_empty() || histogram.len() != LATENCY_BUCKET_BOUNDARIES.len() {
+        if histogram.is_empty() || histogram.len() != LATENCY_HISTOGRAM_LEN {
             return (0.0, 0.0, 0.0, 0.0);
         }
         
-        // Get total sample count from last bucket (cumulative histogram)
+        // Total samples = +Inf cumulative bucket (includes overflow past last finite bound)
         let total_samples = *histogram.last().unwrap();
         if total_samples == 0 {
             return (0.0, 0.0, 0.0, 0.0);
@@ -149,46 +151,59 @@ impl LatencyMetrics {
 
     fn calculate_percentile(histogram: &Vec<u64>, total_samples: u64, percentile: f64) -> f64 {
         let boundaries = &LATENCY_BUCKET_BOUNDARIES;
+        let last_finite = *boundaries.last().unwrap();
         let target_count = (total_samples as f64 * percentile / 100.0) as u64;
         
-        // Find the bucket containing the target count
+        // Find the bucket containing the target count (last index is +Inf / overflow)
         for (i, &bucket_count) in histogram.iter().enumerate() {
             if bucket_count >= target_count {
-                let boundary = boundaries[i];
-                
-                // Linear interpolation within the bucket
-                let prev_count = if i == 0 { 0 } else { histogram[i-1] };
+                let prev_count = if i == 0 { 0 } else { histogram[i - 1] };
                 let bucket_samples = bucket_count - prev_count;
-                
+                let boundary = if i < boundaries.len() {
+                    boundaries[i]
+                } else {
+                    // Overflow: report lower bound (last finite boundary)
+                    last_finite
+                };
+
                 if bucket_samples == 0 {
                     return boundary;
                 }
-                
-                let prev_boundary = if i == 0 { 0.0 } else { boundaries[i-1] };
+
+                let prev_boundary = if i == 0 {
+                    0.0
+                } else if i <= boundaries.len() {
+                    boundaries[i - 1]
+                } else {
+                    last_finite
+                };
                 let samples_into_bucket = target_count - prev_count;
                 let fraction = samples_into_bucket as f64 / bucket_samples as f64;
-                
+
                 return prev_boundary + (boundary - prev_boundary) * fraction;
             }
         }
         
-        // Fallback: return the last boundary
-        *LATENCY_BUCKET_BOUNDARIES.last().unwrap()
+        last_finite
     }
 
     fn calculate_weighted_average(histogram: &Vec<u64>, total_samples: u64) -> f64 {
         let boundaries = &LATENCY_BUCKET_BOUNDARIES;
+        let last_finite = *boundaries.last().unwrap();
         let mut weighted_sum = 0.0;
         
         for (i, &bucket_count) in histogram.iter().enumerate() {
-            let boundary = boundaries[i];
-            
-            // Calculate bucket midpoint
-            let prev_boundary = if i == 0 { 0.0 } else { boundaries[i-1] };
-            let bucket_midpoint = (prev_boundary + boundary) / 2.0;
+            let bucket_midpoint = if i < boundaries.len() {
+                let boundary = boundaries[i];
+                let prev_boundary = if i == 0 { 0.0 } else { boundaries[i - 1] };
+                (prev_boundary + boundary) / 2.0
+            } else {
+                // Overflow samples (>= last finite): use last finite as lower-bound estimate
+                last_finite
+            };
             
             // Get samples in this bucket (not cumulative)
-            let prev_count = if i == 0 { 0 } else { histogram[i-1] };
+            let prev_count = if i == 0 { 0 } else { histogram[i - 1] };
             let bucket_samples = bucket_count - prev_count;
             
             weighted_sum += bucket_midpoint * bucket_samples as f64;
@@ -296,47 +311,51 @@ impl WorkerAggregateMetrics {
         }
     }
 
+    /// Emit poll-derived operator/task gauges from absolute snapshot totals.
+    ///
+    /// Throughput rollups are gauges (set-to-current), not counters: values are
+    /// already cumulative sums of task counters, and this runs every poll tick.
     pub fn record(&self) {
         let pipeline_id = self.pipeline_id.0.clone();
 
         for (operator_id, operator_metrics) in self.operator_metrics.iter() {
-            // Record throughput metrics
-            counter!(
+            let throughput = &operator_metrics.throughput_metrics;
+            gauge!(
                 METRIC_OPERATOR_MESSAGES_SENT,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).increment(operator_metrics.throughput_metrics.messages_sent);
-            counter!(
+            ).set(throughput.messages_sent as f64);
+            gauge!(
                 METRIC_OPERATOR_MESSAGES_RECV,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).increment(operator_metrics.throughput_metrics.messages_recv);
-            counter!(
+            ).set(throughput.messages_recv as f64);
+            gauge!(
                 METRIC_OPERATOR_RECORDS_SENT,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).increment(operator_metrics.throughput_metrics.records_sent);
-            counter!(
+            ).set(throughput.records_sent as f64);
+            gauge!(
                 METRIC_OPERATOR_RECORDS_RECV,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).increment(operator_metrics.throughput_metrics.records_recv);
-            counter!(
+            ).set(throughput.records_recv as f64);
+            gauge!(
                 METRIC_OPERATOR_BYTES_SENT,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).increment(operator_metrics.throughput_metrics.bytes_sent);
-            counter!(
+            ).set(throughput.bytes_sent as f64);
+            gauge!(
                 METRIC_OPERATOR_BYTES_RECV,
                 LABEL_OPERATOR_ID => operator_id.clone(),
                 LABEL_WORKER_ID => self.worker_id.clone(),
                 LABEL_PIPELINE_ID => pipeline_id.clone(),
-            ).increment(operator_metrics.throughput_metrics.bytes_recv);
+            ).set(throughput.bytes_recv as f64);
             
             // Record latency metrics
             gauge!(
@@ -844,7 +863,7 @@ fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Opt
     let mut records_recv = 0u64;
     let mut bytes_sent = 0u64;
     let mut bytes_recv = 0u64;
-    let mut latency_histogram = vec![0u64; LATENCY_BUCKET_BOUNDARIES.len()];
+    let mut latency_histogram = vec![0u64; LATENCY_HISTOGRAM_LEN];
     let mut backpressure_per_peer = HashMap::new();
 
     for sample in scrape.samples {
@@ -905,13 +924,19 @@ fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Opt
     }
 }
 
-/// Convert Prometheus histogram counts to simple bucket format
+/// Convert Prometheus histogram counts to finite buckets + trailing `+Inf` count.
 fn convert_histogram_counts_to_buckets(histogram_counts: &[HistogramCount]) -> Vec<u64> {
-    // Filter out the infinity bucket that Prometheus adds automatically
-    histogram_counts.iter()
-        .filter(|hc| !hc.less_than.is_infinite())
-        .map(|hc| hc.count as u64)
-        .collect()
+    let mut buckets = vec![0u64; LATENCY_HISTOGRAM_LEN];
+    let mut finite_i = 0usize;
+    for hc in histogram_counts {
+        if hc.less_than.is_infinite() {
+            buckets[LATENCY_BUCKET_BOUNDARIES.len()] = hc.count as u64;
+        } else if finite_i < LATENCY_BUCKET_BOUNDARIES.len() {
+            buckets[finite_i] = hc.count as u64;
+            finite_i += 1;
+        }
+    }
+    buckets
 }
 
 #[cfg(test)]
@@ -921,19 +946,23 @@ mod tests {
     use super::*;
     use metrics::{counter, histogram};
 
-    /// Helper function to manually build a histogram from latency measurements
+    /// Helper: cumulative hist matching Prom (finite bounds + trailing +Inf).
     fn build_expected_histogram(latencies: &[f64], boundaries: &[f64]) -> Vec<u64> {
-        let mut histogram = vec![0u64; boundaries.len()];
+        let mut histogram = vec![0u64; boundaries.len() + 1];
         
         for &latency in latencies {
+            let mut placed = false;
             for (i, &boundary) in boundaries.iter().enumerate() {
                 if latency <= boundary {
-                    // Increment all buckets from this one onwards (cumulative)
-                    for j in i..boundaries.len() {
+                    for j in i..histogram.len() {
                         histogram[j] += 1;
                     }
+                    placed = true;
                     break;
                 }
+            }
+            if !placed {
+                *histogram.last_mut().unwrap() += 1;
             }
         }
         
@@ -1018,22 +1047,31 @@ mod tests {
         // Verify histogram has data
         assert!(!parsed_metrics.latency_stats.latency_histogram.is_empty(), "Histogram should not be empty");
         
-        // Verify exact match between expected and parsed histogram
+        // Verify exact match between expected and parsed histogram (finite + +Inf)
         assert_eq!(
             parsed_metrics.latency_stats.latency_histogram.len(), 
             expected_histogram.len(),
-            "Histogram should have same number of buckets as boundaries"
+            "Histogram should have finite buckets plus +Inf"
+        );
+        assert_eq!(
+            parsed_metrics.latency_stats.latency_histogram.len(),
+            LATENCY_HISTOGRAM_LEN
         );
         
         for (i, (&expected, &actual)) in expected_histogram.iter().zip(parsed_metrics.latency_stats.latency_histogram.iter()).enumerate() {
+            let boundary_label = if i < LATENCY_BUCKET_BOUNDARIES.len() {
+                format!("{}ms", LATENCY_BUCKET_BOUNDARIES[i])
+            } else {
+                "+Inf".to_string()
+            };
             assert_eq!(
                 actual, expected,
-                "Bucket {} mismatch: expected {}, got {} (boundary: {}ms)", 
-                i, expected, actual, LATENCY_BUCKET_BOUNDARIES[i]
+                "Bucket {} mismatch: expected {}, got {} (boundary: {})", 
+                i, expected, actual, boundary_label
             );
         }
         
-        // Verify we recorded all latency values
+        // Verify we recorded all latency values (+Inf cumulative)
         let total_count = parsed_metrics.latency_stats.latency_histogram.last().unwrap_or(&0);
         assert_eq!(*total_count, latency_measurements.len() as u64, 
                    "Should have recorded {} latency measurements", latency_measurements.len());
@@ -1065,6 +1103,72 @@ mod tests {
         let metrics_a_again = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
         assert_eq!(metrics_a_again.throughput_stast.messages_sent, 5);
         assert_eq!(metrics_a_again.throughput_stast.records_sent, 25);
+    }
+
+    #[test]
+    fn test_latency_histogram_includes_overflow_past_last_boundary() {
+        init_metrics();
+
+        let vertex_id = "overflow_task".to_string();
+        let labels = MetricsLabels {
+            pipeline_id: "pipe_overflow".to_string(),
+            worker_id: "worker_overflow".to_string(),
+        };
+
+        // One in-range sample and one past the last finite boundary (5000ms)
+        let latency_measurements = [10.0, 10_000.0];
+        for &latency in &latency_measurements {
+            histogram!(
+                METRIC_STREAM_TASK_LATENCY,
+                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                LABEL_WORKER_ID => labels.worker_id.clone()
+            )
+            .record(latency);
+        }
+
+        let expected = build_expected_histogram(&latency_measurements, &LATENCY_BUCKET_BOUNDARIES);
+        let parsed = get_stream_task_metrics(Arc::<str>::from(vertex_id), Some(&labels));
+
+        assert_eq!(parsed.latency_stats.latency_histogram, expected);
+        assert_eq!(*parsed.latency_stats.latency_histogram.last().unwrap(), 2);
+        // Last finite cumulative count should be 1 (only the 10ms sample)
+        assert_eq!(
+            parsed.latency_stats.latency_histogram[LATENCY_BUCKET_BOUNDARIES.len() - 1],
+            1
+        );
+
+        // All-overflow hist: percentiles report the last finite bound (lower bound)
+        let last_finite = *LATENCY_BUCKET_BOUNDARIES.last().unwrap();
+        let mut all_overflow = vec![0u64; LATENCY_HISTOGRAM_LEN];
+        *all_overflow.last_mut().unwrap() = 10;
+        let stats = LatencyMetrics::new(all_overflow);
+        assert_eq!(stats.p50, last_finite);
+        assert_eq!(stats.p99, last_finite);
+        assert_eq!(stats.avg, last_finite);
+    }
+
+    #[test]
+    fn test_convert_histogram_counts_keeps_inf_bucket() {
+        let counts = [
+            HistogramCount { less_than: 1.0, count: 0.0 },
+            HistogramCount { less_than: 2.0, count: 0.0 },
+            HistogramCount { less_than: 5.0, count: 0.0 },
+            HistogramCount { less_than: 10.0, count: 1.0 },
+            HistogramCount { less_than: 25.0, count: 1.0 },
+            HistogramCount { less_than: 50.0, count: 1.0 },
+            HistogramCount { less_than: 100.0, count: 1.0 },
+            HistogramCount { less_than: 250.0, count: 1.0 },
+            HistogramCount { less_than: 500.0, count: 1.0 },
+            HistogramCount { less_than: 1000.0, count: 1.0 },
+            HistogramCount { less_than: 2500.0, count: 1.0 },
+            HistogramCount { less_than: 5000.0, count: 1.0 },
+            HistogramCount { less_than: f64::INFINITY, count: 3.0 },
+        ];
+        let buckets = convert_histogram_counts_to_buckets(&counts);
+        assert_eq!(buckets.len(), LATENCY_HISTOGRAM_LEN);
+        assert_eq!(buckets[3], 1); // le=10
+        assert_eq!(*buckets.last().unwrap(), 3);
     }
 
 }
