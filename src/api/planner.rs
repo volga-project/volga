@@ -565,36 +565,7 @@ mod tests {
     use petgraph::Direction;
     use std::sync::Arc;
     use crate::runtime::operators::sink::sink_operator::SinkConfig;
-    /// Node type enum for logical graph nodes (used in planner tests)
-    #[derive(Debug, Clone, Copy, PartialEq)]
-    pub enum NodeType {
-        Source,
-        Sink,
-        Projection,
-        Filter,
-        KeyBy,
-        Aggregate,
-        Join,
-        Window,
-        WindowRequest,
-    }
-
-    /// Helper function to get node type from operator config (used in planner tests)
-    pub fn get_node_type(operator_config: &OperatorConfig) -> NodeType {
-        use crate::runtime::functions::map::MapFunction;
-        match operator_config {
-            OperatorConfig::SourceConfig(_) => NodeType::Source,
-            OperatorConfig::SinkConfig(_) => NodeType::Sink,
-            OperatorConfig::MapConfig(MapFunction::Projection(_)) => NodeType::Projection,
-            OperatorConfig::MapConfig(MapFunction::Filter(_)) => NodeType::Filter,
-            OperatorConfig::KeyByConfig(_) => NodeType::KeyBy,
-            OperatorConfig::AggregateConfig(_) => NodeType::Aggregate,
-            OperatorConfig::JoinConfig(_) => NodeType::Join,
-            OperatorConfig::WindowConfig(_) => NodeType::Window,
-            OperatorConfig::WindowRequestConfig(_) => NodeType::WindowRequest,
-            _ => panic!("Unsupported operator config: {:?}", operator_config),
-        }
-    }
+    use crate::runtime::operators::OperatorKind;
 
     fn create_planner() -> Planner {
         let ctx = SessionContext::new();
@@ -613,12 +584,11 @@ mod tests {
         planner
     }
 
-    /// Find nodes by type using local get_node_type function
-    fn find_nodes_by_type(graph: &LogicalGraph, node_type: NodeType) -> Vec<usize> {
+    fn find_nodes_by_kind(graph: &LogicalGraph, kind: OperatorKind) -> Vec<usize> {
         graph.get_nodes()
             .enumerate()
             .filter_map(|(idx, node)| {
-                if get_node_type(&node.operator_config) == node_type {
+                if node.operator_config.kind() == kind {
                     Some(idx)
                 } else {
                     None
@@ -627,16 +597,16 @@ mod tests {
             .collect()
     }
 
-    /// Helper function to verify edge connectivity between specific node types
+    /// Helper function to verify edge connectivity between specific operator kinds
     fn verify_edge_connectivity(
         graph: &LogicalGraph, 
-        expected_edges: &[(NodeType, NodeType, PartitionType, usize)]
+        expected_edges: &[(OperatorKind, OperatorKind, PartitionType, usize)]
     ) {
         let edges: Vec<_> = graph.get_edges().collect();
         
         for (expected_from, expected_to, expected_partition_type, expected_count) in expected_edges {
-            let from_nodes = find_nodes_by_type(graph, *expected_from);
-            let to_nodes = find_nodes_by_type(graph, *expected_to);
+            let from_nodes = find_nodes_by_kind(graph, *expected_from);
+            let to_nodes = find_nodes_by_kind(graph, *expected_to);
             
             assert!(!from_nodes.is_empty(), "Could not find {:?} node", expected_from);
             assert!(!to_nodes.is_empty(), "Could not find {:?} node", expected_to);
@@ -682,7 +652,7 @@ mod tests {
 
         // Verify edge connectivity: source -> projection
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Projection, PartitionType::RoundRobin, 1),
         ]);
     }
 
@@ -712,8 +682,8 @@ mod tests {
 
         // Verify edge connectivity: source -> projection -> sink
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::Projection, PartitionType::RoundRobin, 1),
-            (NodeType::Projection, NodeType::Sink, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RoundRobin, 1),
         ]);
     }
 
@@ -740,8 +710,8 @@ mod tests {
 
         // Verify edge connectivity: source -> filter -> projection
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::Filter, PartitionType::RoundRobin, 1),
-            (NodeType::Filter, NodeType::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::Filter, PartitionType::RoundRobin, 1),
+            (OperatorKind::Filter, OperatorKind::Projection, PartitionType::RoundRobin, 1),
         ]);
     }
 
@@ -800,9 +770,9 @@ mod tests {
         // Verify edge connectivity: source -> keyby -> aggregate -> projection
         // keyby -> aggregate should be Hash, others RoundRobin
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 1),
-            (NodeType::KeyBy, NodeType::Aggregate, PartitionType::Hash, 1),
-            (NodeType::Aggregate, NodeType::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::KeyBy, OperatorKind::Aggregate, PartitionType::Hash, 1),
+            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::RoundRobin, 1),
         ]);
     }
     
@@ -883,10 +853,10 @@ mod tests {
         // Structure: source -> keyby1 -> aggregate1 -> projection1 -> keyby2 -> aggregate2 -> projection2
         // 2 Hash edges (keyby->aggregate), 4 RoundRobin edges (all others)
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 1),
-            (NodeType::KeyBy, NodeType::Aggregate, PartitionType::Hash, 2),
-            (NodeType::Aggregate, NodeType::Projection, PartitionType::RoundRobin, 2),
-            (NodeType::Projection, NodeType::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::KeyBy, OperatorKind::Aggregate, PartitionType::Hash, 2),
+            (OperatorKind::Aggregate, OperatorKind::Projection, PartitionType::RoundRobin, 2),
+            (OperatorKind::Projection, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
         ]);
     }
 
@@ -939,9 +909,9 @@ mod tests {
         // Verify edge connectivity: source -> keyby -> window -> projection
         // keyby -> window should be Hash (for partitioning), others RoundRobin
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 1),
-            (NodeType::KeyBy, NodeType::Window, PartitionType::Hash, 1),
-            (NodeType::Window, NodeType::Projection, PartitionType::RoundRobin, 1),
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 1),
+            (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1),
+            (OperatorKind::Window, OperatorKind::Projection, PartitionType::RoundRobin, 1),
         ]);
 
         // Event-time lineage: assign on Source (defining site), not Window/KeyBy.
@@ -1019,11 +989,11 @@ mod tests {
         //   - request_source -> keyby -> window_request -> projection (root)
         //   - root -> request_sink
         verify_edge_connectivity(&graph, &[
-            (NodeType::Source, NodeType::KeyBy, PartitionType::RoundRobin, 2), // original source -> keyby + request_source -> keyby
-            (NodeType::KeyBy, NodeType::Window, PartitionType::Hash, 1), // original keyby -> window
-            (NodeType::KeyBy, NodeType::WindowRequest, PartitionType::Hash, 1), // new keyby -> window_request
-            (NodeType::WindowRequest, NodeType::Projection, PartitionType::RoundRobin, 1), // window_request -> projection
-            (NodeType::Projection, NodeType::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
+            (OperatorKind::Source, OperatorKind::KeyBy, PartitionType::RoundRobin, 2), // original source -> keyby + request_source -> keyby
+            (OperatorKind::KeyBy, OperatorKind::Window, PartitionType::Hash, 1), // original keyby -> window
+            (OperatorKind::KeyBy, OperatorKind::WindowRequest, PartitionType::Hash, 1), // new keyby -> window_request
+            (OperatorKind::WindowRequest, OperatorKind::Projection, PartitionType::RoundRobin, 1), // window_request -> projection
+            (OperatorKind::Projection, OperatorKind::Sink, PartitionType::RequestRoute, 1), // root -> request_sink (uses RequestRoute partition type)
         ]);
         
         // Verify window node has no outgoing edges
