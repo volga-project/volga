@@ -147,14 +147,20 @@ pub(crate) async fn run_watermark_window_pipeline(
         );
     }
 
-    let worker = Worker::spawn_configured(WorkerConfig::new(
-        "wm-e2e-worker".to_string(),
-        PipelineId(Uuid::new_v4().to_string()),
-        exec_graph,
-        vertex_ids,
-        2,
-        TransportBackendType::Grpc,
-    ))
+    let mut state = crate::api::StateSpec::default();
+    state.maintenance_enabled = true;
+    state.maintenance_interval_ms = 50;
+    let worker = Worker::spawn_configured(
+        WorkerConfig::new(
+            "wm-e2e-worker".to_string(),
+            PipelineId(Uuid::new_v4().to_string()),
+            exec_graph,
+            vertex_ids,
+            2,
+            TransportBackendType::Grpc,
+        )
+        .with_state_spec(&state),
+    )
     .await;
 
     worker

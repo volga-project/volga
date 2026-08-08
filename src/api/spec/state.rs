@@ -19,12 +19,27 @@ pub enum OperatorStateBackendConfig {
 #[serde(rename_all = "snake_case")]
 pub enum RequestStoreConfig {}
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+#[schemars(default)]
 pub struct StateSpec {
-    #[serde(default)]
     pub checkpoint_store: CheckpointStoreConfig,
-    #[serde(default)]
     pub operator_backend: OperatorStateBackendConfig,
-    #[serde(default)]
     pub request_store: Option<RequestStoreConfig>,
+    /// When true, workers run periodic `OperatorStore::maintain`.
+    pub maintenance_enabled: bool,
+    /// Cleaner tick interval in milliseconds.
+    pub maintenance_interval_ms: u64,
+}
+
+impl Default for StateSpec {
+    fn default() -> Self {
+        Self {
+            checkpoint_store: CheckpointStoreConfig::default(),
+            operator_backend: OperatorStateBackendConfig::default(),
+            request_store: None,
+            maintenance_enabled: true,
+            maintenance_interval_ms: 1_000,
+        }
+    }
 }

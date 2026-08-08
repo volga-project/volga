@@ -10,7 +10,6 @@ use serde::{Deserialize, Serialize};
 use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
-use crate::runtime::operators::window::retention::wo_retention_floor;
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
@@ -77,9 +76,17 @@ impl WindowOperatorState {
     }
 
     /// `(watermark, data_floor)` when a frontier has been established.
+    ///
+    /// Data floor is `W - max_window_length - lateness` (both clamped to ≥ 0).
+    /// Raw rows with `ts < floor` and tiles fully below the floor may be pruned.
+    /// Consumed triggers (`fire_at.ts <= W`) are dropped separately.
     pub fn retention_cutoff(&self) -> Option<(i64, i64)> {
         let watermark = self.watermark_frontier()?;
-        let floor = wo_retention_floor(watermark, self.max_window_length_ms, self.lateness_ms);
+        let lateness_ms = self.lateness_ms.max(0);
+        let max_window_length_ms = self.max_window_length_ms.max(0);
+        let floor = watermark
+            .saturating_sub(max_window_length_ms)
+            .saturating_sub(lateness_ms);
         Some((watermark, floor))
     }
 

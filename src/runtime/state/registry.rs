@@ -48,7 +48,7 @@ impl StateRegistry {
             tracker,
             stores: Mutex::new(HashMap::new()),
             task_states: DashMap::new(),
-            maintenance_enabled: AtomicBool::new(false),
+            maintenance_enabled: AtomicBool::new(true),
         }
     }
 

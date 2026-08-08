@@ -175,6 +175,12 @@ impl PipelineSpecBuilder {
         self
     }
 
+    pub fn with_state_maintenance(mut self, enabled: bool, interval_ms: u64) -> Self {
+        self.spec.state.maintenance_enabled = enabled;
+        self.spec.state.maintenance_interval_ms = interval_ms.max(1);
+        self
+    }
+
     pub fn with_operator_overrides_defaults(mut self, defaults: OperatorOverride) -> Self {
         self.spec.operator_overrides.defaults = defaults;
         self

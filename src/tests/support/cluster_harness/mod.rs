@@ -72,6 +72,9 @@ pub struct PipelineLaunchSpec {
 
 impl PipelineLaunchSpec {
     pub fn new(pipeline: PipelineSpec, worker_count: usize, expected_output_rows: usize) -> Self {
+        let mut pipeline = pipeline;
+        // Cluster e2e (local/docker/kube) always run store maintenance by default.
+        pipeline.state.maintenance_enabled = true;
         Self {
             pipeline,
             worker_count,
@@ -88,6 +91,13 @@ impl PipelineLaunchSpec {
 
     pub fn with_runtime_consts_profile(mut self, profile: RuntimeConstsProfile) -> Self {
         self.runtime_consts_profile = profile;
+        self
+    }
+
+    /// Pipeline `state.maintenance_*` (flows into kube `pipelineSpec` / docker spec JSON).
+    pub fn with_state_maintenance(mut self, enabled: bool, interval_ms: u64) -> Self {
+        self.pipeline.state.maintenance_enabled = enabled;
+        self.pipeline.state.maintenance_interval_ms = interval_ms.max(1);
         self
     }
 }

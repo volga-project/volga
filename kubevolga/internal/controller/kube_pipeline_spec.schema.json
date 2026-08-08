@@ -11,7 +11,7 @@
           "out_of_orderness_ms": 0
         },
         "window": {
-          "allowed_lateness_ms": null
+          "allowed_lateness_ms": 0
         }
       }
     },
@@ -65,6 +65,8 @@
       "$ref": "#/$defs/StateSpec",
       "default": {
         "checkpoint_store": "in_memory",
+        "maintenance_enabled": true,
+        "maintenance_interval_ms": 1000,
         "operator_backend": "in_memory",
         "request_store": null
       }
@@ -111,7 +113,7 @@
         "window": {
           "$ref": "#/$defs/WindowEventTimeSpec",
           "default": {
-            "allowed_lateness_ms": null
+            "allowed_lateness_ms": 0
           }
         }
       }
@@ -178,12 +180,25 @@
         "in_memory"
       ]
     },
+    "RequestStoreConfig": false,
     "StateSpec": {
       "type": "object",
       "properties": {
         "checkpoint_store": {
           "$ref": "#/$defs/CheckpointStoreConfig",
           "default": "in_memory"
+        },
+        "maintenance_enabled": {
+          "description": "When true, workers run periodic `OperatorStore::maintain`.",
+          "type": "boolean",
+          "default": true
+        },
+        "maintenance_interval_ms": {
+          "description": "Cleaner tick interval in milliseconds.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 1000,
+          "minimum": 0
         },
         "operator_backend": {
           "$ref": "#/$defs/OperatorStateBackendConfig",
@@ -202,7 +217,6 @@
         }
       }
     },
-    "RequestStoreConfig": false,
     "TaskWorkerAssignmentStrategyType": {
       "oneOf": [
         {
@@ -263,13 +277,10 @@
       "type": "object",
       "properties": {
         "allowed_lateness_ms": {
-          "description": "Window state retention after advance (ms). `None` = no prune.\nDoes not delay watermarks or accept post-frontier ingest; CDC late-data is separate.",
-          "type": [
-            "integer",
-            "null"
-          ],
+          "description": "Window state retention after advance (ms). Default `0`: prune below\n`watermark − max_window_length`. Does not delay watermarks or accept\npost-frontier ingest; CDC late-data is separate.",
+          "type": "integer",
           "format": "int64",
-          "default": null
+          "default": 0
         }
       }
     }

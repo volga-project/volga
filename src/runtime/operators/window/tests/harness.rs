@@ -174,7 +174,6 @@ impl Harness {
 pub struct WoWroHarness {
     pub wo: WindowOperator,
     pub wro: WindowRequestOperator,
-    pub store: Arc<InMemWindowStore>,
 }
 
 impl WoWroHarness {
@@ -224,9 +223,8 @@ impl WoWroHarness {
             sql,
             tiling,
             exclude_current_row,
-            store.clone(),
-            store.clone(),
-            store,
+            store.clone() as Arc<dyn WindowOperatorStore>,
+            store as Arc<dyn WindowRequestStore>,
             namespace,
             lateness,
         )
@@ -237,7 +235,6 @@ impl WoWroHarness {
         sql: &str,
         tiling: Option<TileConfig>,
         exclude_current_row: bool,
-        store: Arc<InMemWindowStore>,
         operator_store: Arc<dyn WindowOperatorStore>,
         request_store: Arc<dyn WindowRequestStore>,
         namespace: StateNamespace,
@@ -267,12 +264,13 @@ impl WoWroHarness {
         wro.set_state_with_store_and_ns(request_store, namespace);
         wro.open(&wro_ctx).await.expect("wro open");
 
-        Self { wo, wro, store }
+        Self { wo, wro }
     }
 
     pub async fn run_maintenance(&self) {
         let state = self.wo.task_state();
-        self.store
+        state
+            .store()
             .maintain(state.namespace(), state.as_ref())
             .await
             .expect("maintain");

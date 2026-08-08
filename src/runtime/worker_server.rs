@@ -160,8 +160,7 @@ impl WorkerService for WorkerServiceImpl {
         if !master_addr.is_empty() {
             worker_config.master_addr = Some(master_addr);
         }
-        worker_config.operator_state_backend = spec.state.operator_backend.clone();
-        worker_config.request_store = spec.state.request_store.clone();
+        worker_config = worker_config.with_state_spec(&spec.state);
 
         self.worker
             .ask(Configure(worker_config))

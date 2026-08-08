@@ -1,6 +1,5 @@
 pub mod operator;
 pub mod request;
-pub mod retention;
 pub mod spec;
 
 pub mod aggs;
