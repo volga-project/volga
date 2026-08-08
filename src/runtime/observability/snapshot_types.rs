@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use crate::common::types::PipelineId;
 use crate::runtime::metrics::WorkerAggregateMetrics;
 use crate::runtime::VertexId;
-use crate::runtime::metrics::TaskMetrics;
 use anyhow::Result;
 use crate::storage::StorageStatsSnapshot;
 use super::task_metadata::TaskMetadata;
@@ -36,7 +35,6 @@ impl From<u8> for StreamTaskStatus {
 pub struct TaskSnapshot {
     pub vertex_id: VertexId,
     pub status: StreamTaskStatus,
-    pub metrics: TaskMetrics,
     /// Opaque operator data for harness/debug (e.g. source `records_generated`).
     pub metadata: TaskMetadata,
 }

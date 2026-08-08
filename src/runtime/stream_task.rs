@@ -6,8 +6,7 @@ use crate::{
         execution_graph::ExecutionGraph,
         health::{WorkerFatalReason, WorkerHealth},
         metrics::{
-            get_stream_task_metrics, init_metrics, MetricsLabels,
-            LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
+            init_metrics, MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
             METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY,
             METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
             METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
@@ -855,12 +854,12 @@ impl StreamTask {
 
     pub async fn get_state(&self) -> TaskSnapshot {
         // Detach from the live bag so later operator writes do not mutate the snapshot.
+        // Throughput/latency for WorkerSnapshot are scraped once by the worker poll.
         let metadata = TaskMetadata::default();
         metadata.extend(&self.runtime_context.task_metadata());
         TaskSnapshot {
             vertex_id: self.vertex_id.clone(),
             status: StreamTaskStatus::from(self.status.load(Ordering::SeqCst)),
-            metrics: get_stream_task_metrics(self.vertex_id.clone(), self.metrics_labels.as_ref()),
             metadata,
         }
     }

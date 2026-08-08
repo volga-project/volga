@@ -249,6 +249,17 @@ pub struct TaskMetrics {
     pub backpressure_per_peer: HashMap<String, f64>,
 }
 
+impl TaskMetrics {
+    pub fn empty(vertex_id: impl Into<String>) -> Self {
+        Self {
+            vertex_id: vertex_id.into(),
+            latency_stats: LatencyMetrics::new(vec![0u64; LATENCY_HISTOGRAM_LEN]),
+            throughput_stast: ThroughputMetrics::new(0, 0, 0, 0, 0, 0),
+            backpressure_per_peer: HashMap::new(),
+        }
+    }
+}
+
 // aggregated metrics for an operator_id over all its tasks
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OperatorAggregateMetrics {
@@ -846,35 +857,50 @@ fn _init_metrics() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-pub fn get_stream_task_metrics(vertex_id: VertexId, labels: Option<&MetricsLabels>) -> TaskMetrics {
+/// One `render()` + parse of the in-process Prometheus registry into per-vertex
+/// task metrics. Owned by the worker poll / `get_state` path (not task `GetState`).
+///
+/// Hot path still writes via `counter!` / `histogram!` into this recorder for
+/// external export; snapshots read through this scrape instead of per-task dumps.
+pub fn scrape_stream_task_metrics(labels: Option<&MetricsLabels>) -> HashMap<String, TaskMetrics> {
     let handle = PROMETHEUS_HANDLE.get().expect("Metrics not initialized");
     let prometheus_text = handle.render();
-    
-    parse_stream_task_metrics(&prometheus_text, vertex_id.as_ref(), labels)
+    parse_all_stream_task_metrics(&prometheus_text, labels)
 }
 
-fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Option<&MetricsLabels>) -> TaskMetrics {
+/// Lookup helper (tests). Prefer [`scrape_stream_task_metrics`] for poll paths.
+pub fn get_stream_task_metrics(vertex_id: VertexId, labels: Option<&MetricsLabels>) -> TaskMetrics {
+    let vertex = vertex_id.as_ref();
+    scrape_stream_task_metrics(labels)
+        .remove(vertex)
+        .unwrap_or_else(|| TaskMetrics::empty(vertex))
+}
+
+fn parse_all_stream_task_metrics(
+    prometheus_text: &str,
+    labels: Option<&MetricsLabels>,
+) -> HashMap<String, TaskMetrics> {
     let scrape = Scrape::parse(prometheus_text.lines().map(|line| Ok(line.to_string())))
         .expect("Failed to parse Prometheus metrics");
-    
-    let mut messages_sent = 0u64;
-    let mut messages_recv = 0u64;
-    let mut records_sent = 0u64;
-    let mut records_recv = 0u64;
-    let mut bytes_sent = 0u64;
-    let mut bytes_recv = 0u64;
-    let mut latency_histogram = vec![0u64; LATENCY_HISTOGRAM_LEN];
-    let mut backpressure_per_peer = HashMap::new();
+
+    #[derive(Default)]
+    struct Acc {
+        messages_sent: u64,
+        messages_recv: u64,
+        records_sent: u64,
+        records_recv: u64,
+        bytes_sent: u64,
+        bytes_recv: u64,
+        latency_histogram: Option<Vec<u64>>,
+        backpressure_per_peer: HashMap<String, f64>,
+    }
+
+    let mut by_vertex: HashMap<String, Acc> = HashMap::new();
 
     for sample in scrape.samples {
-        // Check if this metric belongs to our vertex_id
-        if let Some(sample_vertex_id) = sample.labels.get(LABEL_VERTEX_ID) {
-            if sample_vertex_id != vertex_id {
-                continue;
-            }
-        } else {
-            continue; // Skip metrics without vertex_id label
-        }
+        let Some(sample_vertex_id) = sample.labels.get(LABEL_VERTEX_ID) else {
+            continue;
+        };
 
         if let Some(labels) = labels {
             if sample.labels.get(LABEL_PIPELINE_ID) != Some(labels.pipeline_id.as_str()) {
@@ -884,44 +910,61 @@ fn parse_stream_task_metrics(prometheus_text: &str, vertex_id: &str, labels: Opt
                 continue;
             }
         }
-        
+
+        let acc = by_vertex.entry(sample_vertex_id.to_string()).or_default();
+
         match sample.value {
-            Value::Counter(value) => {
-                match sample.metric.as_str() {
-                    METRIC_STREAM_TASK_MESSAGES_SENT => messages_sent = value as u64,
-                    METRIC_STREAM_TASK_MESSAGES_RECV => messages_recv = value as u64,
-                    METRIC_STREAM_TASK_RECORDS_SENT => records_sent = value as u64,
-                    METRIC_STREAM_TASK_RECORDS_RECV => records_recv = value as u64,
-                    METRIC_STREAM_TASK_BYTES_SENT => bytes_sent = value as u64,
-                    METRIC_STREAM_TASK_BYTES_RECV => bytes_recv = value as u64,
-                    _ => {}
-                }
-            }
+            Value::Counter(value) => match sample.metric.as_str() {
+                METRIC_STREAM_TASK_MESSAGES_SENT => acc.messages_sent = value as u64,
+                METRIC_STREAM_TASK_MESSAGES_RECV => acc.messages_recv = value as u64,
+                METRIC_STREAM_TASK_RECORDS_SENT => acc.records_sent = value as u64,
+                METRIC_STREAM_TASK_RECORDS_RECV => acc.records_recv = value as u64,
+                METRIC_STREAM_TASK_BYTES_SENT => acc.bytes_sent = value as u64,
+                METRIC_STREAM_TASK_BYTES_RECV => acc.bytes_recv = value as u64,
+                _ => {}
+            },
             Value::Histogram(histogram_counts) => {
                 if sample.metric == METRIC_STREAM_TASK_LATENCY {
-                    latency_histogram = convert_histogram_counts_to_buckets(&histogram_counts);
+                    acc.latency_histogram =
+                        Some(convert_histogram_counts_to_buckets(&histogram_counts));
                 }
             }
             Value::Gauge(value) => {
                 if sample.metric == METRIC_STREAM_TASK_BACKPRESSURE_RATIO {
                     if let Some(peer_vertex_id) = sample.labels.get(LABEL_TARGET_VERTEX_ID) {
-                        backpressure_per_peer.insert(peer_vertex_id.to_string(), value as f64);
+                        acc.backpressure_per_peer
+                            .insert(peer_vertex_id.to_string(), value as f64);
                     }
                 }
             }
-            _ => {} // Ignore other metric types
+            _ => {}
         }
     }
 
-    let latency_stats = LatencyMetrics::new(latency_histogram);
-    let throughput_stats = ThroughputMetrics::new(messages_sent, messages_recv, records_sent, records_recv, bytes_sent, bytes_recv);
-    
-    TaskMetrics {
-        vertex_id: vertex_id.to_string(),
-        latency_stats,
-        throughput_stast: throughput_stats,
-        backpressure_per_peer
-    }
+    by_vertex
+        .into_iter()
+        .map(|(vertex_id, acc)| {
+            let latency_histogram = acc
+                .latency_histogram
+                .unwrap_or_else(|| vec![0u64; LATENCY_HISTOGRAM_LEN]);
+            (
+                vertex_id.clone(),
+                TaskMetrics {
+                    vertex_id,
+                    latency_stats: LatencyMetrics::new(latency_histogram),
+                    throughput_stast: ThroughputMetrics::new(
+                        acc.messages_sent,
+                        acc.messages_recv,
+                        acc.records_sent,
+                        acc.records_recv,
+                        acc.bytes_sent,
+                        acc.bytes_recv,
+                    ),
+                    backpressure_per_peer: acc.backpressure_per_peer,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Convert Prometheus histogram counts to finite buckets + trailing `+Inf` count.
@@ -1103,6 +1146,11 @@ mod tests {
         let metrics_a_again = get_stream_task_metrics(Arc::<str>::from(vertex_id.clone()), Some(&labels));
         assert_eq!(metrics_a_again.throughput_stast.messages_sent, 5);
         assert_eq!(metrics_a_again.throughput_stast.records_sent, 25);
+
+        // One scrape returns both vertices
+        let all = scrape_stream_task_metrics(Some(&labels));
+        assert_eq!(all.get(&vertex_id).unwrap().throughput_stast.messages_sent, 5);
+        assert_eq!(all.get(&vertex_b).unwrap().throughput_stast.messages_sent, 1);
     }
 
     #[test]
