@@ -8,10 +8,12 @@ use crate::{
         metrics::{
             increment_vertex_counter, init_metrics, record_vertex_histogram, set_vertex_gauge,
             MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
-            METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS, METRIC_STREAM_TASK_BYTES_RECV,
-            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS,
-            METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS, METRIC_STREAM_TASK_CHECKPOINT_FAIL,
-            METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES, METRIC_STREAM_TASK_CHECKPOINT_SUCCESS,
+            METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND,
+            METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS, METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND,
+            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
+            METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS, METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS,
+            METRIC_STREAM_TASK_CHECKPOINT_FAIL, METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES,
+            METRIC_STREAM_TASK_CHECKPOINT_SUCCESS, METRIC_STREAM_TASK_IDLE_TIME_MS_PER_SECOND,
             METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
             METRIC_STREAM_TASK_PATH_LATENCY, METRIC_STREAM_TASK_RECORDS_RECV,
             METRIC_STREAM_TASK_RECORDS_SENT, METRIC_STREAM_TASK_WATERMARK_LAG_MS,
@@ -36,6 +38,49 @@ use std::collections::HashSet;
 use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
+
+/// Accumulates Flink-style task time-budget nanos within a flush window.
+#[derive(Debug, Default)]
+pub(crate) struct TaskTimeBudget {
+    idle_ns: AtomicU64,
+    busy_ns: AtomicU64,
+    backpressured_ns: AtomicU64,
+}
+
+impl TaskTimeBudget {
+    fn add_idle_ns(&self, ns: u64) {
+        self.idle_ns.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    fn add_busy_ns(&self, ns: u64) {
+        self.busy_ns.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    fn add_backpressured_ns(&self, ns: u64) {
+        self.backpressured_ns.fetch_add(ns, Ordering::Relaxed);
+    }
+
+    fn idle_ns(&self) -> u64 {
+        self.idle_ns.load(Ordering::Relaxed)
+    }
+
+    /// Scale accumulated times to ms-per-second and reset.
+    fn take_ms_per_second(&self, window: Duration) -> (f64, f64, f64) {
+        let idle = self.idle_ns.swap(0, Ordering::Relaxed);
+        let busy = self.busy_ns.swap(0, Ordering::Relaxed);
+        let bp = self.backpressured_ns.swap(0, Ordering::Relaxed);
+        let window_ms = window.as_secs_f64() * 1000.0;
+        if window_ms <= 0.0 {
+            return (0.0, 0.0, 0.0);
+        }
+        let scale = 1000.0 / window_ms;
+        (
+            (busy as f64 / 1_000_000.0) * scale,
+            (idle as f64 / 1_000_000.0) * scale,
+            (bp as f64 / 1_000_000.0) * scale,
+        )
+    }
+}
 // serde imports removed; this module does not define serializable DTOs directly.
 use crate::common::grpc::master::master_client as connect_master_client;
 use crate::common::grpc::GrpcConfig;
@@ -407,6 +452,7 @@ impl StreamTask {
         mut aligner: CheckpointAligner,
         labels: Option<MetricsLabels>,
         execution_attempt_id: u64,
+        time_budget: Arc<TaskTimeBudget>,
     ) -> MessageStream {
         Box::pin(stream! {
             let mut input_stream = input_stream;
@@ -416,7 +462,12 @@ impl StreamTask {
                 upstream_watermarks.clone(),
                 current_watermark.clone(),
             );
-            while let Some(message) = input_stream.next().await {
+            loop {
+                let idle_start = Instant::now();
+                let Some(message) = input_stream.next().await else {
+                    break;
+                };
+                time_budget.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
                 Self::record_control_propagation(&vertex_id, &message, labels.as_ref());
 
@@ -494,18 +545,20 @@ impl StreamTask {
         })
     }
 
-    // Helper function to send message to collectors (similar to original stream_task.rs)
+    // Helper function to send message to collectors (similar to original stream_task.rs).
+    /// Returns wall-clock nanoseconds spent in the send / retry loop (output wait).
     async fn send_to_collectors_if_needed(
         mut collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,
         vertex_id: VertexId,
         status: Arc<AtomicU8>
-    ) {
+    ) -> u64 {
         if collectors_per_target_operator.is_empty() {
             // Edge operator - no downstream collectors
-            return;
+            return 0;
         }
 
+        let send_started = Instant::now();
         let mut channels_to_send_per_operator = HashMap::new();
         for (target_operator_id, collector) in collectors_per_target_operator.iter_mut() {
             let partitioned_channels = collector.gen_partitioned_channels(&message);
@@ -550,6 +603,39 @@ impl StreamTask {
                 break;
             }
         }
+        send_started.elapsed().as_nanos() as u64
+    }
+
+    fn maybe_flush_time_budget(
+        budget: &TaskTimeBudget,
+        window_start: &mut Instant,
+        vertex_id: &VertexId,
+        labels: Option<&MetricsLabels>,
+    ) {
+        let elapsed = window_start.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        let (busy, idle, bp) = budget.take_ms_per_second(elapsed);
+        set_vertex_gauge(
+            METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND,
+            busy,
+            vertex_id.as_ref(),
+            labels,
+        );
+        set_vertex_gauge(
+            METRIC_STREAM_TASK_IDLE_TIME_MS_PER_SECOND,
+            idle,
+            vertex_id.as_ref(),
+            labels,
+        );
+        set_vertex_gauge(
+            METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND,
+            bp,
+            vertex_id.as_ref(),
+            labels,
+        );
+        *window_start = Instant::now();
     }
 
     pub async fn start(&mut self) {
@@ -700,6 +786,9 @@ impl StreamTask {
                 None
             };
             
+            let time_budget = Arc::new(TaskTimeBudget::default());
+            let mut budget_window_start = Instant::now();
+
             if !is_source {
                 // Pre-process input stream for non-source operators
                 let reader = transport_client.reader.take()
@@ -720,6 +809,7 @@ impl StreamTask {
                     checkpoint_aligner,
                     metrics_labels.clone(),
                     execution_attempt_id,
+                    time_budget.clone(),
                 );
 
                 operator.set_input(Some(preprocessed_stream))
@@ -751,11 +841,16 @@ impl StreamTask {
                     None
                 };
 
+                let poll_started = Instant::now();
+                let idle_before = time_budget.idle_ns();
                 let poll_res = if let Some(msg) = produced {
                     OperatorPollResult::Ready(msg)
                 } else {
                     operator.poll_next().await
                 };
+                let poll_elapsed_ns = poll_started.elapsed().as_nanos() as u64;
+                let idle_during_poll = time_budget.idle_ns().saturating_sub(idle_before);
+                time_budget.add_busy_ns(poll_elapsed_ns.saturating_sub(idle_during_poll));
 
                 match poll_res {
                     OperatorPollResult::Ready(mut message) => {
@@ -903,12 +998,13 @@ impl StreamTask {
                         Self::record_metrics(vertex_id.clone(), &message, false, metrics_labels.as_ref());
 
                         // Send to collectors
-                        Self::send_to_collectors_if_needed(
+                        let bp_ns = Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,
                             vertex_id.clone(),
                             status.clone()
                         ).await;
+                        time_budget.add_backpressured_ns(bp_ns);
 
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);
@@ -927,13 +1023,14 @@ impl StreamTask {
                                 false,
                                 metrics_labels.as_ref(),
                             );
-                            Self::send_to_collectors_if_needed(
+                            let bp_ns = Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 injected,
                                 vertex_id.clone(),
                                 status.clone(),
                             )
                             .await;
+                            time_budget.add_backpressured_ns(bp_ns);
                         }
                     }
                     OperatorPollResult::None => {
@@ -944,13 +1041,14 @@ impl StreamTask {
                                 Some(Self::now_ms()),
                             ));
                             Self::record_metrics(vertex_id.clone(), &wm, false, metrics_labels.as_ref());
-                            Self::send_to_collectors_if_needed(
+                            let bp_ns = Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 wm,
                                 vertex_id.clone(),
                                 status.clone(),
                             )
                             .await;
+                            time_budget.add_backpressured_ns(bp_ns);
                         } else {
                             // Peer/transport teardown can drop the input without a max watermark.
                             println!(
@@ -962,8 +1060,15 @@ impl StreamTask {
                         status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                         break;
                     }
-                    OperatorPollResult::Continue => { /* no output */ }
+                    OperatorPollResult::Continue => { /* no output; busy already counted */ }
                 }
+
+                Self::maybe_flush_time_budget(
+                    &time_budget,
+                    &mut budget_window_start,
+                    &vertex_id,
+                    metrics_labels.as_ref(),
+                );
             }
             
             // Flush and close collectors
