@@ -45,6 +45,10 @@ impl OperatorPollResult {
     }
 }
 
+/// Execution role in the topology (not the logical operator kind).
+///
+/// For Window / Join / Map / … see [`crate::runtime::operators::OperatorKind`]
+/// via [`OperatorConfig::kind`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperatorType {
     Source,
