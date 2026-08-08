@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
+use crate::runtime::operators::window::retention::wo_retention_floor;
 use crate::runtime::operators::window::store::data::cursors_from_batch;
 use crate::runtime::operators::window::store::{
     PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
@@ -29,6 +30,8 @@ pub struct WindowOperatorState {
     namespace: StateNamespace,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+    lateness_ms: i64,
+    max_window_length_ms: i64,
     /// Task watermark frontier; [`WATERMARK_UNSET`] until the first advance.
     pub watermark_frontier: AtomicI64,
 }
@@ -46,12 +49,16 @@ impl WindowOperatorState {
         namespace: StateNamespace,
         ts_column_index: usize,
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+        lateness_ms: i64,
+        max_window_length_ms: i64,
     ) -> Self {
         Self {
             store,
             namespace,
             ts_column_index,
             window_configs,
+            lateness_ms,
+            max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
         }
     }
@@ -67,6 +74,13 @@ impl WindowOperatorState {
     pub fn watermark_frontier(&self) -> Option<i64> {
         let v = self.watermark_frontier.load(Ordering::Acquire);
         (v != WATERMARK_UNSET).then_some(v)
+    }
+
+    /// `(watermark, data_floor)` when a frontier has been established.
+    pub fn retention_cutoff(&self) -> Option<(i64, i64)> {
+        let watermark = self.watermark_frontier()?;
+        let floor = wo_retention_floor(watermark, self.max_window_length_ms, self.lateness_ms);
+        Some((watermark, floor))
     }
 
     pub fn partition(&self, key: &Key) -> PartitionKey {

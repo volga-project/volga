@@ -101,7 +101,7 @@ pub(crate) async fn run_watermark_window_pipeline(
             num_threads_per_task: 4,
         })
         .with_out_of_orderness_ms(out_of_orderness_ms)
-        .with_window_allowed_lateness_ms(Some(lateness_ms))
+        .with_window_allowed_lateness_ms(lateness_ms)
         .with_source(
             SourceSpec::new(
                 "datagen_source",

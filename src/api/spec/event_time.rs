@@ -35,8 +35,9 @@ impl Default for WatermarkSpec {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WindowEventTimeSpec {
-    /// Window state retention after advance (ms). `None` = no prune.
-    /// Does not delay watermarks or accept post-frontier ingest; CDC late-data is separate.
+    /// Window state retention after advance (ms). Default `0`: prune below
+    /// `watermark − max_window_length`. Does not delay watermarks or accept
+    /// post-frontier ingest; CDC late-data is separate.
     #[serde(default)]
-    pub allowed_lateness_ms: Option<i64>,
+    pub allowed_lateness_ms: i64,
 }

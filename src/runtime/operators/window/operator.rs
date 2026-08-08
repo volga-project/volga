@@ -17,7 +17,7 @@ use crate::runtime::operators::operator::{
 };
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
-use crate::runtime::operators::window::frame_utils::require_range_frame;
+use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
@@ -72,6 +72,9 @@ pub struct WindowOperator {
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
     state: Option<Arc<WindowOperatorState>>,
     output_mode: WindowOutputMode,
+    /// Retention padding behind `max_window_length_ms` (see `WindowSpec.lateness`).
+    lateness_ms: i64,
+    max_window_length_ms: i64,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     ts_column_index: usize,
@@ -108,11 +111,18 @@ impl WindowOperator {
         }
 
         let windows = Arc::new(built.windows);
+        let max_window_length_ms = windows
+            .values()
+            .map(|window| get_window_length_ms(window.window_expr.get_window_frame()))
+            .max()
+            .unwrap_or(0);
         Self {
             base: OperatorBase::new(config),
             window_configs: windows,
             state: None,
             output_mode: window_operator_config.output_mode,
+            lateness_ms: window_operator_config.spec.lateness,
+            max_window_length_ms,
             output_schema: built.output_schema,
             input_schema: built.input_schema,
             ts_column_index: built.ts_column_index,
@@ -134,7 +144,14 @@ impl WindowOperator {
             namespace,
             self.ts_column_index,
             self.window_configs.clone(),
+            self.lateness_ms,
+            self.max_window_length_ms,
         )));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn task_state(&self) -> Arc<WindowOperatorState> {
+        self.state_ref().clone()
     }
 
     fn state_ref(&self) -> &Arc<WindowOperatorState> {
@@ -212,6 +229,8 @@ impl OperatorTrait for WindowOperator {
                 ns,
                 self.ts_column_index,
                 self.window_configs.clone(),
+                self.lateness_ms,
+                self.max_window_length_ms,
             ));
             registry.insert_task_state(
                 context.vertex_id_arc(),

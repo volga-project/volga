@@ -124,10 +124,10 @@ pub fn checkpoint_recovery_launch_spec(
             .expect("valid checkpoint window tiling");
             builder = builder
                 .with_out_of_orderness_ms(0)
-                .with_window_allowed_lateness_ms(Some(0))
+                .with_window_allowed_lateness_ms(0)
                 .with_operator_overrides_defaults(OperatorOverride {
                     tuning: Some(OperatorTuningSpec::Window(WindowSpec {
-                        lateness: None,
+                        lateness: 0,
                         tiling: Some(tiling),
                     })),
                     ..OperatorOverride::default()

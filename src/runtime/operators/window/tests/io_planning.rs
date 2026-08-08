@@ -286,9 +286,11 @@ FROM test_table"#;
         sql,
         Some(tiling),
         true,
+        inner,
         recording.clone(),
         recording.clone(),
         StateNamespace::new(b"wro_io_planning"),
+        0,
     )
     .await;
     let initial_ts: Vec<_> = (0..=10).map(|minute| minute * 60_000).collect();
