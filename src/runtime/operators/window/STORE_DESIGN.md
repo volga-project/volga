@@ -105,6 +105,27 @@ pub struct WindowStateSnapshot {
 - `WindowData` is one materialized WRO snapshot. Evaluation filters its rows by
   cursor; batches need not be mapped back to individual runs.
 
+## Worker state topology
+
+Physical stores are worker-scoped and shared by `OperatorKind` (one backend
+instance per kind). Logical isolation is `StateNamespace` (pipeline + owner
+operator + task). WRO reuses the WO owner namespace.
+
+`OperatorStore` is the generic maintenance port (same `Arc` as the window
+backend). The worker cleaner runs one tick:
+
+1. for each registered kind in parallel,
+2. `try_join_all` over that kind's task states,
+3. `store.maintain(ns, task_state)`.
+
+Window eligibility is read from `OperatorTaskState` (watermark →
+`retention_cutoff`); there is no separate cut/meta publish on the data-plane
+trait. Pipeline `StateSpec.maintenance_*` (default on) enables the cleaner.
+
+See the [window operator README](README.md) for the runtime retention contract
+and how InMem implements `maintain` today. Scylla's `maintain` body is still
+proposed below.
+
 ## Store traits
 
 ```rust
@@ -191,7 +212,8 @@ pub trait WindowRequestStore: Send + Sync + Debug {
 
 `InMemWindowStore` is the reference backend. One lock provides the WRO snapshot
 boundary, and its checkpoint embeds serialized partition state and triggers.
-Asynchronous physical retention is not emulated.
+It implements `OperatorStore::maintain` and prunes eagerly under the same
+retention contract as Scylla (control flow identical; lag ~0).
 
 ## Runtime flows
 
@@ -218,6 +240,8 @@ WO advance:
    do not overfetch raw rows.
 6. Publish updated `KeyEvaluationState` with `store_key_state`.
 7. Advance and forward the task watermark only after all due work succeeds.
+   Physical prune is not awaited here; the worker cleaner applies it via
+   `maintain`.
 
 Tile-based slide retraction is limited to aggregates whose states can be
 subtracted safely (`SUM`, `COUNT`, and `AVG`). Other sliding aggregates retract
@@ -552,27 +576,41 @@ is LWT with `LOCAL_SERIAL` + learn `LOCAL_QUORUM`:
 **Possible future improvement:** generation + `USING TIMESTAMP` may avoid LWT on
 each publish; still quorum everywhere. Explore it only if LWT latency hurts.
 
-### State Prune/Cleanup
+### State prune / cleanup
 
-Retain versions reachable from writer heads, serving heads, recovery bases, and
-retained completed checkpoints. We should have a separet maintenance task (per worker?) that independently performs:
+**Eligibility (per task / namespace):** after watermark advance to `W`,
+`data_floor = W − max_window_length − lateness` (lateness default `0`).
+`max_window_length` is required because raw/tiles are shared across all window
+expressions on the op — shorter windows over-retain; longer ones must not
+under-retain.
 
-- trigger cleanup at or below watermarks no longer reachable from retained
-  checkpoints;
-- logical raw/tile retention below the floor derived from watermark, maximum
-  window length, and lateness;
-- MVCC cleanup of unreachable versions;
-- orphan cleanup for failed or zombie writes;
+**Executor (per worker):** `StateRegistry::run_maintenance_once` — parallel
+loop per `OperatorKind`, then per-task `OperatorStore::maintain(ns, state)`.
+Not on the master; not inside WO `poll_next`.
 
-TTL/TWCS may perform physical expiry when consistent with logical retention.
+**Window `maintain` body:**
+- drop consumed triggers (`fire_at.ts ≤ W`);
+- prune raw rows with `ts < data_floor` and tiles fully below the floor;
+- Scylla additionally: MVCC cleanup of versions unreachable from writer heads,
+  serving heads, recovery bases, and retained checkpoints; orphan/zombie
+  cleanup for failed writes.
+
+TTL/TWCS may expire physical SSTables only when consistent with logical
+`data_floor`. InMem applies the same logical rules immediately inside
+`maintain`.
 
 ## Future next steps
+
+Worker maintenance **orchestration** (`OperatorStore::maintain`, cleaner loop,
+`StateSpec.maintenance_*`) is decided in the runtime; Scylla's `maintain`
+implementation remains TODO.
 
 ### Namespaced cache quota
 
 Assign each state consumer its own memory and local-disk quota. This prevents
 one operator or namespace from consuming the shared cache and gives concurrent
-consumers a predictable fair share of local resources.
+consumers a predictable fair share of local resources. The worker
+`StateResourceTracker` is the scaffold for charging/releasing those quotas.
 
 ### Mem pressure / backpressure
 
@@ -580,7 +618,8 @@ Track both local cache pressure (mem+disk) and logical remote-state usage. If ev
 spill cannot keep a consumer within its cache quota, or its retained remote
 state reaches a configured logical limit, backpressure its upstream tasks.
 Remote state must not act as a bottomless overflow sink; these limits make
-state growth visible to normal flow control.
+state growth visible to normal flow control. `StateResourceTracker` will surface
+pressure signals; maintenance paths must not block on admission.
 
 ### CDC and late events
 
