@@ -33,7 +33,10 @@ pub enum CheckpointAckOutcome {
     /// Progress recorded; still waiting for state acks and/or barrier aligns.
     Pending,
     /// Expected state acks and barrier aligns both satisfied; newly completed.
-    Completed,
+    Completed {
+        /// Wall ms from checkpoint start to completion.
+        duration_ms: u64,
+    },
     /// Ignored / rejected without completing.
     Rejected(CheckpointAckReject),
 }
@@ -99,10 +102,10 @@ impl Checkpoints {
             .start(&self.expected_acks, &self.expected_aligns)
     }
 
-    pub fn abort_in_flight(&mut self) -> Option<u64> {
-        let checkpoint_id = self.protocol.abort_in_flight()?;
+    pub fn abort_in_flight(&mut self) -> Option<(u64, u64)> {
+        let (checkpoint_id, duration_ms) = self.protocol.abort_in_flight()?;
         self.pending.remove(&checkpoint_id);
-        Some(checkpoint_id)
+        Some((checkpoint_id, duration_ms))
     }
 
     pub fn in_flight_id(&self) -> Option<u64> {
@@ -175,7 +178,7 @@ impl Checkpoints {
         checkpoint_id: u64,
         outcome: CheckpointAckOutcome,
     ) -> anyhow::Result<CheckpointAckOutcome> {
-        if !matches!(outcome, CheckpointAckOutcome::Completed) {
+        if !matches!(outcome, CheckpointAckOutcome::Completed { .. }) {
             return Ok(outcome);
         }
         let tasks = self.pending.remove(&checkpoint_id).unwrap_or_default();
@@ -246,10 +249,10 @@ mod tests {
                 .unwrap(),
             CheckpointAckOutcome::Pending
         );
-        assert_eq!(
+        assert!(matches!(
             cps.note_barrier_progress(id, task("a", 0)).await.unwrap(),
-            CheckpointAckOutcome::Completed
-        );
+            CheckpointAckOutcome::Completed { .. }
+        ));
         id
     }
 
@@ -287,7 +290,7 @@ mod tests {
             CheckpointAckOutcome::Pending
         );
         assert!(cps.load(id).await.is_err());
-        assert_eq!(cps.abort_in_flight(), Some(id));
+        assert_eq!(cps.abort_in_flight().map(|(cid, _)| cid), Some(id));
         assert!(cps.load(id).await.is_err());
     }
 
@@ -310,11 +313,11 @@ mod tests {
                 .unwrap(),
             CheckpointAckOutcome::Pending
         );
-        assert_eq!(
+        assert!(matches!(
             cps.note_barrier_progress(id, task("sink", 0))
                 .await
                 .unwrap(),
-            CheckpointAckOutcome::Completed
-        );
+            CheckpointAckOutcome::Completed { .. }
+        ));
     }
 }

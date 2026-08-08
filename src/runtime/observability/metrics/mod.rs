@@ -43,6 +43,21 @@ pub const METRIC_STREAM_TASK_WM_PROPAGATION_MS: &str = "volga_stream_task_wm_pro
 /// Hop delay for checkpoint barriers: `recv − create_stamp`.
 pub const METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS: &str =
     "volga_stream_task_barrier_propagation_ms";
+/// Wait from first barrier seen to full upstream alignment (non-sources).
+pub const METRIC_STREAM_TASK_CHECKPOINT_ALIGN_WAIT_MS: &str =
+    "volga_stream_task_checkpoint_align_wait_ms";
+/// Local snapshot + report RPC wall time.
+pub const METRIC_STREAM_TASK_CHECKPOINT_DURATION_MS: &str =
+    "volga_stream_task_checkpoint_duration_ms";
+pub const METRIC_STREAM_TASK_CHECKPOINT_PAYLOAD_BYTES: &str =
+    "volga_stream_task_checkpoint_payload_bytes";
+pub const METRIC_STREAM_TASK_CHECKPOINT_SUCCESS: &str = "volga_stream_task_checkpoint_success";
+pub const METRIC_STREAM_TASK_CHECKPOINT_FAIL: &str = "volga_stream_task_checkpoint_fail";
+
+/// Job-level checkpoint wall time (master `started_at` → complete/fail).
+pub const METRIC_CHECKPOINT_DURATION_MS: &str = "volga_checkpoint_duration_ms";
+pub const METRIC_CHECKPOINT_COMPLETED: &str = "volga_checkpoint_completed";
+pub const METRIC_CHECKPOINT_FAILED: &str = "volga_checkpoint_failed";
 
 // Worker-derived (poll-time) metrics
 pub const METRIC_WORKER_BACKPRESSURE_MAX: &str = "volga_worker_backpressure_max";
@@ -138,6 +153,19 @@ pub fn set_vertex_gauge(
     } else {
         gauge!(name, LABEL_VERTEX_ID => vertex).set(value);
     }
+}
+
+/// Record a pipeline-scoped histogram sample (master / job-level).
+pub fn record_pipeline_histogram(name: &'static str, value_ms: f64, pipeline_id: &str) {
+    histogram!(name, LABEL_PIPELINE_ID => pipeline_id.to_string()).record(value_ms);
+}
+
+/// Increment a pipeline-scoped counter (master / job-level).
+pub fn increment_pipeline_counter(name: &'static str, delta: u64, pipeline_id: &str) {
+    if delta == 0 {
+        return;
+    }
+    counter!(name, LABEL_PIPELINE_ID => pipeline_id.to_string()).increment(delta);
 }
 
 // Histogram bucket boundaries, milliseconds (Prometheus also emits a trailing +Inf bucket).

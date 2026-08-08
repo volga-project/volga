@@ -85,7 +85,7 @@ impl Message<StartCheckpoint> for CheckpointCoordinator {
 }
 
 impl Message<AbortInFlightCheckpoint> for CheckpointCoordinator {
-    type Reply = Option<u64>;
+    type Reply = Option<(u64, u64)>;
 
     async fn handle(
         &mut self,
