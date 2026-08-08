@@ -36,6 +36,13 @@ pub const METRIC_STREAM_TASK_TX_QUEUE_SIZE: &str = "volga_stream_task_tx_queue_s
 pub const METRIC_STREAM_TASK_TX_QUEUE_REM: &str = "volga_stream_task_tx_queue_rem";
 pub const METRIC_STREAM_TASK_BACKPRESSURE_RATIO: &str = "volga_stream_task_backpressure_ratio";
 pub const METRIC_STREAM_TASK_BACKPRESSURE_MAX: &str = "volga_stream_task_backpressure_max";
+/// Event-time lag: `wall_now_ms − current_watermark` (omit for 0 / MAX).
+pub const METRIC_STREAM_TASK_WATERMARK_LAG_MS: &str = "volga_stream_task_watermark_lag_ms";
+/// Hop delay for watermarks: `recv − create_stamp`.
+pub const METRIC_STREAM_TASK_WM_PROPAGATION_MS: &str = "volga_stream_task_wm_propagation_ms";
+/// Hop delay for checkpoint barriers: `recv − create_stamp`.
+pub const METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS: &str =
+    "volga_stream_task_barrier_propagation_ms";
 
 // Worker-derived (poll-time) metrics
 pub const METRIC_WORKER_BACKPRESSURE_MAX: &str = "volga_worker_backpressure_max";

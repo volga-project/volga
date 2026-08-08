@@ -6,11 +6,13 @@ use crate::{
         execution_graph::ExecutionGraph,
         health::{WorkerFatalReason, WorkerHealth},
         metrics::{
-            init_metrics, MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
-            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
-            METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
-            METRIC_STREAM_TASK_PATH_LATENCY, METRIC_STREAM_TASK_RECORDS_RECV,
-            METRIC_STREAM_TASK_RECORDS_SENT,
+            init_metrics, record_vertex_histogram, set_vertex_gauge, MetricsLabels,
+            LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
+            METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS, METRIC_STREAM_TASK_BYTES_RECV,
+            METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_MESSAGES_RECV,
+            METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_PATH_LATENCY,
+            METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
+            METRIC_STREAM_TASK_WATERMARK_LAG_MS, METRIC_STREAM_TASK_WM_PROPAGATION_MS,
         },
         observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
         operators::operator::{
@@ -24,7 +26,7 @@ use crate::{
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
 use async_stream::stream;
-use metrics::{counter, histogram};
+use metrics::counter;
 use tokio::{task::JoinHandle, sync::Mutex, sync::watch, sync::mpsc};
 use crate::transport::transport_client::DataReaderControl;
 use std::collections::HashSet;
@@ -49,6 +51,8 @@ pub(crate) struct CheckpointAligner {
     upstream_count: usize,
     current_checkpoint: Option<u64>,
     seen_upstreams: HashSet<String>,
+    /// Earliest create stamp among barriers for the current checkpoint (for propagation).
+    inject_stamp: Option<u64>,
     reader_control: DataReaderControl,
 }
 
@@ -58,15 +62,17 @@ impl CheckpointAligner {
             upstream_count: upstream_vertices.len(),
             current_checkpoint: None,
             seen_upstreams: HashSet::new(),
+            inject_stamp: None,
             reader_control,
         }
     }
 
+    /// Returns `Some((checkpoint_id, inject_stamp))` when fully aligned.
     fn on_barrier(
         &mut self,
         barrier: &crate::common::message::CheckpointBarrierMessage,
         expected_attempt_id: u64,
-    ) -> Result<Option<u64>, String> {
+    ) -> Result<Option<(u64, Option<u64>)>, String> {
         if barrier.execution_attempt_id != expected_attempt_id {
             // Orphan from a previous attempt — drop without failing the new attempt.
             println!(
@@ -86,6 +92,13 @@ impl CheckpointAligner {
         let checkpoint_id = barrier.checkpoint_id;
         if self.current_checkpoint.is_none() {
             self.current_checkpoint = Some(checkpoint_id);
+            self.inject_stamp = barrier.metadata.ingest_timestamp;
+        } else if let (Some(existing), Some(stamp)) =
+            (self.inject_stamp, barrier.metadata.ingest_timestamp)
+        {
+            self.inject_stamp = Some(existing.min(stamp));
+        } else if self.inject_stamp.is_none() {
+            self.inject_stamp = barrier.metadata.ingest_timestamp;
         }
         if self.current_checkpoint != Some(checkpoint_id) {
             return Err(format!(
@@ -98,9 +111,10 @@ impl CheckpointAligner {
         self.seen_upstreams.insert(upstream_vertex_id);
 
         if self.seen_upstreams.len() == self.upstream_count {
+            let stamp = self.inject_stamp.take();
             self.current_checkpoint = None;
             self.seen_upstreams.clear();
-            return Ok(Some(checkpoint_id));
+            return Ok(Some((checkpoint_id, stamp)));
         }
         Ok(None)
     }
@@ -230,17 +244,54 @@ impl StreamTask {
         vertex_id: &VertexId,
         labels: Option<&MetricsLabels>,
     ) {
-        if let Some(labels) = labels {
-            histogram!(
-                name,
-                LABEL_VERTEX_ID => vertex_id.clone(),
-                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                LABEL_WORKER_ID => labels.worker_id.clone()
-            )
-            .record(value_ms);
-        } else {
-            histogram!(name, LABEL_VERTEX_ID => vertex_id.clone()).record(value_ms);
+        record_vertex_histogram(name, value_ms, vertex_id.as_ref(), labels);
+    }
+
+    fn record_control_propagation(
+        vertex_id: &VertexId,
+        message: &Message,
+        labels: Option<&MetricsLabels>,
+    ) {
+        let Some(stamp) = message.ingest_timestamp() else {
+            return;
+        };
+        let delay_ms = Self::now_ms().saturating_sub(stamp) as f64;
+        match message {
+            Message::Watermark(_) => {
+                Self::record_histogram(
+                    METRIC_STREAM_TASK_WM_PROPAGATION_MS,
+                    delay_ms,
+                    vertex_id,
+                    labels,
+                );
+            }
+            Message::CheckpointBarrier(_) => {
+                Self::record_histogram(
+                    METRIC_STREAM_TASK_BARRIER_PROPAGATION_MS,
+                    delay_ms,
+                    vertex_id,
+                    labels,
+                );
+            }
+            _ => {}
         }
+    }
+
+    fn set_watermark_lag_gauge(
+        vertex_id: &VertexId,
+        watermark_value: u64,
+        labels: Option<&MetricsLabels>,
+    ) {
+        if watermark_value == 0 || watermark_value == MAX_WATERMARK_VALUE {
+            return;
+        }
+        let lag_ms = Self::now_ms().saturating_sub(watermark_value) as f64;
+        set_vertex_gauge(
+            METRIC_STREAM_TASK_WATERMARK_LAG_MS,
+            lag_ms,
+            vertex_id.as_ref(),
+            labels,
+        );
     }
 
     fn record_metrics(
@@ -356,6 +407,7 @@ impl StreamTask {
             );
             while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
+                Self::record_control_propagation(&vertex_id, &message, labels.as_ref());
 
                 match &message {
                     Message::Watermark(watermark) => {
@@ -364,22 +416,24 @@ impl StreamTask {
                         }
                         // Advance watermark and only forward to operator if advanced.
                         if let Some(new_watermark) = watermark_manager.merge_watermark(watermark.clone()).await {
+                            Self::set_watermark_lag_gauge(&vertex_id, new_watermark, labels.as_ref());
                             let mut wm = watermark.clone();
                             wm.watermark_value = new_watermark;
                             wm.metadata.upstream_vertex_id = Some(vertex_id.as_ref().to_string());
+                            // Keep create stamp for downstream propagation.
                             yield Message::Watermark(wm);
                         }
                     }
                     Message::CheckpointBarrier(barrier) => {
                         match aligner.on_barrier(barrier, execution_attempt_id) {
-                            Ok(Some(checkpoint_id)) => {
-                                // Once fully aligned, yield a single barrier downstream through the operator.
+                            Ok(Some((checkpoint_id, inject_stamp))) => {
+                                // Once fully aligned, yield a single barrier; preserve inject stamp.
                                 yield Message::CheckpointBarrier(
                                     crate::common::message::CheckpointBarrierMessage::new(
                                         vertex_id.as_ref().to_string(),
                                         checkpoint_id,
                                         execution_attempt_id,
-                                        None,
+                                        inject_stamp,
                                     ),
                                 );
                             }
@@ -405,10 +459,15 @@ impl StreamTask {
                             // Treat injected watermark exactly like an upstream watermark: merge and
                             // emit a task-local watermark only if it advances.
                             if let Some(new_watermark) = watermark_manager.merge_watermark(wm.clone()).await {
+                                Self::set_watermark_lag_gauge(
+                                    &vertex_id,
+                                    new_watermark,
+                                    labels.as_ref(),
+                                );
                                 yield Message::Watermark(WatermarkMessage::new(
                                     vertex_id.as_ref().to_string(),
                                     new_watermark,
-                                    None,
+                                    Some(Self::now_ms()),
                                 ));
                             }
                         }
@@ -664,7 +723,7 @@ impl StreamTask {
                                     vertex_id.as_ref().to_string(),
                                     checkpoint_id,
                                     execution_attempt_id,
-                                    None,
+                                    Some(Self::now_ms()),
                                 ),
                             ))
                         }
@@ -753,10 +812,11 @@ impl StreamTask {
                         //     println!("StreamTask {:?} produced message {:?}", vertex_id, message);
                         // }
                         if is_source {
-                            message.set_ingest_timestamp(SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis() as u64);
+                            // Stamp data (path latency) and control (propagation) at source egress
+                            // unless already stamped (e.g. barrier inject time).
+                            if message.ingest_timestamp().is_none() {
+                                message.set_ingest_timestamp(Self::now_ms());
+                            }
                         }
                         if let Message::Watermark(ref mut watermark) = message {
                             if is_source {
@@ -765,6 +825,11 @@ impl StreamTask {
                                         watermark.watermark_value = new_watermark;
                                     }
                                 }
+                                Self::set_watermark_lag_gauge(
+                                    &vertex_id,
+                                    watermark.watermark_value,
+                                    metrics_labels.as_ref(),
+                                );
                             }
                             // If operator outputs max watermark, finish task
                             if watermark.watermark_value == MAX_WATERMARK_VALUE {
@@ -792,6 +857,14 @@ impl StreamTask {
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);
                             injected.set_upstream_vertex_id(vertex_id.as_ref().to_string());
+                            injected.set_ingest_timestamp(Self::now_ms());
+                            if let Message::Watermark(ref w) = injected {
+                                Self::set_watermark_lag_gauge(
+                                    &vertex_id,
+                                    w.watermark_value,
+                                    metrics_labels.as_ref(),
+                                );
+                            }
                             Self::record_metrics(
                                 vertex_id.clone(),
                                 &injected,
@@ -812,7 +885,7 @@ impl StreamTask {
                             let wm = Message::Watermark(WatermarkMessage::new(
                                 vertex_id.as_ref().to_string(),
                                 MAX_WATERMARK_VALUE,
-                                None,
+                                Some(Self::now_ms()),
                             ));
                             Self::record_metrics(vertex_id.clone(), &wm, false, metrics_labels.as_ref());
                             Self::send_to_collectors_if_needed(
