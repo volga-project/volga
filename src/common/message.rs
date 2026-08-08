@@ -16,7 +16,7 @@ impl BaseMessage {
     pub fn new(upstream_vertex_id: Option<String>, record_batch: RecordBatch, ingest_timestamp: Option<u64>, extras: Option<HashMap<String, String>>) -> Self {
         Self {
             record_batch,
-            metadata: MessageMetadata { upstream_vertex_id, ingest_timestamp, extras }
+            metadata: MessageMetadata::new(upstream_vertex_id, ingest_timestamp, extras),
         }
     }
 
@@ -101,9 +101,25 @@ pub struct MessageMetadata {
     pub upstream_vertex_id: Option<String>,
     pub ingest_timestamp: Option<u64>,
     pub extras: Option<HashMap<String, String>>,
+    /// Local task recv wall time (ms); not serialized — dwell is per-task only.
+    #[serde(skip)]
+    pub recv_timestamp: Option<u64>,
 }
 
 impl MessageMetadata {
+    pub fn new(
+        upstream_vertex_id: Option<String>,
+        ingest_timestamp: Option<u64>,
+        extras: Option<HashMap<String, String>>,
+    ) -> Self {
+        Self {
+            upstream_vertex_id,
+            ingest_timestamp,
+            extras,
+            recv_timestamp: None,
+        }
+    }
+
     pub fn get_memory_size(&self) -> usize {
         // Option<u64> = 8 bytes, Option<String> = 24 bytes + string length
         let mut len = 0;
@@ -119,7 +135,7 @@ impl MessageMetadata {
             }
         }
         
-        8 + 24 + 24 + len // u64 + Option<String> + Option<HashMap> + content
+        8 + 24 + 24 + len // ingest u64 + Option<String> + Option<HashMap> + content
     }
 }
 
@@ -202,11 +218,7 @@ impl WatermarkMessage {
     pub fn new(upstream_vertex_id: String, watermark_value: u64, ingest_timestamp: Option<u64>) -> Self {
         Self {
             watermark_value,
-            metadata: MessageMetadata {
-                upstream_vertex_id: Some(upstream_vertex_id),
-                ingest_timestamp,
-                extras: None
-            }
+            metadata: MessageMetadata::new(Some(upstream_vertex_id), ingest_timestamp, None),
         }
     }
 
@@ -253,11 +265,7 @@ impl CheckpointBarrierMessage {
         Self {
             checkpoint_id,
             execution_attempt_id,
-            metadata: MessageMetadata {
-                upstream_vertex_id: Some(upstream_vertex_id),
-                ingest_timestamp,
-                extras: None,
-            },
+            metadata: MessageMetadata::new(Some(upstream_vertex_id), ingest_timestamp, None),
         }
     }
 
@@ -346,6 +354,26 @@ impl Message {
             Message::Keyed(message) => message.base.set_ingest_timestamp(ingest_timestamp),
             Message::Watermark(message) => message.set_ingest_timestamp(ingest_timestamp),
             Message::CheckpointBarrier(message) => message.set_ingest_timestamp(ingest_timestamp),
+        }
+    }
+
+    pub fn recv_timestamp(&self) -> Option<u64> {
+        match self {
+            Message::Regular(message) => message.metadata.recv_timestamp,
+            Message::Keyed(message) => message.base.metadata.recv_timestamp,
+            Message::Watermark(message) => message.metadata.recv_timestamp,
+            Message::CheckpointBarrier(message) => message.metadata.recv_timestamp,
+        }
+    }
+
+    pub fn set_recv_timestamp(&mut self, recv_timestamp: u64) {
+        match self {
+            Message::Regular(message) => message.metadata.recv_timestamp = Some(recv_timestamp),
+            Message::Keyed(message) => message.base.metadata.recv_timestamp = Some(recv_timestamp),
+            Message::Watermark(message) => message.metadata.recv_timestamp = Some(recv_timestamp),
+            Message::CheckpointBarrier(message) => {
+                message.metadata.recv_timestamp = Some(recv_timestamp)
+            }
         }
     }
 

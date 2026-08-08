@@ -7,8 +7,9 @@ use crate::{
         health::{WorkerFatalReason, WorkerHealth},
         metrics::{
             init_metrics, MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
-            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT, METRIC_STREAM_TASK_LATENCY,
-            METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
+            METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
+            METRIC_STREAM_TASK_DWELL, METRIC_STREAM_TASK_MESSAGES_RECV,
+            METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_PATH_LATENCY,
             METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
         },
         observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
@@ -234,86 +235,128 @@ impl StreamTask {
         Ok(())
     }
 
+    fn now_ms() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64
+    }
+
+    fn record_histogram(
+        name: &'static str,
+        value_ms: f64,
+        vertex_id: &VertexId,
+        labels: Option<&MetricsLabels>,
+    ) {
+        if let Some(labels) = labels {
+            histogram!(
+                name,
+                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                LABEL_WORKER_ID => labels.worker_id.clone()
+            )
+            .record(value_ms);
+        } else {
+            histogram!(name, LABEL_VERTEX_ID => vertex_id.clone()).record(value_ms);
+        }
+    }
+
     fn record_metrics(
         vertex_id: VertexId,
         message: &Message,
         recv_or_send: bool,
         labels: Option<&MetricsLabels>,
     ) {
-        let is_control_message = matches!(message, Message::Watermark(_) | Message::CheckpointBarrier(_));
-        
-        if !is_control_message {
-            if recv_or_send {
-                if let Some(labels) = labels {
-                    counter!(
-                        METRIC_STREAM_TASK_MESSAGES_RECV,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(1);
-                    counter!(
-                        METRIC_STREAM_TASK_RECORDS_RECV,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.num_records() as u64);
-                    counter!(
-                        METRIC_STREAM_TASK_BYTES_RECV,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.get_memory_size() as u64);
-                } else {
-                    counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
-                    counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
-                    counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
-                }
-                
-                if let Some(ingest_timestamp) = message.ingest_timestamp() {
-                    let current_time = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64;
-                    let latency = current_time.saturating_sub(ingest_timestamp);
-                    if let Some(labels) = labels {
-                        histogram!(
-                            METRIC_STREAM_TASK_LATENCY,
-                            LABEL_VERTEX_ID => vertex_id.clone(),
-                            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                            LABEL_WORKER_ID => labels.worker_id.clone()
-                        )
-                        .record(latency as f64);
-                    } else {
-                        histogram!(METRIC_STREAM_TASK_LATENCY, LABEL_VERTEX_ID => vertex_id.clone())
-                            .record(latency as f64);
-                    }
-                }
+        let is_control_message =
+            matches!(message, Message::Watermark(_) | Message::CheckpointBarrier(_));
 
+        if is_control_message {
+            return;
+        }
+
+        if recv_or_send {
+            if let Some(labels) = labels {
+                counter!(
+                    METRIC_STREAM_TASK_MESSAGES_RECV,
+                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                    LABEL_WORKER_ID => labels.worker_id.clone()
+                )
+                .increment(1);
+                counter!(
+                    METRIC_STREAM_TASK_RECORDS_RECV,
+                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                    LABEL_WORKER_ID => labels.worker_id.clone()
+                )
+                .increment(message.num_records() as u64);
+                counter!(
+                    METRIC_STREAM_TASK_BYTES_RECV,
+                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                    LABEL_WORKER_ID => labels.worker_id.clone()
+                )
+                .increment(message.get_memory_size() as u64);
             } else {
-                if let Some(labels) = labels {
-                    counter!(
-                        METRIC_STREAM_TASK_MESSAGES_SENT,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(1);
-                    counter!(
-                        METRIC_STREAM_TASK_RECORDS_SENT,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.num_records() as u64);
-                    counter!(
-                        METRIC_STREAM_TASK_BYTES_SENT,
-                        LABEL_VERTEX_ID => vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).increment(message.get_memory_size() as u64);
-                } else {
-                    counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(1);
-                    counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.num_records() as u64);
-                    counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone()).increment(message.get_memory_size() as u64);
-                }
+                counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                    .increment(1);
+                counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                    .increment(message.num_records() as u64);
+                counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                    .increment(message.get_memory_size() as u64);
+            }
+
+            // Path latency: recv − source ingest (omit when ingest absent, e.g. WO outputs).
+            if let Some(ingest_timestamp) = message.ingest_timestamp() {
+                let path_latency = Self::now_ms().saturating_sub(ingest_timestamp);
+                Self::record_histogram(
+                    METRIC_STREAM_TASK_PATH_LATENCY,
+                    path_latency as f64,
+                    &vertex_id,
+                    labels,
+                );
+            }
+        } else {
+            if let Some(labels) = labels {
+                counter!(
+                    METRIC_STREAM_TASK_MESSAGES_SENT,
+                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                    LABEL_WORKER_ID => labels.worker_id.clone()
+                )
+                .increment(1);
+                counter!(
+                    METRIC_STREAM_TASK_RECORDS_SENT,
+                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                    LABEL_WORKER_ID => labels.worker_id.clone()
+                )
+                .increment(message.num_records() as u64);
+                counter!(
+                    METRIC_STREAM_TASK_BYTES_SENT,
+                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                    LABEL_WORKER_ID => labels.worker_id.clone()
+                )
+                .increment(message.get_memory_size() as u64);
+            } else {
+                counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                    .increment(1);
+                counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                    .increment(message.num_records() as u64);
+                counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                    .increment(message.get_memory_size() as u64);
+            }
+
+            // Task dwell: send − recv (only when this task stamped recv on the message).
+            if let Some(recv_timestamp) = message.recv_timestamp() {
+                let dwell = Self::now_ms().saturating_sub(recv_timestamp);
+                Self::record_histogram(
+                    METRIC_STREAM_TASK_DWELL,
+                    dwell as f64,
+                    &vertex_id,
+                    labels,
+                );
             }
         }
     }
@@ -340,7 +383,14 @@ impl StreamTask {
                 upstream_watermarks.clone(),
                 current_watermark.clone(),
             );
-            while let Some(message) = input_stream.next().await {
+            while let Some(mut message) = input_stream.next().await {
+                let is_control = matches!(
+                    message,
+                    Message::Watermark(_) | Message::CheckpointBarrier(_)
+                );
+                if !is_control {
+                    message.set_recv_timestamp(Self::now_ms());
+                }
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
 
                 match &message {
