@@ -26,6 +26,13 @@ pub async fn execute_with_state_updates(
         _ => panic!("Execution profile must be SingleWorker"),
     };
 
+    // Maintenance on by default (StateSpec); use a short interval so inproc
+    // tests actually tick the cleaner before finishing.
+    let mut state = spec.state.clone();
+    state.maintenance_enabled = true;
+    if state.maintenance_interval_ms >= 1_000 {
+        state.maintenance_interval_ms = 50;
+    }
     let worker_config = WorkerConfig::new(
         worker_id.clone(),
         pipeline_id,
@@ -33,7 +40,8 @@ pub async fn execute_with_state_updates(
         vertex_ids,
         num_threads_per_task,
         TransportBackendType::Grpc,
-    );
+    )
+    .with_state_spec(&state);
     let worker = Worker::spawn_configured(worker_config).await;
 
     if let Some(pipeline_state_sender) = state_updates_sender {

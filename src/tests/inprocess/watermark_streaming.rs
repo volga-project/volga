@@ -101,7 +101,7 @@ pub(crate) async fn run_watermark_window_pipeline(
             num_threads_per_task: 4,
         })
         .with_out_of_orderness_ms(out_of_orderness_ms)
-        .with_window_allowed_lateness_ms(Some(lateness_ms))
+        .with_window_allowed_lateness_ms(lateness_ms)
         .with_source(
             SourceSpec::new(
                 "datagen_source",
@@ -147,14 +147,20 @@ pub(crate) async fn run_watermark_window_pipeline(
         );
     }
 
-    let worker = Worker::spawn_configured(WorkerConfig::new(
-        "wm-e2e-worker".to_string(),
-        PipelineId(Uuid::new_v4().to_string()),
-        exec_graph,
-        vertex_ids,
-        2,
-        TransportBackendType::Grpc,
-    ))
+    let mut state = crate::api::StateSpec::default();
+    state.maintenance_enabled = true;
+    state.maintenance_interval_ms = 50;
+    let worker = Worker::spawn_configured(
+        WorkerConfig::new(
+            "wm-e2e-worker".to_string(),
+            PipelineId(Uuid::new_v4().to_string()),
+            exec_graph,
+            vertex_ids,
+            2,
+            TransportBackendType::Grpc,
+        )
+        .with_state_spec(&state),
+    )
     .await;
 
     worker

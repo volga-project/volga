@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
+use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig, StateSpec};
 use crate::common::types::PipelineId;
 use crate::runtime::checkpoint::{SerializedRestore, TaskKey};
 use crate::runtime::execution_graph::ExecutionGraph;
@@ -54,6 +54,15 @@ impl WorkerConfig {
 
     pub fn with_master_addr(mut self, master_addr: String) -> Self {
         self.master_addr = Some(master_addr);
+        self
+    }
+
+    /// Apply pipeline [`StateSpec`] backend + maintenance knobs.
+    pub fn with_state_spec(mut self, state: &StateSpec) -> Self {
+        self.operator_state_backend = state.operator_backend.clone();
+        self.request_store = state.request_store.clone();
+        self.state_maintenance_enabled = state.maintenance_enabled;
+        self.state_maintenance_interval_ms = state.maintenance_interval_ms.max(1);
         self
     }
 }

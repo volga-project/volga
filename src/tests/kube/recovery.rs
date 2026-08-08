@@ -31,7 +31,9 @@ use crate::tests::support::recovery::{
 async fn test_kube_single_worker_kill_pod_poll_recovers() -> Result<()> {
     let (target, report) = run_worker_kill_recovery(
         RuntimeEnv::Kube,
-        single_worker_recovery_launch_spec().with_kube_worker_health_poll(true),
+        single_worker_recovery_launch_spec()
+            .with_kube_worker_health_poll(true)
+            .with_state_maintenance(true, 100),
         WorkerKillMode::Abrupt,
     )
     .await?;
@@ -44,7 +46,9 @@ async fn test_kube_single_worker_kill_pod_poll_recovers() -> Result<()> {
 async fn test_kube_single_worker_kill_pod_heartbeat_recovers() -> Result<()> {
     let (target, report) = run_worker_kill_recovery(
         RuntimeEnv::Kube,
-        single_worker_recovery_launch_spec().with_kube_worker_health_poll(false),
+        single_worker_recovery_launch_spec()
+            .with_kube_worker_health_poll(false)
+            .with_state_maintenance(true, 100),
         WorkerKillMode::Abrupt,
     )
     .await?;
@@ -57,7 +61,9 @@ async fn test_kube_single_worker_kill_pod_heartbeat_recovers() -> Result<()> {
 async fn test_kube_multi_worker_single_kill_pod_recovers() -> Result<()> {
     let (target, report) = run_worker_kill_recovery(
         RuntimeEnv::Kube,
-        multi_worker_recovery_launch_spec().with_kube_worker_health_poll(true),
+        multi_worker_recovery_launch_spec()
+            .with_kube_worker_health_poll(true)
+            .with_state_maintenance(true, 100),
         WorkerKillMode::Abrupt,
     )
     .await?;
@@ -70,7 +76,9 @@ async fn test_kube_multi_worker_single_kill_pod_recovers() -> Result<()> {
 async fn test_kube_multi_worker_multi_kill_pod_recovers() -> Result<()> {
     let (targets, report) = run_workers_kill_recovery(
         RuntimeEnv::Kube,
-        multi_worker_recovery_launch_spec().with_kube_worker_health_poll(true),
+        multi_worker_recovery_launch_spec()
+            .with_kube_worker_health_poll(true)
+            .with_state_maintenance(true, 100),
         WorkerKillMode::Abrupt,
         2,
     )

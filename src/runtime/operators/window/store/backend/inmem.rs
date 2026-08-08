@@ -15,6 +15,7 @@ use tokio::sync::RwLock;
 use std::any::Any;
 
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
+use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
 use super::{
@@ -65,7 +66,8 @@ struct InMemState {
 }
 
 /// Development/test reference backend with inline checkpoints limited to 8 MiB.
-/// One read lock is the WRO snapshot boundary.
+/// One read lock is the WRO snapshot boundary. Physical prune runs via
+/// [`OperatorStore::maintain`], not the WO watermark hot path.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
     state: Arc<RwLock<InMemState>>,
@@ -74,6 +76,21 @@ pub struct InMemWindowStore {
 impl InMemWindowStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) {
+        state.triggers.retain(|trigger| {
+            trigger.partition.namespace.as_slice() != namespace || trigger.fire_at.ts > watermark
+        });
+        for (partition, part) in state.partitions.iter_mut() {
+            if partition.namespace.as_slice() != namespace {
+                continue;
+            }
+            part.raw.retain(|cursor, _| cursor.ts >= floor);
+            part.tiles.retain(|&(granularity, start_ts), _| {
+                start_ts + granularity.to_millis() > floor
+            });
+        }
     }
 
     fn select_raw(state: &PartitionState, runs: &[RawRun]) -> Vec<RecordBatch> {
@@ -365,10 +382,17 @@ impl OperatorStore for InMemWindowStore {
 
     async fn maintain(
         &self,
-        _ns: &StateNamespace,
-        _state: &dyn OperatorTaskState,
+        ns: &StateNamespace,
+        state: &dyn OperatorTaskState,
     ) -> Result<()> {
-        // Retention prune lands in a follow-up change.
+        let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
+            return Ok(());
+        };
+        let Some((watermark, floor)) = wo.retention_cutoff() else {
+            return Ok(());
+        };
+        let mut store = self.state.write().await;
+        Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
         Ok(())
     }
 }
@@ -382,7 +406,9 @@ mod tests {
     use crate::runtime::operators::window::model::{
         KeyEvaluationState, TileRun, TimeGranularity, WindowTiles, WindowTriggerKind,
     };
+    use crate::runtime::operators::window::state::WindowOperatorState;
     use crate::runtime::operators::window::store::{data::RowIdx, StateVersion};
+    use crate::runtime::state::OperatorStore;
 
     fn partition() -> PartitionKey {
         PartitionKey {
@@ -764,6 +790,99 @@ mod tests {
         let second = due.try_next().await.unwrap().unwrap();
         assert_eq!(second[0].triggers.len(), 34);
         assert!(due.try_next().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn maintain_prunes_triggers_raw_and_tiles() {
+        let store = InMemWindowStore::new();
+        let partition = partition();
+        let namespace = StateNamespace::new(&partition.namespace);
+        let triggers = [
+            WindowTrigger {
+                fire_at: Cursor::new(1_000, 1),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            },
+            WindowTrigger {
+                fire_at: Cursor::new(5_000, 2),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            },
+            WindowTrigger {
+                fire_at: Cursor::new(10_000, 3),
+                partition: partition.clone(),
+                kind: WindowTriggerKind::RowEmit,
+            },
+        ];
+        store
+            .commit_events(
+                &partition,
+                0,
+                &batch(&[(1_000, 1), (5_000, 2), (10_000, 3)]),
+                &tiles(&[
+                    (TimeGranularity::Seconds(1), 1_000, 7),
+                    (TimeGranularity::Seconds(1), 5_000, 7),
+                    (TimeGranularity::Seconds(1), 10_000, 7),
+                ]),
+                &KeyState {
+                    next_seq: 4,
+                    ..Default::default()
+                },
+                &triggers,
+            )
+            .await
+            .unwrap();
+
+        let task_state = WindowOperatorState::new(
+            Arc::new(store.clone()) as Arc<dyn WindowOperatorStore>,
+            namespace.clone(),
+            0,
+            Arc::new(BTreeMap::new()),
+            0,
+            0,
+        );
+        task_state
+            .watermark_frontier
+            .store(5_000, std::sync::atomic::Ordering::Release);
+        store
+            .maintain(&namespace, &task_state)
+            .await
+            .unwrap();
+
+        let mut due = store.stream_due(&namespace, None, Cursor::new(10_000, u64::MAX));
+        let work = due.try_next().await.unwrap().unwrap();
+        assert_eq!(work[0].triggers, vec![triggers[2].clone()]);
+        assert!(due.try_next().await.unwrap().is_none());
+
+        assert_eq!(
+            raw_cursors(
+                &store
+                    .load_raw(&partition, &[raw_run((0, 0), (20_000, 0))])
+                    .await
+                    .unwrap()
+            ),
+            vec![Cursor::new(5_000, 2), Cursor::new(10_000, 3)]
+        );
+        assert_eq!(
+            tile_keys(
+                &store
+                    .load_tiles(
+                        &partition,
+                        &[TileRun {
+                            granularity: TimeGranularity::Seconds(1),
+                            start_ts: 0,
+                            end_ts_exclusive: 20_000,
+                        }]
+                    )
+                    .await
+                    .unwrap()
+            ),
+            vec![
+                (TimeGranularity::Seconds(1), 5_000),
+                (TimeGranularity::Seconds(1), 10_000)
+            ]
+        );
+        assert_eq!(store.load_key_state(&partition).await.unwrap().next_seq, 4);
     }
 
     #[tokio::test]

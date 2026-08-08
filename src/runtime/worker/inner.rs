@@ -145,6 +145,12 @@ impl WorkerInner {
         if let Some(handle) = self.state_maintenance_handle.take() {
             handle.abort();
         }
+        // Final cleaner tick so short-lived runs still apply retention.
+        if self.config.state_maintenance_enabled {
+            if let Err(err) = self.state_registry.run_maintenance_once().await {
+                eprintln!("[WORKER] final state maintenance failed: {err:#}");
+            }
+        }
 
         // Close: signal after Finished; abort mid-run so dispose cannot hang.
         if !self.task_actors.is_empty() {

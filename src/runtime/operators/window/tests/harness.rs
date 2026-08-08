@@ -29,6 +29,7 @@ use crate::runtime::operators::window::store::{
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::observability::TaskMetadata;
+use crate::runtime::state::OperatorStore;
 
 pub fn test_input_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -129,6 +130,15 @@ impl Harness {
         }
     }
 
+    /// Sync cleaner tick: maintain for this harness task state.
+    pub async fn run_maintenance(&self) {
+        let state = self.op.task_state();
+        self.store
+            .maintain(state.namespace(), state.as_ref())
+            .await
+            .expect("maintain");
+    }
+
     pub async fn ingest(&mut self, b: RecordBatch, partition: &str) {
         self.op
             .set_input(Some(Box::pin(futures::stream::iter(vec![keyed_message(
@@ -144,10 +154,12 @@ impl Harness {
         self.op.set_input(Some(Box::pin(futures::stream::iter(vec![
             watermark_message(wm),
         ]))));
-        match self.op.poll_next().await {
+        let out = match self.op.poll_next().await {
             OperatorPollResult::Ready(Message::Regular(base)) => base.record_batch,
             other => panic!("expected output on watermark, got {:?}", other),
-        }
+        };
+        self.run_maintenance().await;
+        out
     }
 
     pub async fn drain_passthrough_watermark(&mut self) -> u64 {
@@ -166,12 +178,25 @@ pub struct WoWroHarness {
 
 impl WoWroHarness {
     pub async fn new(sql: &str, tiling: Option<TileConfig>, exclude_current_row: bool) -> Self {
-        Self::with_store(
+        Self::with_lateness(sql, tiling, exclude_current_row, 0).await
+    }
+
+    /// Shared WO/WRO harness with explicit WO retention padding.
+    /// Use a large `lateness` when tests advance the watermark but still query
+    /// history older than the WO floor (WRO horizon is not modeled yet).
+    pub async fn with_lateness(
+        sql: &str,
+        tiling: Option<TileConfig>,
+        exclude_current_row: bool,
+        lateness: i64,
+    ) -> Self {
+        Self::with_store_and_lateness(
             sql,
             tiling,
             exclude_current_row,
             Arc::new(InMemWindowStore::new()),
             StateNamespace::new(b"window_state"),
+            lateness,
         )
         .await
     }
@@ -183,13 +208,25 @@ impl WoWroHarness {
         store: Arc<InMemWindowStore>,
         namespace: StateNamespace,
     ) -> Self {
+        Self::with_store_and_lateness(sql, tiling, exclude_current_row, store, namespace, 0).await
+    }
+
+    pub async fn with_store_and_lateness(
+        sql: &str,
+        tiling: Option<TileConfig>,
+        exclude_current_row: bool,
+        store: Arc<InMemWindowStore>,
+        namespace: StateNamespace,
+        lateness: i64,
+    ) -> Self {
         Self::with_stores(
             sql,
             tiling,
             exclude_current_row,
-            store.clone(),
-            store,
+            store.clone() as Arc<dyn WindowOperatorStore>,
+            store as Arc<dyn WindowRequestStore>,
             namespace,
+            lateness,
         )
         .await
     }
@@ -201,17 +238,17 @@ impl WoWroHarness {
         operator_store: Arc<dyn WindowOperatorStore>,
         request_store: Arc<dyn WindowRequestStore>,
         namespace: StateNamespace,
+        lateness: i64,
     ) -> Self {
         let exec = window_exec_from_sql(sql).await;
+        let spec = WindowSpec {
+            lateness,
+            tiling: tiling.clone(),
+        };
 
         let mut wo_cfg = WindowOperatorConfig::new(exec.clone());
         wo_cfg.output_mode = WindowOutputMode::StateOnly;
-        if tiling.is_some() {
-            wo_cfg.spec = WindowSpec {
-                tiling: tiling.clone(),
-                ..Default::default()
-            };
-        }
+        wo_cfg.spec = spec.clone();
         let wo_ctx = runtime_context();
         let mut wo = WindowOperator::new(OperatorConfig::WindowConfig(wo_cfg));
         wo.set_state_with_store_and_ns(operator_store, namespace.clone());
@@ -221,18 +258,22 @@ impl WoWroHarness {
             WindowOperatorConfig::new(exec),
         );
         req_cfg.exclude_current_row = exclude_current_row;
-        if tiling.is_some() {
-            req_cfg.spec = WindowSpec {
-                tiling,
-                ..Default::default()
-            };
-        }
+        req_cfg.spec = spec;
         let wro_ctx = runtime_context();
         let mut wro = WindowRequestOperator::new(OperatorConfig::WindowRequestConfig(req_cfg));
         wro.set_state_with_store_and_ns(request_store, namespace);
         wro.open(&wro_ctx).await.expect("wro open");
 
         Self { wo, wro }
+    }
+
+    pub async fn run_maintenance(&self) {
+        let state = self.wo.task_state();
+        state
+            .store()
+            .maintain(state.namespace(), state.as_ref())
+            .await
+            .expect("maintain");
     }
 
     pub async fn ingest(&mut self, b: RecordBatch, partition: &str) {
@@ -261,6 +302,7 @@ impl WoWroHarness {
             }
             other => panic!("expected passthrough watermark, got {:?}", other),
         }
+        self.run_maintenance().await;
     }
 
     pub async fn request(&mut self, b: RecordBatch, partition: &str) -> RecordBatch {

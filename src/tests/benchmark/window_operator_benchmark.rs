@@ -62,7 +62,7 @@ pub struct WindowBenchmarkConfig {
     // Window operator config params
     pub output_mode: WindowOutputMode,
     pub tiling_configs: Option<Vec<Option<TileConfig>>>,
-    pub lateness: Option<i64>,
+    pub lateness: i64,
 
     // Metrics collection params
     pub polling_interval_ms: u64,
@@ -83,7 +83,7 @@ impl Default for WindowBenchmarkConfig {
             aggregation_type: AggregationType::Retractable,
             output_mode: WindowOutputMode::Emit,
             tiling_configs: None,
-            lateness: None,
+            lateness: 0,
             polling_interval_ms: 100,
             throughput_window_seconds: Some(5),
         }
@@ -604,7 +604,7 @@ async fn test_window_benchmark_basic() -> Result<()> {
         aggregation_type: AggregationType::Plain,
         output_mode: WindowOutputMode::StateOnly,
         tiling_configs: Some(tiling_configs),
-        lateness: None,
+        lateness: 0,
         polling_interval_ms: 100,
         throughput_window_seconds: Some(5),
     };

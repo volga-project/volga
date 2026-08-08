@@ -280,8 +280,7 @@ async fn wro_uses_one_selective_tiled_load() {
   ) AS min_value
 FROM test_table"#;
     let tiling = TileConfig::new(vec![TimeGranularity::Minutes(1)]).unwrap();
-    let inner = Arc::new(InMemWindowStore::new());
-    let recording = Arc::new(RecordingWindowStore::new(inner.clone()));
+    let recording = Arc::new(RecordingWindowStore::new(Arc::new(InMemWindowStore::new())));
     let mut h = WoWroHarness::with_stores(
         sql,
         Some(tiling),
@@ -289,6 +288,7 @@ FROM test_table"#;
         recording.clone(),
         recording.clone(),
         StateNamespace::new(b"wro_io_planning"),
+        0,
     )
     .await;
     let initial_ts: Vec<_> = (0..=10).map(|minute| minute * 60_000).collect();

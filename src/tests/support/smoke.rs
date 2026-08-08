@@ -64,8 +64,11 @@ pub fn docker_smoke_launch_spec() -> PipelineLaunchSpec {
     deployment_smoke_launch_spec(FieldGenerator::Values {
         values: vec![datafusion::common::ScalarValue::Utf8(Some("v".to_string()))],
     })
+    .with_state_maintenance(true, 100)
 }
 
 pub fn kube_smoke_launch_spec() -> PipelineLaunchSpec {
     deployment_smoke_launch_spec(FieldGenerator::Key { num_unique: 6 })
+        .with_kube_worker_health_poll(true)
+        .with_state_maintenance(true, 100)
 }

@@ -104,7 +104,7 @@ impl PipelineSpecBuilder {
         self
     }
 
-    pub fn with_window_allowed_lateness_ms(mut self, allowed_lateness_ms: Option<i64>) -> Self {
+    pub fn with_window_allowed_lateness_ms(mut self, allowed_lateness_ms: i64) -> Self {
         self.spec.event_time.window.allowed_lateness_ms = allowed_lateness_ms;
         self
     }
@@ -112,7 +112,7 @@ impl PipelineSpecBuilder {
     /// Sets watermark out-of-orderness and window retention (`allowed_lateness_ms`) to the same value.
     pub fn with_event_time_skew_ms(mut self, skew_ms: u64) -> Self {
         self.spec.event_time.watermark.out_of_orderness_ms = skew_ms;
-        self.spec.event_time.window.allowed_lateness_ms = Some(skew_ms as i64);
+        self.spec.event_time.window.allowed_lateness_ms = skew_ms as i64;
         self
     }
 
@@ -172,6 +172,12 @@ impl PipelineSpecBuilder {
 
     pub fn with_request_store(mut self, request_store: RequestStoreConfig) -> Self {
         self.spec.state.request_store = Some(request_store);
+        self
+    }
+
+    pub fn with_state_maintenance(mut self, enabled: bool, interval_ms: u64) -> Self {
+        self.spec.state.maintenance_enabled = enabled;
+        self.spec.state.maintenance_interval_ms = interval_ms.max(1);
         self
     }
 

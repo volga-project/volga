@@ -364,7 +364,8 @@ async fn matrix_wro_points_match_oracle() {
                 .map(|(ts, v)| oracle_wro_point(&evs, *ts, *v, exclude))
                 .collect();
 
-            let mut h = WoWroHarness::new(sql, tiling.clone(), exclude).await;
+            // Retain full fixture after advance; WRO query horizon is not modeled yet.
+            let mut h = WoWroHarness::with_lateness(sql, tiling.clone(), exclude, 300_000).await;
             h.ingest(events.clone(), "A").await;
             h.advance(wm as u64).await;
             let out = h.request(request_batch.clone(), "A").await;

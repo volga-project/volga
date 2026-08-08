@@ -5,9 +5,10 @@ use crate::runtime::operators::window::tile::TileConfig;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct WindowSpec {
-    /// State retention after advance (`watermark − max_wl − lateness`).
-    /// Streaming late data is at or behind the task watermark.
-    pub lateness: Option<i64>,
+    /// Retention padding after advance (`watermark − max_wl − lateness`).
+    /// Default `0`: prune data below `W − max_wl`. Streaming late ingest is
+    /// still gated by the task watermark (`ts ≤ frontier`), not this field.
+    pub lateness: i64,
     /// Default tiling for all windows (overridable per-window via `tiling_configs`).
     pub tiling: Option<TileConfig>,
 }
@@ -15,7 +16,7 @@ pub struct WindowSpec {
 impl Default for WindowSpec {
     fn default() -> Self {
         Self {
-            lateness: None,
+            lateness: 0,
             tiling: None,
         }
     }

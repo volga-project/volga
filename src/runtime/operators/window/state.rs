@@ -29,6 +29,8 @@ pub struct WindowOperatorState {
     namespace: StateNamespace,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+    lateness_ms: i64,
+    max_window_length_ms: i64,
     /// Task watermark frontier; [`WATERMARK_UNSET`] until the first advance.
     pub watermark_frontier: AtomicI64,
 }
@@ -46,12 +48,16 @@ impl WindowOperatorState {
         namespace: StateNamespace,
         ts_column_index: usize,
         window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+        lateness_ms: i64,
+        max_window_length_ms: i64,
     ) -> Self {
         Self {
             store,
             namespace,
             ts_column_index,
             window_configs,
+            lateness_ms,
+            max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
         }
     }
@@ -67,6 +73,21 @@ impl WindowOperatorState {
     pub fn watermark_frontier(&self) -> Option<i64> {
         let v = self.watermark_frontier.load(Ordering::Acquire);
         (v != WATERMARK_UNSET).then_some(v)
+    }
+
+    /// `(watermark, data_floor)` when a frontier has been established.
+    ///
+    /// Data floor is `W - max_window_length - lateness` (both clamped to ≥ 0).
+    /// Raw rows with `ts < floor` and tiles fully below the floor may be pruned.
+    /// Consumed triggers (`fire_at.ts <= W`) are dropped separately.
+    pub fn retention_cutoff(&self) -> Option<(i64, i64)> {
+        let watermark = self.watermark_frontier()?;
+        let lateness_ms = self.lateness_ms.max(0);
+        let max_window_length_ms = self.max_window_length_ms.max(0);
+        let floor = watermark
+            .saturating_sub(max_window_length_ms)
+            .saturating_sub(lateness_ms);
+        Some((watermark, floor))
     }
 
     pub fn partition(&self, key: &Key) -> PartitionKey {

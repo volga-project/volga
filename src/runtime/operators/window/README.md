@@ -47,7 +47,12 @@ accumulator capability, optional tiling, and WRO current-row behavior.
 
 `WindowSpec` controls:
 
-- `lateness`: retention padding behind the largest window.
+- `lateness`: retention padding behind the largest window (default `0`).
+  After a successful watermark advance to `W`, WO updates its
+  `OperatorTaskState` frontier. A worker cleaner later calls
+  `OperatorStore::maintain(state)` per task; the window store reads
+  `data_floor = W − max_wl − lateness` from that state and prunes
+  (not on the WO hot path).
 - `tiling`: default tile granularities, with optional per-window overrides.
 
 Window state advances only on watermarks. State-only request-serving topologies
@@ -83,7 +88,8 @@ Emitting WO pages durable triggers through the requested watermark:
 4. Merge emit-row and historical coverage, then load raw rows and tiles once.
 5. Evaluate each window by sliding or rebuilding.
 6. Save evaluation state through the final trigger.
-7. Advance and forward the watermark after every due page succeeds.
+7. Publish retention meta and advance the task watermark; a worker cleaner
+   applies prune asynchronously via `maintain`.
 
 State-only WO publishes raw rows and tiles on ingest but creates no row
 triggers or evaluation state.
@@ -137,6 +143,9 @@ store access.
 - atomically commit ingest data, metadata, and triggers;
 - page due triggers and publish evaluation state after advancement;
 - flush, checkpoint, and restore a namespace.
+
+Physical retention is via `OperatorStore::maintain` (worker cleaner), reading
+cutoff from `OperatorTaskState` — not a separate meta publish API.
 
 `WindowRequestStore` exposes one operation that returns raw rows and tiles from
 the same coherent snapshot. A backend must not combine raw rows from one
@@ -195,6 +204,7 @@ giving evaluators one ordered view.
 ```text
 operator.rs       WO runtime operator and watermark processing
 request.rs        WRO runtime operator
+retention.rs      WO retention floor after watermark advance
 state.rs          WO ingest state plus checkpoint/restore bridge
 spec.rs           shared window runtime settings
 config.rs         DataFusion expression-to-window configuration
