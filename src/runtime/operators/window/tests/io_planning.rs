@@ -12,6 +12,9 @@ use crate::runtime::operators::window::store::{
     DueWorkStream, InMemWindowStore, KeyState, PartitionKey, StateNamespace, TileMap,
     WindowBackendSnapshot, WindowData, WindowOperatorStore, WindowRequestStore,
 };
+use std::any::Any;
+
+use crate::runtime::state::{OperatorStore, OperatorTaskState};
 use crate::runtime::operators::window::tests::harness::{
     assert_window_values, batch, window_exec_from_sql, Harness, WoWroHarness,
 };
@@ -124,6 +127,21 @@ impl WindowRequestStore for RecordingWindowStore {
         self.inner
             .load_window_data(partition, raw_runs, tile_runs)
             .await
+    }
+}
+
+#[async_trait]
+impl OperatorStore for RecordingWindowStore {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn maintain(
+        &self,
+        ns: &StateNamespace,
+        state: &dyn OperatorTaskState,
+    ) -> Result<()> {
+        self.inner.maintain(ns, state).await
     }
 }
 

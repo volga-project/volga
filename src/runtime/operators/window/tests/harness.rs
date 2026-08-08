@@ -29,7 +29,6 @@ use crate::runtime::operators::window::store::{
 use crate::runtime::operators::window::TileConfig;
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::observability::TaskMetadata;
-use crate::runtime::state::OperatorStates;
 
 pub fn test_input_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -87,14 +86,7 @@ pub async fn window_exec_from_sql(sql: &str) -> Arc<BoundedWindowAggExec> {
 }
 
 pub fn runtime_context() -> RuntimeContext {
-    RuntimeContext::new(
-        "test_vertex".to_string().into(),
-        0,
-        1,
-        None,
-        Some(Arc::new(OperatorStates::new())),
-        None,
-    )
+    RuntimeContext::new("test_vertex".to_string().into(), 0, 1, None, None, None)
 }
 
 pub struct Harness {

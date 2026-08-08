@@ -10,6 +10,8 @@ use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
+use crate::runtime::operators::OperatorKind;
+use crate::runtime::state::{OperatorStore, StateRegistry};
 
 use super::WindowData;
 
@@ -17,11 +19,23 @@ mod inmem;
 
 pub use inmem::InMemWindowStore;
 
-pub async fn open_window_operator_store(
+/// Op-specific open: share via [`StateRegistry`].
+pub fn open_window_operator_store(
+    registry: &StateRegistry,
     config: &OperatorStateBackendConfig,
 ) -> Result<Arc<dyn WindowOperatorStore>> {
     match config {
-        OperatorStateBackendConfig::InMemory => Ok(Arc::new(InMemWindowStore::new())),
+        OperatorStateBackendConfig::InMemory => {
+            let store = registry.get_or_insert_store(OperatorKind::Window, |_session| {
+                Arc::new(InMemWindowStore::new()) as Arc<dyn OperatorStore>
+            });
+            let inmem = store
+                .as_any()
+                .downcast_ref::<InMemWindowStore>()
+                .expect("window InMem store type")
+                .clone();
+            Ok(Arc::new(inmem) as Arc<dyn WindowOperatorStore>)
+        }
     }
 }
 
@@ -57,7 +71,7 @@ pub type DueWorkStream<'a> = BoxStream<'a, Result<Vec<DueWindowWork>>>;
 
 /// Store operations used by the sole Window Operator for a partition.
 #[async_trait]
-pub trait WindowOperatorStore: Send + Sync + std::fmt::Debug {
+pub trait WindowOperatorStore: OperatorStore {
     async fn load_key_state(&self, partition: &PartitionKey) -> Result<KeyState>;
     async fn load_raw(&self, partition: &PartitionKey, runs: &[RawRun])
         -> Result<Vec<RecordBatch>>;

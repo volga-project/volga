@@ -12,7 +12,7 @@ use crate::runtime::functions::source::request_source::RequestSourceProcessor;
 use crate::runtime::health::WorkerHealth;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
 use crate::runtime::operators::source::SourceHandles;
-use crate::runtime::state::OperatorStates;
+use crate::runtime::state::{StateRegistry, StateResourceTracker, StateSessionHandle};
 use crate::runtime::stream_task_actor::StreamTaskActor;
 use crate::runtime::VertexId;
 use crate::transport::transport_backend_actor::{
@@ -29,9 +29,10 @@ pub(crate) struct WorkerInner {
     pub(crate) task_runtimes: HashMap<VertexId, Runtime>,
     pub(crate) transport_backend_runtime: Option<Runtime>,
     pub(crate) worker_state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
-    pub(crate) operator_states: Arc<OperatorStates>,
+    pub(crate) state_registry: Arc<StateRegistry>,
     pub(crate) running: Arc<AtomicBool>,
     pub(crate) tasks_state_polling_handle: Option<tokio::task::JoinHandle<()>>,
+    pub(crate) state_maintenance_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) fatal_watcher_handle: Option<tokio::task::JoinHandle<()>>,
     pub(crate) request_source_processor: Option<RequestSourceProcessor>,
     pub(crate) request_source_processor_runtime: Option<Runtime>,
@@ -71,6 +72,14 @@ impl WorkerInner {
             config.pipeline_id.clone(),
         )));
 
+        let session = StateSessionHandle::connect(&config.operator_state_backend)
+            .expect("state session init");
+        let state_registry = Arc::new(StateRegistry::new(
+            session,
+            Arc::new(StateResourceTracker::new()),
+        ));
+        state_registry.set_maintenance_enabled(config.state_maintenance_enabled);
+
         Self {
             config,
             health,
@@ -86,9 +95,10 @@ impl WorkerInner {
                     .unwrap(),
             ),
             worker_state,
-            operator_states: Arc::new(OperatorStates::new()),
+            state_registry,
             running: Arc::new(AtomicBool::new(false)),
             tasks_state_polling_handle: None,
+            state_maintenance_handle: None,
             fatal_watcher_handle: None,
             request_source_processor: None,
             request_source_processor_runtime,
@@ -130,6 +140,9 @@ impl WorkerInner {
         }
         self.running.store(false, Ordering::SeqCst);
         if let Some(handle) = self.tasks_state_polling_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.state_maintenance_handle.take() {
             handle.abort();
         }
 
@@ -182,6 +195,9 @@ impl Drop for WorkerInner {
             handle.abort();
         }
         if let Some(handle) = self.tasks_state_polling_handle.take() {
+            handle.abort();
+        }
+        if let Some(handle) = self.state_maintenance_handle.take() {
             handle.abort();
         }
         self.request_source_processor.take();

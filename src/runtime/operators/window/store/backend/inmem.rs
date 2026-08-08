@@ -12,7 +12,10 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
+use std::any::Any;
+
 use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
+use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
 use super::{
     DueWindowWork, DueWorkStream, WindowBackendSnapshot, WindowOperatorStore, WindowRequestStore,
@@ -351,6 +354,22 @@ impl WindowRequestStore for InMemWindowStore {
             Self::select_raw(state, raw_runs),
             Self::select_tiles(state, tile_runs),
         ))
+    }
+}
+
+#[async_trait]
+impl OperatorStore for InMemWindowStore {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    async fn maintain(
+        &self,
+        _ns: &StateNamespace,
+        _state: &dyn OperatorTaskState,
+    ) -> Result<()> {
+        // Retention prune lands in a follow-up change.
+        Ok(())
     }
 }
 
