@@ -8,9 +8,9 @@ use crate::{
         metrics::{
             init_metrics, MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
             METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
-            METRIC_STREAM_TASK_DWELL, METRIC_STREAM_TASK_MESSAGES_RECV,
-            METRIC_STREAM_TASK_MESSAGES_SENT, METRIC_STREAM_TASK_PATH_LATENCY,
-            METRIC_STREAM_TASK_RECORDS_RECV, METRIC_STREAM_TASK_RECORDS_SENT,
+            METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
+            METRIC_STREAM_TASK_PATH_LATENCY, METRIC_STREAM_TASK_RECORDS_RECV,
+            METRIC_STREAM_TASK_RECORDS_SENT,
         },
         observability::{TaskMetadata, TaskSnapshot, StreamTaskStatus},
         operators::operator::{
@@ -347,17 +347,6 @@ impl StreamTask {
                 counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
                     .increment(message.get_memory_size() as u64);
             }
-
-            // Task dwell: send − recv (only when this task stamped recv on the message).
-            if let Some(recv_timestamp) = message.recv_timestamp() {
-                let dwell = Self::now_ms().saturating_sub(recv_timestamp);
-                Self::record_histogram(
-                    METRIC_STREAM_TASK_DWELL,
-                    dwell as f64,
-                    &vertex_id,
-                    labels,
-                );
-            }
         }
     }
 
@@ -383,14 +372,7 @@ impl StreamTask {
                 upstream_watermarks.clone(),
                 current_watermark.clone(),
             );
-            while let Some(mut message) = input_stream.next().await {
-                let is_control = matches!(
-                    message,
-                    Message::Watermark(_) | Message::CheckpointBarrier(_)
-                );
-                if !is_control {
-                    message.set_recv_timestamp(Self::now_ms());
-                }
+            while let Some(message) = input_stream.next().await {
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
 
                 match &message {

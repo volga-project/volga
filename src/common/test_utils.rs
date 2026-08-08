@@ -94,11 +94,6 @@ pub fn print_pipeline_state(
                     println!("      P95: {:.2}ms", operator_metrics.path_latency.p95);
                     println!("      P50: {:.2}ms", operator_metrics.path_latency.p50);
                     println!("      Avg: {:.2}ms", operator_metrics.path_latency.avg);
-                    println!("    Dwell:");
-                    println!("      P99: {:.2}ms", operator_metrics.dwell.p99);
-                    println!("      P95: {:.2}ms", operator_metrics.dwell.p95);
-                    println!("      P50: {:.2}ms", operator_metrics.dwell.p50);
-                    println!("      Avg: {:.2}ms", operator_metrics.dwell.avg);
                     has_operator_metrics = true;
                 }
             }
@@ -139,11 +134,6 @@ pub fn print_pipeline_state(
                     println!("      P95: {:.2}ms", task_metrics.path_latency.p95);
                     println!("      P50: {:.2}ms", task_metrics.path_latency.p50);
                     println!("      Avg: {:.2}ms", task_metrics.path_latency.avg);
-                    println!("    Dwell:");
-                    println!("      P99: {:.2}ms", task_metrics.dwell.p99);
-                    println!("      P95: {:.2}ms", task_metrics.dwell.p95);
-                    println!("      P50: {:.2}ms", task_metrics.dwell.p50);
-                    println!("      Avg: {:.2}ms", task_metrics.dwell.avg);
                     if !task_metrics.backpressure_per_peer.is_empty() {
                         println!("    Backpressure per Peer:");
                         for (peer_id, ratio) in &task_metrics.backpressure_per_peer {

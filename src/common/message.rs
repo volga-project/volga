@@ -101,9 +101,6 @@ pub struct MessageMetadata {
     pub upstream_vertex_id: Option<String>,
     pub ingest_timestamp: Option<u64>,
     pub extras: Option<HashMap<String, String>>,
-    /// Local task recv wall time (ms); not serialized — dwell is per-task only.
-    #[serde(skip)]
-    pub recv_timestamp: Option<u64>,
 }
 
 impl MessageMetadata {
@@ -116,7 +113,6 @@ impl MessageMetadata {
             upstream_vertex_id,
             ingest_timestamp,
             extras,
-            recv_timestamp: None,
         }
     }
 
@@ -354,26 +350,6 @@ impl Message {
             Message::Keyed(message) => message.base.set_ingest_timestamp(ingest_timestamp),
             Message::Watermark(message) => message.set_ingest_timestamp(ingest_timestamp),
             Message::CheckpointBarrier(message) => message.set_ingest_timestamp(ingest_timestamp),
-        }
-    }
-
-    pub fn recv_timestamp(&self) -> Option<u64> {
-        match self {
-            Message::Regular(message) => message.metadata.recv_timestamp,
-            Message::Keyed(message) => message.base.metadata.recv_timestamp,
-            Message::Watermark(message) => message.metadata.recv_timestamp,
-            Message::CheckpointBarrier(message) => message.metadata.recv_timestamp,
-        }
-    }
-
-    pub fn set_recv_timestamp(&mut self, recv_timestamp: u64) {
-        match self {
-            Message::Regular(message) => message.metadata.recv_timestamp = Some(recv_timestamp),
-            Message::Keyed(message) => message.base.metadata.recv_timestamp = Some(recv_timestamp),
-            Message::Watermark(message) => message.metadata.recv_timestamp = Some(recv_timestamp),
-            Message::CheckpointBarrier(message) => {
-                message.metadata.recv_timestamp = Some(recv_timestamp)
-            }
         }
     }
 
