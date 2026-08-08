@@ -20,7 +20,7 @@ use kameo::Actor;
 
 use crate::common::types::PipelineId;
 use crate::runtime::observability::snapshot_types::WorkerSnapshot;
-use crate::runtime::state::OperatorStates;
+use crate::runtime::state::StateRegistry;
 
 use inner::WorkerInner;
 
@@ -80,11 +80,11 @@ impl Worker {
             .unwrap_or_default()
     }
 
-    pub fn operator_states(&self) -> Arc<OperatorStates> {
+    pub fn state_registry(&self) -> Arc<StateRegistry> {
         self.inner
             .as_ref()
-            .map(|i| i.operator_states.clone())
-            .unwrap_or_else(|| Arc::new(OperatorStates::new()))
+            .map(|i| i.state_registry.clone())
+            .unwrap_or_else(|| Arc::new(StateRegistry::default()))
     }
 
     pub(crate) fn identity(&self) -> WorkerIdentity {

@@ -22,8 +22,10 @@ use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
 use crate::runtime::operators::window::store::{open_window_operator_store, StateNamespace};
 use crate::runtime::operators::window::TileConfig;
-use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::observability::TaskMetadata;
+use crate::runtime::runtime_context::RuntimeContext;
+use crate::runtime::state::{OperatorTaskState, StateRegistry};
+use crate::runtime::VertexId;
 use datafusion::physical_plan::windows::BoundedWindowAggExec;
 
 #[cfg(test)]
@@ -69,11 +71,12 @@ pub struct WindowOperator {
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
     state: Option<Arc<WindowOperatorState>>,
     output_mode: WindowOutputMode,
-    watermark_frontier: Option<i64>,
     output_schema: SchemaRef,
     input_schema: SchemaRef,
     ts_column_index: usize,
     task_metadata: TaskMetadata,
+    state_registry: Option<Arc<StateRegistry>>,
+    vertex_id: Option<VertexId>,
 }
 
 impl fmt::Debug for WindowOperator {
@@ -109,11 +112,12 @@ impl WindowOperator {
             window_configs: windows,
             state: None,
             output_mode: window_operator_config.output_mode,
-            watermark_frontier: None,
             output_schema: built.output_schema,
             input_schema: built.input_schema,
             ts_column_index: built.ts_column_index,
             task_metadata: TaskMetadata::default(),
+            state_registry: None,
+            vertex_id: None,
         }
     }
 
@@ -140,8 +144,8 @@ impl WindowOperator {
 
     async fn process_due(&self, through: Cursor) -> RecordBatch {
         let state = self.state_ref();
-        let after = self
-            .watermark_frontier
+        let after = state
+            .watermark_frontier()
             .map(|timestamp| Cursor::new(timestamp, u64::MAX));
         let mut pages = state
             .store()
@@ -189,7 +193,10 @@ impl OperatorTrait for WindowOperator {
             let backend = context
                 .operator_state_backend()
                 .expect("state backend must be configured for WindowOperator");
-            let store = open_window_operator_store(backend).await?;
+            let registry = context
+                .state_registry()
+                .expect("state registry must be configured for WindowOperator");
+            let store = open_window_operator_store(registry, backend)?;
             let ns = StateNamespace::for_operator_task(
                 context
                     .pipeline_id()
@@ -199,18 +206,28 @@ impl OperatorTrait for WindowOperator {
                     .expect("operator id must be configured for WindowOperator"),
                 context.task_index(),
             );
-            self.state = Some(Arc::new(WindowOperatorState::new(
+            let state = Arc::new(WindowOperatorState::new(
                 store,
                 ns,
                 self.ts_column_index,
                 self.window_configs.clone(),
-            )));
+            ));
+            registry.insert_task_state(
+                context.vertex_id_arc(),
+                state.clone() as Arc<dyn OperatorTaskState>,
+            );
+            self.state_registry = Some(registry.clone());
+            self.vertex_id = Some(context.vertex_id_arc());
+            self.state = Some(state);
         }
 
         Ok(())
     }
 
     async fn close(&mut self) -> Result<()> {
+        if let (Some(registry), Some(vertex_id)) = (&self.state_registry, &self.vertex_id) {
+            registry.remove_task_state(vertex_id.as_ref());
+        }
         self.base.close().await
     }
 
@@ -227,17 +244,14 @@ impl OperatorTrait for WindowOperator {
     }
 
     async fn checkpoint(&mut self, _checkpoint_id: u64) -> Result<SerializedCheckpoint> {
-        let snapshot = self
-            .state_ref()
-            .checkpoint(self.watermark_frontier)
-            .await?;
+        let snapshot = self.state_ref().checkpoint().await?;
         Ok(SerializedCheckpoint::new(bincode::serialize(&snapshot)?))
     }
 
     async fn restore(&mut self, restore: SerializedRestore) -> Result<()> {
         let bytes = restore.into_bytes();
         let snapshot: WindowStateSnapshot = bincode::deserialize(&bytes)?;
-        self.watermark_frontier = self.state_ref().restore(snapshot).await?;
+        self.state_ref().restore(snapshot).await?;
         Ok(())
     }
 
@@ -256,7 +270,6 @@ impl OperatorTrait for WindowOperator {
                         .insert_batch(
                             key,
                             keyed_message.base.record_batch.clone(),
-                            self.watermark_frontier,
                             self.output_mode == WindowOutputMode::Emit,
                         )
                         .await;
@@ -276,9 +289,10 @@ impl OperatorTrait for WindowOperator {
                         watermark.watermark_value as i64
                     };
                     let advance_to = Cursor::new(wm_ts, u64::MAX);
+                    let state = self.state_ref();
 
-                    let advances_frontier = self
-                        .watermark_frontier
+                    let advances_frontier = state
+                        .watermark_frontier()
                         .map_or(true, |frontier| wm_ts > frontier);
                     let result = if advances_frontier
                         && self.output_mode == WindowOutputMode::Emit
@@ -288,7 +302,7 @@ impl OperatorTrait for WindowOperator {
                         RecordBatch::new_empty(self.output_schema.clone())
                     };
                     if advances_frontier {
-                        self.watermark_frontier = Some(wm_ts);
+                        state.set_watermark_frontier(wm_ts);
                     }
 
                     self.base

@@ -20,6 +20,10 @@ pub struct WorkerConfig {
     pub task_restore_data: HashMap<TaskKey, SerializedRestore>,
     pub operator_state_backend: OperatorStateBackendConfig,
     pub request_store: Option<RequestStoreConfig>,
+    /// When true, worker runs periodic state store maintenance.
+    pub state_maintenance_enabled: bool,
+    /// Cleaner tick interval when maintenance is enabled.
+    pub state_maintenance_interval_ms: u64,
 }
 
 impl WorkerConfig {
@@ -43,6 +47,8 @@ impl WorkerConfig {
             task_restore_data: HashMap::new(),
             operator_state_backend: OperatorStateBackendConfig::default(),
             request_store: None,
+            state_maintenance_enabled: true,
+            state_maintenance_interval_ms: 1_000,
         }
     }
 

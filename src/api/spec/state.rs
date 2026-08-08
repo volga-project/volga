@@ -8,7 +8,7 @@ pub enum CheckpointStoreConfig {
     InMemory,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OperatorStateBackendConfig {
     #[default]

@@ -8,7 +8,7 @@ use crate::runtime::execution_graph::ExecutionGraph;
 use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
 use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::observability::TaskMetadata;
-use crate::runtime::state::OperatorStates;
+use crate::runtime::state::StateRegistry;
 use crate::runtime::VertexId;
 
 #[derive(Clone, Debug)]
@@ -17,7 +17,7 @@ pub struct RuntimeContext {
     task_index: i32,
     parallelism: i32,
     job_config: HashMap<String, Value>,
-    operator_states: Option<Arc<OperatorStates>>,
+    state_registry: Option<Arc<StateRegistry>>,
     execution_graph: Option<ExecutionGraph>,
     operator_state_backend: Option<OperatorStateBackendConfig>,
     request_store: Option<RequestStoreConfig>,
@@ -36,7 +36,7 @@ impl RuntimeContext {
         task_index: i32,
         parallelism: i32,
         job_config: Option<HashMap<String, Value>>,
-        operator_states: Option<Arc<OperatorStates>>,
+        state_registry: Option<Arc<StateRegistry>>,
         execution_graph: Option<ExecutionGraph>,
     ) -> Self {
         Self {
@@ -44,7 +44,7 @@ impl RuntimeContext {
             task_index,
             parallelism,
             job_config: job_config.unwrap_or_default(),
-            operator_states,
+            state_registry,
             execution_graph,
             operator_state_backend: None,
             request_store: None,
@@ -72,10 +72,8 @@ impl RuntimeContext {
     pub fn job_config(&self) -> &HashMap<String, Value> {
         &self.job_config
     }
-    pub fn operator_states(&self) -> &Arc<OperatorStates> {
-        self.operator_states
-            .as_ref()
-            .expect("operator states should be set")
+    pub fn state_registry(&self) -> Option<&Arc<StateRegistry>> {
+        self.state_registry.as_ref()
     }
     pub fn execution_graph(&self) -> &ExecutionGraph {
         self.execution_graph
@@ -94,6 +92,11 @@ impl RuntimeContext {
         self.request_store = request_store;
         self.pipeline_id = Some(pipeline_id);
         self.operator_id = Some(operator_id);
+        self
+    }
+
+    pub fn with_state_registry(mut self, registry: Arc<StateRegistry>) -> Self {
+        self.state_registry = Some(registry);
         self
     }
 

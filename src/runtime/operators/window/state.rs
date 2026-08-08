@@ -1,5 +1,6 @@
+use std::any::Any;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use arrow::array::{RecordBatch, TimestampMillisecondArray, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
@@ -14,14 +15,17 @@ use crate::runtime::operators::window::store::{
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
+use crate::runtime::operators::OperatorKind;
+use crate::runtime::state::OperatorTaskState;
 
-/// Runtime state owned by the WO.
+/// Runtime state owned by the WO (per task / state namespace).
 #[derive(Debug)]
 pub struct WindowOperatorState {
     store: Arc<dyn WindowOperatorStore>,
     namespace: StateNamespace,
     ts_column_index: usize,
     window_configs: Arc<BTreeMap<WindowId, WindowConfig>>,
+    watermark_frontier: RwLock<Option<i64>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +47,7 @@ impl WindowOperatorState {
             namespace,
             ts_column_index,
             window_configs,
+            watermark_frontier: RwLock::new(None),
         }
     }
 
@@ -54,52 +59,59 @@ impl WindowOperatorState {
         &self.namespace
     }
 
+    pub fn watermark_frontier(&self) -> Option<i64> {
+        *self.watermark_frontier.read().expect("watermark lock")
+    }
+
+    pub fn set_watermark_frontier(&self, watermark: i64) {
+        *self.watermark_frontier.write().expect("watermark lock") = Some(watermark);
+    }
+
+    pub fn set_watermark_frontier_opt(&self, watermark: Option<i64>) {
+        *self.watermark_frontier.write().expect("watermark lock") = watermark;
+    }
+
     pub fn partition(&self, key: &Key) -> PartitionKey {
         PartitionKey::new(&self.namespace, key)
     }
 
-    pub async fn checkpoint(
-        &self,
-        watermark_frontier: Option<i64>,
-    ) -> anyhow::Result<WindowStateSnapshot> {
+    pub async fn checkpoint(&self) -> anyhow::Result<WindowStateSnapshot> {
         Ok(WindowStateSnapshot {
             namespace: self.namespace.bytes.clone(),
-            watermark_frontier,
+            watermark_frontier: self.watermark_frontier(),
             backend: self.store.checkpoint(&self.namespace).await?,
         })
     }
 
-    pub async fn restore(&self, restore: WindowStateSnapshot) -> anyhow::Result<Option<i64>> {
+    pub async fn restore(&self, restore: WindowStateSnapshot) -> anyhow::Result<()> {
         anyhow::ensure!(
             restore.namespace == self.namespace.bytes,
             "window checkpoint namespace does not match runtime namespace",
         );
         self.store.restore(&self.namespace, &restore.backend).await?;
-        Ok(restore.watermark_frontier)
+        self.set_watermark_frontier_opt(restore.watermark_frontier);
+        Ok(())
     }
 
     pub async fn insert_batch(
         &self,
         key: &Key,
         batch: RecordBatch,
-        watermark_frontier: Option<i64>,
         schedule_row_triggers: bool,
     ) -> usize {
         if batch.num_rows() == 0 {
             return 0;
         }
         let partition = self.partition(key);
+        let watermark_frontier = self.watermark_frontier();
 
         let mut key_state = self
             .store
             .load_key_state(&partition)
             .await
             .expect("key state");
-        let (accepted, dropped) = drop_late_entries(
-            &batch,
-            self.ts_column_index,
-            watermark_frontier,
-        );
+        let (accepted, dropped) =
+            drop_late_entries(&batch, self.ts_column_index, watermark_frontier);
         if accepted.num_rows() == 0 {
             return dropped;
         }
@@ -110,7 +122,6 @@ impl WindowOperatorState {
             .checked_add(accepted.num_rows() as u64)
             .expect("per-key sequence exhausted");
 
-        // Load and update every tile touched by this batch.
         let mut tile_runs = Vec::new();
         let mut tiling_windows = Vec::new();
         for (window_id, window) in self.window_configs.iter() {
@@ -171,6 +182,20 @@ impl WindowOperatorState {
             .await
             .expect("atomic ingest write");
         dropped
+    }
+}
+
+impl OperatorTaskState for WindowOperatorState {
+    fn state_namespace(&self) -> &StateNamespace {
+        &self.namespace
+    }
+
+    fn kind(&self) -> OperatorKind {
+        OperatorKind::Window
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
     }
 }
 

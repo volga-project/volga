@@ -21,7 +21,7 @@ use crate::runtime::metrics::{
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
 use crate::runtime::runtime_context::RuntimeContext;
-use crate::runtime::state::OperatorStates;
+use crate::runtime::state::StateRegistry;
 use crate::runtime::stream_task::StreamTask;
 use crate::runtime::stream_task_actor::{StreamTaskActor, StreamTaskMessage};
 use crate::runtime::VertexId;
@@ -40,7 +40,7 @@ impl WorkerInner {
         task_runtimes: HashMap<VertexId, Handle>,
         task_actors: HashMap<VertexId, ActorRef<StreamTaskActor>>,
         graph: ExecutionGraph,
-        operator_states: Arc<OperatorStates>,
+        state_registry: Arc<StateRegistry>,
         state: Arc<tokio::sync::Mutex<WorkerSnapshot>>,
         state_update_sender: Option<mpsc::Sender<WorkerSnapshot>>,
     ) {
@@ -73,7 +73,7 @@ impl WorkerInner {
                     task_metadata.insert(vertex_id.clone(), state.metadata.clone());
                 }
 
-                if let Some(op_state) = operator_states.get_operator_state(vertex_id.as_ref()) {
+                if let Some(op_state) = state_registry.get_task_state(vertex_id.as_ref()) {
                     if let Some(m) = op_state.task_operator_metrics() {
                         task_operator_metrics.insert(vertex_id.clone(), m);
                     }
@@ -210,7 +210,7 @@ impl WorkerInner {
                     );
                     Some(cfg)
                 },
-                Some(self.operator_states.clone()),
+                Some(self.state_registry.clone()),
                 Some(config.graph.clone()),
             )
             .with_state_config(
@@ -292,7 +292,7 @@ impl WorkerInner {
         let task_actors = self.task_actors.clone();
         let graph = config.graph.clone();
         let state = self.worker_state.clone();
-        let operator_states = self.operator_states.clone();
+        let state_registry = self.state_registry.clone();
         let worker_id = config.worker_id.clone();
         let pipeline_id = config.pipeline_id.clone();
 
@@ -310,7 +310,7 @@ impl WorkerInner {
                     task_runtime_handles.clone(),
                     task_actors.clone(),
                     graph.clone(),
-                    operator_states.clone(),
+                    state_registry.clone(),
                     state.clone(),
                     state_updates_sender.clone(),
                 )
@@ -323,7 +323,7 @@ impl WorkerInner {
                 task_runtime_handles,
                 task_actors,
                 graph,
-                operator_states.clone(),
+                state_registry.clone(),
                 state,
                 state_updates_sender.clone(),
             )
@@ -331,6 +331,20 @@ impl WorkerInner {
         });
 
         self.tasks_state_polling_handle = Some(polling_handle);
+
+        if self.config.state_maintenance_enabled {
+            let registry = self.state_registry.clone();
+            let running = self.running.clone();
+            let interval_ms = self.config.state_maintenance_interval_ms.max(1);
+            self.state_maintenance_handle = Some(tokio::spawn(async move {
+                while running.load(Ordering::SeqCst) {
+                    if let Err(err) = registry.run_maintenance_once().await {
+                        eprintln!("[WORKER] state maintenance tick failed: {err:#}");
+                    }
+                    sleep(Duration::from_millis(interval_ms)).await;
+                }
+            }));
+        }
 
         self.spawn_fatal_watcher();
 
@@ -477,7 +491,7 @@ impl WorkerInner {
                 task_runtime_handles,
                 task_actors,
                 graph,
-                self.operator_states.clone(),
+                self.state_registry.clone(),
                 state,
                 None,
             )
