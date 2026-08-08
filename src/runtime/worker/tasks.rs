@@ -16,7 +16,8 @@ use crate::runtime::functions::source::request_source::{
     extract_request_source_config, RequestSourceProcessor,
 };
 use crate::runtime::metrics::{
-    emit_poll_derived_gauges, MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
+    emit_poll_derived_gauges, scrape_stream_task_metrics, MetricsLabels, TaskMetrics,
+    WorkerAggregateMetrics,
 };
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
@@ -61,14 +62,12 @@ impl WorkerInner {
         let task_results = join_all(task_futures).await;
 
         let mut task_statuses: HashMap<VertexId, StreamTaskStatus> = HashMap::new();
-        let mut task_metrics: HashMap<VertexId, TaskMetrics> = HashMap::new();
         let mut task_operator_metrics: HashMap<VertexId, TaskOperatorMetrics> = HashMap::new();
         let mut task_metadata: HashMap<VertexId, TaskMetadata> = HashMap::new();
 
         for result in task_results {
             if let Ok((vertex_id, state)) = result {
                 task_statuses.insert(vertex_id.clone(), state.status.clone());
-                task_metrics.insert(vertex_id.clone(), state.metrics.clone());
                 if !state.metadata.is_empty() {
                     task_metadata.insert(vertex_id.clone(), state.metadata.clone());
                 }
@@ -81,9 +80,22 @@ impl WorkerInner {
             }
         }
 
-        let task_metrics_str: HashMap<String, TaskMetrics> = task_metrics
-            .into_iter()
-            .map(|(k, v)| (k.as_ref().to_string(), v))
+        // One registry render+parse for all tasks (not per-task GetState).
+        let labels = MetricsLabels {
+            pipeline_id: pipeline_id.0.clone(),
+            worker_id: worker_id.clone(),
+        };
+        let scraped = scrape_stream_task_metrics(Some(&labels));
+        let task_metrics_str: HashMap<String, TaskMetrics> = task_statuses
+            .keys()
+            .map(|vertex_id| {
+                let key = vertex_id.as_ref().to_string();
+                let metrics = scraped
+                    .get(&key)
+                    .cloned()
+                    .unwrap_or_else(|| TaskMetrics::empty(key.clone()));
+                (key, metrics)
+            })
             .collect();
         let worker_metrics =
             WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
