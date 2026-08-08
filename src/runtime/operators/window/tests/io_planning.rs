@@ -110,6 +110,13 @@ impl WindowOperatorStore for RecordingWindowStore {
     ) -> Result<()> {
         self.inner.restore(namespace, restore).await
     }
+
+    fn state_size(
+        &self,
+        namespace: &StateNamespace,
+    ) -> crate::runtime::observability::snapshot_types::WindowStateSizeSnapshot {
+        self.inner.state_size(namespace)
+    }
 }
 
 #[async_trait]

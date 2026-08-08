@@ -7,6 +7,7 @@ use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
+use crate::runtime::observability::snapshot_types::WindowStateSizeSnapshot;
 use crate::runtime::operators::window::model::{
     Cursor, KeyState, PartitionKey, RawRun, StateNamespace, TileMap, TileRun, WindowTrigger,
 };
@@ -99,6 +100,11 @@ pub trait WindowOperatorStore: OperatorStore {
         namespace: &StateNamespace,
         snapshot: &WindowBackendSnapshot,
     ) -> Result<()>;
+    /// Logical state size for `namespace` (raw / tiles / triggers).
+    fn state_size(&self, namespace: &StateNamespace) -> WindowStateSizeSnapshot {
+        let _ = namespace;
+        WindowStateSizeSnapshot::default()
+    }
 }
 
 /// Coherent point-lookup reads used by the Window Request Operator.

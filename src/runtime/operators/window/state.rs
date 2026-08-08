@@ -16,6 +16,7 @@ use crate::runtime::operators::window::store::{
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
+use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::state::OperatorTaskState;
 
@@ -218,6 +219,12 @@ impl OperatorTaskState for WindowOperatorState {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+
+    fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
+        Some(TaskOperatorMetrics::Window {
+            state: self.store.state_size(&self.namespace),
+        })
     }
 }
 

@@ -6,7 +6,6 @@ use crate::common::types::PipelineId;
 use crate::runtime::metrics::WorkerAggregateMetrics;
 use crate::runtime::VertexId;
 use anyhow::Result;
-use crate::storage::StorageStatsSnapshot;
 use super::task_metadata::TaskMetadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,10 +38,29 @@ pub struct TaskSnapshot {
     pub metadata: TaskMetadata,
 }
 
+/// Logical WO store size for one task namespace (raw / tiles / triggers).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowStateSizeSnapshot {
+    pub raw_count: u64,
+    pub raw_bytes: u64,
+    pub tiles_count: u64,
+    pub tiles_bytes: u64,
+    pub triggers_count: u64,
+    pub triggers_bytes: u64,
+}
+
+impl WindowStateSizeSnapshot {
+    pub fn total_bytes(&self) -> u64 {
+        self.raw_bytes
+            .saturating_add(self.tiles_bytes)
+            .saturating_add(self.triggers_bytes)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskOperatorMetrics {
-    /// Window operator task metrics derived from operator state.
-    Window { storage: StorageStatsSnapshot },
+    /// Window operator task metrics derived from operator / store state.
+    Window { state: WindowStateSizeSnapshot },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,4 +117,3 @@ impl PipelineSnapshot {
         Self { worker_states }
     }
 }
-

@@ -16,8 +16,8 @@ use crate::runtime::functions::source::request_source::{
     extract_request_source_config, RequestSourceProcessor,
 };
 use crate::runtime::metrics::{
-    emit_poll_derived_gauges, scrape_stream_task_metrics, MetricsLabels, TaskMetrics,
-    WorkerAggregateMetrics,
+    emit_poll_derived_gauges, emit_window_state_size_gauges, emit_worker_memory_gauges,
+    scrape_stream_task_metrics, MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
 };
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
@@ -101,6 +101,12 @@ impl WorkerInner {
             WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
         worker_metrics.record();
         emit_poll_derived_gauges(&worker_metrics);
+        for (vertex_id, op_metrics) in &task_operator_metrics {
+            if let TaskOperatorMetrics::Window { state: size } = op_metrics {
+                emit_window_state_size_gauges(vertex_id.as_ref(), size, &labels);
+            }
+        }
+        emit_worker_memory_gauges(&labels);
 
         {
             let mut state_guard = state.lock().await;
