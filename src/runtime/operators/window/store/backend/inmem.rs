@@ -16,7 +16,7 @@ use std::any::Any;
 
 use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
 use crate::runtime::operators::window::model::{
-    Cursor, RawRun, TileRun, WindowTiles, WindowTrigger,
+    Cursor, RawRun, TileRun, WindowTrigger,
 };
 use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
