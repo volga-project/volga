@@ -1,4 +1,4 @@
-use metrics::gauge;
+use metrics::{counter, gauge, histogram};
 use serde::{Deserialize, Serialize};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use metrics_exporter_tcp::TcpBuilder;
@@ -65,6 +65,72 @@ pub const LABEL_PIPELINE_ID: &str = "pipeline_id";
 pub struct MetricsLabels {
     pub pipeline_id: String,
     pub worker_id: String,
+}
+
+/// Record a per-vertex histogram sample (ms), with optional pipeline/worker labels.
+pub fn record_vertex_histogram(
+    name: &'static str,
+    value_ms: f64,
+    vertex_id: &str,
+    labels: Option<&MetricsLabels>,
+) {
+    let vertex = vertex_id.to_string();
+    if let Some(labels) = labels {
+        histogram!(
+            name,
+            LABEL_VERTEX_ID => vertex,
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_WORKER_ID => labels.worker_id.clone(),
+        )
+        .record(value_ms);
+    } else {
+        histogram!(name, LABEL_VERTEX_ID => vertex).record(value_ms);
+    }
+}
+
+/// Increment a per-vertex counter, with optional pipeline/worker labels.
+pub fn increment_vertex_counter(
+    name: &'static str,
+    delta: u64,
+    vertex_id: &str,
+    labels: Option<&MetricsLabels>,
+) {
+    if delta == 0 {
+        return;
+    }
+    let vertex = vertex_id.to_string();
+    if let Some(labels) = labels {
+        counter!(
+            name,
+            LABEL_VERTEX_ID => vertex,
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_WORKER_ID => labels.worker_id.clone(),
+        )
+        .increment(delta);
+    } else {
+        counter!(name, LABEL_VERTEX_ID => vertex).increment(delta);
+    }
+}
+
+/// Set a per-vertex gauge, with optional pipeline/worker labels.
+pub fn set_vertex_gauge(
+    name: &'static str,
+    value: f64,
+    vertex_id: &str,
+    labels: Option<&MetricsLabels>,
+) {
+    let vertex = vertex_id.to_string();
+    if let Some(labels) = labels {
+        gauge!(
+            name,
+            LABEL_VERTEX_ID => vertex,
+            LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+            LABEL_WORKER_ID => labels.worker_id.clone(),
+        )
+        .set(value);
+    } else {
+        gauge!(name, LABEL_VERTEX_ID => vertex).set(value);
+    }
 }
 
 // Histogram bucket boundaries, milliseconds (Prometheus also emits a trailing +Inf bucket).
