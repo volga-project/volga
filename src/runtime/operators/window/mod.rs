@@ -7,6 +7,7 @@ pub mod cate;
 pub mod config;
 pub mod eval;
 pub mod frame_utils;
+pub mod metrics;
 pub mod model;
 pub mod state;
 pub mod store;

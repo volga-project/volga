@@ -8,9 +8,6 @@ use std::{collections::HashMap, sync::{Once, OnceLock}};
 
 use crate::{common::types::PipelineId, runtime::VertexId};
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::observability::snapshot_types::{
-    TaskOperatorMetrics, WindowOperatorMetrics,
-};
 
 // Global Prometheus handle for programmatic access
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -44,14 +41,6 @@ pub const METRIC_STREAM_TASK_BACKPRESSURE_MAX: &str = "volga_stream_task_backpre
 pub const METRIC_WORKER_BACKPRESSURE_MAX: &str = "volga_worker_backpressure_max";
 pub const METRIC_WORKER_RSS_BYTES: &str = "volga_worker_rss_bytes";
 pub const METRIC_WORKER_VIRTUAL_BYTES: &str = "volga_worker_virtual_bytes";
-
-// Window operator state size (poll-derived gauges)
-pub const METRIC_WO_STATE_RAW_COUNT: &str = "volga_wo_state_raw_count";
-pub const METRIC_WO_STATE_RAW_BYTES: &str = "volga_wo_state_raw_bytes";
-pub const METRIC_WO_STATE_TILES_COUNT: &str = "volga_wo_state_tiles_count";
-pub const METRIC_WO_STATE_TILES_BYTES: &str = "volga_wo_state_tiles_bytes";
-pub const METRIC_WO_STATE_TRIGGERS_COUNT: &str = "volga_wo_state_triggers_count";
-pub const METRIC_WO_STATE_TRIGGERS_BYTES: &str = "volga_wo_state_triggers_bytes";
 
 // Operator metrics
 pub const METRIC_OPERATOR_MESSAGES_SENT: &str = "volga_operator_messages_sent";
@@ -451,70 +440,6 @@ pub fn emit_backpressure_gauges(worker_metrics: &WorkerAggregateMetrics) {
         LABEL_WORKER_ID => worker_metrics.worker_id.clone(),
         LABEL_PIPELINE_ID => pipeline_id,
     ).set(worker_max_backpressure);
-}
-
-/// Emit Prom gauges for a sampled [`TaskOperatorMetrics`] (poll-time, set-to-current).
-///
-/// Pair with storing the same value on [`crate::runtime::observability::snapshot_types::WorkerSnapshot`]
-/// so API and Prom stay aligned.
-pub fn emit_task_operator_metrics(
-    vertex_id: &str,
-    metrics: &TaskOperatorMetrics,
-    labels: &MetricsLabels,
-) {
-    match metrics {
-        TaskOperatorMetrics::Window(m) => emit_window_operator_metrics(vertex_id, m, labels),
-    }
-}
-
-fn emit_window_operator_metrics(
-    vertex_id: &str,
-    state: &WindowOperatorMetrics,
-    labels: &MetricsLabels,
-) {
-    let vertex = vertex_id.to_string();
-    gauge!(
-        METRIC_WO_STATE_RAW_COUNT,
-        LABEL_VERTEX_ID => vertex.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-    )
-    .set(state.raw_count as f64);
-    gauge!(
-        METRIC_WO_STATE_RAW_BYTES,
-        LABEL_VERTEX_ID => vertex.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-    )
-    .set(state.raw_bytes as f64);
-    gauge!(
-        METRIC_WO_STATE_TILES_COUNT,
-        LABEL_VERTEX_ID => vertex.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-    )
-    .set(state.tiles_count as f64);
-    gauge!(
-        METRIC_WO_STATE_TILES_BYTES,
-        LABEL_VERTEX_ID => vertex.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-    )
-    .set(state.tiles_bytes as f64);
-    gauge!(
-        METRIC_WO_STATE_TRIGGERS_COUNT,
-        LABEL_VERTEX_ID => vertex.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-    )
-    .set(state.triggers_count as f64);
-    gauge!(
-        METRIC_WO_STATE_TRIGGERS_BYTES,
-        LABEL_VERTEX_ID => vertex,
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-    )
-    .set(state.triggers_bytes as f64);
 }
 
 /// Emit process RSS / virtual memory gauges for this worker.

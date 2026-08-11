@@ -16,10 +16,11 @@ use crate::runtime::functions::source::request_source::{
     extract_request_source_config, RequestSourceProcessor,
 };
 use crate::runtime::metrics::{
-    emit_backpressure_gauges, emit_task_operator_metrics, emit_worker_memory_gauges,
-    scrape_stream_task_metrics, MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
+    emit_backpressure_gauges, emit_worker_memory_gauges, scrape_stream_task_metrics,
+    MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
 };
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
+use crate::runtime::operators::window::metrics::emit_window_operator_metrics;
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::StateRegistry;
@@ -102,7 +103,11 @@ impl WorkerInner {
         worker_metrics.record();
         emit_backpressure_gauges(&worker_metrics);
         for (vertex_id, op_metrics) in &task_operator_metrics {
-            emit_task_operator_metrics(vertex_id.as_ref(), op_metrics, &labels);
+            match op_metrics {
+                TaskOperatorMetrics::Window(m) => {
+                    emit_window_operator_metrics(vertex_id.as_ref(), m, &labels);
+                }
+            }
         }
         emit_worker_memory_gauges(&labels);
 

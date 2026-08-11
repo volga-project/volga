@@ -62,7 +62,7 @@ impl WindowOperatorMetrics {
 /// Per-task operator metrics sampled on the worker poll path.
 ///
 /// Built once via [`crate::runtime::state::OperatorTaskState::sample_metrics`], then
-/// published to both [`WorkerSnapshot`] (API) and Prom gauges.
+/// published to both [`WorkerSnapshot`] (API) and operator-owned Prom emit helpers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskOperatorMetrics {
     Window(WindowOperatorMetrics),
