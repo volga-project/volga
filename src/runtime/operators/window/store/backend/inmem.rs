@@ -68,22 +68,6 @@ struct InMemState {
     triggers: BTreeSet<WindowTrigger>,
 }
 
-fn batch_logical_bytes(batch: &RecordBatch) -> u64 {
-    batch.get_array_memory_size() as u64
-}
-
-fn tiles_logical_bytes(tiles: &WindowTiles) -> u64 {
-    bincode::serialized_size(tiles).unwrap_or(0)
-}
-
-fn trigger_logical_bytes(trigger: &WindowTrigger) -> u64 {
-    bincode::serialized_size(trigger).unwrap_or(0)
-}
-
-fn key_state_logical_bytes(meta: &KeyState) -> u64 {
-    bincode::serialized_size(meta).unwrap_or(0)
-}
-
 /// Development/test reference backend with inline checkpoints limited to 8 MiB.
 /// One read lock is the WRO snapshot boundary. Physical prune runs via
 /// [`OperatorStore::maintain`], not the WO watermark hot path.
@@ -115,14 +99,18 @@ impl InMemWindowStore {
             snap.key_states_count += 1;
             snap.key_states_bytes = snap
                 .key_states_bytes
-                .saturating_add(key_state_logical_bytes(&part.meta));
+                .saturating_add(bincode::serialized_size(&part.meta).unwrap_or(0));
             for batch in part.raw.values() {
                 snap.raw_count += 1;
-                snap.raw_bytes = snap.raw_bytes.saturating_add(batch_logical_bytes(batch));
+                snap.raw_bytes = snap
+                    .raw_bytes
+                    .saturating_add(batch.get_array_memory_size() as u64);
             }
             for tiles in part.tiles.values() {
                 snap.tiles_count += 1;
-                snap.tiles_bytes = snap.tiles_bytes.saturating_add(tiles_logical_bytes(tiles));
+                snap.tiles_bytes = snap
+                    .tiles_bytes
+                    .saturating_add(bincode::serialized_size(tiles).unwrap_or(0));
             }
         }
         for trigger in &state.triggers {
@@ -132,7 +120,7 @@ impl InMemWindowStore {
             snap.triggers_count += 1;
             snap.triggers_bytes = snap
                 .triggers_bytes
-                .saturating_add(trigger_logical_bytes(trigger));
+                .saturating_add(bincode::serialized_size(trigger).unwrap_or(0));
         }
         snap
     }

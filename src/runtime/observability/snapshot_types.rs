@@ -41,7 +41,7 @@ pub struct TaskSnapshot {
 
 /// Per-task operator metrics sampled on the worker poll path.
 ///
-/// Built once via [`crate::runtime::state::OperatorTaskState::sample_metrics`], then
+/// Built once via [`crate::runtime::state::OperatorTaskState::task_operator_metrics`], then
 /// published to both [`WorkerSnapshot`] (API) and [`TaskOperatorMetrics::emit`] (Prom).
 /// Operator-specific payloads live with the operator (e.g. window metrics).
 #[derive(Debug, Clone, Serialize, Deserialize)]

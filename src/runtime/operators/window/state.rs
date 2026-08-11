@@ -11,7 +11,6 @@ use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
-use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
 };
@@ -224,14 +223,15 @@ impl OperatorTaskState for WindowOperatorState {
         self
     }
 
-    async fn sample_metrics(&self) -> Option<TaskOperatorMetrics> {
-        // InMem computes on demand; other backends return empty until they implement sampling.
-        let metrics = if let Some(store) = self.store.as_any().downcast_ref::<InMemWindowStore>() {
-            store.sample_namespace_metrics(&self.namespace).await
-        } else {
-            WindowOperatorMetrics::default()
-        };
-        Some(TaskOperatorMetrics::Window(metrics))
+    async fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
+        let store = self
+            .store
+            .as_any()
+            .downcast_ref::<InMemWindowStore>()
+            .expect("window task_operator_metrics requires InMemWindowStore");
+        Some(TaskOperatorMetrics::Window(
+            store.sample_namespace_metrics(&self.namespace).await,
+        ))
     }
 }
 

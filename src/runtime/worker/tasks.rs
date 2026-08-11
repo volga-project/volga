@@ -73,7 +73,7 @@ impl WorkerInner {
                 }
 
                 if let Some(op_state) = state_registry.get_task_state(vertex_id.as_ref()) {
-                    if let Some(m) = op_state.sample_metrics().await {
+                    if let Some(m) = op_state.task_operator_metrics().await {
                         task_operator_metrics.insert(vertex_id.clone(), m);
                     }
                 }

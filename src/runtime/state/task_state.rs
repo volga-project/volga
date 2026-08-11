@@ -16,7 +16,7 @@ pub trait OperatorTaskState: Send + Sync + std::fmt::Debug {
     fn as_any(&self) -> &dyn Any;
 
     /// Sampled operator metrics for the worker poll path (API snapshot + Prom).
-    async fn sample_metrics(&self) -> Option<TaskOperatorMetrics> {
+    async fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
         None
     }
 }
