@@ -8,7 +8,9 @@ use std::{collections::HashMap, sync::{Once, OnceLock}};
 
 use crate::{common::types::PipelineId, runtime::VertexId};
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::runtime::observability::snapshot_types::WindowStateSizeSnapshot;
+use crate::runtime::observability::snapshot_types::{
+    TaskOperatorMetrics, WindowOperatorMetrics,
+};
 
 // Global Prometheus handle for programmatic access
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -421,11 +423,10 @@ impl WorkerAggregateMetrics {
     }
 }
 
-/// Emit poll-derived gauges that are computed from a snapshot of task metrics.
+/// Emit max-backpressure gauges from a scraped [`WorkerAggregateMetrics`] snapshot.
 ///
-/// These are intentionally gauges (set-to-current) rather than counters to avoid
-/// double-counting across poll ticks.
-pub fn emit_poll_derived_gauges(worker_metrics: &WorkerAggregateMetrics) {
+/// Set-to-current gauges (not counters) so poll ticks do not double-count.
+pub fn emit_backpressure_gauges(worker_metrics: &WorkerAggregateMetrics) {
     let pipeline_id = worker_metrics.pipeline_id.0.clone();
 
     let mut worker_max_backpressure = 0.0f64;
@@ -452,10 +453,23 @@ pub fn emit_poll_derived_gauges(worker_metrics: &WorkerAggregateMetrics) {
     ).set(worker_max_backpressure);
 }
 
-/// Emit WO logical state-size gauges for one task (poll-time, set-to-current).
-pub fn emit_window_state_size_gauges(
+/// Emit Prom gauges for a sampled [`TaskOperatorMetrics`] (poll-time, set-to-current).
+///
+/// Pair with storing the same value on [`crate::runtime::observability::snapshot_types::WorkerSnapshot`]
+/// so API and Prom stay aligned.
+pub fn emit_task_operator_metrics(
     vertex_id: &str,
-    state: &WindowStateSizeSnapshot,
+    metrics: &TaskOperatorMetrics,
+    labels: &MetricsLabels,
+) {
+    match metrics {
+        TaskOperatorMetrics::Window(m) => emit_window_operator_metrics(vertex_id, m, labels),
+    }
+}
+
+fn emit_window_operator_metrics(
+    vertex_id: &str,
+    state: &WindowOperatorMetrics,
     labels: &MetricsLabels,
 ) {
     let vertex = vertex_id.to_string();

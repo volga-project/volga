@@ -16,7 +16,7 @@ use tokio::sync::RwLock;
 
 use std::any::Any;
 
-use crate::runtime::observability::snapshot_types::WindowStateSizeSnapshot;
+use crate::runtime::observability::snapshot_types::WindowOperatorMetrics;
 use crate::runtime::operators::window::model::{
     Cursor, RawRun, TileRun, WindowTiles, WindowTrigger,
 };
@@ -81,7 +81,7 @@ struct NamespaceSizeStats {
 }
 
 impl NamespaceSizeStats {
-    fn store(&self, snap: WindowStateSizeSnapshot) {
+    fn store(&self, snap: WindowOperatorMetrics) {
         self.raw_count.store(snap.raw_count, Ordering::Relaxed);
         self.raw_bytes.store(snap.raw_bytes, Ordering::Relaxed);
         self.tiles_count.store(snap.tiles_count, Ordering::Relaxed);
@@ -92,8 +92,8 @@ impl NamespaceSizeStats {
             .store(snap.triggers_bytes, Ordering::Relaxed);
     }
 
-    fn snapshot(&self) -> WindowStateSizeSnapshot {
-        WindowStateSizeSnapshot {
+    fn snapshot(&self) -> WindowOperatorMetrics {
+        WindowOperatorMetrics {
             raw_count: self.raw_count.load(Ordering::Relaxed),
             raw_bytes: self.raw_bytes.load(Ordering::Relaxed),
             tiles_count: self.tiles_count.load(Ordering::Relaxed),
@@ -131,7 +131,7 @@ impl InMemWindowStore {
     }
 
     fn recompute_namespace_size(state: &InMemState, namespace: &[u8], sizes: &DashMap<Vec<u8>, NamespaceSizeStats>) {
-        let mut snap = WindowStateSizeSnapshot::default();
+        let mut snap = WindowOperatorMetrics::default();
         for (partition, part) in &state.partitions {
             if partition.namespace.as_slice() != namespace {
                 continue;
@@ -279,7 +279,7 @@ impl WindowOperatorStore for InMemWindowStore {
         Ok(())
     }
 
-    fn state_size(&self, namespace: &StateNamespace) -> WindowStateSizeSnapshot {
+    fn state_size(&self, namespace: &StateNamespace) -> WindowOperatorMetrics {
         self.sizes
             .get(namespace.bytes.as_slice())
             .map(|stats| stats.snapshot())

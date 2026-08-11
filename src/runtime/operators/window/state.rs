@@ -221,10 +221,10 @@ impl OperatorTaskState for WindowOperatorState {
         self
     }
 
-    fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
-        Some(TaskOperatorMetrics::Window {
-            state: self.store.state_size(&self.namespace),
-        })
+    fn sample_metrics(&self) -> Option<TaskOperatorMetrics> {
+        Some(TaskOperatorMetrics::Window(
+            self.store.state_size(&self.namespace),
+        ))
     }
 }
 

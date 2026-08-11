@@ -38,9 +38,11 @@ pub struct TaskSnapshot {
     pub metadata: TaskMetadata,
 }
 
-/// Logical WO store size for one task namespace (raw / tiles / triggers).
+/// Sampled window-operator metrics for API snapshots and Prom gauges.
+///
+/// Today this is logical store size (raw / tiles / triggers) for one task namespace.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WindowStateSizeSnapshot {
+pub struct WindowOperatorMetrics {
     pub raw_count: u64,
     pub raw_bytes: u64,
     pub tiles_count: u64,
@@ -49,7 +51,7 @@ pub struct WindowStateSizeSnapshot {
     pub triggers_bytes: u64,
 }
 
-impl WindowStateSizeSnapshot {
+impl WindowOperatorMetrics {
     pub fn total_bytes(&self) -> u64 {
         self.raw_bytes
             .saturating_add(self.tiles_bytes)
@@ -57,10 +59,13 @@ impl WindowStateSizeSnapshot {
     }
 }
 
+/// Per-task operator metrics sampled on the worker poll path.
+///
+/// Built once via [`crate::runtime::state::OperatorTaskState::sample_metrics`], then
+/// published to both [`WorkerSnapshot`] (API) and Prom gauges.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskOperatorMetrics {
-    /// Window operator task metrics derived from operator / store state.
-    Window { state: WindowStateSizeSnapshot },
+    Window(WindowOperatorMetrics),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

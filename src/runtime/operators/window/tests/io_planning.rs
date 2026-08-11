@@ -114,7 +114,7 @@ impl WindowOperatorStore for RecordingWindowStore {
     fn state_size(
         &self,
         namespace: &StateNamespace,
-    ) -> crate::runtime::observability::snapshot_types::WindowStateSizeSnapshot {
+    ) -> crate::runtime::observability::snapshot_types::WindowOperatorMetrics {
         self.inner.state_size(namespace)
     }
 }
