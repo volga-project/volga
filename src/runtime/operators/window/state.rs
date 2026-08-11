@@ -11,6 +11,7 @@ use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
+use crate::runtime::operators::window::metrics::WindowMetrics;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
 };
@@ -35,6 +36,8 @@ pub struct WindowOperatorState {
     max_window_length_ms: i64,
     /// Task watermark frontier; [`WATERMARK_UNSET`] until the first advance.
     pub watermark_frontier: AtomicI64,
+    /// Prom + API metrics handle (None in tests without worker/pipeline labels).
+    metrics: Option<Arc<WindowMetrics>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +64,17 @@ impl WindowOperatorState {
             lateness_ms,
             max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, metrics: Arc<WindowMetrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+
+    pub fn metrics(&self) -> Option<&WindowMetrics> {
+        self.metrics.as_deref()
     }
 
     pub fn store(&self) -> &dyn WindowOperatorStore {
@@ -229,9 +242,14 @@ impl OperatorTaskState for WindowOperatorState {
             .as_any()
             .downcast_ref::<InMemWindowStore>()
             .expect("window task_operator_metrics requires InMemWindowStore");
-        Some(TaskOperatorMetrics::Window(
-            store.sample_namespace_metrics(&self.namespace).await,
-        ))
+        let mut snap = store.sample_namespace_metrics(&self.namespace).await;
+        if let Some(metrics) = self.metrics() {
+            let (late, pruned) = metrics.counter_totals();
+            snap.late_dropped_rows = late;
+            snap.pruned_rows = pruned;
+            metrics.publish_state_sizes(&snap);
+        }
+        Some(TaskOperatorMetrics::Window(snap))
     }
 }
 

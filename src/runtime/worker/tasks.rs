@@ -101,9 +101,6 @@ impl WorkerInner {
             WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
         worker_metrics.record();
         emit_backpressure_gauges(&worker_metrics);
-        for (vertex_id, op_metrics) in &task_operator_metrics {
-            op_metrics.emit(vertex_id.as_ref(), &labels);
-        }
         emit_worker_memory_gauges(&labels);
 
         {

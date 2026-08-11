@@ -162,25 +162,7 @@ impl StreamTask {
             .and_then(|v| v.as_u64())
             .unwrap_or(0);
 
-        let metrics_labels = {
-            let cfg = runtime_context.job_config();
-            let pipeline_id = cfg
-                .get("pipeline_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let worker_id = cfg
-                .get("worker_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-            match (pipeline_id, worker_id) {
-                (Some(pipeline_id), Some(worker_id)) => Some(MetricsLabels {
-                    pipeline_id,
-                    worker_id,
-                }),
-                _ => None,
-            }
-        };
+        let metrics_labels = runtime_context.metrics_labels();
         Self {
             vertex_id: vertex_id.clone(),
             runtime_context,

@@ -125,19 +125,24 @@ impl InMemWindowStore {
         snap
     }
 
-    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) {
+    /// Returns number of raw rows pruned.
+    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) -> u64 {
         state.triggers.retain(|trigger| {
             trigger.partition.namespace.as_slice() != namespace || trigger.fire_at.ts > watermark
         });
+        let mut pruned_rows = 0u64;
         for (partition, part) in state.partitions.iter_mut() {
             if partition.namespace.as_slice() != namespace {
                 continue;
             }
+            let before = part.raw.len();
             part.raw.retain(|cursor, _| cursor.ts >= floor);
+            pruned_rows += (before - part.raw.len()) as u64;
             part.tiles.retain(|&(granularity, start_ts), _| {
                 start_ts + granularity.to_millis() > floor
             });
         }
+        pruned_rows
     }
 
     fn select_raw(state: &PartitionState, runs: &[RawRun]) -> Vec<RecordBatch> {
@@ -438,8 +443,14 @@ impl OperatorStore for InMemWindowStore {
         let Some((watermark, floor)) = wo.retention_cutoff() else {
             return Ok(());
         };
+        let started = std::time::Instant::now();
         let mut store = self.state.write().await;
-        Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
+        let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
+        drop(store);
+        if let Some(metrics) = wo.metrics() {
+            metrics.record_maintain_ms(started.elapsed().as_secs_f64() * 1000.0);
+            metrics.add_pruned(pruned_rows);
+        }
         Ok(())
     }
 }
