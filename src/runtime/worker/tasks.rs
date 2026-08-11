@@ -16,8 +16,8 @@ use crate::runtime::functions::source::request_source::{
     extract_request_source_config, RequestSourceProcessor,
 };
 use crate::runtime::metrics::{
-    emit_poll_derived_gauges, scrape_stream_task_metrics, MetricsLabels, TaskMetrics,
-    WorkerAggregateMetrics,
+    emit_backpressure_gauges, emit_worker_memory_gauges, scrape_stream_task_metrics,
+    MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
 };
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
@@ -73,7 +73,7 @@ impl WorkerInner {
                 }
 
                 if let Some(op_state) = state_registry.get_task_state(vertex_id.as_ref()) {
-                    if let Some(m) = op_state.task_operator_metrics() {
+                    if let Some(m) = op_state.task_operator_metrics().await {
                         task_operator_metrics.insert(vertex_id.clone(), m);
                     }
                 }
@@ -100,7 +100,11 @@ impl WorkerInner {
         let worker_metrics =
             WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
         worker_metrics.record();
-        emit_poll_derived_gauges(&worker_metrics);
+        emit_backpressure_gauges(&worker_metrics);
+        for (vertex_id, op_metrics) in &task_operator_metrics {
+            op_metrics.emit(vertex_id.as_ref(), &labels);
+        }
+        emit_worker_memory_gauges(&labels);
 
         {
             let mut state_guard = state.lock().await;

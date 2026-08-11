@@ -14,7 +14,10 @@ use tokio::sync::RwLock;
 
 use std::any::Any;
 
-use crate::runtime::operators::window::model::{Cursor, RawRun, TileRun, WindowTrigger};
+use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
+use crate::runtime::operators::window::model::{
+    Cursor, RawRun, TileRun, WindowTrigger,
+};
 use crate::runtime::operators::window::state::WindowOperatorState;
 use crate::runtime::state::{OperatorStore, OperatorTaskState};
 
@@ -76,6 +79,50 @@ pub struct InMemWindowStore {
 impl InMemWindowStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Compute logical namespace metrics on demand (no cached size counters).
+    pub async fn sample_namespace_metrics(
+        &self,
+        namespace: &StateNamespace,
+    ) -> WindowOperatorMetrics {
+        let state = self.state.read().await;
+        Self::namespace_metrics(&state, namespace.bytes.as_slice())
+    }
+
+    fn namespace_metrics(state: &InMemState, namespace: &[u8]) -> WindowOperatorMetrics {
+        let mut snap = WindowOperatorMetrics::default();
+        for (partition, part) in &state.partitions {
+            if partition.namespace.as_slice() != namespace {
+                continue;
+            }
+            snap.key_states_count += 1;
+            snap.key_states_bytes = snap
+                .key_states_bytes
+                .saturating_add(bincode::serialized_size(&part.meta).unwrap_or(0));
+            for batch in part.raw.values() {
+                snap.raw_count += 1;
+                snap.raw_bytes = snap
+                    .raw_bytes
+                    .saturating_add(batch.get_array_memory_size() as u64);
+            }
+            for tiles in part.tiles.values() {
+                snap.tiles_count += 1;
+                snap.tiles_bytes = snap
+                    .tiles_bytes
+                    .saturating_add(bincode::serialized_size(tiles).unwrap_or(0));
+            }
+        }
+        for trigger in &state.triggers {
+            if trigger.partition.namespace.as_slice() != namespace {
+                continue;
+            }
+            snap.triggers_count += 1;
+            snap.triggers_bytes = snap
+                .triggers_bytes
+                .saturating_add(bincode::serialized_size(trigger).unwrap_or(0));
+        }
+        snap
     }
 
     fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) {
@@ -883,6 +930,16 @@ mod tests {
             ]
         );
         assert_eq!(store.load_key_state(&partition).await.unwrap().next_seq, 4);
+
+        let size = store.sample_namespace_metrics(&namespace).await;
+        assert_eq!(size.raw_count, 2);
+        assert_eq!(size.tiles_count, 2);
+        assert_eq!(size.triggers_count, 1);
+        assert_eq!(size.key_states_count, 1);
+        assert!(size.raw_bytes > 0);
+        assert!(size.tiles_bytes > 0);
+        assert!(size.triggers_bytes > 0);
+        assert!(size.key_states_bytes > 0);
     }
 
     #[tokio::test]

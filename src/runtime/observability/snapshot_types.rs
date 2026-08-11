@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::types::PipelineId;
-use crate::runtime::metrics::WorkerAggregateMetrics;
+use crate::runtime::metrics::{MetricsLabels, WorkerAggregateMetrics};
+use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
 use crate::runtime::VertexId;
 use anyhow::Result;
-use crate::storage::StorageStatsSnapshot;
 use super::task_metadata::TaskMetadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -39,10 +39,23 @@ pub struct TaskSnapshot {
     pub metadata: TaskMetadata,
 }
 
+/// Per-task operator metrics sampled on the worker poll path.
+///
+/// Built once via [`crate::runtime::state::OperatorTaskState::task_operator_metrics`], then
+/// published to both [`WorkerSnapshot`] (API) and [`TaskOperatorMetrics::emit`] (Prom).
+/// Operator-specific payloads live with the operator (e.g. window metrics).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskOperatorMetrics {
-    /// Window operator task metrics derived from operator state.
-    Window { storage: StorageStatsSnapshot },
+    Window(WindowOperatorMetrics),
+}
+
+impl TaskOperatorMetrics {
+    /// Dispatch Prom emission to the operator-owned implementation.
+    pub fn emit(&self, vertex_id: &str, labels: &MetricsLabels) {
+        match self {
+            TaskOperatorMetrics::Window(m) => m.emit(vertex_id, labels),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,4 +112,3 @@ impl PipelineSnapshot {
         Self { worker_states }
     }
 }
-

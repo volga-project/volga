@@ -8,7 +8,6 @@ use std::{collections::HashMap, sync::{Once, OnceLock}};
 
 use crate::{common::types::PipelineId, runtime::VertexId};
 use crate::runtime::execution_graph::ExecutionGraph;
-use crate::storage::StorageStatsSnapshot;
 
 // Global Prometheus handle for programmatic access
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
@@ -40,6 +39,8 @@ pub const METRIC_STREAM_TASK_BACKPRESSURE_MAX: &str = "volga_stream_task_backpre
 
 // Worker-derived (poll-time) metrics
 pub const METRIC_WORKER_BACKPRESSURE_MAX: &str = "volga_worker_backpressure_max";
+pub const METRIC_WORKER_RSS_BYTES: &str = "volga_worker_rss_bytes";
+pub const METRIC_WORKER_VIRTUAL_BYTES: &str = "volga_worker_virtual_bytes";
 
 // Operator metrics
 pub const METRIC_OPERATOR_MESSAGES_SENT: &str = "volga_operator_messages_sent";
@@ -59,22 +60,6 @@ pub const LABEL_TARGET_VERTEX_ID: &str = "target_vertex_id";
 pub const LABEL_WORKER_ID: &str = "worker_id";
 pub const LABEL_OPERATOR_ID: &str = "operator_id";
 pub const LABEL_PIPELINE_ID: &str = "pipeline_id";
-pub const LABEL_STORAGE_TYPE: &str = "storage_type";
-
-// Storage (poll-derived) metrics
-pub const METRIC_STORAGE_INMEM_BATCHES: &str = "volga_storage_inmem_batches";
-pub const METRIC_STORAGE_INMEM_BYTES: &str = "volga_storage_inmem_bytes";
-pub const METRIC_STORAGE_PRESSURE_RELIEF_RUNS: &str = "volga_storage_pressure_relief_runs";
-pub const METRIC_STORAGE_PRESSURE_PLANNED_BUCKETS: &str = "volga_storage_pressure_planned_buckets";
-pub const METRIC_STORAGE_PRESSURE_DUMPED_BUCKETS: &str = "volga_storage_pressure_dumped_buckets";
-pub const METRIC_STORAGE_DUMP_CALLS: &str = "volga_storage_dump_calls";
-pub const METRIC_STORAGE_DUMP_PUBLISHED: &str = "volga_storage_dump_published";
-pub const METRIC_STORAGE_DUMP_WRITTEN_SEGMENTS: &str = "volga_storage_dump_written_segments";
-pub const METRIC_STORAGE_DUMP_WRITTEN_BYTES: &str = "volga_storage_dump_written_bytes";
-pub const METRIC_STORAGE_DUMP_SECONDS: &str = "volga_storage_dump_seconds";
-pub const METRIC_STORAGE_COMPACT_CALLS: &str = "volga_storage_compact_calls";
-pub const METRIC_STORAGE_COMPACT_PUBLISHED: &str = "volga_storage_compact_published";
-pub const METRIC_STORAGE_COMPACT_SECONDS: &str = "volga_storage_compact_seconds";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetricsLabels {
@@ -427,11 +412,10 @@ impl WorkerAggregateMetrics {
     }
 }
 
-/// Emit poll-derived gauges that are computed from a snapshot of task metrics.
+/// Emit max-backpressure gauges from a scraped [`WorkerAggregateMetrics`] snapshot.
 ///
-/// These are intentionally gauges (set-to-current) rather than counters to avoid
-/// double-counting across poll ticks.
-pub fn emit_poll_derived_gauges(worker_metrics: &WorkerAggregateMetrics) {
+/// Set-to-current gauges (not counters) so poll ticks do not double-count.
+pub fn emit_backpressure_gauges(worker_metrics: &WorkerAggregateMetrics) {
     let pipeline_id = worker_metrics.pipeline_id.0.clone();
 
     let mut worker_max_backpressure = 0.0f64;
@@ -458,100 +442,23 @@ pub fn emit_poll_derived_gauges(worker_metrics: &WorkerAggregateMetrics) {
     ).set(worker_max_backpressure);
 }
 
-/// Emit gauges from a storage stats snapshot.
-///
-/// These are gauges (set-to-snapshot-value) to make polling idempotent.
-pub fn emit_storage_stats_gauges(snapshot: &StorageStatsSnapshot, labels: &MetricsLabels, storage_type: &str) {
-    
-    let base = || {
-        (
-            LABEL_STORAGE_TYPE,
-            storage_type.to_string(),
-        )
+/// Emit process RSS / virtual memory gauges for this worker.
+pub fn emit_worker_memory_gauges(labels: &MetricsLabels) {
+    let Some(usage) = memory_stats::memory_stats() else {
+        return;
     };
-
-    // Note: macro doesn't accept shared label maps; duplicate labels explicitly.
     gauge!(
-        METRIC_STORAGE_INMEM_BATCHES,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+        METRIC_WORKER_RSS_BYTES,
         LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.inmem_batches as f64);
+        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+    )
+    .set(usage.physical_mem as f64);
     gauge!(
-        METRIC_STORAGE_INMEM_BYTES,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+        METRIC_WORKER_VIRTUAL_BYTES,
         LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.inmem_bytes as f64);
-
-    gauge!(
-        METRIC_STORAGE_PRESSURE_RELIEF_RUNS,
         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.pressure_relief_runs as f64);
-    gauge!(
-        METRIC_STORAGE_PRESSURE_PLANNED_BUCKETS,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.pressure_planned_buckets as f64);
-    gauge!(
-        METRIC_STORAGE_PRESSURE_DUMPED_BUCKETS,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.pressure_dumped_buckets as f64);
-
-    gauge!(
-        METRIC_STORAGE_DUMP_CALLS,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.dump_calls as f64);
-    gauge!(
-        METRIC_STORAGE_DUMP_PUBLISHED,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.dump_published as f64);
-    gauge!(
-        METRIC_STORAGE_DUMP_WRITTEN_SEGMENTS,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.dump_written_segments as f64);
-    gauge!(
-        METRIC_STORAGE_DUMP_WRITTEN_BYTES,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.dump_written_bytes as f64);
-    gauge!(
-        METRIC_STORAGE_DUMP_SECONDS,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.dump_seconds);
-
-    gauge!(
-        METRIC_STORAGE_COMPACT_CALLS,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.compact_calls as f64);
-    gauge!(
-        METRIC_STORAGE_COMPACT_PUBLISHED,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1.clone()
-    ).set(snapshot.compact_published as f64);
-    gauge!(
-        METRIC_STORAGE_COMPACT_SECONDS,
-        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-        LABEL_WORKER_ID => labels.worker_id.clone(),
-        base().0 => base().1
-    ).set(snapshot.compact_seconds);
+    )
+    .set(usage.virtual_mem as f64);
 }
 
 #[derive(Debug, Clone)]
