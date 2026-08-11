@@ -11,14 +11,16 @@ use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
+use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
 use crate::runtime::operators::window::store::{
-    PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
+    InMemWindowStore, PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
 };
 use crate::runtime::operators::window::tile::{apply_batch_to_tiles, plan_update_runs_for_batch};
 use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::state::OperatorTaskState;
+use async_trait::async_trait;
 
 /// Sentinel in [`WindowOperatorState::watermark_frontier`]: no frontier yet.
 pub const WATERMARK_UNSET: i64 = i64::MIN;
@@ -208,6 +210,7 @@ impl WindowOperatorState {
     }
 }
 
+#[async_trait]
 impl OperatorTaskState for WindowOperatorState {
     fn state_namespace(&self) -> &StateNamespace {
         &self.namespace
@@ -221,10 +224,14 @@ impl OperatorTaskState for WindowOperatorState {
         self
     }
 
-    fn sample_metrics(&self) -> Option<TaskOperatorMetrics> {
-        Some(TaskOperatorMetrics::Window(
-            self.store.state_size(&self.namespace),
-        ))
+    async fn sample_metrics(&self) -> Option<TaskOperatorMetrics> {
+        // InMem computes on demand; other backends return empty until they implement sampling.
+        let metrics = if let Some(store) = self.store.as_any().downcast_ref::<InMemWindowStore>() {
+            store.sample_namespace_metrics(&self.namespace).await
+        } else {
+            WindowOperatorMetrics::default()
+        };
+        Some(TaskOperatorMetrics::Window(metrics))
     }
 }
 

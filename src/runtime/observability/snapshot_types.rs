@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::common::types::PipelineId;
-use crate::runtime::metrics::WorkerAggregateMetrics;
+use crate::runtime::metrics::{MetricsLabels, WorkerAggregateMetrics};
+use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
 use crate::runtime::VertexId;
 use anyhow::Result;
 use super::task_metadata::TaskMetadata;
@@ -38,34 +39,23 @@ pub struct TaskSnapshot {
     pub metadata: TaskMetadata,
 }
 
-/// Sampled window-operator metrics for API snapshots and Prom gauges.
-///
-/// Today this is logical store size (raw / tiles / triggers) for one task namespace.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WindowOperatorMetrics {
-    pub raw_count: u64,
-    pub raw_bytes: u64,
-    pub tiles_count: u64,
-    pub tiles_bytes: u64,
-    pub triggers_count: u64,
-    pub triggers_bytes: u64,
-}
-
-impl WindowOperatorMetrics {
-    pub fn total_bytes(&self) -> u64 {
-        self.raw_bytes
-            .saturating_add(self.tiles_bytes)
-            .saturating_add(self.triggers_bytes)
-    }
-}
-
 /// Per-task operator metrics sampled on the worker poll path.
 ///
 /// Built once via [`crate::runtime::state::OperatorTaskState::sample_metrics`], then
-/// published to both [`WorkerSnapshot`] (API) and operator-owned Prom emit helpers.
+/// published to both [`WorkerSnapshot`] (API) and [`TaskOperatorMetrics::emit`] (Prom).
+/// Operator-specific payloads live with the operator (e.g. window metrics).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum TaskOperatorMetrics {
     Window(WindowOperatorMetrics),
+}
+
+impl TaskOperatorMetrics {
+    /// Dispatch Prom emission to the operator-owned implementation.
+    pub fn emit(&self, vertex_id: &str, labels: &MetricsLabels) {
+        match self {
+            TaskOperatorMetrics::Window(m) => m.emit(vertex_id, labels),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

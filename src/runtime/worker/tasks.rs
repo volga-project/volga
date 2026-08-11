@@ -20,7 +20,6 @@ use crate::runtime::metrics::{
     MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
 };
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
-use crate::runtime::operators::window::metrics::emit_window_operator_metrics;
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
 use crate::runtime::runtime_context::RuntimeContext;
 use crate::runtime::state::StateRegistry;
@@ -74,7 +73,7 @@ impl WorkerInner {
                 }
 
                 if let Some(op_state) = state_registry.get_task_state(vertex_id.as_ref()) {
-                    if let Some(m) = op_state.sample_metrics() {
+                    if let Some(m) = op_state.sample_metrics().await {
                         task_operator_metrics.insert(vertex_id.clone(), m);
                     }
                 }
@@ -103,11 +102,7 @@ impl WorkerInner {
         worker_metrics.record();
         emit_backpressure_gauges(&worker_metrics);
         for (vertex_id, op_metrics) in &task_operator_metrics {
-            match op_metrics {
-                TaskOperatorMetrics::Window(m) => {
-                    emit_window_operator_metrics(vertex_id.as_ref(), m, &labels);
-                }
-            }
+            op_metrics.emit(vertex_id.as_ref(), &labels);
         }
         emit_worker_memory_gauges(&labels);
 

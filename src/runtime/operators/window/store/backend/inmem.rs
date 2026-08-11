@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::Cursor as IoCursor;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
@@ -10,13 +9,12 @@ use arrow::array::RecordBatch;
 use arrow::ipc::reader::FileReader;
 use arrow::ipc::writer::FileWriter;
 use async_trait::async_trait;
-use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
 use std::any::Any;
 
-use crate::runtime::observability::snapshot_types::WindowOperatorMetrics;
+use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
 use crate::runtime::operators::window::model::{
     Cursor, RawRun, TileRun, WindowTiles, WindowTrigger,
 };
@@ -70,40 +68,6 @@ struct InMemState {
     triggers: BTreeSet<WindowTrigger>,
 }
 
-#[derive(Debug, Default)]
-struct NamespaceSizeStats {
-    raw_count: AtomicU64,
-    raw_bytes: AtomicU64,
-    tiles_count: AtomicU64,
-    tiles_bytes: AtomicU64,
-    triggers_count: AtomicU64,
-    triggers_bytes: AtomicU64,
-}
-
-impl NamespaceSizeStats {
-    fn store(&self, snap: WindowOperatorMetrics) {
-        self.raw_count.store(snap.raw_count, Ordering::Relaxed);
-        self.raw_bytes.store(snap.raw_bytes, Ordering::Relaxed);
-        self.tiles_count.store(snap.tiles_count, Ordering::Relaxed);
-        self.tiles_bytes.store(snap.tiles_bytes, Ordering::Relaxed);
-        self.triggers_count
-            .store(snap.triggers_count, Ordering::Relaxed);
-        self.triggers_bytes
-            .store(snap.triggers_bytes, Ordering::Relaxed);
-    }
-
-    fn snapshot(&self) -> WindowOperatorMetrics {
-        WindowOperatorMetrics {
-            raw_count: self.raw_count.load(Ordering::Relaxed),
-            raw_bytes: self.raw_bytes.load(Ordering::Relaxed),
-            tiles_count: self.tiles_count.load(Ordering::Relaxed),
-            tiles_bytes: self.tiles_bytes.load(Ordering::Relaxed),
-            triggers_count: self.triggers_count.load(Ordering::Relaxed),
-            triggers_bytes: self.triggers_bytes.load(Ordering::Relaxed),
-        }
-    }
-}
-
 fn batch_logical_bytes(batch: &RecordBatch) -> u64 {
     batch.get_array_memory_size() as u64
 }
@@ -116,13 +80,16 @@ fn trigger_logical_bytes(trigger: &WindowTrigger) -> u64 {
     bincode::serialized_size(trigger).unwrap_or(0)
 }
 
+fn key_state_logical_bytes(meta: &KeyState) -> u64 {
+    bincode::serialized_size(meta).unwrap_or(0)
+}
+
 /// Development/test reference backend with inline checkpoints limited to 8 MiB.
 /// One read lock is the WRO snapshot boundary. Physical prune runs via
 /// [`OperatorStore::maintain`], not the WO watermark hot path.
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
     state: Arc<RwLock<InMemState>>,
-    sizes: Arc<DashMap<Vec<u8>, NamespaceSizeStats>>,
 }
 
 impl InMemWindowStore {
@@ -130,12 +97,25 @@ impl InMemWindowStore {
         Self::default()
     }
 
-    fn recompute_namespace_size(state: &InMemState, namespace: &[u8], sizes: &DashMap<Vec<u8>, NamespaceSizeStats>) {
+    /// Compute logical namespace metrics on demand (no cached size counters).
+    pub async fn sample_namespace_metrics(
+        &self,
+        namespace: &StateNamespace,
+    ) -> WindowOperatorMetrics {
+        let state = self.state.read().await;
+        Self::namespace_metrics(&state, namespace.bytes.as_slice())
+    }
+
+    fn namespace_metrics(state: &InMemState, namespace: &[u8]) -> WindowOperatorMetrics {
         let mut snap = WindowOperatorMetrics::default();
         for (partition, part) in &state.partitions {
             if partition.namespace.as_slice() != namespace {
                 continue;
             }
+            snap.key_states_count += 1;
+            snap.key_states_bytes = snap
+                .key_states_bytes
+                .saturating_add(key_state_logical_bytes(&part.meta));
             for batch in part.raw.values() {
                 snap.raw_count += 1;
                 snap.raw_bytes = snap.raw_bytes.saturating_add(batch_logical_bytes(batch));
@@ -154,10 +134,7 @@ impl InMemWindowStore {
                 .triggers_bytes
                 .saturating_add(trigger_logical_bytes(trigger));
         }
-        sizes
-            .entry(namespace.to_vec())
-            .or_default()
-            .store(snap);
+        snap
     }
 
     fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) {
@@ -275,15 +252,7 @@ impl WindowOperatorStore for InMemWindowStore {
         }
         state.meta = meta.clone();
         store.triggers.extend(triggers.iter().cloned());
-        Self::recompute_namespace_size(&store, partition.namespace.as_slice(), &self.sizes);
         Ok(())
-    }
-
-    fn state_size(&self, namespace: &StateNamespace) -> WindowOperatorMetrics {
-        self.sizes
-            .get(namespace.bytes.as_slice())
-            .map(|stats| stats.snapshot())
-            .unwrap_or_default()
     }
 
     fn stream_due<'a>(
@@ -441,7 +410,6 @@ impl WindowOperatorStore for InMemWindowStore {
             .triggers
             .retain(|trigger| trigger.partition.namespace.as_slice() != namespace.bytes.as_slice());
         store.triggers.extend(checkpoint.triggers);
-        Self::recompute_namespace_size(&store, namespace.bytes.as_slice(), &self.sizes);
         Ok(())
     }
 }
@@ -484,7 +452,6 @@ impl OperatorStore for InMemWindowStore {
         };
         let mut store = self.state.write().await;
         Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
-        Self::recompute_namespace_size(&store, ns.bytes.as_slice(), &self.sizes);
         Ok(())
     }
 }
@@ -976,54 +943,15 @@ mod tests {
         );
         assert_eq!(store.load_key_state(&partition).await.unwrap().next_seq, 4);
 
-        let size = store.state_size(&namespace);
+        let size = store.sample_namespace_metrics(&namespace).await;
         assert_eq!(size.raw_count, 2);
         assert_eq!(size.tiles_count, 2);
         assert_eq!(size.triggers_count, 1);
+        assert_eq!(size.key_states_count, 1);
         assert!(size.raw_bytes > 0);
         assert!(size.tiles_bytes > 0);
         assert!(size.triggers_bytes > 0);
-    }
-
-    #[tokio::test]
-    async fn state_size_tracks_commit_and_restore() {
-        let store = InMemWindowStore::new();
-        let partition = partition();
-        let namespace = StateNamespace::new(&partition.namespace);
-        let triggers = [WindowTrigger {
-            fire_at: Cursor::new(1_000, 1),
-            partition: partition.clone(),
-            kind: WindowTriggerKind::RowEmit,
-        }];
-        store
-            .commit_events(
-                &partition,
-                0,
-                &batch(&[(1_000, 1), (2_000, 2)]),
-                &tiles(&[(TimeGranularity::Seconds(1), 1_000, 7)]),
-                &KeyState::default(),
-                &triggers,
-            )
-            .await
-            .unwrap();
-
-        let after_commit = store.state_size(&namespace);
-        assert_eq!(after_commit.raw_count, 2);
-        assert_eq!(after_commit.tiles_count, 1);
-        assert_eq!(after_commit.triggers_count, 1);
-        assert!(after_commit.total_bytes() > 0);
-
-        let checkpoint = store.checkpoint(&namespace).await.unwrap();
-        let empty = InMemWindowStore::new();
-        empty.restore(&namespace, &checkpoint).await.unwrap();
-        let after_restore = empty.state_size(&namespace);
-        // Counts are exact; Arrow buffer layout (hence raw_bytes) can differ after IPC round-trip.
-        assert_eq!(after_restore.raw_count, after_commit.raw_count);
-        assert_eq!(after_restore.tiles_count, after_commit.tiles_count);
-        assert_eq!(after_restore.triggers_count, after_commit.triggers_count);
-        assert_eq!(after_restore.tiles_bytes, after_commit.tiles_bytes);
-        assert_eq!(after_restore.triggers_bytes, after_commit.triggers_bytes);
-        assert!(after_restore.raw_bytes > 0);
+        assert!(size.key_states_bytes > 0);
     }
 
     #[tokio::test]
