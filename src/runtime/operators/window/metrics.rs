@@ -30,13 +30,6 @@ pub struct WindowOperatorMetrics {
 }
 
 impl WindowOperatorMetrics {
-    pub fn total_bytes(&self) -> u64 {
-        self.raw_bytes
-            .saturating_add(self.tiles_bytes)
-            .saturating_add(self.triggers_bytes)
-            .saturating_add(self.key_states_bytes)
-    }
-
     /// Emit Prom gauges (poll-time, set-to-current).
     pub fn emit(&self, vertex_id: &str, labels: &MetricsLabels) {
         let vertex = vertex_id.to_string();
