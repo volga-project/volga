@@ -11,6 +11,8 @@ use crate::common::Key;
 use crate::runtime::operators::window::config::WindowConfig;
 use crate::runtime::operators::window::model::{WindowId, WindowTrigger, WindowTriggerKind};
 use crate::runtime::operators::window::store::data::cursors_from_batch;
+use crate::runtime::metrics::MetricsLabels;
+use crate::runtime::operators::window::metrics::collect_window_operator_snapshot;
 use crate::runtime::operators::window::store::{
     InMemWindowStore, PartitionKey, StateNamespace, WindowBackendSnapshot, WindowOperatorStore,
 };
@@ -19,6 +21,7 @@ use crate::runtime::operators::window::SEQ_NO_COLUMN_NAME;
 use crate::runtime::observability::snapshot_types::TaskOperatorMetrics;
 use crate::runtime::operators::OperatorKind;
 use crate::runtime::state::OperatorTaskState;
+use crate::runtime::VertexId;
 use async_trait::async_trait;
 
 /// Sentinel in [`WindowOperatorState::watermark_frontier`]: no frontier yet.
@@ -35,6 +38,8 @@ pub struct WindowOperatorState {
     max_window_length_ms: i64,
     /// Task watermark frontier; [`WATERMARK_UNSET`] until the first advance.
     pub watermark_frontier: AtomicI64,
+    /// Task id + labels for metrics writes (None in tests without pipeline labels).
+    metrics: Option<(VertexId, MetricsLabels)>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,7 +66,17 @@ impl WindowOperatorState {
             lateness_ms,
             max_window_length_ms,
             watermark_frontier: AtomicI64::new(WATERMARK_UNSET),
+            metrics: None,
         }
+    }
+
+    pub fn with_metrics(mut self, task_id: VertexId, labels: MetricsLabels) -> Self {
+        self.metrics = Some((task_id, labels));
+        self
+    }
+
+    pub fn metrics(&self) -> Option<(&VertexId, &MetricsLabels)> {
+        self.metrics.as_ref().map(|(id, labels)| (id, labels))
     }
 
     pub fn store(&self) -> &dyn WindowOperatorStore {
@@ -224,14 +239,13 @@ impl OperatorTaskState for WindowOperatorState {
     }
 
     async fn task_operator_metrics(&self) -> Option<TaskOperatorMetrics> {
-        let store = self
-            .store
-            .as_any()
-            .downcast_ref::<InMemWindowStore>()
-            .expect("window task_operator_metrics requires InMemWindowStore");
-        Some(TaskOperatorMetrics::Window(
-            store.sample_namespace_metrics(&self.namespace).await,
-        ))
+        let Some((task_id, labels)) = self.metrics() else {
+            return Some(TaskOperatorMetrics::Window(Default::default()));
+        };
+        Some(TaskOperatorMetrics::Window(collect_window_operator_snapshot(
+            task_id.as_ref(),
+            Some(labels),
+        )))
     }
 }
 

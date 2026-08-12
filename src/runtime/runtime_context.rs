@@ -5,6 +5,7 @@ use serde_json::Value;
 use crate::api::spec::state::{OperatorStateBackendConfig, RequestStoreConfig};
 use crate::common::types::PipelineId;
 use crate::runtime::execution_graph::ExecutionGraph;
+use crate::runtime::metrics::MetricsLabels;
 use crate::{common::Message, runtime::functions::source::request_source::PendingRequest};
 use crate::runtime::operators::source::SourceHandles;
 use crate::runtime::observability::TaskMetadata;
@@ -72,6 +73,33 @@ impl RuntimeContext {
     pub fn job_config(&self) -> &HashMap<String, Value> {
         &self.job_config
     }
+
+    /// Worker id from job config (`worker_id` string), when present.
+    pub fn worker_id(&self) -> Option<&str> {
+        self.job_config
+            .get("worker_id")
+            .and_then(|v| v.as_str())
+    }
+
+    /// Pipeline + worker labels for Prom, when both are configured.
+    pub fn metrics_labels(&self) -> Option<MetricsLabels> {
+        let pipeline_id = self
+            .pipeline_id
+            .as_ref()
+            .map(|p| p.0.clone())
+            .or_else(|| {
+                self.job_config
+                    .get("pipeline_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })?;
+        let worker_id = self.worker_id()?.to_string();
+        Some(MetricsLabels {
+            pipeline_id,
+            worker_id,
+        })
+    }
+
     pub fn state_registry(&self) -> Option<&Arc<StateRegistry>> {
         self.state_registry.as_ref()
     }

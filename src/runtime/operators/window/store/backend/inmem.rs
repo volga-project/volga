@@ -14,7 +14,7 @@ use tokio::sync::RwLock;
 
 use std::any::Any;
 
-use crate::runtime::operators::window::metrics::WindowOperatorMetrics;
+use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{
     Cursor, RawRun, TileRun, WindowTrigger,
 };
@@ -81,63 +81,78 @@ impl InMemWindowStore {
         Self::default()
     }
 
-    /// Compute logical namespace metrics on demand (no cached size counters).
-    pub async fn sample_namespace_metrics(
-        &self,
-        namespace: &StateNamespace,
-    ) -> WindowOperatorMetrics {
-        let state = self.state.read().await;
-        Self::namespace_metrics(&state, namespace.bytes.as_slice())
-    }
-
-    fn namespace_metrics(state: &InMemState, namespace: &[u8]) -> WindowOperatorMetrics {
-        let mut snap = WindowOperatorMetrics::default();
+    /// Scan namespace store sizes and write gauges into the metrics registry.
+    fn report_namespace_sizes(
+        state: &InMemState,
+        namespace: &[u8],
+        task_id: &str,
+        labels: &crate::runtime::metrics::MetricsLabels,
+    ) {
+        let mut raw_count = 0u64;
+        let mut raw_bytes = 0u64;
+        let mut tiles_count = 0u64;
+        let mut tiles_bytes = 0u64;
+        let mut triggers_count = 0u64;
+        let mut triggers_bytes = 0u64;
+        let mut key_states_count = 0u64;
+        let mut key_states_bytes = 0u64;
         for (partition, part) in &state.partitions {
             if partition.namespace.as_slice() != namespace {
                 continue;
             }
-            snap.key_states_count += 1;
-            snap.key_states_bytes = snap
-                .key_states_bytes
+            key_states_count += 1;
+            key_states_bytes = key_states_bytes
                 .saturating_add(bincode::serialized_size(&part.meta).unwrap_or(0));
             for batch in part.raw.values() {
-                snap.raw_count += 1;
-                snap.raw_bytes = snap
-                    .raw_bytes
-                    .saturating_add(batch.get_array_memory_size() as u64);
+                raw_count += 1;
+                raw_bytes = raw_bytes.saturating_add(batch.get_array_memory_size() as u64);
             }
             for tiles in part.tiles.values() {
-                snap.tiles_count += 1;
-                snap.tiles_bytes = snap
-                    .tiles_bytes
-                    .saturating_add(bincode::serialized_size(tiles).unwrap_or(0));
+                tiles_count += 1;
+                tiles_bytes =
+                    tiles_bytes.saturating_add(bincode::serialized_size(tiles).unwrap_or(0));
             }
         }
         for trigger in &state.triggers {
             if trigger.partition.namespace.as_slice() != namespace {
                 continue;
             }
-            snap.triggers_count += 1;
-            snap.triggers_bytes = snap
-                .triggers_bytes
-                .saturating_add(bincode::serialized_size(trigger).unwrap_or(0));
+            triggers_count += 1;
+            triggers_bytes =
+                triggers_bytes.saturating_add(bincode::serialized_size(trigger).unwrap_or(0));
         }
-        snap
+        metrics::set_state_size_gauges(
+            task_id,
+            labels,
+            raw_count,
+            raw_bytes,
+            tiles_count,
+            tiles_bytes,
+            triggers_count,
+            triggers_bytes,
+            key_states_count,
+            key_states_bytes,
+        );
     }
 
-    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) {
+    /// Returns number of raw rows pruned.
+    fn prune_namespace(state: &mut InMemState, namespace: &[u8], watermark: i64, floor: i64) -> u64 {
         state.triggers.retain(|trigger| {
             trigger.partition.namespace.as_slice() != namespace || trigger.fire_at.ts > watermark
         });
+        let mut pruned_rows = 0u64;
         for (partition, part) in state.partitions.iter_mut() {
             if partition.namespace.as_slice() != namespace {
                 continue;
             }
+            let before = part.raw.len();
             part.raw.retain(|cursor, _| cursor.ts >= floor);
+            pruned_rows += (before - part.raw.len()) as u64;
             part.tiles.retain(|&(granularity, start_ts), _| {
                 start_ts + granularity.to_millis() > floor
             });
         }
+        pruned_rows
     }
 
     fn select_raw(state: &PartitionState, runs: &[RawRun]) -> Vec<RecordBatch> {
@@ -438,8 +453,19 @@ impl OperatorStore for InMemWindowStore {
         let Some((watermark, floor)) = wo.retention_cutoff() else {
             return Ok(());
         };
+        let started = std::time::Instant::now();
         let mut store = self.state.write().await;
-        Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
+        let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
+        if let Some((task_id, labels)) = wo.metrics() {
+            Self::report_namespace_sizes(&store, ns.bytes.as_slice(), task_id.as_ref(), labels);
+            drop(store);
+            metrics::record_maintain_ms(
+                task_id.as_ref(),
+                labels,
+                started.elapsed().as_secs_f64() * 1000.0,
+            );
+            metrics::add_pruned(task_id.as_ref(), labels, pruned_rows);
+        }
         Ok(())
     }
 }
@@ -930,16 +956,6 @@ mod tests {
             ]
         );
         assert_eq!(store.load_key_state(&partition).await.unwrap().next_seq, 4);
-
-        let size = store.sample_namespace_metrics(&namespace).await;
-        assert_eq!(size.raw_count, 2);
-        assert_eq!(size.tiles_count, 2);
-        assert_eq!(size.triggers_count, 1);
-        assert_eq!(size.key_states_count, 1);
-        assert!(size.raw_bytes > 0);
-        assert!(size.tiles_bytes > 0);
-        assert!(size.triggers_bytes > 0);
-        assert!(size.key_states_bytes > 0);
     }
 
     #[tokio::test]

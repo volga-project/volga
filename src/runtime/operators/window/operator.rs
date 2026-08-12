@@ -2,9 +2,10 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::time::Instant;
 
 use anyhow::Result;
-use arrow::array::RecordBatch;
+use arrow::array::{RecordBatch, TimestampMillisecondArray};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 use futures::{future, TryStreamExt};
@@ -18,6 +19,7 @@ use crate::runtime::operators::operator::{
 use crate::runtime::operators::window::config::{BuiltWindows, WindowConfig};
 use crate::runtime::operators::window::eval::advance_key;
 use crate::runtime::operators::window::frame_utils::{get_window_length_ms, require_range_frame};
+use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{Cursor, WindowId};
 use crate::runtime::operators::window::spec::WindowSpec;
 use crate::runtime::operators::window::state::{WindowOperatorState, WindowStateSnapshot};
@@ -224,14 +226,18 @@ impl OperatorTrait for WindowOperator {
                     .expect("operator id must be configured for WindowOperator"),
                 context.task_index(),
             );
-            let state = Arc::new(WindowOperatorState::new(
+            let mut state = WindowOperatorState::new(
                 store,
                 ns,
                 self.ts_column_index,
                 self.window_configs.clone(),
                 self.lateness_ms,
                 self.max_window_length_ms,
-            ));
+            );
+            if let Some(labels) = context.metrics_labels() {
+                state = state.with_metrics(context.vertex_id_arc(), labels);
+            }
+            let state = Arc::new(state);
             registry.insert_task_state(
                 context.vertex_id_arc(),
                 state.clone() as Arc<dyn OperatorTaskState>,
@@ -285,8 +291,8 @@ impl OperatorTrait for WindowOperator {
                 Message::Keyed(keyed_message) => {
                     let key = keyed_message.key();
                     let input_rows = keyed_message.base.record_batch.num_rows();
-                    let dropped = self
-                        .state_ref()
+                    let state = self.state_ref();
+                    let dropped = state
                         .insert_batch(
                             key,
                             keyed_message.base.record_batch.clone(),
@@ -300,6 +306,9 @@ impl OperatorTrait for WindowOperator {
                     );
                     self.task_metadata
                         .increment_u64(TASK_METADATA_ROWS_DROPPED_LATE, dropped as u64);
+                    if let Some((task_id, labels)) = state.metrics() {
+                        metrics::add_late_dropped(task_id.as_ref(), labels, dropped as u64);
+                    }
                     OperatorPollResult::Continue
                 }
                 Message::Watermark(watermark) => {
@@ -317,7 +326,23 @@ impl OperatorTrait for WindowOperator {
                     let result = if advances_frontier
                         && self.output_mode == WindowOutputMode::Emit
                     {
-                        self.process_due(advance_to).await
+                        let started = Instant::now();
+                        let batch = self.process_due(advance_to).await;
+                        if let Some((task_id, labels)) = state.metrics() {
+                            metrics::record_wm_process_ms(
+                                task_id.as_ref(),
+                                labels,
+                                started.elapsed().as_secs_f64() * 1000.0,
+                            );
+                            if let Some(ts) = batch
+                                .column(self.ts_column_index)
+                                .as_any()
+                                .downcast_ref::<TimestampMillisecondArray>()
+                            {
+                                metrics::record_result_freshness(task_id.as_ref(), labels, ts);
+                            }
+                        }
+                        batch
                     } else {
                         RecordBatch::new_empty(self.output_schema.clone())
                     };
