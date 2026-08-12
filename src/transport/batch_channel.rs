@@ -17,7 +17,7 @@ use crate::common::Message;
 /// matching Flink-style backpressured time and the queue-fill ratio published by
 /// [`crate::transport::transport_client::DataWriter`] on the same write path.
 #[derive(Debug, Default)]
-pub struct OutputBackpressure {
+pub struct BackpressureTracker {
     accumulated_ns: AtomicU64,
     state: Mutex<WaitState>,
 }
@@ -28,7 +28,7 @@ struct WaitState {
     started: Option<Instant>,
 }
 
-impl OutputBackpressure {
+impl BackpressureTracker {
     pub fn new() -> Self {
         Self::default()
     }
@@ -58,7 +58,7 @@ impl OutputBackpressure {
     }
 }
 
-struct WaitGuard<'a>(&'a OutputBackpressure);
+struct WaitGuard<'a>(&'a BackpressureTracker);
 
 impl Drop for WaitGuard<'_> {
     fn drop(&mut self) {
@@ -107,7 +107,7 @@ impl BatchSender {
     pub async fn send(
         &self,
         message: Message,
-        bp: Option<&OutputBackpressure>,
+        bp: Option<&BackpressureTracker>,
     ) -> Result<(), SendError<Message>> {
         // Ensure that every message is sendable, even if it's bigger than our max size
         let count = message_count(&message, self.size);
@@ -246,7 +246,7 @@ mod tests {
     #[tokio::test]
     async fn fast_send_records_no_blocked_time() {
         let (tx, mut rx) = batch_bounded_channel(4);
-        let bp = OutputBackpressure::new();
+        let bp = BackpressureTracker::new();
         tx.send(wm(1), Some(&bp)).await.unwrap();
         assert_eq!(bp.take_ns(), 0);
         assert!(rx.recv().await.is_some());
@@ -255,7 +255,7 @@ mod tests {
     #[tokio::test]
     async fn blocked_send_records_wait_near_hold_time() {
         let (tx, mut rx) = batch_bounded_channel(1);
-        let bp = Arc::new(OutputBackpressure::new());
+        let bp = Arc::new(BackpressureTracker::new());
         tx.send(wm(1), None).await.unwrap();
         // size=1 full → 1 - 1/(1+1) = 0.5
         assert!((tx.backpressure_ratio() - 0.5).abs() < 1e-9);
@@ -276,7 +276,7 @@ mod tests {
     #[tokio::test]
     async fn parallel_waits_count_exclusively() {
         let (tx, mut rx) = batch_bounded_channel(1);
-        let bp = Arc::new(OutputBackpressure::new());
+        let bp = Arc::new(BackpressureTracker::new());
         tx.send(wm(0), None).await.unwrap();
 
         let hold = Duration::from_millis(80);
@@ -306,7 +306,7 @@ mod tests {
     #[tokio::test]
     async fn timeout_cancel_still_accounts_blocked_time() {
         let (tx, _rx) = batch_bounded_channel(1);
-        let bp = OutputBackpressure::new();
+        let bp = BackpressureTracker::new();
         tx.send(wm(1), None).await.unwrap();
 
         let wait = Duration::from_millis(50);

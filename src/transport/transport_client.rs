@@ -1,7 +1,7 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender, OutputBackpressure}, channel::Channel}};
+use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender, BackpressureTracker}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
@@ -181,8 +181,8 @@ pub struct DataWriter {
     pub senders: HashMap<String, BatchSender>,
     metrics_labels: Option<MetricsLabels>,
     worker_health: Arc<WorkerHealth>,
-    /// Task-scoped queue-wait clock (ratio gauges + time-budget BP share this write path).
-    output_backpressure: Option<Arc<OutputBackpressure>>,
+    /// Task-scoped queue-wait clock (ratio gauges + task time BP share this write path).
+    backpressure_tracker: Option<Arc<BackpressureTracker>>,
     // batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
@@ -204,7 +204,7 @@ impl DataWriter {
             senders,
             metrics_labels,
             worker_health,
-            output_backpressure: None,
+            backpressure_tracker: None,
             // batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
@@ -212,8 +212,8 @@ impl DataWriter {
         }
     }
 
-    pub fn set_output_backpressure(&mut self, bp: Arc<OutputBackpressure>) {
-        self.output_backpressure = Some(bp);
+    pub fn set_backpressure_tracker(&mut self, bp: Arc<BackpressureTracker>) {
+        self.backpressure_tracker = Some(bp);
     }
 
     pub async fn start(&mut self) {
@@ -290,7 +290,7 @@ impl DataWriter {
         retries: usize,
     ) -> bool {
         let mut attempts = 0;
-        let bp = self.output_backpressure.as_deref();
+        let bp = self.backpressure_tracker.as_deref();
 
         while attempts <= retries {
             if self.senders.is_empty() {
@@ -299,7 +299,7 @@ impl DataWriter {
             let channel_id = channel.get_channel_id();
             if let Some(sender) = self.senders.get(&channel_id) {
                 let target_vertex_id = channel.get_target_vertex_id();
-                // Same path as time-budget BP: sample queue, then send (waits record on `bp`).
+                // Same path as task time BP: sample queue, then send (waits record on `bp`).
                 self.publish_queue_metrics(sender, &target_vertex_id);
                 match time::timeout(timeout_duration, sender.send(message.clone(), bp)).await {
                     Ok(Ok(())) => return true,

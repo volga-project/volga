@@ -42,30 +42,30 @@ use crate::transport::transport_client::TransportClient;
 use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 
-/// Accumulates Flink-style task time-budget nanos within a flush window.
+/// Accumulates Flink-style task time metrics within a report window.
 ///
 /// Idle = input wait; backpressured = exclusive tx-queue wait via
-/// [`OutputBackpressure`] (same write path as BP ratio gauges); busy = residual
+/// [`BackpressureTracker`] (same write path as BP ratio gauges); busy = residual
 /// wall time so the three ms/s gauges sum to ~1000.
 #[derive(Debug, Default)]
-pub(crate) struct TaskTimeBudget {
+pub(crate) struct TaskTimeMetrics {
     idle_ns: AtomicU64,
-    output_bp: Arc<crate::transport::batch_channel::OutputBackpressure>,
+    backpressure_tracker: Arc<crate::transport::batch_channel::BackpressureTracker>,
 }
 
-impl TaskTimeBudget {
+impl TaskTimeMetrics {
     fn add_idle_ns(&self, ns: u64) {
         self.idle_ns.fetch_add(ns, Ordering::Relaxed);
     }
 
-    fn output_backpressure(&self) -> Arc<crate::transport::batch_channel::OutputBackpressure> {
-        self.output_bp.clone()
+    fn backpressure_tracker(&self) -> Arc<crate::transport::batch_channel::BackpressureTracker> {
+        self.backpressure_tracker.clone()
     }
 
     /// Scale to ms-per-second and reset. Returns `(busy, idle, backpressured)`.
     fn take_ms_per_second(&self, window: Duration) -> (f64, f64, f64) {
         let idle = self.idle_ns.swap(0, Ordering::Relaxed);
-        let bp = self.output_bp.take_ns();
+        let bp = self.backpressure_tracker.take_ns();
         let window_ms = window.as_secs_f64() * 1000.0;
         if window_ms <= 0.0 {
             return (0.0, 0.0, 0.0);
@@ -349,23 +349,6 @@ impl StreamTask {
         );
     }
 
-    fn maybe_publish_watermark_lag(
-        window_start: &mut Instant,
-        vertex_id: &VertexId,
-        labels: Option<&MetricsLabels>,
-        current_watermark: &AtomicU64,
-    ) {
-        if window_start.elapsed() < Duration::from_secs(1) {
-            return;
-        }
-        Self::set_watermark_lag_gauge(
-            vertex_id,
-            current_watermark.load(Ordering::Relaxed),
-            labels,
-        );
-        *window_start = Instant::now();
-    }
-
     fn record_metrics(
         vertex_id: VertexId,
         message: &Message,
@@ -468,7 +451,7 @@ impl StreamTask {
         mut aligner: CheckpointAligner,
         labels: Option<MetricsLabels>,
         execution_attempt_id: u64,
-        time_budget: Arc<TaskTimeBudget>,
+        task_time_metrics: Arc<TaskTimeMetrics>,
     ) -> MessageStream {
         Box::pin(stream! {
             let mut input_stream = input_stream;
@@ -483,7 +466,7 @@ impl StreamTask {
                 let Some(message) = input_stream.next().await else {
                     break;
                 };
-                time_budget.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
+                task_time_metrics.add_idle_ns(idle_start.elapsed().as_nanos() as u64);
                 Self::record_metrics(vertex_id.clone(), &message, true, labels.as_ref());
                 Self::record_control_propagation(&vertex_id, &message, labels.as_ref());
 
@@ -619,17 +602,18 @@ impl StreamTask {
         }
     }
 
-    fn maybe_flush_time_budget(
-        budget: &TaskTimeBudget,
+    fn report_task_time_metrics(
+        metrics: &TaskTimeMetrics,
         window_start: &mut Instant,
         vertex_id: &VertexId,
         labels: Option<&MetricsLabels>,
+        current_watermark: &AtomicU64,
     ) {
         let elapsed = window_start.elapsed();
         if elapsed < Duration::from_secs(1) {
             return;
         }
-        let (busy, idle, bp) = budget.take_ms_per_second(elapsed);
+        let (busy, idle, bp) = metrics.take_ms_per_second(elapsed);
         set_task_gauge(
             METRIC_STREAM_TASK_BUSY_TIME_MS_PER_SECOND,
             busy,
@@ -646,6 +630,11 @@ impl StreamTask {
             METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND,
             bp,
             vertex_id.as_ref(),
+            labels,
+        );
+        Self::set_watermark_lag_gauge(
+            vertex_id,
+            current_watermark.load(Ordering::Relaxed),
             labels,
         );
         *window_start = Instant::now();
@@ -696,10 +685,10 @@ impl StreamTask {
             let mut transport_client =
                 TransportClient::new(vertex_id.clone(), transport_client_config, run_loop_health);
 
-            // Install before collectors clone the writer so ratio + time-budget BP share one clock.
-            let time_budget = Arc::new(TaskTimeBudget::default());
+            // Install before collectors clone the writer so ratio + BP time share one tracker.
+            let task_time_metrics = Arc::new(TaskTimeMetrics::default());
             if let Some(writer) = transport_client.writer.as_mut() {
-                writer.set_output_backpressure(time_budget.output_backpressure());
+                writer.set_backpressure_tracker(task_time_metrics.backpressure_tracker());
             }
             
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
@@ -805,7 +794,7 @@ impl StreamTask {
                 None
             };
             
-            let mut budget_window_start = Instant::now();
+            let mut metrics_window_start = Instant::now();
 
             if !is_source {
                 // Pre-process input stream for non-source operators
@@ -827,13 +816,12 @@ impl StreamTask {
                     checkpoint_aligner,
                     metrics_labels.clone(),
                     execution_attempt_id,
-                    time_budget.clone(),
+                    task_time_metrics.clone(),
                 );
 
                 operator.set_input(Some(preprocessed_stream))
             };
 
-            let mut lag_window_start = Instant::now();
             while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 {
                 // For sources: if checkpoint is triggered, synthesize a CheckpointBarrier message and treat it exactly
                 // like a poll_next() output (same code path, no duplication).
@@ -1011,7 +999,7 @@ impl StreamTask {
                         message.set_upstream_vertex_id(vertex_id.as_ref().to_string());
                         Self::record_metrics(vertex_id.clone(), &message, false, metrics_labels.as_ref());
 
-                        // Send to collectors (queue waits record on time_budget.output_bp)
+                        // Send to collectors (queue waits record on BackpressureTracker)
                         Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,
@@ -1071,19 +1059,14 @@ impl StreamTask {
                         status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                         break;
                     }
-                    OperatorPollResult::Continue => { /* no output; busy = residual on flush */ }
+                    OperatorPollResult::Continue => { /* no output; busy = residual on report */ }
                 }
-                Self::maybe_publish_watermark_lag(
-                    &mut lag_window_start,
+                Self::report_task_time_metrics(
+                    &task_time_metrics,
+                    &mut metrics_window_start,
                     &vertex_id,
                     metrics_labels.as_ref(),
                     &current_watermark,
-                );
-                Self::maybe_flush_time_budget(
-                    &time_budget,
-                    &mut budget_window_start,
-                    &vertex_id,
-                    metrics_labels.as_ref(),
                 );
             }
             
