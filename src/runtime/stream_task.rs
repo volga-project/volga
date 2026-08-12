@@ -6,7 +6,7 @@ use crate::{
         execution_graph::ExecutionGraph,
         health::{WorkerFatalReason, WorkerHealth},
         metrics::{
-            init_metrics, MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
+            init_metrics, MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
             METRIC_STREAM_TASK_BYTES_RECV, METRIC_STREAM_TASK_BYTES_SENT,
             METRIC_STREAM_TASK_MESSAGES_RECV, METRIC_STREAM_TASK_MESSAGES_SENT,
             METRIC_STREAM_TASK_PATH_LATENCY, METRIC_STREAM_TASK_RECORDS_RECV,
@@ -251,13 +251,13 @@ impl StreamTask {
         if let Some(labels) = labels {
             histogram!(
                 name,
-                LABEL_VERTEX_ID => vertex_id.clone(),
+                LABEL_TASK_ID => vertex_id.clone(),
                 LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                 LABEL_WORKER_ID => labels.worker_id.clone()
             )
             .record(value_ms);
         } else {
-            histogram!(name, LABEL_VERTEX_ID => vertex_id.clone()).record(value_ms);
+            histogram!(name, LABEL_TASK_ID => vertex_id.clone()).record(value_ms);
         }
     }
 
@@ -278,31 +278,31 @@ impl StreamTask {
             if let Some(labels) = labels {
                 counter!(
                     METRIC_STREAM_TASK_MESSAGES_RECV,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(1);
                 counter!(
                     METRIC_STREAM_TASK_RECORDS_RECV,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.num_records() as u64);
                 counter!(
                     METRIC_STREAM_TASK_BYTES_RECV,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.get_memory_size() as u64);
             } else {
-                counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_MESSAGES_RECV, LABEL_TASK_ID => vertex_id.clone())
                     .increment(1);
-                counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_RECORDS_RECV, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.num_records() as u64);
-                counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_BYTES_RECV, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.get_memory_size() as u64);
             }
 
@@ -320,31 +320,31 @@ impl StreamTask {
             if let Some(labels) = labels {
                 counter!(
                     METRIC_STREAM_TASK_MESSAGES_SENT,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(1);
                 counter!(
                     METRIC_STREAM_TASK_RECORDS_SENT,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.num_records() as u64);
                 counter!(
                     METRIC_STREAM_TASK_BYTES_SENT,
-                    LABEL_VERTEX_ID => vertex_id.clone(),
+                    LABEL_TASK_ID => vertex_id.clone(),
                     LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                     LABEL_WORKER_ID => labels.worker_id.clone()
                 )
                 .increment(message.get_memory_size() as u64);
             } else {
-                counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_MESSAGES_SENT, LABEL_TASK_ID => vertex_id.clone())
                     .increment(1);
-                counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_RECORDS_SENT, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.num_records() as u64);
-                counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_VERTEX_ID => vertex_id.clone())
+                counter!(METRIC_STREAM_TASK_BYTES_SENT, LABEL_TASK_ID => vertex_id.clone())
                     .increment(message.get_memory_size() as u64);
             }
         }

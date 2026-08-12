@@ -16,8 +16,7 @@ use crate::runtime::functions::source::request_source::{
     extract_request_source_config, RequestSourceProcessor,
 };
 use crate::runtime::metrics::{
-    emit_backpressure_gauges, emit_worker_memory_gauges, scrape_stream_task_metrics,
-    MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
+    collect_stream_task_metrics, MetricsLabels, TaskMetrics, WorkerAggregateMetrics,
 };
 use crate::runtime::observability::snapshot_types::{TaskOperatorMetrics, WorkerSnapshot};
 use crate::runtime::observability::{StreamTaskStatus, TaskMetadata};
@@ -80,17 +79,17 @@ impl WorkerInner {
             }
         }
 
-        // One registry render+parse for all tasks (not per-task GetState).
+        // One in-process registry visit for all tasks (not per-task GetState / Prom parse).
         let labels = MetricsLabels {
             pipeline_id: pipeline_id.0.clone(),
             worker_id: worker_id.clone(),
         };
-        let scraped = scrape_stream_task_metrics(Some(&labels));
+        let collected = collect_stream_task_metrics(Some(&labels));
         let task_metrics_str: HashMap<String, TaskMetrics> = task_statuses
             .keys()
             .map(|vertex_id| {
                 let key = vertex_id.as_ref().to_string();
-                let metrics = scraped
+                let metrics = collected
                     .get(&key)
                     .cloned()
                     .unwrap_or_else(|| TaskMetrics::empty(key.clone()));
@@ -99,12 +98,7 @@ impl WorkerInner {
             .collect();
         let worker_metrics =
             WorkerAggregateMetrics::new(worker_id, pipeline_id, task_metrics_str, &graph);
-        worker_metrics.record();
-        emit_backpressure_gauges(&worker_metrics);
-        for (vertex_id, op_metrics) in &task_operator_metrics {
-            op_metrics.emit(vertex_id.as_ref(), &labels);
-        }
-        emit_worker_memory_gauges(&labels);
+        worker_metrics.publish_poll_gauges(&labels);
 
         {
             let mut state_guard = state.lock().await;

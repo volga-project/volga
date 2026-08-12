@@ -8,7 +8,7 @@ use crate::{
     tests::support::pipeline_exec,
     runtime::{
         functions::source::word_count_source::BatchingMode,
-        metrics::{LatencyMetrics, LATENCY_BUCKET_BOUNDARIES},
+        metrics::{HistogramMetrics, LATENCY_BUCKET_BOUNDARIES},
         observability::{PipelineSnapshot, WorkerSnapshot},
         operators::{
             operator::OperatorConfig,
@@ -83,12 +83,12 @@ impl BenchmarkMetrics {
         }
     }
 
-    pub fn calculate_latency_stats(&self) -> Option<LatencyMetrics> {
+    pub fn calculate_latency_stats(&self) -> Option<HistogramMetrics> {
         if self.latency_histogram.is_none() {
             return None;
         }
 
-        Some(LatencyMetrics::new(self.latency_histogram.clone().unwrap()))
+        Some(HistogramMetrics::new(self.latency_histogram.clone().unwrap()))
     }
 }
 
@@ -273,7 +273,7 @@ pub async fn run_word_count_benchmark(
                             .unwrap()
                             .as_secs()
                     );
-                    print_pipeline_state(&pipeline_state, None, false, false, None, None);
+                    print_pipeline_state(&pipeline_state, None, false, false);
                     last_print_timestamp = now;
                 }
             }
