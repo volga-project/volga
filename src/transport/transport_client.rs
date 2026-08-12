@@ -1,7 +1,7 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_VERTEX_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
@@ -249,31 +249,31 @@ impl DataWriter {
                 if let Some(labels) = &self.metrics_labels {
                     gauge!(
                         METRIC_STREAM_TASK_TX_QUEUE_SIZE,
-                        LABEL_VERTEX_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_TASK_ID => self.vertex_id.clone(),
+                        LABEL_TARGET_TASK_ID => target_vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).set(queue_size);
                     gauge!(
                         METRIC_STREAM_TASK_TX_QUEUE_REM,
-                        LABEL_VERTEX_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_TASK_ID => self.vertex_id.clone(),
+                        LABEL_TARGET_TASK_ID => target_vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).set(queue_remaining);
                     let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
                     gauge!(
                         METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
-                        LABEL_VERTEX_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_VERTEX_ID => target_vertex_id.clone(),
+                        LABEL_TASK_ID => self.vertex_id.clone(),
+                        LABEL_TARGET_TASK_ID => target_vertex_id.clone(),
                         LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
                         LABEL_WORKER_ID => labels.worker_id.clone()
                     ).set(backpressure);
                 } else {
-                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_size);
-                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(queue_remaining);
+                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_TASK_ID => self.vertex_id.clone(), LABEL_TARGET_TASK_ID => target_vertex_id.clone()).set(queue_size);
+                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_TASK_ID => self.vertex_id.clone(), LABEL_TARGET_TASK_ID => target_vertex_id.clone()).set(queue_remaining);
                     let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
-                    gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_VERTEX_ID => self.vertex_id.clone(), LABEL_TARGET_VERTEX_ID => target_vertex_id.clone()).set(backpressure);
+                    gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_TASK_ID => self.vertex_id.clone(), LABEL_TARGET_TASK_ID => target_vertex_id.clone()).set(backpressure);
                 }
                 match time::timeout(timeout_duration, sender.send(message.clone())).await {
                     Ok(Ok(())) => {

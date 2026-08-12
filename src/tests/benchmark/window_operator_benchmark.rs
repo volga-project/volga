@@ -13,8 +13,7 @@ use crate::{
             datagen_source::{DatagenSourceConfig, FieldGenerator},
             DatagenSpec,
         },
-        metrics::PipelineStateHistory,
-        observability::PipelineSnapshot,
+                observability::PipelineSnapshot,
         operators::window::{
             operator::WindowOutputMode, TileConfig, TimeGranularity,
         },
@@ -94,7 +93,7 @@ impl Default for WindowBenchmarkConfig {
 pub struct BenchmarkMetrics {
     pub execution_time: Duration,
     pub records_produced: usize,
-    pub history: PipelineStateHistory,
+    pub samples: Vec<(u64, PipelineSnapshot)>,
 }
 
 impl BenchmarkMetrics {
@@ -102,12 +101,12 @@ impl BenchmarkMetrics {
         Self {
             execution_time: Duration::from_secs(0),
             records_produced: 0,
-            history: PipelineStateHistory::new(),
+            samples: Vec::new(),
         }
     }
 
     pub fn add_sample(&mut self, timestamp: u64, pipeline_state: PipelineSnapshot) {
-        self.history.add_sample(timestamp, pipeline_state);
+        self.samples.push((timestamp, pipeline_state));
     }
 }
 
@@ -375,12 +374,6 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
                                 })
                                 .collect();
 
-                            // Get history from metrics for throughput calculation
-                            let history = {
-                                let metrics_guard = benchmark_metrics_clone.lock().await;
-                                metrics_guard.history.clone()
-                            };
-
                             print_pipeline_state(
                                 &pipeline_state,
                                 if window_operator_ids.is_empty() {
@@ -390,8 +383,6 @@ pub async fn run_window_benchmark(config: WindowBenchmarkConfig) -> Result<Bench
                                 },
                                 false,
                                 false,
-                                Some(&history),
-                                throughput_window_seconds_clone,
                             );
                             last_print_timestamp = now;
                         }
@@ -510,69 +501,9 @@ pub fn print_benchmark_results(config: &WindowBenchmarkConfig, metrics: &Benchma
             metrics.records_produced as f64 / metrics.execution_time.as_secs_f64()
         );
     }
-    println!("  Sample Count: {}", metrics.history.samples.len());
-
-    // Print final aggregated statistics
-    let final_stats = metrics.history.final_stats();
-
-    if !final_stats.throughput_per_task.is_empty() {
-        println!("\nThroughput Statistics (per task, aggregated over all history):");
-        for (task_id, task_stats) in &final_stats.throughput_per_task {
-            println!("  Task: {}", task_id);
-            println!(
-                "    Messages Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} msg/s",
-                task_stats.messages_sent.avg,
-                task_stats.messages_sent.min,
-                task_stats.messages_sent.max,
-                task_stats.messages_sent.stddev
-            );
-            println!(
-                "    Messages Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} msg/s",
-                task_stats.messages_recv.avg,
-                task_stats.messages_recv.min,
-                task_stats.messages_recv.max,
-                task_stats.messages_recv.stddev
-            );
-            println!(
-                "    Records Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} rec/s",
-                task_stats.records_sent.avg,
-                task_stats.records_sent.min,
-                task_stats.records_sent.max,
-                task_stats.records_sent.stddev
-            );
-            println!(
-                "    Records Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} rec/s",
-                task_stats.records_recv.avg,
-                task_stats.records_recv.min,
-                task_stats.records_recv.max,
-                task_stats.records_recv.stddev
-            );
-            println!(
-                "    Bytes Sent: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} B/s",
-                task_stats.bytes_sent.avg,
-                task_stats.bytes_sent.min,
-                task_stats.bytes_sent.max,
-                task_stats.bytes_sent.stddev
-            );
-            println!(
-                "    Bytes Recv: avg={:.2}, min={:.2}, max={:.2}, stddev={:.2} B/s",
-                task_stats.bytes_recv.avg,
-                task_stats.bytes_recv.min,
-                task_stats.bytes_recv.max,
-                task_stats.bytes_recv.stddev
-            );
-        }
-    }
-
-    if !final_stats.latency_per_task.is_empty() {
-        println!("\nPath latency (per task, merged histogram over all history):");
-        for (task_id, latency_stats) in &final_stats.latency_per_task {
-            println!("  Task: {}", task_id);
-            println!("    Avg: {:.2} ms", latency_stats.avg);
-            println!("    P50: {:.2} ms", latency_stats.p50);
-            println!("    P95: {:.2} ms", latency_stats.p95);
-            println!("    P99: {:.2} ms", latency_stats.p99);
-        }
+    println!("  Sample Count: {}", metrics.samples.len());
+    if let Some((_, last)) = metrics.samples.last() {
+        print_pipeline_state(last, None, false, false);
     }
 
     println!("==========================================\n");

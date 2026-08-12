@@ -4,7 +4,7 @@ use metrics::gauge;
 use serde::{Deserialize, Serialize};
 
 use crate::runtime::metrics::{
-    MetricsLabels, LABEL_PIPELINE_ID, LABEL_VERTEX_ID, LABEL_WORKER_ID,
+    MetricsLabels, LABEL_PIPELINE_ID, LABEL_TASK_ID, LABEL_WORKER_ID,
 };
 
 pub const METRIC_WO_STATE_RAW_COUNT: &str = "volga_wo_state_raw_count";
@@ -35,56 +35,56 @@ impl WindowOperatorMetrics {
         let vertex = vertex_id.to_string();
         gauge!(
             METRIC_WO_STATE_RAW_COUNT,
-            LABEL_VERTEX_ID => vertex.clone(),
+            LABEL_TASK_ID => vertex.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
         .set(self.raw_count as f64);
         gauge!(
             METRIC_WO_STATE_RAW_BYTES,
-            LABEL_VERTEX_ID => vertex.clone(),
+            LABEL_TASK_ID => vertex.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
         .set(self.raw_bytes as f64);
         gauge!(
             METRIC_WO_STATE_TILES_COUNT,
-            LABEL_VERTEX_ID => vertex.clone(),
+            LABEL_TASK_ID => vertex.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
         .set(self.tiles_count as f64);
         gauge!(
             METRIC_WO_STATE_TILES_BYTES,
-            LABEL_VERTEX_ID => vertex.clone(),
+            LABEL_TASK_ID => vertex.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
         .set(self.tiles_bytes as f64);
         gauge!(
             METRIC_WO_STATE_TRIGGERS_COUNT,
-            LABEL_VERTEX_ID => vertex.clone(),
+            LABEL_TASK_ID => vertex.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
         .set(self.triggers_count as f64);
         gauge!(
             METRIC_WO_STATE_TRIGGERS_BYTES,
-            LABEL_VERTEX_ID => vertex.clone(),
+            LABEL_TASK_ID => vertex.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
         .set(self.triggers_bytes as f64);
         gauge!(
             METRIC_WO_STATE_KEY_STATES_COUNT,
-            LABEL_VERTEX_ID => vertex.clone(),
+            LABEL_TASK_ID => vertex.clone(),
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
         .set(self.key_states_count as f64);
         gauge!(
             METRIC_WO_STATE_KEY_STATES_BYTES,
-            LABEL_VERTEX_ID => vertex,
+            LABEL_TASK_ID => vertex,
             LABEL_WORKER_ID => labels.worker_id.clone(),
             LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
         )
