@@ -63,14 +63,9 @@ impl CheckpointProtocol {
         Ok(checkpoint_id)
     }
 
-    /// Returns `(checkpoint_id, duration_ms)` when an in-flight checkpoint is aborted.
-    pub(super) fn abort_in_flight(&mut self) -> Option<(u64, u64)> {
-        self.in_flight.take().map(|c| {
-            (
-                c.checkpoint_id,
-                c.started_at.elapsed().as_millis() as u64,
-            )
-        })
+    /// Returns the aborted checkpoint id, if any.
+    pub(super) fn abort_in_flight(&mut self) -> Option<u64> {
+        self.in_flight.take().map(|c| c.checkpoint_id)
     }
 
     /// Record a state ack. Completes only when acks and aligns both match expected sets.

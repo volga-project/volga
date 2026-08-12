@@ -45,7 +45,7 @@ pub const METRIC_STREAM_TASK_IDLE_TIME_MS_PER_SECOND: &str =
 pub const METRIC_STREAM_TASK_BACKPRESSURED_TIME_MS_PER_SECOND: &str =
     "volga_stream_task_backpressured_time_ms_per_second";
 
-/// Job-level checkpoint wall time (master `started_at` → complete/fail).
+/// Job-level checkpoint wall time (master `started_at` → complete only).
 pub const METRIC_CHECKPOINT_DURATION_MS: &str = "volga_checkpoint_duration_ms";
 pub const METRIC_CHECKPOINT_COMPLETED: &str = "volga_checkpoint_completed";
 pub const METRIC_CHECKPOINT_FAILED: &str = "volga_checkpoint_failed";

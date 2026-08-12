@@ -323,13 +323,9 @@ impl MasterState {
             .ask(AbortInFlightCheckpoint)
             .await
             .map_err(|error| format!("checkpoint coordinator: {error}"))?;
-        if let Some((checkpoint_id, duration_ms)) = aborted {
+        if let Some(checkpoint_id) = aborted {
             let pipeline_id = self.orchestrator.get_pipeline_id().await;
-            record_pipeline_histogram(
-                METRIC_CHECKPOINT_DURATION_MS,
-                duration_ms as f64,
-                &pipeline_id,
-            );
+            // Duration stays success-only so abort/timeouts do not inflate the histogram.
             increment_pipeline_counter(METRIC_CHECKPOINT_FAILED, 1, &pipeline_id);
             self.record_lifecycle_event(LifecycleEvent::CheckpointFailed {
                 checkpoint_id,

@@ -102,10 +102,10 @@ impl Checkpoints {
             .start(&self.expected_acks, &self.expected_aligns)
     }
 
-    pub fn abort_in_flight(&mut self) -> Option<(u64, u64)> {
-        let (checkpoint_id, duration_ms) = self.protocol.abort_in_flight()?;
+    pub fn abort_in_flight(&mut self) -> Option<u64> {
+        let checkpoint_id = self.protocol.abort_in_flight()?;
         self.pending.remove(&checkpoint_id);
-        Some((checkpoint_id, duration_ms))
+        Some(checkpoint_id)
     }
 
     pub fn in_flight_id(&self) -> Option<u64> {
@@ -290,7 +290,7 @@ mod tests {
             CheckpointAckOutcome::Pending
         );
         assert!(cps.load(id).await.is_err());
-        assert_eq!(cps.abort_in_flight().map(|(cid, _)| cid), Some(id));
+        assert_eq!(cps.abort_in_flight(), Some(id));
         assert!(cps.load(id).await.is_err());
     }
 
