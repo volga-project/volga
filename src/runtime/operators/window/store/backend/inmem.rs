@@ -14,6 +14,7 @@ use tokio::sync::RwLock;
 
 use std::any::Any;
 
+use crate::runtime::metrics::MetricsLabels;
 use crate::runtime::operators::window::metrics;
 use crate::runtime::operators::window::model::{
     Cursor, RawRun, TileRun, WindowTrigger,
@@ -74,11 +75,17 @@ struct InMemState {
 #[derive(Debug, Clone, Default)]
 pub struct InMemWindowStore {
     state: Arc<RwLock<InMemState>>,
+    metrics_labels: Option<MetricsLabels>,
 }
 
 impl InMemWindowStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn with_metrics_labels(mut self, labels: Option<MetricsLabels>) -> Self {
+        self.metrics_labels = labels;
+        self
     }
 
     /// Scan namespace store footprint and write gauges into the metrics registry.
@@ -451,23 +458,23 @@ impl OperatorStore for InMemWindowStore {
         self
     }
 
-    async fn maintain(
-        &self,
-        ns: &StateNamespace,
-        state: &dyn OperatorTaskState,
-        task_id: &str,
-        labels: Option<&crate::runtime::metrics::MetricsLabels>,
-    ) -> Result<()> {
+    fn metrics_labels(&self) -> Option<&MetricsLabels> {
+        self.metrics_labels.as_ref()
+    }
+
+    async fn maintain(&self, state: &dyn OperatorTaskState) -> Result<()> {
         let Some(wo) = state.as_any().downcast_ref::<WindowOperatorState>() else {
             return Ok(());
         };
         let Some((watermark, floor)) = wo.retention_cutoff() else {
             return Ok(());
         };
+        let ns = state.state_namespace();
+        let task_id = state.task_id();
         let started = std::time::Instant::now();
         let mut store = self.state.write().await;
         let pruned_rows = Self::prune_namespace(&mut store, ns.bytes.as_slice(), watermark, floor);
-        if let Some(labels) = labels {
+        if let Some(labels) = self.metrics_labels.as_ref() {
             Self::report_metrics(&store, ns.bytes.as_slice(), task_id, labels);
             drop(store);
             metrics::record_maintain_ms(
@@ -920,6 +927,7 @@ mod tests {
         let task_state = WindowOperatorState::new(
             Arc::new(store.clone()) as Arc<dyn WindowOperatorStore>,
             namespace.clone(),
+            Arc::from("test-task"),
             0,
             Arc::new(BTreeMap::new()),
             0,
@@ -928,10 +936,7 @@ mod tests {
         task_state
             .watermark_frontier
             .store(5_000, std::sync::atomic::Ordering::Release);
-        store
-            .maintain(&namespace, &task_state, "test-task", None)
-            .await
-            .unwrap();
+        store.maintain(&task_state).await.unwrap();
 
         let mut due = store.stream_due(&namespace, None, Cursor::new(10_000, u64::MAX));
         let work = due.try_next().await.unwrap().unwrap();

@@ -155,6 +155,7 @@ impl WindowOperator {
         self.state = Some(Arc::new(WindowOperatorState::new(
             store,
             namespace,
+            Arc::from("test-task"),
             self.ts_column_index,
             self.window_configs.clone(),
             self.lateness_ms,
@@ -237,20 +238,22 @@ impl OperatorTrait for WindowOperator {
                     .expect("operator id must be configured for WindowOperator"),
                 context.task_index(),
             );
+            let task_id = context.vertex_id_arc();
             let state = Arc::new(WindowOperatorState::new(
                 store,
                 ns,
+                task_id.clone(),
                 self.ts_column_index,
                 self.window_configs.clone(),
                 self.lateness_ms,
                 self.max_window_length_ms,
             ));
             registry.insert_task_state(
-                context.vertex_id_arc(),
+                task_id.clone(),
                 state.clone() as Arc<dyn OperatorTaskState>,
             );
             self.state_registry = Some(registry.clone());
-            self.vertex_id = Some(context.vertex_id_arc());
+            self.vertex_id = Some(task_id);
             self.metrics_labels = context.metrics_labels();
             self.state = Some(state);
         }
