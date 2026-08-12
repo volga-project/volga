@@ -202,3 +202,120 @@ pub fn batch_bounded_channel(size: u32) -> (BatchSender, BatchReceiver) {
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::message::WatermarkMessage;
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    fn wm(i: u64) -> Message {
+        Message::Watermark(WatermarkMessage::new("t".to_string(), i, Some(0)))
+    }
+
+    fn assert_ns_near(actual: u64, expected: Duration, lo_frac: f64, hi_frac: f64) {
+        let expected_ns = expected.as_nanos() as f64;
+        let lo = (expected_ns * lo_frac) as u64;
+        let hi = (expected_ns * hi_frac) as u64;
+        assert!(
+            actual >= lo && actual <= hi,
+            "blocked_ns={actual} not in [{lo}, {hi}] for expected {expected:?}"
+        );
+    }
+
+    #[test]
+    fn backpressure_ratio_empty_and_full() {
+        let (tx, _rx) = batch_bounded_channel(2);
+        assert!((tx.backpressure_ratio() - 0.0).abs() < 1e-9);
+
+        // Fill: each watermark counts as 1 toward the bound.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tx.send(wm(1), None).await.unwrap();
+            tx.send(wm(2), None).await.unwrap();
+        });
+        assert_eq!(tx.capacity(), 0);
+        // 1 - 1/(2+1) = 2/3
+        assert!((tx.backpressure_ratio() - (2.0 / 3.0)).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn fast_send_records_no_blocked_time() {
+        let (tx, mut rx) = batch_bounded_channel(4);
+        let bp = OutputBackpressure::new();
+        tx.send(wm(1), Some(&bp)).await.unwrap();
+        assert_eq!(bp.take_ns(), 0);
+        assert!(rx.recv().await.is_some());
+    }
+
+    #[tokio::test]
+    async fn blocked_send_records_wait_near_hold_time() {
+        let (tx, mut rx) = batch_bounded_channel(1);
+        let bp = Arc::new(OutputBackpressure::new());
+        tx.send(wm(1), None).await.unwrap();
+        // size=1 full → 1 - 1/(1+1) = 0.5
+        assert!((tx.backpressure_ratio() - 0.5).abs() < 1e-9);
+
+        let hold = Duration::from_millis(80);
+        let sender = tx.clone();
+        let bp_send = bp.clone();
+        let blocked = tokio::spawn(async move { sender.send(wm(2), Some(&bp_send)).await });
+
+        sleep(hold).await;
+        assert!(rx.recv().await.is_some());
+        blocked.await.unwrap().unwrap();
+
+        let ns = bp.take_ns();
+        assert_ns_near(ns, hold, 0.5, 2.5);
+    }
+
+    #[tokio::test]
+    async fn parallel_waits_count_exclusively() {
+        let (tx, mut rx) = batch_bounded_channel(1);
+        let bp = Arc::new(OutputBackpressure::new());
+        tx.send(wm(0), None).await.unwrap();
+
+        let hold = Duration::from_millis(80);
+        let mut joins = Vec::new();
+        for i in 1..=2 {
+            let sender = tx.clone();
+            let bp_send = bp.clone();
+            joins.push(tokio::spawn(async move {
+                sender.send(wm(i), Some(&bp_send)).await
+            }));
+        }
+
+        sleep(hold).await;
+        // Still both waiting: in-flight exclusive slice ≈ hold, not 2×hold.
+        let mid = bp.take_ns();
+        assert_ns_near(mid, hold, 0.5, 1.75);
+
+        assert!(rx.recv().await.is_some());
+        assert!(rx.recv().await.is_some());
+        for j in joins {
+            j.await.unwrap().unwrap();
+        }
+        // Residual after mid take should be small (drain latency), not another full hold.
+        assert!(bp.take_ns() < Duration::from_millis(40).as_nanos() as u64);
+    }
+
+    #[tokio::test]
+    async fn timeout_cancel_still_accounts_blocked_time() {
+        let (tx, _rx) = batch_bounded_channel(1);
+        let bp = OutputBackpressure::new();
+        tx.send(wm(1), None).await.unwrap();
+
+        let wait = Duration::from_millis(50);
+        let err = timeout(wait, tx.send(wm(2), Some(&bp))).await;
+        assert!(err.is_err(), "send should time out while queue is full");
+
+        let ns = bp.take_ns();
+        assert_ns_near(ns, wait, 0.5, 2.5);
+        // No double-count after drop.
+        assert_eq!(bp.take_ns(), 0);
+    }
+}
