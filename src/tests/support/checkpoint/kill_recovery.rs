@@ -81,6 +81,12 @@ async fn wait_for_kill_restore(
                 }
                 _ => {}
             }
+            // Stop once both signals are seen so we don't advance the cursor past
+            // a later AttemptRunning in the same poll batch (final wait needs it).
+            // Checkpoint metrics make lifecycle batches denser, which amplifies this.
+            if restore_attempt.is_some() && target_replaced {
+                break;
+            }
         }
         if let (Some(attempt_id), true) = (restore_attempt, target_replaced) {
             return Ok(attempt_id);
