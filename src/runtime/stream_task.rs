@@ -43,11 +43,14 @@ use crate::common::message::{Message, WatermarkMessage};
 use std::{collections::HashMap, sync::{atomic::{AtomicU8, AtomicU64, Ordering}, Arc}, time::{Duration, Instant, SystemTime, UNIX_EPOCH}};
 
 /// Accumulates Flink-style task time-budget nanos within a flush window.
+///
+/// Idle = input wait; backpressured = exclusive tx-queue wait via
+/// [`OutputBackpressure`] (same write path as BP ratio gauges); busy = residual
+/// wall time so the three ms/s gauges sum to ~1000.
 #[derive(Debug, Default)]
 pub(crate) struct TaskTimeBudget {
     idle_ns: AtomicU64,
-    busy_ns: AtomicU64,
-    backpressured_ns: AtomicU64,
+    output_bp: Arc<crate::transport::batch_channel::OutputBackpressure>,
 }
 
 impl TaskTimeBudget {
@@ -55,33 +58,26 @@ impl TaskTimeBudget {
         self.idle_ns.fetch_add(ns, Ordering::Relaxed);
     }
 
-    fn add_busy_ns(&self, ns: u64) {
-        self.busy_ns.fetch_add(ns, Ordering::Relaxed);
+    fn output_backpressure(&self) -> Arc<crate::transport::batch_channel::OutputBackpressure> {
+        self.output_bp.clone()
     }
 
-    fn add_backpressured_ns(&self, ns: u64) {
-        self.backpressured_ns.fetch_add(ns, Ordering::Relaxed);
-    }
-
-    fn idle_ns(&self) -> u64 {
-        self.idle_ns.load(Ordering::Relaxed)
-    }
-
-    /// Scale accumulated times to ms-per-second and reset.
+    /// Scale to ms-per-second and reset. Returns `(busy, idle, backpressured)`.
     fn take_ms_per_second(&self, window: Duration) -> (f64, f64, f64) {
         let idle = self.idle_ns.swap(0, Ordering::Relaxed);
-        let busy = self.busy_ns.swap(0, Ordering::Relaxed);
-        let bp = self.backpressured_ns.swap(0, Ordering::Relaxed);
+        let bp = self.output_bp.take_ns();
         let window_ms = window.as_secs_f64() * 1000.0;
         if window_ms <= 0.0 {
             return (0.0, 0.0, 0.0);
         }
+        let idle_ms = (idle as f64 / 1_000_000.0).min(window_ms);
+        let mut bp_ms = bp as f64 / 1_000_000.0;
+        if idle_ms + bp_ms > window_ms {
+            bp_ms = (window_ms - idle_ms).max(0.0);
+        }
+        let busy_ms = (window_ms - idle_ms - bp_ms).max(0.0);
         let scale = 1000.0 / window_ms;
-        (
-            (busy as f64 / 1_000_000.0) * scale,
-            (idle as f64 / 1_000_000.0) * scale,
-            (bp as f64 / 1_000_000.0) * scale,
-        )
+        (busy_ms * scale, idle_ms * scale, bp_ms * scale)
     }
 }
 // serde imports removed; this module does not define serializable DTOs directly.
@@ -566,19 +562,17 @@ impl StreamTask {
     }
 
     // Helper function to send message to collectors (similar to original stream_task.rs).
-    /// Returns wall-clock nanoseconds spent in the send / retry loop (output wait).
     async fn send_to_collectors_if_needed(
         mut collectors_per_target_operator: &mut HashMap<String, Collector>,
         message: Message,
         vertex_id: VertexId,
         status: Arc<AtomicU8>
-    ) -> u64 {
+    ) {
         if collectors_per_target_operator.is_empty() {
             // Edge operator - no downstream collectors
-            return 0;
+            return;
         }
 
-        let send_started = Instant::now();
         let mut channels_to_send_per_operator = HashMap::new();
         for (target_operator_id, collector) in collectors_per_target_operator.iter_mut() {
             let partitioned_channels = collector.gen_partitioned_channels(&message);
@@ -588,7 +582,7 @@ impl StreamTask {
 
         // TODO should retires be inside transport?
         let mut retries_before_close = 3; // per - messages
-    
+
         // send message to all destinations until no backpressure
         while status.load(Ordering::SeqCst) == StreamTaskStatus::Running as u8 ||
             status.load(Ordering::SeqCst) == StreamTaskStatus::Finished as u8 {
@@ -610,7 +604,7 @@ impl StreamTask {
             for (target_operator_id, write_res) in write_results {
                 let mut resend_channels = vec![];
                 for channel in write_res.keys() {
-                    let (success, _backpressure_time_ms) = write_res.get(channel).unwrap();
+                    let success = write_res.get(channel).unwrap();
                     if !success {
                         resend_channels.push(channel.clone());
                     }
@@ -623,7 +617,6 @@ impl StreamTask {
                 break;
             }
         }
-        send_started.elapsed().as_nanos() as u64
     }
 
     fn maybe_flush_time_budget(
@@ -702,6 +695,12 @@ impl StreamTask {
             
             let mut transport_client =
                 TransportClient::new(vertex_id.clone(), transport_client_config, run_loop_health);
+
+            // Install before collectors clone the writer so ratio + time-budget BP share one clock.
+            let time_budget = Arc::new(TaskTimeBudget::default());
+            if let Some(writer) = transport_client.writer.as_mut() {
+                writer.set_output_backpressure(time_budget.output_backpressure());
+            }
             
             let mut collectors_per_target_operator: HashMap<String, Collector> = HashMap::new();
 
@@ -806,7 +805,6 @@ impl StreamTask {
                 None
             };
             
-            let time_budget = Arc::new(TaskTimeBudget::default());
             let mut budget_window_start = Instant::now();
 
             if !is_source {
@@ -862,16 +860,11 @@ impl StreamTask {
                     None
                 };
 
-                let poll_started = Instant::now();
-                let idle_before = time_budget.idle_ns();
                 let poll_res = if let Some(msg) = produced {
                     OperatorPollResult::Ready(msg)
                 } else {
                     operator.poll_next().await
                 };
-                let poll_elapsed_ns = poll_started.elapsed().as_nanos() as u64;
-                let idle_during_poll = time_budget.idle_ns().saturating_sub(idle_before);
-                time_budget.add_busy_ns(poll_elapsed_ns.saturating_sub(idle_during_poll));
 
                 match poll_res {
                     OperatorPollResult::Ready(mut message) => {
@@ -1018,14 +1011,13 @@ impl StreamTask {
                         message.set_upstream_vertex_id(vertex_id.as_ref().to_string());
                         Self::record_metrics(vertex_id.clone(), &message, false, metrics_labels.as_ref());
 
-                        // Send to collectors
-                        let bp_ns = Self::send_to_collectors_if_needed(
+                        // Send to collectors (queue waits record on time_budget.output_bp)
+                        Self::send_to_collectors_if_needed(
                             &mut collectors_per_target_operator,
                             message,
                             vertex_id.clone(),
                             status.clone()
                         ).await;
-                        time_budget.add_backpressured_ns(bp_ns);
 
                         if let Some(wm) = injected_wm {
                             let mut injected = Message::Watermark(wm);
@@ -1044,14 +1036,13 @@ impl StreamTask {
                                 false,
                                 metrics_labels.as_ref(),
                             );
-                            let bp_ns = Self::send_to_collectors_if_needed(
+                            Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 injected,
                                 vertex_id.clone(),
                                 status.clone(),
                             )
                             .await;
-                            time_budget.add_backpressured_ns(bp_ns);
                         }
                     }
                     OperatorPollResult::None => {
@@ -1062,14 +1053,13 @@ impl StreamTask {
                                 Some(Self::now_ms()),
                             ));
                             Self::record_metrics(vertex_id.clone(), &wm, false, metrics_labels.as_ref());
-                            let bp_ns = Self::send_to_collectors_if_needed(
+                            Self::send_to_collectors_if_needed(
                                 &mut collectors_per_target_operator,
                                 wm,
                                 vertex_id.clone(),
                                 status.clone(),
                             )
                             .await;
-                            time_budget.add_backpressured_ns(bp_ns);
                         } else {
                             // Peer/transport teardown can drop the input without a max watermark.
                             println!(
@@ -1081,7 +1071,7 @@ impl StreamTask {
                         status.store(StreamTaskStatus::Finished as u8, Ordering::SeqCst);
                         break;
                     }
-                    OperatorPollResult::Continue => { /* no output; busy already counted */ }
+                    OperatorPollResult::Continue => { /* no output; busy = residual on flush */ }
                 }
                 Self::maybe_publish_watermark_lag(
                     &mut lag_window_start,

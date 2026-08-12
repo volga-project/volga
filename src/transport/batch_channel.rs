@@ -1,9 +1,78 @@
-use std::sync::{atomic::{AtomicU32, AtomicU64, Ordering}, Arc};
+use std::sync::{
+    atomic::{AtomicU32, AtomicU64, Ordering},
+    Arc, Mutex,
+};
+use std::time::Instant;
 
-use tokio::sync::{mpsc::{error::SendError, unbounded_channel, UnboundedReceiver, UnboundedSender}, Notify};
+use tokio::sync::{
+    mpsc::{error::SendError, unbounded_channel, UnboundedReceiver, UnboundedSender},
+    Notify,
+};
 
 use crate::common::Message;
 
+/// Exclusive wall-clock time spent blocked on tx queue space.
+///
+/// Parallel `send`s share one instance: overlapping waits count once (task-level BP),
+/// matching Flink-style backpressured time and the queue-fill ratio published by
+/// [`crate::transport::transport_client::DataWriter`] on the same write path.
+#[derive(Debug, Default)]
+pub struct OutputBackpressure {
+    accumulated_ns: AtomicU64,
+    state: Mutex<WaitState>,
+}
+
+#[derive(Debug, Default)]
+struct WaitState {
+    waiters: u32,
+    started: Option<Instant>,
+}
+
+impl OutputBackpressure {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn begin_wait(&self) -> WaitGuard<'_> {
+        {
+            let mut g = self.state.lock().expect("output backpressure");
+            if g.waiters == 0 {
+                g.started = Some(Instant::now());
+            }
+            g.waiters = g.waiters.saturating_add(1);
+        }
+        WaitGuard(self)
+    }
+
+    /// Take accumulated blocked nanos for the current metrics window (includes an
+    /// in-flight wait slice, which continues into the next window).
+    pub fn take_ns(&self) -> u64 {
+        let mut g = self.state.lock().expect("output backpressure");
+        let mut total = self.accumulated_ns.swap(0, Ordering::Relaxed);
+        if g.waiters > 0 {
+            if let Some(started) = g.started.replace(Instant::now()) {
+                total = total.saturating_add(started.elapsed().as_nanos() as u64);
+            }
+        }
+        total
+    }
+}
+
+struct WaitGuard<'a>(&'a OutputBackpressure);
+
+impl Drop for WaitGuard<'_> {
+    fn drop(&mut self) {
+        let mut g = self.0.state.lock().expect("output backpressure");
+        g.waiters = g.waiters.saturating_sub(1);
+        if g.waiters == 0 {
+            if let Some(started) = g.started.take() {
+                self.0
+                    .accumulated_ns
+                    .fetch_add(started.elapsed().as_nanos() as u64, Ordering::Relaxed);
+            }
+        }
+    }
+}
 
 // Arroyo-style bounded batch channel
 // uses batch-size as a bound
@@ -27,7 +96,19 @@ fn message_bytes(message: &Message) -> u64 {
 }
 
 impl BatchSender {
-    pub async fn send(&self, message: Message) -> Result<(), SendError<Message>> {
+    /// Queue fill ratio in `[0, 1)` used for `volga_stream_task_backpressure_ratio`.
+    pub fn backpressure_ratio(&self) -> f64 {
+        let size = self.size as f64;
+        let remaining = self.capacity() as f64;
+        1.0 - (remaining + 1.0) / (size + 1.0)
+    }
+
+    /// Send `message`. When `bp` is set, queue-full waits are recorded there.
+    pub async fn send(
+        &self,
+        message: Message,
+        bp: Option<&OutputBackpressure>,
+    ) -> Result<(), SendError<Message>> {
         // Ensure that every message is sendable, even if it's bigger than our max size
         let count = message_count(&message, self.size);
         loop {
@@ -56,6 +137,7 @@ impl BatchSender {
             } else {
                 // not enough room in the queue, wait to be notified that the receiver has
                 // consumed
+                let _wait = bp.map(|b| b.begin_wait());
                 self.notify.notified().await;
             }
         }

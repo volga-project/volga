@@ -1,7 +1,7 @@
 use anyhow::Result;
 use metrics::gauge;
 use std::collections::HashMap;
-use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender}, channel::Channel}};
+use crate::{common::message::Message, runtime::{health::{WorkerFatalReason, WorkerHealth}, metrics::{MetricsLabels, LABEL_PIPELINE_ID, LABEL_TARGET_TASK_ID, LABEL_TASK_ID, LABEL_WORKER_ID, METRIC_STREAM_TASK_BACKPRESSURE_RATIO, METRIC_STREAM_TASK_TX_QUEUE_REM, METRIC_STREAM_TASK_TX_QUEUE_SIZE}, operators::operator::MessageStream}, transport::{batch_channel::{BatchReceiver, BatchSender, OutputBackpressure}, channel::Channel}};
 use std::time::Duration;
 use tokio::{sync::mpsc::error::SendError, time};
 use tokio::sync::Notify;
@@ -181,6 +181,8 @@ pub struct DataWriter {
     pub senders: HashMap<String, BatchSender>,
     metrics_labels: Option<MetricsLabels>,
     worker_health: Arc<WorkerHealth>,
+    /// Task-scoped queue-wait clock (ratio gauges + time-budget BP share this write path).
+    output_backpressure: Option<Arc<OutputBackpressure>>,
     // batcher: Batcher,
     default_timeout: Duration,
     default_retries: usize,
@@ -202,11 +204,16 @@ impl DataWriter {
             senders,
             metrics_labels,
             worker_health,
+            output_backpressure: None,
             // batcher,
             default_timeout: Duration::from_millis(5000),
             default_retries: 10,
             _batching_config: batching_config,
         }
+    }
+
+    pub fn set_output_backpressure(&mut self, bp: Arc<OutputBackpressure>) {
+        self.output_backpressure = Some(bp);
     }
 
     pub async fn start(&mut self) {
@@ -218,12 +225,61 @@ impl DataWriter {
         Ok(())
     }
 
-    pub async fn write_message(&mut self, channel: &Channel, message: &Message) -> (bool, u32) {
-        // match self.batcher.write_message(channel_id, message.clone()).await {
-        //     Ok(()) => (true, 0), // Success, no latency for batching
-        //     Err(_) => (false, 0)
-        // }
-        self.write_message_with_params(channel, message, self.default_timeout, self.default_retries).await
+    /// Publish queue size / remaining / fill-ratio for one outbound channel.
+    fn publish_queue_metrics(&self, sender: &BatchSender, target_vertex_id: &str) {
+        let queue_size = sender.size();
+        let queue_remaining = sender.capacity();
+        let backpressure = sender.backpressure_ratio();
+        if let Some(labels) = &self.metrics_labels {
+            gauge!(
+                METRIC_STREAM_TASK_TX_QUEUE_SIZE,
+                LABEL_TASK_ID => self.vertex_id.clone(),
+                LABEL_TARGET_TASK_ID => target_vertex_id.to_string(),
+                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                LABEL_WORKER_ID => labels.worker_id.clone()
+            )
+            .set(queue_size);
+            gauge!(
+                METRIC_STREAM_TASK_TX_QUEUE_REM,
+                LABEL_TASK_ID => self.vertex_id.clone(),
+                LABEL_TARGET_TASK_ID => target_vertex_id.to_string(),
+                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                LABEL_WORKER_ID => labels.worker_id.clone()
+            )
+            .set(queue_remaining);
+            gauge!(
+                METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
+                LABEL_TASK_ID => self.vertex_id.clone(),
+                LABEL_TARGET_TASK_ID => target_vertex_id.to_string(),
+                LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
+                LABEL_WORKER_ID => labels.worker_id.clone()
+            )
+            .set(backpressure);
+        } else {
+            gauge!(
+                METRIC_STREAM_TASK_TX_QUEUE_SIZE,
+                LABEL_TASK_ID => self.vertex_id.clone(),
+                LABEL_TARGET_TASK_ID => target_vertex_id.to_string()
+            )
+            .set(queue_size);
+            gauge!(
+                METRIC_STREAM_TASK_TX_QUEUE_REM,
+                LABEL_TASK_ID => self.vertex_id.clone(),
+                LABEL_TARGET_TASK_ID => target_vertex_id.to_string()
+            )
+            .set(queue_remaining);
+            gauge!(
+                METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
+                LABEL_TASK_ID => self.vertex_id.clone(),
+                LABEL_TARGET_TASK_ID => target_vertex_id.to_string()
+            )
+            .set(backpressure);
+        }
+    }
+
+    pub async fn write_message(&mut self, channel: &Channel, message: &Message) -> bool {
+        self.write_message_with_params(channel, message, self.default_timeout, self.default_retries)
+            .await
     }
 
     async fn write_message_with_params(
@@ -231,10 +287,10 @@ impl DataWriter {
         channel: &Channel,
         message: &Message,
         timeout_duration: Duration,
-        retries: usize
-    ) -> (bool, u32) {
+        retries: usize,
+    ) -> bool {
         let mut attempts = 0;
-        let start_time = std::time::Instant::now();
+        let bp = self.output_backpressure.as_deref();
 
         while attempts <= retries {
             if self.senders.is_empty() {
@@ -242,43 +298,11 @@ impl DataWriter {
             }
             let channel_id = channel.get_channel_id();
             if let Some(sender) = self.senders.get(&channel_id) {
-                let queue_size = sender.size();
-                let queue_remaining = sender.capacity();
                 let target_vertex_id = channel.get_target_vertex_id();
-
-                if let Some(labels) = &self.metrics_labels {
-                    gauge!(
-                        METRIC_STREAM_TASK_TX_QUEUE_SIZE,
-                        LABEL_TASK_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_TASK_ID => target_vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).set(queue_size);
-                    gauge!(
-                        METRIC_STREAM_TASK_TX_QUEUE_REM,
-                        LABEL_TASK_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_TASK_ID => target_vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).set(queue_remaining);
-                    let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
-                    gauge!(
-                        METRIC_STREAM_TASK_BACKPRESSURE_RATIO,
-                        LABEL_TASK_ID => self.vertex_id.clone(),
-                        LABEL_TARGET_TASK_ID => target_vertex_id.clone(),
-                        LABEL_PIPELINE_ID => labels.pipeline_id.clone(),
-                        LABEL_WORKER_ID => labels.worker_id.clone()
-                    ).set(backpressure);
-                } else {
-                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_SIZE, LABEL_TASK_ID => self.vertex_id.clone(), LABEL_TARGET_TASK_ID => target_vertex_id.clone()).set(queue_size);
-                    gauge!(METRIC_STREAM_TASK_TX_QUEUE_REM, LABEL_TASK_ID => self.vertex_id.clone(), LABEL_TARGET_TASK_ID => target_vertex_id.clone()).set(queue_remaining);
-                    let backpressure = 1.0 - (queue_remaining as f64 + 1.0) / (queue_size as f64 + 1.0);
-                    gauge!(METRIC_STREAM_TASK_BACKPRESSURE_RATIO, LABEL_TASK_ID => self.vertex_id.clone(), LABEL_TARGET_TASK_ID => target_vertex_id.clone()).set(backpressure);
-                }
-                match time::timeout(timeout_duration, sender.send(message.clone())).await {
-                    Ok(Ok(())) => {
-                        return (true, start_time.elapsed().as_millis() as u32)
-                    }
+                // Same path as time-budget BP: sample queue, then send (waits record on `bp`).
+                self.publish_queue_metrics(sender, &target_vertex_id);
+                match time::timeout(timeout_duration, sender.send(message.clone(), bp)).await {
+                    Ok(Ok(())) => return true,
                     Ok(Err(_)) => {
                         self.worker_health.report_fatal(
                             WorkerFatalReason::TransportDisconnect,
@@ -287,9 +311,10 @@ impl DataWriter {
                                 self.vertex_id, channel_id
                             ),
                         );
-                        return (false, start_time.elapsed().as_millis() as u32);
+                        return false;
                     }
                     Err(_) => {
+                        // Timed out mid-wait: WaitGuard drop still accounts blocked time on `bp`.
                         println!("DataWriter {:?} timeout", self.vertex_id);
                         attempts += 1;
                         continue;
@@ -299,8 +324,8 @@ impl DataWriter {
                 panic!("DataWriter {:?} channel {} not found", self.vertex_id, channel_id);
             }
         }
-    
-        (false, start_time.elapsed().as_millis() as u32)
+
+        false
     }
 
     pub fn get_queue_size_and_capacity(&self, channel_id: &str) -> Option<(u32, u32)> {
