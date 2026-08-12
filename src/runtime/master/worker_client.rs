@@ -45,10 +45,14 @@ impl std::error::Error for WorkerCallError {}
 fn is_retryable_status(status: &tonic::Status) -> bool {
     matches!(
         status.code(),
+        // Transient transport / overload. Include Cancelled: an in-flight RPC is often
+        // cancelled when the peer restarts (SameAddrRestart gap); retry so fencing can
+        // land on the rebound listener instead of recovering on a bare Cancelled poll.
         Code::Unavailable
             | Code::DeadlineExceeded
             | Code::ResourceExhausted
             | Code::Aborted
+            | Code::Cancelled
             | Code::Unknown
     )
 }
